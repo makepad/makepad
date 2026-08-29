@@ -13,7 +13,7 @@
 use crate::aabb_tree::AabbTree;
 use crate::cdt::{Point2, CDT};
 use crate::tri_tri::{tri_tri_intersection_indexed, EdgeIsect};
-use makepad_csg_math::Vec3d;
+use makepad_csg_math::{thread_pool, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use std::collections::HashMap;
 
@@ -57,6 +57,10 @@ pub struct CorefinementResult {
     pub on_boundary_a: Vec<bool>,
     /// For each triangle in mesh_b, is it on the intersection boundary?
     pub on_boundary_b: Vec<bool>,
+    /// Number of intersection segments found between the two meshes.
+    /// Zero means the meshes were copied through untouched (no triangle was
+    /// split); the boolean's finishing passes can then be skipped entirely.
+    pub num_segments: usize,
 }
 
 /// Perform mesh corefinement on two triangle meshes.
@@ -91,6 +95,9 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::new();
 
     for &(ai, bi) in &pairs {
+        if thread_pool::cancelled() {
+            break;
+        }
         let (a0, a1, a2) = tris_a[ai as usize];
         let (b0, b1, b2) = tris_b[bi as usize];
         let a_vi = mesh_a.triangles[ai as usize];
@@ -152,6 +159,9 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
     let mut tri_b_segments: Vec<Vec<usize>> = vec![Vec::new(); mesh_b.triangle_count()];
 
     for (si, seg) in segments.iter().enumerate() {
+        if thread_pool::cancelled() {
+            break;
+        }
         tri_a_segments[seg.tri_a as usize].push(si);
         tri_b_segments[seg.tri_b as usize].push(si);
     }
@@ -170,6 +180,7 @@ pub fn corefine(mesh_a: &TriMesh, mesh_b: &TriMesh) -> CorefinementResult {
         origin_b,
         on_boundary_a: boundary_a,
         on_boundary_b: boundary_b,
+        num_segments: segments.len(),
     }
 }
 
@@ -225,6 +236,19 @@ impl VertexGrid {
 }
 
 /// Re-triangulate a mesh, splitting triangles that are intersected.
+///
+/// Emit triangle-local vertices here and let the boolean finisher weld them.
+/// That historical representation is intentional: exact-position indexing
+/// before selection lost cascading intersection seams in staged booleans.
+/// Keeps the mesh indexed: the input's vertex array is preserved (untouched
+/// triangles keep their original index triples) and only vertices introduced
+/// by the CDT re-triangulation are appended, deduplicated by exact position
+/// bits. Every position emitted by `retriangulate_triangle` is bitwise equal
+/// to either one of the triangle's own corners or an entry of the shared
+/// intersection-vertex pool, so exact-bits deduplication is lossless. This
+/// matters twice: downstream welding runs on ~6x fewer vertices, and a
+/// zero-segment corefinement can skip finishing entirely because the copied
+/// meshes are still properly indexed.
 fn retriangulate_mesh(
     mesh: &TriMesh,
     segments: &[IntersectionSegment],
@@ -232,20 +256,26 @@ fn retriangulate_mesh(
     shared_verts: &[Vec3d],
     is_mesh_a: bool,
 ) -> (TriMesh, Vec<u32>, Vec<bool>) {
-    let mut result = TriMesh::new();
-    let mut origins: Vec<u32> = Vec::new();
-    let mut boundaries: Vec<bool> = Vec::new();
+    let mut result = TriMesh::with_capacity(mesh.vertex_count(), mesh.triangle_count());
+    result.vertices.extend_from_slice(&mesh.vertices);
+    let mut origins: Vec<u32> = Vec::with_capacity(mesh.triangle_count());
+    let mut boundaries: Vec<bool> = Vec::with_capacity(mesh.triangle_count());
+
+    // Exact-position map for vertices appended beyond the original array.
+    let mut new_vert_map: HashMap<[u64; 3], u32> = HashMap::new();
+    let key = |v: Vec3d| -> [u64; 3] { [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()] };
 
     for ti in 0..mesh.triangle_count() {
+        if thread_pool::cancelled() {
+            break;
+        }
         let segs = &tri_segments[ti];
+        let [i0, i1, i2] = mesh.triangles[ti];
         let (v0, v1, v2) = mesh.triangle_vertices(ti);
 
         if segs.is_empty() {
-            // No intersection: copy triangle as-is
-            let a = result.add_vertex(v0);
-            let b = result.add_vertex(v1);
-            let c = result.add_vertex(v2);
-            result.add_triangle(a, b, c);
+            // No intersection: keep the original indexed triangle as-is.
+            result.add_triangle(i0, i1, i2);
             origins.push(ti as u32);
             boundaries.push(false);
         } else {
@@ -253,9 +283,30 @@ fn retriangulate_mesh(
             let new_tris =
                 retriangulate_triangle(v0, v1, v2, segs, segments, shared_verts, is_mesh_a);
             for [a, b, c] in new_tris {
-                let ia = result.add_vertex(a);
-                let ib = result.add_vertex(b);
-                let ic = result.add_vertex(c);
+                let mut map_vert = |p: Vec3d| -> u32 {
+                    // Original corners come through bitwise-unchanged.
+                    if key(p) == key(v0) {
+                        return i0;
+                    }
+                    if key(p) == key(v1) {
+                        return i1;
+                    }
+                    if key(p) == key(v2) {
+                        return i2;
+                    }
+                    match new_vert_map.entry(key(p)) {
+                        std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let idx = result.vertices.len() as u32;
+                            result.vertices.push(p);
+                            e.insert(idx);
+                            idx
+                        }
+                    }
+                };
+                let ia = map_vert(a);
+                let ib = map_vert(b);
+                let ic = map_vert(c);
                 result.add_triangle(ia, ib, ic);
                 origins.push(ti as u32);
                 boundaries.push(true);

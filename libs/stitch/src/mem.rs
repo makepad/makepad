@@ -207,13 +207,24 @@ impl MemEntity {
         self.bytes
             .resize((new_size as usize).checked_mul(PAGE_SIZE).unwrap(), 0);
         let new_data = self.bytes.as_mut_ptr();
+        // Walk the chain of call frames and patch every cached copy of the
+        // memory data pointer and size in the frame headers, since the
+        // resize above may have moved the memory's bytes.
+        //
+        // Each frame's header sits at `sp[-4..-1]` (saved ip, sp, md, ms),
+        // so we patch the header at the current `ptr` BEFORE stepping to
+        // the caller's sp, and stop once we reach the bottom of the stack.
+        // (Stepping first both skipped the current frame's header and
+        // dereferenced below the bottom of the stack on the last step.)
+        // Note that the cached size is in BYTES (see `Ms`), not pages.
+        let new_size_bytes = self.bytes.len() as u32;
         let mut ptr = stack.ptr();
         while ptr != stack.base_ptr() {
-            ptr = *ptr.offset(-3).cast();
             if *ptr.offset(-2).cast::<*mut u8>() == old_data {
                 *ptr.offset(-2).cast() = new_data;
-                *ptr.offset(-1).cast() = new_size;
+                *ptr.offset(-1).cast::<u32>() = new_size_bytes;
             }
+            ptr = *ptr.offset(-3).cast();
         }
         Ok(old_size)
     }

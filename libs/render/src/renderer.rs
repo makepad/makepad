@@ -5,7 +5,7 @@
 
 use makepad_draw::*;
 use makepad_game_sim::{
-    entity_index_sorted, BodyKind, ChunkKey, Entity, GameWorld, Shape, Terrain, TerrainMaterials,
+    entity_index_sorted, BodyKind, ChunkKey, Entity, GameWorld, Part, Shape, Terrain, TerrainMaterials,
     VoxelField, WaterState, WaterVolume, MAX_WAVES,
 };
 
@@ -15,7 +15,7 @@ use crate::light_grid::{
     merge_transients_into_block, LightBlock, LightGrid, LIGHT_BLOCK_FLOATS, LIGHT_GRID_CELL,
 };
 use crate::shaders::{
-    DrawSceneAlpha, DrawSceneCube, DrawSceneFlare, DrawSceneScreen, DrawSceneShadow,
+    DrawSceneAlpha, DrawSceneCube, DrawSceneDecal, DrawSceneFlare, DrawSceneScreen, DrawSceneShadow,
     DrawScenePbr, DrawSceneShadowSdf, DrawSceneSkinned, DrawSceneSkinnedGpu, DrawSceneSky,
     DrawSceneSkyAnalytic,
     DrawSceneSkyMap,
@@ -72,9 +72,9 @@ pub struct SceneDraws<'a> {
 
 /// One world-space upright quad. `pos.xyz` is the centre, `pos.w` is yaw
 /// (camera yaw faces the orbit/walk camera). `size.xy` is width/height in
-/// world units; `size.zw` is the TEXTURE's pixel size, which the shader needs
-/// to sample on texel centres (crisp magnification, filtered minification).
-/// Leave `zw` zero and the quad falls back to a plain bilinear fetch.
+/// world units; `size.zw` retains the texture's pixel size for callers that
+/// need the sheet metadata. Pixel-art sampling itself uses the shader's
+/// exact nearest fetch and therefore does not depend on half-texel maths.
 #[derive(Clone)]
 pub struct ScreenInstance {
     pub texture: Texture,
@@ -84,6 +84,10 @@ pub struct ScreenInstance {
     /// `u0 > u1` draws it X-mirrored. A whole-texture quad passes
     /// `(0, 0, 1, 1)`.
     pub uv: Vec4f,
+    /// Per-instance albedo multiplier. White preserves the authored sprite.
+    pub tint: Vec4f,
+    /// Hue degrees, saturation multiplier, value multiplier, reserved.
+    pub color_adjust: Vec4f,
 }
 
 /// Per-frame render counters, handed back for the host's profiler.
@@ -100,6 +104,8 @@ pub struct RenderStats {
     pub firework_shells: u64,
     /// Lamp flare billboards drawn — one GPU instance each.
     pub flares: u64,
+    /// Resident bullet-hole quads submitted this frame (bounded at 64).
+    pub bullet_decals: u64,
     /// Prop draws that bound a baked AO atlas, and that did not.
     pub ao_bound: u64,
     pub ao_missing: u64,
@@ -216,6 +222,14 @@ pub struct Renderer {
     /// [`SceneDraws`] because a map's sky has nothing for a host to theme,
     /// and every host would have had to adopt a new field to get one.
     sky_draw: Option<Box<DrawSceneSkyMap>>,
+    /// Engine-owned bullet-hole shader. A host gets the default marks merely
+    /// by drawing a GameWorld; no widget field or per-game wiring is needed.
+    decal_draw: Option<Box<DrawSceneDecal>>,
+    /// One-shot diagnostic guard for the only state in which a parsed sky
+    /// can still disappear before submission: its lazy shader could not be
+    /// constructed because the script VM was busy. The first miss is loud;
+    /// subsequent frames keep retrying without flooding the app log.
+    sky_draw_wait_logged: bool,
     /// Seconds of sky time — what the scrolling layers of a Quake sky ride.
     /// Advanced by [`Renderer::tick_sky`]; deliberately not wall-clock, so a
     /// paused game has a still sky and a capture is reproducible.
@@ -465,6 +479,8 @@ pub struct SkinnedDraw {
     /// Per-character wash over the model's own colours, so one rig can furnish
     /// a village without every villager being the same figure.
     pub tint: Vec4f,
+    /// Hue degrees, saturation multiplier, value multiplier, reserved.
+    pub color_adjust: Vec4f,
     /// Index into [`SkinnedBatch::textures`]. Characters from different packs
     /// carry different atlases, and binding one character's atlas to another
     /// does not fail — it renders, wrongly, looking like a shading bug.
@@ -497,6 +513,7 @@ impl SkinnedDraw {
             rig,
             transform,
             tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             texture: 0,
             palette: Vec::new(),
             bounds: None,
@@ -508,6 +525,11 @@ impl SkinnedDraw {
 
     pub fn with_tint(mut self, tint: Vec4f) -> Self {
         self.tint = tint;
+        self
+    }
+
+    pub fn with_color_adjust(mut self, color_adjust: Vec4f) -> Self {
+        self.color_adjust = color_adjust;
         self
     }
 
@@ -944,6 +966,10 @@ fn sky_wants_mips(projection: crate::model::SkyProjection) -> bool {
     !matches!(projection, crate::model::SkyProjection::Cylinder)
 }
 
+fn sky_trace_enabled() -> bool {
+    std::env::var_os("MAKEPAD_SKY_TRACE").is_some()
+}
+
 /// A resident [`crate::model::SkyPart`]: the faces plus their layer images.
 struct LoadedSky {
     part: crate::model::SkyPart,
@@ -953,6 +979,9 @@ struct LoadedSky {
     /// unconditionally and every projection stays one draw.
     tex0: Texture,
     tex1: Texture,
+    /// One-shot trace bits: bit 0 records a frustum rejection, bit 1 a draw
+    /// submission. Kept per resident model so switching maps is traced too.
+    draw_trace: u8,
     /// Model-space triangles, kept for the same reason `mesh_positions` is:
     /// a sky face is still a WALL to a walker (Doom's sky brushes are
     /// solid), even though it is never lit or shadowed.
@@ -1014,6 +1043,10 @@ struct AnimPartRuntime {
 #[derive(Default)]
 struct ModelStates {
     map: std::collections::BTreeMap<(ModelTarget, String), AnimPartRuntime>,
+    /// Engine presentation clock for model-authored `localgen-*` idle clips.
+    /// It is independent from level script state: placing the GLB is enough
+    /// to make its manifest animation run.
+    idle_time: f32,
 }
 
 impl ModelStates {
@@ -1054,6 +1087,7 @@ impl ModelStates {
         if dt <= 0.0 {
             return;
         }
+        self.idle_time = (self.idle_time + dt).rem_euclid(86_400.0);
         for run in self.map.values_mut() {
             if !run.speed.is_finite() {
                 run.time = run.target;
@@ -1107,6 +1141,12 @@ impl ModelStates {
         match run {
             Some(r) => (r.state, r.time, r.target),
             None => {
+                if def.kind.as_deref().is_some_and(|kind| kind.starts_with("localgen-"))
+                    && def.duration() > 0.0
+                {
+                    let t = self.idle_time.rem_euclid(def.duration());
+                    return (def.default, t, t);
+                }
                 let t = def.state_time(def.default);
                 (def.default, t, t)
             }
@@ -1155,6 +1195,10 @@ pub struct AnimPartBox {
 pub struct ModelInstance {
     pub model: String,
     pub transform: Mat4f,
+    /// Per-copy albedo multiplier. White preserves the authored material.
+    pub tint: Vec4f,
+    /// Hue degrees, saturation multiplier, value multiplier, reserved.
+    pub color_adjust: Vec4f,
     /// True for instances that follow a moving body (`on_body`). Dynamic
     /// instances are EXCLUDED from the baked static shadows — a driveable
     /// car's parked silhouette otherwise stays behind as a stain — and get a
@@ -1348,10 +1392,22 @@ impl ModelInstance {
         Self {
             model,
             transform: Mat4f::mul(frame, &local),
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: true,
             depth_order: 0.0,
             part_poses: Vec::new(),
         }
+    }
+
+    pub fn with_tint(mut self, tint: Vec4f) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    pub fn with_color_adjust(mut self, color_adjust: Vec4f) -> Self {
+        self.color_adjust = color_adjust;
+        self
     }
 }
 
@@ -1696,6 +1752,29 @@ struct SlabChunk {
     max: Vec3f,
     slab: [Vec<f32>; 5],
     slab_alpha: [Vec<f32>; 5],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimitiveBucket {
+    Opaque,
+    Alpha,
+}
+
+/// `None` = not drawn at all. `Entity::shell` boxes are pure containment:
+/// solid to movement, skipped by the camera boom, and INVISIBLE — an
+/// interior is an open stage (user, 2026-08-27: "make these indoor spaces
+/// without walls — all you see is a little box you're inside of"). The
+/// earlier inward-wound "dollhouse" rendering was wrong twice from a thin
+/// wall slab: inside the room you saw its far skin, outside you saw the
+/// near wall's inner skin — a box either way.
+fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
+    if entity.sensor {
+        Some(PrimitiveBucket::Alpha)
+    } else if entity.shell {
+        None
+    } else {
+        Some(PrimitiveBucket::Opaque)
+    }
 }
 
 /// Settle delay before the world-settle work (receiver refresh + lightmap
@@ -2048,6 +2127,8 @@ impl Default for Renderer {
             skin_joint_bases: Vec::new(),
             static_models: Vec::new(),
             sky_draw: None,
+            decal_draw: None,
+            sky_draw_wait_logged: false,
             sky_time: 0.0,
             model_casts_shadow: std::collections::BTreeMap::new(),
             model_anim_state: ModelStates::default(),
@@ -2857,6 +2938,10 @@ impl Renderer {
         id
     }
 
+    /// Inward-wound twin of [`Self::ensure_shape_geometry`]. With the shared
+    /// cube shader's ordinary back-face culling this draws only the room side
+    /// of an interior shell and disappears when the eye sits outside it.
+
     /// Rotation part of an entity's transform. Rigids carry a full box3d
     /// orientation quat (M1a); everything else rotates by visual yaw exactly
     /// as before. Column-major, same layout as Mat4f::rotation.
@@ -2915,6 +3000,22 @@ impl Renderer {
         }
     }
 
+    /// Compose one primitive attachment from its owner's live transform and
+    /// its fixed owner-local pose. Movers use this same path every frame, so
+    /// translating/turning the body carries every part without simulation or
+    /// script writes. Procedural gait is a rotation overlay only.
+    fn part_transform(owner: &Entity, part: &Part) -> Mat4f {
+        let mut owner_frame = Self::entity_rotation(owner);
+        owner_frame.v[12] = owner.pos.x;
+        owner_frame.v[13] = owner.pos.y;
+        owner_frame.v[14] = owner.pos.z;
+        let mut local = Mat4f::rotation(part.rot + part.procedural_rot);
+        local.v[12] = part.offset.x * owner.scale.x;
+        local.v[13] = part.offset.y * owner.scale.y;
+        local.v[14] = part.offset.z * owner.scale.z;
+        Mat4f::mul(&owner_frame, &local)
+    }
+
     /// PERF: pack one instance in the exact slice layout `DrawCube::draw`
     /// emits (DrawVars::as_slice covers the trailing glow/fog instance
     /// fields), so slab content and immediate draws are indistinguishable.
@@ -2924,12 +3025,13 @@ impl Renderer {
     fn pack_cube_instance(
         &mut self,
         draws: &mut SceneDraws,
-        alpha: bool,
+        bucket: PrimitiveBucket,
         out_index: usize,
         transform: Mat4f,
         size: Vec3f,
         color: Vec4f,
         glow: f32,
+        color_adjust: Vec4f,
     ) {
         let center = vec3f(transform.v[12], transform.v[13], transform.v[14]);
         let r = size.length() * 0.5;
@@ -2958,13 +3060,14 @@ impl Renderer {
             chunk.max.y.max(center.y + r),
             chunk.max.z.max(center.z + r),
         );
-        if alpha {
+        if bucket == PrimitiveBucket::Alpha {
             draws.alpha.cube.cube.transform = transform;
             draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
             draws.alpha.cube.cube.cube_size = size;
             draws.alpha.cube.cube.color = color;
             draws.alpha.cube.cube.depth_clip = 1.0;
             draws.alpha.cube.glow = glow;
+            draws.alpha.cube.color_adjust_ctl = color_adjust;
             let slice = draws.alpha.cube.cube.draw_vars.as_slice();
             chunk.slab_alpha[out_index].extend_from_slice(slice);
             self.slab_instance_count += 1;
@@ -2975,8 +3078,12 @@ impl Renderer {
             draws.cube.cube.color = color;
             draws.cube.cube.depth_clip = 1.0;
             draws.cube.glow = glow;
+            draws.cube.color_adjust_ctl = color_adjust;
             let slice = draws.cube.cube.draw_vars.as_slice();
-            chunk.slab[out_index].extend_from_slice(slice);
+            match bucket {
+                PrimitiveBucket::Opaque => chunk.slab[out_index].extend_from_slice(slice),
+                PrimitiveBucket::Alpha => unreachable!(),
+            }
             self.slab_instance_count += 1;
         }
     }
@@ -3012,10 +3119,24 @@ impl Renderer {
             // Baked occlusion rides in the colour we were already sending —
             // no extra instance field, no shader work, no draw call.
             color = shade_color(color, self.bake.static_shade(e.id), e.glow);
-            self.pack_cube_instance(draws, e.sensor, e.shape.index(), transform, size, color, e.glow);
+            let Some(bucket) = primitive_bucket(e) else { continue };
+            self.pack_cube_instance(
+                draws,
+                bucket,
+                e.shape.index(),
+                transform,
+                size,
+                color,
+                e.glow,
+                e.color_adjust.instance(),
+            );
         }
         // Settled parts of static owners.
-        for p in world.parts.iter().filter(|p| !p.anim_active) {
+        for p in world
+            .parts
+            .iter()
+            .filter(|p| !p.anim_active && !p.procedural_anim)
+        {
             // Entity ids are spawn-ordered, so the list stays sorted; the
             // shared sim helper owns (and debug-asserts) that invariant.
             let Some(owner) = entity_index_sorted(&world.entities, p.owner)
@@ -3024,15 +3145,7 @@ impl Renderer {
             else {
                 continue;
             };
-            let mut owner_frame = Mat4f::rotation(vec3f(0.0, owner.yaw, 0.0));
-            owner_frame.v[12] = owner.pos.x;
-            owner_frame.v[13] = owner.pos.y;
-            owner_frame.v[14] = owner.pos.z;
-            let mut local = Mat4f::rotation(p.rot);
-            local.v[12] = p.offset.x * owner.scale.x;
-            local.v[13] = p.offset.y * owner.scale.y;
-            local.v[14] = p.offset.z * owner.scale.z;
-            let transform = Mat4f::mul(&owner_frame, &local);
+            let transform = Self::part_transform(owner, p);
             let size = vec3(
                 p.half.x * 2.0 * owner.scale.x,
                 p.half.y * 2.0 * owner.scale.y,
@@ -3040,7 +3153,16 @@ impl Renderer {
             );
             // A part inherits its owner's bake — it is bolted to it.
             let color = shade_color(p.color, self.bake.static_shade(owner.id), p.glow);
-            self.pack_cube_instance(draws, false, p.shape.index(), transform, size, color, p.glow);
+            self.pack_cube_instance(
+                draws,
+                PrimitiveBucket::Opaque,
+                p.shape.index(),
+                transform,
+                size,
+                color,
+                p.glow,
+                owner.color_adjust.instance(),
+            );
         }
     }
 
@@ -3551,40 +3673,67 @@ impl Renderer {
                 let g = Geometry::new(cx);
                 g.update(cx, part.indices.clone(), part.vertices.clone());
                 let mips = sky_wants_mips(part.projection);
-                let mut layer = |i: usize, fallback: u32| -> Texture {
-                    part.images
-                        .get(i)
-                        .and_then(|png| ImageBuffer::from_png(png).ok())
-                        .map(|img| {
-                            if mips {
-                                img.into_new_mip_repeat_texture(cx)
-                            } else {
-                                // Explicitly mip-FREE (not `into_new_texture`,
-                                // which builds a chain on some backends).
-                                Texture::new_with_format(
-                                    cx,
-                                    TextureFormat::VecBGRAu8_32 {
-                                        width: img.width,
-                                        height: img.height,
-                                        data: Some(img.data),
-                                        updated: TextureUpdated::Full,
-                                    },
-                                )
-                            }
-                        })
-                        .unwrap_or_else(|| {
+                let mut layer = |i: usize, fallback: u32| -> (Texture, String) {
+                    let Some(png) = part.images.get(i) else {
+                        let mut flat = ImageBuffer::default();
+                        flat.width = 1;
+                        flat.height = 1;
+                        flat.data = vec![fallback];
+                        return (flat.into_new_texture(cx), "absent (1x1 fallback)".into());
+                    };
+                    let img = match ImageBuffer::from_png(png) {
+                        Ok(img) => img,
+                        Err(error) => {
                             let mut flat = ImageBuffer::default();
                             flat.width = 1;
                             flat.height = 1;
                             flat.data = vec![fallback];
-                            flat.into_new_texture(cx)
-                        })
+                            return (
+                                flat.into_new_texture(cx),
+                                format!("decode failed ({error:?}; 1x1 fallback)"),
+                            );
+                        }
+                    };
+                    let (width, height) = (img.width, img.height);
+                    let texture = if mips {
+                        img.into_new_mip_repeat_texture(cx)
+                    } else {
+                        // Explicitly one level: a Doom cylinder is always
+                        // magnified, and a mip chain turns atan2's longitude
+                        // cut into a visible hairline.
+                        Texture::new_with_format(
+                            cx,
+                            TextureFormat::VecBGRAu8_32 {
+                                width,
+                                height,
+                                data: Some(img.data),
+                                updated: TextureUpdated::Full,
+                            },
+                        )
+                    };
+                    (texture, format!("embedded {width}x{height}"))
                 };
+                let (tex0, tex0_source) = layer(0, 0xFFFF_FFFF);
+                // Transparent: the front layer keys the back one through
+                // its alpha, so an absent second layer must add nothing.
+                let (tex1, tex1_source) = layer(1, 0x0000_0000);
+                if sky_trace_enabled() {
+                    log!(
+                        "map sky upload: model='{id}' texture='{}' projection={} tris={} \
+                         layer0={} id={:?}, layer1={} id={:?}",
+                        part.texture.as_deref().unwrap_or("<unnamed>"),
+                        part.projection.as_str(),
+                        part.triangle_count(),
+                        tex0_source,
+                        tex0.texture_id(),
+                        tex1_source,
+                        tex1.texture_id(),
+                    );
+                }
                 Some(LoadedSky {
-                    tex0: layer(0, 0xFFFF_FFFF),
-                    // Transparent: the front layer keys the back one through
-                    // its alpha, so an absent second layer must add nothing.
-                    tex1: layer(1, 0x0000_0000),
+                    tex0,
+                    tex1,
+                    draw_trace: 0,
                     geometry: g,
                     part,
                     positions,
@@ -5420,6 +5569,8 @@ impl Renderer {
                 stats.ao_missing += 1;
             }
             draw.base().transform = inst.transform;
+            draw.base().tint = inst.tint;
+            draw.base().color_adjust_ctl = inst.color_adjust;
             // This copy's window into the light atlas; zero disables — a
             // dynamic prop or an unbaked model lights analytically as before.
             draw.base().lm_rect = if dynamic {
@@ -5663,21 +5814,40 @@ impl Renderer {
                 .try_with_vm(|vm| Box::new(DrawSceneSkyMap::script_new_with_default(vm)));
         }
         let Some(mut draw) = self.sky_draw.take() else {
+            if sky_trace_enabled() && !self.sky_draw_wait_logged {
+                log!("map sky draw: waiting for DrawSceneSkyMap shader construction");
+                self.sky_draw_wait_logged = true;
+            }
             return;
         };
+        self.sky_draw_wait_logged = false;
         let time = self.sky_time;
         let instances = std::mem::take(&mut self.placed_models);
         for inst in &instances {
-            let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == inst.model)
+            let Some((_, loaded)) = self.static_models.iter_mut().find(|(k, _)| *k == inst.model)
             else {
                 continue;
             };
-            let Some(sky) = &loaded.sky else { continue };
+            let Some(sky) = &mut loaded.sky else { continue };
             // A map whose sky is entirely behind the camera pays nothing.
             // Per-FACE culling is deliberately not attempted: the faces are
             // one geometry precisely so a sky costs one draw.
             if let Some(frustum) = frustum {
                 if !frustum.intersects_obb(sky.part.min, sky.part.max, &inst.transform) {
+                    if sky_trace_enabled() && sky.draw_trace & 1 == 0 {
+                        log!(
+                            "map sky draw: model='{}' frustum-culled bounds \
+                             ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+                            inst.model,
+                            sky.part.min.x,
+                            sky.part.min.y,
+                            sky.part.min.z,
+                            sky.part.max.x,
+                            sky.part.max.y,
+                            sky.part.max.z,
+                        );
+                        sky.draw_trace |= 1;
+                    }
                     stats.model_culled += 1;
                     continue;
                 }
@@ -5695,7 +5865,73 @@ impl Renderer {
             draw.draw_vars.geometry_id = Some(sky.geometry.geometry_id());
             draw.draw_vars.set_texture(0, &sky.tex0);
             draw.draw_vars.set_texture(1, &sky.tex1);
-            if draw.draw_vars.can_instance() {
+            let shader_ready = draw.draw_vars.can_instance();
+            if sky_trace_enabled() && sky.draw_trace & 2 == 0 {
+                let resident0 = match sky.tex0.get_format(cx.cx) {
+                    TextureFormat::VecBGRAu8_32 {
+                        width,
+                        height,
+                        data,
+                        updated,
+                    } => format!(
+                        "VecBGRAu8_32({width}x{height}, texels={}, first={:#010x}, {updated:?})",
+                        data.as_ref().map_or(0, Vec::len),
+                        data.as_ref().and_then(|pixels| pixels.first()).copied().unwrap_or(0),
+                    ),
+                    TextureFormat::VecMipBGRAu8_32 {
+                        width,
+                        height,
+                        data,
+                        max_level,
+                        wrap,
+                        updated,
+                    } => format!(
+                        "VecMipBGRAu8_32({width}x{height}, texels={}, first={:#010x}, \
+                         max_level={max_level:?}, wrap={wrap:?}, {updated:?})",
+                        data.as_ref().map_or(0, Vec::len),
+                        data.as_ref()
+                            .and_then(|pixels| pixels.first())
+                            .copied()
+                            .unwrap_or(0),
+                    ),
+                    other => format!("{other:?}"),
+                };
+                let shader_textures = draw
+                    .draw_vars
+                    .draw_shader_id
+                    .map(|shader| {
+                        cx.cx.draw_shaders[shader.index]
+                            .mapping
+                            .textures
+                            .iter()
+                            .map(|input| format!("{}", input.id))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                log!(
+                    "map sky draw: model='{}' texture='{}' shader_ready={} cull={} brightness={:.3} \
+                     layer0={:?} layer1={:?} bound0={:?} bound1={:?} inputs={:?} \
+                     resident0={} tris={}",
+                    inst.model,
+                    sky.part.texture.as_deref().unwrap_or("<unnamed>"),
+                    shader_ready,
+                    draw.draw_vars.options.backface_culling,
+                    draw.brightness,
+                    sky.tex0.texture_id(),
+                    sky.tex1.texture_id(),
+                    draw.draw_vars.texture_slots[0]
+                        .as_ref()
+                        .map(Texture::texture_id),
+                    draw.draw_vars.texture_slots[1]
+                        .as_ref()
+                        .map(Texture::texture_id),
+                    shader_textures,
+                    resident0,
+                    sky.part.triangle_count(),
+                );
+                sky.draw_trace |= 2;
+            }
+            if shader_ready {
                 let new_area = cx.add_instance(&draw.draw_vars);
                 draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
             }
@@ -6141,6 +6377,7 @@ impl Renderer {
                 Some(self.skin_rig_geometries[at].1.geometry_id());
             batch.skinned.transform = item.transform;
             batch.skinned.tint = item.tint;
+            batch.skinned.color_adjust_ctl = item.color_adjust;
             batch.skinned.depth_clip = 1.0;
             batch.skinned.fog_color = fog.0;
             batch.skinned.fog_density = fog.1;
@@ -6718,21 +6955,25 @@ impl Renderer {
             let Some(owner_index) = entity_index_sorted(&world.entities, part.owner) else {
                 continue;
             };
-            if world.entities[owner_index].kind != BodyKind::Static || part.anim_active {
+            if world.entities[owner_index].kind != BodyKind::Static
+                || part.anim_active
+                || part.procedural_anim
+            {
                 dyn_parts.push((part_index, owner_index));
             }
         }
         let mut dyn_entity_shapes = [false; 5];
+
         let mut dyn_sensor_shapes = [false; 5];
         for e in world
             .entities
             .iter()
             .filter(|e| e.kind != BodyKind::Static && !e.hidden)
         {
-            if e.sensor {
-                dyn_sensor_shapes[e.shape.index()] = true;
-            } else {
-                dyn_entity_shapes[e.shape.index()] = true;
+            match primitive_bucket(e) {
+                Some(PrimitiveBucket::Opaque) => dyn_entity_shapes[e.shape.index()] = true,
+                Some(PrimitiveBucket::Alpha) => dyn_sensor_shapes[e.shape.index()] = true,
+                None => {}
             }
         }
         let mut dyn_part_shapes = [false; 5];
@@ -6773,7 +7014,12 @@ impl Renderer {
             for e in world
                 .entities
                 .iter()
-                .filter(|e| !e.sensor && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
+                .filter(|e| {
+                    primitive_bucket(e) == Some(PrimitiveBucket::Opaque)
+                        && !e.hidden
+                        && e.kind != BodyKind::Static
+                        && e.shape == shape
+                })
             {
                 // Every shape geometry spans [-0.5, 0.5] scaled by cube_size,
                 // so |half*scale| bounds the visual under ANY rotation. The
@@ -6808,6 +7054,7 @@ impl Renderer {
                     shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = e.glow;
+                draws.cube.color_adjust_ctl = e.color_adjust.instance();
                 draws.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
             }
@@ -6818,15 +7065,7 @@ impl Renderer {
                     continue;
                 }
                 let owner = &world.entities[owner_index];
-                let mut owner_frame = Self::entity_rotation(owner);
-                owner_frame.v[12] = owner.pos.x;
-                owner_frame.v[13] = owner.pos.y;
-                owner_frame.v[14] = owner.pos.z;
-                let mut local = Mat4f::rotation(part.rot);
-                local.v[12] = part.offset.x * owner.scale.x;
-                local.v[13] = part.offset.y * owner.scale.y;
-                local.v[14] = part.offset.z * owner.scale.z;
-                let transform = Mat4f::mul(&owner_frame, &local);
+                let transform = Self::part_transform(owner, part);
                 // Both frames are pure rotations, so the composed transform's
                 // translation is the part's world centre and |half*scale|
                 // bounds it, exactly as for the entity above.
@@ -6854,6 +7093,7 @@ impl Renderer {
                     shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = part.glow;
+                draws.cube.color_adjust_ctl = owner.color_adjust.instance();
                 draws.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
             }
@@ -6904,6 +7144,7 @@ impl Renderer {
                     draws.cube.cube.color = beam.color;
                     draws.cube.cube.depth_clip = 1.0;
                     draws.cube.glow = beam.glow;
+                    draws.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
                     draws.cube.cube.draw(cx);
                     stats.dyn_instances += 1;
                 }
@@ -7488,6 +7729,7 @@ impl Renderer {
                     draws.alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, quad.alpha);
                     draws.alpha.cube.cube.depth_clip = 1.0;
                     draws.alpha.cube.glow = 0.0;
+                    draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
                     draws.alpha.cube.cube.draw(cx);
                     stats.dyn_instances += 1;
                     stats.shadows += 1;
@@ -7517,6 +7759,7 @@ impl Renderer {
                     );
                     draws.alpha.cube.cube.depth_clip = 1.0;
                     draws.alpha.cube.glow = 0.8;
+                    draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
                     draws.alpha.cube.cube.draw(cx);
                     stats.dyn_instances += 1;
                     stats.particles += 1;
@@ -7559,6 +7802,7 @@ impl Renderer {
                 draws.alpha.cube.cube.color = color;
                 draws.alpha.cube.cube.depth_clip = 1.0;
                 draws.alpha.cube.glow = e.glow;
+                draws.alpha.cube.color_adjust_ctl = e.color_adjust.instance();
                 draws.alpha.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
             }
@@ -7658,6 +7902,7 @@ impl Renderer {
                 draws.alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, 0.25);
                 draws.alpha.cube.cube.depth_clip = 1.0;
                 draws.alpha.cube.glow = 0.0;
+                draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
                 draws.alpha.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
                 stats.shadow_catcher_drawn = true;
@@ -7731,6 +7976,48 @@ impl Renderer {
             }
         }
 
+        // 6.55 Engine-default bullet holes: one bounded, instanced procedural
+        // quad per live mark. Static/level marks are already world-space;
+        // entity marks reconstruct their owner-local pose here every frame.
+        // Nothing in this path keys the static slabs or allocates per frame.
+        if !world.bullet_decals.is_empty() {
+            if self.decal_draw.is_none() {
+                self.decal_draw = cx
+                    .cx
+                    .try_with_vm(|vm| Box::new(DrawSceneDecal::script_new_with_default(vm)));
+            }
+            if let Some(mut decal) = self.decal_draw.take() {
+                let geometry_id = self.ensure_flare_geometry(cx.cx);
+                decal.draw_vars.geometry_id = Some(geometry_id);
+                decal.depth_clip = 1.0;
+                for mark in world.bullet_decals.as_slice() {
+                    let Some((pos, normal)) = mark.world_pose(world) else {
+                        continue;
+                    };
+                    if let Some(frustum) = frustum {
+                        if !frustum.intersects_sphere(pos, mark.size) {
+                            continue;
+                        }
+                    }
+                    decal.decal_pos = vec4(pos.x, pos.y, pos.z, mark.size);
+                    let roll = (mark.serial as f32 * 2.399_963_1).rem_euclid(std::f32::consts::TAU);
+                    decal.decal_normal = vec4(normal.x, normal.y, normal.z, roll);
+                    decal.decal_color = vec4(
+                        mark.color.x,
+                        mark.color.y,
+                        mark.color.z,
+                        mark.kind.shader_id(),
+                    );
+                    if decal.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&decal.draw_vars);
+                        decal.draw_vars.area = cx.update_area_refs(decal.draw_vars.area, new_area);
+                        stats.bullet_decals += 1;
+                    }
+                }
+                self.decal_draw = Some(decal);
+            }
+        }
+
         // 6.6 In-world video screen: one textured quad on the shared flare
         // geometry. The host owns placement and the per-frame texture; this
         // just issues the instance. Opaque + depth-written, so ordering
@@ -7740,7 +8027,10 @@ impl Renderer {
             sc.draw_vars.geometry_id = Some(geometry_id);
             sc.depth_clip = 1.0;
             sc.cutout = 0.0;
+            sc.pixelated = 0.0;
             sc.uv_rect = vec4(0.0, 0.0, 1.0, 1.0);
+            sc.tint = vec4(1.0, 1.0, 1.0, 1.0);
+            sc.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
             if sc.screen_size.x.abs() > 0.0
                 && sc.screen_size.y > 0.0
                 && sc.draw_vars.can_instance()
@@ -7753,17 +8043,45 @@ impl Renderer {
             // transparent. Without the alpha test every actor is a black
             // rectangle. The video screen above keeps cutout 0.
             sc.cutout = 1.0;
+            // Every ScreenInstance in this lane is sprite-sheet artwork:
+            // monsters, props/map items, and one-shot impact/burst clips all
+            // take the same exact level-0 nearest path. The shared video
+            // screen above deliberately keeps ordinary smooth sampling.
+            sc.pixelated = 1.0;
+            let mut sprites_drawn = 0usize;
+            let mut sprites_skipped = 0usize;
             for inst in draws.screen_instances {
                 if inst.size.x <= 0.0 || inst.size.y <= 0.0 {
+                    sprites_skipped += 1;
                     continue;
                 }
                 sc.draw_vars.set_texture(0, &inst.texture);
                 sc.screen_pos = inst.pos;
                 sc.screen_size = inst.size;
                 sc.uv_rect = inst.uv;
+                sc.tint = inst.tint;
+                sc.color_adjust_ctl = inst.color_adjust;
                 if sc.draw_vars.can_instance() {
                     let new_area = cx.add_instance(&sc.draw_vars);
                     sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
+                    sprites_drawn += 1;
+                } else {
+                    sprites_skipped += 1;
+                }
+            }
+            // Working-tree probe (not for commit): the sprite pass's own count.
+            {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static N: AtomicU32 = AtomicU32::new(0);
+                if N.fetch_add(1, Ordering::Relaxed) % 120 == 0
+                    && !draws.screen_instances.is_empty()
+                {
+                    log!(
+                        "SPRITEPASS received {} instances, submitted {} to GPU, skipped {}",
+                        draws.screen_instances.len(),
+                        sprites_drawn,
+                        sprites_skipped
+                    );
                 }
             }
         }
@@ -7785,6 +8103,25 @@ impl Renderer {
 }
 
 #[cfg(test)]
+mod shell_bucket_tests {
+    use super::*;
+
+    #[test]
+    fn entity_shell_flag_draws_nothing_at_all() {
+        let ordinary = Entity::default();
+        let shell = Entity { shell: true, ..Default::default() };
+        let sensor_shell = Entity { shell: true, sensor: true, ..Default::default() };
+
+        assert_eq!(primitive_bucket(&ordinary), Some(PrimitiveBucket::Opaque));
+        // Invisible containment: an interior is an open stage.
+        assert_eq!(primitive_bucket(&shell), None);
+        // Existing sensor alpha semantics win for the nonsensical combined
+        // spelling.
+        assert_eq!(primitive_bucket(&sensor_shell), Some(PrimitiveBucket::Alpha));
+    }
+}
+
+#[cfg(test)]
 mod realm_lifecycle_tests {
     use super::*;
 
@@ -7794,6 +8131,8 @@ mod realm_lifecycle_tests {
         ModelInstance {
             model: id.to_string(),
             transform,
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic,
             depth_order,
             part_poses: Vec::new(),
@@ -8215,6 +8554,42 @@ mod cull_tests {
         assert!(!fr.intersects_aabb(vec3f(-1.0, -1.0, 19.0), vec3f(1.0, 1.0, 21.0)));
         assert!(fr.intersects_aabb(vec3f(-100.0, -1.0, -1.0), vec3f(0.0, 1.0, 1.0)));
         assert!(!fr.intersects_aabb(vec3f(-101.0, -1.0, -1.0), vec3f(-99.0, 1.0, 1.0)));
+    }
+}
+
+#[cfg(test)]
+mod part_attachment_tests {
+    use super::*;
+
+    fn center(m: Mat4f) -> Vec3f {
+        vec3f(m.v[12], m.v[13], m.v[14])
+    }
+
+    #[test]
+    fn mover_parts_follow_translation_and_owner_local_heading() {
+        let mut owner = Entity {
+            id: 1,
+            kind: BodyKind::Mover,
+            pos: vec3f(3.0, 2.0, 5.0),
+            yaw: std::f32::consts::FRAC_PI_2,
+            scale: vec3f(1.0, 1.0, 1.0),
+            ..Default::default()
+        };
+        let part = Part {
+            id: 2,
+            owner: 1,
+            offset: vec3f(0.0, 0.0, -2.0),
+            ..Default::default()
+        };
+
+        let first = center(Renderer::part_transform(&owner, &part));
+        let expected = owner.pos + makepad_game_sim::heading_to_forward(owner.yaw) * 2.0;
+        assert!((first - expected).length() < 1.0e-5, "part offset was world-space: {first:?}");
+
+        let delta = vec3f(7.0, -0.5, 4.0);
+        owner.pos += delta;
+        let moved = center(Renderer::part_transform(&owner, &part));
+        assert!((moved - first - delta).length() < 1.0e-5, "part did not ride its mover");
     }
 }
 
@@ -9048,6 +9423,26 @@ mod anim_part_tests {
     }
 
     #[test]
+    fn localgen_manifest_clip_loops_until_a_game_command_overrides_it() {
+        let mut part = door();
+        part.kind = Some("localgen-bob".into());
+        let mut states = ModelStates::default();
+        let key = ModelTarget::Model("prop".into());
+
+        states.tick(0.25);
+        let (_, idle, _) = states.clock(&key, "prop", &part);
+        assert!((idle - 0.25).abs() < 1.0e-6);
+        states.tick(1.0);
+        let (_, wrapped, _) = states.clock(&key, "prop", &part);
+        assert!((wrapped - 0.25).abs() < 1.0e-6);
+
+        assert!(states.set(key.clone(), &part, "closed", 0.0));
+        states.tick(0.25);
+        let (_, overridden, _) = states.clock(&key, "prop", &part);
+        assert!(overridden.abs() < 1.0e-6);
+    }
+
+    #[test]
     fn a_zero_blend_snaps_and_an_unknown_state_changes_nothing() {
         let part = door();
         let mut states = ModelStates::default();
@@ -9121,6 +9516,8 @@ mod anim_part_tests {
         renderer.set_models(vec![ModelInstance {
             model: "map".to_string(),
             transform,
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
             part_poses: Vec::new(),
@@ -9131,6 +9528,23 @@ mod anim_part_tests {
             .keys()
             .all(|(t, _)| matches!(t, ModelTarget::Model(_))));
         assert_eq!(renderer.model_anim_state.map.len(), 1);
+    }
+
+    #[test]
+    fn model_instance_appearance_is_per_copy_and_neutral_by_default() {
+        let bounds = (vec3f(-1.0, 0.0, -1.0), vec3f(1.0, 2.0, 1.0));
+        let frame = Mat4f::identity();
+        let neutral = ModelInstance::on_body("dog".into(), bounds, 1.0, 1.0, &frame);
+        assert_eq!(neutral.tint, vec4(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(neutral.color_adjust, vec4(0.0, 1.0, 1.0, 0.0));
+
+        let blue = neutral
+            .clone()
+            .with_tint(vec4(0.2, 0.5, 1.0, 1.0))
+            .with_color_adjust(vec4(210.0, 1.1, 0.9, 0.0));
+        assert_eq!(blue.tint, vec4(0.2, 0.5, 1.0, 1.0));
+        assert_eq!(blue.color_adjust, vec4(210.0, 1.1, 0.9, 0.0));
+        assert_eq!(neutral.tint, vec4(1.0, 1.0, 1.0, 1.0));
     }
 
     #[test]
@@ -9225,6 +9639,59 @@ mod caster_only_tests {
 mod sky_lane_tests {
     use super::*;
     use crate::model::tests::room_and_sky_glb;
+
+    /// The Asset Store keeps the real E1M1 payload outside the source tree's
+    /// normal test fixtures. When it is present, pin the whole parsed upload
+    /// hand-off: the embedded SKY1 PNG must become the resident sky texture,
+    /// not the renderer's black null texture. A clean checkout simply skips
+    /// this real-asset diagnostic, like the kit tests in model.rs.
+    #[test]
+    fn real_e1m1_parsed_upload_keeps_the_embedded_sky1_pixels() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../local/asset-ui/asset-server/cas/objects/92/e2/\
+             92e29a55fc78fc51fa84022536634f01dad5af350f734b772ad168b0f005f264",
+        );
+        let Ok(glb) = std::fs::read(&path) else {
+            eprintln!("real E1M1 store payload absent — skipped");
+            return;
+        };
+        let model = StaticModel::parse_glb(&glb).expect("parse real E1M1");
+        let sky = model.sky.as_ref().expect("tagged E1M1 sky node");
+        assert_eq!(sky.texture.as_deref(), Some("sky1"));
+        assert_eq!(sky.images.len(), 1, "one embedded SKY1 image");
+        let decoded = ImageBuffer::from_png(&sky.images[0]).expect("decode embedded SKY1");
+        assert_eq!((decoded.width, decoded.height), (256, 128));
+        assert!(
+            decoded.data.iter().any(|pixel| pixel & 0x00ff_ffff != 0),
+            "SKY1 itself must not decode as black"
+        );
+        let expected = decoded.data;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer
+            .load_model_parsed(&mut cx, "doom/e1m1", model, None, None)
+            .expect("upload parsed E1M1");
+        let loaded = renderer
+            .static_models
+            .iter()
+            .find(|(id, _)| id == "doom/e1m1")
+            .and_then(|(_, model)| model.sky.as_ref())
+            .expect("resident E1M1 sky");
+        assert_ne!(loaded.tex0.texture_id(), cx.null_texture.texture_id());
+        match loaded.tex0.get_format(&mut cx) {
+            TextureFormat::VecBGRAu8_32 {
+                width,
+                height,
+                data,
+                ..
+            } => {
+                assert_eq!((*width, *height), (256, 128));
+                assert_eq!(data.as_deref(), Some(expected.as_slice()));
+            }
+            other => panic!("Doom sky must be a one-level texture, got {other:?}"),
+        }
+    }
 
     #[test]
     /// Which sky gets a mip chain, and why. A cylinder strip must NOT: it is

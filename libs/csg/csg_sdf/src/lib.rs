@@ -10,9 +10,11 @@ mod grid;
 mod octree;
 mod primitives;
 mod sdf;
+mod splash_field;
 
 pub use combinators::*;
 pub use grid::SdfGrid3;
-pub use octree::sdf_to_mesh;
+pub use octree::{sdf_to_mesh, sdf_to_mesh_ref};
 pub use primitives::*;
 pub use sdf::Sdf3;
+pub use splash_field::SdfSplashExpr;

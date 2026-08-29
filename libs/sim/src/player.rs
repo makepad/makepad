@@ -47,6 +47,14 @@ pub const WIRE_ACTIONS: [LiveId; 11] = [
 pub const WIRE_VIEW_PREFERENCE_BIT: u32 = 1 << 11;
 pub const WIRE_FIRST_PERSON_BIT: u32 = 1 << 12;
 
+/// Three reserved held-button bits carry the pad's walk→run continuum. They
+/// were previously zero and sit outside [`WIRE_ACTIONS`], so an older frame
+/// decodes as walking while current peers preserve the local pad curve. Seven
+/// steps are sufficient for the short top quarter above the stick's run knee
+/// and avoid spending the flight rudder's already-occupied analog byte.
+pub const WIRE_RUN_SHIFT: u32 = 13;
+pub const WIRE_RUN_MASK: u32 = 0b111 << WIRE_RUN_SHIFT;
+
 // ── analog wire quantization ────────────────────────────────────────────
 //
 // The quantized value is the truth (mix.md §3.3): the sim only ever consumes
@@ -130,6 +138,18 @@ pub enum PlayerSource {
     Bot,
 }
 
+/// The wire's vehicle-analog lanes, interpreted once — see
+/// [`PlayerInput::wire_drive`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WireDrive {
+    /// Signed trigger throttle `RT − LT`, −1..1.
+    pub throttle: f32,
+    /// Handbrake: the shoot hold, or the analog lane, whichever is stronger.
+    pub handbrake: f32,
+    /// Flight rudder, −1..1, from the spare analog byte.
+    pub rudder: f32,
+}
+
 /// One player's control state for the current tick.
 ///
 /// For player 0 this is a *mirror* of the world's device fields, refreshed
@@ -163,6 +183,8 @@ pub struct PlayerInput {
     /// consumer derives its float through [`dequantize_unit`], so the host
     /// applies precisely the number the client's device layer committed to.
     pub analog: [u8; 4],
+    /// Quantized sprint continuum, 0..7, packed into [`WIRE_RUN_MASK`].
+    run: u8,
 }
 
 impl PlayerInput {
@@ -219,10 +241,32 @@ impl PlayerInput {
 
     /// Buttons packed for the wire ([`WIRE_ACTIONS`] bit order is protocol,
     /// keep it stable).
+    ///
+    /// The four DIRECTIONAL bits pack the keyboard set only, never the
+    /// stick fold that [`Self::held`] applies. The stick already travels
+    /// beside these bits at full float fidelity (`axis_x`/`axis_z`), and the
+    /// receiver's [`Self::axes`] ADDS keys and stick — so a folded stick bit
+    /// double-counted every deflection past 0.5 into saturated ±1.0 and
+    /// collapsed the whole sub-knee amble band for remote players (a split
+    /// client ambling at 0.6 deflection walked flat-out on the host).
+    /// Directional `held()` queries still see the stick on the receiving
+    /// side, through the same fold they always had — only the double count
+    /// is gone.
     pub fn buttons(&self) -> u32 {
+        let directional = [
+            live_id!(left),
+            live_id!(right),
+            live_id!(up),
+            live_id!(down),
+        ];
         let mut bits = 0u32;
         for (i, action) in WIRE_ACTIONS.iter().enumerate() {
-            if self.held(*action) {
+            let held = if directional.contains(action) {
+                self.held.contains(action)
+            } else {
+                self.held(*action)
+            };
+            if held {
                 bits |= 1 << i;
             }
             if self.pressed(*action) {
@@ -235,7 +279,46 @@ impl PlayerInput {
                 bits |= WIRE_FIRST_PERSON_BIT;
             }
         }
+        bits |= ((self.run.min(7) as u32) << WIRE_RUN_SHIFT) & WIRE_RUN_MASK;
         bits
+    }
+
+    /// Device-side sprint continuum. Quantized before it reaches the wire so
+    /// the local and host-side rigs consume the same value.
+    pub fn set_run(&mut self, run: f32) {
+        self.run = if run.is_finite() {
+            (run.clamp(0.0, 1.0) * 7.0).round() as u8
+        } else {
+            0
+        };
+    }
+
+    pub fn run(&self) -> f32 {
+        self.run.min(7) as f32 / 7.0
+    }
+
+    /// The ONE wire→vehicle-analog interpretation of this input frame.
+    ///
+    /// Both consumers of a remote frame — `session::drive_input_for` and the
+    /// blocks controller's `RawInput::from_wire` — derive their trigger
+    /// throttle, handbrake and rudder through here, so the two hand-kept
+    /// copies of this mapping can never drift apart again.
+    ///
+    /// Semantics deliberately match the LOCAL device path (`apply_pad`):
+    /// throttle is the one SIGNED number `RT − LT`. LT is reverse context —
+    /// the car block brakes-then-reverses from the throttle sign alone — and
+    /// never a simultaneous opposing brake lane. The old remote mapping split
+    /// RT into throttle and LT into `brake`, which gave the same pair of
+    /// hands structurally different cars on the two panes of a split (and a
+    /// remote player whose LT could never reverse).
+    pub fn wire_drive(&self) -> WireDrive {
+        WireDrive {
+            throttle: (dequantize_unit(self.analog[0]) - dequantize_unit(self.analog[1]))
+                .clamp(-1.0, 1.0),
+            handbrake: (if self.held(live_id!(shoot)) { 1.0f32 } else { 0.0 })
+                .max(dequantize_unit(self.analog[2])),
+            rudder: dequantize_rudder(self.analog[3]),
+        }
     }
 
     /// Device-side entry for analog triggers/pedals: quantized immediately,
@@ -297,6 +380,7 @@ impl PlayerInput {
             self.first_person = buttons & WIRE_FIRST_PERSON_BIT != 0;
             self.view_preference_received = true;
         }
+        self.run = ((buttons & WIRE_RUN_MASK) >> WIRE_RUN_SHIFT) as u8;
         self.pad = PadState::default();
         self.pad.axis_x = axis_x as f64;
         self.pad.axis_z = axis_z as f64;
@@ -678,6 +762,76 @@ mod tests {
         let mut input = PlayerInput::default();
         input.set_analog(0.5, 1.0, f32::NAN, -1.0);
         assert_eq!(input.analog, [128, 255, 0, 0]);
+    }
+
+    #[test]
+    fn run_continuum_uses_reserved_button_bits_and_round_trips() {
+        let mut source = PlayerInput::default();
+        source.set_run(0.72);
+        let buttons = source.buttons();
+        assert_ne!(buttons & WIRE_RUN_MASK, 0);
+
+        let mut received = PlayerInput::default();
+        received.apply_wire_v2(buttons, 0.0, 0.0, 0.0, 0.0, [0; 4], 0, 0);
+        assert!((received.run() - source.run()).abs() < f32::EPSILON);
+        assert!((received.run() - 0.72).abs() <= 1.0 / 7.0);
+
+        let mut hostile = PlayerInput::default();
+        hostile.set_run(f32::NAN);
+        assert_eq!(hostile.run(), 0.0);
+    }
+
+    #[test]
+    fn wire_preserves_the_amble_band_for_remote_sticks() {
+        // L1: the directional held bits used to fold stick deflection > 0.5,
+        // and the receiver's axes() ADDS keys and stick — so any deflection
+        // in (0.5, 1.0] saturated to ±1.0 on the host and the whole sub-knee
+        // amble band existed only on the sender's own pane.
+        let mut source = PlayerInput::default();
+        source.pad.axis_x = 0.6;
+        source.pad.axis_z = -0.6;
+        let buttons = source.buttons();
+
+        let mut host = PlayerInput::default();
+        host.apply_wire_v2(
+            buttons,
+            source.pad.axis_x as f32,
+            source.pad.axis_z as f32,
+            0.0,
+            0.0,
+            [0; 4],
+            0,
+            0,
+        );
+        let (x, z) = host.axes();
+        assert!((x - 0.6).abs() < 1.0e-6, "amble band collapsed: x={x}");
+        assert!((z + 0.6).abs() < 1.0e-6, "amble band collapsed: z={z}");
+        // The directional HELD queries still see the stick through the
+        // receiver-side fold — only the double count is gone.
+        assert!(host.held(live_id!(right)));
+        assert!(host.held(live_id!(up)));
+        // Keyboard keys still travel as bits and still read at ±1.
+        let mut keys = PlayerInput::default();
+        keys.held.insert(live_id!(left));
+        let mut host = PlayerInput::default();
+        host.apply_wire_v2(keys.buttons(), 0.0, 0.0, 0.0, 0.0, [0; 4], 0, 0);
+        assert_eq!(host.axes().0, -1.0);
+    }
+
+    #[test]
+    fn wire_drive_is_the_signed_local_trigger_semantic() {
+        // L2: both triggers held must partially cancel into ONE signed
+        // throttle — the local pane's semantic — not throttle+brake at once.
+        let mut input = PlayerInput::default();
+        input.set_analog(0.25, 1.0, 0.0, 0.0);
+        let wire = input.wire_drive();
+        assert!(wire.throttle < -0.7, "LT must win as reverse: {}", wire.throttle);
+        input.set_analog(1.0, 0.0, 0.4, 0.0);
+        input.set_rudder(-0.5);
+        let wire = input.wire_drive();
+        assert!((wire.throttle - 1.0).abs() < 1.0e-6);
+        assert!((wire.handbrake - dequantize_unit(quantize_unit(0.4))).abs() < f32::EPSILON);
+        assert!((wire.rudder - dequantize_rudder(quantize_rudder(-0.5))).abs() < f32::EPSILON);
     }
 
     #[test]

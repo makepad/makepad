@@ -15,7 +15,7 @@ pub struct Stack {
 }
 
 impl Stack {
-    pub(crate) const SIZE: usize = 1024 * 1024;
+    pub(crate) const SIZE: usize = 512 * 1024;
 
     pub fn lock() -> StackGuard {
         StackGuard {
@@ -37,7 +37,7 @@ impl Stack {
 
     fn new() -> Self {
         let mut stack = Self {
-            slots: AliasableBox::from_box(Box::from(vec![0; Self::SIZE])),
+            slots: AliasableBox::from_box(Box::from(vec![StackSlot::ZERO; Self::SIZE])),
             ptr: ptr::null_mut(),
         };
         stack.ptr = stack.slots.as_mut_ptr();
@@ -70,7 +70,24 @@ impl Drop for StackGuard {
     }
 }
 
-pub(crate) type StackSlot = u64;
+/// A single stack slot.
+///
+/// Every Wasm value occupies exactly one stack slot, regardless of its type.
+/// A slot is 16 bytes so that a `v128` value fits in one slot like every
+/// other value type; this keeps the compiler's operand-index <-> stack-index
+/// identity intact (no multi-slot "blocks" on the stack). Values smaller
+/// than 16 bytes are stored at the start of their slot (little-endian).
+/// The 16-byte alignment makes aligned `v128` slot accesses valid.
+///
+/// `Stack::SIZE` is halved relative to the old 8-byte slots so the stack
+/// still occupies 8 MiB per thread.
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(16))]
+pub struct StackSlot([u64; 2]);
+
+impl StackSlot {
+    pub(crate) const ZERO: Self = Self([0; 2]);
+}
 
 thread_local! {
     static STACK: Cell<Option<Stack>> = Cell::new(Some(Stack::new()));
