@@ -73,7 +73,7 @@ impl GpuTimeQuery {
 #[derive(Debug)]
 pub struct DrawPass(PoolId);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DrawPassId(pub(crate) usize);
 
 #[derive(Default)]

@@ -827,7 +827,10 @@ mod imp {
                     request_id,
                     kind_id: 0,
                 });
-                cx.redraw_all();
+                // Repaint, don't redraw: a grab must show what is on screen,
+                // including edits made directly to the draw buffers (the
+                // tweaker's theme pulse); a redraw would overwrite those.
+                cx.repaint_windows();
                 let _ = tx.send(Reply::Ok);
             }
             Cmd::Dump(tx) => {

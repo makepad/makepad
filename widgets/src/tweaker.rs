@@ -190,6 +190,15 @@ struct TweakSession {
     /// A remote undo (true) / redo (false) request, consumed by the
     /// tweaker's event loop (Cmd+Z / Shift+Cmd+Z by the bridge).
     undo_redo: Option<bool>,
+    /// A remote pulse request: a theme colour name (or #rrggbbaa) to pulse
+    /// app-wide until an empty request clears it; consumed by the tweaker.
+    pulse_req: Option<String>,
+    /// A remote lock on the pulse mix (deterministic grabs): the pulse
+    /// holds that tone instead of animating. None animates.
+    pulse_lock: Option<f32>,
+    /// The live theme pulse, shared by the tweaker's tick and the
+    /// post-draw hook (taken out of the lock while either runs).
+    pulse: Option<PulseState>,
     /// Remote pose lock for the state swatches: Some(0..1) freezes every
     /// track at that mix (deterministic grabs), None animates.
     states_lock: Option<f64>,
@@ -891,6 +900,7 @@ pub fn window_intercept(
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 tw.doc_tip_hover(cx, abs);
                 tw.states_hover(cx, abs);
+                tw.pulse_hover(cx, abs);
             }
             let eyedrop = session().lock().unwrap().eyedrop.is_some();
             cx.set_cursor(if annotate || eyedrop {
@@ -1998,6 +2008,296 @@ enum StructKind {
     /// Recognized as structured but with no editor yet (a big nested
     /// struct like a full text_style): shown collapsed, never dumped.
     NoEditor,
+}
+
+/// The hover pulse: every drawn value equal to a theme colour — dynamic
+/// uniforms and colour instances across every draw call — is scaled in
+/// brightness in place (CPU-side buffers, dirty flags set, uploaded next
+/// frame). No ledger, no apply: stopping just redraws all, which rebuilds
+/// every buffer from the widgets — restore is the ordinary draw path.
+/// The pulsed form of a colour at mix amount `m` (0 = the true colour).
+/// A brightness multiply is invisible on black or near-transparent theme
+/// colours, so the pulse mixes rgb toward the contrast tone (white for
+/// dark colours, black for light ones) and lifts alpha toward opaque —
+/// visible for any colour, and exactly invertible via the same function.
+fn pulse_tone(target: [f32; 4], m: f32) -> [f32; 4] {
+    let lum = 0.299 * target[0] + 0.587 * target[1] + 0.114 * target[2];
+    let tone = if lum < 0.5 { 1.0 } else { 0.0 };
+    [
+        target[0] + (tone - target[0]) * m,
+        target[1] + (tone - target[1]) * m,
+        target[2] + (tone - target[2]) * m,
+        target[3] + (1.0 - target[3]) * m * 0.85,
+    ]
+}
+
+/// One colour slot the pulse has written. Theme colours reach the GPU
+/// four ways: per-instance values, a draw call's dyn uniforms, a shader
+/// referencing the theme in its code (a per-shader scope uniform), and a
+/// pass clear colour (the window background).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PulseSlot {
+    Inst { list: DrawListId, item: usize, at: usize },
+    Uni { list: DrawListId, item: usize, at: usize },
+    Scope { shader: usize, at: usize },
+    Clear { pass: DrawPassId },
+}
+
+/// The live theme pulse: the colour, the current mix, the last value
+/// written, and the ledger of every slot holding it. Slots are re-toned
+/// by identity, never by value, so no other colour can be caught.
+struct PulseState {
+    target: [f32; 4],
+    m: f32,
+    last: [f32; 4],
+    ledger: Vec<PulseSlot>,
+}
+
+impl PulseState {
+    fn new(rgba: u32) -> Self {
+        let target = [
+            ((rgba >> 24) & 0xff) as f32 / 255.0,
+            ((rgba >> 16) & 0xff) as f32 / 255.0,
+            ((rgba >> 8) & 0xff) as f32 / 255.0,
+            (rgba & 0xff) as f32 / 255.0,
+        ];
+        Self { target, m: 0.0, last: target, ledger: Vec::new() }
+    }
+}
+
+fn pulse_close(v: &[f32], w: [f32; 4]) -> bool {
+    (v[0] - w[0]).abs() < 0.004
+        && (v[1] - w[1]).abs() < 0.004
+        && (v[2] - w[2]).abs() < 0.004
+        && (v[3] - w[3]).abs() < 0.004
+}
+
+fn pulse_slot_get(cx: &Cx, s: PulseSlot) -> Option<[f32; 4]> {
+    let v: [f32; 4] = match s {
+        PulseSlot::Inst { list, item, at } => {
+            let items = &cx.draw_lists[list].draw_items;
+            if item >= items.len() {
+                return None;
+            }
+            let b = items[item].instances.as_ref()?.get(at..at + 4)?;
+            [b[0], b[1], b[2], b[3]]
+        }
+        PulseSlot::Uni { list, item, at } => {
+            let items = &cx.draw_lists[list].draw_items;
+            if item >= items.len() {
+                return None;
+            }
+            let b = items[item].draw_call()?.dyn_uniforms.get(at..at + 4)?;
+            [b[0], b[1], b[2], b[3]]
+        }
+        PulseSlot::Scope { shader, at } => {
+            let b = cx.draw_shaders.shaders.get(shader)?.mapping.scope_uniforms_buf.get(at..at + 4)?;
+            [b[0], b[1], b[2], b[3]]
+        }
+        PulseSlot::Clear { pass } => {
+            let c = cx.passes[pass].clear_color;
+            [c.x, c.y, c.z, c.w]
+        }
+    };
+    Some(v)
+}
+
+fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
+    match s {
+        PulseSlot::Inst { list, item, at } => {
+            let items = &mut cx.draw_lists[list].draw_items;
+            if item >= items.len() {
+                return;
+            }
+            let it = &mut items[item];
+            if let Some(dst) = it.instances.as_mut().and_then(|b| b.get_mut(at..at + 4)) {
+                dst.copy_from_slice(&v);
+            }
+            if let Some(call) = it.kind.draw_call_mut() {
+                call.instance_dirty = true;
+            }
+        }
+        PulseSlot::Uni { list, item, at } => {
+            let items = &mut cx.draw_lists[list].draw_items;
+            if item >= items.len() {
+                return;
+            }
+            if let Some(call) = items[item].kind.draw_call_mut() {
+                if let Some(dst) = call.dyn_uniforms.get_mut(at..at + 4) {
+                    dst.copy_from_slice(&v);
+                    call.uniforms_dirty = true;
+                }
+            }
+        }
+        PulseSlot::Scope { shader, at } => {
+            if let Some(sh) = cx.draw_shaders.shaders.get_mut(shader) {
+                if let Some(dst) = sh.mapping.scope_uniforms_buf.get_mut(at..at + 4) {
+                    dst.copy_from_slice(&v);
+                    sh.mapping.scope_uniforms_gen = sh.mapping.scope_uniforms_gen.wrapping_add(1);
+                }
+            }
+        }
+        PulseSlot::Clear { pass } => {
+            let p = &mut cx.passes[pass];
+            p.clear_color = Vec4f { x: v[0], y: v[1], z: v[2], w: v[3] };
+            p.paint_dirty = true;
+        }
+    }
+}
+
+/// Bring every draw buffer in line with the pulse: re-tone the ledger's
+/// slots (dropping any a widget has since written something else into),
+/// then adopt every fresh occurrence of the true colour — a redraw writes
+/// the true values back, and this runs again after each one.
+fn pulse_sync(cx: &mut Cx, st: &mut PulseState) -> usize {
+    let pulsed = pulse_tone(st.target, st.m);
+    let target = st.target;
+    let last = st.last;
+    let live: std::collections::HashSet<DrawListId> = cx.draw_lists.id_iter().collect();
+    let passes: Vec<DrawPassId> = cx.passes.id_iter().collect();
+    let mut ledger = std::mem::take(&mut st.ledger);
+    ledger.retain(|s| {
+        match *s {
+            PulseSlot::Inst { list, .. } | PulseSlot::Uni { list, .. } if !live.contains(&list) => return false,
+            PulseSlot::Clear { pass } if !passes.contains(&pass) => return false,
+            _ => {}
+        }
+        match pulse_slot_get(cx, *s) {
+            Some(v) if pulse_close(&v, target) || pulse_close(&v, last) => {
+                pulse_slot_set(cx, *s, pulsed);
+                true
+            }
+            _ => false,
+        }
+    });
+    let known: std::collections::HashSet<PulseSlot> = ledger.iter().copied().collect();
+    let mut shader_slots: std::collections::HashMap<usize, (usize, Vec<usize>, Vec<usize>)> = Default::default();
+    for list_id in live {
+        let item_count = cx.draw_lists[list_id].draw_items.len();
+        for item_id in 0..item_count {
+            let Some(shader_index) = cx.draw_lists[list_id].draw_items[item_id]
+                .draw_call()
+                .map(|dc| dc.draw_shader_id.index)
+            else {
+                continue;
+            };
+            let (stride, inst_offs, uni_offs) = shader_slots
+                .entry(shader_index)
+                .or_insert_with(|| {
+                    let mapping = &cx.draw_shaders.shaders[shader_index].mapping;
+                    (
+                        mapping.instances.total_slots,
+                        mapping.instances.inputs.iter().filter(|i| i.slots == 4).map(|i| i.offset).collect(),
+                        mapping.dyn_uniforms.inputs.iter().filter(|i| i.slots == 4).map(|i| i.offset).collect(),
+                    )
+                })
+                .clone();
+            let mut fresh: Vec<PulseSlot> = Vec::new();
+            {
+                let item = &cx.draw_lists[list_id].draw_items[item_id];
+                if let (Some(buf), true) = (item.instances.as_ref(), stride > 0) {
+                    for n in 0..buf.len() / stride {
+                        for off in &inst_offs {
+                            let at = n * stride + off;
+                            let s = PulseSlot::Inst { list: list_id, item: item_id, at };
+                            if at + 4 <= buf.len() && !known.contains(&s) && pulse_close(&buf[at..at + 4], target) {
+                                fresh.push(s);
+                            }
+                        }
+                    }
+                }
+                if let Some(call) = item.draw_call() {
+                    for off in &uni_offs {
+                        let s = PulseSlot::Uni { list: list_id, item: item_id, at: *off };
+                        if *off + 4 <= call.dyn_uniforms.len()
+                            && !known.contains(&s)
+                            && pulse_close(&call.dyn_uniforms[*off..*off + 4], target)
+                        {
+                            fresh.push(s);
+                        }
+                    }
+                }
+            }
+            for s in fresh {
+                pulse_slot_set(cx, s, pulsed);
+                ledger.push(s);
+            }
+        }
+    }
+    // Theme colours referenced inside shader code, and pass clear colours.
+    let mut fresh: Vec<PulseSlot> = Vec::new();
+    for shader in 0..cx.draw_shaders.shaders.len() {
+        let mapping = &cx.draw_shaders.shaders[shader].mapping;
+        for input in mapping.scope_uniforms.inputs.iter().filter(|i| i.slots == 4) {
+            let at = input.offset;
+            let s = PulseSlot::Scope { shader, at };
+            if let Some(b) = mapping.scope_uniforms_buf.get(at..at + 4) {
+                if !known.contains(&s) && pulse_close(b, target) {
+                    fresh.push(s);
+                }
+            }
+        }
+    }
+    for pass in passes {
+        let s = PulseSlot::Clear { pass };
+        let c = cx.passes[pass].clear_color;
+        if !known.contains(&s) && pulse_close(&[c.x, c.y, c.z, c.w], target) {
+            fresh.push(s);
+        }
+    }
+    for s in fresh {
+        pulse_slot_set(cx, s, pulsed);
+        ledger.push(s);
+    }
+    st.last = pulsed;
+    st.ledger = ledger;
+    st.ledger.len()
+}
+
+/// Repaint (no redraw) what the pulse touched: the window passes, the
+/// passes of every patched draw list, and every patched clear colour.
+fn pulse_repaint(cx: &mut Cx, st: &PulseState) {
+    let mut dirty: Vec<DrawPassId> = Vec::new();
+    for pass in cx.passes.id_iter() {
+        if matches!(cx.passes[pass].parent, CxDrawPassParent::Window(_)) {
+            dirty.push(pass);
+        }
+    }
+    for s in &st.ledger {
+        match *s {
+            PulseSlot::Inst { list, .. } | PulseSlot::Uni { list, .. } => {
+                if let Some(pass) = cx.draw_lists[list].draw_pass_id {
+                    dirty.push(pass);
+                }
+            }
+            PulseSlot::Clear { pass } => dirty.push(pass),
+            PulseSlot::Scope { .. } => {}
+        }
+    }
+    for pass in dirty {
+        cx.passes[pass].paint_dirty = true;
+    }
+}
+
+/// Write the true colour back into every slot still holding the pulse.
+fn pulse_restore(cx: &mut Cx, st: &PulseState) {
+    for s in &st.ledger {
+        if let Some(v) = pulse_slot_get(cx, *s) {
+            if pulse_close(&v, st.last) {
+                pulse_slot_set(cx, *s, st.target);
+            }
+        }
+    }
+}
+
+/// The post-draw hook while a pulse is live: widgets that just redrew
+/// wrote true colours; re-apply before the paint.
+fn pulse_after_draw(cx: &mut Cx) {
+    let st = session().lock().unwrap().pulse.take();
+    if let Some(mut st) = st {
+        pulse_sync(cx, &mut st);
+        session().lock().unwrap().pulse = Some(st);
+    }
 }
 
 /// The app's theme palette: every `color_*` in `mod.theme`, with the
@@ -3269,6 +3569,23 @@ pub fn tweak_callback(
             cx.redraw_all();
             Ok(format!("{{\"ok\":1,\"op\":{}}}", json_str(op)))
         }
+        "pulse" => {
+            // Pin the theme pulse on a colour (name=color_x or a #hex);
+            // an empty name restores and unpins.
+            let name = arg(args, &["name", "color"]).unwrap_or("").to_string();
+            let lock = arg(args, &["m"]).and_then(|s| s.parse::<f32>().ok()).map(|m| m.clamp(0.0, 1.0));
+            {
+                let mut s = session().lock().unwrap();
+                s.pulse_req = Some(name.clone());
+                s.pulse_lock = lock;
+            }
+            cx.redraw_all();
+            Ok(format!(
+                "{{\"ok\":1,\"pulse\":{},\"m\":{}}}",
+                json_str(&name),
+                lock.map_or("null".to_string(), |m| format!("{m}"))
+            ))
+        }
         "states" => {
             // The state swatches' pose lock: phase=0 (off pose), 1 (on
             // pose), any mix between, or auto to animate again.
@@ -3952,11 +4269,7 @@ struct RowBinding {
 /// One hot-patchable shader constant of the pinned widget's draw layer.
 #[derive(Clone)]
 struct ConstRef {
-    shader: DrawShaderId,
-    index: usize,
     layer: String,
-    /// The literal's file:line.
-    loc: String,
     name: String,
     initial: f32,
 }
@@ -4018,7 +4331,6 @@ enum VisKind {
     /// the row keeps a second set of field uids for it).
     Tweakable(usize),
     /// The annotation line (doc + range) under a row.
-    Doc(usize),
     /// The Shader tab's INPUTS header: the mirrored layer's own inputs.
     InputsHeader(usize),
     /// One level of the selection's cascade (index into Tweaker::cascade).
@@ -4228,6 +4540,18 @@ pub struct Tweaker {
     /// The theme's colour palette (name, rgba, defined-at), read once.
     #[rust]
     theme_colors: Vec<(String, u32, String)>,
+    /// The colour being hover-pulsed app-wide (and when it started).
+    #[rust]
+    pulse: Option<(u32, f64)>,
+    /// Pinned by a remote `op=pulse`: the pointer no longer clears it.
+    #[rust]
+    pulse_pinned: bool,
+    #[rust]
+    pulse_ticks: u64,
+    #[rust]
+    pulse_last_sync: f64,
+    #[rust]
+    pulse_frame: NextFrame,
     /// A scroll-to-selection servo: each tree draw reports where the
     /// selected row landed and the error is corrected until it is inside
     /// the viewport (estimates and clamping cannot diverge it).
@@ -4246,9 +4570,6 @@ pub struct Tweaker {
     /// the tab here and sets this).
     #[rust]
     vibe_layer: Option<String>,
-    /// The shader tab's preview generation (vs rows_gen).
-    #[rust]
-    vibe_applied_gen: u64,
     /// Tab-bar button uids, captured at draw.
     #[rust]
     tab_uids: [u64; 3],
@@ -4820,11 +5141,6 @@ impl Tweaker {
                     sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
                     sf_num := FabValueInput { width: 56 height: 18 }
                 }
-                let DocRowT = View {
-                    width: Fill height: Fit flow: Right
-                    padding: Inset{left: 18 right: 8 top: 0 bottom: 3}
-                    doc := FabLabelSmall { width: Fill text: "" }
-                }
                 let NoEditorRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
@@ -4965,7 +5281,6 @@ impl Tweaker {
                             InsetRow := InsetRowT {}
                             MetricsRow := MetricsRowT {}
                             SizeFieldRow := SizeFieldRowT {}
-                            DocRow := DocRowT {}
                             NoEditorRow := NoEditorRowT {}
                         }
                         }
@@ -5076,7 +5391,6 @@ impl Tweaker {
                         InsetRow := InsetRowT {}
                         MetricsRow := MetricsRowT {}
                         SizeFieldRow := SizeFieldRowT {}
-                        DocRow := DocRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
                     }
@@ -5296,7 +5610,7 @@ impl Tweaker {
             let materials = self.materials.clone();
             for (mi, layer) in materials.iter().enumerate() {
                 let mut seen: Vec<String> = Vec::new();
-                for (shader, index, name, doc, initial, value, loc) in layer_consts(cx, &widget, layer, mi == 0) {
+                for (_, _, name, doc, initial, value, loc) in layer_consts(cx, &widget, layer, mi == 0) {
                     // One knob per name: a literal annotated at two sites
                     // in the same shader is one constant (both patch).
                     if seen.contains(&name) {
@@ -5308,7 +5622,8 @@ impl Tweaker {
                     } else {
                         name.clone()
                     };
-                    self.row_docs.insert(prop.clone(), doc);
+                    // The tooltip names the literal's site: these live in shader code.
+                    self.row_docs.insert(prop.clone(), if doc.is_empty() { loc } else { format!("{doc}\n{loc}") });
                     self.rows.push(RowBinding {
                         prop,
                         kind: RowKind::Num,
@@ -5325,7 +5640,7 @@ impl Tweaker {
                         comp_uids: Vec::new(),
                         mode_uids: Vec::new(),
                         alt_uids: Vec::new(),
-                        const_ref: Some(ConstRef { shader, index, layer: layer.clone(), loc, name, initial }),
+                        const_ref: Some(ConstRef { layer: layer.clone(), name, initial }),
                         theme_match: None,
                         theme_uid: 0,
                     });
@@ -5373,55 +5688,6 @@ impl Tweaker {
             || leaf.contains("shadow")
     }
 
-    /// The annotation line under a row: the doc's first sentence, plus the
-    /// range/step the hint declares (`0..24 step 0.5`) for a number.
-    fn doc_line_for(&self, index: usize) -> String {
-        let Some(row) = self.rows.get(index) else { return String::new() };
-        let Some(doc) = self.row_docs.get(&row.prop) else { return String::new() };
-        if let Some(cref) = &row.const_ref {
-            let hint = parse_doc_hint(doc);
-            let mut parts = vec![cref.layer.clone()];
-            if let (Some(lo), Some(hi)) = (hint.min, hint.max) {
-                let mut range = format!("{}..{}", fmt_f64(lo), fmt_f64(hi));
-                if let Some(step) = hint.step {
-                    range.push_str(&format!(" step {}", fmt_f64(step)));
-                }
-                parts.push(range);
-            }
-            parts.push(cref.loc.clone());
-            return parts.join(" \u{00b7} ");
-        }
-        let first = doc.lines().next().unwrap_or("").trim();
-        // The hint rides inside the doc (`gap between icon and label 0..24
-        // step 1`): show the prose, then the range in one place.
-        let tokens: Vec<&str> = first.split_whitespace().collect();
-        let prose_end = tokens
-            .iter()
-            .position(|tok| tok.contains("..") && tok.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-'))
-            .unwrap_or(tokens.len());
-        let prose = tokens[..prose_end].join(" ");
-        let mut text: String = prose.chars().take(140).collect();
-        if prose.chars().count() > 140 {
-            text.push('\u{2026}');
-        }
-        if row.kind == RowKind::Num {
-            let hint = parse_doc_hint(doc);
-            let mut range = String::new();
-            if let (Some(lo), Some(hi)) = (hint.min, hint.max) {
-                range = format!("{}..{}", fmt_f64(lo), fmt_f64(hi));
-            }
-            if let Some(step) = hint.step {
-                if !range.is_empty() {
-                    range.push(' ');
-                }
-                range.push_str(&format!("step {}", fmt_f64(step)));
-            }
-            if !range.is_empty() {
-                text = format!("{text} \u{00b7} {range}");
-            }
-        }
-        text
-    }
 
     fn row_index(&self, prop: &str) -> Option<usize> {
         self.rows.iter().position(|row| row.prop == prop)
@@ -6099,7 +6365,6 @@ impl Tweaker {
                     VisKind::AlignGrid => live_id!(AlignRow),
                     VisKind::TweakHeader(..) | VisKind::InputsHeader(_) => live_id!(SectionRow),
                     VisKind::CascadeLevel(_) => live_id!(CascadeRow),
-                    VisKind::Doc(_) => live_id!(DocRow),
                     VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
                         StructKind::Inset => live_id!(InsetRow),
@@ -6133,10 +6398,6 @@ impl Tweaker {
                         item.child(live_id!(title)).set_text(cx, "Shader constants");
                         item.child(live_id!(count))
                             .set_text(cx, &format!("{count}{}", if open { "" } else { "  +" }));
-                    }
-                    VisKind::Doc(index) => {
-                        let text = self.doc_line_for(index);
-                        item.child(live_id!(doc)).set_text(cx, &text);
                     }
                     VisKind::InputsHeader(count) => {
                         item.child(live_id!(title)).set_text(cx, "Inputs");
@@ -6712,6 +6973,70 @@ impl Tweaker {
         }
         if lock.is_none() && !paused {
             self.states_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Hovering an "≈ theme.color_x" chip pulses that colour everywhere it
+    /// is drawn, live — leave restores by redrawing all (the ordinary draw
+    /// path rebuilds every buffer; the pulse never touches the ledger).
+    fn pulse_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let mut over: Option<u32> = None;
+        if tweak_is_on() {
+            for row in &self.rows {
+                if row.theme_uid == 0 {
+                    continue;
+                }
+                let Some(name) = &row.theme_match else { continue };
+                let rect = cx
+                    .widget_tree()
+                    .widget(WidgetUid(row.theme_uid))
+                    .area()
+                    .clipped_rect(cx);
+                if rect.size.x > 0.0 && rect.contains(abs) {
+                    over = self.theme_colors.iter().find(|(n, _, _)| n == name).map(|(_, c, _)| *c);
+                    break;
+                }
+            }
+        }
+        // A remotely pinned pulse ignores the pointer until it is cleared.
+        if self.pulse_pinned && over.is_none() {
+            return;
+        }
+        self.set_pulse(cx, over);
+    }
+
+    /// Start pulsing `over` app-wide, hop to it from another colour, or
+    /// (None) restore the true colour everywhere. Never touches the ledger.
+    fn set_pulse(&mut self, cx: &mut Cx, over: Option<u32>) {
+        match (over, self.pulse) {
+            (Some(c), Some((p, _))) if c == p => {}
+            (Some(c), _) => {
+                // Hopping between chips restores the old colour first.
+                self.pulse_end(cx);
+                self.pulse = Some((c, cx.seconds_since_app_start()));
+                self.pulse_ticks = 0;
+                session().lock().unwrap().pulse = Some(PulseState::new(c));
+                cx.post_draw_hook = Some(Box::new(pulse_after_draw));
+                self.pulse_frame = cx.new_next_frame();
+                log!("TWEAK pulse on #{c:08x}");
+            }
+            (None, Some(_)) => {
+                self.pulse_end(cx);
+                log!("TWEAK pulse off — restore");
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Stop the pulse: true colours back into every slot it wrote, the
+    /// hook down, and a redraw of everything for good measure.
+    fn pulse_end(&mut self, cx: &mut Cx) {
+        self.pulse = None;
+        cx.post_draw_hook = None;
+        let st = session().lock().unwrap().pulse.take();
+        if let Some(st) = st {
+            pulse_restore(cx, &st);
+            cx.redraw_all();
         }
     }
 
@@ -7924,9 +8249,63 @@ impl Widget for Tweaker {
                 self.redo(cx);
             }
         }
+        let pulse_req = session().lock().unwrap().pulse_req.take();
+        if let Some(req) = pulse_req {
+            let color = if req.is_empty() {
+                None
+            } else if let Some(hex) = req.strip_prefix('#') {
+                u32::from_str_radix(hex, 16).ok().map(|v| if hex.len() == 6 { (v << 8) | 0xff } else { v })
+            } else {
+                let found = self.theme_colors.iter().find(|(n, _, _)| *n == req).map(|(_, c, _)| *c);
+                if found.is_none() {
+                    log!("TWEAK pulse: unknown theme colour {req}");
+                }
+                found
+            };
+            self.pulse_pinned = color.is_some();
+            self.set_pulse(cx, color);
+        }
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
             self.states_hover(cx, e.abs);
+            self.pulse_hover(cx, e.abs);
+        }
+        if self.pulse_frame.is_event(event).is_some() {
+            if let Some((_, t0)) = self.pulse {
+                let now = cx.seconds_since_app_start();
+                let t = now - t0;
+                let lock = session().lock().unwrap().pulse_lock;
+                let m = lock.unwrap_or_else(|| 0.3 + 0.25 * ((t * std::f64::consts::TAU * 2.5).sin() as f32));
+                // Frames arrive far faster than the display on a hidden or
+                // occluded window; pace the buffer work at ~90 Hz, and a
+                // locked tone needs no work at all once it is on screen.
+                let due = now - self.pulse_last_sync >= 1.0 / 90.0;
+                let mut st = if due { session().lock().unwrap().pulse.take() } else { None };
+                if st.as_ref().is_some_and(|s| lock.is_some() && s.m == m && self.pulse_ticks > 0) {
+                    session().lock().unwrap().pulse = st.take();
+                }
+                if let Some(mut st) = st {
+                    self.pulse_last_sync = now;
+                    st.m = m;
+                    let hits = pulse_sync(cx, &mut st);
+                    pulse_repaint(cx, &st);
+                    if self.pulse_ticks == 0 {
+                        let n = |f: &dyn Fn(&PulseSlot) -> bool| st.ledger.iter().filter(|s| f(s)).count();
+                        log!(
+                            "TWEAK pulse hits {hits} (inst {} uni {} scope {} clear {})",
+                            n(&|s| matches!(s, PulseSlot::Inst { .. })),
+                            n(&|s| matches!(s, PulseSlot::Uni { .. })),
+                            n(&|s| matches!(s, PulseSlot::Scope { .. })),
+                            n(&|s| matches!(s, PulseSlot::Clear { .. }))
+                        );
+                    } else if self.pulse_ticks % 90 == 0 {
+                        log!("TWEAK pulse tick {} m={m:.2} ledger {hits}", self.pulse_ticks);
+                    }
+                    session().lock().unwrap().pulse = Some(st);
+                    self.pulse_ticks += 1;
+                }
+                self.pulse_frame = cx.new_next_frame();
+            }
         }
         // The wells' scroll viewports, read between frames when the rect
         // slots hold the drawn values (mid-draw they answer zero).
@@ -8020,7 +8399,7 @@ impl Widget for Tweaker {
                                 self.tweakables_open = !self.tweakables_open;
                                 self.redraw_sidebar(cx);
                             }
-                            VisKind::Tweakable(_) | VisKind::Doc(_) | VisKind::InputsHeader(_) | VisKind::CascadeLevel(_) => {}
+                            VisKind::Tweakable(_) | VisKind::InputsHeader(_) | VisKind::CascadeLevel(_) => {}
                             VisKind::Material(mi) => {
                                 // Thumbnail click: jump to the Shader tab
                                 // with this draw layer loaded.

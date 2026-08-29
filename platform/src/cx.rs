@@ -180,6 +180,10 @@ pub struct Cx {
     /// Deepest `nesting_depth` reached during the last draw. The exploded
     /// view sizes its fan from this instead of a draw-call count.
     pub nesting_depth_max: usize,
+    /// Runs after every draw event, before the paint: for tools that edit
+    /// the draw buffers in place (the tweaker's theme pulse) and must
+    /// re-apply after widgets rewrite them.
+    pub post_draw_hook: Option<Box<dyn FnMut(&mut Cx)>>,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     #[allow(dead_code)]
@@ -484,6 +488,7 @@ impl Cx {
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
 
+            post_draw_hook: None,
             screenshot_requests: Default::default(),
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
