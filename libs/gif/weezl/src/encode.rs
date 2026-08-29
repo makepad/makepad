@@ -1085,7 +1085,7 @@ mod tests {
 
     fn make_decoded() -> Vec<u8> {
         const FILE: &'static [u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"));
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/encode.rs")); // was Cargo.lock: not tracked in this vendored tree; any sizable byte blob works for this roundtrip test
         return Vec::from(FILE);
     }
 
