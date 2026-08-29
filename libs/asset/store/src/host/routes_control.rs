@@ -43,7 +43,10 @@ use super::routes::{
     call_state, is_read, method_not_allowed, not_found, read_body, require_cap, secret_of,
     Outcome, RouteCtx,
 };
-use super::state::{envelope_build, envelope_parse, StateCtx, MAX_JOB_NAMESPACES};
+use super::state::{
+    envelope_build, envelope_parse, StateCtx, MAX_JOB_NAMESPACES, MAX_PIPELINE_PROMPT_BYTES,
+    MAX_PIPELINE_STAGES, MAX_PIPELINE_TITLE_BYTES, MAX_STAGE_WEIGHT,
+};
 use super::util::{from_hex_bounded, from_hex_exact, now_ms, rand16, rand32, to_hex};
 use crate::search::{kind_name, kind_parse};
 use crate::{
@@ -244,6 +247,14 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         // ---- the vision-annotation queue -----------------------------------
         ["v1", "annotate", "summary"] if is_read(m) => annotate_summary(head, rc),
         ["v1", "annotate", "backlog"] if m == Method::Post => annotate_backlog(conn, head, rc),
+
+        // ---- pipelines -----------------------------------------------------
+        ["v1", "pipelines"] if m == Method::Post => pipeline_create(conn, head, rc),
+        ["v1", "pipelines"] if is_read(m) => pipeline_list(head, rc),
+        ["v1", "pipelines", p] if is_read(m) => pipeline_get(head, rc, pipe_of(p)?),
+        ["v1", "pipelines", p, "cancel"] if m == Method::Post => {
+            pipeline_cancel(head, rc, pipe_of(p)?)
+        }
 
         ["v1", "jobs", j, "cancel"] if m == Method::Post => {
             let job = parse_job(j).ok_or(Fail::Http(400, "malformed job id"))?;
@@ -1838,6 +1849,8 @@ fn alias_delete(head: &Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Ou
                 game_revision: None,
                 alias: Some(alias.as_str().to_string()),
                 model_preview: None,
+                pipeline: None,
+                pipeline_state: None,
                 content_kind: None,
                 ts_ms: now,
             };
@@ -2149,6 +2162,8 @@ fn game_alias_delete(head: &Head, rc: &RouteCtx, alias: GameAlias) -> RouteResul
                 game_revision: None,
                 alias: Some(alias.as_str().to_string()),
                 model_preview: None,
+                pipeline: None,
+                pipeline_state: None,
                 content_kind: None,
                 ts_ms: now,
             };
@@ -2191,14 +2206,19 @@ fn events_resp(
 ) -> Resp {
     let arr = events
         .iter()
-        // v1-v3 have no honest durable spelling for a part-delta preview.
-        // They advance over its sequence but do not receive a fake event.
+        // v1-v3 have no honest durable spelling for a part-delta preview,
+        // and v1-v4 none for a pipeline finishing — a pipeline is not an
+        // asset, and pretending otherwise would tell an old client that
+        // content appeared when a run may have failed publishing nothing.
+        // Older subscribers advance over those sequences and receive no
+        // fake event.
         .filter(|e| {
-            vocabulary >= 4
+            (vocabulary >= 4
                 || !matches!(
                     e.kind,
                     events::KIND_MODEL_PREVIEW | events::KIND_MODEL_PREVIEW_CLEAR
-                )
+                ))
+                && (vocabulary >= 5 || e.kind != events::KIND_PIPELINE_FINISHED)
         })
         .map(|e| {
             let mut pairs = vec![
@@ -2264,6 +2284,12 @@ fn events_resp(
                             .collect(),
                     ),
                 ));
+            }
+            if let Some(v) = &e.pipeline {
+                pairs.push(("pipeline", s(v.clone())));
+            }
+            if let Some(v) = e.pipeline_state {
+                pairs.push(("pipeline_state", s(v)));
             }
             if let Some(k) = e.content_kind {
                 pairs.push(("content_kind", s(k)));
@@ -3144,14 +3170,7 @@ fn job_get(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
 
 fn job_prompt(payload: &[u8]) -> Option<String> {
     let (_, _, body) = envelope_parse(payload)?;
-    let prompt = body.get("prompt")?.as_str()?;
-    let mut out = String::new();
-    for ch in prompt.chars().filter(|ch| !ch.is_control()) {
-        if out.len() + ch.len_utf8() > 256 {
-            break;
-        }
-        out.push(ch);
-    }
+    let out = display_text(body.get("prompt")?.as_str()?, 256);
     (!out.is_empty()).then_some(out)
 }
 
@@ -3272,17 +3291,873 @@ fn job_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
 fn job_cancel(head: &Head, rc: &RouteCtx, job: JobId) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
+    let hub = rc.events.clone();
     let cancelled = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let meta = ctx
             .meta_get(&job)?
             .ok_or(ServerError::NotFound { what: "job" })?;
         require_cap(ctx, &p, Capability::JobCancel, &meta.ns)?;
-        ctx.core.jobs().cancel(&job, now)
+        let cancelled = ctx.core.jobs().cancel(&job, now)?;
+        // Cancelling ONE stage of a pipeline can finish the pipeline. The
+        // cancellation is already committed, so this may not turn into the
+        // caller's refusal; the janitor sweep re-derives anything a failure
+        // here leaves unannounced.
+        let _ = pipeline_of_job_settle(ctx, &hub, &job, now);
+        Ok(cancelled)
     })?;
     Ok(Outcome::Resp(Resp::json(
         200,
         &obj(vec![("cancelled", Value::Int(cancelled as i64))]),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// pipelines
+// ---------------------------------------------------------------------------
+
+// A pipeline is its stage JOBS — enqueued all at once with `deps` and
+// `$from` splices — plus a thin transport record that names, groups and
+// weights them. The jobs are the execution truth: they advance through the
+// dependency gate and the claim-time splice with NOBODY watching, they
+// crash-resume, and they cancel and doom as one tree. The record is the
+// presentation truth: what the person called this, the words they typed,
+// and how much of the whole each stage is worth.
+//
+// State is never stored. `pipeline_derive` computes it from the stage jobs
+// on every read, so the record cannot drift from what actually happened —
+// and a failed stage reads `failed` IMMEDIATELY, without waiting for the
+// lazy doom propagation to reach its dependents.
+
+/// Weight for a stage that declares none. The per-kind table lives in ONE
+/// place — the client crate — precisely so two clients cannot disagree;
+/// this is only the neutral fallback.
+const DEFAULT_STAGE_WEIGHT: u64 = 10;
+
+/// Most pipelines the janitor re-derives per tick while looking for a
+/// finish nobody announced. Newest first: these are the runs somebody is
+/// watching, and every READ of a pipeline reports the truthful derived
+/// state regardless — the sweep only ever owes the EVENT.
+pub(crate) const PIPELINE_SWEEP: u64 = 64;
+
+fn pipe_of(t: &str) -> RouteResult<super::state::PipelineId> {
+    super::api::parse_pipeline(t).ok_or(Fail::Http(400, "malformed pipeline id"))
+}
+
+/// One stage as the create route parsed it, before any job exists.
+struct StageSpec {
+    name: String,
+    kind: String,
+    body: Value,
+    weight: u64,
+    on_fail: &'static str,
+    /// Indices of EARLIER stages. Backward-only by construction, so the
+    /// declared graph is acyclic before a single row is written.
+    deps: Vec<usize>,
+    priority: i64,
+    max_attempts: u32,
+}
+
+fn stage_name_ok(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+        })
+}
+
+fn kind_ok(kind: &str) -> bool {
+    (1..=64).contains(&kind.len())
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+}
+
+/// Parse and bound the declared stage list. Everything is checked BEFORE
+/// anything is enqueued: a pipeline half in the queue is the one outcome
+/// this route may never produce.
+fn parse_stage_specs(body: &Value, rc: &RouteCtx) -> RouteResult<Vec<StageSpec>> {
+    let stages = body
+        .get("stages")
+        .and_then(Value::as_arr)
+        .ok_or(Fail::Http(400, "stages must be an array"))?;
+    if stages.is_empty() {
+        return Err(Fail::Http(400, "a pipeline needs at least one stage"));
+    }
+    if stages.len() > MAX_PIPELINE_STAGES {
+        return Err(Fail::Http(413, "too many pipeline stages"));
+    }
+    let mut out: Vec<StageSpec> = Vec::with_capacity(stages.len());
+    for (index, stage) in stages.iter().enumerate() {
+        let name = stage
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|n| stage_name_ok(n))
+            .ok_or(Fail::Http(400, "malformed stage name"))?
+            .to_string();
+        if out.iter().any(|s| s.name == name) {
+            return Err(Fail::Http(400, "duplicate stage name"));
+        }
+        let kind = stage
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|k| kind_ok(k))
+            .ok_or(Fail::Http(400, "malformed stage kind"))?
+            .to_string();
+        let body = match stage.get("body") {
+            None => Value::Obj(Vec::new()),
+            Some(v @ Value::Obj(_)) => v.clone(),
+            Some(_) => return Err(Fail::Http(400, "stage body must be an object")),
+        };
+        let weight = match stage.get("weight") {
+            None => DEFAULT_STAGE_WEIGHT,
+            Some(v) => v.as_u64().ok_or(Fail::Http(400, "malformed stage weight"))?,
+        };
+        if weight == 0 || weight > MAX_STAGE_WEIGHT {
+            return Err(Fail::Http(400, "stage weight out of bounds"));
+        }
+        let on_fail = match stage.get("on_fail") {
+            None => "fail",
+            Some(v) => match v.as_str() {
+                Some("fail") => "fail",
+                Some("skip") => "skip",
+                _ => return Err(Fail::Http(400, "on_fail is fail or skip")),
+            },
+        };
+        // Named deps, or — the common shape — the stage before this one.
+        let deps = match stage.get("deps") {
+            None => {
+                if index == 0 {
+                    Vec::new()
+                } else {
+                    vec![index - 1]
+                }
+            }
+            Some(v) => {
+                let names = v.as_arr().ok_or(Fail::Http(400, "stage deps must be an array"))?;
+                if names.len() > MAX_PIPELINE_STAGES {
+                    return Err(Fail::Http(413, "too many stage deps"));
+                }
+                let mut deps = Vec::with_capacity(names.len());
+                for item in names {
+                    let dep = item.as_str().ok_or(Fail::Http(400, "malformed stage dep"))?;
+                    // Backward-only: a stage may only wait for one already
+                    // declared above it, which is what makes a cycle
+                    // unrepresentable rather than merely refused.
+                    let at = out
+                        .iter()
+                        .position(|s| s.name == dep)
+                        .ok_or(Fail::Http(400, "stage dep names no earlier stage"))?;
+                    if !deps.contains(&at) {
+                        deps.push(at);
+                    }
+                }
+                deps
+            }
+        };
+        let priority = match stage.get("priority") {
+            None => 0,
+            Some(v) => v.as_i64().ok_or(Fail::Http(400, "malformed priority"))?,
+        };
+        let max_attempts = match stage.get("max_attempts") {
+            None => 1u32,
+            Some(v) => u32::try_from(v.as_u64().ok_or(Fail::Http(400, "malformed max_attempts"))?)
+                .map_err(|_| Fail::Http(400, "malformed max_attempts"))?,
+        };
+        if max_attempts == 0 || max_attempts > rc.cfg.budgets.max_attempts {
+            return Err(Fail::Http(400, "max_attempts out of bounds"));
+        }
+        out.push(StageSpec { name, kind, body, weight, on_fail, deps, priority, max_attempts });
+    }
+    Ok(out)
+}
+
+/// Rewrite the author-friendly stage reference
+/// `{"$from_stage": "<stage name>", "field": "<field>"}` into the wire form
+/// the claim-time splice understands, `{"$from": "job_…", "field": …}`.
+///
+/// The named stage must be one this stage DEPENDS on: a splice may only
+/// read a result whose success this stage provably waited for, and that is
+/// exactly the guarantee `deps` gives. Refused loudly here rather than at
+/// claim, so a mistyped stage name is a 400 on the request that made it and
+/// never a run that dies twenty minutes later.
+fn rewrite_from_stage(
+    v: &mut Value,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), Fail> {
+    match v {
+        Value::Obj(pairs) => {
+            if pairs.iter().any(|(k, _)| k == "$from_stage") {
+                if pairs.len() != 2 {
+                    return Err(Fail::Http(400, "a $from_stage reference carries $from_stage and field"));
+                }
+                let stage = pairs
+                    .iter()
+                    .find(|(k, _)| k == "$from_stage")
+                    .and_then(|(_, val)| val.as_str())
+                    .ok_or(Fail::Http(400, "a $from_stage reference needs a stage name"))?;
+                let field = pairs
+                    .iter()
+                    .find(|(k, _)| k == "field")
+                    .and_then(|(_, val)| val.as_str())
+                    .filter(|f| !f.is_empty() && f.len() <= 64)
+                    .ok_or(Fail::Http(400, "a $from_stage reference needs a field name"))?
+                    .to_string();
+                let job = resolve(stage)
+                    .ok_or(Fail::Http(400, "a $from_stage reference names no dependency"))?;
+                *v = obj(vec![("$from", s(job)), ("field", s(field))]);
+                return Ok(());
+            }
+            for (_, val) in pairs.iter_mut() {
+                rewrite_from_stage(val, resolve)?;
+            }
+            Ok(())
+        }
+        Value::Arr(items) => {
+            for item in items.iter_mut() {
+                rewrite_from_stage(item, resolve)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `POST /v1/pipelines` — declare a whole run and walk away.
+///
+/// ```json
+/// {"namespace":"gen", "title":"DREAM", "prompt":"80s new wave…",
+///  "stages":[
+///    {"name":"expand","kind":"text.expand","weight":5,"on_fail":"skip",
+///     "body":{"prompt":"80s new wave…"}},
+///    {"name":"image","kind":"image.generate","weight":15,
+///     "body":{"prompt":{"$from_stage":"expand","field":"text"}}},
+///    {"name":"video","kind":"video.generate","weight":70,
+///     "body":{"source_revision":{"$from_stage":"image","field":"revision"}}}]}
+/// ```
+///
+/// Every job id is minted first, the `$from_stage` references are rewritten
+/// against them, and the whole graph is enqueued in ONE state-thread
+/// closure. ENQUEUE IS VISIBILITY: the record and all its pending stage
+/// jobs exist before anything is claimed, so a spawned run is inspectable
+/// and cancellable from t=0, not from its first dispatch.
+fn pipeline_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let ns = body_str(&body, "namespace")?.to_string();
+    let title = body_str(&body, "title")?.to_string();
+    if title.is_empty() || title.len() > MAX_PIPELINE_TITLE_BYTES || title.chars().any(char::is_control) {
+        return Err(Fail::Http(400, "malformed pipeline title"));
+    }
+    let prompt = match body.get("prompt") {
+        None | Some(Value::Null) => String::new(),
+        Some(v) => v
+            .as_str()
+            .ok_or(Fail::Http(400, "malformed pipeline prompt"))?
+            .to_string(),
+    };
+    if prompt.len() > MAX_PIPELINE_PROMPT_BYTES
+        || prompt.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(Fail::Http(400, "malformed pipeline prompt"));
+    }
+    let mut specs = parse_stage_specs(&body, rc)?;
+    // `on_fail: skip` falls back to the words the person typed. Without
+    // them the fallback would hand a box an empty prompt, which is not a
+    // degraded run — it is a broken one.
+    if specs.iter().any(|s| s.on_fail == "skip") && prompt.is_empty() {
+        return Err(Fail::Http(400, "on_fail skip needs a pipeline prompt"));
+    }
+
+    let pipeline = super::state::PipelineId(rand16()?);
+    let mut job_ids = Vec::with_capacity(specs.len());
+    for _ in 0..specs.len() {
+        job_ids.push(JobId(rand16()?));
+    }
+    // Rewrite each stage's references against the minted ids. A reference
+    // resolves only through this stage's OWN deps.
+    for index in 0..specs.len() {
+        let deps: Vec<(String, String)> = specs[index]
+            .deps
+            .iter()
+            .map(|at| (specs[*at].name.clone(), super::api::job_str(&job_ids[*at])))
+            .collect();
+        let resolve = |name: &str| -> Option<String> {
+            deps.iter().find(|(n, _)| n == name).map(|(_, job)| job.clone())
+        };
+        let mut declared = specs[index].body.clone();
+        rewrite_from_stage(&mut declared, &resolve)?;
+        specs[index].body = declared;
+    }
+
+    let now = now_ms();
+    let stage_jobs = job_ids.clone();
+    let plan: Vec<(String, String, Value, u64, &'static str, Vec<usize>, i64, u32)> = specs
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                s.kind.clone(),
+                s.body.clone(),
+                s.weight,
+                s.on_fail,
+                s.deps.clone(),
+                s.priority,
+                s.max_attempts,
+            )
+        })
+        .collect();
+    let ns_for_state = ns.clone();
+    let title_for_state = title.clone();
+    let prompt_for_state = prompt.clone();
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_cap(ctx, &p, Capability::JobEnqueue, &ns_for_state)?;
+        let known = ctx.meta_distinct_ns()?;
+        if !known.iter().any(|k| k == &ns_for_state) && known.len() as u64 >= MAX_JOB_NAMESPACES {
+            return Err(ServerError::OverBudget {
+                what: "job namespaces",
+                limit: MAX_JOB_NAMESPACES,
+                found: known.len() as u64 + 1,
+            });
+        }
+        // Enqueue every stage, in declaration order so a dep edge always
+        // points at a job that already exists.
+        let mut created: Vec<JobId> = Vec::with_capacity(plan.len());
+        for (index, (_, kind, body, _, _, deps, priority, max_attempts)) in plan.iter().enumerate() {
+            let job_id = stage_jobs[index];
+            let dep_ids: Vec<JobId> = deps.iter().map(|at| stage_jobs[*at]).collect();
+            let payload = envelope_build(&ns_for_state, &p, body);
+            let outcome = ctx.meta_insert(&job_id, &ns_for_state, kind, &p, now).and_then(|()| {
+                let new_job = NewJob {
+                    job_id,
+                    parent: None,
+                    kind,
+                    payload: &payload,
+                    priority: *priority,
+                    max_attempts: *max_attempts,
+                    not_before_ms: 0,
+                    deps: &dep_ids,
+                };
+                ctx.core.jobs().enqueue(&new_job, now)
+            });
+            if let Err(e) = outcome {
+                // A pipeline is one thing: either the whole graph is
+                // queued or none of it is. Undo what landed — cancelling
+                // rather than deleting, because the core keeps job history
+                // on purpose — and write no pipeline record at all.
+                let _ = ctx.meta_delete(&job_id);
+                for done in &created {
+                    let _ = ctx.core.jobs().cancel(done, now);
+                    let _ = ctx.meta_delete(done);
+                }
+                return Err(e);
+            }
+            created.push(job_id);
+        }
+        ctx.pipeline_insert(&pipeline, &ns_for_state, &title_for_state, &prompt_for_state, &p, now)?;
+        for (index, (name, _, _, weight, on_fail, _, _, _)) in plan.iter().enumerate() {
+            ctx.pipeline_stage_insert(
+                &pipeline,
+                index as u64,
+                name,
+                &stage_jobs[index],
+                *weight,
+                on_fail,
+            )?;
+        }
+        Ok(())
+    })?;
+    let stages = specs
+        .iter()
+        .zip(job_ids.iter())
+        .map(|(spec, job)| {
+            obj(vec![
+                ("name", s(spec.name.clone())),
+                ("job", s(super::api::job_str(job))),
+            ])
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        201,
+        &obj(vec![
+            ("pipeline", s(super::api::pipeline_str(&pipeline))),
+            ("stages", Value::Arr(stages)),
+        ]),
+    )))
+}
+
+/// One stage of a pipeline, as read back: the declared row joined to what
+/// its job is actually doing.
+struct StageView {
+    name: String,
+    seq: u64,
+    job_id: JobId,
+    weight: u64,
+    on_fail: String,
+    kind: String,
+    state: JobState,
+    /// The stage failed, and it was declared `on_fail: skip`: the pipeline
+    /// went on without it. Never stored — `failed` plus `skip` IS skipped.
+    skipped: bool,
+    attempts: usize,
+    progress: Option<super::state::ProgressRow>,
+    /// Only loaded for the single-pipeline read.
+    declared: Option<Value>,
+    records: Vec<super::state::StageRow>,
+    result: Option<super::state::ResultRow>,
+}
+
+/// THE derived contract, in one place, because every client renders what it
+/// returns and none of them may compute it differently:
+///
+/// - state: `failed` if any stage failed other than a skipped one;
+///   otherwise, once every stage is terminal, `cancelled` if any was
+///   cancelled and `succeeded` if none was; otherwise `running`. A failure
+///   reads through IMMEDIATELY — dependents doom lazily at the next claim,
+///   and a person watching a dead run may not wait for a worker to poll.
+/// - permille: `Σ(weight_i × done_i) / Σ(weight_i)`, where `done_i` is 1000
+///   for a succeeded or skipped stage, 0 for a pending one, and the stage
+///   job's own banded permille for a running, failed or cancelled one (the
+///   bar freezes where the work stopped). A completed stage therefore
+///   contributes its whole weight as a floor, so the aggregate never falls
+///   across a stage boundary; a RETRY of one stage can still dip inside its
+///   own band, which is what the client's per-run high-water mark is for.
+/// - current: the failure point if there is one, else the running stage,
+///   else the next pending one, else the last stage.
+fn pipeline_derive(stages: &[StageView]) -> (&'static str, u64, Option<usize>) {
+    let mut weighted = 0u64;
+    let mut total = 0u64;
+    let mut hard_failed: Option<usize> = None;
+    let mut running: Option<usize> = None;
+    let mut pending: Option<usize> = None;
+    let mut any_cancelled = false;
+    let mut all_terminal = true;
+    for (index, stage) in stages.iter().enumerate() {
+        let permille = stage.progress.as_ref().map_or(0, |p| p.permille.min(1000));
+        let done = match stage.state {
+            JobState::Succeeded => 1000,
+            JobState::Pending => 0,
+            JobState::Failed if stage.skipped => 1000,
+            _ => permille,
+        };
+        total += stage.weight;
+        weighted += stage.weight * done;
+        match stage.state {
+            JobState::Failed if !stage.skipped => {
+                hard_failed = hard_failed.or(Some(index));
+            }
+            JobState::Cancelled => any_cancelled = true,
+            JobState::Running => running = running.or(Some(index)),
+            JobState::Pending => {
+                pending = pending.or(Some(index));
+            }
+            _ => {}
+        }
+        if !stage.state.is_terminal() {
+            all_terminal = false;
+        }
+    }
+    let state = if hard_failed.is_some() {
+        "failed"
+    } else if !all_terminal {
+        "running"
+    } else if any_cancelled {
+        "cancelled"
+    } else {
+        "succeeded"
+    };
+    let permille = if total == 0 { 0 } else { (weighted / total).min(1000) };
+    let current = hard_failed
+        .or(running)
+        .or(pending)
+        .or_else(|| stages.len().checked_sub(1));
+    (state, permille, current)
+}
+
+/// Load a pipeline's stages, joining the declared rows to their jobs.
+/// `detail` additionally reads the declared bodies, the worker's stage
+/// input records and the result documents — the single-pipeline read only,
+/// because a listing page of those would be megabytes.
+fn pipeline_stage_views(
+    ctx: &StateCtx,
+    pipeline: &super::state::PipelineId,
+    detail: bool,
+) -> Result<Vec<StageView>, ServerError> {
+    let rows = ctx.pipeline_stages(pipeline)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let state = ctx
+            .core
+            .jobs()
+            .state(&row.job_id)?
+            .ok_or(ServerError::InvalidState { what: "pipeline stage", state: "job missing" })?;
+        let kind = ctx.meta_get(&row.job_id)?.map(|m| m.kind).unwrap_or_default();
+        let skipped = state == JobState::Failed && row.on_fail == "skip";
+        let attempts = ctx.core.jobs().attempts(&row.job_id)?.len();
+        let progress = ctx.progress_get(&row.job_id)?;
+        let (declared, records, result) = if detail {
+            let declared = ctx
+                .core
+                .jobs()
+                .payload(&row.job_id)?
+                .and_then(|payload| envelope_parse(&payload).map(|(_, _, body)| body));
+            (declared, ctx.stages_get(&row.job_id)?, ctx.result_get(&row.job_id)?)
+        } else {
+            (None, Vec::new(), None)
+        };
+        out.push(StageView {
+            name: row.name,
+            seq: row.seq,
+            job_id: row.job_id,
+            weight: row.weight,
+            on_fail: row.on_fail,
+            kind,
+            state,
+            skipped,
+            attempts,
+            progress,
+            declared,
+            records,
+            result,
+        });
+    }
+    Ok(out)
+}
+
+fn progress_value(p: &super::state::ProgressRow) -> Value {
+    obj(vec![
+        ("permille", Value::Int(p.permille as i64)),
+        ("note", s(p.note.clone())),
+        ("updated_ms", Value::Int(p.updated_ms as i64)),
+    ])
+}
+
+/// `on_fail: skip`, then the finish announcement — everything the transport
+/// owes a pipeline once one of its stage jobs reached a terminal state.
+/// Runs INSIDE the state closure that committed the transition, so the
+/// event's order equals the commit's.
+pub(crate) fn pipeline_settle(
+    ctx: &StateCtx,
+    hub: &super::events::EventHub,
+    pipeline: &super::state::PipelineId,
+    now: u64,
+) -> Result<(), ServerError> {
+    let Some(row) = ctx.pipeline_get(pipeline)? else { return Ok(()) };
+    let rows = ctx.pipeline_stages(pipeline)?;
+
+    // The skip rewrite. A stage declared `on_fail: skip` that failed must
+    // not doom the rest: every later stage still waiting on it stops
+    // waiting, and any reference to its result becomes the words the person
+    // typed — the raw-prompt fallback, structurally, so a run is never lost
+    // to an expander refusing. This is the ONE place the transport edits a
+    // body other than swapping a `$from`; it substitutes the recorded
+    // prompt and nothing else.
+    for stage in &rows {
+        if stage.on_fail != "skip" {
+            continue;
+        }
+        if ctx.core.jobs().state(&stage.job_id)? != Some(JobState::Failed) {
+            continue;
+        }
+        for later in rows.iter().filter(|l| l.seq > stage.seq) {
+            let deps = ctx.core.jobs().deps_of(&later.job_id)?;
+            if !deps.contains(&stage.job_id) {
+                continue;
+            }
+            let Some(payload) = ctx.core.jobs().payload(&later.job_id)? else { continue };
+            let Some((dep_ns, dep_by, mut body)) = envelope_parse(&payload) else { continue };
+            let skipped_job = super::api::job_str(&stage.job_id);
+            replace_stage_ref(&mut body, &skipped_job, &row.prompt);
+            let rebuilt = envelope_build(&dep_ns, &dep_by, &body);
+            ctx.core.jobs().detach_dep(&later.job_id, &stage.job_id, &rebuilt, now)?;
+        }
+    }
+
+    let stages = pipeline_stage_views(ctx, pipeline, false)?;
+    let (state, _, _) = pipeline_derive(&stages);
+    if state != "running" && ctx.pipeline_announce_finish(pipeline, now)? {
+        hub.publish(super::events::EventBody::pipeline(
+            &row.ns,
+            super::api::pipeline_str(pipeline),
+            match state {
+                "succeeded" => "succeeded",
+                "cancelled" => "cancelled",
+                _ => "failed",
+            },
+            now,
+        ));
+    }
+    Ok(())
+}
+
+/// Replace every `{"$from": <job>, "field": …}` naming `job` with `text`.
+fn replace_stage_ref(v: &mut Value, job: &str, text: &str) {
+    match v {
+        Value::Obj(pairs) => {
+            let names_it = pairs
+                .iter()
+                .any(|(k, val)| k == "$from" && val.as_str() == Some(job));
+            if names_it {
+                *v = s(text);
+                return;
+            }
+            for (_, val) in pairs.iter_mut() {
+                replace_stage_ref(val, job, text);
+            }
+        }
+        Value::Arr(items) => {
+            for item in items.iter_mut() {
+                replace_stage_ref(item, job, text);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Settle the pipeline a job belongs to, if it belongs to one. Cheap for
+/// the overwhelmingly common case (a standalone job): one indexed lookup
+/// that finds nothing.
+pub(crate) fn pipeline_of_job_settle(
+    ctx: &StateCtx,
+    hub: &super::events::EventHub,
+    job: &JobId,
+    now: u64,
+) -> Result<(), ServerError> {
+    let Some(pipeline) = ctx.pipeline_of_job(job)? else { return Ok(()) };
+    pipeline_settle(ctx, hub, &pipeline, now)
+}
+
+/// `GET /v1/pipelines?ns=&state=active|all&limit=` — one page of pipeline
+/// rows, newest first, each carrying everything a run CARD needs: title,
+/// the person's words, derived state, the aggregate bar, the current stage
+/// and its note. One request draws the whole global runs panel.
+fn pipeline_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let ns = head.query_get("ns").map(str::to_string);
+    let active_only = match head.query_get("state") {
+        None | Some("all") => false,
+        Some("active") => true,
+        Some(_) => return Err(Fail::Http(400, "state is active or all")),
+    };
+    let limit = parse_limit(head.query_get("limit"), 50, 200)?;
+    let now = now_ms();
+    let rows = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        if let Some(ns) = &ns {
+            if !holds_any(ctx, &p, ns, &JOB_VIEW_CAPS)? {
+                return Err(ServerError::Denied { capability: "job_enqueue" });
+            }
+        }
+        let metas = match &ns {
+            Some(ns) => ctx.pipeline_list_ns(ns, active_only, limit)?,
+            // No namespace filter: the caller's own runs.
+            None => ctx.pipeline_list_by(&p, active_only, limit)?,
+        };
+        let mut out = Vec::with_capacity(metas.len());
+        for row in metas {
+            let stages = pipeline_stage_views(ctx, &row.pipeline_id, false)?;
+            let (state, permille, current) = pipeline_derive(&stages);
+            if active_only && state != "running" {
+                continue;
+            }
+            let current = current.and_then(|at| stages.get(at));
+            let stage_name = current.map(|c| c.name.clone());
+            let note = current
+                .and_then(|c| c.progress.as_ref())
+                .map(|p| p.note.clone())
+                .unwrap_or_default();
+            out.push((row, state, permille, stage_name, note, stages.len()));
+        }
+        Ok(out)
+    })?;
+    let pipelines = rows
+        .iter()
+        .map(|(row, state, permille, stage_name, note, stage_count)| {
+            let mut pairs = vec![
+                ("pipeline", s(super::api::pipeline_str(&row.pipeline_id))),
+                ("namespace", s(row.ns.clone())),
+                ("title", s(row.title.clone())),
+                ("state", s(*state)),
+                ("permille", Value::Int(*permille as i64)),
+                ("stages", Value::Int(*stage_count as i64)),
+                ("enqueued_by", s(principal_str(&row.enqueued_by))),
+                ("created_ms", Value::Int(row.created_ms as i64)),
+            ];
+            // The words the PERSON typed, display-bounded. The whole text
+            // stays on the record (and comes back on the single read); a
+            // listing is a card row, not a document.
+            if !row.prompt.is_empty() {
+                pairs.push(("prompt", s(display_text(&row.prompt, 256))));
+            }
+            if let Some(name) = stage_name {
+                pairs.push(("current_stage", s(name.clone())));
+            }
+            if !note.is_empty() {
+                pairs.push(("note", s(note.clone())));
+            }
+            if row.finished_ms != 0 {
+                pairs.push(("finished_ms", Value::Int(row.finished_ms as i64)));
+            }
+            obj(pairs)
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("pipelines", Value::Arr(pipelines))]),
+    )))
+}
+
+/// Control characters out, length bounded — the same treatment a job's
+/// projected prompt gets, for the same reason.
+fn display_text(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().filter(|ch| !ch.is_control()) {
+        if out.len() + ch.len_utf8() > max {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `GET /v1/pipelines/<id>` — the whole run in one request: derived state
+/// and aggregate bar, then every stage with its job, kind, state, weight,
+/// progress, attempt count, the body it was DECLARED with (which is what
+/// makes a stage inspectable before it has ever been dispatched), the
+/// worker's stage input records once it has, and its result document.
+fn pipeline_get(head: &Head, rc: &RouteCtx, pipeline: super::state::PipelineId) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let (row, stages) = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let row = ctx
+            .pipeline_get(&pipeline)?
+            .ok_or(ServerError::NotFound { what: "pipeline" })?;
+        // Same visibility rule a job read has: the enqueuer, or a holder of
+        // any job capability on the namespace. Everyone else gets the 404
+        // an unknown id gets.
+        if row.enqueued_by != p && !holds_any(ctx, &p, &row.ns, &JOB_VIEW_CAPS)? {
+            return Err(ServerError::NotFound { what: "pipeline" });
+        }
+        let stages = pipeline_stage_views(ctx, &pipeline, true)?;
+        Ok((row, stages))
+    })?;
+    let (state, permille, current) = pipeline_derive(&stages);
+    let mut pairs = vec![
+        ("pipeline", s(super::api::pipeline_str(&row.pipeline_id))),
+        ("namespace", s(row.ns.clone())),
+        ("title", s(row.title.clone())),
+        ("state", s(state)),
+        ("permille", Value::Int(permille as i64)),
+        ("enqueued_by", s(principal_str(&row.enqueued_by))),
+        ("created_ms", Value::Int(row.created_ms as i64)),
+    ];
+    if !row.prompt.is_empty() {
+        pairs.push(("prompt", s(row.prompt.clone())));
+    }
+    if let Some(name) = current.and_then(|at| stages.get(at)).map(|c| c.name.clone()) {
+        pairs.push(("current_stage", s(name)));
+    }
+    if row.finished_ms != 0 {
+        pairs.push(("finished_ms", Value::Int(row.finished_ms as i64)));
+    }
+    let mut out = Vec::with_capacity(stages.len());
+    for stage in &stages {
+        let mut sp = vec![
+            ("name", s(stage.name.clone())),
+            ("seq", Value::Int(stage.seq as i64)),
+            ("job", s(super::api::job_str(&stage.job_id))),
+            ("kind", s(stage.kind.clone())),
+            ("state", s(stage.state.as_str())),
+            ("skipped", Value::Bool(stage.skipped)),
+            ("weight", Value::Int(stage.weight as i64)),
+            ("on_fail", s(stage.on_fail.clone())),
+            ("attempts", Value::Int(stage.attempts as i64)),
+        ];
+        if let Some(p) = &stage.progress {
+            sp.push(("progress", progress_value(p)));
+        }
+        if let Some(declared) = &stage.declared {
+            sp.push(("declared", declared.clone()));
+        }
+        if !stage.records.is_empty() {
+            let mut records = Vec::with_capacity(stage.records.len());
+            for record in &stage.records {
+                let body = super::json::parse(&record.body).map_err(|_| {
+                    Fail::Srv(ServerError::Io {
+                        op: "job stage body",
+                        kind: std::io::ErrorKind::InvalidData,
+                    })
+                })?;
+                records.push(obj(vec![
+                    ("name", s(record.name.clone())),
+                    ("recorded_ms", Value::Int(record.recorded_ms as i64)),
+                    ("record", body),
+                ]));
+            }
+            sp.push(("records", Value::Arr(records)));
+        }
+        if let Some(result) = &stage.result {
+            let body = super::json::parse(&result.body).map_err(|_| {
+                Fail::Srv(ServerError::Io {
+                    op: "job result body",
+                    kind: std::io::ErrorKind::InvalidData,
+                })
+            })?;
+            sp.push(("result", obj(vec![
+                ("outcome", s(result.outcome.clone())),
+                ("attempt", Value::Int(result.attempt as i64)),
+                ("recorded_ms", Value::Int(result.recorded_ms as i64)),
+                ("body", body),
+            ])));
+        }
+        out.push(obj(sp));
+    }
+    pairs.push(("stages", Value::Arr(out)));
+    Ok(Outcome::Resp(Resp::json(200, &obj(pairs))))
+}
+
+/// `POST /v1/pipelines/<id>/cancel` — stop a whole run, from anywhere.
+///
+/// Every non-terminal stage job is cancelled in one closure; the existing
+/// per-job chain does the rest — the lease is dropped, so the worker's next
+/// heartbeat or poll is refused and it cancels the node dispatch, and any
+/// pending dependent dooms at the next claim. No stage is left orphaned
+/// mid-flight, and nothing already produced is destroyed: a stage that
+/// published stays succeeded, inside a pipeline that reads cancelled.
+///
+/// Cancellability does not depend on the process that spawned the run being
+/// alive — which is the whole point of the record.
+fn pipeline_cancel(head: &Head, rc: &RouteCtx, pipeline: super::state::PipelineId) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let (cancelled, state) = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let row = ctx
+            .pipeline_get(&pipeline)?
+            .ok_or(ServerError::NotFound { what: "pipeline" })?;
+        require_cap(ctx, &p, Capability::JobCancel, &row.ns)?;
+        let mut cancelled = 0u64;
+        for stage in ctx.pipeline_stages(&pipeline)? {
+            let Some(state) = ctx.core.jobs().state(&stage.job_id)? else { continue };
+            if state.is_terminal() {
+                continue;
+            }
+            cancelled += ctx.core.jobs().cancel(&stage.job_id, now)?;
+        }
+        pipeline_settle(ctx, &hub, &pipeline, now)?;
+        let stages = pipeline_stage_views(ctx, &pipeline, false)?;
+        let (state, _, _) = pipeline_derive(&stages);
+        Ok((cancelled, state))
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("pipeline", s(super::api::pipeline_str(&pipeline))),
+            ("cancelled", Value::Int(cancelled as i64)),
+            ("state", s(state)),
+        ]),
     )))
 }
 
@@ -3622,6 +4497,7 @@ fn worker_claim(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
     let suffix = worker_suffix(&body)?;
     let allowed_kinds = worker_allowed_kinds(&body)?;
     let now = now_ms();
+    let hub = rc.events.clone();
     let claimed = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         // The pre-claim gate: job_worker on every namespace this transport
@@ -3716,6 +4592,7 @@ fn worker_claim(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
                                 doc.to_json().as_bytes(),
                                 now,
                             )?;
+                            let _ = pipeline_of_job_settle(ctx, &hub, &cj.job_id, now);
                         }
                         return Ok(None);
                     }
@@ -3802,6 +4679,7 @@ fn worker_succeed(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
     let suffix = worker_suffix(&body)?;
     let result = result_bytes(&body, "result")?;
     let now = now_ms();
+    let hub = rc.events.clone();
     call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let meta = ctx
@@ -3829,6 +4707,11 @@ fn worker_succeed(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
                 .unwrap_or(0);
             ctx.result_set(&job, "succeeded", attempt, bytes, now)?;
         }
+        // The result is recorded BEFORE this: a pipeline that finishes on
+        // this stage announces itself over a complete record. Never the
+        // worker's problem — the success is committed, and the janitor
+        // sweep re-derives whatever a failure here leaves unannounced.
+        let _ = pipeline_of_job_settle(ctx, &hub, &job, now);
         Ok(())
     })?;
     Ok(Outcome::Resp(Resp::json(
@@ -3845,6 +4728,7 @@ fn worker_fail(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
     let retry_delay_ms = body_u64(&body, "retry_delay_ms").unwrap_or(0);
     let error = result_bytes(&body, "error")?;
     let now = now_ms();
+    let hub = rc.events.clone();
     let state = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let meta = ctx
@@ -3866,6 +4750,10 @@ fn worker_fail(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
                     .unwrap_or(0);
                 ctx.result_set(&job, "failed", attempt, bytes, now)?;
             }
+            // Terminal only: a retry has not skipped anything and has not
+            // finished anything. Best-effort for the same reason success
+            // is: the failure is committed either way.
+            let _ = pipeline_of_job_settle(ctx, &hub, &job, now);
         }
         Ok(state)
     })?;

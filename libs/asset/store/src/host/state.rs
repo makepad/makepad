@@ -29,7 +29,7 @@ use crate::{
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-pub const TRANSPORT_SCHEMA_VERSION: u64 = 5;
+pub const TRANSPORT_SCHEMA_VERSION: u64 = 6;
 
 /// Most distinct namespaces the transport will ever route jobs for. The
 /// worker claim gate authorizes against every namespace jobs have been
@@ -129,6 +129,60 @@ CREATE INDEX IF NOT EXISTS job_stages_by_job ON job_stages(job_id, seq);
 /// or a hostile worker, and either way the queue must stay bounded.
 pub const MAX_JOB_STAGES: u64 = 16;
 
+/// v6: the PIPELINE record — the presentation truth beside the execution
+/// truth.
+///
+/// A pipeline is its stage JOBS, enqueued up front with `deps` and
+/// `$from` splices: that graph is what actually runs, crash-resumes and
+/// dooms, and it needs nobody watching it. These two tables add only what
+/// the queue has no business knowing: that these jobs are ONE thing, what
+/// the person called it, the words they typed, and how much of the whole
+/// each stage is worth.
+///
+/// State is NEVER stored here. It is derived from the stage jobs on every
+/// read (see `routes_control::pipeline_derive`), so a pipeline record can no
+/// more disagree with its jobs than a sum can disagree with its addends.
+/// The single written-back field is `finished_ms`, and that is not the
+/// state: it is the latch that makes `pipeline.finished` fire exactly once.
+const TRANSPORT_SCHEMA_V6: &str = "
+CREATE TABLE IF NOT EXISTS pipelines(
+    pipeline_id BLOB PRIMARY KEY,
+    ns TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    enqueued_by BLOB NOT NULL,
+    finished_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS pipelines_by_ns ON pipelines(ns, created_ms);
+CREATE INDEX IF NOT EXISTS pipelines_by_principal ON pipelines(enqueued_by, created_ms);
+CREATE INDEX IF NOT EXISTS pipelines_unfinished ON pipelines(created_ms) WHERE finished_ms = 0;
+CREATE TABLE IF NOT EXISTS pipeline_stages(
+    pipeline_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    job_id BLOB NOT NULL,
+    weight INTEGER NOT NULL,
+    on_fail TEXT NOT NULL,
+    PRIMARY KEY(pipeline_id, seq)
+);
+CREATE INDEX IF NOT EXISTS pipeline_stages_by_job ON pipeline_stages(job_id);
+";
+
+/// Most stages one pipeline may declare — the job graph's own depth budget,
+/// because a pipeline IS a dependency chain and nothing may outrun the
+/// depth the queue is willing to walk.
+pub const MAX_PIPELINE_STAGES: usize = 8;
+/// A pipeline title is a label on a card, not a document.
+pub const MAX_PIPELINE_TITLE_BYTES: usize = 200;
+/// The words the PERSON typed, kept whole: this is what a skipped expander
+/// falls back to, so a truncated copy would silently shorten a real prompt.
+pub const MAX_PIPELINE_PROMPT_BYTES: usize = 4000;
+/// Declared stage weight bounds. The share a stage owns of the aggregate
+/// bar is `weight / sum(weights)`, so only the RATIOS matter; the ceiling
+/// is what keeps that arithmetic in a u64 with room to spare.
+pub const MAX_STAGE_WEIGHT: u64 = 1000;
+
 const ROOT_ADMIN_KEY: &str = "root_admin_principal";
 
 pub struct StateCtx {
@@ -162,7 +216,8 @@ pub fn build_ctx(root: &Path, budgets: Budgets) -> ServerResult<(StateCtx, Recov
                 db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
                 db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
                 db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
-                db.exec("set transport version", "PRAGMA user_version=5")
+                db.exec("create pipeline records v6", TRANSPORT_SCHEMA_V6)?;
+                db.exec("set transport version", "PRAGMA user_version=6")
             })?;
         }
         1 | 2 | 3 => {
@@ -177,15 +232,24 @@ pub fn build_ctx(root: &Path, budgets: Budgets) -> ServerResult<(StateCtx, Recov
                 db.exec("create transport index v3", TRANSPORT_SCHEMA_V3_INDEX)?;
                 db.exec("drop revision mirror", TRANSPORT_SCHEMA_V4)?;
                 db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
-                db.exec("set transport version", "PRAGMA user_version=5")
+                db.exec("create pipeline records v6", TRANSPORT_SCHEMA_V6)?;
+                db.exec("set transport version", "PRAGMA user_version=6")
             })?;
         }
         // A v4 root keeps every row it has; stage records simply start
-        // being kept from here on.
+        // being kept from here on. A v5 root gains the pipeline tables the
+        // same way — both are additive, so no row is ever rewritten.
         4 => {
             tdb.tx(|db| {
                 db.exec("create stage records v5", TRANSPORT_SCHEMA_V5)?;
-                db.exec("set transport version", "PRAGMA user_version=5")
+                db.exec("create pipeline records v6", TRANSPORT_SCHEMA_V6)?;
+                db.exec("set transport version", "PRAGMA user_version=6")
+            })?;
+        }
+        5 => {
+            tdb.tx(|db| {
+                db.exec("create pipeline records v6", TRANSPORT_SCHEMA_V6)?;
+                db.exec("set transport version", "PRAGMA user_version=6")
             })?;
         }
         TRANSPORT_SCHEMA_VERSION => {}
@@ -615,6 +679,278 @@ impl StateCtx {
         } else {
             Ok(None)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pipeline records
+// ---------------------------------------------------------------------------
+
+/// A pipeline's identity. Transport-only, by construction: the core knows
+/// the stage JOBS and their dependency edges — the grouping, the title and
+/// the weights are presentation, and presentation never enters the catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PipelineId(pub [u8; 16]);
+
+pub struct PipelineRow {
+    pub pipeline_id: PipelineId,
+    pub ns: String,
+    pub title: String,
+    /// The words the person typed, whole. The `on_fail: skip` rewrite
+    /// falls back to exactly this text, so it is stored untruncated.
+    pub prompt: String,
+    pub created_ms: u64,
+    pub enqueued_by: PrincipalId,
+    /// When the finish was ANNOUNCED (`pipeline.finished`), 0 while it has
+    /// not been. Not the state — the state is derived from the stage jobs
+    /// on every read; this is only the latch that keeps the event unique.
+    pub finished_ms: u64,
+}
+
+/// One declared stage: its name, the job that executes it, the share of the
+/// aggregate bar it owns, and what a failure of it means for the rest.
+pub struct PipelineStageRow {
+    pub seq: u64,
+    pub name: String,
+    pub job_id: JobId,
+    pub weight: u64,
+    /// `fail` (the default: this stage failing fails the pipeline) or
+    /// `skip` (the pipeline goes on without it — see the transport's skip
+    /// rewrite).
+    pub on_fail: String,
+}
+
+impl StateCtx {
+    pub fn pipeline_insert(
+        &self,
+        id: &PipelineId,
+        ns: &str,
+        title: &str,
+        prompt: &str,
+        by: &PrincipalId,
+        now: u64,
+    ) -> ServerResult<()> {
+        let mut st = self.tdb.prepare(
+            "pipeline insert",
+            "INSERT INTO pipelines(pipeline_id, ns, title, prompt, created_ms, enqueued_by, finished_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        st.bind_text(2, ns)?;
+        st.bind_text(3, title)?;
+        st.bind_text(4, prompt)?;
+        st.bind_u64(5, now)?;
+        st.bind_blob(6, &by.0)?;
+        st.run()
+    }
+
+    pub fn pipeline_stage_insert(
+        &self,
+        id: &PipelineId,
+        seq: u64,
+        name: &str,
+        job: &JobId,
+        weight: u64,
+        on_fail: &str,
+    ) -> ServerResult<()> {
+        let mut st = self.tdb.prepare(
+            "pipeline stage insert",
+            "INSERT INTO pipeline_stages(pipeline_id, seq, name, job_id, weight, on_fail)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        st.bind_u64(2, seq)?;
+        st.bind_text(3, name)?;
+        st.bind_blob(4, &job.0)?;
+        st.bind_u64(5, weight)?;
+        st.bind_text(6, on_fail)?;
+        st.run()
+    }
+
+    pub fn pipeline_get(&self, id: &PipelineId) -> ServerResult<Option<PipelineRow>> {
+        let mut st = self.tdb.prepare(
+            "pipeline get",
+            "SELECT ns, title, prompt, created_ms, enqueued_by, finished_ms
+             FROM pipelines WHERE pipeline_id=?1",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        if !st.step()? {
+            return Ok(None);
+        }
+        Ok(Some(PipelineRow {
+            pipeline_id: *id,
+            ns: st.column_text(0),
+            title: st.column_text(1),
+            prompt: st.column_text(2),
+            created_ms: st.column_u64(3),
+            enqueued_by: PrincipalId(fixed16_of(&st.column_blob(4))?),
+            finished_ms: st.column_u64(5),
+        }))
+    }
+
+    /// Declared stages in declaration order.
+    pub fn pipeline_stages(&self, id: &PipelineId) -> ServerResult<Vec<PipelineStageRow>> {
+        let mut st = self.tdb.prepare(
+            "pipeline stages",
+            "SELECT seq, name, job_id, weight, on_fail FROM pipeline_stages
+             WHERE pipeline_id=?1 ORDER BY seq",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        let mut out = Vec::new();
+        while st.step()? {
+            out.push(PipelineStageRow {
+                seq: st.column_u64(0),
+                name: st.column_text(1),
+                job_id: JobId(fixed16_of(&st.column_blob(2))?),
+                weight: st.column_u64(3),
+                on_fail: st.column_text(4),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The pipeline one job is a stage of, if any. Indexed by job id: this
+    /// runs on every terminal job transition, so it may not be a scan.
+    pub fn pipeline_of_job(&self, job: &JobId) -> ServerResult<Option<PipelineId>> {
+        let mut st = self.tdb.prepare(
+            "pipeline of job",
+            "SELECT pipeline_id FROM pipeline_stages WHERE job_id=?1 LIMIT 1",
+        )?;
+        st.bind_blob(1, &job.0)?;
+        if !st.step()? {
+            return Ok(None);
+        }
+        Ok(Some(PipelineId(fixed16_of(&st.column_blob(0))?)))
+    }
+
+    /// Newest-first pipeline rows in one namespace. `unannounced` narrows to
+    /// rows whose finish has not been announced — a tight superset of the
+    /// still-running ones, served by the partial index, so a global "what
+    /// is running now" page stays one indexed read no matter how much
+    /// finished history sits in front of it. (The caller still derives, so
+    /// a terminal-but-unswept row is filtered there, never shown.)
+    pub fn pipeline_list_ns(
+        &self,
+        ns: &str,
+        unannounced: bool,
+        limit: u64,
+    ) -> ServerResult<Vec<PipelineRow>> {
+        self.pipeline_list(
+            if unannounced {
+                "SELECT pipeline_id, ns, title, prompt, created_ms, enqueued_by, finished_ms
+                 FROM pipelines WHERE ns=?1 AND finished_ms=0
+                 ORDER BY created_ms DESC, pipeline_id DESC LIMIT ?2"
+            } else {
+                "SELECT pipeline_id, ns, title, prompt, created_ms, enqueued_by, finished_ms
+                 FROM pipelines WHERE ns=?1 ORDER BY created_ms DESC, pipeline_id DESC LIMIT ?2"
+            },
+            |st| st.bind_text(1, ns),
+            limit,
+        )
+    }
+
+    pub fn pipeline_list_by(
+        &self,
+        by: &PrincipalId,
+        unannounced: bool,
+        limit: u64,
+    ) -> ServerResult<Vec<PipelineRow>> {
+        self.pipeline_list(
+            if unannounced {
+                "SELECT pipeline_id, ns, title, prompt, created_ms, enqueued_by, finished_ms
+                 FROM pipelines WHERE enqueued_by=?1 AND finished_ms=0
+                 ORDER BY created_ms DESC, pipeline_id DESC LIMIT ?2"
+            } else {
+                "SELECT pipeline_id, ns, title, prompt, created_ms, enqueued_by, finished_ms
+                 FROM pipelines WHERE enqueued_by=?1 ORDER BY created_ms DESC, pipeline_id DESC LIMIT ?2"
+            },
+            |st| st.bind_blob(1, &by.0),
+            limit,
+        )
+    }
+
+    fn pipeline_list(
+        &self,
+        sql: &str,
+        bind1: impl FnOnce(&mut super::appdb::Stmt<'_>) -> ServerResult<()>,
+        limit: u64,
+    ) -> ServerResult<Vec<PipelineRow>> {
+        let mut st = self.tdb.prepare("pipeline list", sql)?;
+        bind1(&mut st)?;
+        st.bind_u64(2, limit)?;
+        let mut out = Vec::new();
+        while st.step()? {
+            out.push(PipelineRow {
+                pipeline_id: PipelineId(fixed16_of(&st.column_blob(0))?),
+                ns: st.column_text(1),
+                title: st.column_text(2),
+                prompt: st.column_text(3),
+                created_ms: st.column_u64(4),
+                enqueued_by: PrincipalId(fixed16_of(&st.column_blob(5))?),
+                finished_ms: st.column_u64(6),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Newest pipelines whose finish has not been announced yet — the
+    /// janitor's bounded work list. Newest first on purpose: these are the
+    /// runs somebody is watching. A read of any pipeline always reports the
+    /// truthful derived state regardless, so the sweep only ever owes the
+    /// EVENT, never the answer.
+    pub fn pipelines_unannounced(&self, limit: u64) -> ServerResult<Vec<PipelineId>> {
+        let mut st = self.tdb.prepare(
+            "pipelines unannounced",
+            "SELECT pipeline_id FROM pipelines WHERE finished_ms = 0
+             ORDER BY created_ms DESC, pipeline_id DESC LIMIT ?1",
+        )?;
+        st.bind_u64(1, limit)?;
+        let mut out = Vec::new();
+        while st.step()? {
+            out.push(PipelineId(fixed16_of(&st.column_blob(0))?));
+        }
+        Ok(out)
+    }
+
+    /// Latch the finish announcement. `true` exactly once per pipeline —
+    /// the state thread runs calls to completion, so the read and the write
+    /// below cannot interleave with another closure's.
+    pub fn pipeline_announce_finish(&self, id: &PipelineId, now: u64) -> ServerResult<bool> {
+        let mut st = self.tdb.prepare(
+            "pipeline finish read",
+            "SELECT finished_ms FROM pipelines WHERE pipeline_id=?1",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        if !st.step()? {
+            return Ok(false);
+        }
+        if st.column_u64(0) != 0 {
+            return Ok(false);
+        }
+        drop(st);
+        let mut st = self.tdb.prepare(
+            "pipeline finish latch",
+            "UPDATE pipelines SET finished_ms=?2 WHERE pipeline_id=?1 AND finished_ms=0",
+        )?;
+        st.bind_blob(1, &id.0)?;
+        st.bind_u64(2, now.max(1))?;
+        st.run()?;
+        Ok(true)
+    }
+
+    /// Undo the enqueue of a pipeline whose stage jobs could not all be
+    /// created. Called only from the create route's rollback path.
+    pub fn pipeline_delete(&self, id: &PipelineId) -> ServerResult<()> {
+        let mut st = self
+            .tdb
+            .prepare("pipeline stages delete", "DELETE FROM pipeline_stages WHERE pipeline_id=?1")?;
+        st.bind_blob(1, &id.0)?;
+        st.run()?;
+        let mut st = self
+            .tdb
+            .prepare("pipeline delete", "DELETE FROM pipelines WHERE pipeline_id=?1")?;
+        st.bind_blob(1, &id.0)?;
+        st.run()
     }
 }
 
