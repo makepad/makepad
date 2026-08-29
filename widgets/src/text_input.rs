@@ -2337,7 +2337,14 @@ impl Widget for TextInput {
 
         // Self-detect focus loss from taps outside our area
         // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
-        if cx.has_key_focus(self.draw_bg.area())
+        // And only from a LIVE area: an input not drawn in its list's current
+        // redraw holds a stale area (or Empty) that can compare equal to the
+        // focus another widget just took — every such input then cleared
+        // the global focus on the same click, so a FabValueInput's editor
+        // committed the old value before a keystroke could reach it.
+        if !self.draw_bg.area().is_empty()
+            && self.draw_bg.area().is_valid(cx)
+            && cx.has_key_focus(self.draw_bg.area())
             && !cx.fingers.is_area_captured(self.draw_bg.area())
         {
             let rect = self.draw_bg.area().rect(cx);

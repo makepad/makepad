@@ -2026,11 +2026,11 @@ fn layer_consts(cx: &mut Cx, widget: &WidgetRef, layer: &str, primary: bool) -> 
         .map(|(i, tc)| (i, tc.name.clone(), tc.doc.clone(), tc.initial, tc.value, tc.ip))
         .collect();
     for (i, name, doc, initial, value, ip) in raw {
-        // ip_to_loc names the line before the literal (the codebase-wide
-        // convention, the same as error messages): +1 is the literal.
+        // ip_to_loc names the literal's exact line (711a490ce fixed the
+        // tokenizer's float-column measurement and script_mod!'s row 0).
         let loc = cx.with_vm(|vm| vm.bx.code.ip_to_loc(ip)).map(|l| {
             let base = l.file.rsplit('/').next().unwrap_or(&l.file).to_string();
-            format!("{base}:{}", l.line + 1)
+            format!("{base}:{}", l.line)
         });
         out.push((shader, i, name, doc, initial, value, loc.unwrap_or_else(|| "?".to_string())));
     }
@@ -3805,7 +3805,7 @@ struct ConstRef {
     shader: DrawShaderId,
     index: usize,
     layer: String,
-    /// The literal's file:line (ip_to_loc reports the line before it).
+    /// The literal's file:line.
     loc: String,
     name: String,
     initial: f32,
@@ -3869,6 +3869,8 @@ enum VisKind {
     Tweakable(usize),
     /// The annotation line (doc + range) under a row.
     Doc(usize),
+    /// The Shader tab's INPUTS header: the mirrored layer's own inputs.
+    InputsHeader(usize),
 }
 
 #[derive(Clone)]
@@ -4050,9 +4052,14 @@ pub struct Tweaker {
     states_frame: NextFrame,
     #[rust]
     states_pause_uid: u64,
-    /// TWEAKABLES fold state (open by default: it is the point).
+    /// SHADER CONSTANTS fold state (open by default: it is the point).
     #[rust(true)]
     tweakables_open: bool,
+    /// The Shader tab's row list (constants + inputs of the mirrored layer).
+    #[rust]
+    shader_list_uid: u64,
+    #[rust]
+    shader_entries: Vec<VisKind>,
     /// The row whose field was last touched: its doc line rides under it.
     #[rust]
     doc_row: Option<usize>,
@@ -4736,6 +4743,35 @@ impl Tweaker {
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                         }
+                        shader_rows_wrap := View {
+                            width: Fill
+                            height: Fit
+                            visible: false
+                        shader_rows := PortalList {
+                            width: Fill
+                            height: 320
+                            margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
+                            drag_scrolling: false
+                            SectionRow := SectionRowT {}
+                            MaterialRow := MaterialRowT {}
+                            NumRow := NumRowT {}
+                            BoolRow := BoolRowT {}
+                            TextRow := TextRowT {}
+                            InfoRow := InfoRowT {}
+                            SizeRow := SizeRowT {}
+                            BoxRow := BoxRowT {}
+                            FlowRow := FlowRowT {}
+                            AlignRow := AlignRowT {}
+                            MoreRow := MoreRowT {}
+                            ColorRow := ColorRowT {}
+                            VecRow := VecRowT {}
+                            InsetRow := InsetRowT {}
+                            MetricsRow := MetricsRowT {}
+                            SizeFieldRow := SizeFieldRowT {}
+                            DocRow := DocRowT {}
+                            NoEditorRow := NoEditorRowT {}
+                        }
+                        }
                         src_fold := Button {
                             width: Fit
                             height: 20
@@ -4862,6 +4898,11 @@ impl Tweaker {
         self.tree_list_uid = sidebar
             .child(live_id!(tree_wrap))
             .child(live_id!(tree))
+            .widget_uid()
+            .0;
+        self.shader_list_uid = sidebar
+            .child(live_id!(shader_col))
+            .child(live_id!(shader_rows))
             .widget_uid()
             .0;
         self.sidebar = Some(sidebar);
@@ -5612,6 +5653,51 @@ impl Tweaker {
                 }
                 // The animator's states, each a small posed well.
                 self.refresh_state_swatches(cx, &col);
+                // Under the wells: this layer's SHADER CONSTANTS, then its
+                // INPUTS (uniforms/instances; annotated first), then source.
+                {
+                    let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+                    let mut ents = Vec::new();
+                    let consts: Vec<usize> = self
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.const_ref.as_ref().is_some_and(|c| c.layer == layer))
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !consts.is_empty() {
+                        ents.push(VisKind::TweakHeader(consts.len(), true));
+                        for i in consts {
+                            ents.push(VisKind::Tweakable(i));
+                            ents.push(VisKind::Doc(i));
+                        }
+                    }
+                    let prefix = format!("{layer}.");
+                    let mut inputs: Vec<usize> = self
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| {
+                            r.const_ref.is_none()
+                                && r.kind != RowKind::Info
+                                && r.section != SectionKind::Cascade
+                                && r.prop.starts_with(&prefix)
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    inputs.sort_by_key(|i| if self.row_docs.contains_key(&self.rows[*i].prop) { 0 } else { 1 });
+                    if !inputs.is_empty() {
+                        ents.push(VisKind::InputsHeader(inputs.len()));
+                        for i in inputs {
+                            ents.push(VisKind::Prop(i));
+                            if self.row_docs.contains_key(&self.rows[i].prop) {
+                                ents.push(VisKind::Doc(i));
+                            }
+                        }
+                    }
+                    col.child(live_id!(shader_rows_wrap)).set_visible(cx, !ents.is_empty());
+                    self.shader_entries = ents;
+                }
             }
             // Tree tab data: refresh on generation change.
             if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
@@ -5652,8 +5738,9 @@ impl Tweaker {
         self.composite_align.clear();
         self.composite_clicks.clear();
         self.open_popup = None;
-        let entries = self.build_visible();
-        let mut visible_rects: Vec<VisRow> = Vec::with_capacity(entries.len());
+        let entries_all = self.build_visible();
+        let shader_entries = self.shader_entries.clone();
+        let mut visible_rects: Vec<VisRow> = Vec::with_capacity(entries_all.len());
 
         let walk = Walk::abs_rect(Rect {
             pos: dvec2(band.pos.x + SPLITTER_WIDTH, band.pos.y),
@@ -5772,9 +5859,11 @@ impl Tweaker {
                 }
                 continue;
             }
+            let in_shader_tab = step_widget.widget_uid().0 == self.shader_list_uid;
             let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
                 continue;
             };
+            let entries = if in_shader_tab { &shader_entries } else { &entries_all };
             list.set_item_range(cx, 0, entries.len());
             // A row can draw twice (TWEAKABLES + its home section); every
             // draw registers its fields, so the sets start empty per frame.
@@ -5796,7 +5885,7 @@ impl Tweaker {
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
-                    VisKind::TweakHeader(..) => live_id!(SectionRow),
+                    VisKind::TweakHeader(..) | VisKind::InputsHeader(_) => live_id!(SectionRow),
                     VisKind::Doc(_) => live_id!(DocRow),
                     VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
@@ -5841,6 +5930,9 @@ impl Tweaker {
                     VisKind::Doc(index) => {
                         let text = self.doc_line_for(index);
                         item.child(live_id!(doc)).set_text(cx, &text);
+                    }
+                    VisKind::InputsHeader(count) => {
+                        item.child(live_id!(title)).set_text(cx, &format!("INPUTS ({count})"));
                     }
                     VisKind::Material(mi) => {
                         let layer = self.materials.get(mi).cloned().unwrap_or_default();
@@ -6299,7 +6391,20 @@ impl Tweaker {
             match self.state_tracks.get(i) {
                 Some(track) => {
                     item.set_visible(cx, true);
-                    item.child(live_id!(lbl)).set_text(cx, &track.group);
+                    let mut label = format!(
+                        "{} \u{00b7} in {}s, out {}s",
+                        track.group,
+                        fmt_f64(play_duration(track.on_play)),
+                        fmt_f64(play_duration(track.off_play))
+                    );
+                    if let Some(doc) = self.row_docs.get(&format!("animator.{}", track.group)) {
+                        let first = doc.lines().next().unwrap_or("").trim();
+                        if !first.is_empty() {
+                            label.push_str(" \u{00b7} ");
+                            label.push_str(first);
+                        }
+                    }
+                    item.child(live_id!(lbl)).set_text(cx, &label);
                     if let Some(mut sw) = item.child(live_id!(sw)).borrow_mut::<TweakMaterialSwatch>() {
                         sw.mirror_uid = self.rows_uid;
                         sw.mirror_primary = primary;
@@ -7662,7 +7767,7 @@ impl Widget for Tweaker {
                                 self.tweakables_open = !self.tweakables_open;
                                 self.redraw_sidebar(cx);
                             }
-                            VisKind::Tweakable(_) | VisKind::Doc(_) => {}
+                            VisKind::Tweakable(_) | VisKind::Doc(_) | VisKind::InputsHeader(_) => {}
                             VisKind::Material(mi) => {
                                 // Thumbnail click: jump to the Shader tab
                                 // with this draw layer loaded.
