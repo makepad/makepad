@@ -67,7 +67,7 @@ pub fn tweak_is_on() -> bool {
 }
 
 /// One resolved widget under the pointer (or pinned by a click).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct TweakPick {
     pub uid: u64,
     /// Dotted id path from the ui root, the same tokens `/d` prints.
@@ -201,6 +201,11 @@ struct TweakSession {
     /// The live theme pulse, shared by the tweaker's tick and the
     /// post-draw hook (taken out of the lock while either runs).
     pulse: Option<PulseState>,
+    /// Theme colour edits in flight: name -> the original colour and the
+    /// value every use of it now shows (re-applied after each draw).
+    theme_overrides: Vec<(String, PulseState)>,
+    /// A remote theme edit (`op=theme name= value=`), consumed by the tweaker.
+    theme_req: Option<(String, String)>,
     /// Remote pose lock for the state swatches: Some(0..1) freezes every
     /// track at that mix (deterministic grabs), None animates.
     states_lock: Option<f64>,
@@ -2059,6 +2064,8 @@ struct PulseState {
     target: [f32; 4],
     m: f32,
     last: [f32; 4],
+    /// A theme edit: every slot holds this value instead of a pulse tone.
+    fixed: Option<[f32; 4]>,
     ledger: Vec<PulseSlot>,
 }
 
@@ -2070,7 +2077,7 @@ impl PulseState {
             ((rgba >> 8) & 0xff) as f32 / 255.0,
             (rgba & 0xff) as f32 / 255.0,
         ];
-        Self { target, m: 0.0, last: target, ledger: Vec::new() }
+        Self { target, m: 0.0, last: target, fixed: None, ledger: Vec::new() }
     }
 }
 
@@ -2161,7 +2168,7 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
 /// then adopt every fresh occurrence of the true colour — a redraw writes
 /// the true values back, and this runs again after each one.
 fn pulse_sync(cx: &mut Cx, st: &mut PulseState) -> usize {
-    let pulsed = pulse_tone(st.target, st.m);
+    let pulsed = st.fixed.unwrap_or_else(|| pulse_tone(st.target, st.m));
     let target = st.target;
     let last = st.last;
     let live: std::collections::HashSet<DrawListId> = cx.draw_lists.id_iter().collect();
@@ -2311,6 +2318,7 @@ fn pulse_restore(cx: &mut Cx, st: &PulseState) {
 /// The post-draw hook while a pulse is live: widgets that just redrew
 /// wrote true colours; re-apply before the paint.
 fn pulse_after_draw(cx: &mut Cx) {
+    theme_overrides_sync(cx);
     let st = session().lock().unwrap().pulse.take();
     if let Some(mut st) = st {
         pulse_sync(cx, &mut st);
@@ -2318,10 +2326,36 @@ fn pulse_after_draw(cx: &mut Cx) {
     }
 }
 
-/// The app's theme palette: every `color_*` in `mod.theme`, with the
-/// level that defines it. Read once per session from the script cascade.
-fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
-    let mut out: Vec<(String, u32, String)> = Vec::new();
+/// Re-apply every theme colour edit to the draw buffers (widgets that
+/// redrew wrote their baked colour back).
+fn theme_overrides_sync(cx: &mut Cx) {
+    let mut overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
+    for (_, st) in overrides.iter_mut() {
+        pulse_sync(cx, st);
+    }
+    session().lock().unwrap().theme_overrides = overrides;
+}
+
+/// The post-draw hook is up exactly while a pulse or a theme edit lives.
+fn hook_sync(cx: &mut Cx) {
+    let live = {
+        let s = session().lock().unwrap();
+        s.pulse.is_some() || !s.theme_overrides.is_empty()
+    };
+    cx.post_draw_hook = if live { Some(Box::new(pulse_after_draw)) } else { None };
+}
+
+/// One global theme value: a colour or a number.
+#[derive(Clone, Copy)]
+enum ThemeVal {
+    Color(u32),
+    Num(f64),
+}
+
+/// The app's theme: every colour and number in `mod.theme`, with the
+/// level (file:line) that defines it. Read from the script cascade.
+fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
+    let mut out: Vec<(String, LiveId, ThemeVal, String)> = Vec::new();
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
         let chain = vm.construction_chain(theme.into());
@@ -2340,16 +2374,66 @@ fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
         }
         for (key, loc) in keys {
             let name = live_id_token(key);
-            if !name.starts_with("color") {
-                continue;
-            }
-            if let Some(color) = vm.bx.heap.value(theme, key.into(), NoTrap).as_color() {
-                out.push((name, color, loc));
+            let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+            if let Some(color) = value.as_color() {
+                out.push((name, key, ThemeVal::Color(color), loc));
+            } else if let Some(f) = value.as_f64() {
+                out.push((name, key, ThemeVal::Num(f), loc));
             }
         }
     });
     out
 }
+
+/// The theme's colours (`color_*`), for the chips, the pulse and the strip.
+fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
+    theme_values(cx)
+        .into_iter()
+        .filter_map(|(name, _, value, loc)| match value {
+            ThemeVal::Color(c) if name.starts_with("color") => Some((name, c, loc)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Overwrite one theme value in the script heap, wherever in the theme's
+/// prototype chain it is defined (the module is immutable to scripts).
+fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
+    let mut hit = false;
+    cx.with_vm(|vm| {
+        let theme = vm.module(id!(theme));
+        vm.proto_map_iter_mut_with(theme, &mut |_, map| {
+            if let Some(entry) = map.get_mut(&key.into()) {
+                entry.value = value;
+                hit = true;
+            }
+        });
+    });
+    hit
+}
+
+fn rgba_of(c: u32) -> [f32; 4] {
+    [
+        ((c >> 24) & 0xff) as f32 / 255.0,
+        ((c >> 16) & 0xff) as f32 / 255.0,
+        ((c >> 8) & 0xff) as f32 / 255.0,
+        (c & 0xff) as f32 / 255.0,
+    ]
+}
+
+fn packed_of(rgba: [f32; 4]) -> u32 {
+    ((rgba[0] * 255.0).round() as u32) << 24
+        | ((rgba[1] * 255.0).round() as u32) << 16
+        | ((rgba[2] * 255.0).round() as u32) << 8
+        | ((rgba[3] * 255.0).round() as u32)
+}
+
+fn hex_of(c: u32) -> String {
+    format_hex(rgba_of(c), true)
+}
+
+/// The theme rows' place in `rows_uid`: no widget, the theme itself.
+const THEME_ROWS: u64 = u64::MAX;
 
 /// Selected state by fill, never by brackets in the label.
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
@@ -3590,6 +3674,26 @@ pub fn tweak_callback(
             cx.redraw_all();
             Ok(format!("{{\"ok\":1,\"op\":{}}}", json_str(op)))
         }
+        "theme" => {
+            // Set one global theme value: name=color_x&value=#hex, or a number.
+            let name = arg(args, &["name"]).unwrap_or("").to_string();
+            let value = arg(args, &["value"]).unwrap_or("").to_string();
+            if value.is_empty() {
+                // No value: report the theme's current one.
+                let current = theme_values(cx).into_iter().find(|(n, _, _, _)| *n == name).map(|(_, _, v, _)| match v {
+                    ThemeVal::Color(c) => hex_of(c),
+                    ThemeVal::Num(f) => fmt_f64(f),
+                });
+                return Ok(format!(
+                    "{{\"ok\":1,\"theme\":{},\"value\":{}}}",
+                    json_str(&name),
+                    current.map_or("null".to_string(), |v| json_str(&v))
+                ));
+            }
+            session().lock().unwrap().theme_req = Some((name.clone(), value.clone()));
+            cx.redraw_all();
+            Ok(format!("{{\"ok\":1,\"theme\":{},\"value\":{}}}", json_str(&name), json_str(&value)))
+        }
         "pulse" => {
             // Pin the theme pulse on a colour (name=color_x or a #hex);
             // an empty name restores and unpins.
@@ -4311,6 +4415,8 @@ enum PanelTab {
     Props,
     Shader,
     Tree,
+    /// The global theme: its colours, spacing and font sizes, edited live.
+    Theme,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -4571,6 +4677,9 @@ pub struct Tweaker {
     pulse_ticks: u64,
     #[rust]
     pulse_last_sync: f64,
+    /// The theme's definition site (file:line of its first value).
+    #[rust]
+    theme_site: String,
     #[rust]
     pulse_frame: NextFrame,
     /// A scroll-to-selection servo: each tree draw reports where the
@@ -4593,7 +4702,7 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 3],
+    tab_uids: [u64; 4],
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -5224,6 +5333,7 @@ impl Tweaker {
                         tab_props := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_theme := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -5520,6 +5630,194 @@ impl Tweaker {
     /// classify into sections, order each section (box-model progression for
     /// layout, surface-then-content with colors leading for style), and mark
     /// what differs from its session-original (resettable).
+    /// The Theme tab's rows: every theme colour (Colours), number
+    /// (Spacing & sizes) and font size, each editable in place.
+    fn rebuild_theme_rows(&mut self, cx: &mut Cx) {
+        self.rows.clear();
+        self.cascade.clear();
+        self.doc_row = None;
+        self.radius_prop = None;
+        let (diff, overrides): (Vec<TweakDiffEntry>, Vec<String>) = {
+            let s = session().lock().unwrap();
+            (
+                s.diff.iter().filter(|e| e.scope == "theme").cloned().collect(),
+                s.theme_overrides.iter().map(|(n, _)| n.clone()).collect(),
+            )
+        };
+        let mut site = String::new();
+        let mut values = theme_values(cx);
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, _, value, loc) in values {
+            if site.is_empty() {
+                site = loc.clone();
+            }
+            let (kind, text, section) = match value {
+                ThemeVal::Color(c) => (RowKind::Color, hex_of(c), SectionKind::Style),
+                ThemeVal::Num(f) => (
+                    RowKind::Num,
+                    fmt_f64(f),
+                    if name.starts_with("font") { SectionKind::Text } else { SectionKind::Layout },
+                ),
+            };
+            let original = diff.iter().find(|e| e.prop == name).map(|e| e.old.clone());
+            let changed = overrides.iter().any(|n| *n == name) || original.as_ref().is_some_and(|o| *o != text);
+            self.row_docs.insert(name.clone(), format!("theme value, defined in {loc}"));
+            self.rows.push(RowBinding {
+                prop: name,
+                kind,
+                value: text,
+                quoted: false,
+                section,
+                set: true,
+                changed,
+                original,
+                field_uid: 0,
+                swatch_uid: 0,
+                struct_kind: StructKind::None,
+                comp_vals: Vec::new(),
+                comp_uids: Vec::new(),
+                mode_uids: Vec::new(),
+                alt_uids: Vec::new(),
+                const_ref: None,
+                theme_match: None,
+                theme_uid: 0,
+            });
+        }
+        self.theme_site = site;
+        self.rows_uid = THEME_ROWS;
+    }
+
+    /// A `name: value` chunk from a theme row's editor.
+    fn theme_apply_chunk(&mut self, cx: &mut Cx, chunk: &str) {
+        if let Some((prop, value)) = single_prop_chunk(chunk) {
+            if let Err(error) = self.theme_set(cx, &prop, value.trim(), "sidebar") {
+                log!("TWEAK theme apply failed: {error}");
+            }
+        }
+    }
+
+    /// Double-click reset: the session-original value back.
+    fn theme_reset(&mut self, cx: &mut Cx, name: &str) {
+        let original = session()
+            .lock()
+            .unwrap()
+            .diff
+            .iter()
+            .find(|e| e.scope == "theme" && e.prop == name)
+            .map(|e| e.old.clone());
+        if let Some(original) = original {
+            if let Err(error) = self.theme_set(cx, name, &original, "reset") {
+                log!("TWEAK theme reset failed: {error}");
+            }
+        }
+    }
+
+    /// Set one global theme value. A colour: every draw buffer slot
+    /// holding it is retargeted live, app-wide, through the pulse's
+    /// identity ledger (kept in sync after each draw), and the theme
+    /// object in the script heap follows, so widgets applied from now on
+    /// bake the new colour too. A number: the heap value (see below).
+    /// Ledgered at the theme's own definition site with scope "theme";
+    /// undoable.
+    fn theme_set(&mut self, cx: &mut Cx, name: &str, text: &str, origin: &str) -> Result<(), String> {
+        let values = theme_values(cx);
+        let (key, value, loc) = values
+            .iter()
+            .find(|(n, _, _, _)| n == name)
+            .map(|(_, k, v, l)| (*k, *v, l.clone()))
+            .ok_or_else(|| format!("no theme value {name:?}"))?;
+        // `theme.color_y` as a value: that colour's current hex.
+        let text = match text.strip_prefix("theme.") {
+            Some(other) => match values.iter().find(|(n, _, _, _)| n == other).map(|(_, _, v, _)| *v) {
+                Some(ThemeVal::Color(c)) => hex_of(c),
+                Some(ThemeVal::Num(f)) => fmt_f64(f),
+                None => return Err(format!("no theme value {other:?}")),
+            },
+            None => text.to_string(),
+        };
+        let old_text = match value {
+            ThemeVal::Color(c) => hex_of(c),
+            ThemeVal::Num(f) => fmt_f64(f),
+        };
+        let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
+        if old_text == text && !overridden {
+            return Ok(());
+        }
+        match value {
+            ThemeVal::Color(current) => {
+                let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
+                let new = packed_of(rgba);
+                // The theme module is immutable to scripts; a design tool
+                // edits the value in place, at the level that defines it.
+                theme_heap_set(cx, key, ScriptValue::from_color(new));
+                let mut s = session().lock().unwrap();
+                match s.theme_overrides.iter().position(|(n, _)| n == name) {
+                    Some(i) => {
+                        if new == packed_of(s.theme_overrides[i].1.target) {
+                            // Back at the original: restore and forget.
+                            let (_, st) = s.theme_overrides.remove(i);
+                            drop(s);
+                            pulse_restore(cx, &st);
+                        } else {
+                            s.theme_overrides[i].1.fixed = Some(rgba);
+                            drop(s);
+                        }
+                    }
+                    None => {
+                        let mut st = PulseState::new(current);
+                        st.fixed = Some(rgba);
+                        s.theme_overrides.push((name.to_string(), st));
+                        drop(s);
+                    }
+                }
+                theme_overrides_sync(cx);
+                hook_sync(cx);
+                let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
+                for (_, st) in &overrides {
+                    pulse_repaint(cx, st);
+                }
+                session().lock().unwrap().theme_overrides = overrides;
+                self.theme_colors = theme_palette(cx);
+            }
+            ThemeVal::Num(_) => {
+                let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+                // Numbers are baked into layouts at apply time: the heap
+                // holds the new value for everything applied from now on
+                // and the ledger carries it to the source; existing layout
+                // re-flows when the edit lands (a live reload cannot
+                // redefine the immutable widget modules today).
+                theme_heap_set(cx, key, ScriptValue::from_f64(f));
+            }
+        }
+        let now = cx.seconds_since_app_start();
+        let mut s = session().lock().unwrap();
+        s.suppress_until = now + SUPPRESS_LINGER;
+        s.apply_gen += 1;
+        s.next_seq += 1;
+        let entry = TweakDiffEntry {
+            seq: s.next_seq,
+            path: "theme".to_string(),
+            prop: name.to_string(),
+            old: old_text,
+            new: text.clone(),
+            origin: loc,
+            siblings: 0,
+            scope: "theme".to_string(),
+        };
+        if origin != "undo" && origin != "redo" {
+            log!("TWEAK {} theme {} {} -> {} ({})", origin, entry.prop, entry.old, entry.new, entry.origin);
+            track_undo(&mut s, &entry);
+        }
+        s.diff.push(entry);
+        drop(s);
+        if let Some(row) = self.rows.iter_mut().find(|r| r.prop == name) {
+            row.value = text;
+            row.changed = true;
+        }
+        cx.redraw_all();
+        Ok(())
+    }
+
     fn rebuild_rows(&mut self, cx: &mut Cx, sel_uid: u64, sel_path: &str) {
         let widget = cx.widget_tree().widget(WidgetUid(sel_uid));
         if widget.is_empty() {
@@ -5787,7 +6085,8 @@ impl Tweaker {
                 .filter(|(_, row)| row.section == section && row.const_ref.is_none() && self.row_matches_filter(row))
                 .map(|(index, _)| index)
                 .collect();
-            let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering {
+            let theme = self.panel_tab == PanelTab::Theme;
+            let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering && !theme {
                 let mut list = Vec::new();
                 // Always present: an axis with no reflected row IS the Fit
                 // state — the segments must still show it.
@@ -5823,8 +6122,8 @@ impl Tweaker {
             let primary = members
                 .iter()
                 .filter(|&&i| match section {
-                    SectionKind::Style => Self::style_curated(&self.rows[i]),
-                    SectionKind::Layout => !Self::layout_composited(&self.rows[i].prop),
+                    SectionKind::Style => theme || Self::style_curated(&self.rows[i]),
+                    SectionKind::Layout => theme || !Self::layout_composited(&self.rows[i].prop),
                     _ => true,
                 })
                 .count();
@@ -5834,7 +6133,10 @@ impl Tweaker {
             let mut last_material: Option<String> = None;
             for index in members {
                 let row = &self.rows[index];
+                // Theme rows are all primary: nothing is folded behind a
+                // "show all".
                 let in_tail = match section {
+                    _ if theme => false,
                     SectionKind::Layout => {
                         !filtering && Self::layout_composited(&row.prop)
                             || (!expanded && !Self::layout_composited(&row.prop))
@@ -5903,7 +6205,20 @@ impl Tweaker {
         self.ensure_sidebar(cx);
         let sidebar = self.sidebar.as_ref().unwrap().clone();
 
+        if self.panel_tab == PanelTab::Theme {
+            let colours = self.rows.iter().filter(|r| r.kind == RowKind::Color).count();
+            let footer = sidebar.child(live_id!(ident_footer));
+            footer
+                .child(live_id!(title_label))
+                .set_text(cx, &format!("Theme  \u{2022}  {colours} colours  \u{2022}  {} values", self.rows.len() - colours));
+            let site = self.theme_site.split(':').next().unwrap_or("").to_string();
+            footer.child(live_id!(path_label)).set_text(cx, &format!("edits land in {site}"));
+            footer.child(live_id!(scope_row)).set_visible(cx, false);
+        } else {
+            sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).set_visible(cx, sel.is_some());
+        }
         match sel {
+            _ if self.panel_tab == PanelTab::Theme => {}
             Some(sel) => {
                 let head = {
                     let mut head = format!("{}  \u{2022}  {} props", sel.ty, self.rows.len());
@@ -6002,7 +6317,7 @@ impl Tweaker {
             let tab = self.panel_tab;
             sidebar
                 .child(live_id!(props_wrap))
-                .set_visible(cx, tab == PanelTab::Props);
+                .set_visible(cx, matches!(tab, PanelTab::Props | PanelTab::Theme));
             sidebar
                 .child(live_id!(shader_col))
                 .set_visible(cx, tab == PanelTab::Shader);
@@ -6014,6 +6329,7 @@ impl Tweaker {
                 (live_id!(tab_props), PanelTab::Props, "Props"),
                 (live_id!(tab_shader), PanelTab::Shader, "Shader"),
                 (live_id!(tab_tree), PanelTab::Tree, "Tree"),
+                (live_id!(tab_theme), PanelTab::Theme, "Theme"),
             ];
             for (i, (id, t, label)) in tabs.into_iter().enumerate() {
                 let btn = tab_row.child(id);
@@ -6408,7 +6724,17 @@ impl Tweaker {
                 }
                 match entry {
                     VisKind::Section(section, count, open) => {
-                        item.child(live_id!(title)).set_text(cx, section.title());
+                        let title = if self.panel_tab == PanelTab::Theme {
+                            match section {
+                                SectionKind::Style => "Colours",
+                                SectionKind::Layout => "Spacing & sizes",
+                                SectionKind::Text => "Font sizes",
+                                _ => section.title(),
+                            }
+                        } else {
+                            section.title()
+                        };
+                        item.child(live_id!(title)).set_text(cx, title);
                         item.child(live_id!(count))
                             .set_text(cx, &format!("{count}{}", if open { "" } else { "  +" }));
                     }
@@ -6824,13 +7150,15 @@ impl Tweaker {
                                 // Theme mapping: a value that IS a theme
                                 // colour names it, and one click makes the
                                 // property say `theme.color_x` in splash.
-                                let matched = rgba.and_then(|(c, _)| {
-                                    let packed = ((c[0] * 255.0).round() as u32) << 24
-                                        | ((c[1] * 255.0).round() as u32) << 16
-                                        | ((c[2] * 255.0).round() as u32) << 8
-                                        | ((c[3] * 255.0).round() as u32);
-                                    self.theme_colors.iter().find(|(_, tc, _)| *tc == packed).map(|(n, _, _)| n.clone())
-                                });
+                                // (a theme row IS its colour: no chip there)
+                                let matched = if self.panel_tab == PanelTab::Theme {
+                                    None
+                                } else {
+                                    rgba.and_then(|(c, _)| {
+                                        let packed = packed_of(c);
+                                        self.theme_colors.iter().find(|(_, tc, _)| *tc == packed).map(|(n, _, _)| n.clone())
+                                    })
+                                };
                                 let wrap = item.child(live_id!(tname_wrap));
                                 wrap.set_visible(cx, matched.is_some());
                                 if let Some(name) = &matched {
@@ -7048,7 +7376,7 @@ impl Tweaker {
                 self.pulse = Some((c, cx.seconds_since_app_start()));
                 self.pulse_ticks = 0;
                 session().lock().unwrap().pulse = Some(PulseState::new(c));
-                cx.post_draw_hook = Some(Box::new(pulse_after_draw));
+                hook_sync(cx);
                 self.pulse_frame = cx.new_next_frame();
                 log!("TWEAK pulse on #{c:08x}");
             }
@@ -7091,8 +7419,8 @@ impl Tweaker {
     /// hook down, and a redraw of everything for good measure.
     fn pulse_end(&mut self, cx: &mut Cx) {
         self.pulse = None;
-        cx.post_draw_hook = None;
         let st = session().lock().unwrap().pulse.take();
+        hook_sync(cx);
         if let Some(st) = st {
             pulse_restore(cx, &st);
             cx.redraw_all();
@@ -7322,14 +7650,18 @@ impl Tweaker {
                 seq_start,
                 ..
             } => {
-                let Ok(widget) = resolve_widget_for_history(cx, path) else {
-                    session().lock().unwrap().undo.push(step);
-                    return;
-                };
-                let undone = if let Some(name) = prop.strip_prefix("const:") {
-                    const_set(cx, &widget, path, name, old.parse::<f64>().ok(), "undo").map(|_| ())
+                let undone = if path.as_str() == "theme" {
+                    self.theme_set(cx, prop.as_str(), old.as_str(), "undo")
                 } else {
-                    eval_chunk(cx, &widget, &format!("{prop}: {old}"))
+                    let Ok(widget) = resolve_widget_for_history(cx, path) else {
+                        session().lock().unwrap().undo.push(step);
+                        return;
+                    };
+                    if let Some(name) = prop.strip_prefix("const:") {
+                        const_set(cx, &widget, path, name, old.parse::<f64>().ok(), "undo").map(|_| ())
+                    } else {
+                        eval_chunk(cx, &widget, &format!("{prop}: {old}"))
+                    }
                 };
                 if let Err(error) = undone {
                     log!("TWEAK undo failed: {error}");
@@ -7383,15 +7715,19 @@ impl Tweaker {
             UndoStep::Value {
                 path, prop, new, ..
             } => {
-                let Ok(widget) = resolve_widget_for_history(cx, path) else {
-                    session().lock().unwrap().redo.push(step);
-                    return;
-                };
-                let redone = if let Some(name) = prop.strip_prefix("const:") {
-                    const_set(cx, &widget, path, name, new.parse::<f64>().ok(), "redo").map(|_| ())
+                let redone = if path.as_str() == "theme" {
+                    self.theme_set(cx, prop.as_str(), new.as_str(), "redo")
                 } else {
-                    let chunk = format!("{prop}: {new}");
-                    apply_splash_chunk(cx, &widget, path, &chunk, "redo").map(|_| ())
+                    let Ok(widget) = resolve_widget_for_history(cx, path) else {
+                        session().lock().unwrap().redo.push(step);
+                        return;
+                    };
+                    if let Some(name) = prop.strip_prefix("const:") {
+                        const_set(cx, &widget, path, name, new.parse::<f64>().ok(), "redo").map(|_| ())
+                    } else {
+                        let chunk = format!("{prop}: {new}");
+                        apply_splash_chunk(cx, &widget, path, &chunk, "redo").map(|_| ())
+                    }
                 };
                 if let Err(error) = redone {
                     log!("TWEAK redo failed: {error}");
@@ -7525,6 +7861,7 @@ impl Tweaker {
                     self.panel_tab = match index {
                         1 => PanelTab::Shader,
                         2 => PanelTab::Tree,
+                        3 => PanelTab::Theme,
                         _ => PanelTab::Props,
                     };
                     self.redraw_sidebar(cx);
@@ -7638,7 +7975,9 @@ impl Tweaker {
                 }
             }
         }
-        let Some(sel) = sel else {
+        // The Theme tab edits the theme itself: no widget is selected.
+        let theme = self.panel_tab == PanelTab::Theme;
+        let Some(sel) = sel.or_else(|| theme.then(TweakPick::default)) else {
             return;
         };
         #[derive(Clone)]
@@ -7994,7 +8333,11 @@ impl Tweaker {
             }
         }
         for prop in resets {
-            self.reset_prop(cx, &sel, &prop);
+            if theme {
+                self.theme_reset(cx, &prop);
+            } else {
+                self.reset_prop(cx, &sel, &prop);
+            }
         }
         for (index, value) in const_edits {
             let Some(cref) = self.rows.get(index).and_then(|r| r.const_ref.clone()) else { continue };
@@ -8012,6 +8355,7 @@ impl Tweaker {
         }
         for edit in edits {
             match edit {
+                Edit::Apply(chunk) if theme => self.theme_apply_chunk(cx, &chunk),
                 Edit::Apply(chunk) => self.sidebar_apply(cx, &sel, &chunk),
                 Edit::Eyedrop(prop) => {
                     log!("TWEAK eyedropper armed for {prop} — click a pixel in the app");
@@ -8041,9 +8385,16 @@ impl Tweaker {
                         } else {
                             value.clone()
                         };
-                        self.sidebar_apply(cx, &sel, &format!("{}: {}", row.prop, text));
+                        let chunk = format!("{}: {}", row.prop, text);
+                        if theme {
+                            self.theme_apply_chunk(cx, &chunk);
+                        } else {
+                            self.sidebar_apply(cx, &sel, &chunk);
+                        }
                     }
-                    self.rows_uid = 0;
+                    if !theme {
+                        self.rows_uid = 0;
+                    }
                 }
                 Edit::HoldOn(index) => {
                     session().lock().unwrap().edit_hold = true;
@@ -8334,6 +8685,12 @@ impl Widget for Tweaker {
                 self.undo(cx);
             } else {
                 self.redo(cx);
+            }
+        }
+        let theme_req = session().lock().unwrap().theme_req.take();
+        if let Some((name, value)) = theme_req {
+            if let Err(error) = self.theme_set(cx, &name, &value, "remote") {
+                log!("TWEAK theme set failed: {error}");
             }
         }
         let pulse_req = session().lock().unwrap().pulse_req.take();
@@ -8929,7 +9286,14 @@ impl Widget for Tweaker {
         // whether the selection exposes a radius input.
         let sel = pinned.clone();
         let apply_gen = session().lock().unwrap().apply_gen;
-        if let Some(sel_pick) = &sel {
+        if self.panel_tab == PanelTab::Theme {
+            if self.rows_uid != THEME_ROWS || self.rows_gen != apply_gen {
+                self.rebuild_theme_rows(cx);
+                self.rows_gen = apply_gen;
+                self.swatch_refresh = true;
+                self.next_frame = cx.new_next_frame();
+            }
+        } else if let Some(sel_pick) = &sel {
             if self.rows_uid != sel_pick.uid || self.rows_gen != apply_gen {
                 let path = sel_pick.path.clone();
                 self.rebuild_rows(cx, sel_pick.uid, &path);
