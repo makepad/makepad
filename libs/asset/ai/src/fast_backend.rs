@@ -63,15 +63,18 @@ pub fn grid_points_for_forwards(forwards: u32) -> u32 {
     forwards + 1
 }
 
-/// A `fast` model manifest MUST carry a swapped bf16 DiT: without the role
+/// A `fast` model manifest MUST carry its own swapped DiT — the bf16 shard
+/// set on the big boxes, or the in-house pruned-Q4_K GGUF on the 24GB tier
+/// (`fasth3-4step-q4-24g`, written by `h3_quant_gguf`). Without either role
 /// the H3 machinery would quietly run the canonical MiniMax DiT under the
 /// FastH3 id. Fail closed at load time.
 pub fn check_fast_spec(spec: &ModelSpec) -> Result<(), AssetAiError> {
     let plan = tier_plan_for_spec(spec)?;
-    if plan.kind != H3TierKind::Bf16Dit {
+    if !matches!(plan.kind, H3TierKind::Bf16Dit | H3TierKind::GgufQ4) {
         return Err(AssetAiError::Registry(format!(
             "model {}: the fast backend needs a {ROLE_DIT_BF16:?} file role naming the FastH3 \
-             transformer shard index, got a {:?} tier plan",
+             transformer shard index (or a quantized FastH3 dit-gguf tier manifest), got a \
+             {:?} tier plan",
             spec.id, plan.kind
         )));
     }
@@ -243,19 +246,40 @@ mod tests {
 
     #[test]
     fn a_fast_manifest_must_name_its_swapped_dit() {
+        use crate::h3_backend::{
+            ROLE_AUDIO_VAE, ROLE_AUDIO_VAE_CONFIG, ROLE_TE_GGUF, ROLE_TOKENIZER_JSON,
+            ROLE_VIDEO_VAE,
+        };
         assert!(check_fast_spec(&spec("ok", &[ROLE_DIT_BF16])).is_ok());
         // The bare tree would run the canonical MiniMax DiT under the
-        // FastH3 id; a quant DiT is a different tier altogether.
+        // FastH3 id.
         let err = check_fast_spec(&spec("tree", &[])).unwrap_err();
         assert!(err.to_string().contains(ROLE_DIT_BF16), "{err}");
-        assert!(check_fast_spec(&spec("quant", &[ROLE_DIT_GGUF])).is_err());
+        // The quantized FastH3 tier is a COMPLETE GgufQ4 manifest (the
+        // in-house h3_quant_gguf DiT + the shared TE/VAE set)...
+        assert!(check_fast_spec(&spec(
+            "quant",
+            &[
+                ROLE_DIT_GGUF,
+                ROLE_TE_GGUF,
+                ROLE_VIDEO_VAE,
+                ROLE_AUDIO_VAE,
+                ROLE_AUDIO_VAE_CONFIG,
+                ROLE_TOKENIZER_JSON,
+            ]
+        ))
+        .is_ok());
+        // ...while a bare dit-gguf is still an incomplete tier manifest.
+        assert!(check_fast_spec(&spec("quant-bare", &[ROLE_DIT_GGUF])).is_err());
     }
 
     #[test]
-    fn the_embedded_fast_model_passes_the_manifest_gate() {
+    fn the_embedded_fast_models_pass_the_manifest_gate() {
         let registry = crate::registry::Registry::embedded().unwrap();
-        let fast = registry.find("fasth3-4step").unwrap();
-        assert_eq!(fast.backend, "fast");
-        check_fast_spec(fast).unwrap();
+        for id in ["fasth3-4step", "fasth3-4step-q4-24g"] {
+            let fast = registry.find(id).unwrap();
+            assert_eq!(fast.backend, "fast", "{id}");
+            check_fast_spec(fast).unwrap();
+        }
     }
 }

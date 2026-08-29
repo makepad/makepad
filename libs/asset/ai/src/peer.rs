@@ -315,25 +315,26 @@ pub struct BlobEntry {
 /// Every fetchable registry source that is digest-pinned AND currently
 /// verified on disk (receipt + identity), deduplicated by digest. This is both
 /// the serve allow-list and what `/v1/model_inventory` reports to the
-/// coordinator. Local-only and converted outputs are deliberately omitted:
-/// the current receiver installs `FileSpec` sources only.
+/// coordinator. Converted outputs are deliberately omitted (the current
+/// receiver installs `FileSpec` sources only), but digest-pinned LOCAL
+/// sources are included: the in-house quantized tiers exist nowhere but the
+/// fleet, so the peer network is their only distribution channel — `local`
+/// gates Hugging Face, not the LAN.
 pub fn build_inventory(registry: &Registry, cache_dir: &Path) -> Vec<BlobEntry> {
     let mut by_digest: HashMap<String, BlobEntry> = HashMap::new();
     for model in &registry.models {
         for file in &model.files {
-            if !file.local {
-                if let (Some(digest), Some(size)) = (file.sha256.as_deref(), file.size) {
-                    if crate::download::source_file_is_verified(file, cache_dir) {
-                        push_entry(
-                            &mut by_digest,
-                            digest,
-                            size,
-                            &file.cache_as,
-                            "source",
-                            &model.id,
-                            file.dest_path(cache_dir),
-                        );
-                    }
+            if let (Some(digest), Some(size)) = (file.sha256.as_deref(), file.size) {
+                if crate::download::source_file_is_verified(file, cache_dir) {
+                    push_entry(
+                        &mut by_digest,
+                        digest,
+                        size,
+                        &file.cache_as,
+                        "source",
+                        &model.id,
+                        file.dest_path(cache_dir),
+                    );
                 }
             }
         }
@@ -375,8 +376,9 @@ pub fn find_verified_blob(registry: &Registry, cache_dir: &Path, digest: &str) -
     }
     for model in &registry.models {
         for file in &model.files {
-            if !file.local
-                && file.sha256.as_deref() == Some(digest)
+            // `local` files with a pinned digest are servable like any other
+            // source — see `build_inventory`.
+            if file.sha256.as_deref() == Some(digest)
                 && file.size.is_some()
                 && crate::download::source_file_is_verified(file, cache_dir)
             {

@@ -29,6 +29,7 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     let bf16 = registry.find("minimax-h3-bf16-96g").unwrap();
     let legacy = registry.find("minimax-h3").unwrap();
     let fast = registry.find("fasth3-4step").unwrap();
+    let fast_q4 = registry.find("fasth3-4step-q4-24g").unwrap();
 
     // Role-driven tier selection.
     assert_eq!(tier_plan_for_spec(q4).unwrap().kind, H3TierKind::GgufQ4);
@@ -39,6 +40,17 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     let fast_plan = tier_plan_for_spec(fast).unwrap();
     assert_eq!(fast_plan.kind, H3TierKind::Bf16Dit);
     assert!(!fast_plan.staged && fast_plan.max_pixel_frames.is_none());
+    // The quantized FastH3 tier is a full GgufQ4 manifest (the in-house
+    // h3_quant_gguf DiT + the minimax q4 tier's shared TE/VAE set), staged
+    // and ceilinged exactly like the minimax q4 tier.
+    let fast_q4_plan = tier_plan_for_spec(fast_q4).unwrap();
+    assert_eq!(fast_q4_plan.kind, H3TierKind::GgufQ4);
+    assert!(fast_q4_plan.staged);
+    assert_eq!(
+        fast_q4_plan.max_pixel_frames,
+        tier_plan_for_spec(q4).unwrap().max_pixel_frames
+    );
+    assert_eq!(fast_q4.backend, "fast");
     assert!(tier_plan_for_spec(q4).unwrap().staged);
     assert!(tier_plan_for_spec(nv4).unwrap().staged);
     assert!(!tier_plan_for_spec(bf16).unwrap().staged);
@@ -53,6 +65,10 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     assert!(gate(q4, &rtx4090).is_ok());
     assert!(gate(q4, &rtx5090).is_ok());
     assert!(gate(q4, &rtx6000).is_ok());
+    // The quantized FastH3 tier places exactly like the minimax q4 tier.
+    assert!(gate(fast_q4, &rtx4090).is_ok());
+    assert!(gate(fast_q4, &rtx5090).is_ok());
+    assert!(gate(fast_q4, &rtx6000).is_ok());
     assert!(gate(nv4, &rtx4090).is_err(), "nvfp4 must fail closed on sm89");
     assert!(gate(nv4, &rtx5090).is_ok());
     assert!(gate(nv4, &rtx6000).is_ok());
@@ -72,14 +88,16 @@ fn tier_manifests_place_on_the_fleet_exactly() {
         estimated_peak_mb(spec).saturating_add(DEFAULT_RESERVE_MB)
     };
     assert_eq!(required(q4), 22 * 1024);
+    assert_eq!(required(fast_q4), 22 * 1024);
     assert_eq!(required(nv4), 30 * 1024);
     assert_eq!(required(bf16), 92 * 1024);
     assert!(required(q4) <= rtx4090.vram_total_mb.unwrap());
+    assert!(required(fast_q4) <= rtx4090.vram_total_mb.unwrap());
     assert!(required(nv4) <= rtx5090.vram_total_mb.unwrap());
     assert!(required(bf16) <= rtx6000.vram_total_mb.unwrap());
 
     // A GPU-less/unknown box refuses every gated tier.
-    for spec in [q4, nv4, bf16] {
+    for spec in [q4, nv4, bf16, fast_q4] {
         assert!(gate(spec, &GpuInfo::default()).is_err(), "{}", spec.id);
     }
     // The legacy alias keeps its ungated behavior.
@@ -115,7 +133,7 @@ fn tier_canvas_envelopes_match_the_ladder() {
 #[test]
 fn tier_files_are_fully_pinned_and_sized() {
     let registry = Registry::embedded().unwrap();
-    for id in ["minimax-h3-q4-24g", "minimax-h3-nvfp4-32g"] {
+    for id in ["minimax-h3-q4-24g", "minimax-h3-nvfp4-32g", "fasth3-4step-q4-24g"] {
         let spec = registry.find(id).unwrap();
         for file in &spec.files {
             assert!(file.role.is_some(), "{id}: {} needs a role", file.cache_as);
@@ -136,8 +154,9 @@ fn tier_files_are_fully_pinned_and_sized() {
             );
         }
     }
-    // Download budgets per box (weights only): ~35.5 GB for q4, ~34.0 GB for
-    // nvfp4 (the 5.8 GB VAE/tokenizer set is shared on disk).
+    // Download budgets per box: ~35.5 GB for q4, ~34.1 GB for nvfp4 (the
+    // 5.8 GB VAE/tokenizer set is shared on disk; both carry the 22.7 MB
+    // RIFE interpolate flownet — stale pre-RIFE pins caught here once).
     let total = |id: &str| -> u64 {
         registry
             .find(id)
@@ -147,6 +166,39 @@ fn tier_files_are_fully_pinned_and_sized() {
             .map(|f| f.size.unwrap())
             .sum()
     };
-    assert_eq!(total("minimax-h3-q4-24g"), 35_458_826_906);
-    assert_eq!(total("minimax-h3-nvfp4-32g"), 34_035_877_462);
+    assert_eq!(total("minimax-h3-q4-24g"), 35_481_501_594);
+    assert_eq!(total("minimax-h3-nvfp4-32g"), 34_058_552_150);
+    // fasth3-4step-q4-24g = the in-house 11.4GB FastH3 DiT plus the minimax
+    // q4 tier's shared TE/VAE/tokenizer set (identical pins, identical cache
+    // paths — a box carrying the minimax tier only adds the DiT).
+    assert_eq!(total("fasth3-4step-q4-24g"), 35_489_644_339);
+    let fast_q4 = registry.find("fasth3-4step-q4-24g").unwrap();
+    let dit = fast_q4
+        .files
+        .iter()
+        .find(|f| f.role.as_deref() == Some("dit-gguf"))
+        .unwrap();
+    // The DiT is a locally-generated artifact: never Hugging Face, peer
+    // network only — and digest-pinned so peers can verify it.
+    assert!(dit.local);
+    assert_eq!(dit.size, Some(11_428_787_200));
+    assert_eq!(
+        dit.sha256.as_deref(),
+        Some("2693c1c6c5218578564306f25fb2bdeeea1f7f6758d126eb37f5644fa47f7b27")
+    );
+    let q4_spec = registry.find("minimax-h3-q4-24g").unwrap();
+    for role in ["te-gguf", "video-vae", "audio-vae", "audio-vae-config", "tokenizer-json"] {
+        let ours = fast_q4
+            .files
+            .iter()
+            .find(|f| f.role.as_deref() == Some(role))
+            .unwrap();
+        let theirs = q4_spec
+            .files
+            .iter()
+            .find(|f| f.role.as_deref() == Some(role))
+            .unwrap();
+        assert_eq!(ours.cache_as, theirs.cache_as, "{role} must share the cache path");
+        assert_eq!(ours.sha256, theirs.sha256, "{role} must share the pinned bytes");
+    }
 }

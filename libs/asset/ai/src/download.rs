@@ -150,10 +150,13 @@ impl Downloader {
             self.guarded_remove(&dest)?;
             let _ = fs::remove_file(verification_path(&dest));
         }
-        if file.local {
+        if file.local && (file.sha256.is_none() || file.size.is_none()) {
             // Locally-converted weights (e.g. .mktts): there is nothing to
             // download — the file has to be placed in the cache by hand or by
-            // the converter tooling.
+            // the converter tooling. Digest-pinned local artifacts (the
+            // in-house quantized tiers) fall through to the PEER phase below
+            // instead: `local` means "never Hugging Face", and a pinned
+            // sha256+size is exactly the identity a peer transfer verifies.
             return Err(AssetAiError::Download(format!(
                 "{} is a locally-converted file that cannot be downloaded; place it at {}",
                 file.cache_as,
@@ -197,6 +200,18 @@ impl Downloader {
                 // canonical path.
                 let _ = fs::remove_file(&part);
             }
+        }
+
+        if file.local {
+            // A digest-pinned local artifact exists only inside the fleet:
+            // peers were the whole plan, and Hugging Face must never be
+            // asked for it.
+            return Err(AssetAiError::Download(format!(
+                "{} is a locally-generated artifact with no upstream source; no peer could \
+                 supply it — place it at {} or bring a box that carries it online",
+                file.cache_as,
+                dest.display()
+            )));
         }
 
         let mut offset = match fs::metadata(&part) {

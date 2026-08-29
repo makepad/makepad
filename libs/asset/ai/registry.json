@@ -3579,6 +3579,117 @@
      "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
+  },
+  {
+   "id": "fasth3-4step-q4-24g",
+   "domain": "video",
+   "backend": "fast",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree/raw/b65818d41939b5085451074fe8ca8b799f8d4921/LICENSE",
+    "summary": "MiniMax H3 Community License, inherited by the FastH3 distillation (model card: 'This checkpoint inherits the MiniMax H3 Community License'; the LICENSE file ships with the weights under the license role). Same terms as minimax-h3: local generation is the intended use of this OSS stack; review the acceptable-use and commercial-authorization clauses before shipping a product on these weights.",
+    "restriction": "community",
+    "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+   },
+   "vram_gb": 20.0,
+   "min_vram_gb": 22.0,
+   "min_compute_cap": 8.9,
+   "note": "FastVideo FastH3 4-step Preview v1 NATIVE QUANTIZED 24GB tier: the fasth3-4step distilled DiT repacked in-house by libs/ai/models/h3 h3_quant_gguf (safetensors -> pruned-Q4_K GGUF: ggml reference Q4_K round-to-nearest quantization of the block attention/FFN linears, BF16 boundary projections, AdaLN rank-8 curve table folded from the checkpoint's own time_embedder over the 1025-point grid) from transformer@b65818d41939b5085451074fe8ca8b799f8d4921. No third-party quant of this checkpoint exists; the file is local-only (never Hugging Face) and distributes over the fleet peer network from the box that generated it. Same layout, loader, staged TE -> DiT -> VAE residency and measured 960x544x124f pruned-ladder ceiling as minimax-h3-q4-24g, whose Q4_K_M TE, VAE repacks and tokenizer it shares byte-for-byte (same cache paths - a box holding the minimax q4 tier only adds the 11.4GB DiT). Runs the trained 4-forward DMD schedule through the fast backend (steps = DiT forwards, 1..8 honoured); dense attention exactly like the bf16 fasth3-4step - the VSA gate tensors were dropped at quantization time. i2v/fl2va requests run the base conditioning path outside the student's distillation, same as the bf16 tier. Optional post-stage: interpolate=2 or 4 (native RIFE v4.26, 'interpolate' role).",
+   "files": [
+    {
+     "role": "dit-gguf",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/MiniMax-H3-tiers/fasth3_4step_dit_pruned-Q4_K.gguf",
+     "size": 11428787200,
+     "sha256": "2693c1c6c5218578564306f25fb2bdeeea1f7f6758d126eb37f5644fa47f7b27",
+     "local": true
+    },
+    {
+     "role": "te-gguf",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+     "size": 18218065024,
+     "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc"
+    },
+    {
+     "role": "video-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/vae/minimax_h3_video_vae_fp16.safetensors",
+     "size": 5207808496,
+     "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    },
+    {
+     "role": "audio-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/minimax_h3_audio_vae_fp32.safetensors",
+     "size": 605254808,
+     "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    {
+     "role": "audio-vae-config",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/config.json",
+     "size": 2271,
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
+    },
+    {
+     "role": "tokenizer-json",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+     "role": "license",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "LICENSE",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/LICENSE",
+     "size": 17604,
+     "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
+     "role": "provenance",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "provenance.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/provenance.json",
+     "size": 986,
+     "sha256": "db0ec52026d3344603df22482c504dc24167406e468eb9426bac4d781064d976"
+    },
+    {
+     "role": "inference-contract",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "fastvideo_inference.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/fastvideo_inference.json",
+     "size": 859,
+     "sha256": "07745b19fd0387562eb1f9e3b3753db4dffa4d22acb97102fe49f57472c5c22f"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
+    }
+   ]
   }
  ]
 }
