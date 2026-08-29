@@ -60,6 +60,12 @@ pub struct RealtimeSession {
     /// H.264 input packets that failed to decode (see `handle_binary`) —
     /// surfaced as `stats.codec.dropped_decode`.
     dropped_decode: AtomicU64,
+    /// Milliseconds the most recent completed outbound encode took, written
+    /// by the encoder thread; the loop reports it as `stage_ms.post`.
+    last_encode_ms: AtomicU64,
+    /// Outbound frames overwritten before the encoder thread picked them up
+    /// (the loop never waits for the encode).
+    dropped_encode: AtomicU64,
     stop_requested: AtomicBool,
     /// `{"type":"control","reset":true}`: consumed once by the worker, which
     /// drops its previous output so the next feedback frame cold-starts.
@@ -102,6 +108,8 @@ impl RealtimeSession {
             frames_out: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             dropped_decode: AtomicU64::new(0),
+            last_encode_ms: AtomicU64::new(0),
+            dropped_encode: AtomicU64::new(0),
             stop_requested: AtomicBool::new(false),
             reset_requested: AtomicBool::new(false),
             reference0_version: AtomicU64::new(0),
@@ -962,6 +970,37 @@ pub fn run_live(
     let mut last_log = Instant::now();
     let mut idle_since: Option<Instant> = None;
 
+    // The outbound encode never sits between two model steps: the loop hands
+    // each finished frame to this thread (latest wins) and immediately goes
+    // round again; only the copy streamed to the client is ever encoded.
+    let outbound: Mutex<Option<(u64, RgbImage)>> = Mutex::new(None);
+    let outbound_cv = Condvar::new();
+    let outbound_done = AtomicBool::new(false);
+    let result = std::thread::scope(|threads| {
+    threads.spawn(|| {
+        loop {
+            let item = {
+                let mut slot = outbound.lock().unwrap();
+                loop {
+                    if let Some(item) = slot.take() {
+                        break item;
+                    }
+                    if outbound_done.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    slot = outbound_cv.wait(slot).unwrap();
+                }
+            };
+            let encode_start = Instant::now();
+            for frame_bytes in session.encode_output(&item.1, item.0 as u32) {
+                session.push_bytes(frame_bytes);
+            }
+            session
+                .last_encode_ms
+                .store(encode_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
+    });
+    let mut worker = || -> Result<(), AssetAiError> {
     'session: loop {
         cancel.check()?;
         if session.stop_requested() {
@@ -1085,11 +1124,16 @@ pub fn run_live(
             }
         };
 
-        let post_start = Instant::now();
-        for frame_bytes in session.encode_output(&out.image, frame_index as u32) {
-            session.push_bytes(frame_bytes);
+        {
+            let mut slot = outbound.lock().unwrap();
+            if slot.replace((frame_index, out.image.clone())).is_some() {
+                session.dropped_encode.fetch_add(1, Ordering::Relaxed);
+            }
+            outbound_cv.notify_one();
         }
-        let post_ms = post_start.elapsed().as_secs_f64() * 1000.0;
+        // What `post` reports now: the most recent COMPLETED encode, which
+        // runs beside the next model step instead of before it.
+        let post_ms = session.last_encode_ms.load(Ordering::Relaxed) as f64;
         let frame_diff = last_output.as_ref().and_then(|previous| mean_abs_diff(previous, &out.image));
         last_output = Some(out.image);
 
@@ -1147,6 +1191,13 @@ pub fn run_live(
 
         frame_index += 1;
     }
+    };
+    let result = worker();
+    outbound_done.store(true, Ordering::Relaxed);
+    outbound_cv.notify_all();
+    result
+    });
+    result
 }
 
 #[cfg(test)]
