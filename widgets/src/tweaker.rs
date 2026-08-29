@@ -45,6 +45,7 @@ use crate::makepad_script::script_eval;
 use crate::Animate;
 use crate::ButtonAction;
 use crate::tooltip::Tooltip;
+use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
 use std::collections::{HashMap, HashSet};
@@ -185,6 +186,11 @@ struct TweakSession {
     /// AI, /tweak/apply): the view re-reads its text for those only —
     /// otherwise a person's half-typed edit would be replaced under them.
     fn_override_gen: u64,
+    /// Remote pose lock for the state swatches: Some(0..1) freezes every
+    /// track at that mix (deterministic grabs), None animates.
+    states_lock: Option<f64>,
+    /// The pinned widget's animator groups, for /tweak/state.
+    state_names: Vec<String>,
     /// Edit scope: false = "this" (specialise this instance), true = "all"
     /// (every live widget of the type; the ledger names the type's site).
     scope_all: bool,
@@ -860,6 +866,7 @@ pub fn window_intercept(
             // (the panel never sees these moves).
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 tw.doc_tip_hover(cx, abs);
+                tw.states_hover(cx, abs);
             }
             let eyedrop = session().lock().unwrap().eyedrop.is_some();
             cx.set_cursor(if annotate || eyedrop {
@@ -1577,6 +1584,222 @@ fn layer_fn_sources(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<(String
                 }
                 break;
             }
+        }
+    });
+    out
+}
+
+/// One animator track (hover, down, focus, disabled…) of a widget, read
+/// from its script cascade, ready to POSE the layer's instance slice: the
+/// values the off and on states apply to this layer, per shader input.
+#[derive(Clone)]
+pub struct StateTrack {
+    pub group: String,
+    fields: Vec<StateField>,
+    /// Into `on` from `off` (the track's own `from` map, `all` fallback).
+    on_play: Play,
+    on_ease: AnimEase,
+    /// Back into `off`.
+    off_play: Play,
+    off_ease: AnimEase,
+}
+
+#[derive(Clone)]
+struct StateField {
+    id: LiveId,
+    /// Slot values of the pose; None = whatever the live widget has.
+    off: Option<Vec<f32>>,
+    on: Option<Vec<f32>>,
+}
+
+impl StateTrack {
+    /// Write the pose between off (0) and on (1) over the mirrored
+    /// instance, by the shader's own instance layout.
+    fn pose(&self, cx: &Cx, mirror: &mut MaterialMirror, mix: f32) {
+        let Some(shader_id) = mirror.draw_vars.draw_shader_id else { return };
+        let sh = &cx.draw_shaders[shader_id.index];
+        for field in &self.fields {
+            let Some(input) = sh.mapping.instances.inputs.iter().find(|i| i.id == field.id) else {
+                continue;
+            };
+            for slot in 0..input.slots {
+                let at = input.offset + slot;
+                if at >= mirror.instance.len() {
+                    break;
+                }
+                let live = mirror.instance[at];
+                let a = field.off.as_ref().and_then(|v| v.get(slot).copied()).unwrap_or(live);
+                let b = field.on.as_ref().and_then(|v| v.get(slot).copied()).unwrap_or(live);
+                mirror.instance[at] = a + (b - a) * mix;
+            }
+        }
+    }
+}
+
+/// Where a track is in its off→on→off cycle at time `t` (seconds since
+/// the cycle began): the real transition (duration + ease from the
+/// animator, a Snap jumps) each way, each pose held for a beat.
+fn track_mix(track: &StateTrack, t: f64) -> f32 {
+    const HOLD: f64 = 0.7;
+    const MIN: f64 = 0.15;
+    let on_d = play_duration(track.on_play).max(MIN);
+    let off_d = play_duration(track.off_play).max(MIN);
+    let cycle = on_d + HOLD + off_d + HOLD;
+    let p = t.rem_euclid(cycle);
+    if p < on_d {
+        if matches!(track.on_play, Play::Snap) { 1.0 } else { track.on_ease.map(p / on_d) as f32 }
+    } else if p < on_d + HOLD {
+        1.0
+    } else if p < on_d + HOLD + off_d {
+        if matches!(track.off_play, Play::Snap) {
+            0.0
+        } else {
+            1.0 - track.off_ease.map((p - on_d - HOLD) / off_d) as f32
+        }
+    } else {
+        0.0
+    }
+}
+
+fn play_duration(play: Play) -> f64 {
+    match play {
+        Play::Snap => 0.0,
+        Play::Forward { duration }
+        | Play::Reverse { duration, .. }
+        | Play::Loop { duration, .. }
+        | Play::ReverseLoop { duration, .. }
+        | Play::BounceLoop { duration, .. } => duration,
+    }
+}
+
+/// A state's `apply` values for one layer, as shader slots: numbers are
+/// one slot, colours four (rgba 0..1), bools one.
+fn pose_values(vm: &mut ScriptVm, state: &AnimatorState, layer_id: LiveId) -> Vec<(LiveId, Vec<f32>)> {
+    let mut out = Vec::new();
+    let Some(apply) = state.apply else { return out };
+    let layer_value = vm.bx.heap.value(apply, layer_id.into(), NoTrap);
+    let Some(layer_obj) = layer_value.as_object() else { return out };
+    let mut keys: Vec<LiveId> = Vec::new();
+    for lvl in vm.construction_chain(layer_value) {
+        for key in &lvl.own_keys {
+            if !keys.contains(key) {
+                keys.push(*key);
+            }
+        }
+    }
+    for key in keys {
+        let mut value = vm.bx.heap.value(layer_obj, key.into(), NoTrap);
+        // `snap(1.0)` / `instance(x)` wrap the value in an object keyed
+        // `value`; the pose is the wrapped scalar.
+        if value.as_color().is_none() && value.as_bool().is_none() && value.as_number().is_none() {
+            if let Some(obj) = value.as_object() {
+                let inner = vm.bx.heap.value(obj, id!(value).into(), NoTrap);
+                if !inner.is_nil() {
+                    value = inner;
+                }
+            }
+        }
+        let slots = if let Some(c) = value.as_color() {
+            vec![
+                ((c >> 24) & 0xff) as f32 / 255.0,
+                ((c >> 16) & 0xff) as f32 / 255.0,
+                ((c >> 8) & 0xff) as f32 / 255.0,
+                (c & 0xff) as f32 / 255.0,
+            ]
+        } else if let Some(b) = value.as_bool() {
+            vec![if b { 1.0 } else { 0.0 }]
+        } else if let Some(n) = value.as_number() {
+            vec![n as f32]
+        } else {
+            continue;
+        };
+        out.push((key, slots));
+    }
+    out
+}
+
+/// The widget's animator tracks that touch `layer`, from its script
+/// cascade (the instance's own animator, else its type's): per group the
+/// default state is "off" and the first other state is "on".
+fn animator_tracks(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<StateTrack> {
+    let mut out = Vec::new();
+    let source = widget.script_source();
+    if source == ScriptObject::ZERO {
+        return out;
+    }
+    let layer_id = LiveId::from_str(layer);
+    cx.with_vm(|vm| {
+        let anim = vm.bx.heap.value(source, id!(animator).into(), NoTrap);
+        let Some(anim_obj) = anim.as_object() else { return };
+        let mut groups: Vec<LiveId> = Vec::new();
+        for lvl in vm.construction_chain(anim) {
+            for key in &lvl.own_keys {
+                if !groups.contains(key) {
+                    groups.push(*key);
+                }
+            }
+        }
+        for group in groups {
+            let group_value = vm.bx.heap.value(anim_obj, group.into(), NoTrap);
+            let Some(group_obj) = group_value.as_object() else { continue };
+            let mut default = LiveId(0);
+            let mut states: Vec<LiveId> = Vec::new();
+            for lvl in vm.construction_chain(group_value) {
+                for key in &lvl.own_keys {
+                    if *key == id!(default) {
+                        continue;
+                    }
+                    if !states.contains(key) {
+                        states.push(*key);
+                    }
+                }
+            }
+            if let Some(id) = vm.bx.heap.value(group_obj, id!(default).into(), NoTrap).as_id() {
+                default = id;
+            }
+            if states.is_empty() {
+                continue;
+            }
+            let off = if states.contains(&default) { default } else { states[0] };
+            let Some(on) = states.iter().copied().find(|s| *s != off) else { continue };
+            let off_state = AnimatorState::script_from_value(vm, vm.bx.heap.value(group_obj, off.into(), NoTrap));
+            let on_state = AnimatorState::script_from_value(vm, vm.bx.heap.value(group_obj, on.into(), NoTrap));
+            let off_values = pose_values(vm, &off_state, layer_id);
+            let on_values = pose_values(vm, &on_state, layer_id);
+            if off_values.is_empty() && on_values.is_empty() {
+                // This track never touches the layer (a text-only state).
+                continue;
+            }
+            let mut fields: Vec<StateField> = Vec::new();
+            for (id, v) in &off_values {
+                fields.push(StateField { id: *id, off: Some(v.clone()), on: None });
+            }
+            for (id, v) in &on_values {
+                match fields.iter_mut().find(|f| f.id == *id) {
+                    Some(f) => f.on = Some(v.clone()),
+                    None => fields.push(StateField { id: *id, off: None, on: Some(v.clone()) }),
+                }
+            }
+            let on_play = on_state
+                .from
+                .get(&off)
+                .or_else(|| on_state.from.get(&id!(all)))
+                .copied()
+                .unwrap_or(Play::Forward { duration: 0.3 });
+            let off_play = off_state
+                .from
+                .get(&on)
+                .or_else(|| off_state.from.get(&id!(all)))
+                .copied()
+                .unwrap_or(Play::Forward { duration: 0.3 });
+            out.push(StateTrack {
+                group: format!("{}", live_id_token(group)),
+                fields,
+                on_play,
+                on_ease: on_state.ease.unwrap_or(AnimEase::Linear),
+                off_play,
+                off_ease: off_state.ease.unwrap_or(AnimEase::Linear),
+            });
         }
     });
     out
@@ -2474,6 +2697,40 @@ pub fn tweak_callback(
                 if annotate { 1 } else { 0 }
             ))
         }
+        // TEMP DEBUG RIG (do not commit): /tweak/op?op=perf — enable the
+        // perf monitor and dump ring averages for framerate diagnosis.
+        "perf" => {
+            if !cx.perf_monitor.enabled() {
+                cx.perf_monitor.set_enabled(true);
+                return Ok("{\"enabled\":1,\"note\":\"call again for data\"}".to_string());
+            }
+            let mut frames = Vec::new();
+            cx.perf_monitor.read(&mut frames);
+            let live: Vec<_> = frames.iter().filter(|f| f.gap_ms > 0.0).collect();
+            let n = live.len().max(1) as f32;
+            let avg_gap: f32 = live.iter().map(|f| f.gap_ms).sum::<f32>() / n;
+            let max_gap: f32 = live.iter().map(|f| f.gap_ms).fold(0.0, f32::max);
+            let mut sorted: Vec<f32> = live.iter().map(|f| f.gap_ms).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p95 = sorted.get(sorted.len().saturating_sub(1) * 95 / 100).copied().unwrap_or(0.0);
+            let mut out = format!(
+                "{{\"frames_painted\":{},\"ring_frames\":{},\"gap_avg_ms\":{:.2},\"gap_p95_ms\":{:.2},\"gap_max_ms\":{:.2},\"channels\":{{",
+                cx.perf_monitor.frames_painted(), live.len(), avg_gap, p95, max_gap
+            );
+            let names: Vec<String> = cx.perf_monitor.channels().iter().map(|c| c.name.clone()).collect();
+            for (i, name) in names.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                let avg_us: f32 = live.iter().map(|f| f.channel_us[i] as f32).sum::<f32>() / n;
+                let max_us = live.iter().map(|f| f.channel_us[i]).max().unwrap_or(0);
+                out.push_str(&format!("{}:{{\"avg_us\":{:.0},\"max_us\":{}}}", json_str(name), avg_us, max_us));
+            }
+            let ts = cx.widget_tree().stats();
+            out.push_str(&format!(
+                "}},\"tree\":{{\"lookups\":{},\"misses\":{},\"walk_nodes\":{},\"invalidations\":{},\"stores_skipped\":{}}}}}",
+                ts.lookups, ts.cache_misses, ts.walk_nodes, ts.invalidations, ts.stores_skipped
+            ));
+            Ok(out)
+        }
         "state" => {
             let (pinned, hover, diff, strokes) = {
                 let s = session().lock().unwrap();
@@ -2622,8 +2879,42 @@ pub fn tweak_callback(
             // (a shader that reads draw_pass.time keeps every live pass
             // repainting — the platform's time repaint, the spinner's too).
             out.push_str(&format!(",\"f\":{}", cx.repaint_id()));
+            {
+                let s = session().lock().unwrap();
+                out.push_str(",\"states\":[");
+                out.push_str(&s.state_names.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","));
+                out.push(']');
+                out.push_str(&format!(
+                    ",\"states_lock\":{}",
+                    s.states_lock.map_or("null".to_string(), |v| format!("{v}"))
+                ));
+            }
             out.push('}');
             Ok(out)
+        }
+        "states" => {
+            // The state swatches' pose lock: phase=0 (off pose), 1 (on
+            // pose), any mix between, or auto to animate again.
+            let phase = arg(args, &["phase"]).map(|s| s.to_string());
+            let mut s = session().lock().unwrap();
+            match phase.as_deref() {
+                Some("auto") => s.states_lock = None,
+                Some(p) => {
+                    if let Ok(v) = p.parse::<f64>() {
+                        s.states_lock = Some(v.clamp(0.0, 1.0));
+                    }
+                }
+                None => {}
+            }
+            let lock = s.states_lock;
+            let names = s.state_names.clone();
+            drop(s);
+            cx.redraw_all();
+            Ok(format!(
+                "{{\"ok\":1,\"lock\":{},\"states\":[{}]}}",
+                lock.map_or("null".to_string(), |v| format!("{v}")),
+                names.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(",")
+            ))
         }
         "apply" => {
             if !tweak_is_on() {
@@ -2865,6 +3156,13 @@ pub struct TweakMaterialSwatch {
     /// Rebuild generation the preview was last applied at (MAX = never).
     #[rust(u64::MAX)]
     pub applied_gen: u64,
+    /// When set, the swatch shows ONE animator track of the mirrored
+    /// widget: the layer's instance slice is posed between the track's off
+    /// and on apply values by `mix` (0 = off, 1 = on) before it draws.
+    #[rust]
+    pub state: Option<StateTrack>,
+    #[rust]
+    pub mix: f32,
 }
 
 impl Widget for TweakMaterialSwatch {
@@ -2894,7 +3192,10 @@ impl Widget for TweakMaterialSwatch {
             None
         };
         match mirrored {
-            Some(mirror) => {
+            Some(mut mirror) => {
+                if let Some(state) = &self.state {
+                    state.pose(cx, &mut mirror, self.mix);
+                }
                 let native = mirror.native_size();
                 if self.well_list.is_none() {
                     self.well_list = Some(DrawList2d::new(cx));
@@ -3411,6 +3712,26 @@ pub struct Tweaker {
     /// An apply just happened: redraw the panel one frame later so the
     /// swatch mirrors the widget AFTER it redrew with the new value.
     swatch_refresh: bool,
+    /// The pinned widget's animator tracks, shown as posed state swatches
+    /// under the well.
+    #[rust]
+    state_tracks: Vec<StateTrack>,
+    #[rust]
+    states_gen: u64,
+    #[rust]
+    states_uid: u64,
+    #[rust]
+    states_layer: String,
+    #[rust]
+    states_paused: bool,
+    #[rust]
+    states_hover: bool,
+    #[rust]
+    states_t0: f64,
+    #[rust]
+    states_frame: NextFrame,
+    #[rust]
+    states_pause_uid: u64,
     /// Set by the note button; the next event opens the card.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
@@ -3706,6 +4027,38 @@ impl Tweaker {
                         big := TweakMaterialSwatch {
                             width: Fill
                             height: 150
+                        }
+                        states_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true}
+                            spacing: 6
+                            visible: false
+                            st0 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            st1 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            st2 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            st3 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            st4 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            st5 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
+                                sw := TweakMaterialSwatch { width: 56 height: 36 }
+                                lbl := FabLabelSmall { text: "" }
+                            }
+                            states_pause := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
                         }
                         src_fold := Button {
                             width: Fit
@@ -4737,6 +5090,8 @@ impl Tweaker {
                         }
                     }
                 }
+                // The animator's states, each a small posed well.
+                self.refresh_state_swatches(cx, &col);
             }
             // Tree tab data: refresh on generation change.
             if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
@@ -5283,6 +5638,114 @@ impl Tweaker {
 
     /// Apply one sidebar-originated chunk to the selection (same path the
     /// AI uses, same diff log; TWEAK log lines throttle to one per pause).
+    /// One small well per animator track of the pinned widget, under the
+    /// main well: the same byte-copied draw call, posed by that track's
+    /// off/on apply values and cycled on the frame clock. Every scrub or
+    /// fn edit shows in all of them at once — they mirror the live call.
+    fn refresh_state_swatches(&mut self, cx: &mut Cx, col: &WidgetRef) {
+        let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+        let row = col.child(live_id!(states_row));
+        let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+        if widget.is_empty() {
+            row.set_visible(cx, false);
+            self.state_tracks.clear();
+            return;
+        }
+        if self.states_gen != self.rows_gen || self.states_uid != self.rows_uid || self.states_layer != layer {
+            self.state_tracks = animator_tracks(cx, &widget, &layer);
+            self.states_gen = self.rows_gen;
+            if self.states_uid != self.rows_uid {
+                // A new selection starts its cycle at the off pose.
+                self.states_t0 = cx.seconds_since_app_start();
+            }
+            self.states_uid = self.rows_uid;
+            self.states_layer = layer.clone();
+            session().lock().unwrap().state_names = self.state_tracks.iter().map(|t| t.group.clone()).collect();
+        }
+        row.set_visible(cx, !self.state_tracks.is_empty());
+        let primary = self.materials.first().is_some_and(|m| *m == layer);
+        let slots = [live_id!(st0), live_id!(st1), live_id!(st2), live_id!(st3), live_id!(st4), live_id!(st5)];
+        for (i, slot) in slots.into_iter().enumerate() {
+            let item = row.child(slot);
+            match self.state_tracks.get(i) {
+                Some(track) => {
+                    item.set_visible(cx, true);
+                    item.child(live_id!(lbl)).set_text(cx, &track.group);
+                    if let Some(mut sw) = item.child(live_id!(sw)).borrow_mut::<TweakMaterialSwatch>() {
+                        sw.mirror_uid = self.rows_uid;
+                        sw.mirror_primary = primary;
+                        sw.mirror_layer = layer.clone();
+                        sw.layer = layer.clone();
+                        sw.applied_gen = self.rows_gen;
+                        sw.state = Some(track.clone());
+                    }
+                }
+                None => item.set_visible(cx, false),
+            }
+        }
+        let pause = row.child(live_id!(states_pause));
+        self.states_pause_uid = pause.widget_uid().0;
+        pause.set_text(cx, if self.states_paused { "play" } else { "pause" });
+        if !self.state_tracks.is_empty() {
+            self.states_frame = cx.new_next_frame();
+        }
+    }
+
+    /// One frame of the state swatches' cycle.
+    fn states_tick(&mut self, cx: &mut Cx) {
+        if self.state_tracks.is_empty() || !tweak_is_on() {
+            return;
+        }
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        let col = sidebar.child(live_id!(shader_col));
+        if !col.visible() {
+            return;
+        }
+        let lock = session().lock().unwrap().states_lock;
+        let paused = self.states_paused || self.states_hover;
+        let t = cx.seconds_since_app_start() - self.states_t0;
+        let row = col.child(live_id!(states_row));
+        let slots = [live_id!(st0), live_id!(st1), live_id!(st2), live_id!(st3), live_id!(st4), live_id!(st5)];
+        let mut moved = false;
+        for (i, slot) in slots.into_iter().enumerate() {
+            let Some(track) = self.state_tracks.get(i) else { break };
+            let mix = match lock {
+                Some(v) => v as f32,
+                None if paused => continue,
+                None => track_mix(track, t),
+            };
+            if let Some(mut sw) = row.child(slot).child(live_id!(sw)).borrow_mut::<TweakMaterialSwatch>() {
+                if (sw.mix - mix).abs() > 1.0e-4 {
+                    sw.mix = mix;
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            self.redraw_sidebar(cx);
+        }
+        if lock.is_none() && !paused {
+            self.states_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Resting the pointer on the state swatches pauses them.
+    fn states_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.state_tracks.is_empty() {
+            return;
+        }
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let row = sidebar.child(live_id!(shader_col)).child(live_id!(states_row));
+        let rect = row.area().clipped_rect(cx);
+        let over = rect.size.x > 0.0 && rect.contains(abs) && tweak_is_on();
+        if over != self.states_hover {
+            self.states_hover = over;
+            if !over {
+                self.states_frame = cx.new_next_frame();
+            }
+        }
+    }
+
     /// The terse doc line under the layer name shows the whole doc while
     /// the pointer rests on it.
     fn doc_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
@@ -5792,6 +6255,16 @@ impl Tweaker {
                     session().lock().unwrap().scope_all = all;
                     log!("TWEAK scope {}", if all { "all — every widget of the type" } else { "this — specialise this instance" });
                     self.rows_uid = 0;
+                    self.redraw_sidebar(cx);
+                }
+                continue;
+            }
+            if self.states_pause_uid != 0 && action_uid == self.states_pause_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.states_paused = !self.states_paused;
+                    if !self.states_paused {
+                        self.states_frame = cx.new_next_frame();
+                    }
                     self.redraw_sidebar(cx);
                 }
                 continue;
@@ -6365,6 +6838,10 @@ impl Widget for Tweaker {
         }
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
+            self.states_hover(cx, e.abs);
+        }
+        if self.states_frame.is_event(event).is_some() {
+            self.states_tick(cx);
         }
         if self.live_error_pending && self.next_frame.is_event(event).is_some() {
             // The backend compile happens at draw: an error there shows up
