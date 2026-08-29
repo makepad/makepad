@@ -21,8 +21,20 @@ use std::ffi::c_void;
 /// Stable op names a Metal backend would implement next to these.
 pub mod names {
     pub const ROFORMER_ATTN_F32: &str = "roformer_attn_f32";
+    pub const ROFORMER_ATTN_F32_TILED: &str = "roformer_attn_f32_tiled";
     pub const ROFORMER_ROPE_NORMAL_F32: &str = "roformer_rope_normal_f32";
 }
+
+/// Shortest key axis for which [`roformer_attn_f32_tiled`] is the better of
+/// the two kernels.
+///
+/// The tiled kernel amortises a 64-query tile and a 45 KB shared footprint
+/// over the key loop, which only pays once the key axis is long; below this
+/// the stems-shaped kernel — one query row per thread, a third of the shared
+/// memory, three resident blocks — wins. BS-RoFormer's axial attention tops
+/// out around a thousand keys and therefore never crosses this line, so the
+/// stems parity gate keeps running on exactly the kernel it was measured on.
+pub const ATTN_TILED_MIN_KEYS: i64 = 2048;
 
 /// Head dims [`roformer_attn_f32`] is compiled and verified for. Anything else
 /// is rejected by the kernel (and should be rejected earlier, at planning
@@ -42,6 +54,33 @@ mod ffi {
     // .cu build ran, link-clean stubs when it did not.
     cuda_ffi! {
         pub fn makepad_cuda_roformer_attn_f32(
+            q: *const c_void,
+            k: *const c_void,
+            v: *const c_void,
+            dst: *mut c_void,
+            d: i32,
+            n_q: i32,
+            kc: i32,
+            heads: i32,
+            kv_heads: i32,
+            batch: i32,
+            scale: f32,
+            q_nb1: usize,
+            q_nb2: usize,
+            q_nb3: usize,
+            k_nb1: usize,
+            k_nb2: usize,
+            k_nb3: usize,
+            v_nb1: usize,
+            v_nb2: usize,
+            v_nb3: usize,
+            d_nb1: usize,
+            d_nb2: usize,
+            d_nb3: usize,
+            stream: Stream,
+        ) -> CudaError;
+
+        pub fn makepad_cuda_roformer_attn_f32_tiled(
             q: *const c_void,
             k: *const c_void,
             v: *const c_void,
@@ -133,6 +172,54 @@ pub unsafe fn roformer_attn_f32(
     stream: Stream,
 ) -> CudaError {
     ffi::makepad_cuda_roformer_attn_f32(
+        q, k, v, dst, d, n_q, kc, heads, kv_heads, batch, scale, q_nb1, q_nb2, q_nb3, k_nb1,
+        k_nb2, k_nb3, v_nb1, v_nb2, v_nb3, d_nb1, d_nb2, d_nb3, stream,
+    )
+}
+
+/// The same op as [`roformer_attn_f32`], register-tiled for a long key axis.
+///
+/// Identical contract — same layouts, same f32 arithmetic, same online
+/// softmax over the same tile order — and identical results to rounding. It
+/// differs only in how the work is cut up: 4x4 score patches and 4 x D/8
+/// accumulator patches per thread instead of one query row each, which is
+/// what the vision tower's 14k-24k key axis needs and what BS-RoFormer's few
+/// hundred does not. Pick it above [`ATTN_TILED_MIN_KEYS`] keys.
+///
+/// `d` must additionally be divisible by 8 (32, 64 and 72 are compiled).
+///
+/// # Safety
+/// As [`roformer_attn_f32`].
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub unsafe fn roformer_attn_f32_tiled(
+    q: *const c_void,
+    k: *const c_void,
+    v: *const c_void,
+    dst: *mut c_void,
+    d: i32,
+    n_q: i32,
+    kc: i32,
+    heads: i32,
+    kv_heads: i32,
+    batch: i32,
+    scale: f32,
+    q_nb1: usize,
+    q_nb2: usize,
+    q_nb3: usize,
+    k_nb1: usize,
+    k_nb2: usize,
+    k_nb3: usize,
+    v_nb1: usize,
+    v_nb2: usize,
+    v_nb3: usize,
+    d_nb1: usize,
+    d_nb2: usize,
+    d_nb3: usize,
+    stream: Stream,
+) -> CudaError {
+    ffi::makepad_cuda_roformer_attn_f32_tiled(
         q, k, v, dst, d, n_q, kc, heads, kv_heads, batch, scale, q_nb1, q_nb2, q_nb3, k_nb1,
         k_nb2, k_nb3, v_nb1, v_nb2, v_nb3, d_nb1, d_nb2, d_nb3, stream,
     )

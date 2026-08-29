@@ -29,6 +29,7 @@ pub mod names {
     pub const QUANTIZE_MMQ_D4: &str = "quantize_mmq_d4";
     pub const DEQUANT_ROWS_BF16: &str = "dequant_rows_bf16";
     pub const CAST_F32_BF16: &str = "cast_f32_bf16";
+    pub const CAST_F32_F16: &str = "cast_f32_f16";
     pub const MUL_MAT_BATCHED: &str = "mul_mat_batched";
     pub const GET_ROWS_F32: &str = "get_rows_f32";
     pub const GET_ROWS_QUANT: &str = "get_rows_quant";
@@ -239,6 +240,15 @@ mod ffi {
             stream: Stream,
         ) -> CudaError;
         pub fn mkllm_cast_f32_bf16(
+            src: *const c_void,
+            dst: *mut c_void,
+            k: i32,
+            m: i32,
+            src_nb0: usize,
+            src_nb1: usize,
+            stream: Stream,
+        ) -> CudaError;
+        pub fn mkllm_cast_f32_f16(
             src: *const c_void,
             dst: *mut c_void,
             k: i32,
@@ -859,6 +869,16 @@ cuda_forward!(cast_f32_bf16(
     src_nb1: usize,
     stream: Stream,
 ) -> CudaError { mkllm_cast_f32_bf16 });
+
+cuda_forward!(cast_f32_f16(
+    src: *const c_void,
+    dst: *mut c_void,
+    k: i32,
+    m: i32,
+    src_nb0: usize,
+    src_nb1: usize,
+    stream: Stream,
+) -> CudaError { mkllm_cast_f32_f16 });
 
 cuda_forward!(mul_mat_batched(
     a_is_f16: i32,

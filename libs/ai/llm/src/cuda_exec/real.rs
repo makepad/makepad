@@ -23,10 +23,10 @@ use makepad_ai_cuda::{
     cudaStreamCreateWithFlags, cudaStreamDestroy, cudaStreamSynchronize, cudaStream_t, CudaGraphExec,
     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP, CUBLAS_OP_N, CUBLAS_OP_T,
     CUBLAS_STATUS_SUCCESS, CUDA_MEMCPY_DEVICE_TO_HOST, CUDA_MEMCPY_HOST_TO_DEVICE, CUDA_R_16BF,
-    CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
+    CUDA_R_16F, CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
 use makepad_ai_cuda::llm_ops::{
-    binary, cast_f32_bf16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
+    binary, cast_f32_bf16, cast_f32_f16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
     get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
@@ -41,7 +41,8 @@ use makepad_ai_cuda::llm_ops::{
     QUANT_Q80 as MKLLM_QUANT_Q80, ROUTE_MMQ, ROUTE_MMVQ,
 };
 use makepad_ai_cuda::roformer_ops::{
-    attn_head_dim_supported, roformer_attn_f32, roformer_rope_normal_f32,
+    attn_head_dim_supported, roformer_attn_f32, roformer_attn_f32_tiled, roformer_rope_normal_f32,
+    ATTN_TILED_MIN_KEYS,
 };
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
@@ -78,6 +79,11 @@ const COMPILED_ARCH: &str = match option_env!("MAKEPAD_LLAMA_CUDA_ARCH") {
 pub const MMV_MAX_COLUMNS: usize = 8;
 /// Transient bf16 weight-slab bound for the GEMM path.
 const GEMM_SLAB_BYTES: usize = 256 << 20;
+/// Narrowest activation an f16 weight is worth casting and handing to cuBLAS
+/// for. Below this the per-launch cost of the cast plus the GEMM outweighs
+/// the dot-product-per-element fallback, which is efficient enough when there
+/// are only a handful of columns to broadcast the weight across.
+const GEMM_F16_MIN_COLUMNS: usize = 32;
 /// Stable scratch reserved before CUDA-graph capture so `cudaMalloc`
 /// cannot happen on the capturing stream. Official ggml-alloc + cuBLAS
 /// workspace is allocated before ggml-cuda.cu:4149 BeginCapture. Prefill
@@ -1081,6 +1087,7 @@ enum KernelSel {
     GemmQuant(i32),
     MmvF32,
     GemmF32,
+    GemmF16,
     MulMatBatched { a_f16: bool },
     CopyStrided,
     // llama.cpp qwen35.cpp:276 / ggml-cuda.cu:2520: CPY view -> cache, not CONT+SET_ROWS
@@ -1447,7 +1454,33 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
             }
             let m_total = (b.ne[1] * b.ne[2] * b.ne[3]) as usize;
             match a.desc.ty {
-                TensorType::F16 => KernelSel::MulMatBatched { a_f16: true },
+                TensorType::F16 => {
+                    // An f16 weight against a wide activation is a plain GEMM
+                    // and belongs on cuBLAS' tensor cores. The fallback below
+                    // is a dot-product-per-output-element kernel: one warp per
+                    // (row, column) re-reading both operands with no reuse
+                    // beyond L2, which measured 3.1 TFLOPS on a 4090 — 62% of
+                    // the whole Qwen3-VL vision encode. Casting the
+                    // activations to f16 (the weight already is) and handing
+                    // the pair to cublasGemmEx is the same arithmetic the
+                    // quantized path above already runs in bf16.
+                    //
+                    // The narrow case stays on the fallback: below a few
+                    // columns the cast plus a GEMM launch costs more than the
+                    // dot-product kernel, which is fine at that width.
+                    let a_2d = a.ne[2] == 1 && a.ne[3] == 1;
+                    if a_2d
+                        && m_total >= GEMM_F16_MIN_COLUMNS
+                        && a.is_contiguous()
+                        && b.is_contiguous()
+                        && t.is_contiguous()
+                        && !disabled_by_env("MKLLM_DISABLE_GEMM_F16")
+                    {
+                        KernelSel::GemmF16
+                    } else {
+                        KernelSel::MulMatBatched { a_f16: true }
+                    }
+                }
                 TensorType::F32 => {
                     let a_2d = a.ne[2] == 1 && a.ne[3] == 1;
                     let b_2d = b.ne[2] == 1 && b.ne[3] == 1;
@@ -1665,14 +1698,17 @@ const UNARY_SIGMOID: i32 = 7;
 const UNARY_SILU: i32 = 10;
 const UNARY_SOFTPLUS: i32 = 15;
 
-fn fusion_disabled(var: &str) -> bool {
+/// `MKLLM_DISABLE_*=1` kill switches: fusion passes and kernel choices both
+/// roll back through this one spelling, so an A/B on the box is an env var
+/// rather than a rebuild.
+fn disabled_by_env(var: &str) -> bool {
     std::env::var_os(var).map(|v| v == "1").unwrap_or(false)
 }
 
 // llama.cpp ggml-cuda.cu:3371-3410 / 3994-4004: RMS_NORM + MUL (+ ADD).
 // Intermediate nodes must have a single use (ggml_can_fuse_ext n_uses==1).
 fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if fusion_disabled("MKLLM_DISABLE_RMS_FUSION") {
+    if disabled_by_env("MKLLM_DISABLE_RMS_FUSION") {
         return 0;
     }
     let mut fused = 0usize;
@@ -1750,7 +1786,7 @@ fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [
 
 // llama.cpp ggml-cuda.cu:3425-3450 / 4012-4017: UNARY + MUL.
 fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if fusion_disabled("MKLLM_DISABLE_UNARY_MUL_FUSION") {
+    if disabled_by_env("MKLLM_DISABLE_UNARY_MUL_FUSION") {
         return 0;
     }
     let mut fused = 0usize;
@@ -1823,7 +1859,7 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
     let force_on = std::env::var_os("MKLLM_ENABLE_SSM_SILU_FUSION")
         .map(|v| v == "1")
         .unwrap_or(false);
-    if !force_on || fusion_disabled("MKLLM_DISABLE_SSM_SILU_FUSION") {
+    if !force_on || disabled_by_env("MKLLM_DISABLE_SSM_SILU_FUSION") {
         return 0;
     }
     let mut fused = 0usize;
@@ -1861,7 +1897,7 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
 // (qwen35.cpp:267-276, ggml-cuda.cu:2520). We still build CONT+SET_ROWS;
 // collapse that pair to the same single strided copy.
 fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) {
-    if fusion_disabled("MKLLM_DISABLE_CPY_FUSION") {
+    if disabled_by_env("MKLLM_DISABLE_CPY_FUSION") {
         return;
     }
     let mut i = 0;
@@ -1905,7 +1941,7 @@ fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
 // view; collapse a same-type same-size F32 write to the same single copy.
 // Official SET_ROWS remains only the attn K/V f16 path.
 fn fuse_set_rows_cpy(tensors: &[Tensor], nodes: &mut [PlannedNode]) {
-    if fusion_disabled("MKLLM_DISABLE_CPY_FUSION") {
+    if disabled_by_env("MKLLM_DISABLE_CPY_FUSION") {
         return;
     }
     for node in nodes.iter_mut() {
@@ -3317,9 +3353,23 @@ impl ExecView<'_> {
                         LlamaError::format(format!("roformer attention {what} exceeds i32"))
                     })
                 };
+                // Two kernels, same arithmetic, different cut of the work: the
+                // register-tiled one pays off only over a long key axis, which
+                // is the vision tower and never the stems lane. `d % 8` is the
+                // tiled kernel's own extra constraint (its accumulator split);
+                // 72 and 64 satisfy it, and anything that does not falls back
+                // rather than failing.
+                let tiled = k.ne[1] >= ATTN_TILED_MIN_KEYS
+                    && q.ne[0] % 8 == 0
+                    && !disabled_by_env("MKLLM_DISABLE_ROFORMER_TILED");
+                let attn = if tiled {
+                    roformer_attn_f32_tiled
+                } else {
+                    roformer_attn_f32
+                };
                 check(
                     unsafe {
-                        roformer_attn_f32(
+                        attn(
                             self.ptr_of(q_id)?,
                             self.ptr_of(k_id)?,
                             self.ptr_of(v_id)?,
@@ -3346,7 +3396,7 @@ impl ExecView<'_> {
                             stream,
                         )
                     },
-                    "roformer_attn",
+                    if tiled { "roformer_attn_tiled" } else { "roformer_attn" },
                 )
             }
             KernelSel::RopeNormal => {
@@ -3873,6 +3923,70 @@ impl ExecView<'_> {
                 };
                 if status != CUBLAS_STATUS_SUCCESS {
                     return Err(LlamaError::format(format!("cublas sgemm failed: {status}")));
+                }
+                Ok(())
+            }
+            KernelSel::GemmF16 => {
+                let a_id = self.src_id(&t, 0)?;
+                let b_id = self.src_id(&t, 1)?;
+                let a = &tensors[a_id];
+                let b = &tensors[b_id];
+                if !a.is_contiguous() || !b.is_contiguous() || !t.is_contiguous() {
+                    return Err(LlamaError::unsupported("strided f16 GEMM"));
+                }
+                // Same shape algebra as GemmF32: ggml's [K, N] weight is a
+                // column-major K x N, so the product is A^T * B, and the
+                // activation's batch axes are extra columns of the one GEMM.
+                let n_total = b.ne[1] * b.ne[2] * b.ne[3];
+                let n = usize::try_from(n_total)
+                    .map_err(|_| LlamaError::format("f16 GEMM column count exceeds usize"))?;
+                let (m, k) = (a.ne[1] as usize, a.ne[0] as usize);
+                let act_ptr = self
+                    .state
+                    .scratch_acts
+                    .borrow_mut()
+                    .ensure(k * n * 2, "f16 GEMM activation scratch")?;
+                check(
+                    unsafe {
+                        cast_f32_f16(
+                            self.ptr_of(b_id)?,
+                            act_ptr,
+                            k as i32,
+                            n as i32,
+                            b.nb[0],
+                            b.nb[1],
+                            stream,
+                        )
+                    },
+                    "f16 GEMM activation cast",
+                )?;
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                let status = unsafe {
+                    cublasGemmEx(
+                        self.state.blas,
+                        CUBLAS_OP_T,
+                        CUBLAS_OP_N,
+                        m as i32,
+                        n as i32,
+                        k as i32,
+                        &alpha as *const f32 as *const c_void,
+                        self.ptr_of(a_id)?,
+                        CUDA_R_16F,
+                        k as i32,
+                        act_ptr,
+                        CUDA_R_16F,
+                        k as i32,
+                        &beta as *const f32 as *const c_void,
+                        self.ptr_of(node_id)?,
+                        CUDA_R_32F,
+                        m as i32,
+                        CUBLAS_COMPUTE_32F,
+                        CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                    )
+                };
+                if status != CUBLAS_STATUS_SUCCESS {
+                    return Err(LlamaError::format(format!("cublas f16 gemm failed: {status}")));
                 }
                 Ok(())
             }

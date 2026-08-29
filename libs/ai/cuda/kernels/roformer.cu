@@ -240,6 +240,293 @@ extern "C" cudaError_t makepad_cuda_roformer_attn_f32(
 }
 
 // ---------------------------------------------------------------------------
+// The same maskless attention, register-tiled for a LONG key axis.
+//
+// The kernel above was written for BS-RoFormer, whose key axis is at most a
+// few hundred entries; it gives each thread ONE query row and four score
+// columns, so its inner loops read shared memory about as often as they
+// multiply: 9 LDS per 8 FMA in QK, 19 per 18 in PV. An SM retires 128 f32
+// FMA per clock but only 32 shared-memory words, so at ~1.1 loads per FMA
+// that kernel is shared-bandwidth bound by roughly 4x and can never exceed a
+// quarter of peak no matter how many blocks are resident.
+//
+// The Qwen3-VL vision tower runs the same op at a completely different size:
+// 14k-24k patches attend to each other with no mask, which is ~65 TFLOP per
+// image at 24k patches and utterly dominates the encode. There the fix is
+// register blocking. Each thread owns a 4x4 patch of the score tile (8 loads
+// per 16 FMA) and a 4-row x D/8-column patch of the output accumulator (13
+// loads per 36 FMA), which is a 2.5x cut in shared traffic per multiply, and
+// the online-softmax rescale is spread over all 128 threads (two per query
+// row, combined with one shuffle) instead of running on 32 of them while the
+// other 96 wait at a barrier.
+//
+// Everything else — f32 throughout, the online softmax, the tile order, the
+// -INFINITY padding of dead columns — is identical to the kernel above, so
+// the two agree to rounding. Selection is by shape at the call site: the
+// stems lane never reaches this one.
+//
+// Tiles: 64 queries x 32 keys per iteration, 128 threads.
+//   QK phase:  128 = 16 row groups x 8 column groups, 4 rows x 4 cols each.
+//   softmax:   128 = 64 rows x 2 halves, 16 columns each.
+//   PV phase:  128 = 16 row groups x 8 dim groups, 4 rows x D/8 dims each.
+// D must therefore divide by 8 (32, 64 and 72 all do).
+// ---------------------------------------------------------------------------
+
+#define ROT_BR 64       // query rows per block
+#define ROT_BC 32       // key rows per tile iteration
+#define ROT_THREADS 128
+#define ROT_RG 16       // row groups
+#define ROT_RPT (ROT_BR / ROT_RG)   // 4 query rows per thread
+#define ROT_CG 8        // column groups (QK) / dim groups (PV)
+#define ROT_CPT (ROT_BC / ROT_CG)   // 4 score columns per thread
+
+// Score-tile row stride. 33 rather than 32 so that the PV phase's
+// `ss[(r0+a)*SLD + c]`, whose threads walk r0 in steps of 4 rows, lands on
+// four distinct banks instead of all 16 row groups colliding on one.
+#define ROT_SLD (ROT_BC + 1)
+
+template <int D>
+static __global__ void __launch_bounds__(ROT_THREADS, 2) makepad_cuda_roformer_attn_f32_tiled_kernel(
+        const uint8_t * __restrict__ q,
+        const uint8_t * __restrict__ k,
+        const uint8_t * __restrict__ v,
+        uint8_t * __restrict__ dst,
+        int n_q, int kc, int gqa,
+        float scale,
+        size_t q_nb1, size_t q_nb2, size_t q_nb3,
+        size_t k_nb1, size_t k_nb2, size_t k_nb3,
+        size_t v_nb1, size_t v_nb2, size_t v_nb3,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3) {
+    constexpr int LD = ROF_LD(D);
+    constexpr int DPT = D / ROT_CG;   // accumulator dims per thread
+
+    __shared__ float qs[ROT_BR * LD];
+    __shared__ float ks[ROT_BC * LD];
+    __shared__ float vs[ROT_BC * LD];
+    __shared__ float ss[ROT_BR * ROT_SLD];
+    __shared__ float ms[ROT_BR];
+    __shared__ float ls[ROT_BR];
+    __shared__ float cs[ROT_BR];
+
+    const int q0 = blockIdx.x * ROT_BR;
+    const int head = blockIdx.y;
+    const int batch = blockIdx.z;
+    const int kv_head = head / gqa;
+
+    const int tid = threadIdx.x;
+    const int rg = tid / ROT_CG;     // row group, shared by the QK and PV phases
+    const int cg = tid % ROT_CG;     // column group (QK) and dim group (PV)
+    const int r0 = rg * ROT_RPT;     // first query row this thread owns
+    const int c0 = cg * ROT_CPT;     // first score column
+    const int d0 = cg * DPT;         // first accumulator dim
+
+    const uint8_t * qb = q + (size_t) head * q_nb2 + (size_t) batch * q_nb3;
+    const uint8_t * kb = k + (size_t) kv_head * k_nb2 + (size_t) batch * k_nb3;
+    const uint8_t * vb = v + (size_t) kv_head * v_nb2 + (size_t) batch * v_nb3;
+
+    // Q tile: rows past the end are zeroed and their results dropped at the
+    // store, so the inner loops stay branch-free.
+    for (int idx = tid; idx < ROT_BR * D; idx += ROT_THREADS) {
+        const int r = idx / D;
+        const int d = idx - r * D;
+        const int gq = q0 + r;
+        qs[r * LD + d] = gq < n_q ? *(const float *) (qb + (size_t) gq * q_nb1 + (size_t) d * 4) : 0.0f;
+    }
+    if (tid < ROT_BR) {
+        ms[tid] = -INFINITY;
+        ls[tid] = 0.0f;
+    }
+
+    float acc[ROT_RPT][DPT];
+#pragma unroll
+    for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+        for (int b = 0; b < DPT; b++) {
+            acc[a][b] = 0.0f;
+        }
+    }
+
+    for (int key0 = 0; key0 < kc; key0 += ROT_BC) {
+        __syncthreads();
+        for (int idx = tid; idx < ROT_BC * D; idx += ROT_THREADS) {
+            const int r = idx / D;
+            const int d = idx - r * D;
+            const int gk = key0 + r;
+            const int live = gk < kc;
+            ks[r * LD + d] = live ? *(const float *) (kb + (size_t) gk * k_nb1 + (size_t) d * 4) : 0.0f;
+            vs[r * LD + d] = live ? *(const float *) (vb + (size_t) gk * v_nb1 + (size_t) d * 4) : 0.0f;
+        }
+        __syncthreads();
+
+        // QK^T, 4x4 per thread: two register vectors feed sixteen multiplies.
+        float s[ROT_RPT][ROT_CPT];
+#pragma unroll
+        for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+            for (int b = 0; b < ROT_CPT; b++) {
+                s[a][b] = 0.0f;
+            }
+        }
+        for (int d = 0; d < D; d++) {
+            float qv[ROT_RPT];
+            float kv[ROT_CPT];
+#pragma unroll
+            for (int a = 0; a < ROT_RPT; a++) {
+                qv[a] = qs[(r0 + a) * LD + d];
+            }
+#pragma unroll
+            for (int b = 0; b < ROT_CPT; b++) {
+                kv[b] = ks[(c0 + b) * LD + d];
+            }
+#pragma unroll
+            for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+                for (int b = 0; b < ROT_CPT; b++) {
+                    s[a][b] = fmaf(qv[a], kv[b], s[a][b]);
+                }
+            }
+        }
+#pragma unroll
+        for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+            for (int b = 0; b < ROT_CPT; b++) {
+                // Keys past the end must not enter the softmax at all.
+                ss[(r0 + a) * ROT_SLD + c0 + b] =
+                    (key0 + c0 + b) < kc ? s[a][b] * scale : -INFINITY;
+            }
+        }
+        __syncthreads();
+
+        // Online softmax, two threads per query row. `key0 < kc` guarantees
+        // at least one live column, so m_new is finite and the first tile's
+        // exp(-inf - m_new) is a clean 0 rather than a NaN. The paired lanes
+        // differ only in bit 0, so one shuffle combines both halves; the
+        // shuffle also reconverges them, which is what makes the later
+        // half==0 store to ms[] safe against the half==1 load above it.
+        {
+            const int row = tid >> 1;
+            const int half = tid & 1;
+            const int cbeg = half * (ROT_BC / 2);
+            float * srow = &ss[row * ROT_SLD];
+            const float m_old = ms[row];
+            float m_part = -INFINITY;
+#pragma unroll
+            for (int c = 0; c < ROT_BC / 2; c++) {
+                m_part = fmaxf(m_part, srow[cbeg + c]);
+            }
+            const float m_new = fmaxf(m_old, fmaxf(m_part, __shfl_xor_sync(0xffffffff, m_part, 1)));
+            float l_part = 0.0f;
+#pragma unroll
+            for (int c = 0; c < ROT_BC / 2; c++) {
+                const float p = expf(srow[cbeg + c] - m_new);
+                srow[cbeg + c] = p;
+                l_part += p;
+            }
+            l_part += __shfl_xor_sync(0xffffffff, l_part, 1);
+            if (half == 0) {
+                const float corr = expf(m_old - m_new);
+                ms[row] = m_new;
+                ls[row] = ls[row] * corr + l_part;
+                cs[row] = corr;
+            }
+        }
+        __syncthreads();
+
+        // P*V, 4 rows x DPT dims per thread: four probabilities and DPT value
+        // words feed 4*DPT multiplies.
+        float corr[ROT_RPT];
+#pragma unroll
+        for (int a = 0; a < ROT_RPT; a++) {
+            corr[a] = cs[r0 + a];
+        }
+#pragma unroll
+        for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+            for (int b = 0; b < DPT; b++) {
+                acc[a][b] *= corr[a];
+            }
+        }
+        for (int c = 0; c < ROT_BC; c++) {
+            float pv[ROT_RPT];
+#pragma unroll
+            for (int a = 0; a < ROT_RPT; a++) {
+                pv[a] = ss[(r0 + a) * ROT_SLD + c];
+            }
+            const float * vrow = &vs[c * LD + d0];
+            float vv[DPT];
+#pragma unroll
+            for (int b = 0; b < DPT; b++) {
+                vv[b] = vrow[b];
+            }
+#pragma unroll
+            for (int a = 0; a < ROT_RPT; a++) {
+#pragma unroll
+                for (int b = 0; b < DPT; b++) {
+                    acc[a][b] = fmaf(pv[a], vv[b], acc[a][b]);
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (int a = 0; a < ROT_RPT; a++) {
+        const int gq = q0 + r0 + a;
+        if (gq >= n_q) {
+            continue;
+        }
+        const float l = ls[r0 + a];
+        const float inv = l > 0.0f ? 1.0f / l : 0.0f;
+        float * out = (float *) (dst + (size_t) batch * d_nb3 + (size_t) gq * d_nb2
+            + (size_t) head * d_nb1) + d0;
+#pragma unroll
+        for (int b = 0; b < DPT; b++) {
+            out[b] = acc[a][b] * inv;
+        }
+    }
+}
+
+extern "C" cudaError_t makepad_cuda_roformer_attn_f32_tiled(
+        const void * q, const void * k, const void * v, void * dst,
+        int d, int n_q, int kc, int heads, int kv_heads, int batch, float scale,
+        size_t q_nb1, size_t q_nb2, size_t q_nb3,
+        size_t k_nb1, size_t k_nb2, size_t k_nb3,
+        size_t v_nb1, size_t v_nb2, size_t v_nb3,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3,
+        cudaStream_t stream) {
+    if (n_q <= 0 || kc <= 0 || heads <= 0 || kv_heads <= 0 || batch <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (kv_heads > heads || heads % kv_heads != 0) {
+        return cudaErrorInvalidValue;
+    }
+    const int gqa = heads / kv_heads;
+    const dim3 block(ROT_THREADS, 1, 1);
+    const dim3 grid((n_q + ROT_BR - 1) / ROT_BR, heads, batch);
+
+#define ROT_LAUNCH(DIM)                                                        \
+    makepad_cuda_roformer_attn_f32_tiled_kernel<DIM><<<grid, block, 0, stream>>>( \
+        (const uint8_t *) q, (const uint8_t *) k, (const uint8_t *) v,          \
+        (uint8_t *) dst, n_q, kc, gqa, scale,                                   \
+        q_nb1, q_nb2, q_nb3, k_nb1, k_nb2, k_nb3,                               \
+        v_nb1, v_nb2, v_nb3, d_nb1, d_nb2, d_nb3)
+
+    // Same verified-dims-only rule as the kernel above. D must divide by
+    // ROT_CG (8) for the accumulator split, which is the extra constraint
+    // here; 72 (Qwen3-VL: n_embd 1152 / 16 heads) is the shape this exists
+    // for. Shared at D=72 is 64*73 + 2*32*73 + 64*33 + 3*64 words = 45.5 KB,
+    // inside the 48 KB static budget and small enough for two resident
+    // blocks out of Ada's 100 KB per SM.
+    switch (d) {
+        case 32: ROT_LAUNCH(32); break;
+        case 64: ROT_LAUNCH(64); break;
+        case 72: ROT_LAUNCH(72); break;
+        default: return cudaErrorInvalidValue;
+    }
+#undef ROT_LAUNCH
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
 // RoPE, GGML_ROPE_TYPE_NORMAL: interleaved adjacent pairs (GPT-J style).
 //
 //   theta(i0) = freq_scale * pos[i2] * freq_base^(-i0 / n_dims)

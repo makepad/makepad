@@ -3062,6 +3062,31 @@ extern "C" cudaError_t mkllm_cast_f32_bf16(
     return cudaGetLastError();
 }
 
+// The same cast to f16, for GEMMs whose weights are already f16 and so need
+// no dequant slab: only the activations have to be converted before
+// cublasGemmEx can run the pair on tensor cores. f16 rather than bf16
+// because the weight side fixes the type, and f16's 11-bit mantissa is the
+// better half of that trade anyway.
+static __global__ void mkllm_cast_f32_f16_kernel(
+        const uint8_t * __restrict__ src, __half * __restrict__ dst,
+        int K, int M, size_t src_nb0, size_t src_nb1) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int m = blockIdx.y;
+    if (k >= K || m >= M) return;
+    const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
+    dst[(size_t) m * K + k] = __float2half_rn(v);
+}
+
+extern "C" cudaError_t mkllm_cast_f32_f16(
+        const void * src, void * dst, int K, int M,
+        size_t src_nb0, size_t src_nb1, cudaStream_t stream) {
+    dim3 block(256);
+    dim3 grid((K + 255) / 256, M);
+    mkllm_cast_f32_f16_kernel<<<grid, block, 0, stream>>>(
+        (const uint8_t *) src, (__half *) dst, K, M, src_nb0, src_nb1);
+    return cudaGetLastError();
+}
+
 // ---------------------------------------------------------------------------
 // General strided batched mat-mul, f16 or f32 A x f32 B -> f32:
 //   dst[n, m, b2, b3] = sum_k A[k, n, b2 % a_ne2, b3 % a_ne3] * B[k, m, b2, b3]
