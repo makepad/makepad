@@ -19,12 +19,26 @@
 //! depth sidecar, a variants json) contributes at most typed files of that
 //! same revision; none of them ever becomes a catalog entry of its own.
 //!
-//! Two kinds do not publish at all, and the kind table says so
+//! PROGRESS IS BANDED AND MONOTONE. One claim is one 0..=1000 run whose
+//! phases own fixed slices of the bar ([`JobBar`]): 0–50 the prompt
+//! expander, 50–900 dispatch plus the node's own fraction, 900–1000 the
+//! fetch/annotate/PUBLISH tail. Nothing may write a smaller number than
+//! this claim has already shown, so a node changing phase, a migration to
+//! another box, or the hand-off from expansion to generation holds the bar
+//! still and lets the NOTE explain. 1000 means published, not denoised.
+//!
+//! Three kinds do not publish at all, and the kind table says so
 //! ([`crate::gen_kinds::Product`]) rather than the loop guessing:
 //!
 //! * `vision.describe` — a question about an image. The answer is TEXT,
 //!   recorded on the job (`{text, model, box}`), which is where the client
 //!   that asked reads it back. A UI making content asks these at runtime.
+//! * `text.expand` — the prompt expander, as a job of its own. Its answer
+//!   is the PROMPT a later stage will be handed, so the result flattens
+//!   `prompt` (and, for a music answer, `lyrics`/`seconds`) as top-level
+//!   fields the store can splice into a dependent job's body at claim
+//!   time. The same expansion still runs as a pre-step inside another job
+//!   when its body says `expand: true`; both go through one code path.
 //! * `annotate.asset` — the catalog's own description pass, minted by the
 //!   store on every publish. The answer is parsed by `makepad-asset-annotate`
 //!   and folded into that asset's annotation record. Both live on the same
@@ -36,7 +50,7 @@
 //! implementation ([`AssetAiFleet`]) is a thin adapter over
 //! `makepad-asset-ai`'s blocking client.
 
-use crate::gen_kinds::{kind_of, GenKind, InputNeed, Product};
+use crate::gen_kinds::{kind_of, GenKind, InputNeed};
 use crate::gen_profiles::slug;
 use crate::glb::inspect_glb;
 use crate::import::{placeholder_thumb, usable_image_thumb};
@@ -118,18 +132,25 @@ const EXPAND_MUSIC_DEADLINE: Duration = Duration::from_secs(180);
 /// generation itself unrunnable.
 const MAX_EXPANDED_PROMPT_BYTES: usize = 3_500;
 
-/// The expander's job kind. Deliberately NOT a row in
-/// [`crate::gen_kinds::GEN_KINDS`]: nobody enqueues `text.expand`, nothing
-/// claims it, and no profile advertises it. It exists so an expansion can
-/// travel the same dispatch/poll/heartbeat path as everything else while
-/// staying invisible to the queue.
-static EXPAND_KIND: GenKind = GenKind {
-    kind: "text.expand",
-    domain: "text",
-    product: Product::Text,
-    input: InputNeed::None,
-    action: "expand a prompt",
-};
+/// The expander's kind, read from the ONE table that defines it
+/// ([`crate::gen_kinds::GEN_KINDS`]).
+///
+/// It used to be a private static here, because nobody could enqueue
+/// `text.expand` and nothing claimed it. It is a real row now, so the
+/// worker-side pre-step and a pipeline's expand STAGE are the same kind by
+/// construction: same dispatch/poll/heartbeat path, same text model, same
+/// result contract. The only difference between them is whether the store
+/// ever saw a job of its own for it.
+fn expand_kind() -> &'static GenKind {
+    kind_of("text.expand").expect("text.expand is a wired kind")
+}
+
+/// The expander's result document has to fit the store's 16 KB result cap,
+/// and it carries three texts: the raw answer, plus the flattened `prompt`
+/// and `lyrics` a dependent stage splices from. Budget them here rather
+/// than discovering the cap at `worker_succeed`, where the answer has
+/// already been paid for.
+const MAX_EXPAND_ANSWER_BYTES: usize = 3_500;
 /// Largest catalog input this worker relays to a box, base64 included.
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 /// Reply budget for a vision answer. The annotation pass answers in nine
@@ -138,6 +159,79 @@ const VISION_MAX_TOKENS: u64 = 220;
 /// Ceiling on the answer text recorded on a job (the server caps the whole
 /// result document at 16 KB).
 const MAX_ANSWER_BYTES: usize = 8 * 1024;
+
+/// One BAND of the per-job progress bar: a phase of a claim owns a
+/// contiguous slice of 0..=1000 and can never write outside it.
+///
+/// The bar used to be the node's render fraction and nothing else, so
+/// everything the worker does after the node finishes — fetching,
+/// measuring, thumbnailing, publishing — happened behind a number that had
+/// stopped moving. A publish refusal then read as "73.2% → failed" on a
+/// clip that was fully rendered. Bands make the last tenth of the bar mean
+/// the last tenth of the work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Band {
+    lo: u16,
+    hi: u16,
+}
+
+impl Band {
+    const fn new(lo: u16, hi: u16) -> Band {
+        Band { lo, hi }
+    }
+
+    /// Where a 0..=1 fraction of this phase lands on the whole bar.
+    fn at(self, fraction: f64) -> u16 {
+        let span = (self.hi - self.lo) as f64;
+        self.lo + (span * fraction.clamp(0.0, 1.0)).round() as u16
+    }
+}
+
+/// The prompt expander, when the body asks for one. Small on purpose: it
+/// is a courtesy step in front of the work, not the work.
+const BAND_EXPAND: Band = Band::new(0, 50);
+/// Dispatch waits plus the node's own fraction. The note grammar
+/// (`@.166 queued behind 1 run`, `waiting-for-vram: …`) stays the
+/// explanation for a flat bar inside this band.
+const BAND_GENERATE: Band = Band::new(50, 900);
+/// Fetch, measure, annotate, PUBLISH. Reaching 1000 means published.
+const BAND_FINISH: Band = Band::new(900, 1000);
+
+/// Monotone progress for ONE claim.
+///
+/// Every write goes through here and none of them can go backwards: a node
+/// changing phase (download → denoise) drops its fraction, the expander
+/// hand-off restarts a node fraction at zero, and a migration re-queues on
+/// another box — all of which used to yank the bar backwards while the
+/// note was already saying what was happening. The bar holds still and the
+/// note explains. (A genuine RETRY is a new claim, and a new claim is
+/// honestly allowed to start over.)
+#[derive(Clone, Copy, Debug, Default)]
+struct JobBar {
+    floor: u16,
+}
+
+impl JobBar {
+    fn new() -> JobBar {
+        JobBar { floor: 0 }
+    }
+
+    /// Write `permille`, never below what this claim has already shown.
+    fn at(&mut self, permille: u16) -> u16 {
+        self.floor = self.floor.max(permille.min(1000));
+        self.floor
+    }
+
+    /// A 0..=1 fraction WITHIN a band, latched the same way.
+    fn in_band(&mut self, band: Band, fraction: f64) -> u16 {
+        self.at(band.at(fraction))
+    }
+
+    /// What the bar currently reads, for a write that is holding it still.
+    fn permille(&self) -> u16 {
+        self.floor
+    }
+}
 
 /// One artifact the fleet produced.
 #[derive(Clone, Debug)]
@@ -300,7 +394,7 @@ impl GenRequest {
 }
 
 /// What one processed job ended as (for logging/tests).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum JobOutcome {
     Published { asset: String, revision: String },
     /// A text answer, recorded on the job for whoever asked.
@@ -309,6 +403,12 @@ pub enum JobOutcome {
         model: String,
         /// LAN host that answered, empty when the transport knows none.
         host: String,
+        /// Extra TOP-LEVEL fields recorded beside `text`, so a DEPENDENT
+        /// job can splice its own body from them at claim time
+        /// (`{"$from":"job_…","field":"prompt"}` — the store resolves only
+        /// top-level plain values, which is why they are flattened rather
+        /// than nested). Empty for a kind that just answers a question.
+        fields: Vec<(String, Value)>,
     },
     /// An annotation record rewritten in place.
     Described {
@@ -358,6 +458,11 @@ struct FleetAnswer {
     backend: String,
     version: String,
     host: Option<String>,
+    /// What went to the box besides the prompt, `key=value` per line — the
+    /// same lines the stage record was opened with, so the record can be
+    /// CLOSED with the answer beside them rather than overwritten by a
+    /// poorer version of itself.
+    params: String,
     elapsed: Duration,
 }
 
@@ -422,12 +527,29 @@ impl<'f> Coordinator<'f> {
             }
             // The answer IS the product: it is recorded on the job, and
             // `GET /v1/jobs/<id>` is where the client that asked reads it.
-            Ok(JobOutcome::Answered { text, model, host }) => {
-                let result = obj(vec![
-                    ("text", s(bounded_answer(text, MAX_ANSWER_BYTES))),
+            Ok(JobOutcome::Answered { text, model, host, fields }) => {
+                // A document carrying flattened fields is carrying its
+                // answer TWICE — once raw, once split — and the store caps
+                // the whole result at 16 KB. The raw answer is the
+                // diagnostic half, so it is the half that gets the smaller
+                // budget; the fields a next stage splices are never cut to
+                // make room for it.
+                let budget = if fields.is_empty() {
+                    MAX_ANSWER_BYTES
+                } else {
+                    MAX_EXPAND_ANSWER_BYTES
+                };
+                let mut result = obj(vec![
+                    ("text", s(bounded_answer(text, budget))),
                     ("model", s(model.clone())),
                     ("box", s(host.clone())),
                 ]);
+                // What a next stage splices from. Written as top-level keys
+                // of the same document, because that is the only shape the
+                // store's `$from` resolver can read.
+                for (key, value) in fields {
+                    set_key(&mut result, key, value.clone());
+                }
                 self.client
                     .worker_succeed(&claimed.job, Some(&self.suffix), Some(&result))?;
             }
@@ -455,22 +577,28 @@ impl<'f> Coordinator<'f> {
 
     /// Route one claimed job by what its kind PRODUCES. The table decides;
     /// this is the only branch on it.
+    ///
+    /// ONE CLAIM, ONE BAR: the latch is minted here, so every phase of this
+    /// job — expansion, dispatch, the node, the publication — writes into
+    /// the same monotone 0..=1000 run.
     fn process_job(
         &mut self,
         kind: &'static GenKind,
         claimed: &ClaimedJobDto,
         stop: &AtomicBool,
     ) -> Result<JobOutcome, ClientError> {
+        let mut bar = JobBar::new();
         if kind.is_annotation() {
-            return self.process_annotation(kind, claimed, stop);
+            return self.process_annotation(kind, claimed, &mut bar, stop);
         }
-        self.process_generation(kind, claimed, stop)
+        self.process_generation(kind, claimed, &mut bar, stop)
     }
 
     fn process_generation(
         &mut self,
         kind: &'static GenKind,
         claimed: &ClaimedJobDto,
+        bar: &mut JobBar,
         stop: &AtomicBool,
     ) -> Result<JobOutcome, ClientError> {
         let mut request = match GenRequest::from_body(kind, &claimed.body) {
@@ -508,17 +636,28 @@ impl<'f> Coordinator<'f> {
         // BEFORE the generation and can only ever improve the prompt: a
         // failed, empty or timed-out expansion leaves the human's words
         // exactly as they were and the run continues.
-        if let Some(outcome) = self.expand_prompt(claimed, &mut request, stop)? {
+        if let Some(outcome) = self.expand_prompt(claimed, &mut request, bar, stop)? {
             return Ok(outcome);
         }
 
+        // A claimed EXPAND job is the pre-step promoted to a stage of its
+        // own: same budgets, same token allowance, so an expansion enqueued
+        // by a pipeline and one run in front of a generation cannot answer
+        // differently.
+        let deadline = if kind.kind == expand_kind().kind {
+            expand_stage_budget(&mut request)
+        } else {
+            JOB_DEADLINE
+        };
         let style = if kind.is_text() { StageStyle::Vision } else { StageStyle::Fleet };
         let answer = match self.dispatch_and_wait(
             claimed,
             &request,
             style,
             FleetReach::OwnBox,
-            JOB_DEADLINE,
+            deadline,
+            BAND_GENERATE,
+            bar,
             stop,
         )? {
             FleetRun::Done(answer) => answer,
@@ -539,7 +678,29 @@ impl<'f> Coordinator<'f> {
                 answer.elapsed.as_secs_f64(),
                 answer.host.as_deref().unwrap_or("the fleet")
             ));
+            // Recording the answer IS the product of a text job: the last
+            // band belongs to that write, not to a bar that stopped at the
+            // node's last poll. The same beat CLOSES this stage's record
+            // with what it answered — the pre-step expander has always done
+            // that, and an expansion enqueued as a stage of its own must
+            // read identically in the run a person opens.
+            let stage = JobStageInput {
+                name: kind.kind,
+                model: &answer.model,
+                at: answer.host.as_deref().unwrap_or_default(),
+                prompt: &request.prompt,
+                params: &answer.params,
+                output: text,
+            };
+            let _ = self.client.worker_heartbeat_stage(
+                &claimed.job,
+                LEASE_MS,
+                Some(&self.suffix),
+                Some((bar.at(1000), "answered")),
+                Some(&stage),
+            );
             return Ok(JobOutcome::Answered {
+                fields: expansion_fields(kind, text),
                 text: text.to_string(),
                 model: answer.model,
                 host: answer.host.unwrap_or_default(),
@@ -563,6 +724,17 @@ impl<'f> Coordinator<'f> {
             });
         };
 
+        // THE LAST TENTH IS REAL WORK. Everything from here — decoding the
+        // payload, measuring it, building a thumbnail, publishing the row —
+        // used to happen behind a bar frozen at the node's final fraction,
+        // so a refusal at the very end read as "73.2% → failed" on a clip
+        // that had rendered completely.
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(BAND_FINISH.lo), "building the row")),
+        );
         let mut publish = match build_product(kind, &claimed.namespace, &request, product) {
             Ok(publish) => publish,
             Err(error) => return Ok(JobOutcome::Failed { error }),
@@ -605,6 +777,12 @@ impl<'f> Coordinator<'f> {
                 params_digest: None,
             });
         }
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(910), "publishing")),
+        );
         let mut published = self.client.publish_artifact(&publish);
         if let Err(error) = &published {
             // The GPU spend already happened. A row the store refuses over
@@ -617,6 +795,15 @@ impl<'f> Coordinator<'f> {
                     "job {}: publish refused ({error}) — retrying with plain annotation text",
                     claimed.job
                 ));
+                let _ = self.client.worker_heartbeat(
+                    &claimed.job,
+                    LEASE_MS,
+                    Some(&self.suffix),
+                    Some((
+                        bar.at(930),
+                        "publish refused over annotation text — scrubbed, publishing again",
+                    )),
+                );
                 scrub_annotation(&mut publish);
                 published = self.client.publish_artifact(&publish);
             }
@@ -627,6 +814,14 @@ impl<'f> Coordinator<'f> {
                     "job {}: published {} rev {}",
                     claimed.job, published.asset_id, published.revision
                 ));
+                // Full bar means PUBLISHED, and the note says so: the row
+                // exists, and the job is about to be marked succeeded.
+                let _ = self.client.worker_heartbeat(
+                    &claimed.job,
+                    LEASE_MS,
+                    Some(&self.suffix),
+                    Some((bar.at(1000), "published")),
+                );
                 Ok(JobOutcome::Published {
                     asset: published.asset_id.to_string(),
                     revision: published.revision.to_string(),
@@ -648,6 +843,7 @@ impl<'f> Coordinator<'f> {
         &mut self,
         kind: &'static GenKind,
         claimed: &ClaimedJobDto,
+        bar: &mut JobBar,
         stop: &AtomicBool,
     ) -> Result<JobOutcome, ClientError> {
         let body = &claimed.body;
@@ -749,6 +945,8 @@ impl<'f> Coordinator<'f> {
             StageStyle::Vision,
             FleetReach::OwnBox,
             JOB_DEADLINE,
+            BAND_GENERATE,
+            bar,
             stop,
         )? {
             FleetRun::Done(answer) => answer,
@@ -798,11 +996,25 @@ impl<'f> Coordinator<'f> {
             provenance: upload.provenance.clone(),
             private: upload.private,
         };
+        // Same law as a publication: writing the record is the work this
+        // job exists for, and it can fail. It gets the last band.
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(BAND_FINISH.lo), "writing the annotation")),
+        );
         if let Err(error) = self.client.put_annotation(&asset, &wire) {
             return Ok(JobOutcome::Failed {
                 error: format!("put annotation: {error}"),
             });
         }
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(1000), "described")),
+        );
         self.log(&format!(
             "job {}: {alias} -> {} ({:.1}s)",
             claimed.job,
@@ -840,6 +1052,7 @@ impl<'f> Coordinator<'f> {
         &mut self,
         claimed: &ClaimedJobDto,
         request: &mut GenRequest,
+        bar: &mut JobBar,
         stop: &AtomicBool,
     ) -> Result<Option<JobOutcome>, ClientError> {
         if request.body.get("expand").and_then(Value::as_bool) != Some(true) {
@@ -883,7 +1096,7 @@ impl<'f> Coordinator<'f> {
             ),
         ]);
         let expand_request = GenRequest {
-            kind: &EXPAND_KIND,
+            kind: expand_kind(),
             prompt: original.clone(),
             original_prompt: None,
             // Affinity picks the fleet's warmest text model; a video pin
@@ -909,6 +1122,8 @@ impl<'f> Coordinator<'f> {
             // wherever this claim loop happens to be pinned.
             FleetReach::WholeFleet,
             if music { EXPAND_MUSIC_DEADLINE } else { EXPAND_DEADLINE },
+            BAND_EXPAND,
+            bar,
             stop,
         )? {
             FleetRun::Done(answer) => {
@@ -941,7 +1156,7 @@ impl<'f> Coordinator<'f> {
                         // person typed, and what the next model will be
                         // handed because of it — in one place, in full.
                         let stage = JobStageInput {
-                            name: EXPAND_KIND.kind,
+                            name: expand_kind().kind,
                             model: &answer.model,
                             at: answer.host.as_deref().unwrap_or_default(),
                             prompt: &original,
@@ -951,11 +1166,15 @@ impl<'f> Coordinator<'f> {
                             // exactly what the next stage will be handed.
                             output: text,
                         };
+                        // The expander's band is done, whatever the
+                        // generation does next: the hand-off is where the
+                        // bar used to fall back to zero.
+                        let permille = bar.at(BAND_EXPAND.hi);
                         let _ = self.client.worker_heartbeat_stage(
                             &claimed.job,
                             LEASE_MS,
                             Some(&self.suffix),
-                            None,
+                            Some((permille, "expanded")),
                             Some(&stage),
                         );
                         None
@@ -975,11 +1194,12 @@ impl<'f> Coordinator<'f> {
             // row an operator is watching is where "used raw prompt" has to
             // appear.
             self.log(&format!("job {}: {note}", claimed.job));
+            let permille = bar.at(BAND_EXPAND.hi);
             let _ = self.client.worker_heartbeat(
                 &claimed.job,
                 LEASE_MS,
                 Some(&self.suffix),
-                Some((0, &bounded(&note, 180))),
+                Some((permille, &bounded(&note, 180))),
             );
         }
         Ok(None)
@@ -992,6 +1212,8 @@ impl<'f> Coordinator<'f> {
         style: StageStyle,
         reach: FleetReach,
         deadline: Duration,
+        band: Band,
+        bar: &mut JobBar,
         stop: &AtomicBool,
     ) -> Result<FleetRun, ClientError> {
         let started = Instant::now();
@@ -1047,13 +1269,16 @@ impl<'f> Coordinator<'f> {
                     let stage = wait_stage
                         .as_deref()
                         .unwrap_or("waiting-for-fleet-admission");
+                    // Nothing has rendered yet: the FLOOR of this phase's
+                    // band, held (a migration must not walk the bar back).
+                    let permille = bar.in_band(band, 0.0);
                     if self
                         .client
                         .worker_heartbeat(
                             &claimed.job,
                             LEASE_MS,
                             Some(&self.suffix),
-                            Some((0, &bounded(stage, 180))),
+                            Some((permille, &bounded(stage, 180))),
                         )
                         .is_err()
                     {
@@ -1117,7 +1342,7 @@ impl<'f> Coordinator<'f> {
                 },
                 StageStyle::Vision => vision_note(&dispatched_model, node_host.as_deref(), 0.0),
             };
-            let mut heartbeat_permille = 0;
+            let mut heartbeat_permille = bar.in_band(band, 0.0);
             // Say WHERE it went the moment it went there. A vision answer
             // takes seconds — less than one heartbeat period — so a job that
             // waited for the normal cadence would finish before anything
@@ -1145,7 +1370,7 @@ impl<'f> Coordinator<'f> {
                 &claimed.job,
                 LEASE_MS,
                 Some(&self.suffix),
-                Some((0, &bounded(&heartbeat_stage, 180))),
+                Some((heartbeat_permille, &bounded(&heartbeat_stage, 180))),
                 Some(&stage),
             );
             loop {
@@ -1211,6 +1436,7 @@ impl<'f> Coordinator<'f> {
                             backend: dispatched_backend,
                             version: dispatched_version,
                             host: node_host,
+                            params: dispatched_params,
                             elapsed: dispatched_at.elapsed(),
                         }))
                     }
@@ -1235,7 +1461,11 @@ impl<'f> Coordinator<'f> {
                     Ok(FleetPoll::Running { stage, progress }) => {
                         // It is running: whatever it waited for is over.
                         stuck_since = None;
-                        heartbeat_permille = (progress.clamp(0.0, 1.0) * 1000.0) as u16;
+                        // The node's own fraction, scaled INTO this
+                        // phase's band and latched: a node that changes
+                        // phase and reports 0 again holds the bar instead
+                        // of resetting it.
+                        heartbeat_permille = bar.in_band(band, progress);
                         if style == StageStyle::Fleet {
                             heartbeat_stage = match &node_tag {
                                 Some(tag) => format!("@{tag} {stage}"),
@@ -1247,8 +1477,9 @@ impl<'f> Coordinator<'f> {
                         // Say WHY it is not moving: a queue behind another
                         // run is a different thing from a VRAM wait, and an
                         // operator deciding whether to wait needs to know
-                        // which one this is and on which box.
-                        heartbeat_permille = 0;
+                        // which one this is and on which box. The bar holds
+                        // where it was; the note is what changed.
+                        heartbeat_permille = bar.permille();
                         if style == StageStyle::Fleet {
                             heartbeat_stage = queued_note(&stage, ahead, node_tag.as_deref());
                         }
@@ -1737,6 +1968,84 @@ fn compose_music_body(answer: &str) -> Option<MusicBody> {
         steps: number("steps").filter(|v| (1.0..=64.0).contains(v)).map(|v| v as u64),
         seed: number("seed").filter(|v| *v >= 0.0).map(|v| v as u64),
     })
+}
+
+/// The extra TOP-LEVEL result fields a claimed `text.expand` job records.
+///
+/// `prompt` is ALWAYS one of them. A pipeline must not have to know whether
+/// the writer answered prose or the music body contract in order to know
+/// which field to point its splice at — it points at `prompt` and gets the
+/// same words the worker-side pre-step would have handed the next model.
+///
+/// A music answer flattens the rest of the body it wrote: `lyrics` (the
+/// whole reason the contract exists — an empty lyric field is what made
+/// every expanded vocal request come back instrumental) and the numbers it
+/// proposed. `model` is deliberately NOT among them, here as in
+/// [`compose_music_body`]: which model runs is a scheduling decision, never
+/// the writer's to make.
+fn expansion_fields(kind: &GenKind, answer: &str) -> Vec<(String, Value)> {
+    if kind.kind != expand_kind().kind {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, Value)> = Vec::new();
+    match compose_music_body(answer) {
+        Some(body) => {
+            out.push((
+                "prompt".to_string(),
+                s(annotation_text(&body.prompt, MAX_EXPANDED_PROMPT_BYTES)),
+            ));
+            // Line breaks SURVIVE here: `[Verse]` and `[Chorus]` on their
+            // own lines are what the music models read.
+            out.push((
+                "lyrics".to_string(),
+                s(bounded_answer(&body.lyrics, MAX_EXPANDED_PROMPT_BYTES)),
+            ));
+            if let Some(seconds) = body.seconds {
+                out.push(("seconds".to_string(), Value::F64(seconds)));
+            }
+            if let Some(steps) = body.steps {
+                out.push(("steps".to_string(), Value::Int(steps as i64)));
+            }
+            if let Some(seed) = body.seed {
+                out.push(("seed".to_string(), Value::Int(seed as i64)));
+            }
+        }
+        // Prose: the answer itself is the prompt, cleaned exactly the way
+        // the pre-step cleans it before handing it to the next model.
+        None => out.push((
+            "prompt".to_string(),
+            s(annotation_text(answer, MAX_EXPANDED_PROMPT_BYTES)),
+        )),
+    }
+    out
+}
+
+/// The budgets a claimed `text.expand` stage runs on: the same deadline and
+/// the same token allowance the worker-side pre-step gives itself, so an
+/// expansion enqueued as a pipeline stage and one run in front of a
+/// generation cannot answer differently.
+///
+/// A music expansion is not a paragraph: it is a JSON body carrying a
+/// caption AND a full lyric script, and at the 512-token default the
+/// composer was cut off mid-song — which is not a worse prompt, it is an
+/// unparseable one. The body's own `max_tokens` still wins: an enqueuer
+/// that said what it wanted is not overruled.
+fn expand_stage_budget(request: &mut GenRequest) -> Duration {
+    let music = matches!(
+        request.body.get("target_domain").and_then(Value::as_str),
+        Some("music") | Some("music_loop")
+    );
+    if request.body.get("max_tokens").is_none() {
+        let budget = if music { EXPAND_MUSIC_MAX_TOKENS } else { EXPAND_MAX_TOKENS };
+        let mut body = request.body.clone();
+        set_key(&mut body, "max_tokens", Value::Int(budget as i64));
+        request.body = body;
+    }
+    if music {
+        EXPAND_MUSIC_DEADLINE
+    } else {
+        EXPAND_DEADLINE
+    }
 }
 
 /// Does this body ask for a seamless LOOP rather than a song? The VJ tags
@@ -3465,6 +3774,9 @@ mod tests {
             .get("model")
             .and_then(Value::as_str)
             .is_some_and(|m| !m.is_empty()));
+        // Only the EXPANDER flattens fields for a next stage: an answer
+        // about a door is not a prompt for anything.
+        assert!(result.body.get("prompt").is_none());
 
         drop(submitter);
         drop(server);
@@ -4909,6 +5221,257 @@ mod tests {
         assert_eq!(publish.prompt, "one two");
         assert_eq!(publish.provenance, "expanded from: a b");
         assert_eq!(publish.tags, vec!["loop".to_string()]);
+    }
+
+    // ------------------------------------------------ the banded job bar
+
+    /// The bar is a LATCH. Every phase of one claim writes through it, and
+    /// none of those writes may be smaller than what the person has already
+    /// seen — which is what a node changing phase, a migration, and the
+    /// expansion→generation hand-off all used to do.
+    #[test]
+    fn the_bar_never_goes_backwards_inside_one_claim() {
+        let mut bar = JobBar::new();
+        // The expander owns the first twentieth.
+        assert_eq!(bar.in_band(BAND_EXPAND, 0.0), 0);
+        assert_eq!(bar.in_band(BAND_EXPAND, 0.5), 25);
+        assert_eq!(bar.at(BAND_EXPAND.hi), 50);
+        // The generation starts where the expansion left off, not at zero.
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.0), 50);
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.5), 475);
+        // A node that changes phase and reports 0 again HOLDS the bar.
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.0), 475);
+        // …and so does a queue behind another run on a new box.
+        assert_eq!(bar.permille(), 475);
+        assert_eq!(bar.in_band(BAND_GENERATE, 1.0), 900);
+        // The last tenth is the publication, and 1000 means published.
+        assert_eq!(bar.at(910), 910);
+        assert_eq!(bar.at(BAND_FINISH.lo), 910, "a retry note never rewinds");
+        assert_eq!(bar.at(930), 930);
+        assert_eq!(bar.at(1000), 1000);
+        // Nothing can write past the end, and nothing can write under the
+        // floor once the job is done.
+        assert_eq!(bar.at(u16::MAX), 1000);
+        assert_eq!(bar.in_band(BAND_EXPAND, 1.0), 1000);
+    }
+
+    /// Each phase owns exactly its slice, and a fraction lands inside it.
+    /// These three numbers are the contract the UI reads: under 50 the
+    /// expander is writing, 900 means the GPU is done and the publish has
+    /// begun, 1000 means a row exists.
+    #[test]
+    fn the_bands_partition_the_bar_without_gaps_or_overlap() {
+        assert_eq!((BAND_EXPAND.lo, BAND_EXPAND.hi), (0, 50));
+        assert_eq!((BAND_GENERATE.lo, BAND_GENERATE.hi), (50, 900));
+        assert_eq!((BAND_FINISH.lo, BAND_FINISH.hi), (900, 1000));
+        assert_eq!(BAND_EXPAND.hi, BAND_GENERATE.lo);
+        assert_eq!(BAND_GENERATE.hi, BAND_FINISH.lo);
+        // A node fraction is scaled INTO its band, never used raw: 25% of a
+        // render is 262‰ of the job, not 250‰ and not 25‰.
+        assert_eq!(BAND_GENERATE.at(0.0), 50);
+        assert_eq!(BAND_GENERATE.at(0.25), 263);
+        assert_eq!(BAND_GENERATE.at(1.0), 900);
+        // Out-of-range fractions are clamped, never wrapped.
+        assert_eq!(BAND_GENERATE.at(-1.0), 50);
+        assert_eq!(BAND_GENERATE.at(9.0), 900);
+        assert_eq!(BAND_FINISH.at(1.0), 1000);
+    }
+
+    /// THE TERMINAL LIE IS DEAD. A published run leaves the bar in the
+    /// publish band with a publish note — not frozen at whatever fraction
+    /// the node last reported before the fetch/thumbnail/publish work that
+    /// nobody could see.
+    #[test]
+    fn a_published_run_ends_in_the_publish_band_and_says_so() {
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, job) =
+            run_one_job("publish_band", "a neon panther", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        let submitter = connect(&server, &token, &root.join("check-cache"));
+        let job = makepad_asset_client::dto::JobId::parse(&job).unwrap();
+        let detail = submitter.job_detail(&job).expect("job detail");
+        assert_eq!(detail.status.state, JobStateDto::Succeeded);
+        let progress = detail.progress.expect("a job that ran has progress");
+        assert!(
+            progress.permille >= 900,
+            "the publish band starts at 900, read {}",
+            progress.permille
+        );
+        assert!(
+            progress.note.contains("publish"),
+            "the note names the phase that finished: {:?}",
+            progress.note
+        );
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // --------------------------------------- text.expand as a real job
+
+    /// The expander, ENQUEUED. It used to be the coordinator's private
+    /// pre-step, so an expansion existed only inside a job that was already
+    /// running. As a kind it is claimable by the box that runs text models,
+    /// and its result is written in the shape the store's `$from` splice
+    /// reads: top-level plain values, so a dependent stage's body can be
+    /// filled from it at claim time without anybody watching.
+    #[test]
+    fn an_enqueued_expansion_is_claimed_and_answers_in_spliceable_fields() {
+        let (server, root, token) = test_server("expand_kind_music");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a warm house track")),
+            ("target_domain", s("music")),
+        ]);
+        let job = submitter
+            .enqueue_job("gen", "text.expand", &body)
+            .expect("a client can enqueue the expander");
+        let answer = r#"{"prompt":"Global Metadata\nDreamy shoegaze, slow.","lyrics":"[Verse]\nPlatform lights dissolve in rain","seconds":90,"steps":40}"#;
+        let mut fleet = ScriptedFleet {
+            expand_text: Some(answer.to_string()),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "text-box".to_string(),
+                // What a text box actually claims — from the kind table, so
+                // the claim filter and the row cannot disagree.
+                kinds: crate::gen_kinds::kinds_for_domains(&["text".to_string()]),
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            assert_eq!(coordinator.kinds, vec!["text.expand".to_string()]);
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the expand job")
+        };
+        assert!(matches!(outcome, JobOutcome::Answered { .. }), "{outcome:?}");
+        // A stage gets the same token budget the pre-step gives itself: a
+        // lyric script cut off at 512 tokens is unparseable, not shorter.
+        assert_eq!(fleet.requests.len(), 1);
+        assert_eq!(
+            fleet.requests[0].body.get("max_tokens").and_then(Value::as_u64),
+            Some(EXPAND_MUSIC_MAX_TOKENS as u64)
+        );
+
+        let detail = submitter.job_detail(&job).expect("job detail");
+        assert_eq!(detail.status.state, JobStateDto::Succeeded);
+        // Nothing is published: an expansion is a sentence, not an asset.
+        assert_eq!(detail.status.result_asset, None);
+        // And it reads like the pre-step expansion does when a person opens
+        // the run: what it was asked, and what it wrote.
+        assert_eq!(detail.status.stages.len(), 1);
+        let stage = &detail.status.stages[0];
+        assert_eq!(stage.name, "text.expand");
+        assert_eq!(stage.prompt, "a warm house track");
+        assert!(stage.output.contains("Dreamy shoegaze"), "{}", stage.output);
+        // The bar ends full: recording the answer IS the product here.
+        let progress = detail.progress.as_ref().expect("progress");
+        assert_eq!(progress.permille, 1000);
+        let result = detail.result.expect("recorded result");
+        // What a next stage splices: `prompt` always, `lyrics` because the
+        // writer answered with the music body contract.
+        assert_eq!(
+            result.body.get("prompt").and_then(Value::as_str),
+            Some("Global Metadata Dreamy shoegaze, slow.")
+        );
+        assert_eq!(
+            result.body.get("lyrics").and_then(Value::as_str),
+            Some("[Verse]\nPlatform lights dissolve in rain"),
+            "the lyric script keeps its line breaks"
+        );
+        // A whole number rides the wire as an int and comes back as one;
+        // both variants are plain values, and `wire_request` reads either.
+        let seconds = match result.body.get("seconds") {
+            Some(Value::Int(i)) => *i as f64,
+            Some(Value::F64(f)) => *f,
+            other => panic!("seconds must be a number, got {other:?}"),
+        };
+        assert_eq!(seconds, 90.0);
+        assert_eq!(result.body.get("steps").and_then(Value::as_u64), Some(40));
+        // The raw answer and who answered it are still there, for a person
+        // reading the run rather than a machine splicing it.
+        assert!(result
+            .body
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.contains("Dreamy shoegaze")));
+        assert_eq!(
+            result.body.get("box").and_then(Value::as_str),
+            Some("10.0.0.203")
+        );
+        // THE SPLICE CONTRACT: the store resolves `{"$from":…,"field":…}`
+        // against TOP-LEVEL PLAIN VALUES of this document and refuses
+        // anything else. Every field it could be pointed at must be one.
+        let Value::Obj(pairs) = &result.body else {
+            panic!("a result is an object")
+        };
+        for (key, value) in pairs {
+            assert!(
+                matches!(
+                    value,
+                    Value::Str(_) | Value::Int(_) | Value::F64(_) | Value::Bool(_)
+                ),
+                "{key} is not spliceable: {value:?}"
+            );
+        }
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A prose expansion answers the same question with the same field: the
+    /// pipeline points at `prompt` and never has to know whether the writer
+    /// wrote a paragraph or a body. The words are cleaned exactly the way
+    /// the pre-step cleans them before handing them to the next model.
+    #[test]
+    fn a_prose_expansion_flattens_the_prompt_the_next_stage_gets() {
+        let (server, root, token) = test_server("expand_kind_prose");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a city at night")),
+            ("target_domain", s("video")),
+        ]);
+        let job = submitter.enqueue_job("gen", "text.expand", &body).expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a rain-slick city\nseen from a rooftop\r\n\tat 3am".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "text-box".to_string(),
+                kinds: vec!["text.expand".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            let _ = coordinator.run_one(&AtomicBool::new(false)).expect("coordinator call");
+        }
+        // A prose brief gets the prose budget, not the music one.
+        assert_eq!(
+            fleet.requests[0].body.get("max_tokens").and_then(Value::as_u64),
+            Some(EXPAND_MAX_TOKENS as u64)
+        );
+        let result = submitter
+            .job_detail(&job)
+            .expect("job detail")
+            .result
+            .expect("recorded result");
+        assert_eq!(
+            result.body.get("prompt").and_then(Value::as_str),
+            Some("a rain-slick city seen from a rooftop at 3am"),
+            "no control characters reach the next stage's body"
+        );
+        // Nothing musical is invented for a video brief.
+        assert!(result.body.get("lyrics").is_none());
+        assert!(result.body.get("seconds").is_none());
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// End to end: a prompt full of newlines publishes, instead of losing

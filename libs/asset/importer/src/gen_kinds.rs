@@ -14,13 +14,18 @@
 //! to ask for, and the coordinator reads it to decide what to do with the
 //! answer.
 //!
-//! Most rows publish a REAL catalog asset ([`Product::Catalog`]). Two do
+//! Most rows publish a REAL catalog asset ([`Product::Catalog`]). Three do
 //! not, and they are why the product is a typed decision rather than an
 //! assumption: a `vision` box answers a QUESTION about an image, and an
 //! answer is not an asset. `vision.describe` records its answer on the job
 //! for whoever asked; `annotate.asset` folds it into an existing asset's
-//! annotation record. `text` (the prompt expander) and `chat` remain absent
-//! entirely: nothing in this worker executes them.
+//! annotation record; `text.expand` answers with the PROMPT a later stage
+//! is going to be handed. `chat` remains absent entirely: nothing in this
+//! worker executes it.
+//!
+//! Two of those are enqueued by software rather than picked by a person
+//! ([`GenKind::advertised`]) — which is a different question from whether a
+//! worker can claim them. Everything in this table is claimable.
 
 use makepad_asset_data::{AssetKind, FileRole, MediaType};
 
@@ -97,6 +102,15 @@ pub struct GenKind {
     /// Human label prefix for advertised profiles ("FLUX.1 schnell" style
     /// text is per model; this names the ACTION).
     pub action: &'static str,
+    /// Does a PICKER offer this kind?
+    ///
+    /// Data, not a derivation, because two rows are enqueued by software
+    /// rather than chosen by a person and they have nothing else in common:
+    /// `annotate.asset` is minted by the store for an asset that already
+    /// exists, and `text.expand` is named by a pipeline as its first stage.
+    /// Both are fully claimable; neither has a prompt a human writes at a
+    /// menu, and a menu entry that produces no visible product is a lie.
+    pub advertised: bool,
 }
 
 impl GenKind {
@@ -117,15 +131,6 @@ impl GenKind {
     /// True when the answer is folded into an existing asset's annotation.
     pub fn is_annotation(&self) -> bool {
         matches!(self.product, Product::Annotation)
-    }
-
-    /// True when a client picks this kind from an advertised profile.
-    ///
-    /// An annotation job is minted BY the server for an asset that already
-    /// exists; there is nothing for a picker to choose and no prompt for a
-    /// human to write, so it is never advertised.
-    pub fn advertised(&self) -> bool {
-        !self.is_annotation()
     }
 }
 
@@ -150,6 +155,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "image",
+        advertised: true,
     },
     GenKind {
         kind: "image.edit",
@@ -164,6 +170,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "edit image",
+        advertised: true,
     },
     GenKind {
         kind: "image.upscale",
@@ -178,6 +185,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "upscale image",
+        advertised: true,
     },
     GenKind {
         kind: "image.inpaint",
@@ -192,6 +200,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "inpaint image",
+        advertised: true,
     },
     GenKind {
         kind: "image.control",
@@ -206,6 +215,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "structure-guided image",
+        advertised: true,
     },
     GenKind {
         kind: "image.matte",
@@ -220,6 +230,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "cutout",
+        advertised: true,
     },
     GenKind {
         // 16-bit metric depth: its own file role, never a plain texture —
@@ -236,6 +247,31 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "metric depth",
+        advertised: true,
+    },
+    GenKind {
+        // The prompt expander, as a REAL job.
+        //
+        // It has always existed as the coordinator's private pre-step in
+        // front of a generation (`expand: true`), where it is invisible
+        // until it has already run. A pipeline needs it as a STAGE: named
+        // at spawn, cancellable, inspectable, and — the point — with a
+        // recorded result a dependent stage can splice its own body from
+        // (`{"$from":"job_…","field":"prompt"}`).
+        //
+        // Its result is TEXT on the job, never a catalog row: an expansion
+        // is a sentence, and a sentence is not an asset. `prompt` is always
+        // flattened onto that result; a music answer also flattens
+        // `lyrics`/`seconds`, which is what a music stage splices.
+        kind: "text.expand",
+        domain: "text",
+        product: Product::Text,
+        input: InputNeed::None,
+        action: "expand a prompt",
+        // Never in a picker: nobody asks for a prompt about a prompt, and a
+        // menu entry whose product is invisible reads as a broken generate.
+        // A pipeline names this kind directly.
+        advertised: false,
     },
     GenKind {
         // A question about an image, answered as text on the JOB. A UI
@@ -246,6 +282,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         product: Product::Text,
         input: InputNeed::Image,
         action: "answer about an image",
+        advertised: true,
     },
     GenKind {
         // The catalog's own annotation pass, executed as a fleet job: the
@@ -260,6 +297,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         product: Product::Annotation,
         input: InputNeed::Image,
         action: "describe a catalog asset",
+        advertised: false,
     },
     GenKind {
         kind: "video.generate",
@@ -274,6 +312,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "video",
+        advertised: true,
     },
     GenKind {
         kind: "video.enhance",
@@ -288,6 +327,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Video,
         action: "enhance video",
+        advertised: true,
     },
     GenKind {
         kind: "audio.generate",
@@ -302,6 +342,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "sound effect",
+        advertised: true,
     },
     GenKind {
         kind: "music.generate",
@@ -318,6 +359,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "music",
+        advertised: true,
     },
     GenKind {
         kind: "speech.generate",
@@ -332,6 +374,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "speech",
+        advertised: true,
     },
     GenKind {
         kind: "mesh.generate",
@@ -346,6 +389,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "3D model",
+        advertised: true,
     },
     GenKind {
         kind: "mesh.paint",
@@ -360,6 +404,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Mesh,
         action: "PBR texturing",
+        advertised: true,
     },
     GenKind {
         kind: "mesh.rig",
@@ -374,6 +419,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Mesh,
         action: "rig",
+        advertised: true,
     },
     GenKind {
         kind: "mesh.motion",
@@ -388,6 +434,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Mesh,
         action: "motion",
+        advertised: true,
     },
     GenKind {
         // A splat scene IS a world, distinguished by category + file role
@@ -405,6 +452,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::Image,
         action: "object splat",
+        advertised: true,
     },
     GenKind {
         kind: "world.generate",
@@ -419,6 +467,7 @@ pub const GEN_KINDS: &[GenKind] = &[
         }),
         input: InputNeed::None,
         action: "walkable world",
+        advertised: true,
     },
 ];
 
@@ -433,7 +482,7 @@ pub fn kind_of(job_kind: &str) -> Option<&'static GenKind> {
 pub fn kind_for_domain(domain: &str) -> Option<&'static GenKind> {
     GEN_KINDS
         .iter()
-        .find(|k| k.domain == domain && k.advertised())
+        .find(|k| k.domain == domain && k.advertised)
 }
 
 /// Every job kind wired for the domains a box advertises. The list is
@@ -475,18 +524,22 @@ mod tests {
                 "{}: duplicate kind",
                 row.kind
             );
-            // A domain may carry several kinds, but only ONE of them is
+            // A domain may carry several kinds, but AT MOST ONE of them is
             // advertised — two profiles for one capability would put the
             // same GPU behind two picker entries that mean the same thing.
-            assert_eq!(
+            // Zero is legal: `text` is claimable and never offered.
+            assert!(
                 GEN_KINDS
                     .iter()
-                    .filter(|o| o.domain == row.domain && o.advertised())
-                    .count(),
-                1,
+                    .filter(|o| o.domain == row.domain && o.advertised)
+                    .count()
+                    <= 1,
                 "{}: duplicate advertised domain",
                 row.domain
             );
+            // An answer folded into somebody else's asset can never be a
+            // menu entry: there is no prompt for a person to write.
+            assert!(!(row.is_annotation() && row.advertised), "{}", row.kind);
             // Job kinds must survive the server's kind validation charset.
             assert!(row
                 .kind
@@ -501,9 +554,15 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        // A box that answers text claims the expander: `text.expand` is a
+        // real queued job now, not the coordinator's private pre-step.
         assert_eq!(
             kinds_for_domains(&domains),
-            vec!["image.generate".to_string(), "video.generate".to_string()]
+            vec![
+                "image.generate".to_string(),
+                "text.expand".to_string(),
+                "video.generate".to_string()
+            ]
         );
         // A box with no wired domain claims nothing at all rather than
         // claiming everything.
@@ -524,32 +583,57 @@ mod tests {
     fn lookups_agree_with_the_table() {
         assert_eq!(kind_of("image.generate").unwrap().domain, "image");
         assert_eq!(kind_for_domain("music").unwrap().kind, "music.generate");
-        assert!(kind_of("text.expand").is_none());
+        assert_eq!(kind_of("text.expand").unwrap().domain, "text");
+        // Claimable, never offered: `kind_for_domain` answers what a PICKER
+        // may show, and the expander is named by a pipeline instead.
+        assert!(kind_for_domain("text").is_none());
         assert!(kind_for_domain("chat").is_none());
         assert_eq!(InputNeed::Mesh.content_type(), "model/gltf-binary");
         assert_eq!(InputNeed::None.content_type(), "image/png");
     }
 
-    /// The two rows that do NOT publish. Everything about them is decided
+    /// The three rows that do NOT publish. Everything about them is decided
     /// here, so a coordinator can never publish an answer by accident.
     #[test]
     fn the_vision_kinds_answer_instead_of_publishing() {
         let describe = kind_of("vision.describe").unwrap();
         assert!(describe.is_text());
         assert!(describe.catalog().is_none());
-        assert!(describe.advertised());
+        assert!(describe.advertised);
         assert_eq!(describe.input, InputNeed::Image);
 
         let annotate = kind_of("annotate.asset").unwrap();
         assert!(annotate.is_annotation());
         assert!(annotate.catalog().is_none());
         // Nobody picks an annotation job from a menu: the server mints it.
-        assert!(!annotate.advertised());
+        assert!(!annotate.advertised);
         assert_eq!(kind_for_domain("vision").unwrap().kind, "vision.describe");
 
         // And the kind string IS the wire to the store's queue.
         assert_eq!(annotate.kind, "annotate.asset");
         // Every catalog kind still publishes.
         assert!(kind_of("image.generate").unwrap().catalog().is_some());
+    }
+
+    /// The expander is a claimable job kind whose answer is a PROMPT. It is
+    /// the first stage of every pipeline that has one, so a client can
+    /// enqueue it and a text box can claim it — while no picker offers it.
+    #[test]
+    fn the_expander_is_claimable_but_never_offered() {
+        let expand = kind_of("text.expand").expect("text.expand is wired");
+        assert_eq!(expand.domain, "text");
+        assert!(expand.is_text(), "an expansion is text on the job");
+        assert!(expand.catalog().is_none(), "an expansion is not an asset");
+        assert!(!expand.is_annotation());
+        assert!(!expand.advertised, "a pipeline names it; a menu never does");
+        // The box that runs text models claims it — the whole point of the
+        // promotion. (.217 is the fleet's text/chat box; its role allows
+        // `text`, so the claim filter and the router agree.)
+        assert!(kinds_for_domains(&["text".to_string()])
+            .contains(&"text.expand".to_string()));
+        assert!(makepad_asset_ai::fleet::role_allows(
+            "http://10.0.0.217:8123",
+            "text"
+        ));
     }
 }
