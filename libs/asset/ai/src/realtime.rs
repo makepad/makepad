@@ -8,8 +8,8 @@
 //! `realtime_wire.rs` for the (de)serialization helpers this module calls.
 
 use crate::backend::{
-    CameraMotion, CancelToken, ContentBackend, LiveConfig, LiveFrameIn, LiveParams, LoopMode,
-    OutputEncoding, RgbImage, SeedMode,
+    merge_feedback_fields, BorderMode, CameraMotion, CancelToken, ContentBackend, DriftParams,
+    LiveConfig, LiveFrameIn, LiveParams, LoopMode, NoiseMode, OutputEncoding, RgbImage, SeedMode,
 };
 use crate::error::AssetAiError;
 use crate::realtime_wire::{self, ClientMessage, FrameHeader, FrameKind};
@@ -61,6 +61,12 @@ pub struct RealtimeSession {
     /// surfaced as `stats.codec.dropped_decode`.
     dropped_decode: AtomicU64,
     stop_requested: AtomicBool,
+    /// `{"type":"control","reset":true}`: consumed once by the worker, which
+    /// drops its previous output so the next feedback frame cold-starts.
+    reset_requested: AtomicBool,
+    /// Bumped every time reference slot 0 is set, so the worker can notice a
+    /// new feedback source without diffing images.
+    reference0_version: AtomicU64,
     /// Persists across input packets (a streaming H.264 decoder needs SPS/
     /// PPS + reference-frame continuity). `handle_binary` runs on the HTTP
     /// route thread, so this — unlike the encoder below — must be shared,
@@ -97,6 +103,8 @@ impl RealtimeSession {
             dropped: AtomicU64::new(0),
             dropped_decode: AtomicU64::new(0),
             stop_requested: AtomicBool::new(false),
+            reset_requested: AtomicBool::new(false),
+            reference0_version: AtomicU64::new(0),
             #[cfg(feature = "video")]
             input_decoder: Mutex::new(None),
             #[cfg(feature = "video")]
@@ -169,6 +177,28 @@ impl RealtimeSession {
         self.mailbox.lock().unwrap().take()
     }
 
+    fn take_reset(&self) -> bool {
+        self.reset_requested.swap(false, Ordering::Relaxed)
+    }
+
+    /// Reference slot 0 if it was (re)set since `seen_version` — the
+    /// feedback source a reference-message client provides. A 1x1 blank is
+    /// the placeholder `set_reference` pads with, never a real source.
+    fn take_new_reference0(&self, seen_version: &mut u64) -> Option<RgbImage> {
+        let version = self.reference0_version.load(Ordering::Relaxed);
+        if version == *seen_version {
+            return None;
+        }
+        *seen_version = version;
+        let state = self.state.lock().unwrap();
+        state
+            .config
+            .references
+            .first()
+            .filter(|image| image.width > 1 || image.height > 1)
+            .cloned()
+    }
+
     fn wait_for_mailbox(&self, timeout: Duration) {
         let guard = self.mailbox.lock().unwrap();
         let _ = self.mailbox_cv.wait_timeout(guard, timeout);
@@ -237,6 +267,9 @@ impl RealtimeSession {
         if let Some(timeout) = update.idle_timeout_s {
             state.idle_timeout_s = timeout.min(3600);
         }
+        if update.reset == Some(true) {
+            self.reset_requested.store(true, Ordering::Relaxed);
+        }
     }
 
     /// `{"type":"reference", "slot":N, ...}`: grows `references` with black
@@ -250,6 +283,12 @@ impl RealtimeSession {
                 .resize_with(slot + 1, || RgbImage::blank(1, 1));
         }
         state.config.references[slot] = image;
+        if slot == 0 {
+            self.reference0_version.fetch_add(1, Ordering::Relaxed);
+            // A feedback worker waiting for its first source sleeps on the
+            // mailbox condvar; slot 0 is a source too, so wake it.
+            self.mailbox_cv.notify_all();
+        }
     }
 
     /// Handles one client -> server binary message: decodes it as an input
@@ -438,20 +477,13 @@ pub fn apply_control_to_config(config: &mut LiveConfig, update: &realtime_wire::
     if let Some(height) = update.height {
         config.height = height.clamp(16, 4096);
     }
-    if let Some(camera) = update.camera.as_ref() {
-        if let Some(dolly) = camera.dolly {
-            config.camera.dolly = dolly as f32;
-        }
-        if let Some(pan_x) = camera.pan_x {
-            config.camera.pan_x = pan_x as f32;
-        }
-        if let Some(pan_y) = camera.pan_y {
-            config.camera.pan_y = pan_y as f32;
-        }
-        if let Some(roll) = camera.roll {
-            config.camera.roll = roll as f32;
-        }
-    }
+    merge_feedback_fields(
+        config,
+        update.feedback,
+        update.noise_mode.as_deref(),
+        update.camera.as_ref(),
+        update.drift.as_ref(),
+    );
 }
 
 /// Decodes a raw or PNG input frame. `handle_binary` routes `H264` frames
@@ -525,24 +557,40 @@ fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The feedback-loop camera warp: a plain CPU center-zoom + pan + roll
-/// resample (bilinear, clamp-to-edge), applied to the session's own
-/// previous output before it becomes the next `live_step` init image in
-/// `loop_mode = "feedback"`. This is the ONLY place camera motion is
-/// applied — backends never warp `LiveFrameIn::init` themselves (see
-/// [`CameraMotion`]'s doc). The CUDA depth-parallax version of this warp is
-/// a documented follow-up; this bilinear resample is the CPU stand-in and
-/// what `testpattern` relies on for its "zoom" behavior.
+/// The feedback-loop camera warp with clamp-to-edge borders — see
+/// [`warp_feedback_bordered`], which this is the `BorderMode::Clamp` case
+/// of. Kept as the plain entry point `testpattern` and the tests use.
 pub fn warp_feedback(image: &RgbImage, camera: &CameraMotion) -> RgbImage {
+    warp_feedback_bordered(image, camera, BorderMode::Clamp, None)
+}
+
+/// The feedback-loop camera warp: a plain CPU center-zoom + pan + roll
+/// bilinear resample, applied to the session's own previous output before
+/// it becomes the next `live_step` init image in `loop_mode = "feedback"`.
+/// This is the ONLY place camera motion is applied — backends never warp
+/// `LiveFrameIn::init` themselves (see [`CameraMotion`]'s doc). Pixels the
+/// motion pulls from outside the frame are filled per `border`
+/// (`BorderMode::Source` needs `source`, and falls back to clamping without
+/// one). The CUDA depth-parallax version of this warp is a documented
+/// follow-up; this bilinear resample is the CPU stand-in.
+pub fn warp_feedback_bordered(
+    image: &RgbImage,
+    camera: &CameraMotion,
+    border: BorderMode,
+    source: Option<&RgbImage>,
+) -> RgbImage {
     let width = image.width;
     let height = image.height;
     if width == 0 || height == 0 || image.data.len() != width as usize * height as usize * 3 {
         return image.clone();
     }
+    let source = source.filter(|s| s.width == width && s.height == height && s.data.len() == image.data.len());
     let zoom = (1.0 + camera.dolly * 0.05).max(1.0e-3);
     let (sin_r, cos_r) = camera.roll.sin_cos();
     let cx = width as f32 / 2.0;
     let cy = height as f32 / 2.0;
+    let max_x = (width - 1) as f32;
+    let max_y = (height - 1) as f32;
     let mut out = vec![0u8; image.data.len()];
     for y in 0..height {
         for x in 0..width {
@@ -552,12 +600,33 @@ pub fn warp_feedback(image: &RgbImage, camera: &CameraMotion) -> RgbImage {
             let ry = -dx * sin_r + dy * cos_r;
             let sx = cx + rx / zoom - camera.pan_x * width as f32;
             let sy = cy + ry / zoom - camera.pan_y * height as f32;
-            let rgb = sample_bilinear_clamped(image, sx, sy);
+            let outside = sx < 0.0 || sy < 0.0 || sx > max_x || sy > max_y;
+            let rgb = match (border, source) {
+                (BorderMode::Reflect, _) if outside => {
+                    sample_bilinear_clamped(image, reflect_coord(sx, max_x), reflect_coord(sy, max_y))
+                }
+                (BorderMode::Source, Some(source)) if outside => sample_bilinear_clamped(source, x as f32, y as f32),
+                _ => sample_bilinear_clamped(image, sx, sy),
+            };
             let idx = (y as usize * width as usize + x as usize) * 3;
             out[idx..idx + 3].copy_from_slice(&rgb);
         }
     }
     RgbImage { width, height, data: out }
+}
+
+/// Mirrors `v` back into `0..=max` (period `2*max`), so a sample that runs
+/// off one edge reads the picture folded back on itself.
+fn reflect_coord(v: f32, max: f32) -> f32 {
+    if max <= 0.0 {
+        return 0.0;
+    }
+    let period = 2.0 * max;
+    let mut t = (v % period).abs();
+    if t > max {
+        t = period - t;
+    }
+    t
 }
 
 fn sample_bilinear_clamped(image: &RgbImage, x: f32, y: f32) -> [u8; 3] {
@@ -593,6 +662,266 @@ fn sample_bilinear_clamped(image: &RgbImage, x: f32, y: f32) -> [u8; 3] {
     out
 }
 
+/// Bilinear resample to `width x height` (the feedback source is sized to
+/// the loop's frame size once, when it arrives).
+pub fn resize_bilinear(image: &RgbImage, width: u32, height: u32) -> RgbImage {
+    if width == 0 || height == 0 || image.width == 0 || image.height == 0 {
+        return RgbImage::blank(width, height);
+    }
+    if image.width == width && image.height == height {
+        return image.clone();
+    }
+    let sx_scale = image.width as f32 / width as f32;
+    let sy_scale = image.height as f32 / height as f32;
+    let mut out = vec![0u8; width as usize * height as usize * 3];
+    for y in 0..height {
+        let sy = (y as f32 + 0.5) * sy_scale - 0.5;
+        for x in 0..width {
+            let sx = (x as f32 + 0.5) * sx_scale - 0.5;
+            let rgb = sample_bilinear_clamped(image, sx, sy);
+            let idx = (y as usize * width as usize + x as usize) * 3;
+            out[idx..idx + 3].copy_from_slice(&rgb);
+        }
+    }
+    RgbImage { width, height, data: out }
+}
+
+/// Per-channel mean and standard deviation of an RGB8 image, in 0..255 —
+/// the statistics the drift anchor pulls a fed-back frame toward.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ChannelStats {
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+}
+
+pub fn channel_stats(image: &RgbImage) -> ChannelStats {
+    channel_stats_f32(&image.data.iter().map(|v| *v as f32).collect::<Vec<f32>>())
+}
+
+fn channel_stats_f32(data: &[f32]) -> ChannelStats {
+    let pixels = data.len() / 3;
+    if pixels == 0 {
+        return ChannelStats::default();
+    }
+    let mut sum = [0.0f64; 3];
+    let mut sum_sq = [0.0f64; 3];
+    for pixel in data.chunks_exact(3) {
+        for c in 0..3 {
+            let v = pixel[c] as f64;
+            sum[c] += v;
+            sum_sq[c] += v * v;
+        }
+    }
+    let n = pixels as f64;
+    let mut stats = ChannelStats::default();
+    for c in 0..3 {
+        let mean = sum[c] / n;
+        let var = (sum_sq[c] / n - mean * mean).max(0.0);
+        stats.mean[c] = mean as f32;
+        stats.std[c] = var.sqrt() as f32;
+    }
+    stats
+}
+
+/// Rotation of the RGB cube about its grey axis by `degrees` — greys map to
+/// themselves (every row sums to 1), hues walk around the wheel.
+fn hue_rotation_matrix(degrees: f32) -> [[f32; 3]; 3] {
+    let (sin_a, cos_a) = degrees.to_radians().sin_cos();
+    let k = (1.0 - cos_a) / 3.0;
+    let s = sin_a / 3.0f32.sqrt();
+    [
+        [cos_a + k, k - s, k + s],
+        [k + s, cos_a + k, k - s],
+        [k - s, k + s, cos_a + k],
+    ]
+}
+
+/// The per-iteration colour treatment of a fed-back frame (see
+/// [`DriftParams`] for what each term does): hue rotation, gain about
+/// mid-grey, the mean/std anchor toward `source`, grain (deterministic per
+/// `frame_index`), then a 3x3 unsharp. With every term at its identity
+/// value (hue 0, gain 1, anchor 0, grain 0, sharpen 0) this returns the
+/// input unchanged.
+pub fn colour_drift(image: &RgbImage, drift: &DriftParams, source: &ChannelStats, frame_index: u64) -> RgbImage {
+    let width = image.width as usize;
+    let height = image.height as usize;
+    if width == 0 || height == 0 || image.data.len() != width * height * 3 {
+        return image.clone();
+    }
+    let matrix = hue_rotation_matrix(drift.hue_deg);
+    let gain = drift.gain;
+    let mut work: Vec<f32> = Vec::with_capacity(image.data.len());
+    for pixel in image.data.chunks_exact(3) {
+        let r = pixel[0] as f32;
+        let g = pixel[1] as f32;
+        let b = pixel[2] as f32;
+        for row in &matrix {
+            let rotated = row[0] * r + row[1] * g + row[2] * b;
+            work.push(127.5 + (rotated - 127.5) * gain);
+        }
+    }
+
+    let anchor = drift.anchor.clamp(0.0, 1.0);
+    if anchor > 0.0 {
+        let current = channel_stats_f32(&work);
+        let mut scale = [1.0f32; 3];
+        let mut offset = [0.0f32; 3];
+        for c in 0..3 {
+            let target_mean = current.mean[c] + (source.mean[c] - current.mean[c]) * anchor;
+            let target_std = current.std[c] + (source.std[c] - current.std[c]) * anchor;
+            scale[c] = if current.std[c] > 1.0e-3 { target_std / current.std[c] } else { 1.0 };
+            offset[c] = target_mean - current.mean[c] * scale[c];
+        }
+        for pixel in work.chunks_exact_mut(3) {
+            for c in 0..3 {
+                pixel[c] = pixel[c] * scale[c] + offset[c];
+            }
+        }
+    }
+
+    let grain = drift.grain.clamp(0.0, 1.0) * 255.0;
+    if grain > 0.0 {
+        let mut state = splitmix64(frame_index ^ 0x5DEE_CE66_D1CE_4E5D) | 1;
+        for value in work.iter_mut() {
+            // xorshift64: a cheap, deterministic per-frame stream.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = (state >> 40) as f32 / (1u64 << 24) as f32;
+            *value += (unit - 0.5) * 2.0 * grain;
+        }
+    }
+
+    let sharpen = drift.sharpen.max(0.0);
+    let mut out = vec![0u8; image.data.len()];
+    if sharpen > 0.0 && width >= 2 && height >= 2 {
+        for y in 0..height {
+            let y0 = y.saturating_sub(1);
+            let y1 = (y + 1).min(height - 1);
+            for x in 0..width {
+                let x0 = x.saturating_sub(1);
+                let x1 = (x + 1).min(width - 1);
+                for c in 0..3 {
+                    let mut sum = 0.0f32;
+                    for yy in [y0, y, y1] {
+                        for xx in [x0, x, x1] {
+                            sum += work[(yy * width + xx) * 3 + c];
+                        }
+                    }
+                    let blur = sum / 9.0;
+                    let v = work[(y * width + x) * 3 + c];
+                    out[(y * width + x) * 3 + c] = (v + sharpen * (v - blur)).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    } else {
+        for (dst, src) in out.iter_mut().zip(work.iter()) {
+            *dst = src.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    RgbImage { width: image.width, height: image.height, data: out }
+}
+
+/// `lerp(a, b, t)` per pixel: `t = 0` is `a` (the source), `t = 1` is `b`
+/// (the drifted previous output). `b` sets the frame size; `a` is resampled
+/// to it if needed.
+pub fn lerp_images(a: &RgbImage, b: &RgbImage, t: f32) -> RgbImage {
+    let t = t.clamp(0.0, 1.0);
+    if b.width == 0 || b.height == 0 || b.data.len() != b.width as usize * b.height as usize * 3 {
+        return b.clone();
+    }
+    let resized;
+    let a = if a.width == b.width && a.height == b.height && a.data.len() == b.data.len() {
+        a
+    } else {
+        resized = resize_bilinear(a, b.width, b.height);
+        &resized
+    };
+    let data = a
+        .data
+        .iter()
+        .zip(b.data.iter())
+        .map(|(pa, pb)| {
+            let v = *pa as f32 + (*pb as f32 - *pa as f32) * t;
+            v.round().clamp(0.0, 255.0) as u8
+        })
+        .collect();
+    RgbImage { width: b.width, height: b.height, data }
+}
+
+/// Mean absolute per-byte difference (0..255) between two same-sized
+/// frames; `None` when they differ in size.
+pub fn mean_abs_diff(a: &RgbImage, b: &RgbImage) -> Option<f64> {
+    if a.width != b.width || a.height != b.height || a.data.len() != b.data.len() || a.data.is_empty() {
+        return None;
+    }
+    let sum: u64 = a
+        .data
+        .iter()
+        .zip(b.data.iter())
+        .map(|(pa, pb)| (*pa as i32 - *pb as i32).unsigned_abs() as u64)
+        .sum();
+    Some(sum as f64 / a.data.len() as f64)
+}
+
+/// The source image a feedback loop anchors to, sized and measured once
+/// per (source, frame size).
+struct PreparedSource {
+    image: RgbImage,
+    stats: ChannelStats,
+}
+
+/// Per-session feedback state, owned by the worker thread inside
+/// [`run_live`]: the source (reference slot 0, or the latest pushed input
+/// frame — whichever arrived last) and its prepared copy at the loop's
+/// frame size. The previous output lives in `run_live` itself because feed
+/// mode keeps it too (for `stats.frame_diff`).
+#[derive(Default)]
+struct FeedbackState {
+    source: Option<RgbImage>,
+    prepared: Option<PreparedSource>,
+    reference0_seen: u64,
+}
+
+impl FeedbackState {
+    fn set_source(&mut self, image: RgbImage) {
+        if image.width == 0 || image.height == 0 || image.data.len() != image.width as usize * image.height as usize * 3 {
+            return;
+        }
+        self.source = Some(image);
+        self.prepared = None;
+    }
+
+    fn prepared(&mut self, width: u32, height: u32) -> Option<&PreparedSource> {
+        let source = self.source.as_ref()?;
+        let stale = self
+            .prepared
+            .as_ref()
+            .map_or(true, |prepared| prepared.image.width != width || prepared.image.height != height);
+        if stale {
+            let image = resize_bilinear(source, width, height);
+            let stats = channel_stats(&image);
+            self.prepared = Some(PreparedSource { image, stats });
+        }
+        self.prepared.as_ref()
+    }
+}
+
+/// One feedback iteration's images: the sampler init (None on a cold
+/// start) and the anchor the edit conditions on. Pure — see the tests.
+pub fn feedback_frame(
+    source: &RgbImage,
+    source_stats: &ChannelStats,
+    previous: Option<&RgbImage>,
+    config: &LiveConfig,
+    frame_index: u64,
+) -> Option<RgbImage> {
+    let previous = previous?;
+    let warped = warp_feedback_bordered(previous, &config.camera, config.drift.border, Some(source));
+    let drifted = colour_drift(&warped, &config.drift, source_stats, frame_index);
+    Some(lerp_images(source, &drifted, config.feedback))
+}
+
 /// The live-session loop. Runs on the single worker thread in place of
 /// `generate` for a live job (`server::execute_live_job`). Loops until:
 /// - the job's cancel flag is raised (`POST /job/<id>/cancel`) -> returns
@@ -612,6 +941,7 @@ pub fn run_live(
     mut progress: impl FnMut(&str, u64, u64, f64),
 ) -> Result<(), AssetAiError> {
     let mut last_output: Option<RgbImage> = None;
+    let mut feedback = FeedbackState::default();
     let mut frame_index: u64 = 0;
     let mut last_progress_push = Instant::now();
     let mut idle_since: Option<Instant> = None;
@@ -636,29 +966,73 @@ pub fn run_live(
         let (mut config, loop_mode, _output_encoding, max_fps) = session.snapshot();
 
         let prep_start = Instant::now();
-        let init_image = match loop_mode {
-            LoopMode::Feed => loop {
-                cancel.check()?;
-                if session.stop_requested() {
-                    return Ok(());
-                }
-                if let Some(frame) = session.take_mailbox_frame() {
-                    break Some(frame);
-                }
-                session.wait_for_mailbox(Duration::from_millis(250));
-            },
+        if session.take_reset() {
+            last_output = None;
+        }
+        let (init_image, anchor_image): (Option<RgbImage>, Option<RgbImage>) = match loop_mode {
+            LoopMode::Feed => {
+                let frame = loop {
+                    cancel.check()?;
+                    if session.stop_requested() {
+                        return Ok(());
+                    }
+                    if let Some(frame) = session.take_mailbox_frame() {
+                        break frame;
+                    }
+                    session.wait_for_mailbox(Duration::from_millis(250));
+                };
+                // Remembered as the feedback source, so a client that opens
+                // in feed mode and flips to feedback keeps the picture it
+                // last pushed as its anchor. Invisible to the backend.
+                feedback.set_source(frame.clone());
+                (Some(frame), None)
+            }
             LoopMode::Feedback => {
-                let base = last_output.take().or_else(|| session.take_mailbox_frame());
-                base.map(|image| warp_feedback(&image, &config.camera))
+                // Whichever arrived last wins: a pushed frame or a new
+                // reference slot 0 is a retarget.
+                if let Some(frame) = session.take_mailbox_frame() {
+                    feedback.set_source(frame);
+                }
+                if let Some(reference) = session.take_new_reference0(&mut feedback.reference0_seen) {
+                    feedback.set_source(reference);
+                }
+                // The loop runs at the previous output's size; the cold
+                // start sizes the source to the (backend-rounded) frame.
+                let (width, height) = match last_output.as_ref() {
+                    Some(previous) => (previous.width, previous.height),
+                    None => (config.width.max(16) / 16 * 16, config.height.max(16) / 16 * 16),
+                };
+                let Some(prepared) = feedback.prepared(width, height) else {
+                    // No source yet: wait for reference slot 0 or the first
+                    // pushed frame rather than failing the session.
+                    session.wait_for_mailbox(Duration::from_millis(250));
+                    continue;
+                };
+                // Slot 0 IS the source in feedback mode — the anchor carries
+                // it, so it must not ride along a second time as an extra
+                // reference.
+                if !config.references.is_empty() {
+                    config.references.remove(0);
+                }
+                let init = feedback_frame(&prepared.image, &prepared.stats, last_output.as_ref(), &config, frame_index);
+                if init.is_none() {
+                    // Cold start: one full edit of the source, from noise.
+                    config.strength = 1.0;
+                }
+                (init, Some(prepared.image.clone()))
             }
         };
-        resolve_seed(&mut config, frame_index);
+        match config.noise_mode.resolve(loop_mode) {
+            NoiseMode::Hold => {}
+            NoiseMode::Reroll | NoiseMode::Auto => resolve_seed(&mut config, frame_index),
+        }
         let prep_ms = prep_start.elapsed().as_secs_f64() * 1000.0;
 
         cancel.check()?;
         let step = backend.live_step(
             LiveFrameIn {
                 init: init_image.as_ref(),
+                anchor: anchor_image.as_ref(),
                 frame_index,
                 config: &config,
             },
@@ -679,6 +1053,7 @@ pub fn run_live(
             session.push_bytes(frame_bytes);
         }
         let post_ms = post_start.elapsed().as_secs_f64() * 1000.0;
+        let frame_diff = last_output.as_ref().and_then(|previous| mean_abs_diff(previous, &out.image));
         last_output = Some(out.image);
 
         let frames_out = session.frames_out.fetch_add(1, Ordering::Relaxed) + 1;
@@ -696,12 +1071,15 @@ pub fn run_live(
                 stage_ms: realtime_wire::StageMsJson {
                     prep: prep_ms,
                     model: out.model_ms,
+                    text_encode: out.text_encode_ms,
                     post: post_ms,
                 },
                 frames_in,
                 frames_out,
                 dropped,
                 codec: session.codec_stats(),
+                loop_mode: loop_mode.as_str().to_string(),
+                frame_diff,
             })
             .into_bytes(),
         );
@@ -870,6 +1248,467 @@ mod tests {
         // And not simply the base seed or the frame index.
         assert_ne!(config_a.seed, 100);
         assert_ne!(config_a.seed, 7);
+    }
+
+    #[test]
+    fn control_merge_feedback_fields_are_partial_and_clamped() {
+        let mut config = blank_config();
+        let update = ControlUpdateJson {
+            kind: "control".to_string(),
+            feedback: Some(1.7), // clamps to 1.0
+            noise_mode: Some("reroll".to_string()),
+            drift: Some(crate::realtime_wire::DriftUpdateJson {
+                hue: Some(2.0),
+                border: Some("source".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_control_to_config(&mut config, &update);
+        assert_eq!(config.feedback, 1.0);
+        assert_eq!(config.noise_mode, NoiseMode::Reroll);
+        assert_eq!(config.drift.hue_deg, 2.0);
+        assert_eq!(config.drift.border, BorderMode::Source);
+        // Drift fields the message did not carry keep their defaults.
+        assert_eq!(config.drift.gain, 0.98);
+        assert_eq!(config.drift.anchor, 0.05);
+        assert_eq!(config.drift.grain, 0.02);
+        assert_eq!(config.drift.sharpen, 0.1);
+
+        // Unknown enum strings are ignored, never fatal.
+        let bad = ControlUpdateJson {
+            kind: "control".to_string(),
+            noise_mode: Some("nonsense".to_string()),
+            drift: Some(crate::realtime_wire::DriftUpdateJson {
+                border: Some("nonsense".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_control_to_config(&mut config, &bad);
+        assert_eq!(config.noise_mode, NoiseMode::Reroll);
+        assert_eq!(config.drift.border, BorderMode::Source);
+    }
+
+    #[test]
+    fn open_request_parses_feedback_fields_and_refuses_bad_enums() {
+        use crate::protocol::RealtimeRequestJson;
+        let request = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            loop_mode: Some("feedback".to_string()),
+            feedback: Some(0.3),
+            noise_mode: Some("hold".to_string()),
+            camera: Some(CameraUpdateJson { dolly: Some(0.2), roll: Some(0.01), ..Default::default() }),
+            drift: Some(crate::realtime_wire::DriftUpdateJson { gain: Some(0.9), ..Default::default() }),
+            ..Default::default()
+        };
+        let params = LiveParams::from_request(&request).unwrap();
+        assert_eq!(params.loop_mode, LoopMode::Feedback);
+        assert_eq!(params.config.feedback, 0.3);
+        assert_eq!(params.config.noise_mode, NoiseMode::Hold);
+        assert_eq!(params.config.camera.dolly, 0.2);
+        assert_eq!(params.config.camera.roll, 0.01);
+        assert_eq!(params.config.drift.gain, 0.9);
+        assert_eq!(params.config.drift.hue_deg, 0.6);
+
+        let bad = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            noise_mode: Some("sometimes".to_string()),
+            ..Default::default()
+        };
+        assert!(LiveParams::from_request(&bad).is_err());
+
+        // Defaults: a plain request is feedback 0.7 / noise auto.
+        let plain = RealtimeRequestJson { model: "testpattern".to_string(), ..Default::default() };
+        let params = LiveParams::from_request(&plain).unwrap();
+        assert_eq!(params.config.feedback, 0.7);
+        assert_eq!(params.config.noise_mode, NoiseMode::Auto);
+        assert_eq!(params.config.noise_mode.resolve(LoopMode::Feedback), NoiseMode::Hold);
+        assert_eq!(params.config.noise_mode.resolve(LoopMode::Feed), NoiseMode::Reroll);
+    }
+
+    #[test]
+    fn strength_is_a_five_position_switch_at_four_steps() {
+        use crate::backend::img2img_start_step;
+        assert_eq!(img2img_start_step(0.0, 4), 4);
+        assert_eq!(img2img_start_step(0.2, 4), 3);
+        assert_eq!(img2img_start_step(0.45, 4), 2);
+        assert_eq!(img2img_start_step(0.5, 4), 2);
+        assert_eq!(img2img_start_step(0.75, 4), 1);
+        // The cliff: anything above 0.75 starts at step 0, where the init
+        // is never encoded at all.
+        assert_eq!(img2img_start_step(0.76, 4), 0);
+        assert_eq!(img2img_start_step(1.0, 4), 0);
+        assert_eq!(img2img_start_step(0.45, 8), 4);
+    }
+
+    fn gradient_image(width: u32, height: u32) -> RgbImage {
+        let mut data = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                data.push((x * 255 / width.max(1)) as u8);
+                data.push((y * 255 / height.max(1)) as u8);
+                data.push(((x + y) * 255 / (width + height).max(1)) as u8);
+            }
+        }
+        RgbImage { width, height, data }
+    }
+
+    fn solid_image(width: u32, height: u32, rgb: [u8; 3]) -> RgbImage {
+        let mut data = Vec::with_capacity((width * height * 3) as usize);
+        for _ in 0..width * height {
+            data.extend_from_slice(&rgb);
+        }
+        RgbImage { width, height, data }
+    }
+
+    #[test]
+    fn lerp_images_blends_source_and_drifted() {
+        let source = solid_image(4, 4, [0, 100, 200]);
+        let drifted = solid_image(4, 4, [200, 100, 0]);
+        assert_eq!(lerp_images(&source, &drifted, 0.0).data, source.data);
+        assert_eq!(lerp_images(&source, &drifted, 1.0).data, drifted.data);
+        let half = lerp_images(&source, &drifted, 0.5);
+        assert_eq!(&half.data[0..3], &[100, 100, 100]);
+        // A source of another size is resampled to the drifted frame.
+        let small = solid_image(2, 2, [0, 100, 200]);
+        let mixed = lerp_images(&small, &drifted, 0.0);
+        assert_eq!((mixed.width, mixed.height), (4, 4));
+        assert_eq!(&mixed.data[0..3], &[0, 100, 200]);
+    }
+
+    fn identity_drift() -> DriftParams {
+        DriftParams { hue_deg: 0.0, gain: 1.0, anchor: 0.0, grain: 0.0, sharpen: 0.0, border: BorderMode::Reflect }
+    }
+
+    #[test]
+    fn colour_drift_identity_terms_return_the_input() {
+        let image = gradient_image(8, 6);
+        let stats = channel_stats(&image);
+        let out = colour_drift(&image, &identity_drift(), &stats, 3);
+        assert_eq!(out.data, image.data);
+    }
+
+    #[test]
+    fn colour_drift_hue_rotates_red_toward_green_and_keeps_grey() {
+        let mut image = solid_image(2, 1, [200, 0, 0]);
+        image.data[3..6].copy_from_slice(&[90, 90, 90]);
+        let stats = channel_stats(&image);
+        let drift = DriftParams { hue_deg: 120.0, ..identity_drift() };
+        let out = colour_drift(&image, &drift, &stats, 0);
+        // Red -> green after a third of a turn.
+        assert!(out.data[1] > 180 && out.data[0] < 20 && out.data[2] < 20, "got {:?}", &out.data[0..3]);
+        // Grey lies on the rotation axis and does not move.
+        assert_eq!(&out.data[3..6], &[90, 90, 90]);
+    }
+
+    #[test]
+    fn colour_drift_gain_pulls_toward_mid_grey() {
+        let image = solid_image(2, 2, [255, 0, 128]);
+        let stats = channel_stats(&image);
+        let drift = DriftParams { gain: 0.5, ..identity_drift() };
+        let out = colour_drift(&image, &drift, &stats, 0);
+        assert_eq!(&out.data[0..3], &[191, 64, 128]);
+    }
+
+    #[test]
+    fn colour_drift_anchor_pulls_stats_toward_source() {
+        // A bright, high-contrast frame against a dark, flat source.
+        let frame = gradient_image(16, 16);
+        let source = ChannelStats { mean: [40.0, 40.0, 40.0], std: [5.0, 5.0, 5.0] };
+        let before = channel_stats(&frame);
+        let full = colour_drift(&frame, &DriftParams { anchor: 1.0, ..identity_drift() }, &source, 0);
+        let after = channel_stats(&full);
+        for c in 0..3 {
+            assert!((after.mean[c] - source.mean[c]).abs() < 1.5, "mean[{c}] {} vs {}", after.mean[c], source.mean[c]);
+            assert!((after.std[c] - source.std[c]).abs() < 1.5, "std[{c}] {} vs {}", after.std[c], source.std[c]);
+        }
+        // 5% moves the statistics 5% of the way, not all the way.
+        let five = colour_drift(&frame, &DriftParams { anchor: 0.05, ..identity_drift() }, &source, 0);
+        let partial = channel_stats(&five);
+        let expected = before.mean[0] + (source.mean[0] - before.mean[0]) * 0.05;
+        assert!((partial.mean[0] - expected).abs() < 1.5, "{} vs {}", partial.mean[0], expected);
+        assert!(partial.mean[0] > after.mean[0] + 10.0);
+    }
+
+    #[test]
+    fn colour_drift_grain_is_deterministic_per_frame_and_bounded() {
+        let image = solid_image(8, 8, [100, 100, 100]);
+        let stats = channel_stats(&image);
+        let drift = DriftParams { grain: 0.02, ..identity_drift() };
+        let a = colour_drift(&image, &drift, &stats, 7);
+        let b = colour_drift(&image, &drift, &stats, 7);
+        let c = colour_drift(&image, &drift, &stats, 8);
+        assert_eq!(a.data, b.data);
+        assert_ne!(a.data, c.data);
+        assert!(a.data.iter().all(|v| (*v as i32 - 100).abs() <= 6));
+        assert!(a.data.iter().any(|v| *v != 100));
+    }
+
+    #[test]
+    fn colour_drift_sharpen_raises_local_contrast() {
+        let mut image = solid_image(5, 5, [100, 100, 100]);
+        let center = (2 * 5 + 2) * 3;
+        image.data[center..center + 3].copy_from_slice(&[140, 140, 140]);
+        let stats = channel_stats(&image);
+        let drift = DriftParams { sharpen: 1.0, ..identity_drift() };
+        let out = colour_drift(&image, &drift, &stats, 0);
+        assert!(out.data[center] > 140, "center {}", out.data[center]);
+        let neighbour = (2 * 5 + 1) * 3;
+        assert!(out.data[neighbour] < 100, "neighbour {}", out.data[neighbour]);
+    }
+
+    #[test]
+    fn warp_border_modes_differ_only_outside_the_frame() {
+        let image = gradient_image(16, 16);
+        let source = solid_image(16, 16, [7, 7, 7]);
+        // Dolly OUT (zoom 0.8): the outer band samples outside the frame.
+        let camera = CameraMotion { dolly: -4.0, ..Default::default() };
+        let clamp = warp_feedback_bordered(&image, &camera, BorderMode::Clamp, Some(&source));
+        let reflect = warp_feedback_bordered(&image, &camera, BorderMode::Reflect, Some(&source));
+        let from_source = warp_feedback_bordered(&image, &camera, BorderMode::Source, Some(&source));
+        assert_ne!(clamp.data, reflect.data);
+        // The corner pixel under `source` fill is the source's pixel.
+        assert_eq!(&from_source.data[0..3], &[7, 7, 7]);
+        assert_ne!(&clamp.data[0..3], &[7, 7, 7]);
+        // The center is inside the frame for every mode and identical.
+        let center = (8 * 16 + 8) * 3;
+        assert_eq!(&clamp.data[center..center + 3], &reflect.data[center..center + 3]);
+        assert_eq!(&clamp.data[center..center + 3], &from_source.data[center..center + 3]);
+        // Reflect folds the edge back: the corner reads an interior value,
+        // not the smeared edge value clamp produces.
+        assert_ne!(&reflect.data[0..3], &clamp.data[0..3]);
+        // Source fill without a source degrades to clamp.
+        let no_source = warp_feedback_bordered(&image, &camera, BorderMode::Source, None);
+        assert_eq!(no_source.data, clamp.data);
+    }
+
+    #[test]
+    fn warp_zoom_and_roll_move_a_marker_as_expected() {
+        let mut image = solid_image(8, 8, [0, 0, 0]);
+        // Marker right of center at (7, 4).
+        let marker = (4 * 8 + 7) * 3;
+        image.data[marker..marker + 3].copy_from_slice(&[255, 255, 255]);
+        // A quarter-turn roll: output (4, 7) samples the input at (7, 4).
+        let rolled = warp_feedback(&image, &CameraMotion { roll: std::f32::consts::FRAC_PI_2, ..Default::default() });
+        let below = (7 * 8 + 4) * 3;
+        assert_eq!(&rolled.data[below..below + 3], &[255, 255, 255]);
+        assert_eq!(&rolled.data[marker..marker + 3], &[0, 0, 0]);
+        // Dolly 0.2 = zoom 1.01: the default feedback zoom is a 1% creep,
+        // which on an 8px frame moves nothing a full pixel — the marker
+        // survives in place (bilinear-attenuated at most).
+        let zoomed = warp_feedback(&image, &CameraMotion { dolly: 0.2, ..Default::default() });
+        assert!(zoomed.data[marker] > 200);
+        // Dolly 20 = zoom 2x: output (7,4) now samples (5.5,4) — black —
+        // and the marker itself would land at output x = 10, off-frame, so
+        // the whole frame goes black.
+        let zoomed2 = warp_feedback(&image, &CameraMotion { dolly: 20.0, ..Default::default() });
+        assert_eq!(zoomed2.data[marker], 0);
+        assert!(zoomed2.data.iter().all(|v| *v == 0));
+    }
+
+    #[test]
+    fn feedback_frame_cold_start_has_no_init_and_blend_follows_feedback() {
+        let source = gradient_image(16, 16);
+        let stats = channel_stats(&source);
+        let mut config = blank_config();
+        config.drift = identity_drift();
+        config.camera = CameraMotion::default();
+        assert!(feedback_frame(&source, &stats, None, &config, 0).is_none());
+
+        let previous = solid_image(16, 16, [200, 50, 50]);
+        config.feedback = 0.0;
+        let init = feedback_frame(&source, &stats, Some(&previous), &config, 1).unwrap();
+        assert_eq!(init.data, source.data, "feedback 0 = the source itself");
+        config.feedback = 1.0;
+        let init = feedback_frame(&source, &stats, Some(&previous), &config, 1).unwrap();
+        assert_eq!(init.data, previous.data, "feedback 1 with identity drift/camera = the previous output");
+        config.feedback = 0.7;
+        let init = feedback_frame(&source, &stats, Some(&previous), &config, 1).unwrap();
+        assert_ne!(init.data, source.data);
+        assert_ne!(init.data, previous.data);
+    }
+
+    #[test]
+    fn mean_abs_diff_measures_motion() {
+        let a = solid_image(4, 4, [10, 10, 10]);
+        let b = solid_image(4, 4, [13, 10, 7]);
+        assert_eq!(mean_abs_diff(&a, &a), Some(0.0));
+        assert_eq!(mean_abs_diff(&a, &b), Some(2.0));
+        assert_eq!(mean_abs_diff(&a, &solid_image(2, 2, [0, 0, 0])), None);
+    }
+
+    /// A backend that records exactly what `run_live` hands it.
+    #[derive(Clone, Debug)]
+    struct SeenFrame {
+        frame_index: u64,
+        has_init: bool,
+        has_anchor: bool,
+        anchor_matches_source: bool,
+        strength: f32,
+        seed: u64,
+        references: usize,
+    }
+
+    struct RecordingBackend {
+        seen: std::sync::Arc<Mutex<Vec<SeenFrame>>>,
+        source: RgbImage,
+    }
+
+    impl ContentBackend for RecordingBackend {
+        fn model_id(&self) -> &str {
+            "recording"
+        }
+        fn ensure_loaded(&mut self, _ctx: &mut crate::backend::BackendCtx) -> Result<(), AssetAiError> {
+            Ok(())
+        }
+        fn generate(
+            &mut self,
+            _params: &crate::backend::GenerateParams,
+            _progress: crate::backend::ProgressSink,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<crate::backend::ArtifactData>, AssetAiError> {
+            Err(AssetAiError::Backend("live only".into()))
+        }
+        fn live_supported(&self) -> bool {
+            true
+        }
+        fn live_step(&mut self, frame: LiveFrameIn<'_>, _cancel: &CancelToken) -> Result<crate::backend::LiveFrameOut, AssetAiError> {
+            self.seen.lock().unwrap().push(SeenFrame {
+                frame_index: frame.frame_index,
+                has_init: frame.init.is_some(),
+                has_anchor: frame.anchor.is_some(),
+                anchor_matches_source: frame.anchor.map_or(false, |a| a.data == self.source.data),
+                strength: frame.config.strength,
+                seed: frame.config.seed,
+                references: frame.config.references.len(),
+            });
+            // A frame that changes every step, so frame_diff is non-zero.
+            let tint = (frame.frame_index * 40 % 256) as u8;
+            let image = solid_image(frame.config.width, frame.config.height, [tint, 20, 30]);
+            Ok(crate::backend::LiveFrameOut { image, model_ms: 0.1, text_encode_ms: 0.0 })
+        }
+    }
+
+    fn run_recording_session(
+        params: LiveParams,
+        setup: impl FnOnce(&RealtimeSession) + Send + 'static,
+        done: impl Fn(&[SeenFrame]) -> bool,
+        source: RgbImage,
+    ) -> Vec<SeenFrame> {
+        let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let worker = {
+            let session = session.clone();
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut backend = RecordingBackend { seen, source };
+                let cancel = CancelToken::new();
+                run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
+            })
+        };
+        setup(&session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(&seen.lock().unwrap()) {
+            assert!(Instant::now() < deadline, "timed out waiting for the session to reach the wanted state");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        session.request_stop();
+        worker.join().unwrap().unwrap();
+        let frames = seen.lock().unwrap().clone();
+        frames
+    }
+
+    fn recording_params(loop_mode: LoopMode) -> LiveParams {
+        let mut config = LiveConfig::default();
+        config.width = 32;
+        config.height = 32;
+        config.strength = 0.45;
+        config.seed = 7;
+        config.seed_mode = SeedMode::Increment;
+        LiveParams {
+            model: "recording".to_string(),
+            config,
+            loop_mode,
+            input_encoding: OutputEncoding::Raw,
+            output_encoding: OutputEncoding::Raw,
+            max_fps: 200.0,
+            idle_timeout_s: 0,
+        }
+    }
+
+    #[test]
+    fn run_live_feed_mode_passes_init_without_anchor_and_rerolls_the_seed() {
+        let source = gradient_image(32, 32);
+        let pushed = source.clone();
+        let frames = run_recording_session(
+            recording_params(LoopMode::Feed),
+            move |session| {
+                session.push_input_frame(pushed.clone());
+                session.push_input_frame(pushed);
+            },
+            |frames| frames.len() >= 1,
+            source,
+        );
+        let first = &frames[0];
+        assert!(first.has_init);
+        assert!(!first.has_anchor, "feed mode never passes an anchor");
+        assert_eq!(first.strength, 0.45);
+        // seed_mode increment applies in feed mode (noise auto = reroll).
+        assert_eq!(first.seed, 7 + first.frame_index);
+    }
+
+    #[test]
+    fn run_live_feedback_cold_starts_from_slot0_then_loops_with_the_source_as_anchor() {
+        let source = gradient_image(32, 32);
+        let reference = source.clone();
+        let frames = run_recording_session(
+            recording_params(LoopMode::Feedback),
+            move |session| {
+                // Nothing for a while: the worker must wait, not fail.
+                std::thread::sleep(Duration::from_millis(120));
+                session.set_reference(0, reference);
+            },
+            |frames| frames.len() >= 4,
+            source,
+        );
+        let first = &frames[0];
+        assert_eq!(first.frame_index, 0);
+        assert!(!first.has_init, "cold start: no init");
+        assert!(first.has_anchor && first.anchor_matches_source);
+        assert_eq!(first.strength, 1.0, "cold start is one full edit");
+        assert_eq!(first.references, 0, "slot 0 rides as the anchor, not as an extra reference");
+        for frame in &frames[1..4] {
+            assert!(frame.has_init, "warm frames carry the blended init");
+            assert!(frame.has_anchor && frame.anchor_matches_source, "the anchor stays the untouched source");
+            assert_eq!(frame.strength, 0.45);
+            assert_eq!(frame.references, 0);
+        }
+        // noise auto = hold in feedback: seed_mode increment is NOT applied.
+        assert!(frames.iter().all(|frame| frame.seed == 7), "{:?}", frames.iter().map(|f| f.seed).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn run_live_feedback_takes_a_pushed_frame_as_source_and_reset_cold_starts_again() {
+        let source = gradient_image(32, 32);
+        let pushed = source.clone();
+        let frames = run_recording_session(
+            recording_params(LoopMode::Feedback),
+            move |session| {
+                session.push_input_frame(pushed);
+                // Let a few frames run, then ask for a cold start.
+                std::thread::sleep(Duration::from_millis(60));
+                session.handle_text(r#"{"type":"control","reset":true}"#).unwrap();
+            },
+            |frames| frames.iter().filter(|f| !f.has_init).count() >= 2 && frames.len() >= 6,
+            source,
+        );
+        assert!(!frames[0].has_init && frames[0].strength == 1.0);
+        assert!(frames[0].anchor_matches_source, "a pushed frame is the feedback source");
+        assert!(frames[1].has_init, "the frame after a cold start is a warm one");
+        let second_cold = frames.iter().skip(1).position(|f| !f.has_init).expect("reset cold-starts again") + 1;
+        assert_eq!(frames[second_cold].strength, 1.0);
+        assert!(frames[second_cold + 1..].iter().all(|f| f.has_init), "one cold start per reset, not a stuck one");
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //!   (euler, 20 steps, guidance 4.0, 1024px default).
 
 use crate::backend::{
-    ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, LiveFrameIn,
-    LiveFrameOut, ProgressSink, RgbImage,
+    img2img_start_step, ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams,
+    LiveFrameIn, LiveFrameOut, ProgressSink, RgbImage,
 };
 use crate::error::AssetAiError;
 use makepad_ai_common::backend::gpu_device_available;
@@ -34,6 +34,33 @@ pub struct Flux2Backend {
     model_id: String,
     cache_dir: Option<PathBuf>,
     pipeline: Option<Flux2Pipeline>,
+    /// Live-session prompt-embed cache, keyed by the exact prompt string:
+    /// Klein's Qwen3 text encoder is a full 4B forward per call, and a live
+    /// session asks the same prompt frame after frame. Holds the pipeline's
+    /// own `prompt_embeds` output, so a hit is bit-identical to a miss.
+    live_embeds: Option<(String, Vec<f32>)>,
+    /// Live-session anchor reference-token cache (the VAE-encoded, packed
+    /// tokens of the feedback anchor): the anchor is the same image every
+    /// frame until the client retargets, so its VAE encode is paid once.
+    live_anchor_tokens: Option<LiveAnchorTokens>,
+    /// The strength-cliff warning (see `img2img_start_step`) fires once per
+    /// backend instance, not once per frame.
+    warned_strength_cliff: bool,
+}
+
+struct LiveAnchorTokens {
+    /// (FNV-1a of the anchor pixels, width, height).
+    key: (u64, u32, u32),
+    tokens: Vec<f32>,
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 impl Flux2Backend {
@@ -42,6 +69,9 @@ impl Flux2Backend {
             model_id: model_id.to_string(),
             cache_dir: None,
             pipeline: None,
+            live_embeds: None,
+            live_anchor_tokens: None,
+            warned_strength_cliff: false,
         }
     }
 
@@ -314,11 +344,23 @@ impl ContentBackend for Flux2Backend {
         !self.is_dev()
     }
 
-    /// Maps one live-session step onto the Klein edit pipeline: `init`
-    /// (the feed-mode latest input frame, or the feedback-warped previous
-    /// output — `crate::realtime::run_live` resolves which) is the edit
-    /// conditioning image, `config.references` ride along as additional
-    /// Klein references, `config.prompt`/`steps`/`seed` map directly.
+    /// Maps one live-session step onto the Klein edit pipeline. The edit's
+    /// first reference (its conditioning image) is `frame.anchor` when the
+    /// session gives one (feedback: the untouched source) and `frame.init`
+    /// otherwise (feed: the latest input frame, exactly as before the
+    /// feedback loop existed); `config.references` ride along as additional
+    /// Klein references; `config.prompt`/`steps`/`seed` map directly.
+    /// `frame.init`, when present, is ALSO the sampler's img2img start at
+    /// `config.strength`. Keeping the reference and the init apart is what
+    /// makes a feedback loop hold: conditioning on the drifted frame itself
+    /// would re-encode every generation of drift into the next.
+    ///
+    /// Two live-only caches sit in front of the pipeline: the prompt embeds
+    /// (the Qwen3 text encoder is a full forward per call and the prompt
+    /// rarely changes between frames) and the anchor's VAE-encoded tokens.
+    /// Both feed the pipeline's own `teacher_*` inputs, which it treats as
+    /// exactly what it would have computed.
+    ///
     /// flux2-dev has no live mode (see `live_supported`) — `POST /realtime`
     /// already refuses it at admission time, so reaching `Flux2Pipeline::
     /// Dev` here would mean that check was bypassed; fail closed rather
@@ -331,10 +373,10 @@ impl ContentBackend for Flux2Backend {
         }
         cancel.check()?;
         let start = std::time::Instant::now();
-        let pipe = self
-            .pipeline
+        let Self { pipeline, live_embeds, live_anchor_tokens, warned_strength_cliff, model_id, .. } = self;
+        let pipe = pipeline
             .as_mut()
-            .ok_or_else(|| AssetAiError::Backend(format!("{} not loaded", self.model_id)))?;
+            .ok_or_else(|| AssetAiError::Backend(format!("{model_id} not loaded")))?;
         let pipe = match pipe {
             Flux2Pipeline::Dev(_) => {
                 return Err(AssetAiError::Unavailable(
@@ -344,60 +386,108 @@ impl ContentBackend for Flux2Backend {
             Flux2Pipeline::Klein(pipe) => pipe,
         };
         let config = frame.config;
-        let init = frame.init.ok_or_else(|| {
+        let conditioning = frame.anchor.or(frame.init).ok_or_else(|| {
             AssetAiError::Params(
-                "flux2-klein-4b live mode requires an init image (feed: latest input frame; \
-                 feedback: previous output) — none available yet"
+                "flux2-klein-4b live mode needs an init image (feed: the latest input frame) or an \
+                 anchor (feedback: the source) — none available yet"
                     .into(),
             )
         })?;
-        let mut references = vec![flux2_image_from_rgb_u8(&init.data, init.width as usize, init.height as usize)
-            .map_err(|err| AssetAiError::Backend(format!("flux2 live init ref: {err}")))?];
-        for extra in &config.references {
-            references.push(
-                flux2_image_from_rgb_u8(&extra.data, extra.width as usize, extra.height as usize)
-                    .map_err(|err| AssetAiError::Backend(format!("flux2 live extra ref: {err}")))?,
-            );
-        }
         let out_w = config.width.max(16) / 16 * 16;
         let out_h = config.height.max(16) / 16 * 16;
+
+        // The anchor's tokens replace the WHOLE reference list on the
+        // pipeline side (`teacher_ref_tokens` is a single-reference input
+        // sized to the output), so the cache only applies when the anchor is
+        // output-sized and stands alone.
+        let anchor_key = frame
+            .anchor
+            .filter(|anchor| anchor.width == out_w && anchor.height == out_h && config.references.is_empty())
+            .map(|anchor| (fnv1a64(&anchor.data), anchor.width, anchor.height));
+        let cached_anchor_tokens = anchor_key.and_then(|key| {
+            live_anchor_tokens
+                .as_ref()
+                .filter(|cached| cached.key == key)
+                .map(|cached| cached.tokens.clone())
+        });
+        let mut references = Vec::new();
+        if cached_anchor_tokens.is_none() {
+            references.push(
+                flux2_image_from_rgb_u8(&conditioning.data, conditioning.width as usize, conditioning.height as usize)
+                    .map_err(|err| AssetAiError::Backend(format!("flux2 live conditioning ref: {err}")))?,
+            );
+            for extra in &config.references {
+                references.push(
+                    flux2_image_from_rgb_u8(&extra.data, extra.width as usize, extra.height as usize)
+                        .map_err(|err| AssetAiError::Backend(format!("flux2 live extra ref: {err}")))?,
+                );
+            }
+        }
         cancel.check()?;
-        // img2img: the incoming frame is ALSO the sampler's init at
-        // `config.strength` (ComfyUI CONST semantics — start at sigma index
-        // floor((1-strength)*steps), run the remaining steps; strength 1.0 =
-        // the full Klein edit from noise, lower = fewer steps, closer to the
-        // frame). The init must match the output size; a feed frame of another
-        // size is resampled by the session before it gets here, so mismatch is
-        // a protocol error we surface rather than silently restyle from noise.
-        let init = if config.strength < 1.0 {
-            Some(Flux2Img2Img {
+        // img2img: the init frame is the sampler's start at `config.strength`
+        // (ComfyUI CONST semantics — start at sigma index floor((1-strength)*
+        // steps), run the remaining steps; strength 1.0 = the full Klein edit
+        // from noise, lower = fewer steps, closer to the frame). The init
+        // must match the output size; the session sizes feedback inits to
+        // the previous output and a feed frame of another size is a protocol
+        // error we surface rather than silently restyle from noise.
+        let steps = config.steps.max(1);
+        let init = match frame.init {
+            Some(init) if config.strength < 1.0 => Some(Flux2Img2Img {
                 image: flux2_image_from_rgb_u8(&init.data, init.width as usize, init.height as usize)
                     .map_err(|err| AssetAiError::Backend(format!("flux2 live init: {err}")))?,
                 strength: config.strength.clamp(0.0, 1.0),
-            })
-        } else {
-            None
+            }),
+            _ => None,
         };
+        if init.is_some() && frame.anchor.is_some() && img2img_start_step(config.strength, steps) == 0 && !*warned_strength_cliff {
+            *warned_strength_cliff = true;
+            eprintln!(
+                "flux2 live: strength {:.2} at {steps} steps starts at step 0 — the feedback init is never \
+                 encoded, every frame is a fresh edit of the source (at 4 steps the loop needs strength <= 0.75)",
+                config.strength
+            );
+        }
+        let teacher_embeds = match live_embeds.take() {
+            Some((prompt, embeds)) if prompt == config.prompt => Some(embeds),
+            _ => None,
+        };
+        let embeds_cached = teacher_embeds.is_some();
         let request = Flux2EditRequest {
             prompt: config.prompt.clone(),
             width: out_w,
             height: out_h,
-            steps: config.steps.max(1) as usize,
+            steps: steps as usize,
             seed: config.seed,
             references,
             noise: None,
-            teacher_ref_tokens: None,
-            teacher_embeds: None,
+            teacher_ref_tokens: cached_anchor_tokens,
+            teacher_embeds,
             init,
         };
-        let result = pipe
-            .edit(&request)
-            .map_err(|err| AssetAiError::Backend(format!("flux2 live edit: {err}")))?;
+        let result = pipe.edit(&request);
+        // Put the cache back before surfacing an error, so one failed frame
+        // does not force a text-encoder rerun on the next.
+        let embeds = match (request.teacher_embeds, &result) {
+            (Some(embeds), _) => Some(embeds),
+            (None, Ok(result)) => Some(result.prompt_embeds.clone()),
+            (None, Err(_)) => None,
+        };
+        if let Some(embeds) = embeds {
+            *live_embeds = Some((config.prompt.clone(), embeds));
+        }
+        let result = result.map_err(|err| AssetAiError::Backend(format!("flux2 live edit: {err}")))?;
+        if let Some(key) = anchor_key {
+            if request.teacher_ref_tokens.is_none() {
+                *live_anchor_tokens = Some(LiveAnchorTokens { key, tokens: result.ref_packed.to_tokens() });
+            }
+        }
         cancel.check()?;
         let (rgb, width, height) = crate::testpattern::decode_png_rgb8(&result.png)?;
         Ok(LiveFrameOut {
             image: RgbImage { width, height, data: rgb },
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
+            text_encode_ms: if embeds_cached { 0.0 } else { result.te_ms },
         })
     }
 }

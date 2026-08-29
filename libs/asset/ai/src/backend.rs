@@ -510,6 +510,70 @@ impl LoopMode {
     }
 }
 
+/// Whether the sampler's starting noise field is re-drawn per frame. In the
+/// Klein pipeline the seed does exactly one thing — it fills the noise
+/// field — so `Hold` means "every frame starts from the session's base
+/// seed's noise" (the StreamDiffusion noise-cache trick: consecutive frames
+/// differ only through their init, which is what keeps a feedback loop from
+/// shimmering) and `Reroll` means "`seed_mode` decides the per-frame seed".
+/// `Auto` (the default) resolves to `Hold` in `loop_mode = "feedback"` and
+/// `Reroll` in `"feed"`, so a plain feed session's per-frame seed sequence
+/// is exactly what it was before this knob existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NoiseMode {
+    #[default]
+    Auto,
+    Hold,
+    Reroll,
+}
+
+impl NoiseMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "auto" => Ok(NoiseMode::Auto),
+            "hold" => Ok(NoiseMode::Hold),
+            "reroll" => Ok(NoiseMode::Reroll),
+            other => Err(AssetAiError::Params(format!(
+                "unknown noise_mode {other:?} (expected \"hold\", \"reroll\" or \"auto\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NoiseMode::Auto => "auto",
+            NoiseMode::Hold => "hold",
+            NoiseMode::Reroll => "reroll",
+        }
+    }
+
+    /// The effective policy for a given loop mode (see the enum doc).
+    pub fn resolve(&self, loop_mode: LoopMode) -> NoiseMode {
+        match self {
+            NoiseMode::Auto => match loop_mode {
+                LoopMode::Feedback => NoiseMode::Hold,
+                LoopMode::Feed => NoiseMode::Reroll,
+            },
+            explicit => *explicit,
+        }
+    }
+}
+
+/// The first sampler step an img2img init actually executes: the Klein
+/// schedule runs `start..steps` where `start = floor((1 - strength) *
+/// steps)` (see `flux2_img2img_start`). At 4 steps that makes `strength` a
+/// five-position switch, not a dial — 0.45 starts at step 2 (half the
+/// schedule re-denoised, the composition survives), 0.75 starts at step 1,
+/// and anything ABOVE 0.75 starts at step 0, where the init is never VAE-
+/// encoded at all: the sampler starts from pure noise and the frame is a
+/// fresh edit of the reference, not a continuation of the loop. That cliff
+/// is why the feedback default sits at 0.45 and why `flux2_backend` warns
+/// when a feedback session asks for a strength that lands on step 0.
+pub fn img2img_start_step(strength: f32, steps: u32) -> u32 {
+    let strength = strength.clamp(0.0, 1.0);
+    (((1.0 - strength) * steps as f32).floor() as u32).min(steps)
+}
+
 /// Wire format for input AND output frames on a realtime session (see
 /// `realtime_wire::FrameKind`, which mirrors this 1:1 on the binary frame
 /// header — `Raw` = kind 0, `Png` = kind 1, `H264` = kind 2, Annex-B). One
@@ -591,6 +655,87 @@ pub struct CameraMotion {
     pub roll: f32,
 }
 
+/// What the feedback warp samples where the camera motion pulls a pixel
+/// from outside the previous frame (a dolly OUT or a pan reveals such a
+/// band along the edges every iteration).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BorderMode {
+    /// Mirror the frame across its edge — nothing new enters, the band is
+    /// the picture folded back on itself.
+    #[default]
+    Reflect,
+    /// Smear the edge pixel outward (the pre-feedback warp's behaviour).
+    Clamp,
+    /// Fill from the session's source image at the same position — the
+    /// source leaks in at the border, which is how a dolly-out "tunnel"
+    /// keeps pulling fresh picture from the anchor.
+    Source,
+}
+
+impl BorderMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "reflect" => Ok(BorderMode::Reflect),
+            "clamp" => Ok(BorderMode::Clamp),
+            "source" => Ok(BorderMode::Source),
+            other => Err(AssetAiError::Params(format!(
+                "unknown drift.border {other:?} (expected \"reflect\", \"clamp\" or \"source\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BorderMode::Reflect => "reflect",
+            BorderMode::Clamp => "clamp",
+            BorderMode::Source => "source",
+        }
+    }
+}
+
+/// Per-iteration colour treatment of the fed-back frame
+/// (`crate::realtime::colour_drift`), applied after the camera warp and
+/// before the blend with the source. Every term is the classic analogue
+/// video-feedback move, and the defaults are the "trippy but coherent"
+/// point: enough hue/gain motion to keep the picture wandering, enough
+/// anchor to stop it burning in to one saturated colour after a minute.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DriftParams {
+    /// Hue rotation per frame, degrees (around the grey axis; greys are
+    /// untouched).
+    pub hue_deg: f32,
+    /// Contrast gain about mid-grey per frame: `< 1` bleeds the picture
+    /// toward grey each iteration (so the model has to re-invent detail),
+    /// `> 1` pushes it toward saturation/clipping.
+    pub gain: f32,
+    /// The anti-burn-in term: per-channel mean/std of the frame are pulled
+    /// this fraction of the way toward the SOURCE image's statistics every
+    /// iteration. 0 = no anchor (the loop is free to run away), 1 = full
+    /// colour match to the source every frame.
+    pub anchor: f32,
+    /// Amplitude of the per-frame uniform grain added before sharpening,
+    /// as a fraction of full scale (0.02 = ±5/255). Gives the sampler
+    /// something to latch onto instead of a perfectly smooth init.
+    pub grain: f32,
+    /// 3x3 unsharp-mask amount (0 = off): counters the softening every
+    /// bilinear warp + VAE round trip applies.
+    pub sharpen: f32,
+    pub border: BorderMode,
+}
+
+impl Default for DriftParams {
+    fn default() -> Self {
+        Self {
+            hue_deg: 0.6,
+            gain: 0.98,
+            anchor: 0.05,
+            grain: 0.02,
+            sharpen: 0.1,
+            border: BorderMode::Reflect,
+        }
+    }
+}
+
 /// Tightly packed RGB8 image (no alpha, no stride padding): `data.len() ==
 /// width * height * 3`. The live-session pixel currency end to end — decoded
 /// wire input frames, backend init/output frames, reference images.
@@ -635,6 +780,14 @@ pub struct LiveConfig {
     /// Decoded reference images (`{"type":"reference", "slot":N, ...}`).
     pub references: Vec<RgbImage>,
     pub camera: CameraMotion,
+    /// `loop_mode = "feedback"` only: how much of the next init is the
+    /// (warped, colour-drifted) previous output versus the source image —
+    /// `init = lerp(source, drifted_previous, feedback)`. 0 = every frame
+    /// is a fresh edit of the source, 1 = pure self-feedback (the source
+    /// only conditions as the reference/anchor, never re-enters the init).
+    pub feedback: f32,
+    pub noise_mode: NoiseMode,
+    pub drift: DriftParams,
 }
 
 impl Default for LiveConfig {
@@ -651,6 +804,68 @@ impl Default for LiveConfig {
             seed_mode: SeedMode::default(),
             references: Vec::new(),
             camera: CameraMotion::default(),
+            feedback: 0.7,
+            noise_mode: NoiseMode::default(),
+            drift: DriftParams::default(),
+        }
+    }
+}
+
+/// Clamps a `feedback` / `drift.*` style unit fraction from the wire.
+fn clamp_unit(value: f64) -> Option<f32> {
+    value.is_finite().then(|| (value as f32).clamp(0.0, 1.0))
+}
+
+/// Merges the optional feedback-loop fields of a `POST /realtime` body or a
+/// control message into `config`: only present, finite values change
+/// anything. Shared by [`LiveParams::from_request`] and
+/// `realtime::apply_control_to_config` so the two entry points can never
+/// disagree on clamps.
+pub fn merge_feedback_fields(
+    config: &mut LiveConfig,
+    feedback: Option<f64>,
+    noise_mode: Option<&str>,
+    camera: Option<&crate::realtime_wire::CameraUpdateJson>,
+    drift: Option<&crate::realtime_wire::DriftUpdateJson>,
+) {
+    if let Some(value) = feedback.and_then(clamp_unit) {
+        config.feedback = value;
+    }
+    if let Some(mode) = noise_mode.and_then(|text| NoiseMode::parse(text).ok()) {
+        config.noise_mode = mode;
+    }
+    if let Some(camera) = camera {
+        if let Some(dolly) = camera.dolly.filter(|v| v.is_finite()) {
+            config.camera.dolly = dolly as f32;
+        }
+        if let Some(pan_x) = camera.pan_x.filter(|v| v.is_finite()) {
+            config.camera.pan_x = pan_x as f32;
+        }
+        if let Some(pan_y) = camera.pan_y.filter(|v| v.is_finite()) {
+            config.camera.pan_y = pan_y as f32;
+        }
+        if let Some(roll) = camera.roll.filter(|v| v.is_finite()) {
+            config.camera.roll = roll as f32;
+        }
+    }
+    if let Some(drift) = drift {
+        if let Some(hue) = drift.hue.filter(|v| v.is_finite()) {
+            config.drift.hue_deg = (hue as f32).clamp(-180.0, 180.0);
+        }
+        if let Some(gain) = drift.gain.filter(|v| v.is_finite()) {
+            config.drift.gain = (gain as f32).clamp(0.0, 2.0);
+        }
+        if let Some(anchor) = drift.anchor.and_then(clamp_unit) {
+            config.drift.anchor = anchor;
+        }
+        if let Some(grain) = drift.grain.and_then(clamp_unit) {
+            config.drift.grain = grain;
+        }
+        if let Some(sharpen) = drift.sharpen.filter(|v| v.is_finite()) {
+            config.drift.sharpen = (sharpen as f32).clamp(0.0, 4.0);
+        }
+        if let Some(border) = drift.border.as_deref().and_then(|text| BorderMode::parse(text).ok()) {
+            config.drift.border = border;
         }
     }
 }
@@ -742,21 +957,39 @@ impl LiveParams {
             .unwrap_or(0.0)
             .min(240.0);
         let idle_timeout_s = request.idle_timeout_s.unwrap_or(30).min(3600);
+        let mut config = LiveConfig {
+            width,
+            height,
+            prompt: request.prompt.clone().unwrap_or_default(),
+            negative_prompt: request.negative_prompt.clone().unwrap_or_default(),
+            strength,
+            steps,
+            guidance,
+            seed,
+            seed_mode,
+            references: Vec::new(),
+            camera: CameraMotion::default(),
+            feedback: 0.7,
+            noise_mode: NoiseMode::Auto,
+            drift: DriftParams::default(),
+        };
+        if let Some(text) = request.noise_mode.as_deref().filter(|t| !t.is_empty()) {
+            // Unlike a control message, a malformed open request is refused.
+            NoiseMode::parse(text)?;
+        }
+        if let Some(text) = request.drift.as_ref().and_then(|d| d.border.as_deref()).filter(|t| !t.is_empty()) {
+            BorderMode::parse(text)?;
+        }
+        merge_feedback_fields(
+            &mut config,
+            request.feedback,
+            request.noise_mode.as_deref(),
+            request.camera.as_ref(),
+            request.drift.as_ref(),
+        );
         Ok(Self {
             model: request.model.clone(),
-            config: LiveConfig {
-                width,
-                height,
-                prompt: request.prompt.clone().unwrap_or_default(),
-                negative_prompt: request.negative_prompt.clone().unwrap_or_default(),
-                strength,
-                steps,
-                guidance,
-                seed,
-                seed_mode,
-                references: Vec::new(),
-                camera: CameraMotion::default(),
-            },
+            config,
             loop_mode,
             input_encoding,
             output_encoding,
@@ -767,21 +1000,36 @@ impl LiveParams {
 }
 
 /// One `ContentBackend::live_step` call's inputs: the (optional) init image
-/// for this frame — `None` only in `loop_mode = "feed"` before any input
-/// frame has ever arrived — the monotonic frame counter, and the current
-/// (already control-merged, seed-resolved) config.
+/// for this frame, the (optional) anchor image, the monotonic frame counter,
+/// and the current (already control-merged, seed-resolved) config.
+///
+/// `init` is what the sampler STARTS from (img2img at `config.strength`).
+/// `anchor` is what the edit is CONDITIONED on — the image a reference-
+/// conditioned model such as Klein sees as its first reference. A feed
+/// session passes `anchor: None` and the backend conditions on `init`
+/// itself, exactly as before the feedback loop existed. A feedback session
+/// (`crate::realtime::run_live`) keeps the two apart on purpose: the init
+/// is the warped/drifted previous output blended with the source, the
+/// anchor is the untouched source — feeding the drifted frame in as both
+/// is the double-feed that collapses a loop into a saturated smear within
+/// a few iterations. `init: None` with `anchor: Some` is the cold start:
+/// one full edit of the anchor from noise.
 pub struct LiveFrameIn<'a> {
     pub init: Option<&'a RgbImage>,
+    pub anchor: Option<&'a RgbImage>,
     pub frame_index: u64,
     pub config: &'a LiveConfig,
 }
 
 /// One `ContentBackend::live_step` call's output: the produced frame plus
 /// the backend's own wall-clock cost (surfaced in the `stats` message's
-/// `stage_ms.model`).
+/// `stage_ms.model`) and, inside that, the share the text encoder took
+/// (`stage_ms.text_encode`; 0 for backends without one, and near 0 on the
+/// frames where `flux2_backend` served the prompt embeds from its cache).
 pub struct LiveFrameOut {
     pub image: RgbImage,
     pub model_ms: f64,
+    pub text_encode_ms: f64,
 }
 
 /// Maximum adapters one job may stack. Each one is merged into the resident

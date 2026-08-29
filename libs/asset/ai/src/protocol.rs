@@ -780,18 +780,39 @@ pub struct LiveStatusJson {
 //   {"type":"control", ...any subset of: prompt, negative_prompt, strength,
 //    steps, guidance, seed, seed_mode, width, height, camera:{dolly,pan_x,
 //    pan_y,roll}, loop_mode, input_encoding, output_encoding, max_fps,
-//    idle_timeout_s}
+//    idle_timeout_s, feedback, noise_mode, drift:{hue,gain,anchor,grain,
+//    sharpen,border}, reset}
 //   {"type":"reference", "slot":0, "png_b64":"..."}
 //   {"type":"stop"}
 // A `control` message only touches the fields it sets (see
 // `realtime::apply_control_to_config`) — every other tunable keeps its
 // current value.
 //
+// Feedback loop (`loop_mode:"feedback"`, see `realtime::run_live`):
+// the session's SOURCE is reference slot 0, or — for a client that pushes
+// raw frames instead — the latest pushed input frame (each new push
+// becomes the new source; a `{"type":"control","loop_mode":"feed"}` round
+// trip is not required to retarget). The first frame is one full edit of
+// the source (strength forced to 1.0). Every frame after that: the previous
+// output is camera-warped (`camera`, border per `drift.border`), colour-
+// drifted (`drift`: hue rotation, gain about mid-grey, per-channel mean/std
+// pulled `anchor` of the way toward the source's statistics, grain,
+// unsharp), blended `init = lerp(source, drifted, feedback)`, and sampled
+// from that init at `strength` while the UNTOUCHED source conditions the
+// edit as the reference. `noise_mode:"hold"` (the feedback default) keeps
+// the base seed's noise field for every frame; `"reroll"` lets `seed_mode`
+// re-draw it. `{"type":"control","reset":true}` drops the previous output
+// so the next frame is a cold start from the current source. `strength` at
+// 4 steps is a 5-position switch (start step = floor((1-strength)*4)):
+// above 0.75 the init is never encoded and every frame is a fresh edit.
+//
 // JSON messages, server -> client:
 //   {"type":"stats", "frame_index":N, "fps":.., "frame_ms":..,
-//    "stage_ms":{"prep":..,"model":..,"post":..}, "frames_in":..,
-//    "frames_out":.., "dropped":..,
-//    "codec":{"input":"h264","output":"h264","dropped_decode":N}}
+//    "stage_ms":{"prep":..,"model":..,"text_encode":..,"post":..},
+//    "frames_in":.., "frames_out":.., "dropped":..,
+//    "codec":{"input":"h264","output":"h264","dropped_decode":N},
+//    "loop_mode":"feed"|"feedback", "frame_diff":<mean |out - previous
+//    out| in 0..255, null on the first frame or a size change>}
 //    (sent every produced frame)
 //   {"type":"error", "message":".."}
 //   {"type":"stopped", "reason":"stopped"|"cancelled"|"error"}  (once, as
@@ -845,6 +866,16 @@ pub struct RealtimeRequestJson {
     pub idle_timeout_s: Option<u64>,
     /// Same admission policy as `/generate`: "queue" (default) or "reject".
     pub queue_policy: Option<String>,
+    /// Feedback loop only — see the wire doc block's "Feedback loop"
+    /// section. All optional; the same fields are live-updatable through
+    /// `{"type":"control"}`. `feedback` 0..1 (default 0.7): share of the
+    /// warped previous output in the next init. `noise_mode`: "hold"
+    /// (default in feedback) | "reroll". `camera` / `drift`: partial
+    /// objects, every field optional.
+    pub feedback: Option<f64>,
+    pub noise_mode: Option<String>,
+    pub camera: Option<crate::realtime_wire::CameraUpdateJson>,
+    pub drift: Option<crate::realtime_wire::DriftUpdateJson>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]

@@ -136,6 +136,20 @@ pub struct CameraUpdateJson {
     pub roll: Option<f64>,
 }
 
+/// Partial update of `backend::DriftParams` (feedback loop colour
+/// treatment) — same all-optional merge pattern as [`CameraUpdateJson`].
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct DriftUpdateJson {
+    /// Degrees per frame.
+    pub hue: Option<f64>,
+    pub gain: Option<f64>,
+    pub anchor: Option<f64>,
+    pub grain: Option<f64>,
+    pub sharpen: Option<f64>,
+    /// "reflect" | "clamp" | "source".
+    pub border: Option<String>,
+}
+
 /// `{"type":"control", ...}` — every field is optional; only the fields
 /// present in a given message change the session (see
 /// `realtime::apply_control_to_config` and `realtime::RealtimeSession::
@@ -159,6 +173,14 @@ pub struct ControlUpdateJson {
     pub output_encoding: Option<String>,
     pub max_fps: Option<f64>,
     pub idle_timeout_s: Option<u64>,
+    /// Feedback loop: share of the warped previous output in the next init.
+    pub feedback: Option<f64>,
+    /// "hold" | "reroll" | "auto".
+    pub noise_mode: Option<String>,
+    pub drift: Option<DriftUpdateJson>,
+    /// `true`: forget the previous output, so the next feedback frame is a
+    /// cold start (one full edit) from the current source.
+    pub reset: Option<bool>,
 }
 
 /// `{"type":"reference", "slot":0, "png_b64":"..."}`.
@@ -208,6 +230,9 @@ pub fn parse_client_message(text: &str) -> Result<ClientMessage, AssetAiError> {
 pub struct StageMsJson {
     pub prep: f64,
     pub model: f64,
+    /// The text encoder's share of `model` (0 when the backend has none or
+    /// served cached prompt embeds).
+    pub text_encode: f64,
     pub post: f64,
 }
 
@@ -223,6 +248,13 @@ pub struct StatsMessageJson {
     pub frames_out: u64,
     pub dropped: u64,
     pub codec: CodecStatsJson,
+    /// "feed" | "feedback" — the loop mode this frame was produced in.
+    pub loop_mode: String,
+    /// Mean absolute difference (0..255) between this output frame and the
+    /// previous one — the "is the loop still moving" number a client would
+    /// otherwise have to compute itself. Absent on the first frame and
+    /// whenever the two differ in size.
+    pub frame_diff: Option<f64>,
 }
 
 /// Wire encoding actually in effect for each direction, plus the count of
@@ -385,6 +417,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_client_message_control_with_feedback_fields() {
+        let msg = parse_client_message(
+            r#"{"type":"control","loop_mode":"feedback","feedback":0.7,"noise_mode":"hold",
+                "drift":{"hue":0.6,"anchor":0.05,"border":"source"},"reset":true}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMessage::Control(update) => {
+                assert_eq!(update.loop_mode.as_deref(), Some("feedback"));
+                assert_eq!(update.feedback, Some(0.7));
+                assert_eq!(update.noise_mode.as_deref(), Some("hold"));
+                assert_eq!(update.reset, Some(true));
+                let drift = update.drift.expect("drift present");
+                assert_eq!(drift.hue, Some(0.6));
+                assert_eq!(drift.anchor, Some(0.05));
+                assert_eq!(drift.border.as_deref(), Some("source"));
+                // Fields the message did not carry stay None (partial merge).
+                assert_eq!(drift.gain, None);
+                assert_eq!(drift.grain, None);
+                assert_eq!(drift.sharpen, None);
+            }
+            _ => panic!("expected Control"),
+        }
+    }
+
+    #[test]
     fn parse_client_message_reference() {
         let msg = parse_client_message(r#"{"type":"reference","slot":2,"png_b64":"AA=="}"#).unwrap();
         match msg {
@@ -422,14 +480,18 @@ mod tests {
             frame_index: 3,
             fps: 30.0,
             frame_ms: 33.3,
-            stage_ms: StageMsJson { prep: 1.0, model: 30.0, post: 2.3 },
+            stage_ms: StageMsJson { prep: 1.0, model: 30.0, text_encode: 4.0, post: 2.3 },
             frames_in: 3,
             frames_out: 3,
             dropped: 0,
             codec: CodecStatsJson::default(),
             kind: String::new(),
+            loop_mode: "feedback".to_string(),
+            frame_diff: Some(12.5),
         });
         assert!(stats.contains("\"type\":\"stats\""));
+        assert!(stats.contains("\"frame_diff\":12.5"));
+        assert!(stats.contains("\"loop_mode\":\"feedback\""));
         assert!(!is_frame_message(stats.as_bytes()));
 
         let error = encode_error_message("bad seed");

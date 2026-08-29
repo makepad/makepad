@@ -110,6 +110,7 @@ impl ContentBackend for TestPatternBackend {
         Ok(LiveFrameOut {
             image: RgbImage { width, height, data: out_data },
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
+            text_encode_ms: 0.0,
         })
     }
 }
@@ -423,7 +424,7 @@ mod tests {
         let cancel = CancelToken::new();
         let out = backend
             .live_step(
-                LiveFrameIn { init: Some(&init), frame_index: 0, config: &config },
+                LiveFrameIn { init: Some(&init), anchor: None, frame_index: 0, config: &config },
                 &cancel,
             )
             .unwrap();
@@ -442,7 +443,7 @@ mod tests {
         // No init image at all (feed mode before any frame arrived): the
         // step still produces a frame of the requested size.
         let out = backend
-            .live_step(LiveFrameIn { init: None, frame_index: 0, config: &config }, &cancel)
+            .live_step(LiveFrameIn { init: None, anchor: None, frame_index: 0, config: &config }, &cancel)
             .unwrap();
         assert_eq!(out.image.width, 4);
         assert_eq!(out.image.height, 4);
@@ -458,10 +459,10 @@ mod tests {
         config.strength = 1.0;
         let cancel = CancelToken::new();
         let frame0 = backend
-            .live_step(LiveFrameIn { init: None, frame_index: 0, config: &config }, &cancel)
+            .live_step(LiveFrameIn { init: None, anchor: None, frame_index: 0, config: &config }, &cancel)
             .unwrap();
         let frame5 = backend
-            .live_step(LiveFrameIn { init: None, frame_index: 5, config: &config }, &cancel)
+            .live_step(LiveFrameIn { init: None, anchor: None, frame_index: 5, config: &config }, &cancel)
             .unwrap();
         assert_ne!(frame0.image.data, frame5.image.data, "pattern must move with frame_index");
     }
