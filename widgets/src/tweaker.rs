@@ -1936,6 +1936,7 @@ fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
 /// Built from `vm.construction_chain` over the widget's `#[source]` object:
 /// the proto chain of `made_at` ips, each resolved to a source location and
 /// its `///` docs (see platform/script/src/docs.rs).
+#[derive(Clone)]
 struct CascadeLevel {
     /// "button.rs:52" (basename:line), or "native" for Rust-built levels.
     loc: String,
@@ -1971,6 +1972,37 @@ enum StructKind {
     /// Recognized as structured but with no editor yet (a big nested
     /// struct like a full text_style): shown collapsed, never dumped.
     NoEditor,
+}
+
+/// Selected state by fill, never by brackets in the label.
+fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
+    let mut btn = btn;
+    let color: Vec4f = if selected { vec4(0.31, 0.34, 0.44, 1.0) } else { vec4(0.20, 0.20, 0.21, 1.0) };
+    script_apply_eval!(cx, btn, { draw_bg +: { color: #(color) } });
+}
+
+/// Keep the leaf visible: `…` then the last `keep` chars.
+fn tail_ellipsis(s: &str, keep: usize) -> String {
+    let n = s.chars().count();
+    if n <= keep {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - keep).collect();
+    format!("\u{2026}{tail}")
+}
+
+/// Which kind of place a cascade level comes from, for its icon:
+/// 0 app file, 1 widget library file, 2 theme file, 3 native (no file).
+fn cascade_icon_kind(file: &str) -> usize {
+    if file.is_empty() {
+        3
+    } else if file.rsplit('/').next().unwrap_or("").contains("theme") {
+        2
+    } else if file.contains("widgets/src/") || file.contains("/widgets/") {
+        1
+    } else {
+        0
+    }
 }
 
 /// A history step's widget: the path when it round-trips, else the pinned
@@ -3602,12 +3634,12 @@ impl SectionKind {
     }
     fn title(self) -> &'static str {
         match self {
-            SectionKind::Layout => "LAYOUT",
-            SectionKind::Style => "STYLE",
-            SectionKind::Text => "TEXT",
-            SectionKind::Behavior => "BEHAVIOR",
-            SectionKind::Other => "OTHER",
-            SectionKind::Cascade => "CASCADE",
+            SectionKind::Layout => "Layout",
+            SectionKind::Style => "Style",
+            SectionKind::Text => "Text",
+            SectionKind::Behavior => "Behavior",
+            SectionKind::Other => "Other",
+            SectionKind::Cascade => "Cascade",
         }
     }
 }
@@ -3871,6 +3903,8 @@ enum VisKind {
     Doc(usize),
     /// The Shader tab's INPUTS header: the mirrored layer's own inputs.
     InputsHeader(usize),
+    /// One level of the selection's cascade (index into Tweaker::cascade).
+    CascadeLevel(usize),
 }
 
 #[derive(Clone)]
@@ -3976,6 +4010,9 @@ pub struct Tweaker {
     /// Which cascade level (0 = instance) set each top-level prop.
     #[rust]
     origin_levels: HashMap<String, usize>,
+    /// The selection's construction chain, one entry per level.
+    #[rust]
+    cascade: Vec<CascadeLevel>,
     /// How many cascade levels the selection has (colors + scroll target).
     #[rust]
     cascade_level_count: usize,
@@ -4264,7 +4301,48 @@ impl Tweaker {
 
                 // Row templates, hoisted: one source of truth for the Props list,
                 // the Shader tab INPUTS list and the shader-constant rows.
-                let SectionRowT = FabSection {}
+                let SectionRowT = FabSection {
+                    count := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 1 right: 0 bottom: 0} text: "" }
+                }
+                let CascadeRowT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    spacing: 2
+                    padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                    head := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0 y: 0.5}
+                        ic_app := View { width: Fit height: Fit visible: false
+                            i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("self:resources/icons/icon_file.svg") } }
+                        }
+                        ic_lib := View { width: Fit height: Fit visible: false
+                            i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("self:resources/icons/icon_widget.svg") } }
+                        }
+                        ic_theme := View { width: Fit height: Fit visible: false
+                            i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("self:resources/icons/icon_draw.svg") } }
+                        }
+                        ic_native := View { width: Fit height: Fit visible: false
+                            i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("self:resources/icons/icon_layout.svg") } }
+                        }
+                        chip := RoundedView {
+                            width: Fit height: Fit
+                            padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
+                            draw_bg +: { color: #x555555 radius: 3. }
+                            lbl := FabLabelSmall { width: Fit text: "L0" draw_text +: { color: #x151515 } }
+                        }
+                        loc := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    }
+                    sets_wrap := View { width: Fill height: Fit visible: false
+                        sets := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                    }
+                    overridden_wrap := View { width: Fill height: Fit visible: false
+                        overridden := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                    }
+                }
                 let MaterialRowT = View {
                     width: Fill
                     height: 40
@@ -4623,27 +4701,6 @@ impl Tweaker {
                     }
                     padding: Inset{left: 4 right: 4 top: 6 bottom: 4}
                     spacing: 4
-                    title_label := FabHeaderLabel {
-                        width: Fill
-                        margin: Inset{left: 4 top: 0 right: 0 bottom: 0}
-                        text: "TWEAK"
-                    }
-                    path_label := FabLabelSmall {
-                        width: Fill
-                        margin: Inset{left: 4 top: 0 right: 0 bottom: 2}
-                        text: "click a widget to inspect it"
-                    }
-                    scope_row := View {
-                        width: Fill
-                        height: Fit
-                        flow: Right
-                        spacing: 4
-                        align: Align{x: 0.0 y: 0.5}
-                        margin: Inset{left: 4 top: 0 right: 0 bottom: 2}
-                        scope_this := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "[this]" }
-                        scope_all := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "all" }
-                        scope_origin := FabLabelSmall { width: Fill text: "" }
-                    }
                     filter_row := View {
                         width: Fill
                         height: Fit
@@ -4852,6 +4909,25 @@ impl Tweaker {
                         width: Fill
                         height: Fill
                         flow: Down
+                        scope_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 3
+                            padding: Inset{left: 8 right: 8 top: 6 bottom: 4}
+                            scope_line := View {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 4
+                                align: Align{x: 0.0 y: 0.5}
+                                scope_label := FabLabelSmall { width: Fit text: "scope" }
+                                scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            }
+                            scope_doc := FabLabelSmall { width: Fill text: "" }
+                            scope_origin := FabLabelSmall { width: Fill text: "" }
+                        }
                         props := PortalList {
                         width: Fill
                         height: Fill
@@ -4868,6 +4944,7 @@ impl Tweaker {
                         BoolRow := BoolRowT {}
                         TextRow := TextRowT {}
                         InfoRow := InfoRowT {}
+                        CascadeRow := CascadeRowT {}
                         SizeRow := SizeRowT {}
                         BoxRow := BoxRowT {}
                         FlowRow := FlowRowT {}
@@ -4881,6 +4958,17 @@ impl Tweaker {
                         DocRow := DocRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
+                    }
+                    ident_footer := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        show_bg: true
+                        draw_bg +: { color: #x262626 }
+                        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                        title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     }
                 }
             });
@@ -5099,26 +5187,6 @@ impl Tweaker {
                 }
             }
             self.origin_levels.clear();
-            let mut push = |prop: String, value: String| {
-                self.rows.push(RowBinding {
-                    prop,
-                    kind: RowKind::Info,
-                    value,
-                    quoted: false,
-                    section: SectionKind::Cascade,
-                    set: true,
-                    changed: false,
-                    original: None,
-                    field_uid: 0,
-                    swatch_uid: 0,
-                    struct_kind: StructKind::None,
-                    comp_vals: Vec::new(),
-                    comp_uids: Vec::new(),
-                    mode_uids: Vec::new(),
-                    alt_uids: Vec::new(),
-                    const_ref: None,
-                });
-            };
             let levels = cascade_levels(cx, &widget);
             self.cascade_level_count = levels.len();
             for (i, lvl) in levels.iter().enumerate() {
@@ -5127,64 +5195,11 @@ impl Tweaker {
                         self.origin_levels.entry(key.clone()).or_insert(i);
                     }
                 }
-                let mut doc_lines = lvl.doc.as_deref().unwrap_or("").lines();
-                push(
-                    format!("L{i} {}", lvl.loc),
-                    doc_lines.next().unwrap_or("").to_string(),
-                );
-                for line in doc_lines {
-                    push("  \u{b7}".to_string(), line.to_string());
-                }
-                for (field, doc) in &lvl.field_docs {
-                    for (j, line) in doc.lines().enumerate() {
-                        let prop = if j == 0 {
-                            format!("  {field}")
-                        } else {
-                            "  \u{b7}".to_string()
-                        };
-                        push(prop, line.to_string());
-                    }
-                }
-                if !lvl.sets.is_empty() {
-                    // ~name~ = overridden by a closer level (struck through
-                    // in spirit; the row font has no strike style yet).
-                    let joined = lvl
-                        .sets
-                        .iter()
-                        .map(|(name, overridden)| {
-                            if *overridden {
-                                format!("~{name}~")
-                            } else {
-                                name.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    // chunk long lists into readable rows
-                    let mut line = String::new();
-                    let mut first = true;
-                    for word in joined.split(' ') {
-                        if !line.is_empty() && line.len() + word.len() > 34 {
-                            push(
-                                if first { "  sets".to_string() } else { "  \u{b7}".to_string() },
-                                line.clone(),
-                            );
-                            first = false;
-                            line.clear();
-                        }
-                        if !line.is_empty() {
-                            line.push(' ');
-                        }
-                        line.push_str(word);
-                    }
-                    if !line.is_empty() {
-                        push(
-                            if first { "  sets".to_string() } else { "  \u{b7}".to_string() },
-                            line,
-                        );
-                    }
-                }
             }
+            // The CASCADE section renders these directly (one row per
+            // level: icon, chip, file:line, what it sets); the rows list
+            // carries no Info rows for it any more.
+            self.cascade = levels;
         }
         self.rows_uid = sel_uid;
     }
@@ -5321,6 +5336,19 @@ impl Tweaker {
             }
         }
         for section in SECTION_ORDER {
+            if section == SectionKind::Cascade {
+                if filtering || self.cascade.is_empty() {
+                    continue;
+                }
+                let open = !self.collapsed[section.index()];
+                out.push(VisKind::Section(section, self.cascade.len(), open));
+                if open {
+                    for i in 0..self.cascade.len() {
+                        out.push(VisKind::CascadeLevel(i));
+                    }
+                }
+                continue;
+            }
             let members: Vec<usize> = self
                 .rows
                 .iter()
@@ -5448,15 +5476,20 @@ impl Tweaker {
                     head
                 };
                 sidebar
-                    .child(live_id!(title_label))
+                    .child(live_id!(ident_footer)).child(live_id!(title_label))
                     .set_text(cx, &head);
-                sidebar.child(live_id!(path_label)).set_text(cx, &sel.path);
+                sidebar.child(live_id!(ident_footer)).child(live_id!(path_label)).set_text(cx, &tail_ellipsis(&sel.path, 44));
                 {
                     let all = session().lock().unwrap().scope_all;
-                    let row = sidebar.child(live_id!(scope_row));
-                    row.child(live_id!(scope_this)).set_text(cx, if all { "this" } else { "[this]" });
-                    let all_label = format!("{}all {}s{}", if all { "[" } else { "" }, sel.ty, if all { "]" } else { "" });
-                    row.child(live_id!(scope_all)).set_text(cx, &all_label);
+                    let row = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row));
+                    row.child(live_id!(scope_line)).child(live_id!(scope_this)).set_text(cx, "this");
+                    row.child(live_id!(scope_line)).child(live_id!(scope_all)).set_text(cx, &format!("all {}s", sel.ty));
+                    set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_this)), !all);
+                    set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_all)), all);
+                    row.child(live_id!(scope_doc)).set_text(
+                        cx,
+                        &format!("this: only this instance \u{00b7} all {}s: every {} in the app (edits the type's definition)", sel.ty, sel.ty),
+                    );
                     let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
                     let origin = if widget.is_empty() {
                         String::new()
@@ -5466,13 +5499,13 @@ impl Tweaker {
                         source_origin(cx, &widget)
                     };
                     let base = origin.rsplit('/').next().unwrap_or(&origin).to_string();
-                    row.child(live_id!(scope_origin)).set_text(cx, &format!("\u{2192} {base}"));
+                    row.child(live_id!(scope_origin)).set_text(cx, &if base.is_empty() { String::new() } else { format!("edits land in {base}") });
                 }
             }
             None => {
-                sidebar.child(live_id!(title_label)).set_text(cx, "TWEAK");
+                sidebar.child(live_id!(ident_footer)).child(live_id!(title_label)).set_text(cx, "tweak");
                 sidebar
-                    .child(live_id!(path_label))
+                    .child(live_id!(ident_footer)).child(live_id!(path_label))
                     .set_text(cx, "click a widget to inspect it");
             }
         }
@@ -5492,8 +5525,8 @@ impl Tweaker {
             .child(live_id!(note))
             .widget_uid()
             .0;
-        self.scope_this_uid = sidebar.child(live_id!(scope_row)).child(live_id!(scope_this)).widget_uid().0;
-        self.scope_all_uid = sidebar.child(live_id!(scope_row)).child(live_id!(scope_all)).widget_uid().0;
+        self.scope_this_uid = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
+        self.scope_all_uid = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
         let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
         let spread = spread_wrap.child(live_id!(spread));
         self.spread_uid = spread.widget_uid().0;
@@ -5538,14 +5571,8 @@ impl Tweaker {
             ];
             for (i, (id, t, label)) in tabs.into_iter().enumerate() {
                 let btn = tab_row.child(id);
-                btn.set_text(
-                    cx,
-                    &if t == tab {
-                        format!("[{label}]")
-                    } else {
-                        label.to_string()
-                    },
-                );
+                btn.set_text(cx, label);
+                set_button_fill(cx, btn.clone(), t == tab);
                 self.tab_uids[i] = btn.widget_uid().0;
             }
             // Shader tab content: the layer's live preview + doc + prompt.
@@ -5886,6 +5913,7 @@ impl Tweaker {
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
                     VisKind::TweakHeader(..) | VisKind::InputsHeader(_) => live_id!(SectionRow),
+                    VisKind::CascadeLevel(_) => live_id!(CascadeRow),
                     VisKind::Doc(_) => live_id!(DocRow),
                     VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
@@ -5908,31 +5936,56 @@ impl Tweaker {
                 }
                 match entry {
                     VisKind::Section(section, count, open) => {
-                        item.child(live_id!(title)).set_text(
-                            cx,
-                            &format!(
-                                "{} {} ({count})",
-                                if open { "-" } else { "+" },
-                                section.title()
-                            ),
-                        );
+                        item.child(live_id!(title)).set_text(cx, section.title());
+                        item.child(live_id!(count))
+                            .set_text(cx, &format!("{count}{}", if open { "" } else { "  +" }));
                     }
                     VisKind::More(_, count) => {
-                        item.child(live_id!(title))
-                            .set_text(cx, &format!("\u{2026} show all ({count})"));
+                        item.child(live_id!(title)).set_text(cx, &format!("+ show all ({count})"));
+                        item.child(live_id!(count)).set_text(cx, "");
                     }
                     VisKind::TweakHeader(count, open) => {
-                        item.child(live_id!(title)).set_text(
-                            cx,
-                            &format!("{} SHADER CONSTANTS ({count})", if open { "-" } else { "+" }),
-                        );
+                        item.child(live_id!(title)).set_text(cx, "Shader constants");
+                        item.child(live_id!(count))
+                            .set_text(cx, &format!("{count}{}", if open { "" } else { "  +" }));
                     }
                     VisKind::Doc(index) => {
                         let text = self.doc_line_for(index);
                         item.child(live_id!(doc)).set_text(cx, &text);
                     }
                     VisKind::InputsHeader(count) => {
-                        item.child(live_id!(title)).set_text(cx, &format!("INPUTS ({count})"));
+                        item.child(live_id!(title)).set_text(cx, "Inputs");
+                        item.child(live_id!(count)).set_text(cx, &format!("{count}"));
+                    }
+                    VisKind::CascadeLevel(level) => {
+                        if let Some(lvl) = self.cascade.get(level).cloned() {
+                            let kind = cascade_icon_kind(&lvl.file);
+                            let head = item.child(live_id!(head));
+                            for (k, id) in [live_id!(ic_app), live_id!(ic_lib), live_id!(ic_theme), live_id!(ic_native)].into_iter().enumerate() {
+                                head.child(id).set_visible(cx, k == kind);
+                            }
+                            let mut chip = head.child(live_id!(chip));
+                            chip.child(live_id!(lbl)).set_text(cx, &format!("L{level}"));
+                            let color = Self::level_color(level);
+                            script_apply_eval!(cx, chip, { draw_bg +: { color: #(color) } });
+                            head.child(live_id!(loc)).set_text(cx, if lvl.file.is_empty() { "native" } else { &lvl.loc });
+                            let own: Vec<&str> = lvl.sets.iter().filter(|(_, o)| !*o).map(|(n, _)| n.as_str()).collect();
+                            let over: Vec<&str> = lvl.sets.iter().filter(|(_, o)| *o).map(|(n, _)| n.as_str()).collect();
+                            item.child(live_id!(sets_wrap)).set_visible(cx, !own.is_empty());
+                            item.child(live_id!(overridden_wrap)).set_visible(cx, !over.is_empty());
+                            item.child(live_id!(sets_wrap)).child(live_id!(sets)).set_text(cx, &if own.is_empty() { String::new() } else { format!("sets {}", own.join(" \u{00b7} ")) });
+                            item.child(live_id!(overridden_wrap)).child(live_id!(overridden)).set_text(cx, &if over.is_empty() {
+                                String::new()
+                            } else {
+                                // the closer level that wins each one
+                                let mut by: Vec<String> = Vec::new();
+                                for name in &over {
+                                    let at = self.origin_levels.get(*name).map(|l| format!("L{l}")).unwrap_or_default();
+                                    by.push(if at.is_empty() { name.to_string() } else { format!("{name} \u{2192} {at}") });
+                                }
+                                format!("overridden {}", by.join(" \u{00b7} "))
+                            });
+                        }
                     }
                     VisKind::Material(mi) => {
                         let layer = self.materials.get(mi).cloned().unwrap_or_default();
@@ -5992,14 +6045,8 @@ impl Tweaker {
                             };
                             for (i, seg_child) in segs.into_iter().enumerate() {
                                 let btn = seg.child(seg_child);
-                                btn.set_text(
-                                    cx,
-                                    &if i == active {
-                                        format!("[{}]", labels[i])
-                                    } else {
-                                        labels[i].to_string()
-                                    },
-                                );
+                                btn.set_text(cx, labels[i]);
+                                set_button_fill(cx, btn.clone(), i == active);
                                 let chunk = match i {
                                     0 => format!("{axis}: Fill"),
                                     1 => format!("{axis}: Fit"),
@@ -7767,7 +7814,7 @@ impl Widget for Tweaker {
                                 self.tweakables_open = !self.tweakables_open;
                                 self.redraw_sidebar(cx);
                             }
-                            VisKind::Tweakable(_) | VisKind::Doc(_) | VisKind::InputsHeader(_) => {}
+                            VisKind::Tweakable(_) | VisKind::Doc(_) | VisKind::InputsHeader(_) | VisKind::CascadeLevel(_) => {}
                             VisKind::Material(mi) => {
                                 // Thumbnail click: jump to the Shader tab
                                 // with this draw layer loaded.
