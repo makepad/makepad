@@ -1,0 +1,16 @@
+[package]
+name = "makepad-teamtalk"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Low-latency LAN voice chat core in safe Rust, no dependencies: UDP peer discovery, per-peer adaptive jitter buffers with loss concealment and drift correction, team channels, and a frame-oriented allocation-free audio-thread API"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+
+[dev-dependencies]
+# Only for the codec test that cross-checks our Ogg pages against an
+# independent reader; consumers of this crate stay dependency-free.
+makepad-audio-decode = { path = "../audio_decode" }

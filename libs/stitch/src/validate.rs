@@ -3,13 +3,15 @@ use {
         code,
         code::{
             BinOpInfo, BlockType, InstrVisitor, LoadInfo, MemArg, StoreInfo, UnOpInfo,
-            UncompiledCode,
+            UncompiledCode, V128BinOpInfo, V128ReduceOpInfo, V128UnOpInfo,
         },
+        config::Extensions,
         decode::DecodeError,
         func::FuncType,
         global::Mut,
         module::ModuleBuilder,
         ref_::RefType,
+        simd::V128,
         val::ValType,
     },
     std::{mem, ops::Deref},
@@ -40,6 +42,7 @@ impl Validator {
         type_: &FuncType,
         module: &ModuleBuilder,
         code: &UncompiledCode,
+        exts: Extensions,
     ) -> Result<(), DecodeError> {
         use crate::decode::Decoder;
 
@@ -62,7 +65,7 @@ impl Validator {
         );
         let mut decoder = Decoder::new(&code.expr);
         while !validation.blocks.is_empty() {
-            code::decode_instr(&mut decoder, &mut self.label_idxs, &mut validation)?;
+            code::decode_instr(&mut decoder, &mut self.label_idxs, &mut validation, exts)?;
         }
         Ok(())
     }
@@ -344,7 +347,9 @@ impl<'a> InstrVisitor for Validation<'a> {
             self.pop_opd()?.check(ValType::I32)?;
             let input_type_1 = self.pop_opd()?;
             let input_type_0 = self.pop_opd()?;
-            if !(input_type_0.is_num() && input_type_1.is_num()) {
+            if !((input_type_0.is_num() || input_type_0.is_vec())
+                && (input_type_1.is_num() || input_type_1.is_vec()))
+            {
                 return Err(DecodeError::new("type mismatch"));
             }
             if let OpdType::ValType(input_type_1) = input_type_1 {
@@ -561,6 +566,93 @@ impl<'a> InstrVisitor for Validation<'a> {
         }
         Ok(())
     }
+
+    // Vector (v128) instructions
+
+    fn visit_v128_load(&mut self, arg: MemArg) -> Result<(), Self::Error> {
+        if arg.align > 4 {
+            return Err(DecodeError::new("alignment too large"));
+        }
+        self.module.memory(0)?;
+        self.pop_opd()?.check(ValType::I32)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_v128_store(&mut self, arg: MemArg) -> Result<(), Self::Error> {
+        if arg.align > 4 {
+            return Err(DecodeError::new("alignment too large"));
+        }
+        self.module.memory(0)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::I32)?;
+        Ok(())
+    }
+
+    fn visit_v128_const(&mut self, _val: V128) -> Result<(), Self::Error> {
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_i8x16_shuffle(&mut self, _lanes: [u8; 16]) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_f32x4_splat(&mut self) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::F32)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_f32x4_extract_lane(&mut self, _lane: u8) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::F32);
+        Ok(())
+    }
+
+    fn visit_f32x4_replace_lane(&mut self, _lane: u8) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::F32)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_v128_any_true(&mut self) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::I32);
+        Ok(())
+    }
+
+    fn visit_v128_bitselect(&mut self) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_v128_un_op(&mut self, _info: V128UnOpInfo) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_v128_bin_op(&mut self, _info: V128BinOpInfo) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::V128);
+        Ok(())
+    }
+
+    fn visit_v128_reduce_op(&mut self, _info: V128ReduceOpInfo) -> Result<(), Self::Error> {
+        self.pop_opd()?.check(ValType::V128)?;
+        self.pop_opd()?.check(ValType::V128)?;
+        self.push_opd(ValType::F32);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -615,6 +707,13 @@ impl OpdType {
     fn is_num(self) -> bool {
         match self {
             OpdType::ValType(type_) => type_.is_num(),
+            _ => true,
+        }
+    }
+
+    fn is_vec(self) -> bool {
+        match self {
+            OpdType::ValType(type_) => type_.is_vec(),
             _ => true,
         }
     }
