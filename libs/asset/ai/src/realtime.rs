@@ -114,6 +114,9 @@ impl RealtimeSession {
 
     pub fn add_socket(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) {
         self.sockets.lock().unwrap().push(SessionSocket { id, sender });
+        // A feedback worker with no listener holds its loop on the mailbox
+        // condvar; a consumer arriving is what it is waiting for.
+        self.mailbox_cv.notify_all();
         // A fresh socket has no decoder state at all — get it a keyframe
         // now instead of making it wait for the encoder's own GOP cadence.
         #[cfg(feature = "video")]
@@ -208,6 +211,10 @@ impl RealtimeSession {
         self.state.lock().unwrap().idle_timeout_s
     }
 
+    fn loop_mode(&self) -> LoopMode {
+        self.state.lock().unwrap().loop_mode
+    }
+
     /// A cloned snapshot of everything `run_live` needs for one iteration
     /// (cloning `LiveConfig` — including any reference images — up front so
     /// the model call below never holds the session lock).
@@ -241,7 +248,15 @@ impl RealtimeSession {
             .as_deref()
             .and_then(|text| LoopMode::parse(text).ok())
         {
+            let changed = state.loop_mode != mode;
             state.loop_mode = mode;
+            if changed {
+                // The server-loop handshake flips feed -> feedback right
+                // after the first output, while the worker is parked on the
+                // mailbox waiting for input that will never come. Wake it so
+                // the flip takes effect now, not at the next timeout tick.
+                self.mailbox_cv.notify_all();
+            }
         }
         if let Some(encoding) = update
             .input_encoding
@@ -947,7 +962,7 @@ pub fn run_live(
     let mut last_log = Instant::now();
     let mut idle_since: Option<Instant> = None;
 
-    loop {
+    'session: loop {
         cancel.check()?;
         if session.stop_requested() {
             return Ok(());
@@ -980,6 +995,13 @@ pub fn run_live(
                     if let Some(frame) = session.take_mailbox_frame() {
                         break frame;
                     }
+                    if session.loop_mode() != LoopMode::Feed {
+                        // A control update flipped the session to feedback
+                        // while this branch sat waiting for input. Re-enter
+                        // the loop under the new mode instead of waiting for
+                        // a frame the client will never push.
+                        continue 'session;
+                    }
                     session.wait_for_mailbox(Duration::from_millis(250));
                 };
                 // Remembered as the feedback source, so a client that opens
@@ -989,6 +1011,15 @@ pub fn run_live(
                 (Some(frame), None)
             }
             LoopMode::Feedback => {
+                if session.socket_count() == 0 {
+                    // A free-running loop with nobody listening would paint
+                    // frames straight into the void (push_bytes drops them)
+                    // and hold the GPU while doing it. Hold the loop instead
+                    // — sources keep landing in the mailbox/reference slots
+                    // — and let the idle timeout above end the session.
+                    session.wait_for_mailbox(Duration::from_millis(250));
+                    continue 'session;
+                }
                 // Whichever arrived last wins: a pushed frame or a new
                 // reference slot 0 is a retarget.
                 if let Some(frame) = session.take_mailbox_frame() {
@@ -1630,6 +1661,10 @@ mod tests {
         source: RgbImage,
     ) -> Vec<SeenFrame> {
         let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        // A feedback worker only runs while somebody listens; give the test
+        // session one socket for its whole life.
+        let (socket_tx, socket_rx) = mpsc::channel();
+        session.add_socket(1, socket_tx);
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let worker = {
             let session = session.clone();
@@ -1648,6 +1683,7 @@ mod tests {
         }
         session.request_stop();
         worker.join().unwrap().unwrap();
+        drop(socket_rx);
         let frames = seen.lock().unwrap().clone();
         frames
     }
@@ -1814,5 +1850,81 @@ mod tests {
         assert_eq!(output_encoding, OutputEncoding::Png);
         assert_eq!(max_fps, 24.0);
         assert_eq!(config.prompt, "hi");
+    }
+
+    /// The server-loop handshake: open in feed, push the source once, flip
+    /// to feedback after the first output. The worker used to park on the
+    /// mailbox inside the feed branch and never re-read the mode — one frame
+    /// out, then silence for ever (the user's "it just says starting").
+    #[test]
+    fn run_live_flips_from_feed_to_feedback_while_waiting_for_input() {
+        let source = gradient_image(32, 32);
+        let params = recording_params(LoopMode::Feed);
+        let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        let (socket_tx, _socket_rx) = mpsc::channel();
+        session.add_socket(1, socket_tx);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let worker = {
+            let session = session.clone();
+            let seen = seen.clone();
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let mut backend = RecordingBackend { seen, source };
+                let cancel = CancelToken::new();
+                run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
+            })
+        };
+        // One pushed source, one feed frame out.
+        session.push_input_frame(source.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().len() < 1 {
+            assert!(Instant::now() < deadline, "no feed frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The flip arrives while the worker waits for input it will never
+        // get. It must free-run from here without another pushed frame.
+        session.handle_text(r#"{"type":"control","loop_mode":"feedback"}"#).unwrap();
+        while seen.lock().unwrap().len() < 5 {
+            assert!(Instant::now() < deadline, "the flip to feedback never freed the loop");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        session.request_stop();
+        worker.join().unwrap().unwrap();
+        assert_eq!(session.frames_in.load(Ordering::Relaxed), 1, "feedback frames need no input");
+        let frames = seen.lock().unwrap().clone();
+        // Feedback frames anchor on the source the feed frame set.
+        assert!(frames[2].has_anchor && frames[2].anchor_matches_source);
+    }
+
+    /// A feedback loop with no listener holds instead of painting into the
+    /// void; a socket arriving resumes it.
+    #[test]
+    fn run_live_feedback_holds_without_a_listener_and_resumes_on_attach() {
+        let source = gradient_image(32, 32);
+        let params = recording_params(LoopMode::Feedback);
+        let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let worker = {
+            let session = session.clone();
+            let seen = seen.clone();
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let mut backend = RecordingBackend { seen, source };
+                let cancel = CancelToken::new();
+                run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
+            })
+        };
+        session.set_reference(0, source.clone());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(seen.lock().unwrap().len(), 0, "generated with nobody listening");
+        let (socket_tx, _socket_rx) = mpsc::channel();
+        session.add_socket(1, socket_tx);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().len() < 3 {
+            assert!(Instant::now() < deadline, "never resumed after the socket attached");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        session.request_stop();
+        worker.join().unwrap().unwrap();
     }
 }
