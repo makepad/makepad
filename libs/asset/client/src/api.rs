@@ -12,7 +12,8 @@
 use crate::dto::{
     self, AliasDto, AssetDetailDto, AssetsPageDto, CatalogPageDto, ClaimedJobDto, EventsPageDto,
     GameAliasDto, HealthDto, ImportReportDto, ImportStatusDto, JobDetailDto, JobId, JobProfileDto,
-    JobRowDto, JobStatusDto, SourceCollectionRowDto, SourceCollectionsPageDto,
+    JobRowDto, JobStatusDto, PipelineCancelDto, PipelineCreatedDto, PipelineDetailDto, PipelineId,
+    PipelineRowDto, SourceCollectionRowDto, SourceCollectionsPageDto, StageOnFailDto,
 };
 use crate::error::{ClientError, ClientResult};
 use crate::http::{self, HttpLimits, Request, Response};
@@ -563,6 +564,13 @@ impl OperationFinalizeRequest {
 }
 
 /// Open a broker-owned chat session bound to one explicit provider.
+///
+/// With BOTH `client_key` and `context_key` set the call is
+/// CREATE-OR-RESUME: the server keeps one durable conversation per
+/// `(principal, client_key, context_key)` and answers with that session —
+/// same `session` id, transcript intact across worker eviction and server
+/// restarts — instead of a fresh one. Without them the session is
+/// ephemeral, exactly as before.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatCreateRequest {
     pub namespace: String,
@@ -570,16 +578,46 @@ pub struct ChatCreateRequest {
     /// Declared app profile ("game", "vj"); the broker selects the
     /// session's taught context and tool surface from it. `None` = general.
     pub client: Option<String>,
+    /// Who is talking: an opaque display-safe id the app chooses for this
+    /// player/device (the sandbox sends `ip:<lan-ip>`; a multiplayer player
+    /// id later). See [`wire::chat_key_ok`] for the shape.
+    pub client_key: Option<String>,
+    /// What the conversation is about: the GAME asset id the chat belongs
+    /// to. One conversation per (client, game) — never shared across games.
+    pub context_key: Option<String>,
 }
 
 impl ChatCreateRequest {
     pub fn new(namespace: impl Into<String>, provider: crate::dto::ChatProviderKind) -> Self {
-        ChatCreateRequest { namespace: namespace.into(), provider, client: None }
+        ChatCreateRequest {
+            namespace: namespace.into(),
+            provider,
+            client: None,
+            client_key: None,
+            context_key: None,
+        }
     }
 
     pub fn with_client(mut self, client: impl Into<String>) -> Self {
         self.client = Some(client.into());
         self
+    }
+
+    /// See [`ChatCreateRequest::client_key`].
+    pub fn with_client_key(mut self, key: impl Into<String>) -> Self {
+        self.client_key = Some(key.into());
+        self
+    }
+
+    /// See [`ChatCreateRequest::context_key`].
+    pub fn with_context_key(mut self, key: impl Into<String>) -> Self {
+        self.context_key = Some(key.into());
+        self
+    }
+
+    /// True when this request resumes-or-creates a durable keyed session.
+    pub fn is_keyed(&self) -> bool {
+        self.client_key.is_some() && self.context_key.is_some()
     }
 
     fn body(&self) -> ClientResult<Value> {
@@ -597,6 +635,18 @@ impl ChatCreateRequest {
             }
             pairs.push(("client", json::s(client.clone())));
         }
+        if let Some(key) = &self.client_key {
+            if !wire::chat_key_ok(key) {
+                return Err(ClientError::InvalidInput { what: "chat client key" });
+            }
+            pairs.push(("client_key", json::s(key.clone())));
+        }
+        if let Some(key) = &self.context_key {
+            if !wire::chat_key_ok(key) {
+                return Err(ClientError::InvalidInput { what: "chat context key" });
+            }
+            pairs.push(("context_key", json::s(key.clone())));
+        }
         Ok(json::obj(pairs))
     }
 }
@@ -611,11 +661,17 @@ pub struct ChatAttachment {
 pub struct ChatSendRequest {
     pub text: String,
     pub attachments: Vec<ChatAttachment>,
+    pub dynamic_context: Option<String>,
 }
 
 impl ChatSendRequest {
     pub fn text(text: impl Into<String>) -> Self {
-        ChatSendRequest { text: text.into(), attachments: Vec::new() }
+        ChatSendRequest { text: text.into(), attachments: Vec::new(), dynamic_context: None }
+    }
+
+    pub fn with_dynamic_context(mut self, context: impl Into<String>) -> Self {
+        self.dynamic_context = Some(context.into());
+        self
     }
 
     fn body(&self) -> ClientResult<Value> {
@@ -625,7 +681,15 @@ impl ChatSendRequest {
         if self.attachments.len() > wire::MAX_CHAT_ATTACHMENTS {
             return Err(ClientError::InvalidInput { what: "chat attachments" });
         }
+        if self.dynamic_context.as_ref().is_some_and(|context| {
+            context.is_empty() || context.len() > 4096 || context.contains('\0')
+        }) {
+            return Err(ClientError::InvalidInput { what: "chat dynamic context" });
+        }
         let mut pairs = vec![("text", json::s(self.text.clone()))];
+        if let Some(context) = &self.dynamic_context {
+            pairs.push(("dynamic_context", json::s(context.clone())));
+        }
         if !self.attachments.is_empty() {
             let mut atts = Vec::with_capacity(self.attachments.len());
             for a in &self.attachments {
@@ -1259,7 +1323,30 @@ impl Api {
         token: &str,
         ttl_ms: u64,
     ) -> ClientResult<crate::dto::RoomDto> {
-        let body = self.room_token_body(room, token, Some(ttl_ms))?;
+        self.room_heartbeat_with(room, token, ttl_ms, None)
+    }
+
+    /// Heartbeat that also reports the head count in the world (host
+    /// included) so a games list can show who is playing. `None` leaves the
+    /// server's last count alone.
+    pub fn room_heartbeat_with(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+        players: Option<u32>,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        let mut body = self.room_token_body(room, token, Some(ttl_ms))?;
+        if let Some(players) = players {
+            // Splice the count into the bounded body rather than rebuild it:
+            // the token body is the one place the room proof is spelled.
+            let count = players.clamp(1, 1024);
+            let mut v = json::parse(&body).map_err(|_| ClientError::Protocol { what: "room body" })?;
+            if let Value::Obj(pairs) = &mut v {
+                pairs.push(("players".to_string(), Value::Int(count as i64)));
+            }
+            body = v.to_json().into_bytes();
+        }
         let path = wire::path_room_heartbeat(room);
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
@@ -1468,11 +1555,16 @@ impl Api {
 
     /// One page of the scoped job listing. `namespace` requires a job
     /// capability on that namespace server-side; `None` lists the caller's
-    /// own jobs. The server returns newest first, capped at
+    /// own jobs. `kind` and `state` narrow the page to one queue — the
+    /// server answers a state filter from the QUEUE index, so "the pending
+    /// annotate jobs" is exact rather than whatever survived a page of
+    /// everything. The server returns newest first, capped at
     /// [`MAX_LIST_LIMIT`].
     pub fn list_jobs(
         &self,
         namespace: Option<&str>,
+        kind: Option<&str>,
+        state: Option<crate::dto::JobStateDto>,
         limit: u64,
     ) -> ClientResult<Vec<JobRowDto>> {
         if limit == 0 || limit > MAX_LIST_LIMIT {
@@ -1483,7 +1575,12 @@ impl Api {
                 return Err(ClientError::InvalidInput { what: "job list namespace" });
             }
         }
-        let path = wire::path_jobs_list(namespace, limit);
+        if let Some(kind) = kind {
+            if kind.is_empty() || kind.len() > 64 || !wire::query_value_ok(kind) {
+                return Err(ClientError::InvalidInput { what: "job list kind" });
+            }
+        }
+        let path = wire::path_jobs_list(namespace, kind, state.map(|s| s.as_str()), limit);
         let mut req = Request::get(&path);
         req.bearer = self.bearer();
         let v = self.call_json(self.endpoints.control, req)?;
@@ -1500,6 +1597,175 @@ impl Api {
         v.get("cancelled")
             .and_then(Value::as_u64)
             .ok_or(ClientError::Protocol { what: "cancel count" })
+    }
+
+    // ---- pipelines (declared multi-stage runs) ------------------------------
+
+    /// Declare a whole run and walk away: every stage is enqueued as a job
+    /// in ONE server closure, wired by `deps` and by the claim-time splice,
+    /// so the run advances, crash-resumes, cancels and dooms as one tree
+    /// with nobody watching it.
+    ///
+    /// `prompt` is the text the PERSON typed — it is what the card shows,
+    /// and what an `on_fail: skip` stage's dependents fall back to, so a
+    /// stage declared skippable without a prompt is refused here.
+    ///
+    /// Stage bodies may carry [`stage_ref`] references; each one must name a
+    /// stage this stage depends on (checked locally, then again by the
+    /// server), so a mistyped stage name is a refusal on the call that made
+    /// it and never a run that dies twenty minutes later.
+    ///
+    /// A server without pipeline routes answers 404, which comes back as
+    /// [`ClientError::NotFound`] with `what: "pipeline routes"` — surface
+    /// it; there is no invisible client-side chaining to fall back to.
+    pub fn create_pipeline(
+        &self,
+        ns: &str,
+        title: &str,
+        prompt: &str,
+        stages: &[PipelineStageSpec],
+    ) -> ClientResult<PipelineCreatedDto> {
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "pipeline namespace" });
+        }
+        if title.is_empty()
+            || title.len() > wire::MAX_PIPELINE_TITLE_BYTES
+            || title.chars().any(char::is_control)
+        {
+            return Err(ClientError::InvalidInput { what: "pipeline title" });
+        }
+        if prompt.len() > wire::MAX_PIPELINE_PROMPT_BYTES
+            || prompt.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(ClientError::InvalidInput { what: "pipeline prompt" });
+        }
+        if stages.is_empty() {
+            return Err(ClientError::InvalidInput { what: "a pipeline needs a stage" });
+        }
+        if stages.len() > wire::MAX_PIPELINE_STAGES {
+            return Err(ClientError::InvalidInput { what: "too many pipeline stages" });
+        }
+        let mut declared: Vec<Value> = Vec::with_capacity(stages.len());
+        for (index, stage) in stages.iter().enumerate() {
+            if stages[..index].iter().any(|s| s.name == stage.name) {
+                return Err(ClientError::InvalidInput { what: "duplicate stage name" });
+            }
+            if stage.on_fail == StageOnFailDto::Skip && prompt.is_empty() {
+                return Err(ClientError::InvalidInput { what: "on_fail skip needs a prompt" });
+            }
+            // Backward-only deps: a stage may only wait for one already
+            // declared above it, which is what makes a cycle unrepresentable
+            // rather than merely refused.
+            let deps = stage.effective_deps(stages, index)?;
+            check_stage_refs(&stage.body, &deps, 0)?;
+            declared.push(stage.to_value()?);
+        }
+        let payload = json::obj(vec![
+            ("namespace", json::s(ns)),
+            ("title", json::s(title)),
+            ("prompt", json::s(prompt)),
+            ("stages", Value::Arr(declared)),
+        ])
+        .to_json()
+        .into_bytes();
+        if payload.len() as u64 > wire::MAX_JSON_RESPONSE_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "pipeline stages",
+                limit: wire::MAX_JSON_RESPONSE_BYTES,
+                found: payload.len() as u64,
+            });
+        }
+        let path = wire::path_pipelines();
+        let mut req = Request::post(&path, &payload);
+        req.bearer = self.bearer();
+        let v = self
+            .call_json_accept(self.endpoints.control, req, &[201])
+            .map_err(pipeline_routes_missing)?;
+        let created = dto::parse_pipeline_created(&v)?;
+        // The answer must describe the run that was asked for: one job per
+        // declared stage, in declaration order, or the ids cannot be trusted
+        // to name what the caller thinks they name.
+        if created.stages.len() != stages.len()
+            || created
+                .stages
+                .iter()
+                .zip(stages.iter())
+                .any(|(got, want)| got.name != want.name)
+        {
+            return Err(ClientError::Protocol { what: "created pipeline stage mismatch" });
+        }
+        Ok(created)
+    }
+
+    /// One page of the scoped pipeline listing, newest first. `namespace`
+    /// requires a job capability on that namespace server-side; `None` lists
+    /// the caller's own runs. `active_only` asks for the runs still moving —
+    /// the server derives every row's state, so the filter is exact no
+    /// matter how much finished history precedes them.
+    ///
+    /// One request carries everything the global runs surface draws: state,
+    /// aggregate bar, current stage, its note, and the person's words.
+    pub fn list_pipelines(
+        &self,
+        namespace: Option<&str>,
+        active_only: bool,
+        limit: u64,
+    ) -> ClientResult<Vec<PipelineRowDto>> {
+        if limit == 0 || limit > wire::MAX_PIPELINE_LIST_LIMIT {
+            return Err(ClientError::InvalidInput { what: "pipeline list limit" });
+        }
+        if let Some(ns) = namespace {
+            if ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+                return Err(ClientError::InvalidInput { what: "pipeline list namespace" });
+            }
+        }
+        let path = wire::path_pipelines_list(namespace, active_only, limit);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self
+            .call_json(self.endpoints.control, req)
+            .map_err(pipeline_routes_missing)?;
+        dto::parse_pipelines_page(&v)
+    }
+
+    /// The whole run in one request: derived state, the aggregate bar, and
+    /// every stage with its job, kind, state, weight, progress, attempts,
+    /// the body it was DECLARED with (present while a stage is still
+    /// pending — this is what makes a spawned run inspectable at t=0), the
+    /// worker's stage records once it was dispatched, and its result.
+    pub fn pipeline_detail(&self, pipeline: &PipelineId) -> ClientResult<PipelineDetailDto> {
+        let path = wire::path_pipeline(&pipeline.to_string());
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req).map_err(unknown_pipeline)?;
+        let detail = dto::parse_pipeline_detail(&v)?;
+        if detail.pipeline != *pipeline {
+            return Err(ClientError::Protocol { what: "pipeline detail id mismatch" });
+        }
+        Ok(detail)
+    }
+
+    /// Stop a whole run, from anywhere. Every non-terminal stage job is
+    /// cancelled in one server closure; the per-job chain does the rest (the
+    /// lease is dropped, so the worker's next heartbeat is refused and it
+    /// cancels the node dispatch, and pending dependents doom at the next
+    /// claim). Partial results are KEPT: a stage that published stays
+    /// succeeded inside a cancelled run.
+    ///
+    /// Cancellability does not depend on the process that spawned the run
+    /// being alive — which is the whole point of the record.
+    pub fn cancel_pipeline(&self, pipeline: &PipelineId) -> ClientResult<PipelineCancelDto> {
+        let path = wire::path_pipeline_cancel(&pipeline.to_string());
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self
+            .call_json_accept(self.endpoints.control, req, &[200])
+            .map_err(unknown_pipeline)?;
+        let cancel = dto::parse_pipeline_cancel(&v)?;
+        if cancel.pipeline != *pipeline {
+            return Err(ClientError::Protocol { what: "pipeline cancel id mismatch" });
+        }
+        Ok(cancel)
     }
 
     // ---- worker protocol (fleet dispatchers) --------------------------------
@@ -1564,6 +1830,27 @@ impl Api {
         suffix: Option<&str>,
         progress: Option<(u16, &str)>,
     ) -> ClientResult<u64> {
+        self.worker_heartbeat_stage(job, extend_ms, suffix, progress, None)
+    }
+
+    /// [`Api::worker_heartbeat`], also recording WHAT one stage of this job
+    /// was given: the exact final text a model was handed, in full, with the
+    /// parameters beside it.
+    ///
+    /// It rides the heartbeat rather than a route of its own because the
+    /// heartbeat is already the proof that this worker holds the job: a
+    /// stage record lands under exactly the same live lease as the progress
+    /// note, and a worker whose lease is gone cannot rewrite the history of
+    /// the attempt that replaced it. Re-recording a stage name REPLACES it,
+    /// so a job re-dispatched to another box ends with one true record.
+    pub fn worker_heartbeat_stage(
+        &self,
+        job: &JobId,
+        extend_ms: u64,
+        suffix: Option<&str>,
+        progress: Option<(u16, &str)>,
+        stage: Option<&crate::dto::JobStageInput<'_>>,
+    ) -> ClientResult<u64> {
         check_worker_suffix(suffix)?;
         if extend_ms == 0 {
             return Err(ClientError::InvalidInput { what: "heartbeat extend_ms" });
@@ -1586,6 +1873,9 @@ impl Api {
                     ("note", json::s(note)),
                 ]),
             ));
+        }
+        if let Some(stage) = stage {
+            pairs.push(("stage", stage.to_value()?));
         }
         let body = json::obj(pairs).to_json().into_bytes();
         let mut req = Request::post("/v1/worker/heartbeat", &body);
@@ -1682,6 +1972,166 @@ impl Api {
     pub fn upload_blob(&self, ns: &str, bytes: &[u8]) -> ClientResult<BlobId> {
         let local = BlobId::hash_of(bytes);
         self.upload_blob_with_digest(ns, bytes, local)
+    }
+
+    /// Announce one in-memory LocalGen preview session. Mesh parts follow on
+    /// the data plane; none of these calls create a durable blob/revision.
+    pub fn open_model_preview(
+        &self,
+        alias: &AssetAlias,
+        session: &str,
+        program: &str,
+    ) -> ClientResult<()> {
+        if !alias.as_str().starts_with("gen/csg/") {
+            return Err(ClientError::InvalidInput { what: "model preview alias" });
+        }
+        validate_preview_session(session)?;
+        if program.len() > 12_000 {
+            return Err(ClientError::InvalidInput { what: "model preview program" });
+        }
+        let body = json::obj(vec![
+            ("op", json::s("open")),
+            ("alias", json::s(alias.as_str())),
+            ("session", json::s(session)),
+            ("program", json::s(program)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    pub fn update_model_preview(
+        &self,
+        session: &str,
+        program: Option<&str>,
+        removed: &[String],
+        renamed: &[crate::dto::ModelPreviewRenameDto],
+    ) -> ClientResult<()> {
+        validate_preview_session(session)?;
+        if program.is_some_and(|program| program.len() > 12_000) {
+            return Err(ClientError::InvalidInput { what: "model preview program" });
+        }
+        if removed.len() > 32 || renamed.len() > 32 {
+            return Err(ClientError::InvalidInput { what: "model preview delta" });
+        }
+        for name in removed {
+            validate_preview_part(name)?;
+        }
+        for rename in renamed {
+            validate_preview_part(&rename.from)?;
+            validate_preview_part(&rename.to)?;
+        }
+        let body = json::obj(vec![
+            ("op", json::s("delta")),
+            ("session", json::s(session)),
+            (
+                "program",
+                program.map_or(Value::Null, |program| json::s(program)),
+            ),
+            (
+                "removed",
+                Value::Arr(removed.iter().map(|name| json::s(name)).collect()),
+            ),
+            (
+                "renamed",
+                Value::Arr(
+                    renamed
+                        .iter()
+                        .map(|rename| {
+                            json::obj(vec![
+                                ("from", json::s(&rename.from)),
+                                ("to", json::s(&rename.to)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    pub fn clear_model_preview(&self, session: &str) -> ClientResult<()> {
+        validate_preview_session(session)?;
+        let body = json::obj(vec![
+            ("op", json::s("clear")),
+            ("session", json::s(session)),
+        ])
+        .to_json()
+        .into_bytes();
+        let path = wire::path_model_previews();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        self.call_json(self.endpoints.control, req)?;
+        Ok(())
+    }
+
+    /// Upload one changed part directly into the server's bounded preview
+    /// memory and return its opaque fetch token.
+    pub fn upload_model_preview_part(
+        &self,
+        session: &str,
+        part: &str,
+        bytes: &[u8],
+    ) -> ClientResult<String> {
+        validate_preview_session(session)?;
+        validate_preview_part(part)?;
+        if bytes.is_empty() {
+            return Err(ClientError::InvalidInput { what: "model preview mesh" });
+        }
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(ClientError::OverBudget {
+                what: "model preview mesh",
+                limit: 16 * 1024 * 1024,
+                found: bytes.len() as u64,
+            });
+        }
+        let path = wire::path_model_preview_part(session, part);
+        let mut req = Request::put(&path, bytes);
+        req.body_content_type = "model/gltf-binary";
+        req.bearer = self.bearer();
+        let value = self.call_json(self.endpoints.data, req)?;
+        let token = value
+            .get("mesh_token")
+            .and_then(Value::as_str)
+            .ok_or(ClientError::Protocol { what: "model preview mesh token" })?;
+        validate_preview_mesh_token(token)?;
+        Ok(token.to_string())
+    }
+
+    pub fn fetch_model_preview_mesh(&self, token: &str) -> ClientResult<Vec<u8>> {
+        validate_preview_mesh_token(token)?;
+        let path = wire::path_model_preview_mesh(token);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let response = http::http_call_pooled(
+            self.endpoints.data,
+            &req,
+            &self.limits,
+            self.pool(),
+        )?;
+        let response = self.accept(response, &[200])?;
+        const MAX_PREVIEW_MESH_BYTES: u64 = 16 * 1024 * 1024;
+        if response.head().content_length > MAX_PREVIEW_MESH_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "model preview mesh",
+                limit: MAX_PREVIEW_MESH_BYTES,
+                found: response.head().content_length,
+            });
+        }
+        if response.head().content_type.as_deref() != Some("model/gltf-binary") {
+            return Err(ClientError::Protocol { what: "model preview mesh content type" });
+        }
+        response.read_full(MAX_PREVIEW_MESH_BYTES)
     }
 
     /// As [`Self::upload_blob`], but `digest` is supplied by the caller
@@ -2381,6 +2831,105 @@ impl Api {
         Ok(())
     }
 
+    /// Read the annotation record as it stands.
+    ///
+    /// The vision pass owns two of its fields and must carry the rest
+    /// through untouched, and the route is a whole-record PUT — so "carry
+    /// through" means read, recompute the owned fields, write the whole
+    /// thing back. Without this a worker would need the store's SQLite file
+    /// on its own disk, which is exactly the coupling the job queue exists
+    /// to remove.
+    pub fn get_annotation(&self, asset: &AssetId) -> ClientResult<dto::AnnotationDto> {
+        let path = wire::path_annotation(asset);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotation(&v)
+    }
+
+    /// Counts behind the annotation bar; `category` narrows to one kit.
+    /// The published thumbnail sheet of an alias, from the DATA plane.
+    ///
+    /// One request, bytes as served — no digest to verify against and
+    /// nothing to cache: this is the picture a vision model is about to be
+    /// shown, and the caller wants exactly what the catalog is publishing
+    /// right now.
+    pub fn thumbnail_alias_bytes(&self, alias: &AssetAlias) -> ClientResult<Vec<u8>> {
+        let path = wire::path_thumbnail_alias(alias);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
+        let mut resp = self.accept(resp, &[200])?;
+        let declared = resp.head().content_length;
+        if declared > wire::MAX_THUMBNAIL_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "thumbnail sheet",
+                limit: wire::MAX_THUMBNAIL_BYTES,
+                found: declared,
+            });
+        }
+        let mut out = Vec::with_capacity(declared as usize);
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = resp.read_chunk(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
+            if out.len() as u64 > wire::MAX_THUMBNAIL_BYTES {
+                return Err(ClientError::OverBudget {
+                    what: "thumbnail sheet",
+                    limit: wire::MAX_THUMBNAIL_BYTES,
+                    found: out.len() as u64,
+                });
+            }
+        }
+        if out.is_empty() {
+            return Err(ClientError::Protocol { what: "empty thumbnail sheet" });
+        }
+        Ok(out)
+    }
+
+    pub fn annotate_summary(
+        &self,
+        category: Option<&str>,
+    ) -> ClientResult<dto::AnnotateSummaryDto> {
+        let path = wire::path_annotate_summary(category);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotate_summary(&v)
+    }
+
+    /// Queue what the vision pass still owes, up to `limit` assets.
+    ///
+    /// ONE request fires a whole library's backlog: the server picks the
+    /// assets and mints the jobs, so nothing depends on a client loop
+    /// surviving the window it was started from. `epoch` is 0 unless an
+    /// operator is deliberately re-driving assets whose jobs failed
+    /// terminally.
+    pub fn annotate_backlog(
+        &self,
+        limit: u64,
+        category: Option<&str>,
+        epoch: u64,
+    ) -> ClientResult<dto::AnnotateBacklogDto> {
+        let mut pairs: Vec<(&str, Value)> = vec![("limit", Value::Int(limit as i64))];
+        if let Some(c) = category {
+            pairs.push(("category", json::s(c)));
+        }
+        if epoch != 0 {
+            pairs.push(("epoch", Value::Int(epoch.min(i64::MAX as u64) as i64)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_annotate_backlog();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_annotate_backlog(&v)
+    }
+
     /// Open a blob body stream, optionally resuming from `range_start`.
     /// Returns the raw response (status 200, 206 or 416); the caller owns the
     /// resume math and digest accounting.
@@ -2548,12 +3097,49 @@ impl Api {
         let path = wire::path_chat_sessions();
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
-        let v = self.call_json_accept(self.endpoints.control, req, &[201])?;
+        // 201 = created fresh; 200 = an existing keyed session came back
+        // (create-or-resume). Both carry the same session document.
+        let v = self.call_json_accept(self.endpoints.control, req, &[200, 201])?;
         let session = dto::parse_chat_session(&v)?;
         if session.namespace != request.namespace || session.provider != request.provider {
             return Err(ClientError::Protocol { what: "chat create echo" });
         }
+        if request.is_keyed()
+            && (session.client_key != request.client_key
+                || session.context_key != request.context_key)
+        {
+            return Err(ClientError::Protocol { what: "chat create key echo" });
+        }
         Ok(session)
+    }
+
+    /// The durable conversation of one session as a client renders it:
+    /// user/assistant text rows and one `tool` row per executed tool (a
+    /// short chip title), thinking stripped. Bounded by the server (last
+    /// rows within its byte budget); `truncated` on the full form says
+    /// whether older rows were dropped.
+    pub fn chat_transcript(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<Vec<crate::dto::ChatTranscriptRowDto>> {
+        Ok(self.chat_transcript_full(id)?.messages)
+    }
+
+    /// [`Api::chat_transcript`] with the session's provider, turn counter
+    /// and the truncation flag.
+    pub fn chat_transcript_full(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<crate::dto::ChatTranscriptDto> {
+        let path = wire::path_chat_transcript(&id.to_string());
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        let transcript = dto::parse_chat_transcript(&v)?;
+        if transcript.session != *id {
+            return Err(ClientError::Protocol { what: "chat transcript id mismatch" });
+        }
+        Ok(transcript)
     }
 
     pub fn chat_get(
@@ -3139,6 +3725,306 @@ fn check_cursor_out(c: &str) -> ClientResult<()> {
     Ok(())
 }
 
+fn validate_preview_session(value: &str) -> ClientResult<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidInput { what: "model preview session" })
+    }
+}
+
+fn validate_preview_part(value: &str) -> ClientResult<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 24
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidInput { what: "model preview part" })
+    }
+}
+
+fn validate_preview_mesh_token(value: &str) -> ClientResult<()> {
+    let valid = value.strip_prefix("pmesh_").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::Protocol { what: "model preview mesh token" })
+    }
+}
+
+// ---- pipelines: declaring the stages ---------------------------------------
+
+/// Declared weight per job kind, in ONE place so two clients drawing the
+/// same run cannot disagree about how long its stages are worth.
+///
+/// These are ESTIMATES, and honest about it: the bar means "weighted share
+/// of DECLARED work completed", never "time left". A misdeclared weight
+/// makes the aggregate crawl then sprint; it stays monotone and
+/// stage-truthful either way, and the note is what says what is happening
+/// now.
+pub const DEFAULT_STAGE_WEIGHTS: &[(&str, u16)] = &[
+    ("text.expand", 5),
+    ("image.generate", 15),
+    ("image.upscale", 25),
+    ("video.generate", 70),
+    ("video.enhance", 25),
+    ("music.generate", 60),
+    ("mesh.generate", 40),
+];
+
+/// What a kind with no declared weight is worth. Matches the server's own
+/// neutral fallback, so an undeclared stage weighs the same on both sides.
+pub const NEUTRAL_STAGE_WEIGHT: u16 = 10;
+
+/// The declared weight for one job kind: [`DEFAULT_STAGE_WEIGHTS`], else
+/// [`NEUTRAL_STAGE_WEIGHT`].
+pub fn default_stage_weight(kind: &str) -> u16 {
+    DEFAULT_STAGE_WEIGHTS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, w)| *w)
+        .unwrap_or(NEUTRAL_STAGE_WEIGHT)
+}
+
+/// A reference to a field of an EARLIER stage's result:
+/// `{"$from_stage": "<stage>", "field": "<field>"}`.
+///
+/// Put one anywhere inside a stage body, at any nesting depth. The server
+/// rewrites it to the job-id form at create, and the value is spliced in AT
+/// CLAIM — the first moment every dependency has provably succeeded — so a
+/// chain can be declared up front and nobody has to stay alive to carry a
+/// result from one stage to the next.
+pub fn stage_ref(stage: &str, field: &str) -> Value {
+    json::obj(vec![("$from_stage", json::s(stage)), ("field", json::s(field))])
+}
+
+/// One declared stage of a pipeline: what to run, with what body, how much
+/// of the bar it is worth, what it waits for, and what its failure means.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineStageSpec {
+    /// `[a-z0-9._-]`, 1..=64 bytes, unique within the pipeline. This is the
+    /// name the chip strip shows and the name [`stage_ref`] resolves.
+    pub name: String,
+    /// The job kind, e.g. `image.generate`.
+    pub kind: String,
+    /// The job body, an object; may carry [`stage_ref`] references.
+    pub body: Value,
+    /// `1..=1000`. `None` takes [`default_stage_weight`] for the kind.
+    pub weight: Option<u16>,
+    /// `Skip` keeps a run alive when this stage fails.
+    pub on_fail: StageOnFailDto,
+    /// Stage NAMES this stage waits for. `None` — the common shape — waits
+    /// for the stage declared immediately before it; `Some(vec![])` declares
+    /// a stage that waits for nothing.
+    pub deps: Option<Vec<String>>,
+    pub priority: i64,
+    /// `None` takes the server default of one attempt.
+    pub max_attempts: Option<u32>,
+}
+
+impl PipelineStageSpec {
+    /// A stage with the defaults: the kind's declared weight, fail-the-run
+    /// on failure, waiting for the stage before it, one attempt.
+    pub fn new(name: impl Into<String>, kind: impl Into<String>, body: Value) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            body,
+            weight: None,
+            on_fail: StageOnFailDto::Fail,
+            deps: None,
+            priority: 0,
+            max_attempts: None,
+        }
+    }
+
+    /// This stage keeps the run alive when it fails: its dependents' spliced
+    /// references are rewritten to the pipeline's prompt and the edge is
+    /// detached. The never-lose-a-run law, structurally.
+    pub fn on_fail_skip(mut self) -> Self {
+        self.on_fail = StageOnFailDto::Skip;
+        self
+    }
+
+    pub fn with_weight(mut self, weight: u16) -> Self {
+        self.weight = Some(weight);
+        self
+    }
+
+    pub fn with_deps(mut self, deps: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.deps = Some(deps.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn with_max_attempts(mut self, attempts: u32) -> Self {
+        self.max_attempts = Some(attempts);
+        self
+    }
+
+    /// The weight this stage will be declared with.
+    pub fn weight(&self) -> u16 {
+        self.weight.unwrap_or_else(|| default_stage_weight(&self.kind))
+    }
+
+    /// The stage names this stage actually waits for, resolved against the
+    /// stages declared before it. Refuses a dep that names a later stage or
+    /// no stage at all — backward-only, so the declared graph is acyclic
+    /// before a single job exists.
+    fn effective_deps(
+        &self,
+        stages: &[PipelineStageSpec],
+        index: usize,
+    ) -> ClientResult<Vec<String>> {
+        match &self.deps {
+            None => Ok(match index {
+                0 => Vec::new(),
+                _ => vec![stages[index - 1].name.clone()],
+            }),
+            Some(names) => {
+                if names.len() > wire::MAX_PIPELINE_STAGES {
+                    return Err(ClientError::InvalidInput { what: "too many stage deps" });
+                }
+                for dep in names {
+                    if !stages[..index].iter().any(|s| &s.name == dep) {
+                        return Err(ClientError::InvalidInput {
+                            what: "stage dep names no earlier stage",
+                        });
+                    }
+                }
+                Ok(names.clone())
+            }
+        }
+    }
+
+    /// The wire document for this stage, or the local refusal that keeps a
+    /// malformed declaration from becoming a round trip.
+    pub fn to_value(&self) -> ClientResult<Value> {
+        if !stage_token_ok(&self.name) {
+            return Err(ClientError::InvalidInput { what: "stage name" });
+        }
+        if !stage_token_ok(&self.kind) {
+            return Err(ClientError::InvalidInput { what: "stage kind" });
+        }
+        if !matches!(self.body, Value::Obj(_)) {
+            return Err(ClientError::InvalidInput { what: "stage body must be an object" });
+        }
+        let weight = self.weight();
+        if weight == 0 || weight > wire::MAX_STAGE_WEIGHT {
+            return Err(ClientError::InvalidInput { what: "stage weight" });
+        }
+        let mut pairs = vec![
+            ("name", json::s(self.name.clone())),
+            ("kind", json::s(self.kind.clone())),
+            ("body", self.body.clone()),
+            ("weight", Value::Int(weight as i64)),
+            ("on_fail", json::s(self.on_fail.as_str())),
+        ];
+        if let Some(deps) = &self.deps {
+            pairs.push((
+                "deps",
+                Value::Arr(deps.iter().map(|d| json::s(d.clone())).collect()),
+            ));
+        }
+        if self.priority != 0 {
+            pairs.push(("priority", Value::Int(self.priority)));
+        }
+        if let Some(attempts) = self.max_attempts {
+            if attempts == 0 {
+                return Err(ClientError::InvalidInput { what: "stage max_attempts" });
+            }
+            pairs.push(("max_attempts", Value::Int(attempts as i64)));
+        }
+        Ok(json::obj(pairs))
+    }
+}
+
+/// Stage names and job kinds share the job contract's `[a-z0-9._-]`,
+/// 1..=64-byte vocabulary.
+fn stage_token_ok(t: &str) -> bool {
+    (1..=64).contains(&t.len())
+        && t.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// Every [`stage_ref`] inside a declared body must name a stage this stage
+/// DEPENDS on: a splice may only read a result whose success this stage
+/// provably waited for. Refused here, before the request, for the same
+/// reason the server refuses it before any job exists.
+fn check_stage_refs(body: &Value, deps: &[String], depth: u32) -> ClientResult<()> {
+    if depth > crate::json::MAX_DEPTH {
+        return Err(ClientError::InvalidInput { what: "stage body nesting" });
+    }
+    match body {
+        Value::Obj(pairs) => {
+            if let Some((_, named)) = pairs.iter().find(|(k, _)| k == "$from_stage") {
+                if pairs.len() != 2 {
+                    return Err(ClientError::InvalidInput { what: "stage reference shape" });
+                }
+                let field = pairs
+                    .iter()
+                    .find(|(k, _)| k == "field")
+                    .and_then(|(_, v)| v.as_str())
+                    .unwrap_or_default();
+                if field.is_empty() || field.len() > 64 {
+                    return Err(ClientError::InvalidInput { what: "stage reference field" });
+                }
+                let named = named.as_str().unwrap_or_default();
+                if !deps.iter().any(|d| d == named) {
+                    return Err(ClientError::InvalidInput {
+                        what: "stage reference names no dependency",
+                    });
+                }
+                return Ok(());
+            }
+            for (_, v) in pairs {
+                check_stage_refs(v, deps, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Arr(items) => {
+            for item in items {
+                check_stage_refs(item, deps, depth + 1)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A 404 from a route that has no id in it can only mean one thing: this
+/// server predates pipelines. Say so — a new client on an old server must
+/// surface the skew, never fall back to invisible client-side chaining.
+fn pipeline_routes_missing(e: ClientError) -> ClientError {
+    match e {
+        ClientError::NotFound { .. } => ClientError::NotFound { what: "pipeline routes" },
+        other => other,
+    }
+}
+
+/// A 404 on an addressed pipeline is the answer for both "no such run" and
+/// "not yours" — the server refuses to tell them apart on purpose.
+fn unknown_pipeline(e: ClientError) -> ClientError {
+    match e {
+        ClientError::NotFound { .. } => ClientError::NotFound { what: "pipeline" },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3186,6 +4072,59 @@ mod tests {
         let body = q.body(None);
         assert_eq!(body.get("tag").unwrap().as_str(), Some("keep"));
         assert_eq!(body.get("exclude_tag").unwrap().as_str(), Some("intermediate"));
+    }
+
+    #[test]
+    fn chat_create_body_carries_keys_only_when_set_and_refuses_bad_ones() {
+        use crate::dto::ChatProviderKind;
+        let plain = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen);
+        assert!(!plain.is_keyed());
+        let body = plain.body().unwrap();
+        assert_eq!(body.get("api_version").unwrap().as_i64(), Some(1));
+        assert_eq!(body.get("namespace").unwrap().as_str(), Some("gen"));
+        assert_eq!(body.get("provider").unwrap().as_str(), Some("fleet-qwen"));
+        assert!(body.get("client").is_none());
+        assert!(body.get("client_key").is_none());
+        assert!(body.get("context_key").is_none());
+
+        let keyed = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+            .with_client("game")
+            .with_client_key("ip:10.0.0.7")
+            .with_context_key("ast_0123456789abcdef0123456789abcdef");
+        assert!(keyed.is_keyed());
+        let body = keyed.body().unwrap();
+        assert_eq!(body.get("client").unwrap().as_str(), Some("game"));
+        assert_eq!(body.get("client_key").unwrap().as_str(), Some("ip:10.0.0.7"));
+        assert_eq!(
+            body.get("context_key").unwrap().as_str(),
+            Some("ast_0123456789abcdef0123456789abcdef")
+        );
+        // One key alone is not a keyed request, but still travels.
+        let half = ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+            .with_client_key("ip:10.0.0.7");
+        assert!(!half.is_keyed());
+        assert!(half.body().unwrap().get("client_key").is_some());
+
+        // Keys are refused LOCALLY, before any socket: empty, spaces,
+        // slashes (a path), control bytes, over-long.
+        for bad in ["", "a b", "a/b", "..", "x\n", &"k".repeat(wire::MAX_CHAT_KEY_BYTES + 1)] {
+            match ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+                .with_client_key(bad)
+                .with_context_key("g")
+                .body()
+            {
+                Err(ClientError::InvalidInput { what: "chat client key" }) => {}
+                other => panic!("{bad:?}: {other:?}"),
+            }
+            match ChatCreateRequest::new("gen", ChatProviderKind::FleetQwen)
+                .with_client_key("c")
+                .with_context_key(bad)
+                .body()
+            {
+                Err(ClientError::InvalidInput { what: "chat context key" }) => {}
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -91,6 +91,7 @@ pub fn fail_closes(f: &Fail) -> bool {
 pub const TOKEN_PREFIX: &str = "mpat_";
 pub const PRINCIPAL_PREFIX: &str = "prin_";
 pub const JOB_PREFIX: &str = "job_";
+pub const PIPELINE_PREFIX: &str = "pipe_";
 pub const OPERATION_PREFIX: &str = "op_";
 
 /// Extract the opaque bearer secret from an Authorization header. Only the
@@ -120,6 +121,15 @@ pub fn job_str(j: &JobId) -> String {
 pub fn parse_job(s: &str) -> Option<JobId> {
     let hex = s.strip_prefix(JOB_PREFIX)?;
     Some(JobId(from_hex_exact::<16>(hex)?))
+}
+
+pub fn pipeline_str(p: &super::state::PipelineId) -> String {
+    format!("{}{}", PIPELINE_PREFIX, to_hex(&p.0))
+}
+
+pub fn parse_pipeline(s: &str) -> Option<super::state::PipelineId> {
+    let hex = s.strip_prefix(PIPELINE_PREFIX)?;
+    Some(super::state::PipelineId(from_hex_exact::<16>(hex)?))
 }
 
 pub fn operation_str(o: &crate::OperationId) -> String {
@@ -175,6 +185,8 @@ pub fn kind_str(k: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 

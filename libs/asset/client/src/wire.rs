@@ -22,8 +22,13 @@ use makepad_asset_data::{
 // ---- discovery beacon ------------------------------------------------------
 
 /// Catalog-event vocabulary this build speaks (see [`path_events`]). v1 is
-/// the original kind set; v2 adds `asset_retired` / `revision_retired`.
-pub const EVENT_VOCABULARY: u32 = 2;
+/// the original kind set; v2 adds retirement, v4 adds in-memory model part
+/// deltas, and v5 adds `pipeline.finished` — a whole declared run reaching a
+/// terminal state, which is the ONE honest signal that a multi-stage run is
+/// over (a publish is per-asset and coincidental, and a run that fails
+/// publishes nothing at all). Kinds above a caller's vocabulary are never
+/// sent to it.
+pub const EVENT_VOCABULARY: u32 = 5;
 
 pub const DISCOVERY_MAGIC: [u8; 8] = *b"MPASDIS1";
 pub const BEACON_LEN: usize = 36;
@@ -308,6 +313,32 @@ pub const MAX_ROOM_TTL_MS: u64 = 10 * 60 * 1000;
 /// Most rooms one listing may carry — the server caps at 64 games.
 pub const MAX_ROOMS_PAGE: usize = 64;
 
+/// The published turntable/preview sheet of an alias, on the DATA plane.
+/// The alias is a validated path, segments and all.
+pub fn path_thumbnail_alias(alias: &AssetAlias) -> String {
+    format!("/v1/thumbnails/alias/{alias}")
+}
+
+/// Ceiling on one fetched thumbnail sheet. Sheets are published at
+/// 1024x1024 PNG (a 4x4 turntable grid); a megabyte over that is a server
+/// this client should refuse rather than buffer.
+pub const MAX_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+
+// ---- the vision-annotation queue -------------------------------------------
+
+/// Counts behind the annotation bar. `category` narrows to one kit.
+pub fn path_annotate_summary(category: Option<&str>) -> String {
+    match category {
+        Some(c) => format!("/v1/annotate/summary?category={c}"),
+        None => "/v1/annotate/summary".to_string(),
+    }
+}
+
+/// Queue everything the vision pass still owes (root only).
+pub fn path_annotate_backlog() -> String {
+    "/v1/annotate/backlog".to_string()
+}
+
 // ---- jobs (generation scheduling) ------------------------------------------
 
 /// Advertised generation capabilities; `domain` filters (`video`, `audio`…).
@@ -333,12 +364,78 @@ pub fn path_job_cancel(job: &str) -> String {
 
 /// Scoped job listing. With `ns` the server requires a job capability on
 /// that namespace; without it the caller's own jobs are listed.
-pub fn path_jobs_list(ns: Option<&str>, limit: u64) -> String {
+///
+/// `kind` and `state` narrow the page to one queue: "what vision work is
+/// running right now" is one request, not a page of everything followed by
+/// a client-side filter that runs out of page before it finds any.
+pub fn path_jobs_list(
+    ns: Option<&str>,
+    kind: Option<&str>,
+    state: Option<&str>,
+    limit: u64,
+) -> String {
     let mut p = format!("/v1/jobs?limit={limit}");
     if let Some(ns) = ns {
         p.push_str("&ns=");
         p.push_str(ns);
     }
+    if let Some(kind) = kind {
+        p.push_str("&kind=");
+        p.push_str(kind);
+    }
+    if let Some(state) = state {
+        p.push_str("&state=");
+        p.push_str(state);
+    }
+    p
+}
+
+// ---- pipelines (declared multi-stage runs) ---------------------------------
+
+/// Transport pipeline id prefix; the full shape is `pipe_<32 lowercase hex>`
+/// (the server's `api::PIPELINE_PREFIX`).
+pub const PIPELINE_PREFIX: &str = "pipe_";
+
+/// Most stages one declared pipeline may carry (the server's
+/// `MAX_PIPELINE_STAGES`, which is the job graph's depth budget).
+pub const MAX_PIPELINE_STAGES: usize = 8;
+/// Longest pipeline title the server accepts.
+pub const MAX_PIPELINE_TITLE_BYTES: usize = 200;
+/// Longest recorded pipeline prompt — the words the PERSON typed, which is
+/// also what an `on_fail: skip` stage falls back to.
+pub const MAX_PIPELINE_PROMPT_BYTES: usize = 4000;
+/// Declared stage weight bounds; the server refuses `0` and anything above.
+pub const MAX_STAGE_WEIGHT: u16 = 1000;
+/// Most rows one `GET /v1/pipelines` page may ask for (server cap).
+pub const MAX_PIPELINE_LIST_LIMIT: u64 = 200;
+
+pub fn path_pipelines() -> String {
+    "/v1/pipelines".to_string()
+}
+
+/// `pipeline` is the canonical `pipe_<32 lowercase hex>` display spelling.
+pub fn path_pipeline(pipeline: &str) -> String {
+    format!("/v1/pipelines/{pipeline}")
+}
+
+pub fn path_pipeline_cancel(pipeline: &str) -> String {
+    format!("/v1/pipelines/{pipeline}/cancel")
+}
+
+/// Scoped pipeline listing. With `ns` the server requires a job capability
+/// on that namespace; without it the caller's own runs are listed.
+///
+/// `active_only` is the state filter the global runs surface polls: the
+/// server answers it from a partial index and then re-derives every row, so
+/// "the runs still moving" is exact no matter how much finished history sits
+/// in front of them.
+pub fn path_pipelines_list(ns: Option<&str>, active_only: bool, limit: u64) -> String {
+    let mut p = format!("/v1/pipelines?limit={limit}");
+    if let Some(ns) = ns {
+        p.push_str("&ns=");
+        p.push_str(ns);
+    }
+    p.push_str(if active_only { "&state=active" } else { "&state=all" });
     p
 }
 
@@ -366,6 +463,18 @@ pub fn path_events(
         p.push_str(c);
     }
     p
+}
+
+pub fn path_model_previews() -> String {
+    "/v1/model-previews".to_string()
+}
+
+pub fn path_model_preview_part(session: &str, part: &str) -> String {
+    format!("/v1/model-preview-sessions/{session}/parts/{part}")
+}
+
+pub fn path_model_preview_mesh(token: &str) -> String {
+    format!("/v1/model-preview-meshes/{token}")
 }
 
 // ---- typed asset operations -------------------------------------------------
@@ -437,9 +546,31 @@ pub fn path_chat_tool_result(id: &str) -> String {
     format!("/v1/chat/sessions/{id}/tool-result")
 }
 
+/// The durable conversation of one session, as a client renders it.
+pub fn path_chat_transcript(id: &str) -> String {
+    format!("/v1/chat/sessions/{id}/transcript")
+}
+
 pub const MAX_CHAT_WAIT_MS: u64 = 30_000;
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_CHAT_ATTACHMENTS: usize = 8;
+/// `client_key` / `context_key` on session create: the identity a keyed
+/// (create-or-resume) session is stored under on the server.
+pub const MAX_CHAT_KEY_BYTES: usize = 64;
+
+/// A chat session key (`client_key` = who, e.g. `ip:10.0.0.7`; `context_key`
+/// = what, e.g. the game's asset id) is opaque but DISPLAY-SAFE and
+/// path-safe by construction: 1..=64 bytes of `[A-Za-z0-9._:@-]` with at
+/// least one letter or digit. Never a secret — it names a transcript file
+/// on the server, it does not protect it (the bearer token does).
+pub fn chat_key_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_CHAT_KEY_BYTES
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'@' | b'-')
+        })
+        && s.bytes().any(|b| b.is_ascii_alphanumeric())
+}
 
 // ---- import + immutable derived variants -----------------------------------
 
@@ -671,6 +802,47 @@ mod tests {
             assert!(p.bytes().all(target_byte_ok), "{p}");
             assert!(p.starts_with('/'), "{p}");
         }
+    }
+
+    #[test]
+    fn chat_paths_and_keys_are_strict() {
+        let sid = "chat_0123456789abcdef";
+        for p in [
+            path_chat_providers(),
+            path_chat_sessions(),
+            path_chat_session(sid),
+            path_chat_send(sid),
+            path_chat_events(sid, 7, 500, 64),
+            path_chat_cancel(sid),
+            path_chat_tool_result(sid),
+            path_chat_transcript(sid),
+        ] {
+            assert!(p.len() <= MAX_TARGET_BYTES, "{p}");
+            assert!(p.bytes().all(target_byte_ok), "{p}");
+            assert!(p.starts_with("/v1/chat/"), "{p}");
+        }
+        assert_eq!(path_chat_transcript(sid), "/v1/chat/sessions/chat_0123456789abcdef/transcript");
+        // The keys the sandbox sends today, a multiplayer player id later,
+        // and an asset id as the context — all fine.
+        for good in ["ip:10.0.0.7", "ip:fe80::1", "player-42", "ast_0123456789abcdef", "a", "rik@n4"] {
+            assert!(chat_key_ok(good), "{good}");
+        }
+        for bad in [
+            "",
+            " ",
+            "a b",
+            "a/b",
+            "..",
+            "...",
+            ":",
+            "a\n",
+            "ü",
+            "a\u{7}",
+            &"x".repeat(MAX_CHAT_KEY_BYTES + 1),
+        ] {
+            assert!(!chat_key_ok(bad), "{bad:?}");
+        }
+        assert!(chat_key_ok(&"x".repeat(MAX_CHAT_KEY_BYTES)));
     }
 
     #[test]

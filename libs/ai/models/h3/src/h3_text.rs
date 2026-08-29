@@ -962,11 +962,21 @@ fn mrope_axis(channel: usize) -> usize {
     }
 }
 
-/// mrope position planes (t, h, w) for the single-image fl2va sequence, per
-/// `Qwen3VLModel.get_rope_index`: text before the image counts positions
-/// linearly; the image group holds t constant and spreads h/w over the
-/// (gh/2, gw/2) block grid; after the image the running position advances by
-/// max(gh, gw)/2 (NOT by the token count) and text continues linearly.
+/// One image's vision-token span inside the fl2va presentation: the row of
+/// its first `<|image_pad|>`, how many merged vision tokens it holds, and
+/// the patch grid those came from.
+#[derive(Clone, Copy, Debug)]
+pub struct H3VisionSpan {
+    pub start_row: usize,
+    pub len: usize,
+    pub gh: usize,
+    pub gw: usize,
+}
+
+/// mrope position planes (t, h, w) for the single-image fl2va sequence.
+/// Thin wrapper over [`h3_fl2va_mrope_positions_multi`], kept because the
+/// single-image geometry is what the vision oracle validator compares
+/// against.
 pub fn h3_fl2va_mrope_positions(
     seq: usize,
     vision_start_row: usize,
@@ -974,37 +984,81 @@ pub fn h3_fl2va_mrope_positions(
     gh: usize,
     gw: usize,
 ) -> Result<[Vec<i64>; 3]> {
-    let blocks_h = gh / 2;
-    let blocks_w = gw / 2;
-    if vision_len != blocks_h * blocks_w {
-        return Err(DiffusionError::workflow(format!(
-            "h3 fl2va positions: vision_len {vision_len} != {blocks_h}x{blocks_w}"
-        )));
-    }
-    if vision_start_row + vision_len > seq {
-        return Err(DiffusionError::workflow(format!(
-            "h3 fl2va positions: vision span {vision_start_row}+{vision_len} exceeds seq {seq}"
-        )));
-    }
+    h3_fl2va_mrope_positions_multi(
+        seq,
+        &[H3VisionSpan {
+            start_row: vision_start_row,
+            len: vision_len,
+            gh,
+            gw,
+        }],
+    )
+}
+
+/// mrope position planes (t, h, w) for an fl2va sequence carrying any number
+/// of images, per `Qwen3VLModel.get_rope_index`
+/// (transformers `models/qwen3_vl/modeling_qwen3_vl.py`, the
+/// `input_type_group` loop): the sequence is walked as runs of one modality,
+/// a text run of length L takes `current_pos + arange(L)` on all three planes
+/// and advances `current_pos` by L, and an image run takes
+/// `get_vision_position_ids(current_pos, grid)` — t held at `current_pos`,
+/// h/w spread over the `(gh/2, gw/2)` block grid — then advances
+/// `current_pos` by `max(gh, gw)/2` (NOT by the token count).
+///
+/// Spans must be sorted, disjoint and inside `seq`; with exactly one span
+/// this is byte-for-byte the old single-image function.
+pub fn h3_fl2va_mrope_positions_multi(
+    seq: usize,
+    spans: &[H3VisionSpan],
+) -> Result<[Vec<i64>; 3]> {
     let mut t = Vec::with_capacity(seq);
     let mut h = Vec::with_capacity(seq);
     let mut w = Vec::with_capacity(seq);
-    for i in 0..vision_start_row {
-        t.push(i as i64);
-        h.push(i as i64);
-        w.push(i as i64);
+    let mut row = 0usize;
+    let mut current_pos = 0i64;
+    for span in spans {
+        let blocks_h = span.gh / 2;
+        let blocks_w = span.gw / 2;
+        if span.len != blocks_h * blocks_w {
+            return Err(DiffusionError::workflow(format!(
+                "h3 fl2va positions: vision_len {} != {blocks_h}x{blocks_w}",
+                span.len
+            )));
+        }
+        if span.start_row < row {
+            return Err(DiffusionError::workflow(format!(
+                "h3 fl2va positions: vision span at {} overlaps the previous one (ends {row})",
+                span.start_row
+            )));
+        }
+        if span.start_row + span.len > seq {
+            return Err(DiffusionError::workflow(format!(
+                "h3 fl2va positions: vision span {}+{} exceeds seq {seq}",
+                span.start_row, span.len
+            )));
+        }
+        // Text run before this image.
+        for _ in row..span.start_row {
+            t.push(current_pos);
+            h.push(current_pos);
+            w.push(current_pos);
+            current_pos += 1;
+        }
+        // The image run: t pinned, h/w over the block grid.
+        for j in 0..span.len {
+            t.push(current_pos);
+            h.push(current_pos + (j / blocks_w) as i64);
+            w.push(current_pos + (j % blocks_w) as i64);
+        }
+        current_pos += (span.gh.max(span.gw) / 2) as i64;
+        row = span.start_row + span.len;
     }
-    let image_pos = vision_start_row as i64;
-    for j in 0..vision_len {
-        t.push(image_pos);
-        h.push(image_pos + (j / blocks_w) as i64);
-        w.push(image_pos + (j % blocks_w) as i64);
-    }
-    let after = image_pos + (gh.max(gw) / 2) as i64;
-    for i in 0..seq - vision_start_row - vision_len {
-        t.push(after + i as i64);
-        h.push(after + i as i64);
-        w.push(after + i as i64);
+    // Trailing text run (the prompt, and `<|vision_end|>` of the last image).
+    for _ in row..seq {
+        t.push(current_pos);
+        h.push(current_pos);
+        w.push(current_pos);
+        current_pos += 1;
     }
     Ok([t, h, w])
 }
@@ -1063,53 +1117,48 @@ pub struct H3Fl2vaTap {
     pub pre_deepstack: Option<Vec<f32>>,
 }
 
-/// Vision-conditioned prompt encode (fl2va): like `h3_text_encode` but the
-/// `<|image_pad|>` embedding rows [vision_start_row..+vision_len) are
-/// replaced by the vision tower's image embeds, rope runs on interleaved
-/// mrope positions, and the three deepstack embeds are added to the image
-/// rows after decoder layers 0/1/2. Attention stays causal over the whole
-/// sequence. Output: (seq, 5120) f32 host values after decoder layer 50.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
+/// One image handed to the fl2va encode: where its `<|image_pad|>` rows sit
+/// and the preprocessed patch rows the vision tower consumes.
+pub struct H3VisionImage<'a> {
+    pub span: H3VisionSpan,
+    /// `h3_vision_preprocess` output for this image.
+    pub pixel_values: &'a [f32],
+}
+
+/// Vision-conditioned prompt encode (fl2va): like `h3_text_encode` but each
+/// image's `<|image_pad|>` embedding rows are replaced by that image's
+/// vision-tower embeds, rope runs on interleaved mrope positions over the
+/// whole presentation, and the three deepstack embeds of each image are
+/// added to its own rows after decoder layers 0/1/2. Attention stays causal
+/// over the whole sequence. Output: (seq, 5120) f32 host values after
+/// decoder layer 50.
+///
+/// Upstream runs the vision tower on the images batched
+/// (`encoders.py::get_qwen3vl_prompt_embeds`, `vision_inputs` carries every
+/// keyframe's `pixel_values` with a per-image `image_grid_thw`); Qwen3-VL's
+/// tower attends inside one image's grid only, so encoding them one at a
+/// time here is the same arithmetic and keeps the single-image path
+/// byte-for-byte what it was.
 pub fn h3_text_encode_fl2va(
     weights: &H3ShardedWeights,
     prepared: &H3TextEncoderPrepared,
     token_ids: &[u32],
-    vision_start_row: usize,
-    vision_len: usize,
-    pixel_values: &[f32],
-    gh: usize,
-    gw: usize,
+    images: &[H3VisionImage],
     on_layer: Option<&mut dyn FnMut(usize, usize)>,
 ) -> Result<Vec<f32>> {
-    let (hidden, _taps) = h3_text_encode_fl2va_taps(
-        weights,
-        prepared,
-        token_ids,
-        vision_start_row,
-        vision_len,
-        pixel_values,
-        gh,
-        gw,
-        &[],
-        on_layer,
-    )?;
+    let (hidden, _taps) =
+        h3_text_encode_fl2va_taps(weights, prepared, token_ids, images, &[], on_layer)?;
     Ok(hidden)
 }
 
 /// `h3_text_encode_fl2va` with validation taps (see `H3Fl2vaTap`).
 /// `on_layer(done, total)` ticks per text decoder layer (the vision tower
 /// runs before layer 1/50 fires).
-#[allow(clippy::too_many_arguments)]
 pub fn h3_text_encode_fl2va_taps(
     weights: &H3ShardedWeights,
     prepared: &H3TextEncoderPrepared,
     token_ids: &[u32],
-    vision_start_row: usize,
-    vision_len: usize,
-    pixel_values: &[f32],
-    gh: usize,
-    gw: usize,
+    images: &[H3VisionImage],
     taps: &[usize],
     mut on_layer: Option<&mut dyn FnMut(usize, usize)>,
 ) -> Result<(Vec<f32>, Vec<H3Fl2vaTap>)> {
@@ -1117,22 +1166,42 @@ pub fn h3_text_encode_fl2va_taps(
     if n == 0 {
         return Err(DiffusionError::workflow("h3 fl2va encode: empty prompt"));
     }
+    if images.is_empty() {
+        return Err(DiffusionError::workflow(
+            "h3 fl2va encode: no vision blocks (use h3_text_encode for t2va)",
+        ));
+    }
     // Positions are validated first (they also check the span geometry).
-    let positions = h3_fl2va_mrope_positions(n, vision_start_row, vision_len, gh, gw)?;
+    let spans: Vec<H3VisionSpan> = images.iter().map(|image| image.span).collect();
+    let positions = h3_fl2va_mrope_positions_multi(n, &spans)?;
 
     // Vision tower first: its embeds replace the image_pad embedding rows.
+    // One prepare, one pass per image (the tower never attends across
+    // images, see `h3_text_encode_fl2va`).
     let vis_prepared = H3VisionPrepared::prepare(weights)?;
-    let vision = h3_vision_encode(weights, &vis_prepared, pixel_values, gh, gw)?;
+    let mut visions = Vec::with_capacity(images.len());
+    for image in images {
+        visions.push(h3_vision_encode(
+            weights,
+            &vis_prepared,
+            image.pixel_values,
+            image.span.gh,
+            image.span.gw,
+        )?);
+    }
     drop(vis_prepared);
 
     let mut embeds = vec![0.0f32; n * H3_TE_HIDDEN];
-    for (row, id) in token_ids.iter().enumerate() {
-        if row >= vision_start_row && row < vision_start_row + vision_len {
-            let src = row - vision_start_row;
-            embeds[row * H3_TE_HIDDEN..(row + 1) * H3_TE_HIDDEN].copy_from_slice(
-                &vision.image_embeds[src * H3_TE_HIDDEN..(src + 1) * H3_TE_HIDDEN],
-            );
-            continue;
+    'rows: for (row, id) in token_ids.iter().enumerate() {
+        for (image, vision) in images.iter().zip(visions.iter()) {
+            let start = image.span.start_row;
+            if row >= start && row < start + image.span.len {
+                let src = row - start;
+                embeds[row * H3_TE_HIDDEN..(row + 1) * H3_TE_HIDDEN].copy_from_slice(
+                    &vision.image_embeds[src * H3_TE_HIDDEN..(src + 1) * H3_TE_HIDDEN],
+                );
+                continue 'rows;
+            }
         }
         let values = weights
             .tensor_row_f32("model.language_model.embed_tokens.weight", *id as u64)?;
@@ -1162,13 +1231,20 @@ pub fn h3_text_encode_fl2va_taps(
     let rope_cos = gpu_upload(&cos, n, half).map_err(DiffusionError::model)?;
     let rope_sin = gpu_upload(&sin, n, half).map_err(DiffusionError::model)?;
 
-    // Deepstack embeds stay device-resident across the early layers.
-    let mut ds_dev = Vec::with_capacity(vision.deepstack.len());
-    for values in &vision.deepstack {
-        ds_dev.push(
-            gpu_upload(values, vision_len, H3_TE_HIDDEN).map_err(DiffusionError::model)?,
-        );
+    // Deepstack embeds stay device-resident across the early layers, one set
+    // per image (added to that image's own rows).
+    let mut ds_dev: Vec<Vec<GpuTensor>> = Vec::with_capacity(images.len());
+    for (image, vision) in images.iter().zip(visions.iter()) {
+        let mut per_image = Vec::with_capacity(vision.deepstack.len());
+        for values in &vision.deepstack {
+            per_image.push(
+                gpu_upload(values, image.span.len, H3_TE_HIDDEN)
+                    .map_err(DiffusionError::model)?,
+            );
+        }
+        ds_dev.push(per_image);
     }
+    let num_ds_layers = ds_dev.first().map_or(0, Vec::len);
 
     for layer in 0..H3_TE_LAYERS {
         if let Some(on_layer) = on_layer.as_deref_mut() {
@@ -1178,11 +1254,14 @@ pub fn h3_text_encode_fl2va_taps(
         let hidden_index = layer + 1;
         let want_tap = taps.contains(&hidden_index);
         let mut pre_deepstack = None;
-        if layer < ds_dev.len() {
+        if layer < num_ds_layers {
             if want_tap {
                 pre_deepstack = Some(gpu_download(&hidden).map_err(DiffusionError::model)?);
             }
-            hidden = add_rows_span(&hidden, vision_start_row, vision_len, &ds_dev[layer])?;
+            for (image, per_image) in images.iter().zip(ds_dev.iter()) {
+                hidden =
+                    add_rows_span(&hidden, image.span.start_row, image.span.len, &per_image[layer])?;
+            }
         }
         if want_tap {
             tap_out.push(H3Fl2vaTap {
@@ -1336,6 +1415,95 @@ mod tests {
         assert_eq!(t, vec![0, 1, 1, 1, 1, 1, 1, 1, 1, 5]);
         assert_eq!(h, vec![0, 1, 1, 1, 1, 2, 2, 2, 2, 5]);
         assert_eq!(w, vec![0, 1, 2, 3, 4, 1, 2, 3, 4, 5]);
+    }
+
+    /// PARITY GATE. The multi-span walker with exactly one span reproduces
+    /// the old single-image positions bit-for-bit — the two cases above run
+    /// through the wrapper, and this pins the two forms against each other
+    /// over a spread of geometries.
+    #[test]
+    fn one_span_multi_matches_the_single_image_form() {
+        for (seq, start, gh, gw) in [(9usize, 3usize, 4usize, 4usize), (10, 1, 4, 8), (300, 12, 22, 40), (7, 0, 2, 2)] {
+            let len = (gh / 2) * (gw / 2);
+            let single = h3_fl2va_mrope_positions(seq, start, len, gh, gw).unwrap();
+            let multi = h3_fl2va_mrope_positions_multi(
+                seq,
+                &[H3VisionSpan { start_row: start, len, gh, gw }],
+            )
+            .unwrap();
+            assert_eq!(single, multi, "seq={seq} start={start} {gh}x{gw}");
+        }
+    }
+
+    /// Two images: each block holds t at the running position and spreads
+    /// h/w over its own block grid, and the position between them advances
+    /// by max(gh, gw)/2 rather than by the token count — per
+    /// `Qwen3VLModel.get_rope_index`'s `current_pos` walk.
+    #[test]
+    fn two_span_positions_advance_per_image() {
+        // 1 text token, image A (4x4 -> 2x2 = 4 tokens) at row 1, 2 text
+        // tokens, image B (4x4) at row 7, 1 text token. seq = 12.
+        let spans = [
+            H3VisionSpan { start_row: 1, len: 4, gh: 4, gw: 4 },
+            H3VisionSpan { start_row: 7, len: 4, gh: 4, gw: 4 },
+        ];
+        let [t, h, w] = h3_fl2va_mrope_positions_multi(12, &spans).unwrap();
+        // pos 0 = text; image A at pos 1 (t=1, h/w over 1..2); then pos
+        // advances by 2 -> 3, two text tokens 3,4; image B at pos 5; then
+        // pos advances by 2 -> 7 for the trailing text token.
+        assert_eq!(t, vec![0, 1, 1, 1, 1, 3, 4, 5, 5, 5, 5, 7]);
+        assert_eq!(h, vec![0, 1, 1, 2, 2, 3, 4, 5, 5, 6, 6, 7]);
+        assert_eq!(w, vec![0, 1, 2, 1, 2, 3, 4, 5, 6, 5, 6, 7]);
+    }
+
+    /// The real fl2va shape: `<Picture i>: ` label, `<|vision_start|>`, the
+    /// pads, `<|vision_end|>`, twice, then the prompt. The second block's
+    /// start is the first block's start plus its pads plus `<|vision_end|>`
+    /// plus the second label plus `<|vision_start|>`.
+    #[test]
+    fn first_last_presentation_spans_are_disjoint_and_ordered() {
+        let label = 3usize; // "<Picture i>: " tokens
+        let pads = 6usize;
+        let start_a = label + 1;
+        let start_b = start_a + pads + 1 + label + 1;
+        let seq = start_b + pads + 1 + 4; // + <|vision_end|> + 4 prompt tokens
+        let spans = [
+            H3VisionSpan { start_row: start_a, len: pads, gh: 4, gw: 6 },
+            H3VisionSpan { start_row: start_b, len: pads, gh: 4, gw: 6 },
+        ];
+        let [t, h, w] = h3_fl2va_mrope_positions_multi(seq, &spans).unwrap();
+        assert_eq!(t.len(), seq);
+        // Inside a block t is constant; between blocks it strictly grows.
+        assert!(t[start_a..start_a + pads].iter().all(|v| *v == t[start_a]));
+        assert!(t[start_b..start_b + pads].iter().all(|v| *v == t[start_b]));
+        assert!(t[start_b] > t[start_a]);
+        // The advance after a 4x6 grid is max(4,6)/2 = 3, so the token after
+        // block A sits at its position + 3.
+        assert_eq!(t[start_a + pads], t[start_a] + 3);
+        // h/w spread over the (2, 3) block grid.
+        assert_eq!(&h[start_a..start_a + pads], &[t[start_a], t[start_a], t[start_a], t[start_a] + 1, t[start_a] + 1, t[start_a] + 1]);
+        assert_eq!(&w[start_a..start_a + pads], &[t[start_a], t[start_a] + 1, t[start_a] + 2, t[start_a], t[start_a] + 1, t[start_a] + 2]);
+    }
+
+    /// Overlapping or out-of-range spans are refused rather than silently
+    /// scrambling the rotary layout.
+    #[test]
+    fn bad_spans_are_refused() {
+        let ok = H3VisionSpan { start_row: 2, len: 4, gh: 4, gw: 4 };
+        // Overlap: the second span starts inside the first.
+        assert!(h3_fl2va_mrope_positions_multi(
+            20,
+            &[ok, H3VisionSpan { start_row: 4, len: 4, gh: 4, gw: 4 }]
+        )
+        .is_err());
+        // Past the end.
+        assert!(h3_fl2va_mrope_positions_multi(5, &[ok]).is_err());
+        // Token count disagrees with the grid.
+        assert!(h3_fl2va_mrope_positions_multi(
+            20,
+            &[H3VisionSpan { start_row: 2, len: 5, gh: 4, gw: 4 }]
+        )
+        .is_err());
     }
 
     /// |a - b| in units of b's last place; equality-class check for values

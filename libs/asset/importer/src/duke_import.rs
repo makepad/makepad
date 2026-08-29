@@ -12,11 +12,30 @@ use makepad_gltf::{write_glb_mesh_textured_parts, GlbTexturedPart};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub const SCALE: f32 = 1.0 / 512.0;
 /// BUILD Z is 16× finer than XY. Wall V and slope height use this ratio.
 const Z_PER_XY: f32 = 16.0;
-/// World Y scale so a 8192-Z storey is one unit, matching 512-XY tiles.
-const SCALE_Z: f32 = SCALE / Z_PER_XY;
+/// Duke's own body, in BUILD z units: the `APLAYER` tile (1405) is 82
+/// texels tall and E1L1 places it at `yrepeat` 40, and a Build sprite
+/// stands `tilesizy * yrepeat * 4` z units — 13120. That sprite is the
+/// person every importer pins to `PERSON_HEIGHT`; the eye (`PHEIGHT`,
+/// 38 << 8) then lands at 1.30 m, the same low eye Doom's 41-unit
+/// `VIEWHEIGHT` gives, and a pig cop (78 texels × 40) at 1.66 m.
+///
+/// Measured, not remembered: `h=1.6016` on E1L1's `spr-61` at the old
+/// 1/8192 z scale is exactly 82 × 40 × 4 / 8192.
+const DUKE_PLAYER_HEIGHT_Z: f32 = 82.0 * 40.0 * 4.0;
+/// World Y metres per BUILD z unit (1/7497): the placed player sprite is
+/// `PERSON_HEIGHT` tall. Was 1/8192 (a 1.60 m Duke, 1.19 m eye) until
+/// 2026-08-26.
+const SCALE_Z: f32 = crate::dimensions::PERSON_HEIGHT / DUKE_PLAYER_HEIGHT_Z;
+/// Metres per BUILD xy unit (1/468.6): z is 16× finer, and the two are
+/// isotropic — a sprite is `xrepeat / 4` xy units per texel across and
+/// `yrepeat * 4 / 16` xy-equivalent units per texel up.
+pub const SCALE: f32 = SCALE_Z * Z_PER_XY;
+/// Metres one sprite texel covers at the repeat E1L1 places its people at
+/// (40): what a sheet declares for a reader that spawns the actor without a
+/// `.place` row to size it by.
+const DUKE_SPRITE_METRES_PER_PIXEL: f32 = 40.0 * 4.0 * SCALE_Z;
 /// Floor/ceiling: world XY / this many units = one texel. Stat bit 3
 /// uses 8 instead (denser mapping).
 const FLOOR_UNITS_PER_TEXEL: f32 = 16.0;
@@ -815,9 +834,9 @@ struct Sprite {
 /// mid-air. Every other classic converter publishes its engine's own view
 /// height (Doom `VIEWHEIGHT` 41, Quake 22+24); this is Build's.
 ///
-/// At this converter's scale that is 1.19 m, in rooms whose median height is
-/// 3 m — Duke's world is about twice Doom's, which is exactly why the eye
-/// has to be DECLARED rather than assumed by the walker.
+/// At this converter's scale that is 1.30 m under a 1.75 m body — Build's
+/// eye sits at 74 % of the sprite, as Doom's does — which is exactly why
+/// the eye has to be DECLARED rather than assumed by the walker.
 const DUKE_VIEW_HEIGHT_Z: i32 = 38 << 8;
 
 /// Every navigation fact a BUILD map states about itself.
@@ -1283,7 +1302,10 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
         // chords, so the split pass reverts and the crack stays. Merging
         // moves a vertex, which the splitter never does — under four
         // millimetres, in rooms three metres tall.
-        let merge = crate::classic_import::merge_near_corners(&parts);
+        // Three of BUILD's own xy units — the E1L1-measured tuning
+        // (`weld::MERGE_TOLERANCE`'s doc), stated in this map's source unit
+        // so it survives any change of the metre.
+        let merge = crate::classic_import::merge_near_corners_with(&parts, 3.0 * SCALE);
         if !merge.is_empty() {
             for bucket in sink.all_mut().flat_map(|m| m.values_mut()) {
                 merge.apply(crate::classic_import::WeldSoup {
@@ -2444,6 +2466,13 @@ fn map_to_place(
         world: world_key.into(),
         spawn: spawn.map(|s| ([s[0], s[1], s[2]], s[3], s[4])),
         places,
+        // Duke's people are pinned to the shared person: the walker body a
+        // reader derives from this is the one the actor table's metres are
+        // written for, so its `world_scale` patch collapses to 1.
+        family: crate::world_place::Family {
+            person_height: crate::dimensions::PERSON_HEIGHT,
+            ..Default::default()
+        },
     }
 }
 
@@ -4281,6 +4310,9 @@ fn build_actor_billboard(
             states,
             frames,
             sheet: None,
+            actor: None,
+            weapon: None,
+            metres_per_pixel: DUKE_SPRITE_METRES_PER_PIXEL,
         },
         tiles,
     ))
@@ -4933,6 +4965,7 @@ enda
                 align: "face".into(),
                 flags: 0,
             }],
+            family: Default::default(),
         };
         std::fs::write(staged.join("worlds/e1l1.place"), place.to_text()).unwrap();
         let used: BTreeSet<u16> = [2000u16].into_iter().collect();
@@ -5986,15 +6019,16 @@ enda
             .collect();
         assert_eq!(states, vec!["closed", "open"]);
         // Shut ceiling is on the floor (0), open is the neighbours' ceiling
-        // 16384 BUILD z up, which is two metres at this scale.
+        // 16384 BUILD z up.
+        let open_m = (16384.0 * SCALE_Z) as f64;
         assert!((num(extras.get("closed").unwrap()) - 0.0).abs() < 1e-6);
-        assert!((num(extras.get("open").unwrap()) - 2.0).abs() < 1e-4, "{extras:?}");
-        assert!((num(extras.get("travel").unwrap()) - 2.0).abs() < 1e-4);
+        assert!((num(extras.get("open").unwrap()) - open_m).abs() < 1e-4, "{extras:?}");
+        assert!((num(extras.get("travel").unwrap()) - open_m).abs() < 1e-4);
 
         // Authored CLOSED, resting OPEN: a viewer that plays nothing still
         // walks through the doorway.
         let t = door.get("translation").and_then(Value::as_arr).expect("rest");
-        assert!((num(&t[1]) - 2.0).abs() < 1e-4, "{t:?}");
+        assert!((num(&t[1]) - open_m).abs() < 1e-4, "{t:?}");
 
         // One LINEAR clip named exactly like the node.
         let anims = root.get("animations").and_then(Value::as_arr).expect("animations");
@@ -6026,7 +6060,7 @@ enda
         assert_eq!(world.doors.len(), 1, "{:?}", world.doors);
         assert_eq!(world.doors[0].name, "door_1");
         assert!((world.doors[0].closed_y - 0.0).abs() < 1e-6);
-        assert!((world.doors[0].open_y - 2.0).abs() < 1e-4);
+        assert!((world.doors[0].open_y - 16384.0 * SCALE_Z).abs() < 1e-4);
     }
 
     #[test]
@@ -6048,9 +6082,9 @@ enda
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(states, vec!["up", "down"]);
-        // Up is where BUILD drew it (half a metre), down is the neighbour's
+        // Up is where BUILD drew it (4096 z), down is the neighbour's
         // floor, so the travel is negative.
-        assert!((num(extras.get("up").unwrap()) - 0.5).abs() < 1e-4, "{extras:?}");
+        assert!((num(extras.get("up").unwrap()) - (4096.0 * SCALE_Z) as f64).abs() < 1e-4, "{extras:?}");
         assert!((num(extras.get("down").unwrap()) - 0.0).abs() < 1e-6);
         assert!(num(extras.get("travel").unwrap()) < 0.0);
         // A lift RESTS up: the platform is in the picture, not in the shaft.
@@ -6315,8 +6349,19 @@ enda
         full.lifts = world.lifts.clone();
         let text = full.to_text();
         let back = crate::world_nav::WorldNav::parse(&text).expect("parse");
-        assert_eq!(back.doors, full.doors);
-        assert_eq!(back.lifts, full.lifts);
+        // The sidecar is four decimal places, so heights come back near.
+        assert_eq!(back.doors.len(), full.doors.len());
+        for (b, f) in back.doors.iter().zip(&full.doors) {
+            assert_eq!(b.name, f.name);
+            assert!((b.open_y - f.open_y).abs() < 1e-3, "{b:?} vs {f:?}");
+            assert!((b.closed_y - f.closed_y).abs() < 1e-3, "{b:?} vs {f:?}");
+        }
+        assert_eq!(back.lifts.len(), full.lifts.len());
+        for (b, f) in back.lifts.iter().zip(&full.lifts) {
+            assert_eq!(b.name, f.name);
+            assert!((b.open_y - f.open_y).abs() < 1e-3, "{b:?} vs {f:?}");
+            assert!((b.closed_y - f.closed_y).abs() < 1e-3, "{b:?} vs {f:?}");
+        }
         // The sidecar is four decimal places — a tenth of a millimetre — so
         // a position comes back near, not bit-equal.
         assert_eq!(

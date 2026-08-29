@@ -37,7 +37,13 @@ fn main() {
     // Browse the catalog through the same keyset paging the routes use.
     let viewer = SearchViewer { principal: None, scope: ViewerScope::All };
     let query =
-        SearchQuery { text: "", filters: SearchFilters::default(), page_size: 100, facets: 0 };
+        SearchQuery {
+            text: "",
+            filters: SearchFilters::default(),
+            expand: false,
+            page_size: 100,
+            facets: 0,
+        };
     let t = Instant::now();
     let page = core.search().search(&query, &viewer, None).expect("browse page 1");
     println!(

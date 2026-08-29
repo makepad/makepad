@@ -819,6 +819,8 @@ impl ThumbnailRenderer {
             ThumbnailSubject::Statue(ModelInstance {
                 model: id,
                 transform: frame.transform,
+                tint: vec4(1.0, 1.0, 1.0, 1.0),
+                color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                 dynamic: true,
                 depth_order: 0.0,
                 part_poses: Vec::new(),

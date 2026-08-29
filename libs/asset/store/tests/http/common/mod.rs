@@ -392,6 +392,45 @@ pub fn prop_manifest(asset_id: AssetId, glb: &[u8], thumb: &[u8]) -> AssetManife
     }
 }
 
+pub fn data_manifest(asset_id: AssetId, source: &[u8]) -> AssetManifest {
+    AssetManifest {
+        asset_id,
+        kind: AssetKind::Data,
+        files: vec![AssetFile {
+            role: FileRole::Source,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media: MediaType::Text,
+            blob: BlobId::hash_of(source),
+            byte_len: source.len() as u64,
+            dims: None,
+        }],
+        dependencies: vec![],
+        thumbnail: None,
+        metrics: Metrics {
+            total_bytes: source.len() as u64,
+            triangles: 0,
+            vertices: 0,
+            joints: 0,
+            clips: 0,
+            max_texture_dim: 0,
+            media_millis: 0,
+        },
+        coordinate_system: CoordinateSystem {
+            units_per_meter: 1.0,
+            up: Axis::YPos,
+            forward: Axis::ZNeg,
+            pivot: Pivot::Origin,
+        },
+        bounds: Bounds { min: Vec3::ZERO, max: Vec3::ZERO },
+        anchors: vec![],
+        capabilities: Capabilities::default(),
+        spawn_recipe: None,
+        provenance: None,
+        rights: test_rights(),
+    }
+}
+
 /// Fixed pack source bytes for the Kenney-style import fixture — identical
 /// to the core crate's fixture so identities agree across test suites and
 /// across clean servers.

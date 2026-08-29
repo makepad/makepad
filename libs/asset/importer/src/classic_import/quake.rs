@@ -298,7 +298,7 @@ pub(crate) fn quake_bsp_to_map(bytes: &[u8]) -> Result<QuakeMap, String> {
     let mut indices = Vec::new();
     let mut liquid_planes: BTreeSet<(i16, String)> = BTreeSet::new();
 
-    let scale = 1.0 / 32.0; // Quake units → rough meters
+    let scale = super::doom::QUAKE_UNIT;
 
     // Faces that leave the level mesh: the sky, the liquids you swim in,
     // and every brush a `func_door` moves.
@@ -1213,7 +1213,8 @@ pub(crate) fn decode_quake_mdl_ex(bytes: &[u8], as_character: bool) -> Result<De
         let x = packed[0] as f32 * scale[0] + origin[0];
         let y = packed[1] as f32 * scale[1] + origin[1];
         let z = packed[2] as f32 * scale[2] + origin[2];
-        [x / 32.0, z / 32.0, -y / 32.0]
+        let u = super::doom::QUAKE_UNIT;
+        [x * u, z * u, -y * u]
     };
     let pose_positions = |frame: &MdlFrame| -> Vec<[f32; 3]> {
         corners

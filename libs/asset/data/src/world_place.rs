@@ -17,12 +17,56 @@ use std::path::Path;
 
 pub const PLACE_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorldPlace {
     pub source: String,
     pub world: String,
     pub spawn: Option<([f32; 3], f32, f32)>,
     pub places: Vec<Place>,
+    /// The level's own facts about the people in it, written by the
+    /// importer so the engine reads them off the map rather than off a
+    /// table keyed by game. Every reference is a namespace-relative asset
+    /// key, like [`Place::asset`]. Empty/zero on sidecars written before
+    /// these lines existed.
+    ///
+    /// ```text
+    /// person 1.75 health=100 max=200
+    /// loadout fist pistol
+    /// weapon pistol billboards/doom1/pisg
+    /// pool bullet BULL 200 50
+    /// event door_open sfx/doom1/dsdoropn
+    /// ```
+    pub family: Family,
+}
+
+/// The per-level facts of a map's family — see [`WorldPlace::family`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Family {
+    /// How tall this level's PLAYER stands, metres, in the yardstick every
+    /// linear number on its actors' definitions is written in. Zero = unknown.
+    pub person_height: f32,
+    /// Starting hit points and the ceiling pickups may heal toward. Zero
+    /// means an older sidecar; runtimes use the classic 100/100 fallback.
+    pub person_health: f32,
+    pub person_health_max: f32,
+    /// Weapon ids the player arrives holding, in the order to select them.
+    pub loadout: Vec<String>,
+    /// Weapon id → the view-sprite asset key whose manifest defines it.
+    pub weapons: Vec<(String, String)>,
+    /// Ammo pools: (id, HUD title, ceiling, what the player starts with).
+    pub pools: Vec<(String, String, i32, i32)>,
+    /// Level/player event → sound asset key (`door_open`, `player_pain`…).
+    pub events: Vec<(String, String)>,
+    /// Per-mover sound overrides: one row per animated part, listing the
+    /// sound key of each transition it makes. The generic `events` table is
+    /// the fallback — these rows are for the door that grinds when every
+    /// other door hums.
+    ///
+    /// ```text
+    /// mover door_3 open=sfx/doom1/dsbdopn close=sfx/doom1/dsbdcls
+    /// mover lift_1 start=sfx/doom1/dspstart stop=sfx/doom1/dspstop move=sfx/doom1/dsstnmov
+    /// ```
+    pub movers: Vec<(String, Vec<(String, String)>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +103,36 @@ impl WorldPlace {
                 pos[0], pos[1], pos[2], yaw, pitch
             ));
         }
+        let f = &self.family;
+        if f.person_height > 0.0 {
+            out.push_str(&format!("person {}", f.person_height));
+            if f.person_health > 0.0 {
+                out.push_str(&format!(" health={}", f.person_health));
+            }
+            if f.person_health_max > 0.0 {
+                out.push_str(&format!(" max={}", f.person_health_max));
+            }
+            out.push('\n');
+        }
+        if !f.loadout.is_empty() {
+            out.push_str(&format!("loadout {}\n", f.loadout.join(" ")));
+        }
+        for (id, key) in &f.weapons {
+            out.push_str(&format!("weapon {id} {key}\n"));
+        }
+        for (id, title, max, start) in &f.pools {
+            out.push_str(&format!("pool {id} {title} {max} {start}\n"));
+        }
+        for (event, key) in &f.events {
+            out.push_str(&format!("event {event} {key}\n"));
+        }
+        for (part, sounds) in &f.movers {
+            out.push_str(&format!("mover {part}"));
+            for (event, key) in sounds {
+                out.push_str(&format!(" {event}={key}"));
+            }
+            out.push('\n');
+        }
         for p in &self.places {
             let asset = if p.asset.is_empty() { "-" } else { p.asset.as_str() };
             out.push_str(&format!(
@@ -87,6 +161,7 @@ impl WorldPlace {
         let mut world = String::new();
         let mut spawn = None;
         let mut places = Vec::new();
+        let mut family = Family::default();
         let mut saw = false;
         for raw in text.lines() {
             let line = raw.trim();
@@ -109,6 +184,50 @@ impl WorldPlace {
                 }
                 "source" => source = it.next().unwrap_or("").to_string(),
                 "world" => world = it.next().unwrap_or("").to_string(),
+                "person" => {
+                    family.person_height = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    for value in it {
+                        if let Some(value) = value.strip_prefix("health=") {
+                            family.person_health = value.parse().unwrap_or(0.0);
+                        } else if let Some(value) = value.strip_prefix("max=") {
+                            family.person_health_max = value.parse().unwrap_or(0.0);
+                        }
+                    }
+                }
+                "loadout" => family.loadout = it.map(String::from).collect(),
+                "weapon" => {
+                    if let (Some(id), Some(key)) = (it.next(), it.next()) {
+                        family.weapons.push((id.to_string(), key.to_string()));
+                    }
+                }
+                "pool" => {
+                    let (Some(id), Some(title), Some(max), Some(start)) =
+                        (it.next(), it.next(), it.next(), it.next())
+                    else {
+                        continue;
+                    };
+                    family.pools.push((
+                        id.to_string(),
+                        title.to_string(),
+                        max.parse().unwrap_or(0),
+                        start.parse().unwrap_or(0),
+                    ));
+                }
+                "event" => {
+                    if let (Some(event), Some(key)) = (it.next(), it.next()) {
+                        family.events.push((event.to_string(), key.to_string()));
+                    }
+                }
+                "mover" => {
+                    let Some(part) = it.next() else { continue };
+                    let sounds: Vec<(String, String)> = it
+                        .filter_map(|kv| kv.split_once('='))
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                    if !sounds.is_empty() {
+                        family.movers.push((part.to_string(), sounds));
+                    }
+                }
                 "spawn" => {
                     let nums: Vec<&str> = it.collect();
                     if nums.len() < 5 {
@@ -169,6 +288,7 @@ impl WorldPlace {
             world,
             spawn,
             places,
+            family,
         })
     }
 }
@@ -375,6 +495,50 @@ pub fn quake_class_actor(class: &str) -> Option<(&'static str, &'static str)> {
 mod tests {
     use super::*;
 
+    /// Mover rows survive the round trip and unknown rows stay ignored.
+    #[test]
+    fn mover_sound_rows_round_trip() {
+        let mut place = WorldPlace {
+            source: "doom".into(),
+            world: "worlds/doom1/e1m1".into(),
+            ..WorldPlace::default()
+        };
+        place.family.movers.push((
+            "door_3".into(),
+            vec![
+                ("open".into(), "sfx/doom1/dsbdopn".into()),
+                ("close".into(), "sfx/doom1/dsbdcls".into()),
+            ],
+        ));
+        place.family.movers.push((
+            "lift_1".into(),
+            vec![("start".into(), "sfx/doom1/dspstart".into())],
+        ));
+        let text = place.to_text();
+        assert!(text.contains("mover door_3 open=sfx/doom1/dsbdopn close=sfx/doom1/dsbdcls\n"));
+        let back = WorldPlace::parse(&text).unwrap();
+        assert_eq!(back.family.movers, place.family.movers);
+        // A sidecar without mover rows parses exactly as before.
+        let plain = WorldPlace::parse("world-place 1\nsource doom\nworld w\n").unwrap();
+        assert!(plain.family.movers.is_empty());
+    }
+
+    #[test]
+    fn person_vitals_extend_the_old_height_line_and_round_trip() {
+        let mut place = WorldPlace::default();
+        place.family.person_height = 1.75;
+        place.family.person_health = 100.0;
+        place.family.person_health_max = 200.0;
+        let text = place.to_text();
+        assert!(text.contains("person 1.75 health=100 max=200\n"));
+        let back = WorldPlace::parse(&text).unwrap();
+        assert_eq!(back.family.person_height, 1.75);
+        assert_eq!((back.family.person_health, back.family.person_health_max), (100.0, 200.0));
+
+        let old = WorldPlace::parse("world-place 1\nperson 1.75\n").unwrap();
+        assert_eq!((old.family.person_health, old.family.person_health_max), (0.0, 0.0));
+    }
+
     #[test]
     fn place_text_round_trips() {
         let p = WorldPlace {
@@ -407,6 +571,7 @@ mod tests {
                     flags: 0,
                 },
             ],
+            family: Default::default(),
         };
         let parsed = WorldPlace::parse(&p.to_text()).expect("parse");
         assert_eq!(parsed.source, "freedoom");
@@ -438,6 +603,7 @@ mod tests {
                 // skill 3 (0x0002) + skill 4/5 (0x0004) + ambush (0x0008)
                 flags: 0x000E,
             }],
+            family: Default::default(),
         };
         let text = p.to_text();
         assert!(text.contains("flags=14"), "expected flags=14 in: {text}");
