@@ -183,6 +183,31 @@ pub struct ControlUpdateJson {
     pub reset: Option<bool>,
 }
 
+/// `{"type":"seed_output", "raw_b64":"...", "w":512, "h":512}` — or the same
+/// picture as `png_b64`.
+///
+/// The one thing a live session cannot rebuild for itself: the trip so far.
+/// A client moving a feed from one box to another (the wall's cluster does
+/// this when the picture in the middle of the view should be on a faster
+/// machine) sends the departing session's LAST OUTPUT here, and the arriving
+/// session continues from it instead of cold-starting a fresh diffusion of
+/// the source — which is a visible snap back toward the clean picture.
+///
+/// It is NOT a source: the anchor stays the true picture (reference slot 0),
+/// which is what the colour drift pulls against. Nothing else travels — the
+/// noise field and the prompt embeds are re-derived locally.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct SeedOutputMessageJson {
+    #[rename(type)]
+    pub kind: String,
+    /// Raw RGB8, base64. Needs `w`/`h`, since raw bytes carry no size.
+    pub raw_b64: Option<String>,
+    /// The same picture as a PNG, for a client that has one to hand.
+    pub png_b64: Option<String>,
+    pub w: Option<u32>,
+    pub h: Option<u32>,
+}
+
 /// `{"type":"reference", "slot":0, "png_b64":"..."}`.
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
 pub struct ReferenceMessageJson {
@@ -197,6 +222,9 @@ pub struct ReferenceMessageJson {
 pub enum ClientMessage {
     Control(ControlUpdateJson),
     Reference(ReferenceMessageJson),
+    /// The trip so far, carried in from another box (see
+    /// [`SeedOutputMessageJson`]).
+    SeedOutput(SeedOutputMessageJson),
     Stop,
 }
 
@@ -215,9 +243,14 @@ pub fn parse_client_message(text: &str) -> Result<ClientMessage, AssetAiError> {
                 .map_err(|e| AssetAiError::Params(format!("realtime reference message: {e:?}")))?;
             Ok(ClientMessage::Reference(reference))
         }
+        "seed_output" => {
+            let seed = SeedOutputMessageJson::deserialize_json_lenient(text)
+                .map_err(|e| AssetAiError::Params(format!("realtime seed_output message: {e:?}")))?;
+            Ok(ClientMessage::SeedOutput(seed))
+        }
         "stop" => Ok(ClientMessage::Stop),
         other => Err(AssetAiError::Params(format!(
-            "realtime message: unknown type {other:?} (expected \"control\", \"reference\" or \"stop\")"
+            "realtime message: unknown type {other:?} (expected \"control\", \"reference\", \"seed_output\" or \"stop\")"
         ))),
     }
 }
@@ -452,6 +485,22 @@ mod tests {
             }
             _ => panic!("expected Reference"),
         }
+    }
+
+    /// The one message a moving feed sends: the trip so far, as one image.
+    #[test]
+    fn parse_client_message_seed_output() {
+        let msg = parse_client_message(r#"{"type":"seed_output","raw_b64":"AAEC","w":1,"h":1}"#).unwrap();
+        match msg {
+            ClientMessage::SeedOutput(seed) => {
+                assert_eq!(seed.raw_b64.as_deref(), Some("AAEC"));
+                assert_eq!((seed.w, seed.h), (Some(1), Some(1)));
+                assert!(seed.png_b64.is_none());
+            }
+            _ => panic!("expected SeedOutput"),
+        }
+        let png = parse_client_message(r#"{"type":"seed_output","png_b64":"iVBOR"}"#).unwrap();
+        assert!(matches!(png, ClientMessage::SeedOutput(seed) if seed.png_b64.as_deref() == Some("iVBOR")));
     }
 
     #[test]

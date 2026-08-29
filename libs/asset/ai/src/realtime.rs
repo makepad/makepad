@@ -73,6 +73,10 @@ pub struct RealtimeSession {
     /// Bumped every time reference slot 0 is set, so the worker can notice a
     /// new feedback source without diffing images.
     reference0_version: AtomicU64,
+    /// `{"type":"seed_output"}`: the trip a feed made on ANOTHER box, handed
+    /// to this session so it carries on instead of cold-starting. Taken once
+    /// by the worker, which drops it into its previous-output slot.
+    pending_seed: Mutex<Option<RgbImage>>,
     /// Persists across input packets (a streaming H.264 decoder needs SPS/
     /// PPS + reference-frame continuity). `handle_binary` runs on the HTTP
     /// route thread, so this — unlike the encoder below — must be shared,
@@ -113,6 +117,7 @@ impl RealtimeSession {
             stop_requested: AtomicBool::new(false),
             reset_requested: AtomicBool::new(false),
             reference0_version: AtomicU64::new(0),
+            pending_seed: Mutex::new(None),
             #[cfg(feature = "video")]
             input_decoder: Mutex::new(None),
             #[cfg(feature = "video")]
@@ -190,6 +195,22 @@ impl RealtimeSession {
 
     fn take_reset(&self) -> bool {
         self.reset_requested.swap(false, Ordering::Relaxed)
+    }
+
+    /// The trip carried in from another box, if one arrived since the last
+    /// iteration. Taken once: from here on it is simply this session's
+    /// previous output and the loop goes on from it.
+    pub fn set_seed_output(&self, image: RgbImage) {
+        if image.width == 0 || image.height == 0 || image.data.len() != image.width as usize * image.height as usize * 3 {
+            return;
+        }
+        *self.pending_seed.lock().unwrap() = Some(image);
+        // A feedback worker parked on the mailbox has something to do now.
+        self.mailbox_cv.notify_all();
+    }
+
+    pub fn take_seed_output(&self) -> Option<RgbImage> {
+        self.pending_seed.lock().unwrap().take()
     }
 
     /// Reference slot 0 if it was (re)set since `seen_version` — the
@@ -383,6 +404,10 @@ impl RealtimeSession {
                     .map_err(|e| AssetAiError::Params(format!("reference: bad base64: {e:?}")))?;
                 let (data, width, height) = crate::testpattern::decode_png_rgb8(&bytes)?;
                 self.set_reference(slot, RgbImage { width, height, data });
+            }
+            ClientMessage::SeedOutput(seed) => {
+                let image = decode_seed_image(&seed)?;
+                self.set_seed_output(image);
             }
             ClientMessage::Stop => self.request_stop(),
         }
@@ -930,6 +955,36 @@ impl FeedbackState {
     }
 }
 
+/// The picture inside a `seed_output` message: raw RGB8 with its size, or a
+/// PNG. One image, nothing else — everything else a session needs it can
+/// rebuild for itself.
+fn decode_seed_image(seed: &crate::realtime_wire::SeedOutputMessageJson) -> Result<RgbImage, AssetAiError> {
+    if let Some(raw_b64) = seed.raw_b64.as_deref() {
+        let data = makepad_base64::base64_decode(raw_b64.as_bytes())
+            .map_err(|e| AssetAiError::Params(format!("seed_output: bad base64: {e:?}")))?;
+        let (width, height) = match (seed.w, seed.h) {
+            (Some(w), Some(h)) => (w, h),
+            _ => return Err(AssetAiError::Params("seed_output: raw_b64 needs w and h".to_string())),
+        };
+        let want = width as usize * height as usize * 3;
+        if data.len() != want {
+            return Err(AssetAiError::Params(format!(
+                "seed_output: {} bytes for a {width}x{height} rgb8 image (expected {want})",
+                data.len()
+            )));
+        }
+        return Ok(RgbImage { width, height, data });
+    }
+    let png_b64 = seed
+        .png_b64
+        .as_deref()
+        .ok_or_else(|| AssetAiError::Params("seed_output: needs raw_b64 (with w/h) or png_b64".to_string()))?;
+    let bytes = makepad_base64::base64_decode(png_b64.as_bytes())
+        .map_err(|e| AssetAiError::Params(format!("seed_output: bad base64: {e:?}")))?;
+    let (data, width, height) = crate::testpattern::decode_png_rgb8(&bytes)?;
+    Ok(RgbImage { width, height, data })
+}
+
 /// One feedback iteration's images: the sampler init (None on a cold
 /// start) and the anchor the edit conditions on. Pure — see the tests.
 pub fn feedback_frame(
@@ -1023,6 +1078,13 @@ pub fn run_live(
         let prep_start = Instant::now();
         if session.take_reset() {
             last_output = None;
+        }
+        // A feed that moved here from another box: its last frame becomes
+        // this session's previous output, so the next iteration continues
+        // the trip rather than cold-starting one full edit from the source.
+        // The size is normalised with the rest below.
+        if let Some(seed) = session.take_seed_output() {
+            last_output = Some(seed);
         }
         let (init_image, anchor_image): (Option<RgbImage>, Option<RgbImage>) = match loop_mode {
             LoopMode::Feed => {
@@ -1873,6 +1935,59 @@ mod tests {
         let latest = session.take_mailbox_frame().unwrap();
         assert_eq!((latest.width, latest.height), (3, 3));
         assert!(session.take_mailbox_frame().is_none());
+    }
+
+    /// A feed that moves from one box to another carries ONE thing with it:
+    /// the trip so far. The receiving session takes that frame as its own
+    /// previous output, so its next iteration continues the melt — instead
+    /// of the cold start (one full edit from the clean picture) that a fresh
+    /// session does, which on screen is a snap back to the engraving.
+    #[test]
+    fn a_seeded_session_carries_the_trip_instead_of_cold_starting() {
+        let params = LiveParams {
+            model: "testpattern".to_string(),
+            config: LiveConfig::default(),
+            loop_mode: LoopMode::Feedback,
+            input_encoding: OutputEncoding::Raw,
+            output_encoding: OutputEncoding::Raw,
+            max_fps: 0.0,
+            idle_timeout_s: 30,
+        };
+        let session = RealtimeSession::new("job-seed".to_string(), &params);
+        // Nothing to carry until something is sent.
+        assert!(session.take_seed_output().is_none());
+
+        let trip = solid_image(8, 8, [10, 200, 40]);
+        let raw_b64 = String::from_utf8(makepad_base64::base64_encode(&trip.data, &makepad_base64::BASE64_STANDARD)).unwrap();
+        let text = format!("{{\"type\":\"seed_output\",\"raw_b64\":\"{raw_b64}\",\"w\":8,\"h\":8}}");
+        session.handle_text(&text).unwrap();
+        let carried = session.take_seed_output().expect("the trip arrived");
+        assert_eq!(carried.data, trip.data);
+        // Taken once — it is this session's own previous output from here on.
+        assert!(session.take_seed_output().is_none());
+
+        // And what the loop does with it: WITH the trip there is an init, so
+        // the sampler continues from it; WITHOUT one there is none, which is
+        // the cold start that forces a full-strength repaint of the source.
+        let source = gradient_image(8, 8);
+        let stats = channel_stats(&source);
+        let mut config = blank_config();
+        config.drift = identity_drift();
+        config.camera = CameraMotion::default();
+        config.feedback = 0.7;
+        assert!(feedback_frame(&source, &stats, None, &config, 0).is_none(), "no trip = cold start");
+        let init = feedback_frame(&source, &stats, Some(&carried), &config, 1).expect("the trip is the init");
+        let to_seed = mean_abs_diff(&init, &carried).unwrap();
+        let to_source = mean_abs_diff(&init, &source).unwrap();
+        assert!(
+            to_seed < to_source * 0.6,
+            "the first frame after a move must continue the trip, not repaint the picture: {to_seed} to the trip vs {to_source} to the source"
+        );
+
+        // A seed that does not describe an image is refused rather than
+        // quietly becoming a smear.
+        assert!(session.handle_text(r#"{"type":"seed_output","raw_b64":"AAAA","w":8,"h":8}"#).is_err());
+        assert!(session.handle_text(r#"{"type":"seed_output"}"#).is_err());
     }
 
     #[test]
