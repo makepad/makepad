@@ -1,78 +1,72 @@
-//! The annotation pass runner.
+//! The annotation pass's operator tool.
 //!
-//! Reads the store's catalog to pick assets, pulls each one's turntable sheet
-//! over the store's data plane, hands the batch to a vision executor, and
-//! publishes the parsed result back through `PUT /v1/assets/{id}/annotation`.
+//! The pass itself does not run here any more: it is an Asset Server job
+//! (`annotate.asset`) that a `vision` fleet box claims off the queue. What
+//! is left is what an operator still needs a command for — QUEUE the work
+//! for a kit or the whole catalog, CURATE a kind, and WIPE what the pass
+//! wrote — plus `--list-kits`, which the Asset UI reads.
 //!
 //! Nothing here creates an asset revision, uploads a blob, or touches an
 //! alias: the pass writes only the mutable annotation record, so a full wipe
 //! and redo of annotations leaves the imported library byte-identical.
 //! `--verify-nondestructive` asserts exactly that.
-//!
-//! The executor is a subprocess speaking the batch protocol in
-//! `libs/ai/llm/src/bin/vlm_annotate.rs`. That is the one seam to change when
-//! the model moves from Metal-local to the CUDA fleet: point `--executor` at a
-//! different program and bump `--version`.
 
 use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
-use makepad_asset_annotate::{
-    needs_annotation, parse_record, plan_upload, sheet, ANNOTATOR_VERSION, PROMPT, PROMPT_PERSON,
-};
+use makepad_asset_annotate::{needs_annotation, ANNOTATOR_VERSION};
 use makepad_asset_client::api::{AnnotationUpload, Api, ApiEndpoints};
 use makepad_asset_client::http::HttpLimits;
 use makepad_asset_data::{AssetId, AssetKind};
 use makepad_sqlite::{Database, Value};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const DEFAULT_STORE: &str = "local/asset-ui/asset-server";
 
 struct Config {
     store: PathBuf,
-    work: PathBuf,
     kit: Option<String>,
     kind: Option<String>,
-    person: bool,
     aliases: Vec<String>,
-    limit: usize,
-    sheet_size: usize,
-    exposure: f32,
+    limit: u64,
     version: u32,
-    model_tag: String,
-    executor: Vec<String>,
-    all: bool,
     dry_run: bool,
+    /// Fresh job ids for assets whose annotate jobs failed terminally.
+    epoch: u64,
     /// Curation: rewrite ONLY the catalog kind of the selected assets (no
     /// VLM, everything else carried). `quake3 rig fragments published as
     /// kind=character` is the shape this exists for.
     set_kind: Option<String>,
     verify: bool,
     wipe: bool,
+    /// Print `<kit>\t<live>\t<needing>` for every kit of `source` and exit.
+    /// The asset-ui import queue's "Annotate all" reads this instead of
+    /// linking a SQL engine of its own.
+    list_kits: bool,
+    /// The collection label whose kits are listed (`kenney`).
+    source: String,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: makepad-asset-annotate [options]
 
+With no verb: QUEUE the annotation work the catalog still owes as
+`annotate.asset` jobs, which a vision fleet box claims and runs.
+
   --store DIR         asset-server state dir (default {DEFAULT_STORE})
-  --work DIR          scratch dir for sheets and batch files
-  --kit NAME          annotate assets carrying this category label
-  --kind K            annotate assets of this catalog kind (e.g. character)
-  --person            person-description prompt variant (for characters)
-  --alias A           annotate exactly this canon alias (repeatable)
-  --limit N           stop after N assets (default 10)
-  --sheet-size N      downscale sheets to NxN before the model (default 512)
-  --exposure G        gamma lift on subject pixels, 1.0 disables (default 1.8)
+  --kit NAME          queue/select only assets carrying this category label
+  --kind K            select assets of this catalog kind (e.g. character)
+  --alias A           select exactly this canon alias (repeatable)
+  --limit N           most assets to queue in one sweep (default 500)
   --version N         annotator version (default {ANNOTATOR_VERSION})
-  --model-tag SLUG    label-safe model identity (default qwen35-9b)
-  --executor CMD...   executor argv; everything after it is the command
-  --all               re-annotate even assets already at this version
-  --dry-run           do everything except the publish
-  --verify-nondestructive  snapshot the import, wipe+redo, prove it untouched
+  --epoch N           mint fresh job ids (re-drive terminally failed jobs)
+  --dry-run           say what would change, change nothing
+  --set-kind K        rewrite ONLY the catalog kind of the selected assets
   --wipe              remove this pass's tags and clear its descriptions
+  --verify-nondestructive  fingerprint the import, wipe, prove it untouched
+  --list-kits         print `<kit>\\t<live>\\t<needing>` per kit and exit
+  --source LABEL      collection label --list-kits groups under (default kenney)
 "
     );
     std::process::exit(2)
@@ -81,27 +75,23 @@ fn usage() -> ! {
 fn parse_config() -> Config {
     let mut c = Config {
         store: PathBuf::from(DEFAULT_STORE),
-        work: PathBuf::from("local/annotate"),
         kit: None,
         kind: None,
-        person: false,
         aliases: Vec::new(),
-        limit: 10,
-        sheet_size: 512,
-        exposure: 1.8,
+        limit: 500,
         version: ANNOTATOR_VERSION,
-        model_tag: "qwen35-9b".to_string(),
-        executor: Vec::new(),
-        all: false,
         dry_run: false,
+        epoch: 0,
         set_kind: None,
         verify: false,
         wipe: false,
+        list_kits: false,
+        source: "kenney".to_string(),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
-        let mut next = |i: &mut usize| -> String {
+        let next = |i: &mut usize| -> String {
             *i += 1;
             if *i >= args.len() {
                 usage();
@@ -110,28 +100,18 @@ fn parse_config() -> Config {
         };
         match args[i].as_str() {
             "--store" => c.store = PathBuf::from(next(&mut i)),
-            "--work" => c.work = PathBuf::from(next(&mut i)),
             "--kit" => c.kit = Some(next(&mut i)),
             "--kind" => c.kind = Some(next(&mut i)),
-            "--person" => c.person = true,
             "--alias" => c.aliases.push(next(&mut i)),
             "--limit" => c.limit = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--sheet-size" => c.sheet_size = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--exposure" => c.exposure = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--version" => c.version = next(&mut i).parse().unwrap_or_else(|_| usage()),
-            "--model-tag" => c.model_tag = next(&mut i),
-            "--all" => c.all = true,
+            "--epoch" => c.epoch = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--dry-run" => c.dry_run = true,
             "--set-kind" => c.set_kind = Some(next(&mut i)),
             "--verify-nondestructive" => c.verify = true,
             "--wipe" => c.wipe = true,
-            "--executor" => {
-                c.executor = args[i + 1..].to_vec();
-                if c.executor.is_empty() {
-                    usage();
-                }
-                break;
-            }
+            "--list-kits" => c.list_kits = true,
+            "--source" => c.source = next(&mut i),
             "-h" | "--help" => usage(),
             other => {
                 eprintln!("unknown argument {other}");
@@ -180,27 +160,47 @@ fn open_catalog(store: &Path) -> Result<Database, String> {
     Ok(db)
 }
 
-/// Load candidates plus their current annotation and tag set.
-fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, String> {
-    let filter = if !cfg.aliases.is_empty() {
-        let list = cfg
-            .aliases
+/// The WHERE clause selecting the pass's working set.
+///
+/// The filters AND together. They used to be an if/else ladder, which made
+/// "the characters of the mini-dungeon kit" inexpressible — and that is
+/// exactly the second pass every kit needs (`--kit X --kind character
+/// --person`), so the on-import job could not have been written without it.
+/// `--alias` stays absolute: naming assets by alias means those assets and
+/// nothing else.
+fn candidate_filter(
+    aliases: &[String],
+    kit: Option<&str>,
+    kind: Option<&str>,
+) -> Result<String, String> {
+    if !aliases.is_empty() {
+        let list = aliases
             .iter()
             .map(|a| format!("'{}'", a.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(",");
-        format!("a.canon_alias IN ({list})")
-    } else if let Some(kit) = &cfg.kit {
-        format!(
+        return Ok(format!("a.canon_alias IN ({list})"));
+    }
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(kit) = kit {
+        clauses.push(format!(
             "EXISTS (SELECT 1 FROM search_labels l WHERE l.asset_id = a.asset_id \
              AND l.kind = 'category' AND l.label = '{}')",
             kit.replace('\'', "''")
-        )
-    } else if let Some(kind) = &cfg.kind {
-        format!("a.kind = '{}'", kind.replace('\'', "''"))
-    } else {
+        ));
+    }
+    if let Some(kind) = kind {
+        clauses.push(format!("a.kind = '{}'", kind.replace('\'', "''")));
+    }
+    if clauses.is_empty() {
         return Err("need --kit, --kind or --alias".to_string());
-    };
+    }
+    Ok(clauses.join(" AND "))
+}
+
+/// Load candidates plus their current annotation and tag set.
+fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, String> {
+    let filter = candidate_filter(&cfg.aliases, cfg.kit.as_deref(), cfg.kind.as_deref())?;
     let sql = format!(
         "SELECT hex(a.asset_id), a.canon_alias, a.title, a.description, a.kind, \
                 a.creator, a.generator, a.backend, a.model, a.prompt, a.provenance, a.visibility \
@@ -249,6 +249,57 @@ fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, St
     Ok(out)
 }
 
+/// Every kit of `source` with its live-asset count and how many of those
+/// still need this annotator version.
+///
+/// Three flat queries and the intersection in Rust rather than one grouped
+/// join: the catalog engine here is our own, and the pass has no business
+/// being the first caller to need GROUP BY.
+fn list_kits(db: &mut Database, cfg: &Config) -> Result<(), String> {
+    let live: std::collections::BTreeSet<String> = rows(
+        db,
+        "SELECT hex(asset_id) FROM search_annotations WHERE live = 1 AND canon_alias <> ''",
+    )?
+    .iter()
+    .map(|r| text(&r[0]))
+    .collect();
+    let done: std::collections::BTreeSet<String> = rows(
+        db,
+        &format!(
+            "SELECT hex(asset_id) FROM search_labels WHERE kind = 'tag' AND label = 'vlm-v{}'",
+            cfg.version
+        ),
+    )?
+    .iter()
+    .map(|r| text(&r[0]))
+    .collect();
+    let mut by_asset: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in rows(db, "SELECT hex(asset_id), label FROM search_labels WHERE kind = 'category'")? {
+        let id = text(&r[0]);
+        if !live.contains(&id) {
+            continue;
+        }
+        by_asset.entry(id).or_default().push(text(&r[1]));
+    }
+    let mut kits: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for (id, labels) in &by_asset {
+        if !labels.iter().any(|l| l == &cfg.source) {
+            continue;
+        }
+        for label in labels.iter().filter(|l| *l != &cfg.source) {
+            let e = kits.entry(label.clone()).or_insert((0, 0));
+            e.0 += 1;
+            if !done.contains(id) {
+                e.1 += 1;
+            }
+        }
+    }
+    for (kit, (total, need)) in kits {
+        println!("{kit}\t{total}\t{need}");
+    }
+    Ok(())
+}
+
 fn read_listen(store: &Path) -> Result<(SocketAddr, SocketAddr), String> {
     let raw = std::fs::read_to_string(store.join("listen"))
         .map_err(|e| format!("read listen: {e}"))?;
@@ -265,37 +316,6 @@ fn read_listen(store: &Path) -> Result<(SocketAddr, SocketAddr), String> {
     Ok((control, data))
 }
 
-/// Minimal GET for the data plane's thumbnail route, which the asset client
-/// does not wrap. Localhost, one request per connection, bounded read.
-fn http_get(addr: SocketAddr, path: &str, token: &str) -> Result<Vec<u8>, String> {
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|e| format!("connect {addr}: {e}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    s.set_write_timeout(Some(Duration::from_secs(30))).ok();
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\n\
-         Accept: */*\r\nConnection: close\r\n\r\n"
-    );
-    s.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
-    let mut buf = Vec::new();
-    s.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
-    let split = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("no header terminator")?;
-    let head = String::from_utf8_lossy(&buf[..split]).to_string();
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse::<u16>().ok())
-        .ok_or("no status line")?;
-    if status != 200 {
-        return Err(format!("HTTP {status} for {path}"));
-    }
-    Ok(buf[split + 4..].to_vec())
-}
-
 // ---- the pass --------------------------------------------------------------
 
 fn main() {
@@ -307,6 +327,11 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cfg = parse_config();
+    if cfg.list_kits {
+        // No server, no token: listing is a read of the catalog file.
+        let mut db = open_catalog(&cfg.store)?;
+        return list_kits(&mut db, &cfg);
+    }
     let token = std::fs::read_to_string(cfg.store.join("admin-token"))
         .map_err(|e| format!("read admin-token: {e}"))?
         .trim()
@@ -318,62 +343,58 @@ fn run() -> Result<(), String> {
         Some(token.clone()),
     )
     .map_err(|e| format!("api: {e:?}"))?;
-    let annotator = Annotator { version: cfg.version, model: cfg.model_tag.clone() };
+    let annotator = Annotator { version: cfg.version, model: String::new() };
     let mut db = open_catalog(&cfg.store)?;
 
     if cfg.verify {
-        return verify_nondestructive(&mut db, &cfg, &api, &annotator, &token, data);
+        return verify_nondestructive(&mut db, &cfg, &api, &annotator);
     }
-
-    let candidates = load_candidates(&mut db, &cfg)?;
     if let Some(kind) = &cfg.set_kind {
+        let candidates = load_candidates(&mut db, &cfg)?;
         return set_kind(&api, &candidates, kind, cfg.dry_run);
     }
     if cfg.wipe {
+        let candidates = load_candidates(&mut db, &cfg)?;
         return wipe(&api, &candidates, cfg.dry_run);
     }
+    queue(&api, &cfg)
+}
 
-    let todo: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|c| cfg.all || needs_annotation(&c.base.tags, &annotator))
-        .take(cfg.limit)
-        .collect();
+/// Queue what the catalog still owes, as jobs the fleet claims.
+///
+/// ONE request: the server picks the assets (`annotation_backlog`), mints a
+/// job id derived from asset + annotator version so a second sweep is a
+/// no-op, and the vision boxes drain it. That is the whole reason this is
+/// not a loop in a command any more — the work has to outlive the shell it
+/// was asked from.
+fn queue(api: &Api, cfg: &Config) -> Result<(), String> {
+    let before = api
+        .annotate_summary(cfg.kit.as_deref())
+        .map_err(|e| format!("annotate summary: {e:?}"))?;
+    let label = cfg.kit.as_deref().unwrap_or("the whole catalog");
     println!(
-        "{} candidates, {} need annotation at v{} (limit {})",
-        candidates.len(),
-        todo.len(),
-        cfg.version,
-        cfg.limit
+        "{label}: {} described at {}, {} owed · queue {} pending / {} running / {} failed",
+        before.annotated,
+        before.version_tag,
+        before.owed,
+        before.pending,
+        before.running,
+        before.failed
     );
-    if todo.is_empty() {
+    if cfg.dry_run {
+        println!("dry run: would queue up to {} of them", cfg.limit.min(before.owed));
         return Ok(());
     }
-
-    let replies = run_executor(&cfg, &api, &todo, &token, data)?;
-
-    let mut published = 0usize;
-    let mut skipped = 0usize;
-    for c in &todo {
-        let Some(reply) = replies.get(&c.asset_hex) else {
-            eprintln!("  {} — no reply", c.alias);
-            skipped += 1;
-            continue;
-        };
-        let rec = parse_record(reply);
-        if !rec.is_useful() {
-            eprintln!("  {} — unusable reply, left unannotated", c.alias);
-            skipped += 1;
-            continue;
-        }
-        let up = plan_upload(&c.base, &rec, &annotator);
-        println!("  {} -> {}", c.alias, up.description);
-        if cfg.dry_run {
-            continue;
-        }
-        put(&api, &c.asset_hex, &up)?;
-        published += 1;
+    if before.owed == 0 {
+        return Ok(());
     }
-    println!("published {published}, skipped {skipped}");
+    let queued = api
+        .annotate_backlog(cfg.limit, cfg.kit.as_deref(), cfg.epoch)
+        .map_err(|e| format!("annotate backlog: {e:?}"))?;
+    println!(
+        "queued {} · {} already queued or done · {} still owed",
+        queued.enqueued, queued.skipped, queued.remaining
+    );
     Ok(())
 }
 
@@ -433,146 +454,6 @@ fn put(
         private: up.private,
     };
     api.put_annotation(&id, &upload).map_err(|e| format!("put {asset_hex}: {e:?}"))
-}
-
-/// Fetch sheets, write the batch files, run the executor, collect replies.
-fn run_executor(
-    cfg: &Config,
-    _api: &Api,
-    todo: &[&Candidate],
-    token: &str,
-    data: SocketAddr,
-) -> Result<BTreeMap<String, String>, String> {
-    if cfg.executor.is_empty() {
-        return Err("--executor is required (see --help)".to_string());
-    }
-    let sheets = cfg.work.join("sheets");
-    std::fs::create_dir_all(&sheets).map_err(|e| format!("mkdir {}: {e}", sheets.display()))?;
-
-    let mut jobs = String::new();
-    for c in todo {
-        let png = http_get(data, &format!("/v1/thumbnails/alias/{}", c.alias), token)?;
-        let mut img = sheet::decode_png(&png)?;
-        // People are small in their cells; zoom each view onto the subject
-        // so the tower's patch budget lands on the person, not the empty
-        // background. Kit pieces keep their true in-cell size (it feeds the
-        // size line).
-        if cfg.person {
-            img = sheet::zoom_to_subject(&img, 4, 0.15);
-        }
-        // Lift before downscaling: the box filter then averages corrected
-        // values rather than correcting an already-averaged shadow.
-        sheet::lift_exposure(&mut img, cfg.exposure);
-        let small = sheet::downscale(&img, cfg.sheet_size);
-        let path = sheets.join(format!("{}.ppm", c.asset_hex));
-        std::fs::write(&path, sheet::to_ppm(&small))
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
-        // The asset's own name and kit are metadata we already hold, and
-        // withholding them only makes the model guess: an upright grey slab
-        // reads as a book until you know the kit calls it "wall". The image
-        // still decides everything the name cannot say — colour, orientation,
-        // how it connects — which is the whole point of the pass.
-        let (kit, name) = c.alias.rsplit_once('/').unwrap_or(("", c.alias.as_str()));
-        let kit = kit.rsplit('/').next().unwrap_or("");
-        if cfg.person {
-            // Person framing: the SET name is context, but the questions are
-            // about the person. No construction-kit talk — a character does
-            // not snap onto a grid, and the grid frame biases the answers
-            // toward objects.
-            let set_frame = if kit.is_empty() {
-                String::new()
-            } else {
-                format!(" It comes from the Kenney \"{kit}\" set.")
-            };
-            jobs.push_str(&format!(
-                "{}\t{}\tThe set calls this character \"{}\".{} Describe the PERSON you see; trust the images over the name where they disagree.\n",
-                c.asset_hex,
-                path.display(),
-                name,
-                set_frame,
-            ));
-            continue;
-        }
-        // Kit-level context beside the piece name: without the frame a wall
-        // panel reads as "a book"; with it the model knows pieces snap on a
-        // grid and names them in kit terms. The images still decide
-        // everything the name cannot say.
-        let kit_frame = if kit.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " It is a game asset from the Kenney \"{kit}\" set, a low-poly \
-                 modular construction kit whose pieces snap together on a grid."
-            )
-        };
-        jobs.push_str(&format!(
-            "{}\t{}\tThe kit calls this piece \"{}\".{} Trust the images over the name where they disagree.\n",
-            c.asset_hex,
-            path.display(),
-            name,
-            kit_frame,
-        ));
-    }
-    let jobs_path = cfg.work.join("jobs.tsv");
-    let prompt_path = cfg.work.join("prompt.txt");
-    let out_path = cfg.work.join("replies.tsv");
-    std::fs::write(&jobs_path, &jobs).map_err(|e| format!("write jobs: {e}"))?;
-    let prompt = if cfg.person { PROMPT_PERSON } else { PROMPT };
-    std::fs::write(&prompt_path, prompt).map_err(|e| format!("write prompt: {e}"))?;
-    let _ = std::fs::remove_file(&out_path);
-
-    println!("running executor over {} sheets...", todo.len());
-    let status = std::process::Command::new(&cfg.executor[0])
-        .args(&cfg.executor[1..])
-        .arg("--jobs")
-        .arg(&jobs_path)
-        .arg("--prompt-file")
-        .arg(&prompt_path)
-        .arg("--out")
-        .arg(&out_path)
-        .status()
-        .map_err(|e| format!("spawn executor: {e}"))?;
-    if !status.success() {
-        eprintln!("executor exited with {status}; using whatever it wrote");
-    }
-
-    let text = std::fs::read_to_string(&out_path).map_err(|e| format!("read replies: {e}"))?;
-    let mut out = BTreeMap::new();
-    for line in text.lines() {
-        let mut it = line.splitn(3, '\t');
-        let (Some(id), Some(status), Some(payload)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        if status != "ok" {
-            eprintln!("  executor error for {id}: {payload}");
-            continue;
-        }
-        out.insert(id.to_string(), unescape(payload));
-    }
-    Ok(out)
-}
-
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
 }
 
 /// Clear the pass's own footprint: drop every `vlm-` tag and blank the
@@ -673,8 +554,6 @@ fn verify_nondestructive(
     cfg: &Config,
     api: &Api,
     annotator: &Annotator,
-    _token: &str,
-    _data: SocketAddr,
 ) -> Result<(), String> {
     const IMPORT_TABLES: &[&str] = &["assets", "asset_revisions", "asset_aliases", "blobs"];
     let fingerprint = |db: &mut Database| -> Result<Vec<String>, String> {

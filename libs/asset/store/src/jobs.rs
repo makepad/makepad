@@ -84,7 +84,8 @@ impl JobState {
             Self::Cancelled => "cancelled",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    /// The wire spelling of a state, as a client query filter writes it.
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
@@ -118,6 +119,16 @@ pub struct ClaimedJob {
     pub payload: Vec<u8>,
     pub attempt: u32,
     pub lease_expires_ms: u64,
+}
+
+/// Jobs of one kind, counted by state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobCounts {
+    pub pending: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub cancelled: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,6 +543,143 @@ impl<'a> Jobs<'a> {
 
     // ---- queries -----------------------------------------------------------
 
+    /// Put a TERMINAL job back in the queue, with a fresh payload and a
+    /// fresh allowance of attempts. `Ok(false)` = the job is still pending
+    /// or running, so it is already queued and nothing was touched.
+    ///
+    /// This exists because a job id may be DERIVED from what it is about
+    /// rather than minted at random (see the annotation queue): derived ids
+    /// make "enqueue twice" a free no-op, but without a way back a
+    /// succeeded job becomes a tombstone that blocks the same work for
+    /// ever — and the work does come back, when whatever the job produced
+    /// is overwritten.
+    ///
+    /// Attempt history is KEPT: `attempts_used` is not reset, the ceiling
+    /// is raised past it, so `job_attempts` stays a truthful record and the
+    /// next claim numbers its attempt after the last one.
+    pub fn requeue(
+        &self,
+        job_id: &JobId,
+        payload: &[u8],
+        extra_attempts: u32,
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        if payload.len() as u64 > self.budgets.max_job_payload_bytes {
+            return Err(ServerError::OverBudget {
+                what: "job payload",
+                limit: self.budgets.max_job_payload_bytes,
+                found: payload.len() as u64,
+            });
+        }
+        self.db.tx(|db| {
+            let mut s = db.prepare(
+                "requeue read",
+                "SELECT state, attempts_used FROM jobs WHERE job_id=?1",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            if !s.step()? {
+                return Err(ServerError::NotFound { what: "job" });
+            }
+            let state = JobState::parse(&s.column_text(0)).ok_or(ServerError::InvalidState {
+                what: "job row",
+                state: "unknown state",
+            })?;
+            let used = s.column_u64(1);
+            drop(s);
+            if !state.is_terminal() {
+                return Ok(false);
+            }
+            let mut s = db.prepare(
+                "requeue job",
+                "UPDATE jobs SET state='pending', payload=?2, not_before_ms=0,
+                        max_attempts=?3, updated_ms=?4
+                 WHERE job_id=?1",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, payload)?;
+            s.bind_u64(3, used.saturating_add(extra_attempts.max(1) as u64))?;
+            s.bind_u64(4, now_ms)?;
+            s.run()?;
+            drop(s);
+            // A terminal job holds no live lease, but a stale row would let
+            // the next heartbeat land on the wrong attempt.
+            let mut s = db.prepare("requeue drop lease", "DELETE FROM job_leases WHERE job_id=?1")?;
+            s.bind_blob(1, &job_id.0)?;
+            s.run()?;
+            Ok(true)
+        })
+    }
+
+    /// How many jobs of one kind sit in each state.
+    ///
+    /// One grouped read, so an operator bar ("312 done, 18 running, 3693
+    /// queued") costs a single query instead of listing thousands of jobs
+    /// a page at a time.
+    pub fn count_by_state(&self, kind: &str) -> ServerResult<JobCounts> {
+        let mut s = self.db.prepare(
+            "job counts",
+            "SELECT state, COUNT(*) FROM jobs WHERE kind = ?1 GROUP BY state",
+        )?;
+        s.bind_text(1, kind)?;
+        let mut c = JobCounts::default();
+        while s.step()? {
+            let n = s.column_u64(1);
+            match JobState::parse(&s.column_text(0)) {
+                Some(JobState::Pending) => c.pending = n,
+                Some(JobState::Running) => c.running = n,
+                Some(JobState::Succeeded) => c.succeeded = n,
+                Some(JobState::Failed) => c.failed = n,
+                Some(JobState::Cancelled) => c.cancelled = n,
+                None => {}
+            }
+        }
+        Ok(c)
+    }
+
+    /// Newest-first job ids narrowed by kind and/or state.
+    ///
+    /// The transport's metadata table carries the namespace and the
+    /// enqueuer; the QUEUE carries the kind and the state. A listing
+    /// filtered on state must therefore start here — scanning the newest
+    /// metadata rows instead would silently miss a pending job that is
+    /// older than the window, which is exactly the job an operator asking
+    /// "what is still queued" wants to see.
+    pub fn list_ids(
+        &self,
+        kind: Option<&str>,
+        state: Option<JobState>,
+        limit: u64,
+    ) -> ServerResult<Vec<JobId>> {
+        let mut sql = String::from("SELECT job_id FROM jobs WHERE 1=1");
+        let mut next = 0i32;
+        if kind.is_some() {
+            next += 1;
+            sql.push_str(&format!(" AND kind = ?{next}"));
+        }
+        if state.is_some() {
+            next += 1;
+            sql.push_str(&format!(" AND state = ?{next}"));
+        }
+        next += 1;
+        sql.push_str(&format!(" ORDER BY created_ms DESC, job_id DESC LIMIT ?{next}"));
+        let mut s = self.db.prepare("job list ids", &sql)?;
+        let mut at = 0i32;
+        if let Some(kind) = kind {
+            at += 1;
+            s.bind_text(at, kind)?;
+        }
+        if let Some(state) = state {
+            at += 1;
+            s.bind_text(at, state.as_str())?;
+        }
+        s.bind_u64(at + 1, limit)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(JobId(crate::catalog::fixed16(&s.column_blob(0), "job row")?));
+        }
+        Ok(out)
+    }
+
     pub fn state(&self, job_id: &JobId) -> ServerResult<Option<JobState>> {
         let mut s = self
             .db
@@ -544,6 +692,18 @@ impl<'a> Jobs<'a> {
         JobState::parse(&state)
             .map(Some)
             .ok_or(ServerError::InvalidState { what: "job row", state: "unknown" })
+    }
+
+    /// The durable, bounded enqueue payload for an existing job. Host
+    /// projections use this to expose selected safe metadata (currently the
+    /// generation prompt) without duplicating payload storage.
+    pub fn payload(&self, job_id: &JobId) -> ServerResult<Option<Vec<u8>>> {
+        let mut s = self.db.prepare("job payload", "SELECT payload FROM jobs WHERE job_id = ?1")?;
+        s.bind_blob(1, &job_id.0)?;
+        if !s.step()? {
+            return Ok(None);
+        }
+        Ok(Some(s.column_blob(0)))
     }
 
     pub fn attempts(&self, job_id: &JobId) -> ServerResult<Vec<AttemptRow>> {
@@ -596,6 +756,76 @@ impl<'a> Jobs<'a> {
             return Ok(None);
         }
         Ok(Some(JobId(crate::catalog::fixed16(&s.column_blob(0), "job row")?)))
+    }
+
+    /// Every dependency edge of a job, in stable (blob) order. Public
+    /// because the transport resolves stage-input references at claim time
+    /// and must check that a reference names an actual dependency — deps
+    /// are the only jobs whose success this one provably waited for.
+    pub fn deps_of(&self, job_id: &JobId) -> ServerResult<Vec<JobId>> {
+        let mut s = self.db.prepare(
+            "job deps",
+            "SELECT depends_on FROM job_deps WHERE job_id = ?1 ORDER BY depends_on",
+        )?;
+        s.bind_blob(1, &job_id.0)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(JobId(crate::catalog::fixed16(&s.column_blob(0), "job dep row")?));
+        }
+        Ok(out)
+    }
+
+    /// Detach one dependency edge from a still-PENDING job and replace its
+    /// payload, in one transaction.
+    ///
+    /// This exists for exactly one caller: a pipeline stage declared
+    /// `on_fail: skip`, which failed. The stages after it must go on
+    /// WITHOUT it — but a failed dependency dooms its dependents at the
+    /// next claim, and the claim gate refuses a job with an unsucceeded
+    /// dep, so the edge itself has to go; and their bodies still reference
+    /// the skipped stage's result, so the payload has to change with it.
+    /// One transaction, because either both happen or the dependent is
+    /// left waiting on something that will never succeed.
+    ///
+    /// `Ok(false)` = nothing was touched: the job is no longer pending
+    /// (already claimed, already doomed, already terminal), so its body is
+    /// not the transport's to rewrite any more.
+    pub fn detach_dep(
+        &self,
+        job_id: &JobId,
+        depends_on: &JobId,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        if payload.len() as u64 > self.budgets.max_job_payload_bytes {
+            return Err(ServerError::OverBudget {
+                what: "job payload",
+                limit: self.budgets.max_job_payload_bytes,
+                found: payload.len() as u64,
+            });
+        }
+        self.db.tx(|db| {
+            if self.state(job_id)? != Some(JobState::Pending) {
+                return Ok(false);
+            }
+            let mut s = db.prepare(
+                "detach dep edge",
+                "DELETE FROM job_deps WHERE job_id=?1 AND depends_on=?2",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, &depends_on.0)?;
+            s.run()?;
+            drop(s);
+            let mut s = db.prepare(
+                "detach dep payload",
+                "UPDATE jobs SET payload=?2, updated_ms=?3 WHERE job_id=?1 AND state='pending'",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, payload)?;
+            s.bind_u64(3, now_ms)?;
+            s.run()?;
+            Ok(true)
+        })
     }
 
     fn lease_of(&self, job_id: &JobId) -> ServerResult<Option<(String, u32)>> {

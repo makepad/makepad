@@ -57,6 +57,7 @@ fn chat_cfg(
                 openai: ScriptedLane::default(),
                 grok: ScriptedLane::default(),
                 max_concurrent_turns,
+                ..Default::default()
             }),
         };
     }

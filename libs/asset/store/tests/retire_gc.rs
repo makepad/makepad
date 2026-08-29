@@ -66,6 +66,7 @@ fn search_titles(core: &AssetServerCore, text: &str) -> Vec<String> {
             &SearchQuery {
                 text,
                 filters: SearchFilters::default(),
+                expand: false,
                 page_size: 50,
                 facets: 0,
             },

@@ -16,7 +16,9 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const MIN_SECONDS: f64 = 10.0;
 pub const MAX_SECONDS: f64 = 600.0;
 pub const DEFAULT_SECONDS: f64 = 60.0;
-pub const DEFAULT_STEPS: u32 = 50;
+/// XL Turbo's own number (the model card's eight), not the non-turbo
+/// schedule this defaulted to. See `makepad_ai_music::ace`.
+pub const DEFAULT_STEPS: u32 = 8;
 
 #[cfg(feature = "audio")]
 const MODEL_CACHE_SUBDIR: &str = "music/ACE-Step-1.5-XL";

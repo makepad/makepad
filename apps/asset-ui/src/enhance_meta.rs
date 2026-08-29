@@ -1,34 +1,15 @@
-//! Post-process pass: walk the local library and fill missing metadata.
+//! Post-process pass: rewrite path-like library labels into catalog titles
+//! (Doom lump → Imp, Quake MDL → Shambler). No model, no invented lore.
 //!
-//! Two layers, both fail-closed:
-//! 1. Catalog names (Doom lump → Imp, Quake MDL → Shambler). No model.
-//! 2. Optional vision caption into `<file>.vision.json` when a Qwen-VL
-//!    (or any fleet model with `vl` in the id) is actually ready. Until
-//!    that box is provisioned the pass records `skipped` and does not
-//!    invent descriptions.
+//! This file also held a stub "vision caption" layer that wrote
+//! `<file>.vision.json` sidecars saying `skipped`: nothing ever called it
+//! and nothing ever read one. The real vision pass is
+//! [`crate::annotate_queue`], which writes descriptions into the STORE,
+//! where search can index them — a sidecar beside a local GLB was never
+//! reachable by a catalog query.
 
 use crate::library::{Library, LibraryMeta};
 use makepad_asset_importer::stateful_billboard::{mesh_title, sprite_title, world_title};
-use std::path::{Path, PathBuf};
-
-pub const VISION_SIDECAR: &str = "vision.json";
-
-#[derive(Clone, Debug, Default)]
-pub struct EnhanceStats {
-    pub scanned: usize,
-    pub named: usize,
-    pub vision_wrote: usize,
-    pub vision_skipped: usize,
-    pub message: String,
-}
-
-pub fn sidecar_path(library_dir: &Path, file: &str) -> PathBuf {
-    library_dir.join(format!("{file}.{VISION_SIDECAR}"))
-}
-
-pub fn has_vision(library_dir: &Path, file: &str) -> bool {
-    sidecar_path(library_dir, file).is_file()
-}
 
 /// Rewrite path-like labels to catalog titles. Does not invent lore.
 pub fn apply_catalog_names(library: &mut Library) -> usize {
@@ -127,28 +108,6 @@ fn label_asset_stem(label: &str) -> Option<&str> {
     }
 }
 
-/// Mark assets that have no vision blob. Does not call a model unless
-/// `vision_ready` is true — then the caller supplies captions.
-pub fn stamp_skipped_vision(library_dir: &Path, items: &[LibraryMeta], reason: &str) -> usize {
-    let mut n = 0usize;
-    for item in items {
-        let path = sidecar_path(library_dir, &item.file);
-        if path.is_file() {
-            continue;
-        }
-        let body = format!(
-            "{{\"status\":\"skipped\",\"reason\":\"{}\",\"label\":\"{}\",\"domain\":\"{}\"}}\n",
-            reason.replace('"', "'"),
-            item.label.replace('"', "'"),
-            item.domain
-        );
-        if std::fs::write(&path, body).is_ok() {
-            n += 1;
-        }
-    }
-    n
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,11 +164,4 @@ mod tests {
         );
         assert_eq!(better_label(&duke).as_deref(), Some("TILE-0123"));
     }
-}
-
-pub fn fleet_has_vision(model_ids: &[String]) -> bool {
-    model_ids.iter().any(|id| {
-        let l = id.to_ascii_lowercase();
-        l.contains("vl") || l.contains("vision") || l.contains("qwen2.5-vl") || l.contains("qwen3-vl")
-    })
 }

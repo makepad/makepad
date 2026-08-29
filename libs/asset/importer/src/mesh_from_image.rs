@@ -14,6 +14,7 @@ use makepad_asset_client::{
     AssetClient, ClientError, JobStateDto, OperationFinalizeRequest, OperationId,
     OperationOutputFile,
 };
+use makepad_asset_data::dimensions::{SizeClass, SizeHint};
 use makepad_asset_data::{BlobId, DeviceTier, FileRole, MediaType};
 use makepad_asset_client::json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +187,7 @@ impl<'f> MeshOpCoordinator<'f> {
             .and_then(|p| p.get("seed"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let size_hint = size_hint_of(body.get("params"));
 
         // ---- fetch EXACTLY the pinned bytes (digest-verified) ----
         self.heartbeat(&claimed.job, 20, "fetching input")?;
@@ -284,24 +286,52 @@ impl<'f> MeshOpCoordinator<'f> {
         };
         let (thumb_bytes, thumb_media, thumb_dims) = thumbnail_for(&measured.base_color);
 
+        // The metric truth: calibrate the unitless mesh to the declared
+        // size and say so in the same `asset-dimensions` words every other
+        // importer uses, as a text sidecar beside the GLB.
+        let dims_text = size_hint.as_ref().and_then(|hint| {
+            let extent = [
+                measured.max[0] - measured.min[0],
+                measured.max[1] - measured.min[1],
+                measured.max[2] - measured.min[2],
+            ];
+            hint.measure(extent, "declared by the generation request")
+                .map(|d| d.to_text())
+        });
+
         self.heartbeat(&claimed.job, 940, "uploading output")?;
         let glb_blob = self.client.upload_blob(&claimed.namespace, &glb)?;
         let thumb_blob = self.client.upload_blob(&claimed.namespace, &thumb_bytes)?;
+        let mut files = vec![OperationOutputFile {
+            role: FileRole::RenderGlb,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media: MediaType::Glb,
+            blob: glb_blob,
+            byte_len: glb.len() as u64,
+            dims: None,
+        }];
+        let mut dims_len = 0u64;
+        if let Some(text) = &dims_text {
+            let blob = self.client.upload_blob(&claimed.namespace, text.as_bytes())?;
+            dims_len = text.len() as u64;
+            files.push(OperationOutputFile {
+                role: FileRole::Source,
+                tier: DeviceTier::Any,
+                lod: 0,
+                media: MediaType::Text,
+                blob,
+                byte_len: dims_len,
+                dims: None,
+            });
+        }
 
         self.heartbeat(&claimed.job, 980, "finalizing")?;
         let finalize = OperationFinalizeRequest {
             job: claimed.job.clone(),
             suffix: Some(self.suffix.clone()),
             output_name: "mesh".into(),
-            files: vec![OperationOutputFile {
-                role: FileRole::RenderGlb,
-                tier: DeviceTier::Any,
-                lod: 0,
-                media: MediaType::Glb,
-                blob: glb_blob,
-                byte_len: glb.len() as u64,
-                dims: None,
-            }],
+            files,
             thumbnail: Some((
                 thumb_blob,
                 thumb_media,
@@ -310,7 +340,7 @@ impl<'f> MeshOpCoordinator<'f> {
                 thumb_bytes.len() as u64,
             )),
             metrics: (
-                glb.len() as u64 + thumb_bytes.len() as u64,
+                glb.len() as u64 + thumb_bytes.len() as u64 + dims_len,
                 measured.triangles,
                 measured.vertices,
                 0,
@@ -372,6 +402,64 @@ struct MeasuredGlb {
     min: [f32; 3],
     max: [f32; 3],
     base_color: Option<Vec<u8>>,
+}
+
+/// A JSON number as f32. Operation params travel the store as FLAT typed
+/// values (Int/Text/Bool — `routes_operations::params_of`), so metres also
+/// arrive as strings ("1.75") and are parsed here.
+fn value_f32(v: &Value) -> Option<f32> {
+    match v {
+        Value::Int(i) => Some(*i as f32),
+        Value::F64(f) => Some(*f as f32),
+        Value::Str(t) => t.trim().parse::<f32>().ok(),
+        _ => None,
+    }
+}
+
+/// The size the expand step declared for this generation, if any. Two
+/// spellings are read:
+///
+/// - flat params, the form the store's operation wire carries TODAY:
+///   `dim_class="character" dim_height="1.75" dim_length="4.5"
+///   dim_width="1.8" dim_preset="real"` (metres as strings);
+/// - a nested `dimensions` object with `class`/`height`/`length`/`width`/
+///   `preset` keys, for a wire that grows structured params.
+///
+/// A generated mesh is unitless, so this hint is the ONLY source of its
+/// physical size; the publish calibrates the mesh to it exactly as a pack
+/// importer calibrates a Kenney kit, and ships the result as an
+/// `asset-dimensions` sidecar beside the GLB. No hint, no sidecar — absent
+/// is honest.
+fn size_hint_of(params: Option<&Value>) -> Option<SizeHint> {
+    let params = params?;
+    let (scope, prefix): (&Value, &str) = match params.get("dimensions") {
+        Some(dims) => (dims, ""),
+        None => (params, "dim_"),
+    };
+    let key = |name: &str| format!("{prefix}{name}");
+    let class = scope
+        .get(&key("class"))
+        .and_then(Value::as_str)
+        .and_then(SizeClass::parse)
+        .unwrap_or(SizeClass::Prop);
+    let metres = |name: &str| {
+        scope
+            .get(&key(name))
+            .and_then(value_f32)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0)
+    };
+    let hint = SizeHint {
+        class,
+        height: metres("height"),
+        length: metres("length"),
+        width: metres("width"),
+        preset: scope
+            .get(&key("preset"))
+            .and_then(Value::as_str)
+            .and_then(makepad_asset_data::ScalePreset::parse),
+    };
+    (hint.height > 0.0 || hint.length > 0.0 || hint.width > 0.0).then_some(hint)
 }
 
 fn measure_glb(glb: &[u8]) -> Result<MeasuredGlb, String> {
@@ -734,6 +822,14 @@ mod tests {
         server: &AssetServer,
         token: &str,
     ) -> (AssetClient, makepad_asset_data::AssetRevisionId, OperationId, Vec<u8>) {
+        seed_and_create_with_params(server, token, Value::Obj(Vec::new()))
+    }
+
+    fn seed_and_create_with_params(
+        server: &AssetServer,
+        token: &str,
+        params: Value,
+    ) -> (AssetClient, makepad_asset_data::AssetRevisionId, OperationId, Vec<u8>) {
         let mut admin = connect(server, token, "seed-cache");
         let png = b"png-bytes-op".to_vec();
         let mut request = PublishRequest::new(
@@ -770,22 +866,22 @@ mod tests {
             .worker_claim_kinds(60_000, Some("w1"), &[MESH_OP_KIND])
             .unwrap()
             .is_none());
-        let status = admin
-            .operation_create(&OperationCreateRequest::new(
-                "gen",
-                "mesh.from_image.v1",
-                "worker-e2e",
-                vec![OperationInputRef {
-                    slot: "image".into(),
-                    asset: published.asset_id,
-                    revision: published.revision,
-                    role: FileRole::Texture,
-                    tier: None,
-                    lod: None,
-                    expected_media: Some(MediaType::Png),
-                }],
-            ))
-            .expect("create");
+        let mut create = OperationCreateRequest::new(
+            "gen",
+            "mesh.from_image.v1",
+            "worker-e2e",
+            vec![OperationInputRef {
+                slot: "image".into(),
+                asset: published.asset_id,
+                revision: published.revision,
+                role: FileRole::Texture,
+                tier: None,
+                lod: None,
+                expected_media: Some(MediaType::Png),
+            }],
+        );
+        create.params = params;
+        let status = admin.operation_create(&create).expect("create");
         (admin, published.revision, status.operation, png)
     }
 
@@ -869,6 +965,57 @@ mod tests {
         let seed_manifest = admin.fetch_asset_manifest(&seed_rev).expect("seed manifest");
         assert_eq!(manifest.rights, seed_manifest.rights, "rights inherit verbatim");
 
+        server.shutdown();
+    }
+
+    /// The expand step said "a 1.75 m character": the published mesh must
+    /// carry the `asset-dimensions` sidecar that calibrates its unitless
+    /// geometry to that person — the same metric contract every importer
+    /// writes, so a generated golem stands beside a Doom imp at one scale.
+    #[test]
+    fn a_declared_size_publishes_the_dimensions_sidecar() {
+        use makepad_asset_client::json::{obj, s};
+        let (mut server, token) = start_server("meshop_dims");
+        // Flat Text params — the only form the operation wire carries.
+        let params = obj(vec![
+            ("dim_class", s("character")),
+            ("dim_height", s("1.75")),
+        ]);
+        let (mut admin, _seed_rev, _op, png) =
+            seed_and_create_with_params(&server, &token, params);
+        let stop = AtomicBool::new(false);
+        let mut fleet =
+            ScriptedMesh { expect_image: png, glb: tiny_glb(), polls: 0, dispatched: false };
+        let mut coordinator = MeshOpCoordinator {
+            client: connect(&server, &token, "worker-cache"),
+            fleet: &mut fleet,
+            suffix: "w1".to_string(),
+            log: false,
+        };
+        let outcome = coordinator.run_one(&stop).expect("run").expect("claimed");
+        let MeshJobOutcome::Finalized { revision, .. } = outcome else {
+            panic!("expected finalized, got {outcome:?}");
+        };
+        let out_rev = revision.parse().expect("revision id");
+        let manifest = admin.fetch_asset_manifest(&out_rev).expect("manifest");
+        let dims_file = manifest
+            .files
+            .iter()
+            .find(|f| f.role == FileRole::Source && f.media == MediaType::Text)
+            .expect("the dimensions sidecar rides beside the GLB");
+        let bytes = admin
+            .fetch_blob_bytes(&dims_file.blob, Some(dims_file.byte_len))
+            .expect("sidecar bytes");
+        let d = makepad_asset_data::Dimensions::parse(
+            std::str::from_utf8(&bytes).expect("utf8"),
+        )
+        .expect("asset-dimensions");
+        // The tiny GLB is one unit tall, so the calibration IS the person.
+        assert!((d.height - 1.75).abs() < 1e-4, "{d:?}");
+        assert!((d.metres_per_unit - 1.75).abs() < 1e-4, "{d:?}");
+        assert!((d.eye - 1.65).abs() < 1e-3, "{d:?}");
+        assert!((d.radius - 0.35).abs() < 1e-3, "{d:?}");
+        assert_eq!(d.default, makepad_asset_data::ScalePreset::Real);
         server.shutdown();
     }
 

@@ -85,6 +85,7 @@ pub fn classify_triangles(
     thread_pool::parallel_map(&work, move |chunk: &[ClassifyWork]| {
         chunk
             .iter()
+            .take_while(|_| !thread_pool::cancelled())
             .map(|w| classify_one(w.centroid, w.normal, w.is_boundary, &ctx))
             .collect()
     })
@@ -165,6 +166,9 @@ fn point_inside_bvh(point: Vec3d, tree: &AabbTree, tris: &[(Vec3d, Vec3d, Vec3d)
 
     let mut inside_votes = 0u32;
     for &ray_dir in &directions {
+        if thread_pool::cancelled() {
+            return false;
+        }
         let crossings = tree.ray_cast_count(point, ray_dir, tris);
         if crossings % 2 == 1 {
             inside_votes += 1;

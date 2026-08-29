@@ -207,7 +207,9 @@ pub struct ServerConfig {
 /// node URLs are operator-supplied and never appear on the chat wire.
 #[derive(Clone, Debug)]
 pub struct ChatConfig {
-    /// Named fleet this server will use. Empty = `default`.
+    /// Named fleet this server's chat broker listens for. Empty = the
+    /// process's `MAKEPAD_AI_FLEET` (what the hosting app's own fleet
+    /// panel filters on), else `default`.
     pub fleet: String,
     /// Fleet/local Qwen node base URLs (`http://10.0.0.217:8765`).
     pub fleet_bases: Vec<String>,
@@ -239,6 +241,9 @@ pub struct ChatScript {
     pub fleet_qwen: ScriptedLane,
     pub openai: ScriptedLane,
     pub grok: ScriptedLane,
+    pub claude_cli: ScriptedLane,
+    pub codex_cli: ScriptedLane,
+    pub grok_cli: ScriptedLane,
     /// Most scripted turns that may run at once across ALL sessions —
     /// the fixture's stand-in for a serving tier's parallel capacity.
     /// 0 = unbounded. A concurrency suite needs this to show fairness

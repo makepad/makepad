@@ -208,15 +208,6 @@ pub fn zoom_to_subject(src: &Rgb, grid: usize, margin_frac: f32) -> Rgb {
     out
 }
 
-/// Serialise as binary P6 PPM, the interchange format the batch executor
-/// reads. Deliberately the dumbest possible container: no compression, no
-/// dependency, and trivially reimplemented by any other executor.
-pub fn to_ppm(img: &Rgb) -> Vec<u8> {
-    let mut out = format!("P6\n{} {}\n255\n", img.w, img.h).into_bytes();
-    out.extend_from_slice(&img.pixels);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,13 +218,6 @@ mod tests {
             pixels.extend_from_slice(&c);
         }
         Rgb { w, h, pixels }
-    }
-
-    #[test]
-    fn ppm_header_and_payload() {
-        let ppm = to_ppm(&solid(2, 3, [1, 2, 3]));
-        assert!(ppm.starts_with(b"P6\n2 3\n255\n"));
-        assert_eq!(ppm.len(), 11 + 2 * 3 * 3);
     }
 
     #[test]

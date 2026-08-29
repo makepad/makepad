@@ -3,6 +3,7 @@
 
 use makepad_asset_store::{AssetServer, ChatConfig, ChatScript, ScriptedLane, ScriptedTurn, ServerConfig};
 use makepad_asset_client::{
+    ChatProviderLocality,
     ApiEndpoints, AssetClient, ChatCreateRequest, ChatEventBodyDto, ChatProviderKind,
     ChatProviderStateDto, ChatSendRequest, ClientConfig, ClientError,
 };
@@ -109,8 +110,9 @@ fn typed_client_lists_providers_without_urls() {
     let (server, token) = start();
     let client = connect(&server, &token, "providers");
     let rows = client.chat_providers().expect("providers");
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 6);
     assert_eq!(rows[0].kind, ChatProviderKind::FleetQwen);
+    assert_eq!(rows[0].locality, ChatProviderLocality::Local);
     match &rows[0].state {
         ChatProviderStateDto::Available { model } => assert_eq!(model, "qwen-scripted"),
         other => panic!("{other:?}"),
@@ -123,6 +125,20 @@ fn typed_client_lists_providers_without_urls() {
         other => panic!("{other:?}"),
     }
     assert_eq!(rows[2].kind, ChatProviderKind::Grok);
+    // The vendor CLIs ride the same list, always marked cloud; a scripted
+    // server has none of them, and says so without leaking a path.
+    for (row, kind) in rows[3..].iter().zip([
+        ChatProviderKind::ClaudeCli,
+        ChatProviderKind::CodexCli,
+        ChatProviderKind::GrokCli,
+    ]) {
+        assert_eq!(row.kind, kind);
+        assert_eq!(row.locality, ChatProviderLocality::Cloud);
+        match &row.state {
+            ChatProviderStateDto::Unavailable { reason } => assert!(!reason.contains('/'), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -175,6 +191,55 @@ fn typed_client_can_choose_external_primary() {
         })
         .collect();
     assert!(text.contains("spawn_turret") || text.contains("Grok primary"), "{text}");
+}
+
+/// The typed client's durable-session flow, as the sandbox uses it:
+/// create-or-resume by (client, game), read the transcript, Clear.
+#[test]
+fn typed_client_resumes_reads_and_clears_a_keyed_session() {
+    let (server, token) = start();
+    let client = connect(&server, &token, "keyed");
+    let request = ChatCreateRequest::new("gen", ChatProviderKind::Grok)
+        .with_client("game")
+        .with_client_key("ip:10.0.0.9")
+        .with_context_key("ast_00000000000000000000000000000009");
+    let created = client.chat_create(&request).expect("create");
+    assert_eq!(created.client_key.as_deref(), Some("ip:10.0.0.9"));
+    assert_eq!(created.context_key.as_deref(), Some("ast_00000000000000000000000000000009"));
+    assert!(client.chat_transcript(&created.session).expect("transcript").is_empty());
+
+    client.chat_send(&created.session, &ChatSendRequest::text("hello")).expect("send");
+    drain_done(&client, &created.session);
+    let rows = client.chat_transcript(&created.session).expect("transcript");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].role, makepad_asset_client::ChatTranscriptRole::User);
+    assert_eq!(rows[0].text, "hello");
+    assert_eq!(rows[1].role, makepad_asset_client::ChatTranscriptRole::Assistant);
+    assert!(rows[1].text.contains("spawn_turret"), "{rows:?}");
+    let full = client.chat_transcript_full(&created.session).expect("transcript");
+    assert_eq!(full.session, created.session);
+    assert_eq!(full.provider, ChatProviderKind::Grok);
+    assert_eq!(full.turn, 1);
+    assert!(!full.truncated);
+
+    // Resume: the same session, transcript intact.
+    let again = client.chat_create(&request).expect("resume");
+    assert_eq!(again.session, created.session);
+    assert_eq!(again.turn, 1);
+    assert_eq!(client.chat_transcript(&created.session).expect("transcript").len(), 2);
+
+    // Clear: gone, and the next create is fresh.
+    assert!(client.chat_retire(&created.session).expect("retire"));
+    let fresh = client.chat_create(&request).expect("create after clear");
+    assert_ne!(fresh.session, created.session);
+    assert!(client.chat_transcript(&fresh.session).expect("transcript").is_empty());
+
+    // An unkeyed create still answers an unkeyed session.
+    let plain = client
+        .chat_create(&ChatCreateRequest::new("gen", ChatProviderKind::Grok))
+        .expect("plain");
+    assert_eq!(plain.client_key, None);
+    assert_eq!(plain.context_key, None);
 }
 
 #[test]

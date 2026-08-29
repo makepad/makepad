@@ -597,10 +597,22 @@ fn encode_input_messages(messages: &[ChatMessage]) -> Value {
         messages
             .iter()
             .map(|m| {
+                // The Responses input schema has no `tool` message role;
+                // live rounds go through `function_call_output` instead.
+                // Historical tool rows reach this encoder only when a
+                // FRESH provider replays a persisted or abandoned-round
+                // history — flatten them into labelled user-side context
+                // rather than emitting a role the API refuses.
+                let (role, text) = match m.role {
+                    crate::wire::ChatRole::Tool => {
+                        ("user", format!("[tool result]\n{}", m.text))
+                    }
+                    other => (other.slug(), m.text.clone()),
+                };
                 json::obj(vec![
                     ("type", json::s("message")),
-                    ("role", json::s(m.role.slug())),
-                    ("content", json::s(m.text.clone())),
+                    ("role", json::s(role)),
+                    ("content", json::s(text)),
                 ])
             })
             .collect(),
@@ -747,6 +759,20 @@ impl<T: ResponsesTransport> ChatProvider for ResponsesChatProvider<T> {
         }
         // Idle cancel and in-flight cancel both retain the conversation
         // chain. An unresolved continuation is fail-closed by begin_turn.
+        self.cancel = CancelToken::new();
+    }
+
+    /// Deliberately abandon the conversation: the pending function call
+    /// (if any) is dropped and the response chain forgotten, so the next
+    /// `begin_turn` replays the session's history from the top as a fresh
+    /// conversation. This is the ONLY way out of an unresolved function
+    /// call — `cancel` preserves it so accidental aborts stay fail-closed.
+    fn reset_conversation(&mut self) {
+        self.cancel.cancel();
+        self.active = None;
+        self.pending_call_id = None;
+        self.previous_response_id = None;
+        self.sent_messages = 0;
         self.cancel = CancelToken::new();
     }
 }

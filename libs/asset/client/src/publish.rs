@@ -1084,6 +1084,34 @@ impl AssetClient {
         &mut self,
         requests: &[PublishBundle],
     ) -> ClientResult<Vec<PublishedBundle>> {
+        self.publish_bundles_with(requests, None, &|| false)
+    }
+
+    /// Atomic multi-bundle publication with cooperative cancellation during
+    /// validation and blob transfer. The final catalog transaction (assets,
+    /// revisions, annotations and aliases together) is deliberately the
+    /// commit point: after `Publishing` is reported it runs uninterruptibly,
+    /// so a cancellation can never leave a published-but-unaliasable result.
+    pub fn publish_bundles_with(
+        &mut self,
+        requests: &[PublishBundle],
+        mut progress: Option<&mut dyn FnMut(&PublishStage)>,
+        abort: &dyn Fn() -> bool,
+    ) -> ClientResult<Vec<PublishedBundle>> {
+        let mut emit = |stage: PublishStage| {
+            if let Some(callback) = progress.as_deref_mut() {
+                callback(&stage);
+            }
+        };
+        let gate = || -> ClientResult<()> {
+            if abort() {
+                Err(ClientError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        gate()?;
+        emit(PublishStage::Validating);
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -1151,6 +1179,8 @@ impl AssetClient {
         // Bytes before catalog rows, in bounded pages per namespace. The
         // page budget stays under the server's batch byte cap.
         const UPLOAD_PAGE_BYTES: usize = 8 * 1024 * 1024;
+        let upload_count: usize = per_ns.iter().map(|(_, blobs)| blobs.len()).sum();
+        let mut uploaded = 0usize;
         for (ns, blobs) in &per_ns {
             let mut page: Vec<&[u8]> = Vec::new();
             let mut page_bytes = 0usize;
@@ -1159,6 +1189,13 @@ impl AssetClient {
                     && (page.len() >= wire::MAX_UPLOAD_BATCH_ITEMS
                         || page_bytes + bytes.len() > UPLOAD_PAGE_BYTES)
                 {
+                    gate()?;
+                    uploaded += page.len();
+                    emit(PublishStage::UploadingBlob {
+                        index: uploaded,
+                        of: upload_count,
+                        bytes: page_bytes as u64,
+                    });
                     self.api().upload_blob_batch(ns, &page)?;
                     page.clear();
                     page_bytes = 0;
@@ -1167,17 +1204,27 @@ impl AssetClient {
                 page_bytes += bytes.len();
             }
             if !page.is_empty() {
+                gate()?;
+                uploaded += page.len();
+                emit(PublishStage::UploadingBlob {
+                    index: uploaded,
+                    of: upload_count,
+                    bytes: page_bytes as u64,
+                });
                 self.api().upload_blob_batch(ns, &page)?;
             }
         }
         // One request publishes the page; echoed identities must match the
         // locally computed ones.
+        gate()?;
+        emit(PublishStage::Publishing);
         let outcomes = self.api().publish_batch(&items)?;
         for ((asset_id, revision, _already), local) in outcomes.iter().zip(&results) {
             if *asset_id != local.asset_id || *revision != local.revision {
                 return Err(ClientError::Protocol { what: "publish batch identity mismatch" });
             }
         }
+        emit(PublishStage::Complete);
         Ok(results)
     }
 

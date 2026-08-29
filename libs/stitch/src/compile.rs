@@ -4,8 +4,9 @@ use {
         code,
         code::{
             BinOpInfo, BlockType, CompiledCode, InstrSlot, InstrVisitor, LoadInfo, MemArg,
-            StoreInfo, UnOpInfo, UncompiledCode,
+            StoreInfo, UnOpInfo, UncompiledCode, V128BinOpInfo, V128ReduceOpInfo, V128UnOpInfo,
         },
+        config::Extensions,
         decode::DecodeError,
         exec,
         exec::ThreadedInstr,
@@ -14,6 +15,7 @@ use {
         func_ref::FuncRef,
         instance::Instance,
         ref_::RefType,
+        simd::V128,
         stack::StackSlot,
         store::Store,
         val::{UnguardedVal, ValType},
@@ -47,6 +49,7 @@ impl Compiler {
         func: Func,
         instance: &Instance,
         code: &UncompiledCode,
+        exts: Extensions,
     ) -> CompiledCode {
         use crate::decode::Decoder;
 
@@ -100,7 +103,7 @@ impl Compiler {
 
         let mut decoder = Decoder::new(&code.expr);
         while !compile.blocks.is_empty() {
-            code::decode_instr(&mut decoder, &mut self.label_idxs, &mut compile).unwrap();
+            code::decode_instr(&mut decoder, &mut self.label_idxs, &mut compile, exts).unwrap();
         }
 
         for (result_idx, result_type) in type_.clone().results().iter().copied().enumerate().rev() {
@@ -495,6 +498,8 @@ impl<'a> Compile<'a> {
             UnguardedVal::I64(val) => self.emit(val),
             UnguardedVal::F32(val) => self.emit(val),
             UnguardedVal::F64(val) => self.emit(val),
+            // v128 values are never immediate operands (see visit_v128_const).
+            UnguardedVal::V128(_) => unreachable!("v128 values are never immediate operands"),
             UnguardedVal::FuncRef(val) => self.emit(val),
             UnguardedVal::ExternRef(val) => self.emit(val),
         }
@@ -1150,6 +1155,39 @@ impl<'a> InstrVisitor for Compile<'a> {
         }
 
         let type_ = type_.unwrap_or_else(|| self.opd(1).type_);
+
+        // `v128` operands are never immediates or register-resident, so
+        // select over `v128` has its own instruction variants: the two
+        // value operands are always read from the stack, the condition can
+        // be on the stack or in the integer register, and the result is
+        // written to a stack slot whose offset is an explicit immediate.
+        if type_ == ValType::V128 {
+            // Ensure that the condition is not an immediate operand (there
+            // are no _i condition variants).
+            self.ensure_opd_not_imm(0);
+
+            // Emit the instruction.
+            self.emit(match self.opd(0).kind() {
+                OpdKind::Stack => exec::select_v128_ss,
+                OpdKind::Reg => exec::select_v128_sr,
+                OpdKind::Imm => panic!("no suitable instruction found"),
+            });
+
+            // Emit the inputs and pop them from the stack (condition first,
+            // matching the handlers' read order).
+            self.emit_opd(0);
+            self.emit_opd(1);
+            self.emit_opd(2);
+            self.pop_opd();
+            self.pop_opd();
+            self.pop_opd();
+
+            // Push the output onto the stack and emit its stack offset.
+            self.push_opd(type_);
+            self.emit_stack_offset(self.opd_stack_idx(0));
+
+            return Ok(());
+        }
 
         // The `select` instruction does not have any _{sri}{sri}i variants.
         //
@@ -2049,6 +2087,348 @@ impl<'a> InstrVisitor for Compile<'a> {
 
         Ok(())
     }
+
+    // Vector (v128) instructions
+    //
+    // `v128` values are never immediates (v128.const materializes its value
+    // to the stack immediately) and never register-resident, so every
+    // `v128` operand is read from the stack, and every `v128` result is
+    // written to a stack slot whose offset is emitted as an immediate after
+    // the operands. Handlers read their operands in exactly the order they
+    // are emitted here, and read all inputs before writing the result, so
+    // it is safe for the result slot to alias an input slot.
+
+    /// Compiles a `v128.load` instruction.
+    fn visit_v128_load(&mut self, arg: MemArg) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // There is no _i variant for the address operand.
+        self.ensure_opd_not_imm(0);
+
+        // Emit the instruction.
+        self.emit(match self.opd(0).kind() {
+            OpdKind::Stack => exec::v128_load_s,
+            OpdKind::Reg => exec::v128_load_r,
+            OpdKind::Imm => panic!("no suitable instruction found"),
+        });
+
+        // Emit the address operand and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Emit the static offset.
+        self.emit(arg.offset);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles a `v128.store` instruction.
+    fn visit_v128_store(&mut self, arg: MemArg) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // There is no _i variant for the address operand.
+        self.ensure_opd_not_imm(1);
+
+        // Emit the instruction.
+        self.emit(match self.opd(1).kind() {
+            OpdKind::Stack => exec::v128_store_ss,
+            OpdKind::Reg => exec::v128_store_rs,
+            OpdKind::Imm => panic!("no suitable instruction found"),
+        });
+
+        // Emit the address and value operands and pop them from the stack.
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+
+        // Emit the static offset.
+        self.emit(arg.offset);
+
+        Ok(())
+    }
+
+    /// Compiles a `v128.const` instruction.
+    fn visit_v128_const(&mut self, val: V128) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // Emit the instruction. The 16-byte immediate occupies two code
+        // slots; the value is materialized to the stack immediately, so
+        // `v128` operands are never immediate operands.
+        self.emit(exec::copy_imm_to_stack_v128 as ThreadedInstr);
+        let bits = val.to_bits();
+        self.emit(bits as u64);
+        self.emit((bits >> 64) as u64);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles an `i8x16.shuffle` instruction.
+    fn visit_i8x16_shuffle(&mut self, lanes: [u8; 16]) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // Emit the instruction.
+        self.emit(exec::i8x16_shuffle as ThreadedInstr);
+
+        // Emit the inputs and pop them from the stack.
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+
+        // Emit the 16 lane indices (two code slots).
+        let bits = V128::from_bytes(lanes).to_bits();
+        self.emit(bits as u64);
+        self.emit((bits >> 64) as u64);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles an `f32x4.splat` instruction.
+    fn visit_f32x4_splat(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // There is no _i variant for the scalar operand.
+        self.ensure_opd_not_imm(0);
+
+        // Emit the instruction.
+        self.emit(match self.opd(0).kind() {
+            OpdKind::Stack => exec::f32x4_splat_s,
+            OpdKind::Reg => exec::f32x4_splat_r,
+            OpdKind::Imm => panic!("no suitable instruction found"),
+        });
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles an `f32x4.extract_lane` instruction.
+    fn visit_f32x4_extract_lane(&mut self, lane: u8) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // The output is a scalar, written to a register; ensure the output
+        // register is available. The input is a `v128`, which never
+        // occupies a register, so there is no exception case.
+        let output_reg_idx = ValType::F32.reg_idx();
+        if self.is_reg_occupied(output_reg_idx) {
+            self.preserve_reg(output_reg_idx);
+        }
+
+        // Emit the instruction.
+        self.emit(exec::f32x4_extract_lane_s as ThreadedInstr);
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Emit the lane index.
+        self.emit(lane as usize);
+
+        // Push the output onto the stack and allocate a register for it.
+        self.push_opd(ValType::F32);
+        self.alloc_reg();
+
+        Ok(())
+    }
+
+    /// Compiles an `f32x4.replace_lane` instruction.
+    fn visit_f32x4_replace_lane(&mut self, lane: u8) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // There is no _i variant for the scalar operand.
+        self.ensure_opd_not_imm(0);
+
+        // Emit the instruction.
+        self.emit(match self.opd(0).kind() {
+            OpdKind::Stack => exec::f32x4_replace_lane_ss,
+            OpdKind::Reg => exec::f32x4_replace_lane_sr,
+            OpdKind::Imm => panic!("no suitable instruction found"),
+        });
+
+        // Emit the vector and scalar operands and pop them from the stack.
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+
+        // Emit the lane index.
+        self.emit(lane as usize);
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles a `v128.any_true` instruction.
+    fn visit_v128_any_true(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // The output is a scalar, written to a register; ensure the output
+        // register is available. The input is a `v128`, which never
+        // occupies a register, so there is no exception case.
+        let output_reg_idx = ValType::I32.reg_idx();
+        if self.is_reg_occupied(output_reg_idx) {
+            self.preserve_reg(output_reg_idx);
+        }
+
+        // Emit the instruction.
+        self.emit(exec::v128_any_true_s as ThreadedInstr);
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Push the output onto the stack and allocate a register for it.
+        self.push_opd(ValType::I32);
+        self.alloc_reg();
+
+        Ok(())
+    }
+
+    /// Compiles a `v128.bitselect` instruction.
+    fn visit_v128_bitselect(&mut self) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // Emit the instruction.
+        self.emit(exec::v128_bitselect as ThreadedInstr);
+
+        // Emit the inputs and pop them from the stack.
+        self.emit_opd(2);
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+        self.pop_opd();
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles a `v128 -> v128` operation.
+    fn visit_v128_un_op(&mut self, info: V128UnOpInfo) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // Emit the instruction.
+        self.emit(info.instr);
+
+        // Emit the input and pop it from the stack.
+        self.emit_opd(0);
+        self.pop_opd();
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles a `v128 x v128 -> v128` operation.
+    fn visit_v128_bin_op(&mut self, info: V128BinOpInfo) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // Emit the instruction.
+        self.emit(info.instr);
+
+        // Emit the inputs and pop them from the stack.
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+
+        // Push the output onto the stack and emit its stack offset.
+        self.push_opd(ValType::V128);
+        self.emit_stack_offset(self.opd_stack_idx(0));
+
+        Ok(())
+    }
+
+    /// Compiles a `v128 x v128 -> f32` reduction.
+    fn visit_v128_reduce_op(&mut self, info: V128ReduceOpInfo) -> Result<(), Self::Error> {
+        // Skip this instruction if it is unreachable.
+        if self.block(0).is_unreachable {
+            return Ok(());
+        }
+
+        // The output is a scalar, written to a register; ensure the output
+        // register is available. The inputs are v128, which never occupy
+        // registers, so there is no exception case.
+        let output_reg_idx = ValType::F32.reg_idx();
+        if self.is_reg_occupied(output_reg_idx) {
+            self.preserve_reg(output_reg_idx);
+        }
+
+        // Emit the instruction.
+        self.emit(info.instr);
+
+        // Emit the inputs and pop them from the stack.
+        self.emit_opd(1);
+        self.emit_opd(0);
+        self.pop_opd();
+        self.pop_opd();
+
+        // Push the output onto the stack and allocate a register for it.
+        self.push_opd(ValType::F32);
+        self.alloc_reg();
+
+        Ok(())
+    }
 }
 
 /// A local on the stack.
@@ -2425,11 +2805,15 @@ fn select_select(
         // variant of this instruction that can handle this case.
         | (_, OpdKind::Reg, OpdKind::Reg, _)
         | (_, _, _, OpdKind::Imm) => panic!("no suitable instruction found"),
+        // select over v128 is handled by a dedicated path in visit_select.
+        (ValType::V128, ..) => unreachable!("select over v128 has a dedicated path"),
     }
 }
 
 fn select_global_get(type_: ValType) -> ThreadedInstr {
     match type_ {
+        // v128 globals are rejected at decode time (see GlobalType::decode).
+        ValType::V128 => unreachable!("v128 globals are not supported"),
         ValType::I32 => exec::global_get_i32,
         ValType::I64 => exec::global_get_i64,
         ValType::F32 => exec::global_get_f32,
@@ -2441,6 +2825,8 @@ fn select_global_get(type_: ValType) -> ThreadedInstr {
 
 fn select_global_set(type_: ValType, kind: OpdKind) -> ThreadedInstr {
     match (type_, kind) {
+        // v128 globals are rejected at decode time (see GlobalType::decode).
+        (ValType::V128, _) => unreachable!("v128 globals are not supported"),
         (ValType::I32, OpdKind::Stack) => exec::global_set_i32_s,
         (ValType::I32, OpdKind::Reg) => exec::global_set_i32_r,
         (ValType::I32, OpdKind::Imm) => exec::global_set_i32_i,
@@ -2583,6 +2969,8 @@ fn select_copy_imm_to_stack(type_: ValType) -> ThreadedInstr {
         ValType::I64 => exec::copy_imm_to_stack_i64,
         ValType::F32 => exec::copy_imm_to_stack_f32,
         ValType::F64 => exec::copy_imm_to_stack_f64,
+        // v128 values are never immediate operands (see visit_v128_const).
+        ValType::V128 => unreachable!("v128 values are never immediate operands"),
         ValType::FuncRef => exec::copy_imm_to_stack_func_ref,
         ValType::ExternRef => exec::copy_imm_to_stack_extern_ref,
     }
@@ -2594,6 +2982,7 @@ fn select_copy_stack(type_: ValType) -> ThreadedInstr {
         ValType::I64 => exec::copy_stack_i64,
         ValType::F32 => exec::copy_stack_f32,
         ValType::F64 => exec::copy_stack_f64,
+        ValType::V128 => exec::copy_stack_v128,
         ValType::FuncRef => exec::copy_stack_func_ref,
         ValType::ExternRef => exec::copy_stack_extern_ref,
     }
@@ -2605,6 +2994,8 @@ fn select_copy_reg_to_stack(type_: ValType) -> ThreadedInstr {
         ValType::I64 => exec::copy_reg_to_stack_i64,
         ValType::F32 => exec::copy_reg_to_stack_f32,
         ValType::F64 => exec::copy_reg_to_stack_f64,
+        // v128 values are never register-resident.
+        ValType::V128 => unreachable!("v128 values are never register-resident"),
         ValType::FuncRef => exec::copy_reg_to_stack_func_ref,
         ValType::ExternRef => exec::copy_reg_to_stack_extern_ref,
     }

@@ -65,6 +65,42 @@ impl Shape {
     }
 }
 
+/// Optional presentation-matched exterior in the entity's local frame.
+///
+/// Physics is intentionally free to keep a cheaper body (for example a low
+/// vehicle chassis). Hosts that bind a taller or wider model can publish its
+/// measured bounds here so weapon rays hit everything the player sees. For a
+/// rigid, capsule walkers also treat this box as a query-only obstacle: the
+/// visible roof and bodywork block a character without adding any solver mass,
+/// contact response, or inertia to the deliberately smaller rigid chassis.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct HurtBox {
+    pub center: Vec3f,
+    pub half: Vec3f,
+}
+
+/// Per-instance albedo adjustment shared by meshes, sprites and primitives.
+/// `hue` is authored in degrees; saturation/value are neutral at 1. The
+/// renderer converts this small CPU-facing value to its vec4 instance lane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorAdjust {
+    pub hue: f32,
+    pub saturation: f32,
+    pub value: f32,
+}
+
+impl Default for ColorAdjust {
+    fn default() -> Self {
+        Self { hue: 0.0, saturation: 1.0, value: 1.0 }
+    }
+}
+
+impl ColorAdjust {
+    pub fn instance(self) -> Vec4f {
+        vec4f(self.hue, self.saturation, self.value, 0.0)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Entity {
     pub id: u64,
@@ -72,7 +108,9 @@ pub struct Entity {
     pub pos: Vec3f,
     pub vel: Vec3f,
     pub half: Vec3f,
+    pub hurt_box: Option<HurtBox>,
     pub color: Vec4f,
+    pub color_adjust: ColorAdjust,
     pub tag: String,
     pub sensor: bool,
     /// `collide: false` = opaque decoration: renders like a solid, but no
@@ -92,6 +130,14 @@ pub struct Entity {
     /// invisible — the same class of trap as the rng that defaulted to a
     /// zero seed and the bodies that defaulted to zero gravity.
     pub hidden: bool,
+    /// Invisible containment: physics treats this exactly like an ordinary
+    /// solid, camera placement rays pass through it, and presentation draws
+    /// NOTHING — an interior is an open stage bounded by walls you feel but
+    /// never see (user, 2026-08-27: "make these indoor spaces without
+    /// walls"). Distinct from `hidden`, which is a presentation lie trap:
+    /// shell is an authored, replicated design choice for room envelopes.
+    /// Default false keeps every existing body an ordinary drawn solid.
+    pub shell: bool,
     /// Retained visual identity with no gameplay presence. The entity still
     /// replicates and renders (for example, a corpse finishing its skinned
     /// death pose), but queries, collision separation and touch collection
@@ -285,7 +331,7 @@ pub fn floor_normal_of(e: &Entity) -> Vec3f {
 /// no physics. Offsets/rotation are OWNER-LOCAL (front at -z) and rotate/scale
 /// with the owner's model; gone when the owner goes. Each field pairs with a
 /// target the engine lerps toward (game.move_part), which is how arms reach.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Part {
     pub id: u64,
     pub owner: u64,
@@ -303,6 +349,14 @@ pub struct Part {
     /// True while easing toward targets (game.move_part re-arms it). Settled
     /// parts skip the easing math AND stay eligible for the static slab.
     pub anim_active: bool,
+    /// Engine-owned procedural rotation layered over `rot`. The part kit uses
+    /// this for declarative gait/tail swings so `move_part` can keep owning
+    /// its ordinary authored pose without a script callback fighting it.
+    pub procedural_rot: Vec3f,
+    /// A procedural animation stays out of the renderer's static slab even at
+    /// the oscillator's zero crossing. Purely presentational: parts remain
+    /// absent from collision, physics and navigation.
+    pub procedural_anim: bool,
 }
 
 /// Immediate-mode stretched box between two points (grapple cables, lasers,

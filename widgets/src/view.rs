@@ -1155,6 +1155,13 @@ enum DrawState {
 }
 
 impl View {
+    /// The design-mode container seam: a view marked `design_mode: true` is
+    /// transparent to the tweaker's pick resolution — its children resolve,
+    /// it never consumes the hit itself.
+    pub fn design_mode(&self) -> bool {
+        self.design_mode
+    }
+
     pub fn swap_child(&mut self, pos_a: usize, pos_b: usize) {
         self.children.swap(pos_a, pos_b);
     }

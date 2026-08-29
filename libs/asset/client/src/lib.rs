@@ -56,7 +56,8 @@ pub use api::{
     ChatAttachment, ChatCreateRequest,
     ChatSendRequest, GcRequest, OperationAliasExpect, OperationCreateRequest,
     OperationFinalizeRequest, OperationInputRef, OperationOutputFile, OperationPublicationRef,
-    SourceCollectionRegistered, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,
+    PipelineStageSpec, SourceCollectionRegistered, default_stage_weight, stage_ref,
+    DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT, NEUTRAL_STAGE_WEIGHT,
 };
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
 pub use client::{
@@ -67,19 +68,26 @@ pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
 pub use dto::{
-    AliasDto, AliasStatusDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
+    ChatProviderLocality,
+    AliasDto, AliasStatusDto, AnnotateBacklogDto, AnnotateSummaryDto, AnnotationDto,
+    AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto,
     CatalogEventDto,
     CatalogEventKind, CatalogFacet, CatalogHit, ClaimedJobDto, EventsPageDto, FacetKind,
+    ModelPreviewDto, ModelPreviewPartDto, ModelPreviewRenameDto,
     GameAliasDto, GcPhaseDto,
     GcStatusDto, HealthDto, ImportEntryDto, RetireDto,
     ImportReportDto, ImportStatusDto, JobAttemptDto, JobDetailDto, JobId, JobProfileDto,
     ChatEventBodyDto, ChatEventDto, ChatEventsPageDto, ChatProviderDto, ChatProviderKind,
-    JobProgressDto, JobResultDto, JobRowDto, JobStateDto, JobStatusDto, OperationEventDto,
+    JobProgressDto, JobResultDto, JobRowDto, JobStageDto, JobStageInput, JobStateDto,
+    JobStatusDto, OperationEventDto,
     ChatProviderStateDto, ChatSessionDto, ChatSessionId, ChatSessionStateDto, ChatToolOutcomeDto,
+    ChatTranscriptDto, ChatTranscriptRole, ChatTranscriptRowDto,
     OperationEventsPageDto, OperationId, OperationInputDto, OperationProgressDto, OperationStateDto,
-    OperationStatusDto, OperationTypeDto, PrincipalDto, ResolvedVariantMapDto,
+    OperationStatusDto, OperationTypeDto, PipelineCancelDto, PipelineCreatedDto, PipelineDetailDto,
+    PipelineId, PipelineRowDto, PipelineStageDto, PipelineStageJobDto, PipelineStateDto,
+    PrincipalDto, ResolvedVariantMapDto,
     RoomClaimDto, RoomDto,
-    SourceCollectionRowDto, SourceCollectionsPageDto,
+    SourceCollectionRowDto, SourceCollectionsPageDto, StageOnFailDto, aggregate_permille,
 };
 pub use error::{ClientError, ClientResult};
 pub use http::HttpLimits;

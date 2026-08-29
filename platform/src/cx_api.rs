@@ -272,6 +272,7 @@ pub enum CxOsOp {
     /// it) so a maximized window reads as a clean fullscreen picture
     /// rather than a decorated window pinned to the work area.
     SetChromelessWhenMaximized(WindowId, bool),
+    SetWindowTitle(WindowId, String),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
@@ -279,6 +280,10 @@ pub enum CxOsOp {
     /// positions, so existing MouseMove consumers work unchanged); `false`
     /// releases. Backends without support ignore it.
     LockMousePointer(bool),
+    /// Widget-scoped pointer pin for value scrubbing: cursor stays at its
+    /// press point (hidden) while deltas keep flowing; restored in place
+    /// on release. Engage at the drag threshold, never on the press.
+    PinMousePointer(bool),
     /// Per-frame lock maintenance, pushed by the captured app every frame:
     /// re-pins the hardware cursor. Exists because OS-level disassociation
     /// proves unreliable on some systems (it silently drops on app
@@ -463,9 +468,11 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
+            Self::SetWindowTitle(..) => write!(f, "SetWindowTitle"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
+            Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
             Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
             Self::SetScreenOrientation(..) => write!(f, "SetScreenOrientation"),
@@ -952,6 +959,38 @@ impl Cx {
     /// cursor pinned even when the OS quietly drops the disassociation.
     pub fn repin_mouse_pointer(&mut self) {
         self.platform_ops.push_back(CxOsOp::RepinMousePointer);
+    }
+
+    /// Pin the CURRENT mouse capture for value scrubbing: the hardware
+    /// cursor hides AT its position and detaches so deltas keep flowing
+    /// with infinite range; the drag owner keeps receiving FingerMove
+    /// through its ordinary capture, and nothing else in the window sees
+    /// the pointer (no hover, no new captures). Engage only when the drag
+    /// actually starts (the 3px threshold crossing), never on the initial
+    /// press. Release is AUTOMATIC: the pin rides on the capture, and the
+    /// hardware button-up releases both (plus focus-loss and the platform
+    /// layer's own unconditional release) — the cursor restores at the
+    /// press point. Call `unpin_pointer_capture` only to cancel EARLY
+    /// (Escape / right-click) while the button is still held.
+    pub fn pin_pointer_capture(&mut self) {
+        if self.fingers.pin_mouse_capture() {
+            self.platform_ops.push_back(CxOsOp::PinMousePointer(true));
+        }
+    }
+
+    /// Cancel a scrub pin while the button is still held (Escape /
+    /// right-click cancel): clears the capture's pin flag and restores the
+    /// cursor at the press point.
+    /// The repaint counter: one step per presented frame. Two reads apart
+    /// in time say whether the app paints on its own.
+    pub fn repaint_id(&self) -> u64 {
+        self.repaint_id
+    }
+
+    pub fn unpin_pointer_capture(&mut self) {
+        if self.fingers.unpin_captures() {
+            self.platform_ops.push_back(CxOsOp::PinMousePointer(false));
+        }
     }
 
     pub fn show_in_dock(&mut self, show: bool) {

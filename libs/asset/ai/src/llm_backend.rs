@@ -36,6 +36,10 @@ const PROMPT_MESH: &str = include_str!("../prompts/expand_mesh.txt");
 const PROMPT_RIG: &str = include_str!("../prompts/expand_rig.txt");
 const PROMPT_AUDIO: &str = include_str!("../prompts/expand_audio.txt");
 const PROMPT_MUSIC: &str = include_str!("../prompts/expand_music.txt");
+/// The same composer, narrowed to the VJ's case: a seamless instrumental
+/// loop, where "no intro, no outro, no final cadence" is the whole request
+/// and lyrics are always `[Instrumental]`.
+const PROMPT_MUSIC_LOOP: &str = include_str!("../prompts/expand_music_loop.txt");
 const PROMPT_GENERIC: &str = include_str!("../prompts/expand_generic.txt");
 
 /// The next publishable streaming snapshot, or None to hold this round.
@@ -290,6 +294,7 @@ pub fn default_system_prompt(target_domain: &str) -> &'static str {
         "rig" => PROMPT_RIG,
         "audio" => PROMPT_AUDIO,
         "music" => PROMPT_MUSIC,
+        "music_loop" => PROMPT_MUSIC_LOOP,
         _ => PROMPT_GENERIC,
     }
 }
@@ -1683,6 +1688,13 @@ mod llama_worker {
                 // and the two disagreeing means ingesting a delta at position 0
                 // of a lane that holds none of the history.
                 let prompt_tokens = tokens.len();
+                // The reply budget is physical, not policy: whatever the
+                // client asked for, a lane can only decode into the context
+                // it has left after this prompt. Clamping HERE (not at the
+                // params layer) keeps the progress meter's denominator and
+                // the scheduler's stop condition the same honest number.
+                let max_new = (job.max_tokens.max(1) as usize)
+                    .min((context_per_lane() as usize).saturating_sub(prompt_tokens).max(1));
                 let request = LaneRequest {
                     job: id,
                     session: job.kind.clone(),
@@ -1690,7 +1702,7 @@ mod llama_worker {
                     // Never a veto from here: the scheduler decides whether a
                     // lane can be resumed, and it is the only thing that knows.
                     reset_first: false,
-                    max_new: job.max_tokens.max(1) as usize,
+                    max_new,
                     sampling: LlamaSamplingParams {
                         temperature: job.temperature.max(0.0),
                         top_p: 0.95,
@@ -1722,7 +1734,7 @@ mod llama_worker {
                         cancel,
                         token_ids: Vec::new(),
                         streamed: String::new(),
-                        max_tokens: job.max_tokens.max(1) as usize,
+                        max_tokens: max_new,
                         prompt_tokens,
                         lane: None,
                         phase: TurnPhase::Waiting,
@@ -2715,16 +2727,32 @@ mod tests {
             assert!(rig.contains(pose_rule), "missing {pose_rule:?}");
         }
         assert!(default_system_prompt("audio").contains("sound"));
+        // MUSIC IS A BODY, NOT A PARAGRAPH. The old prompt asked for a
+        // caption then lyrics after a `Lyrics:` marker and claimed the
+        // pipeline split on it — nothing did, so `lyrics` was always empty
+        // and every expanded song came back instrumental. The writer now
+        // answers with the request body itself, which is the only shape the
+        // lyric field can ever be filled from.
         let music = default_system_prompt("music");
-        assert!(music.contains("Lyrics:"));
+        assert!(music.contains("exactly one valid JSON object"));
+        for key in ["\"model\"", "\"prompt\"", "\"lyrics\"", "\"seconds\""] {
+            assert!(music.contains(key), "missing {key}");
+        }
         assert!(music.contains("[Verse]"));
         assert!(music.contains("[Chorus]"));
-        assert!(music.contains("explicitly instrumental"));
-        // Everything after `Lyrics:` is sung verbatim — the prompt must
-        // forbid bar counts / timing math from leaking into the lyric sheet
-        // (a run once sang "8 bars").
-        assert!(music.contains("sung verbatim"));
+        assert!(music.contains("[Instrumental]"));
+        // Lyric text never goes in the caption, and structure talk never
+        // goes in the lyrics (a run once literally sang "8 bars").
+        assert!(music.contains("Never place lyric text in \"prompt\""));
         assert!(music.contains("bar counts"));
+        // Fields this checkout does not have must never be invented.
+        for forbidden in ["\"bpm\"", "\"negative_prompt\"", "\"tags\""] {
+            assert!(music.contains(forbidden), "the ban on {forbidden} is missing");
+        }
+        // The loop writer is the same contract, narrowed.
+        let loops = default_system_prompt("music_loop");
+        assert!(loops.contains("[Instrumental]"));
+        assert!(loops.contains("no intro, outro, fade, final cadence"));
         // Unknown domains fall back to the generic expander.
         assert_eq!(default_system_prompt("weird"), PROMPT_GENERIC);
     }

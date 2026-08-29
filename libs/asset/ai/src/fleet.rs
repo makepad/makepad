@@ -65,6 +65,163 @@ impl FleetConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Box roles: what a box is ALLOWED to serve
+// ---------------------------------------------------------------------------
+
+/// A box's ROLE — the domains it may serve, regardless of what its
+/// `/health` advertises.
+///
+/// A GPU service announces every domain it *could* execute; that is a
+/// capability statement, not a deployment decision. Some boxes are
+/// dedicated: the fleet's end state (ratified 2026-08-21) keeps ONE node as
+/// the chat box, resident model and all, and puts every other generative
+/// domain elsewhere. Without a role, that node's honest "I can also do
+/// video" made an auto-routed video job land on it, evict the chat weights
+/// and start a 17 GB download — on the one machine whose whole job is to
+/// answer instantly.
+///
+/// Roles are DATA. `MAKEPAD_FLEET_ROLES` names them:
+///
+/// ```text
+/// MAKEPAD_FLEET_ROLES="10.0.0.217=chat,text;10.0.0.9=image,edit"
+/// MAKEPAD_FLEET_ROLES=off      # no box is restricted (tests, one-box rigs)
+/// ```
+///
+/// A host the variable does not name is unrestricted, so adding a box never
+/// needs a config edit. With the variable unset the built-in list below
+/// applies — the deployment law, written down, not a scheduler special case.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FleetRoles {
+    /// `(host, allowed domains)`. An empty rule list restricts nothing.
+    rules: Vec<(String, Vec<String>)>,
+}
+
+/// The ratified fleet end state: `.217` (RTX 5090) is the dedicated chat
+/// box — chat and the prompt expander live there, every other generative
+/// domain lives on the other nodes.
+const DEFAULT_FLEET_ROLES: &str = "10.0.0.217=chat,text";
+
+/// Env var naming the roles; `off` disables the built-in list too.
+pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
+
+impl FleetRoles {
+    /// Parse `host=domain[,domain][;host=…]`. `off`/`none` = no rules.
+    /// Whitespace and empty clauses are ignored; a clause without `=` is
+    /// skipped rather than silently restricting a box to nothing.
+    pub fn parse(text: &str) -> FleetRoles {
+        let trimmed = text.trim();
+        if trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("none") {
+            return FleetRoles::default();
+        }
+        let mut rules: Vec<(String, Vec<String>)> = Vec::new();
+        for clause in trimmed.split([';', '\n']) {
+            let clause = clause.trim();
+            if clause.is_empty() {
+                continue;
+            }
+            let Some((host, domains)) = clause.split_once('=') else {
+                continue;
+            };
+            let host = host.trim().to_ascii_lowercase();
+            if host.is_empty() {
+                continue;
+            }
+            let domains: Vec<String> = domains
+                .split(',')
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect();
+            if domains.is_empty() {
+                continue;
+            }
+            rules.push((host, domains));
+        }
+        FleetRoles { rules }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// May the box at `base_url` serve `domain`? An unnamed host is
+    /// unrestricted; a named one serves exactly its listed domains.
+    pub fn allows(&self, base_url: &str, domain: &str) -> bool {
+        if self.rules.is_empty() {
+            return true;
+        }
+        let host = host_of(base_url);
+        let domain = domain.to_ascii_lowercase();
+        for (rule_host, domains) in &self.rules {
+            if *rule_host == host {
+                return domains.iter().any(|d| *d == domain);
+            }
+        }
+        true
+    }
+
+    /// Is this box NAMED by the role list — i.e. dedicated to the domains
+    /// it lists rather than a general-purpose node?
+    ///
+    /// Provisioning asks this: a dedicated box's disk is its own business,
+    /// and speculatively pulling weights onto the fleet's chat node is
+    /// exactly the surprise a role exists to prevent. Serving decisions use
+    /// [`FleetRoles::allows`]; this is only for "may we put something NEW
+    /// on this box".
+    pub fn names(&self, base_url: &str) -> bool {
+        let host = host_of(base_url);
+        self.rules.iter().any(|(rule_host, _)| *rule_host == host)
+    }
+
+    /// The domains of `advertised` this box's role actually permits.
+    pub fn filter_domains(&self, base_url: &str, advertised: &[String]) -> Vec<String> {
+        advertised
+            .iter()
+            .filter(|domain| self.allows(base_url, domain))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Host part of a base URL, lowercased and without scheme, port or path.
+fn host_of(base_url: &str) -> String {
+    let rest = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    let rest = rest.split(['/', '?']).next().unwrap_or(rest);
+    // IPv6 literals keep their brackets; a trailing :port never does.
+    let host = match rest.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or(inner),
+        None => rest.split(':').next().unwrap_or(rest),
+    };
+    host.trim().to_ascii_lowercase()
+}
+
+/// Process-wide roles, read once from the environment.
+pub fn fleet_roles() -> &'static FleetRoles {
+    static ROLES: std::sync::OnceLock<FleetRoles> = std::sync::OnceLock::new();
+    ROLES.get_or_init(|| {
+        let text = std::env::var(FLEET_ROLES_ENV).unwrap_or_default();
+        if text.trim().is_empty() {
+            FleetRoles::parse(DEFAULT_FLEET_ROLES)
+        } else {
+            FleetRoles::parse(&text)
+        }
+    })
+}
+
+/// May this box serve this domain? Every scheduling path funnels through
+/// here, so a role can never be honoured in one picker and forgotten in
+/// another.
+/// Is this box dedicated (named by the role list)? See [`FleetRoles::names`].
+pub fn role_names(base_url: &str) -> bool {
+    fleet_roles().names(base_url)
+}
+
+pub fn role_allows(base_url: &str, domain: &str) -> bool {
+    fleet_roles().allows(base_url, domain)
+}
+
+// ---------------------------------------------------------------------------
 // Snapshots: what discovery learned about one box
 // ---------------------------------------------------------------------------
 
@@ -288,6 +445,11 @@ pub fn model_admission(snapshot: &BoxSnapshot, model_id: &str) -> Option<VramAdm
         return None;
     }
     let model = snapshot.model(model_id)?;
+    // A box outside its role does not serve this domain at all — the same
+    // answer a box that never advertised the model gives.
+    if !role_allows(&snapshot.base_url, &model.domain) {
+        return None;
+    }
     model.available.then(|| vram_admission_for_model(snapshot, model))
 }
 
@@ -302,6 +464,9 @@ pub fn affinity(snapshot: &BoxSnapshot, model_id: &str) -> Option<u32> {
         return None;
     }
     let model = snapshot.model(model_id)?;
+    if !role_allows(&snapshot.base_url, &model.domain) {
+        return None;
+    }
     if !vram_admission_for_model(snapshot, model).is_hardware_compatible() {
         return None;
     }
@@ -335,8 +500,46 @@ pub fn affinity_reason(score: u32) -> &'static str {
     }
 }
 
+/// Relative speed of the GPUs this fleet runs on, fastest first.
+///
+/// Matched as a lowercase SUBSTRING of the `/health` `gpu` name, first hit
+/// wins — a new card is ONE LINE here and nothing else changes. Unknown
+/// stays 0: a card nobody listed is never preferred, and never excluded
+/// (an unknown GPU still runs everything it is admitted for).
+///
+/// This is a TIEBREAK and nothing more. It never moves work to a box that
+/// would have to download the weights, never past an idle box onto a busy
+/// one, and never past a role: those rules are decided before it is read.
+const GPU_SPEED_RANK: &[(&str, u32)] = &[
+    ("rtx pro 6000", 3),
+    ("rtx 5090", 2),
+    ("rtx 4090", 1),
+];
+
+/// Speed rank of a GPU by its reported name (see [`GPU_SPEED_RANK`]).
+pub fn gpu_speed(name: &str) -> u32 {
+    let name = name.to_ascii_lowercase();
+    GPU_SPEED_RANK
+        .iter()
+        .find(|(needle, _)| name.contains(needle))
+        .map(|(_, rank)| *rank)
+        .unwrap_or(0)
+}
+
+/// Speed rank of the GPU a box reports. A box that names no GPU (an older
+/// service, or a machine where the probe is not cheap) ranks 0.
+pub fn gpu_rank(snapshot: &BoxSnapshot) -> u32 {
+    snapshot
+        .health
+        .as_ref()
+        .and_then(|health| health.gpu.as_deref())
+        .map(gpu_speed)
+        .unwrap_or(0)
+}
+
 /// Picks the best hardware-compatible box for `model_id`: highest affinity,
-/// ties broken by smaller queue depth, then config order. This intentionally
+/// ties broken by the faster GPU, then smaller queue depth, then config
+/// order. This intentionally
 /// includes a sufficiently large node that is temporarily waiting for free
 /// VRAM; dispatchers must use [`pick_box_admitted_scored`], while capability
 /// and queue planners use this function. Returns an index into `snapshots`.
@@ -350,10 +553,11 @@ pub fn pick_box_scored(snapshots: &[BoxSnapshot], model_id: &str) -> Option<(usi
         .iter()
         .enumerate()
         .filter_map(|(i, snap)| affinity(snap, model_id).map(|score| (i, snap, score)))
-        // min_by with an inverted affinity ordering: the "smallest" element
-        // is the highest-affinity, shallowest-queue, earliest-config box.
+        // min_by with an inverted ordering: the "smallest" element is the
+        // highest-affinity, fastest, shallowest-queue, earliest-config box.
         .min_by(|a, b| {
             b.2.cmp(&a.2) // higher affinity first
+                .then(gpu_rank(b.1).cmp(&gpu_rank(a.1))) // faster GPU
                 .then(a.1.jobs_pending().cmp(&b.1.jobs_pending())) // shallower queue
                 .then(a.0.cmp(&b.0)) // config order
         })
@@ -381,6 +585,7 @@ pub fn pick_box_admitted_scored(
         })
         .min_by(|a, b| {
             b.2.cmp(&a.2)
+                .then(gpu_rank(b.1).cmp(&gpu_rank(a.1)))
                 .then(a.1.jobs_pending().cmp(&b.1.jobs_pending()))
                 .then(a.0.cmp(&b.0))
         })
@@ -407,7 +612,14 @@ pub fn pick_for_domain(snapshots: &[BoxSnapshot], domain: &str) -> Option<(usize
 
 /// True for synthetic test backends that only exist for plumbing tests.
 fn is_synthetic_fallback(model: &ModelInfoJson) -> bool {
-    model.backend == "testpattern"
+    is_synthetic_backend(&model.backend)
+}
+
+/// [`is_synthetic_fallback`] by backend NAME — what a caller holding an
+/// already-chosen route has in hand. A scheduler that is about to move a job
+/// somewhere needs this: a test pattern is never worth moving to.
+pub fn is_synthetic_backend(backend: &str) -> bool {
+    backend == "testpattern"
 }
 
 /// Reference/oracle backends are intentionally callable by exact model id,
@@ -424,9 +636,9 @@ pub fn pick_for_domain_scored(
     snapshots: &[BoxSnapshot],
     domain: &str,
 ) -> Option<(usize, String, u32)> {
-    let mut best: Option<(bool, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
     for (i, snap) in snapshots.iter().enumerate() {
-        if !snap.is_up() {
+        if !snap.is_up() || !role_allows(&snap.base_url, domain) {
             continue;
         }
         for model in &snap.models {
@@ -441,26 +653,27 @@ pub fn pick_for_domain_scored(
             };
             let real = !is_synthetic_fallback(model);
             let pending = snap.jobs_pending();
+            let speed = gpu_rank(snap);
             let better = match &best {
                 None => true,
-                Some((br, bs, bp, bi, _)) => {
-                    (real, score, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bs, bg, bp, bi, _)) => {
+                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, pending, i, model.id.as_str()));
+                best = Some((real, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 /// Aggregate admission state for automatic domain routing on one node.
 /// Real backends outrank synthetic fallbacks here exactly as they do in
 /// [`pick_for_domain_scored`]. `None` means no available model in the domain.
 pub fn domain_admission(snapshot: &BoxSnapshot, domain: &str) -> Option<VramAdmission> {
-    if !snapshot.is_up() {
+    if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
         return None;
     }
     let mut best_real: Option<VramAdmission> = None;
@@ -503,6 +716,7 @@ pub fn pick_for_domain_admitted_scored(
 ) -> Option<(usize, String, u32)> {
     let has_compatible_real = snapshots.iter().any(|snapshot| {
         snapshot.is_up()
+            && role_allows(&snapshot.base_url, domain)
             && snapshot.models.iter().any(|model| {
                 model.domain == domain
                     && !is_synthetic_fallback(model)
@@ -511,9 +725,9 @@ pub fn pick_for_domain_admitted_scored(
                     && vram_admission_for_model(snapshot, model).is_hardware_compatible()
             })
     });
-    let mut best: Option<(bool, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
     for (i, snapshot) in snapshots.iter().enumerate() {
-        if !snapshot.is_up() {
+        if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
             continue;
         }
         for model in &snapshot.models {
@@ -531,19 +745,20 @@ pub fn pick_for_domain_admitted_scored(
                 continue;
             }
             let pending = snapshot.jobs_pending();
+            let speed = gpu_rank(snapshot);
             let better = match &best {
                 None => true,
-                Some((br, bs, bp, bi, _)) => {
-                    (real, score, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bs, bg, bp, bi, _)) => {
+                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, pending, i, model.id.as_str()));
+                best = Some((real, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 pub fn pick_for_domain_admitted(
@@ -557,6 +772,150 @@ pub fn pick_for_domain_admitted(
 mod tests {
     use super::*;
     use crate::protocol::*;
+
+    // ------------------------------------------------------------ box roles
+
+    #[test]
+    fn a_role_names_the_domains_a_box_may_serve() {
+        let roles = FleetRoles::parse("10.0.0.217=chat,text; 10.0.0.9 = image , edit ");
+        // Named host: exactly its listed domains, nothing else.
+        assert!(roles.allows("http://10.0.0.217:8123", "chat"));
+        assert!(roles.allows("http://10.0.0.217:8123", "text"));
+        assert!(!roles.allows("http://10.0.0.217:8123", "video"));
+        assert!(!roles.allows("http://10.0.0.217:8123", "image"));
+        // Port and scheme are not identity; the host is.
+        assert!(!roles.allows("https://10.0.0.217:9999/", "video"));
+        assert!(roles.allows("10.0.0.9:8123", "edit"));
+        assert!(!roles.allows("10.0.0.9:8123", "video"));
+        // A host nobody named is unrestricted, so adding a box needs no
+        // config edit.
+        assert!(roles.allows("http://10.0.0.123:8123", "video"));
+        // Case folds on both sides.
+        assert!(roles.allows("http://10.0.0.217:8123", "CHAT"));
+    }
+
+    #[test]
+    fn roles_can_be_turned_off_and_malformed_clauses_restrict_nothing() {
+        assert!(FleetRoles::parse("off").is_empty());
+        assert!(FleetRoles::parse("NONE").is_empty());
+        assert!(FleetRoles::parse("").is_empty());
+        // Empty rules restrict nothing at all.
+        assert!(FleetRoles::parse("off").allows("http://10.0.0.217:8123", "video"));
+        // A clause without domains would otherwise silence a whole box.
+        let junk = FleetRoles::parse("10.0.0.217=;  ;nonsense;=video");
+        assert!(junk.is_empty());
+        assert!(junk.allows("http://10.0.0.217:8123", "video"));
+    }
+
+    #[test]
+    fn the_default_role_list_keeps_the_chat_box_on_chat() {
+        // The ratified fleet end state, as data.
+        let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
+        assert!(roles.allows("http://10.0.0.217:8123", "chat"));
+        assert!(roles.allows("http://10.0.0.217:8123", "text"));
+        for domain in ["video", "image", "music", "mesh", "vision"] {
+            assert!(
+                !roles.allows("http://10.0.0.217:8123", domain),
+                "the dedicated chat box must not serve {domain}"
+            );
+        }
+        assert_eq!(
+            roles.filter_domains(
+                "http://10.0.0.217:8123",
+                &["chat".to_string(), "video".to_string(), "text".to_string()]
+            ),
+            vec!["chat".to_string(), "text".to_string()]
+        );
+        // Every other box keeps everything it advertises.
+        let all = ["chat".to_string(), "video".to_string()];
+        assert_eq!(roles.filter_domains("http://10.0.0.123:8123", &all), all);
+    }
+
+    #[test]
+    fn a_role_excluded_box_is_invisible_to_every_picker() {
+        // The process-wide roles come from the environment; a deployment
+        // that overrode them has nothing to prove here.
+        if std::env::var(FLEET_ROLES_ENV).is_ok() {
+            return;
+        }
+        let chat_box = {
+            let mut snapshot = snap("http://10.0.0.217:8123", 32 * 1024, 32 * 1024);
+            snapshot.models = vec![
+                m("qwen3.8-27b", "chat", MODEL_STATE_LOADED, 24.0),
+                m("minimax-h3-q4-24g", "video", MODEL_STATE_READY, 20.0),
+            ];
+            snapshot
+        };
+        let snaps = vec![chat_box];
+        // Its chat model routes exactly as before.
+        assert_eq!(pick_for_domain(&snaps, "chat"), Some((0, "qwen3.8-27b".to_string())));
+        assert!(pick_box(&snaps, "qwen3.8-27b").is_some());
+        // Its video model does not exist as far as scheduling is concerned —
+        // by domain, by explicit pin, and by admission.
+        assert_eq!(pick_for_domain(&snaps, "video"), None);
+        assert_eq!(pick_for_domain_admitted(&snaps, "video"), None);
+        assert_eq!(pick_box(&snaps, "minimax-h3-q4-24g"), None);
+        assert_eq!(affinity(&snaps[0], "minimax-h3-q4-24g"), None);
+        assert_eq!(model_admission(&snaps[0], "minimax-h3-q4-24g"), None);
+        assert_eq!(domain_admission(&snaps[0], "video"), None);
+    }
+
+    #[test]
+    fn a_host_is_read_out_of_any_url_shape() {
+        assert_eq!(host_of("http://10.0.0.217:8123"), "10.0.0.217");
+        assert_eq!(host_of("https://Box-A:8123/models"), "box-a");
+        assert_eq!(host_of("10.0.0.217"), "10.0.0.217");
+        assert_eq!(host_of("http://[::1]:8123"), "::1");
+    }
+
+    fn m(id: &str, domain: &str, state: &str, vram_gb: f64) -> ModelInfoJson {
+        ModelInfoJson {
+            id: id.to_string(),
+            domain: domain.to_string(),
+            backend: domain.to_string(),
+            available: true,
+            gated: false,
+            vram_gb: Some(vram_gb),
+            note: None,
+            state: state.to_string(),
+            progress_done: None,
+            progress_total: None,
+            downloading_file: None,
+            error: None,
+            revision: None,
+            unavailable_reason: None,
+            license_name: None,
+            license_url: None,
+            license_summary: None,
+            license_restriction: None,
+            license_sha256: None,
+        }
+    }
+
+    fn snap(url: &str, free_mb: u64, total_mb: u64) -> BoxSnapshot {
+        BoxSnapshot {
+            base_url: url.to_string(),
+            health: Some(HealthJson {
+                service: "makepad-asset-ai".to_string(),
+                version: "test".to_string(),
+                gpu: None,
+                vram_free_mb: Some(free_mb),
+                vram_total_mb: Some(total_mb),
+                models_loaded: Vec::new(),
+                jobs_pending: Some(0),
+                node_id: None,
+                node_key: None,
+                started_ms: None,
+                capabilities: None,
+                vram_reserve_mb: Some(1024),
+                queue_limit: Some(8),
+                fleet: None,
+                lanes: None,
+            }),
+            models: Vec::new(),
+        }
+    }
+
 
     fn model(id: &str, domain: &str, state: &str, available: bool) -> ModelInfoJson {
         ModelInfoJson {
@@ -628,6 +987,52 @@ mod tests {
         health.vram_total_mb = Some(total_mb);
         health.vram_reserve_mb = None;
         snapshot
+    }
+
+    fn with_gpu(mut snapshot: BoxSnapshot, gpu: &str) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().gpu = Some(gpu.to_string());
+        snapshot
+    }
+
+    /// The GPU rank is a TIEBREAK: same weights, same queue, faster card.
+    /// It is read from the name the box reports, so a new card is one line
+    /// in the table — and a card nobody listed is never PREFERRED, which is
+    /// a different thing from being excluded.
+    #[test]
+    fn a_faster_gpu_breaks_a_tie_and_an_unlisted_card_never_wins_one() {
+        assert_eq!(gpu_speed("NVIDIA RTX PRO 6000 Blackwell Workstation Edition"), 3);
+        assert_eq!(gpu_speed("NVIDIA GeForce RTX 5090"), 2);
+        assert_eq!(gpu_speed("NVIDIA GeForce RTX 4090"), 1);
+        // Case is not a signal, and a name that merely LOOKS like one on
+        // the list (a different, older card) is not on the list.
+        assert_eq!(gpu_speed("nvidia geforce rtx 5090"), 2);
+        assert_eq!(gpu_speed("NVIDIA RTX 6000 Ada Generation"), 0);
+        assert_eq!(gpu_speed(""), 0);
+        // A box that names no GPU ranks with the unknowns.
+        assert_eq!(gpu_rank(&snapshot("http://quiet", 0, Vec::new())), 0);
+
+        let ready = || vec![model("m", "image", MODEL_STATE_READY, true)];
+        let fleet = vec![
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce RTX 4090"),
+            with_gpu(snapshot("http://b", 0, ready()), "NVIDIA RTX PRO 6000"),
+            with_gpu(snapshot("http://c", 0, ready()), "NVIDIA GeForce RTX 5090"),
+        ];
+        assert_eq!(pick_box(&fleet, "m"), Some(1), "6000 > 5090 > 4090");
+        assert_eq!(pick_for_domain(&fleet, "image"), Some((1, "m".to_string())));
+
+        // But it never outranks the weights: the 4090 HOLDS the model and
+        // the 6000 would have to fetch it.
+        let cold_fast = vec![
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce RTX 4090"),
+            with_gpu(
+                snapshot("http://b", 0, vec![model("m", "image", MODEL_STATE_ABSENT, true)]),
+                "NVIDIA RTX PRO 6000",
+            ),
+        ];
+        assert_eq!(pick_box(&cold_fast, "m"), Some(0));
+        // Nor a role: the chat box stays a chat box, whatever card it has.
+        let roles = FleetRoles::parse("b=chat");
+        assert!(!roles.allows("http://b", "image"));
     }
 
     #[test]
@@ -777,7 +1182,7 @@ mod tests {
                 2 * 1024,
             ),
             with_vram(
-                snapshot("http://10.0.0.217:8767", 0, vec![h3.clone()]),
+                snapshot("http://10.0.0.98:8767", 0, vec![h3.clone()]),
                 24 * 1024,
                 24 * 1024,
                 2 * 1024,
@@ -925,7 +1330,7 @@ mod tests {
         woosh.vram_gb = Some(3.0);
         let models = vec![flux, moss, sa3, woosh];
         let legacy = with_legacy_vram(
-            snapshot("http://10.0.0.217:8765", 0, models.clone()),
+            snapshot("http://10.0.0.99:8765", 0, models.clone()),
             155,
             32_607,
         );
@@ -951,7 +1356,7 @@ mod tests {
         // retires moss+sa3 before the job runs (resident fast path), and a
         // cold target earns the reclaim-by-eviction credit.
         let enforcing = with_vram(
-            snapshot("http://10.0.0.217:8765", 0, models),
+            snapshot("http://10.0.0.99:8765", 0, models),
             155,
             32_607,
             2 * 1024,
@@ -1033,7 +1438,7 @@ mod tests {
         let mut synthetic = model("testpattern", "image", MODEL_STATE_READY, true);
         synthetic.backend = "testpattern".to_string();
         let legacy = with_legacy_vram(
-            snapshot("http://10.0.0.217:8765", 0, vec![flux, moss, sa3, synthetic]),
+            snapshot("http://10.0.0.99:8765", 0, vec![flux, moss, sa3, synthetic]),
             155,
             32_607,
         );

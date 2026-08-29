@@ -447,8 +447,7 @@ impl ScriptHook for ScriptWindowHandle {
         let cx = vm.host.cx_mut();
         let window_id = self.handle.window_id();
         if !self.title.is_empty() {
-            cx.windows[window_id].create_title =
-                crate::remote::tag_window_title(self.title.clone());
+            self.handle.set_title(cx, self.title.clone());
         }
         if !self.app_id.is_empty() {
             cx.windows[window_id].create_app_id = self.app_id.clone();
@@ -489,6 +488,18 @@ impl ScriptHook for ScriptWindowHandle {
 }
 
 impl WindowHandle {
+    pub fn set_title(&self, cx: &mut Cx, title: String) {
+        let title = crate::remote::tag_window_title(title);
+        let window_id = self.window_id();
+        if cx.windows[window_id].create_title == title {
+            return;
+        }
+        cx.windows[window_id].create_title = title.clone();
+        if cx.windows[window_id].is_created {
+            cx.push_unique_platform_op(CxOsOp::SetWindowTitle(window_id, title));
+        }
+    }
+
     pub fn set_pass(&self, cx: &mut Cx, pass: &DrawPass) {
         cx.windows[self.window_id()].main_pass_id = Some(pass.draw_pass_id());
         cx.passes[pass.draw_pass_id()].parent = CxDrawPassParent::Window(self.window_id());

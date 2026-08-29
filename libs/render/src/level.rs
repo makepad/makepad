@@ -163,6 +163,134 @@ impl LevelCollision {
         Some(from.y + t)
     }
 
+    /// Does the level's own geometry cut the straight line from `from` to
+    /// `to`? A line of sight, a shot, a thrown thing: anything that travels
+    /// point to point through a streamed map has to ask THIS, because the
+    /// map's triangles are not bodies in the sim — a body-only ray cast
+    /// passes clean through every wall of the level.
+    pub fn segment_blocked(&self, from: Vec3f, to: Vec3f) -> bool {
+        let delta = to - from;
+        let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+        if dist < 1e-6 {
+            return false;
+        }
+        self.caster.any_hit(from, delta * (1.0 / dist), dist)
+    }
+
+    /// Nearest surface along `dir` (unit length) from `from`, within
+    /// `max`: `(distance, unit normal)`, the normal flipped to face back
+    /// along the ray — winding is not trustworthy in imported maps, and a
+    /// suspension spring wants the push-back direction, not the authored
+    /// one.
+    pub fn ray_hit(&self, from: Vec3f, dir: Vec3f, max: f32) -> Option<(f32, Vec3f)> {
+        let (t, tri) = self.caster.nearest_hit(from, dir, max)?;
+        let (a, b, c) = self.caster.triangle(tri);
+        let (e1, e2) = (b - a, c - a);
+        let mut n = vec3f(
+            e1.y * e2.z - e1.z * e2.y,
+            e1.z * e2.x - e1.x * e2.z,
+            e1.x * e2.y - e1.y * e2.x,
+        );
+        let len = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+        n = if len > 1.0e-9 { n * (1.0 / len) } else { dir * -1.0 };
+        if n.x * dir.x + n.y * dir.y + n.z * dir.z > 0.0 {
+            n = n * -1.0;
+        }
+        Some((t, n))
+    }
+
+    /// The floor a body near `(x, near_y, z)` belongs on.
+    ///
+    /// Indoors a single probe from far above lands on the CEILING (the
+    /// map_actors lesson), so this walks every surface in the column from
+    /// the sky down, keeps the ones with at least `head_room` of space
+    /// above them (a floor you could stand on), and returns the standable
+    /// floor of the room containing `near_y` — else the nearest one. A body
+    /// spawned inside a raised slab is lifted onto it; one spawned in the
+    /// air belongs to the floor below it. `None` = no floor in this column
+    /// (outside the map).
+    pub fn ground_under(&self, x: f32, z: f32, near_y: f32, head_room: f32) -> Option<f32> {
+        let mut surfaces: Vec<f32> = Vec::new();
+        let mut probe = near_y + 200.0;
+        for _ in 0..24 {
+            let Some(hit) = self.floor_below(vec3f(x, probe, z), 500.0) else { break };
+            surfaces.push(hit.y);
+            probe = hit.y - 0.02;
+        }
+        // Standable floors: enough room between this surface and the one
+        // above it (the topmost surface has the sky).
+        let mut floors: Vec<(f32, f32)> = Vec::new(); // (floor, space above)
+        for (i, &y) in surfaces.iter().enumerate() {
+            let space = if i == 0 { f32::INFINITY } else { surfaces[i - 1] - y };
+            if space >= head_room {
+                floors.push((y, space));
+            }
+        }
+        // The room containing near_y wins outright; else nearest floor.
+        floors
+            .iter()
+            .find(|(y, space)| near_y >= *y && near_y < *y + *space)
+            .or_else(|| {
+                floors.iter().min_by(|a, b| {
+                    (a.0 - near_y)
+                        .abs()
+                        .partial_cmp(&(b.0 - near_y).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .map(|(y, _)| *y)
+    }
+
+    /// The room around `at`: `(headroom, span)` — floor-to-ceiling height
+    /// over the floor `at` belongs to, and the narrowest straight
+    /// horizontal line through the spot at door height (eight directions,
+    /// opposite pairs summed). `None` when there is no ceiling: open
+    /// ground, where anything fits.
+    pub fn room_at(&self, at: Vec3f) -> Option<(f32, f32)> {
+        let floor = self.ground_under(at.x, at.z, at.y, 1.0)?;
+        let ceiling = self.ceiling_above(vec3f(at.x, floor + 0.05, at.z), 60.0)?;
+        let probe = vec3f(at.x, floor + 1.0, at.z);
+        let reach = 30.0;
+        let mut dist = [reach; 8];
+        for (i, d) in dist.iter_mut().enumerate() {
+            let a = std::f32::consts::TAU * i as f32 / 8.0;
+            if let Some((t, _)) = self.ray_hit(probe, vec3f(a.sin(), 0.0, -a.cos()), reach) {
+                *d = t;
+            }
+        }
+        let span = (0..4)
+            .map(|i| dist[i] + dist[i + 4])
+            .fold(f32::INFINITY, f32::min);
+        Some((ceiling - floor, span))
+    }
+
+    /// Are any of these horizontal moves cut by the level? Each pair is a
+    /// start/end ground point of one tracked point of a body's footprint
+    /// (a wheeled body sweeps its corners and edge midpoints through here).
+    /// Rays run at each `height` above `base` — the HIGHER of the two floor
+    /// heights, the same rule as [`Self::path_blocked`], so climbing a
+    /// step's own riser never reads as a wall.
+    pub fn moves_blocked(&self, moves: &[(Vec3f, Vec3f)], base: f32, heights: &[f32]) -> bool {
+        for (from, to) in moves {
+            let delta = vec3f(to.x - from.x, 0.0, to.z - from.z);
+            let dist = (delta.x * delta.x + delta.z * delta.z).sqrt();
+            if dist < 1.0e-6 {
+                continue;
+            }
+            let dir = vec3f(delta.x / dist, 0.0, delta.z / dist);
+            for &h in heights {
+                let origin = vec3f(from.x, base + h, from.z);
+                // Barely past the move itself: a fatter margin re-blocked
+                // the move AWAY from a wall the body was already against,
+                // which is how a car got welded to the plaster it hit.
+                if self.caster.any_hit(origin, dir, dist + 0.02) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Is the straight walk from `from` to `to` (both FEET positions)
     /// obstructed? The body is approximated by rays at knee and chest
     /// height, plus the same pair offset by ±`radius` sideways, so a
@@ -4723,5 +4851,130 @@ mod walk_in_the_maps_units {
             best < grid.cell_size(),
             "a crabbing body never converges: closest approach {best:.2} m"
         );
+    }
+}
+
+#[cfg(test)]
+mod level_vehicle_tests {
+    use super::*;
+
+    fn quad(p: &mut Vec<Vec3f>, i: &mut Vec<u32>, a: Vec3f, b: Vec3f, c: Vec3f, d: Vec3f) {
+        let n = p.len() as u32;
+        p.extend_from_slice(&[a, b, c, d]);
+        i.extend_from_slice(&[n, n + 1, n + 2, n, n + 2, n + 3]);
+    }
+
+    fn floor(p: &mut Vec<Vec3f>, i: &mut Vec<u32>, x0: f32, x1: f32, z0: f32, z1: f32, y: f32) {
+        quad(p, i, vec3f(x0, y, z0), vec3f(x1, y, z0), vec3f(x1, y, z1), vec3f(x0, y, z1));
+    }
+
+    /// Wall in the x/y plane at `z`, spanning x0..x1, y0..y1.
+    fn wall_z(p: &mut Vec<Vec3f>, i: &mut Vec<u32>, x0: f32, x1: f32, z: f32, y0: f32, y1: f32) {
+        quad(p, i, vec3f(x0, y0, z), vec3f(x1, y0, z), vec3f(x1, y1, z), vec3f(x0, y1, z));
+    }
+
+    /// A room 8×8, floor 0, ceiling `roof`, with a doorway in the z=0 wall:
+    /// opening x -1..1, lintel from `door_h` up to the ceiling. Room extends
+    /// z 0..8; open ground z<0.
+    fn doorway_room(roof: f32, door_h: f32) -> LevelCollision {
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        floor(&mut p, &mut i, -8.0, 8.0, -8.0, 8.0, 0.0);
+        floor(&mut p, &mut i, -4.0, 4.0, 0.0, 8.0, roof);
+        // The z=0 wall around the opening.
+        wall_z(&mut p, &mut i, -4.0, -1.0, 0.0, 0.0, roof);
+        wall_z(&mut p, &mut i, 1.0, 4.0, 0.0, 0.0, roof);
+        wall_z(&mut p, &mut i, -1.0, 1.0, 0.0, door_h, roof); // lintel
+        // Enclosing walls: sides at x ±4, far wall at z 8.
+        quad(
+            &mut p,
+            &mut i,
+            vec3f(-4.0, 0.0, 0.0),
+            vec3f(-4.0, 0.0, 8.0),
+            vec3f(-4.0, roof, 8.0),
+            vec3f(-4.0, roof, 0.0),
+        );
+        quad(
+            &mut p,
+            &mut i,
+            vec3f(4.0, 0.0, 0.0),
+            vec3f(4.0, 0.0, 8.0),
+            vec3f(4.0, roof, 8.0),
+            vec3f(4.0, roof, 0.0),
+        );
+        wall_z(&mut p, &mut i, -4.0, 4.0, 8.0, 0.0, roof);
+        LevelCollision::from_positions(p, i)
+    }
+
+    #[test]
+    fn ray_hit_reports_distance_and_a_normal_facing_the_ray() {
+        let level = doorway_room(3.0, 2.0);
+        let (t, n) = level
+            .ray_hit(vec3f(2.0, 1.0, 2.0), vec3f(0.0, 0.0, -1.0), 10.0)
+            .expect("the z=0 wall is 2 m away");
+        assert!((t - 2.0).abs() < 1.0e-3, "distance {t}");
+        assert!(n.z > 0.99, "normal {n:?} must face back along the ray");
+        // Up into the ceiling.
+        let (t, n) = level
+            .ray_hit(vec3f(0.0, 1.0, 4.0), vec3f(0.0, 1.0, 0.0), 10.0)
+            .expect("ceiling above");
+        assert!((t - 2.0).abs() < 1.0e-3, "ceiling distance {t}");
+        assert!(n.y < -0.99, "ceiling normal {n:?} pushes down");
+    }
+
+    #[test]
+    fn ground_under_stands_a_body_on_the_floor_not_the_ceiling() {
+        let level = doorway_room(3.0, 2.0);
+        // Inside the room, spawned mid-air: the room's floor, though the
+        // ceiling is a nearer surface for a probe from the sky.
+        assert_eq!(level.ground_under(0.0, 4.0, 1.2, 1.0), Some(0.0));
+        // Spawned above the roof: the roof is standable from up there.
+        assert_eq!(level.ground_under(0.0, 4.0, 3.5, 1.0), Some(3.0));
+    }
+
+    #[test]
+    fn ground_under_lifts_a_body_buried_under_a_raised_floor() {
+        // Two slabs: ground at 0 (z<0 half) — modelled by a low slab — and a
+        // raised floor at 1.5 with headroom above.
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        floor(&mut p, &mut i, -4.0, 4.0, -4.0, 4.0, 1.5);
+        floor(&mut p, &mut i, -4.0, 4.0, -4.0, 4.0, 4.0); // ceiling
+        let level = LevelCollision::from_positions(p, i);
+        // A car spawned at y 0.6 under the 1.5 floor belongs ON that floor.
+        assert_eq!(level.ground_under(0.0, 0.0, 0.6, 1.0), Some(1.5));
+    }
+
+    #[test]
+    fn room_at_measures_headroom_and_span() {
+        let level = doorway_room(3.0, 2.0);
+        let (headroom, span) = level.room_at(vec3f(0.0, 0.5, 4.0)).expect("indoors");
+        assert!((headroom - 3.0).abs() < 0.05, "headroom {headroom}");
+        // Walls at x ±4 bound the narrowest axis (the z probe escapes
+        // through the doorway to open ground).
+        assert!((span - 8.0).abs() < 0.5, "span {span} should be the 8 m width");
+        // Outside: no ceiling, no measurement.
+        assert!(level.room_at(vec3f(6.0, 0.5, 4.0)).is_none());
+    }
+
+    #[test]
+    fn a_body_taller_than_the_door_cannot_pass_a_shorter_one_can() {
+        let level = doorway_room(3.0, 2.0);
+        // A footprint sweep straight through the doorway, x -0.6..0.6.
+        let moves: Vec<(Vec3f, Vec3f)> = [-0.6f32, 0.0, 0.6]
+            .iter()
+            .map(|&x| (vec3f(x, 0.0, -2.0), vec3f(x, 0.0, 2.0)))
+            .collect();
+        // 1.4 m tall body: knee, waist, roof rays all under the 2 m lintel.
+        assert!(
+            !level.moves_blocked(&moves, 0.0, &[0.4, 0.8, 1.3]),
+            "a 1.4 m body must fit a 2 m doorway"
+        );
+        // 2.4 m tall body: the roof ray meets the lintel.
+        assert!(
+            level.moves_blocked(&moves, 0.0, &[0.4, 1.2, 2.3]),
+            "a 2.4 m body must be stopped by the 2 m lintel"
+        );
+        // Off to the side, any height meets the wall.
+        let side = [(vec3f(2.5, 0.0, -2.0), vec3f(2.5, 0.0, 2.0))];
+        assert!(level.moves_blocked(&side, 0.0, &[0.4, 1.2]), "the wall blocks");
     }
 }

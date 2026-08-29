@@ -9,6 +9,23 @@ script_mod! {
     use mod.widgets.*
     use mod.geom
 
+    // One appearance law for every asset family. Hue is a rotation around
+    // the neutral-grey axis, so textured/multi-colour assets keep their
+    // shading while changing family; saturation and value are optional
+    // scalars in the same vec4 lane. Tint is deliberately last.
+    let ColorAdjust = {
+        color_adjust: fn(albedo: vec3, tint: vec4, adjust: vec4) -> vec3 {
+            let angle = adjust.x * 0.01745329252
+            let axis = vec3(0.57735026919, 0.57735026919, 0.57735026919)
+            let rotated = albedo * cos(angle)
+                + cross(axis, albedo) * sin(angle)
+                + axis * dot(axis, albedo) * (1.0 - cos(angle))
+            let luma = dot(rotated, vec3(0.2126, 0.7152, 0.0722))
+            let saturated = mix(vec3(luma, luma, luma), rotated, max(adjust.y, 0.0))
+            return max(saturated * max(adjust.z, 0.0), vec3(0.0, 0.0, 0.0)) * tint.xyz
+        }
+    }
+
     mod.draw.DrawSceneTexture = mod.std.set_type_default() do #(DrawSceneTexture::script_shader(vm)){
         ..mod.draw.DrawQuad
         scene_texture: texture_2d(float)
@@ -28,6 +45,7 @@ script_mod! {
     // per-instance because shadows switch it off individually.
     mod.draw.DrawSceneCube = mod.std.set_type_default() do #(DrawSceneCube::script_shader(vm)){
         ..mod.draw.DrawCube
+        ..ColorAdjust
         // The platform default is OFF (draw_shader.rs:41) and DrawCube does not
         // override it, so every slab, crate, ground plane and rigid body was
         // rasterising its BACK faces too — invisible, and double the fill. A
@@ -41,6 +59,7 @@ script_mod! {
         v_up: varying(float)
         v_lm_uv: varying(vec2f)
         v_lm_in: varying(float)
+        v_albedo: varying(vec3f)
         fog_color: uniform(vec3(0.75, 0.87, 0.96))
         sun_color: uniform(vec3(0.72, 0.72, 0.72))
         sun_sky: uniform(vec3(0.28, 0.28, 0.28))
@@ -302,10 +321,15 @@ script_mod! {
             self.world = self.draw_list.view_transform * wpos
             let view_pos = self.draw_pass.camera_view * self.world
             let dp = max(dot(normal, normalize(self.light_dir)), 0.0)
+            self.v_albedo = self.color_adjust(
+                self.color.xyz,
+                vec4(1.0, 1.0, 1.0, 1.0),
+                self.color_adjust_ctl
+            )
             self.lit_color = self.get_color(dp, normal.y)
             // The direct sun term rides its own varying so the PIXEL stage
             // can gate it by the baked sun-visibility SDF.
-            self.v_direct = self.color.xyz * (self.sun_color * dp)
+            self.v_direct = self.v_albedo * (self.sun_color * dp)
             self.v_up = normal.y
             let lw = max(self.lm_world.zw, vec2(0.000001, 0.000001))
             let lraw = (wpos.xz - self.lm_world.xy) / lw
@@ -336,9 +360,9 @@ script_mod! {
         get_color: fn(dp: float, nrm_y: float) {
             let hemi = clamp(nrm_y * 0.5 + 0.5, 0.0, 1.0)
             let ambient = mix(self.sun_ground, self.sun_sky, hemi)
-            let lit = self.color.xyz * ambient
+            let lit = self.v_albedo * ambient
             // Emission: glowing eyes, beacons, bolts (energy ramps at runtime).
-            let glowing = lit + self.color.xyz * self.glow * 0.6
+            let glowing = lit + self.v_albedo * self.glow * 0.6
             return vec4(glowing, self.color.w)
         }
 
@@ -374,7 +398,7 @@ script_mod! {
             // fills that shadow back in — lightmap::lamp_shadow_fill.
             let local = lamps + dl
             let c = self.lit_color.xyz + self.v_direct * self.sun_filled(sun_vis, local)
-                + self.color.xyz * local
+                + self.v_albedo * local
             let fogged = mix(c, self.fog_color, self.v_fog)
             return vec4(fogged, self.lit_color.w)
         }
@@ -690,11 +714,93 @@ script_mod! {
         }
     }
 
+    // A bullet hole is one tiny surface-aligned procedural quad. No texture,
+    // model, entity or static-slab mutation: the CPU supplies only its current
+    // world pose and this shader makes the dark centre + scorched soft rim.
+    mod.draw.DrawSceneDecal = mod.std.set_type_default() do #(DrawSceneDecal::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        world: varying(vec4f)
+        v_uv: varying(vec2f)
+        alpha_blend: true
+        backface_culling: false
+        // Marks overlap solid surfaces by design. The 2 mm world-space lift
+        // wins their own depth test; not writing depth keeps overlapping marks
+        // and later transparent effects well behaved.
+        depth_write: false
+
+        vertex: fn() {
+            let normal = normalize(self.decal_normal.xyz)
+            var hint = vec3(0.0, 1.0, 0.0)
+            if abs(normal.y) > 0.92 {
+                hint = vec3(1.0, 0.0, 0.0)
+            }
+            let base_right = normalize(cross(hint, normal))
+            let base_up = cross(normal, base_right)
+            let c = cos(self.decal_normal.w)
+            let s = sin(self.decal_normal.w)
+            let right = base_right * c + base_up * s
+            let up = base_up * c - base_right * s
+            let corner = self.geom.geom_pos
+            let center = self.decal_pos.xyz
+            let world3 = center
+                + right * (corner.x * self.decal_pos.w)
+                + up * (corner.y * self.decal_pos.w)
+            self.world = self.draw_list.view_transform
+                * vec4(world3.x, world3.y, world3.z, 1.0)
+            self.v_uv = self.geom.geom_uv
+            self.vertex_pos = self.draw_pass.camera_projection
+                * (self.draw_pass.camera_view * self.world)
+            return self.vertex_pos
+        }
+
+        pixel: fn() {
+            let p = (self.v_uv - vec2(0.5, 0.5)) * 2.0
+            let d = length(p)
+            if d > 1.0 {
+                discard()
+            }
+            if self.decal_color.w < 0.5 {
+                let edge = 1.0 - smoothstep(0.78, 1.0, d)
+                let rim = smoothstep(0.42, 0.82, d)
+                let rgb = vec3(0.012, 0.011, 0.010).mix(vec3(0.105, 0.075, 0.045), rim)
+                let alpha = edge * mix(0.94, 0.72, rim)
+                return Pal.premul(vec4(rgb.x, rgb.y, rgb.z, alpha))
+            }
+            if self.decal_color.w < 1.5 {
+                // A broad, soot-dark blast with a deliberately softer edge
+                // than a puncture. Its 0.5 m scale comes from the mark.
+                let edge = 1.0 - smoothstep(0.52, 1.0, d)
+                let rim = smoothstep(0.30, 0.90, d)
+                let rgb = vec3(0.010, 0.009, 0.008).mix(vec3(0.095, 0.052, 0.022), rim)
+                let alpha = edge * mix(0.86, 0.48, rim)
+                return Pal.premul(vec4(rgb.x, rgb.y, rgb.z, alpha))
+            }
+            // Energy chars the centre and leaves a coloured burn rim. The
+            // tint is the projectile/tracer colour from the weapon manifest.
+            let edge = 1.0 - smoothstep(0.68, 1.0, d)
+            let rim = smoothstep(0.28, 0.76, d)
+            let tint = clamp(self.decal_color.xyz, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let rgb = vec3(0.008, 0.008, 0.009).mix(tint * 0.48, rim)
+            let alpha = edge * mix(0.94, 0.66, rim)
+            return Pal.premul(vec4(rgb.x, rgb.y, rgb.z, alpha))
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
     // Video screen: ONE upright textured quad in world space, fed a texture
     // the host updates per frame (in-world video playback). Reuses the shared
     // flare quad geometry (geom_pos.xy = corner in -0.5..0.5, geom_uv 0..1).
     // Opaque and depth-written, so the world occludes it like any solid.
     mod.draw.DrawSceneScreen = mod.std.set_type_default() do #(DrawSceneScreen::script_shader(vm)){
+        ..ColorAdjust
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -737,38 +843,22 @@ script_mod! {
         }
 
         pixel: fn() {
-            // Classic sprite artwork is a few dozen texels tall and fills the
-            // screen at point-blank range. A plain bilinear fetch smears it
-            // into mush there; a plain nearest fetch is crisp up close but
-            // crawls and sparkles the moment the same sprite is far away.
-            //
-            // Sample on texel centres, but let the crossing between two
-            // texels take exactly ONE SCREEN PIXEL. Magnified, that is a
-            // nearest-neighbour fetch with an antialiased edge — hard pixels,
-            // no stair-step shimmer. Minified, one screen pixel spans several
-            // texels, the ramp is wider than the texel, and the expression
-            // collapses back to the ordinary bilinear average. One sampler,
-            // both behaviours, decided per fragment by the derivatives.
-            var uv = self.v_uv
-            let dims = self.screen_size.zw
-            if dims.x > 0.5 && dims.y > 0.5 {
-                let texel = uv * dims
-                let ramp = max(
-                    max(abs(dFdx(texel)), abs(dFdy(texel))),
-                    vec2(0.00001, 0.00001)
-                )
-                let f = fract(texel) - vec2(0.5, 0.5)
-                let s = clamp(f / ramp + vec2(0.5, 0.5), vec2(0.0, 0.0), vec2(1.0, 1.0))
-                uv = (floor(texel) + s) / dims
+            // Sprite sheets are pixel art: one fragment chooses one exact
+            // source texel. Explicit level zero also keeps a generic decoded
+            // image's optional mip chain out of this path. The same shader is
+            // shared with smooth video, so that lane leaves `pixelated` off.
+            var color = self.tex.sample_as_bgra(self.v_uv)
+            if self.pixelated > 0.5 {
+                color = self.tex.sample_nearest(self.v_uv, 0.0)
             }
-            let color = self.tex.sample_as_bgra(uv)
             // Sprite quads (cutout) are cut-out artwork: the pixels outside
             // the figure are transparent and must not paint a rectangle.
             // A video screen keeps its opaque frame (cutout 0).
             if self.cutout > 0.5 && color.w < 0.5 {
                 discard()
             }
-            return vec4(color.x, color.y, color.z, 1.0)
+            let adjusted = self.color_adjust(color.xyz, self.tint, self.color_adjust_ctl)
+            return vec4(adjusted.x, adjusted.y, adjusted.z, color.w * self.tint.w)
         }
 
         fragment: fn() {
@@ -953,7 +1043,10 @@ script_mod! {
     // world.
     mod.draw.DrawSceneSkyMap = mod.std.set_type_default() do #(DrawSceneSkyMap::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        // Classic sky portals are ceiling/floor sheets seen from their
+        // underside as often as their front. Culling those faces exposes the
+        // pass clear colour (black) even though SKY1 is correctly bound.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -1038,6 +1131,7 @@ script_mod! {
     // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
+        ..ColorAdjust
         alpha_blend: false
         // Imported model layers may be deliberate sheets (roof soffits,
         // glazing, CAD faces). The shadow depth path is already two-sided;
@@ -1482,11 +1576,11 @@ script_mod! {
             self.v_csm = vec4(dl_wp.x, dl_wp.y, dl_wp.z, dp)
             self.v_csm_n = dl_n
             self.v_uv = unpack2f16(self.geom.uv)
-            // rgb is the material tint (x the per-character wash); the ALPHA
-            // lane carries baked self-AO from model.rs, not opacity — this
-            // shader has always returned opaque, so the lane was free.
+            // RGB is the material tint. Instance tint/hue is applied once the
+            // complete texture × vertex albedo exists in the pixel stage.
+            // Alpha carries baked self-AO from model.rs.
             let vc = unpack4u8(self.geom.color)
-            self.v_tint = vec4(vc.x * self.tint.x, vc.y * self.tint.y, vc.z * self.tint.z, vc.w)
+            self.v_tint = vc
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             // Depth-tie breaker: uniform view-space scale toward the camera.
             // The perspective divide cancels it in x/y (the image does not
@@ -1514,7 +1608,11 @@ script_mod! {
                 discard()
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
-            var albedo = vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z)
+            var albedo = self.color_adjust(
+                vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z),
+                self.tint,
+                self.color_adjust_ctl
+            )
             // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
             // Mean-127 overlay is identity; far mips go gray and drop out.
             if self.detail_st.x > 0.001 {
@@ -1687,7 +1785,11 @@ script_mod! {
                 discard()
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
-            let albedo = vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z)
+            let albedo = self.color_adjust(
+                vec3(base.x * self.v_tint.x, base.y * self.v_tint.y, base.z * self.v_tint.z),
+                self.tint,
+                self.color_adjust_ctl
+            )
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
             // wall behind it.
@@ -1874,6 +1976,7 @@ script_mod! {
     // static world must never pay. Lighting/fog match DrawSceneSkinned minus
     // the AO path — a deforming mesh cannot carry a baked occlusion atlas.
     mod.draw.DrawSceneSkinnedGpu = mod.std.set_type_default() do #(DrawSceneSkinnedGpu::script_shader(vm)){
+        ..ColorAdjust
         alpha_blend: false
         backface_culling: true
         vertex_pos: vertex_position(vec4f)
@@ -2232,7 +2335,7 @@ script_mod! {
 
         pixel: fn() {
             let tex = self.tex.sample_as_bgra(self.v_uv)
-            let albedo = vec3(tex.x * self.tint.x, tex.y * self.tint.y, tex.z * self.tint.z)
+            let albedo = self.color_adjust(tex.xyz, self.tint, self.color_adjust_ctl)
             // Same occlusion idiom as DrawSceneSkinned: per-fragment atlas
             // sample, world-anchored hash dither against 8-bit banding,
             // ambient scaled fully and direct partially — a crease should
@@ -4562,29 +4665,24 @@ script_mod! {
     }
 
     // One HUD image: a catalog picture (a key sprite, a mugshot, a weapon
-    // frame) on a quad, tinted and optionally ghosted. Classic artwork is a
-    // few dozen texels tall, so it samples on texel centres — the same
-    // reason DrawSceneScreen does.
+    // frame) on a quad, tinted and optionally ghosted. This draw type is the
+    // pixel-art lane used by both HUD catalog sprites and FPS weapon/flash
+    // sheets; callers can clear `pixelated` for genuinely smooth content.
     mod.draw.DrawHudImage = mod.std.set_type_default() do #(DrawHudImage::script_shader(vm)){
         ..mod.draw.DrawQuad
         tex: texture_2d(float)
-        // `tint` and `tex_size` come from the Rust struct; see DrawHudShape.
+        // `tint` and the sampling mode come from the Rust struct.
         pixel: fn() {
-            var uv = vec2(
+            let uv = vec2(
                 self.uv_rect.x + self.pos.x * (self.uv_rect.z - self.uv_rect.x),
                 self.uv_rect.y + self.pos.y * (self.uv_rect.w - self.uv_rect.y)
             )
-            if self.tex_size.x > 0.5 && self.tex_size.y > 0.5 {
-                let texel = uv * self.tex_size
-                let ramp = max(
-                    max(abs(dFdx(texel)), abs(dFdy(texel))),
-                    vec2(0.00001, 0.00001)
-                )
-                let f = fract(texel) - vec2(0.5, 0.5)
-                let s = clamp(f / ramp + vec2(0.5, 0.5), vec2(0.0, 0.0), vec2(1.0, 1.0))
-                uv = (floor(texel) + s) / self.tex_size
+            var c = self.tex.sample_as_bgra(uv)
+            if self.pixelated > 0.5 {
+                // Exact texel, base level: no bilinear four-texel blend and
+                // no mip-selected half-resolution weapon at any scale.
+                c = self.tex.sample_nearest(uv, 0.0)
             }
-            let c = self.tex.sample_as_bgra(uv)
             return Pal.premul(vec4(c.xyz * self.tint.xyz, c.w * self.tint.w))
         }
     }
@@ -4627,6 +4725,11 @@ pub struct DrawHudImage {
     pub tint: Vec4f,
     #[live(vec2(0.0, 0.0))]
     pub tex_size: Vec2f,
+    /// Exact level-0 nearest sampling for classic pixel artwork. DrawHudImage
+    /// is the sandbox's dedicated sprite/weapon image lane, so it defaults
+    /// on; a smooth-image caller can opt out without changing draw types.
+    #[live(1.0)]
+    pub pixelated: f32,
     /// Sub-rectangle of the texture to show, `(u0, v0, u1, v1)`; `u0 > u1`
     /// mirrors. A packed sheet is one texture with many windows into it.
     #[live(vec4(0.0, 0.0, 1.0, 1.0))]
@@ -4656,6 +4759,9 @@ pub struct DrawSceneCube {
     pub glow: f32,
     #[live(0.0)]
     pub fog_density: f32,
+    /// x = hue degrees, y = saturation, z = value, w reserved.
+    #[live(vec4(0.0, 1.0, 1.0, 0.0))]
+    pub color_adjust_ctl: Vec4f,
 }
 
 /// Alpha-blended variant: water, sensor ghosts, blob shadows.
@@ -4859,6 +4965,9 @@ pub struct DrawSceneSkinned {
     /// multiply in the vertex stage.
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub tint: Vec4f,
+    /// x = hue degrees, y = saturation, z = value, w reserved.
+    #[live(vec4(0.0, 1.0, 1.0, 0.0))]
+    pub color_adjust_ctl: Vec4f,
     /// This instance's window into the baked light atlas (offset uv, scale
     /// uv). Zero scale = no lightmap: full analytic sun, no lamp light —
     /// dynamics and unbaked models render exactly as before.
@@ -4960,6 +5069,26 @@ pub struct DrawSceneFlare {
     pub flare_col: Vec4f,
 }
 
+/// Surface-aligned procedural bullet-hole plane. Both instance payloads are
+/// vec4-packed to keep the shader ABI aligned.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneDecal {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    /// xyz = lifted world centre, w = full diameter.
+    #[live(vec4(0.0, 0.0, 0.0, 0.08))]
+    pub decal_pos: Vec4f,
+    /// xyz = surface normal, w = in-plane rotation.
+    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
+    pub decal_normal: Vec4f,
+    /// rgb = energy tint, w = procedural family (bullet/scorch/energy).
+    #[live(vec4(0.105, 0.075, 0.045, 0.0))]
+    pub decal_color: Vec4f,
+}
+
 /// In-world video screen: one upright textured quad, texture updated per
 /// frame by the host. Instance fields are vec4-packed for the same
 /// shader-ABI reason as [`DrawSceneFlare`].
@@ -4974,7 +5103,7 @@ pub struct DrawSceneScreen {
     /// (yaw == camera orbit yaw faces that camera squarely).
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_pos: Vec4f,
-    /// x = width, y = height in world units; zw unused.
+    /// x = width, y = height in world units; zw may carry source sheet size.
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_size: Vec4f,
     /// 1 = alpha-cut-out sprite artwork (transparent pixels discard), 0 = an
@@ -4983,6 +5112,15 @@ pub struct DrawSceneScreen {
     /// the alpha byte.
     #[live(0.0)]
     pub cutout: f32,
+    /// 1 = exact level-0 nearest sampling for pixel-art sheets, 0 = ordinary
+    /// smooth sampling for the in-world video lane sharing this shader.
+    #[live(0.0)]
+    pub pixelated: f32,
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub tint: Vec4f,
+    /// x = hue degrees, y = saturation, z = value, w reserved.
+    #[live(vec4(0.0, 1.0, 1.0, 0.0))]
+    pub color_adjust_ctl: Vec4f,
     /// Sub-rectangle of the texture this quad shows, `(u0, v0, u1, v1)`.
     /// A packed sprite sheet is ONE texture with many windows into it, which
     /// is what keeps a level's actor set at a dozen textures instead of five
@@ -5025,6 +5163,9 @@ pub struct DrawSceneSkinnedGpu {
     /// Per-character wash over the atlas colours (see DrawSceneSkinned::tint).
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub tint: Vec4f,
+    /// x = hue degrees, y = saturation, z = value, w reserved.
+    #[live(vec4(0.0, 1.0, 1.0, 0.0))]
+    pub color_adjust_ctl: Vec4f,
     /// First texel of this character's palette in the joint texture.
     #[live(0.0)]
     pub joint_base: f32,

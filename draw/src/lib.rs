@@ -26,8 +26,10 @@ pub use crate::{
     cx_draw::CxDraw,
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
     image_cache::{
-        decode_image_from_data, handle_image_cache_network_responses, image_size_by_data,
-        looks_like_svg, load_image_file_by_path_async, load_image_from_cache, load_image_from_data_async,
+        decode_image_from_data, evict_image_from_cache, handle_image_cache_network_responses,
+        image_size_by_data,
+        looks_like_svg, load_image_file_by_path_async, load_image_from_cache,
+        load_image_from_data_async,
         load_image_http_by_url_async, process_async_image_load, AsyncImageLoad, AsyncLoadResult,
         ImageBuffer, ImageCache, ImageCacheImpl, ImageError, JpgDecodeErrors, PngDecodeErrors,
     },
@@ -70,6 +72,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);
+    crate::shader::draw_sploded_hairline::script_mod(vm);
     crate::shader::draw_text_3d::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_pbr::script_mod(vm);
