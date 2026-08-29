@@ -85,6 +85,28 @@ pub fn lerp_frame(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
+/// Catmull-Rom between `b` and `c`, with `a` and `d` as the shoulders.
+///
+/// A straight line between two samples is a poor guess at what the waveform
+/// did in between, and the error is broadband hiss that rises with the
+/// resampling ratio — which is exactly what a key shift asks for. A cubic
+/// through four points costs a handful of multiplies and puts that hiss far
+/// enough down to stop mattering. At `t == 0` it returns `b` unchanged, so
+/// an unresampled deck is still the sample the decoder produced.
+#[inline]
+pub fn cubic_frame(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2], t: f32) -> [f32; 2] {
+    let mut out = [0.0f32; 2];
+    for channel in 0..2 {
+        let (a, b, c, d) = (a[channel], b[channel], c[channel], d[channel]);
+        let c0 = b;
+        let c1 = 0.5 * (c - a);
+        let c2 = a - 2.5 * b + 2.0 * c - 0.5 * d;
+        let c3 = 0.5 * (d - a) + 1.5 * (b - c);
+        out[channel] = ((c3 * t + c2) * t + c1) * t + c0;
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // parameter ramps
 // ---------------------------------------------------------------------------
@@ -256,6 +278,12 @@ pub const WSOLA_CORR: usize = 512;
 const WSOLA_CORR_STRIDE: usize = 2;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
+/// Widest stretch the grain search can still track. A caller that splits a
+/// tempo between the stretcher and a resampler must clamp to the SAME pair
+/// and recover the resampler from the result, or the two disagree about the
+/// ratio and the tempo quietly drifts.
+pub const STRETCH_RATIO_MIN: f64 = 0.05;
+pub const STRETCH_RATIO_MAX: f64 = 4.0;
 
 /// Streaming WSOLA over a random-access source.
 ///
@@ -318,7 +346,7 @@ impl Stretcher {
     }
 
     pub fn set_ratio(&mut self, ratio: f64) {
-        self.ratio = ratio.clamp(0.05, 4.0);
+        self.ratio = ratio.clamp(STRETCH_RATIO_MIN, STRETCH_RATIO_MAX);
     }
 
     pub fn ratio(&self) -> f64 {
@@ -466,14 +494,22 @@ impl Stretcher {
 // rate reader: source frames -> device frames
 // ---------------------------------------------------------------------------
 
-/// Pulls whole source frames and resamples them to the device rate with
-/// linear interpolation. At `step == 1.0` it is a pass-through: the output
-/// is the input frame for frame.
+/// Pulls whole source frames and resamples them with a 4-point cubic. At
+/// `step == 1.0` it is a pass-through: the output is the input frame for
+/// frame.
+///
+/// It carries the device-rate conversion AND, when the stretcher has already
+/// spent the tempo, the key shift — so this is the interpolator a transposed
+/// deck is heard through.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RateReader {
     frac: f64,
+    /// The read head sits between `cur` and `next`; `prev` and `next2` are
+    /// the shoulders the cubic needs.
+    prev: [f32; 2],
     cur: [f32; 2],
     next: [f32; 2],
+    next2: [f32; 2],
     primed: bool,
     drained: bool,
 }
@@ -499,16 +535,26 @@ impl RateReader {
             };
             self.cur = first;
             self.next = pull().unwrap_or(first);
+            self.next2 = pull().unwrap_or(self.next);
+            // Nothing precedes the first frame, so carry the line backwards
+            // rather than repeating it: a repeat is a corner, and a corner at
+            // the head of every grain is a click.
+            self.prev = [
+                2.0 * self.cur[0] - self.next[0],
+                2.0 * self.cur[1] - self.next[1],
+            ];
             self.primed = true;
             self.frac = 0.0;
         }
-        let out = lerp_frame(self.cur, self.next, self.frac as f32);
+        let out = cubic_frame(self.prev, self.cur, self.next, self.next2, self.frac as f32);
         self.frac += step.max(0.0);
         while self.frac >= 1.0 {
             self.frac -= 1.0;
+            self.prev = self.cur;
             self.cur = self.next;
+            self.next = self.next2;
             match pull() {
-                Some(frame) => self.next = frame,
+                Some(frame) => self.next2 = frame,
                 None => {
                     self.drained = true;
                     break;
@@ -629,6 +675,11 @@ const FILTER_HP_MIN_HZ: f32 = 20.0;
 const FILTER_HP_MAX_HZ: f32 = 9_000.0;
 /// Wet/dry crossfade when the chain engages or returns to unity.
 const EQ_ENGAGE_SECS: f32 = 0.012;
+/// Autopilot blend moves on an ENGAGED strip: fast enough to read as a cut
+/// on the bar, slow enough never to click. Matches the mixer's stem-lane
+/// blend so the EQ and stems media perform the same choreography at the
+/// same speed.
+const BLEND_ENGAGE_SECS: f32 = 0.08;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct EqChannelState {
@@ -676,6 +727,9 @@ pub struct DeckEq {
     coeffs: EqCoeffs,
     channels: [EqChannelState; 2],
     gain: [ParamRamp; 3],
+    /// The autopilot's second pair of hands: multiplies the operator's
+    /// band gains without ever moving them. 1.0 = hands off.
+    blend: [ParamRamp; 3],
     /// Bipolar filter knob, 0.5 = off.
     filter: ParamRamp,
     /// Cutoff the coefficients were last built for.
@@ -691,6 +745,7 @@ impl DeckEq {
             coeffs: EqCoeffs::new(sample_rate),
             channels: [EqChannelState::default(); 2],
             gain: [ParamRamp::at(1.0); 3],
+            blend: [ParamRamp::at(1.0); 3],
             filter: ParamRamp::at(0.5),
             filter_built: f32::NAN,
             wet: ParamRamp::at(0.0),
@@ -728,6 +783,46 @@ impl DeckEq {
         self.gain.get(band).map(|g| g.target()).unwrap_or(1.0)
     }
 
+    /// Autopilot blend factor for one band; composes with the operator's
+    /// gain multiplicatively and never moves the knob. While the chain is
+    /// disengaged (wet at zero — a cued deck, or an untouched strip) the
+    /// factor JUMPS instead of slewing: nothing of it is audible yet, and a
+    /// pre-mute set a bar before play must be fully seated when the deck
+    /// starts, not still crossing its ramp.
+    pub fn set_blend_band(&mut self, band: usize, gain: f32) {
+        if band >= 3 {
+            return;
+        }
+        let gain = gain.clamp(0.0, 1.0);
+        if self.wet.current() <= 0.0 {
+            self.blend[band].jump(gain);
+        } else {
+            self.blend[band].slew(gain, BLEND_ENGAGE_SECS);
+        }
+    }
+
+    /// Ramp every blend factor home.
+    pub fn clear_blend(&mut self) {
+        for ramp in &mut self.blend {
+            if self.wet.current() <= 0.0 {
+                ramp.jump(1.0);
+            } else {
+                ramp.slew(1.0, BLEND_ENGAGE_SECS);
+            }
+        }
+    }
+
+    /// Snap the blend home instantly — a fresh track never inherits a
+    /// transition's ducking.
+    pub fn reset_blend(&mut self) {
+        self.blend = [ParamRamp::at(1.0); 3];
+    }
+
+    #[cfg(test)]
+    fn blend_current(&self, band: usize) -> f32 {
+        self.blend[band].current()
+    }
+
     /// Bipolar filter knob: 0 = full low-pass, 0.5 = off, 1 = full high-pass.
     pub fn set_filter(&mut self, position: f32) {
         self.filter.slew(position.clamp(0.0, 1.0), EQ_ENGAGE_SECS * 4.0);
@@ -741,6 +836,7 @@ impl DeckEq {
     /// bypassed and the deck stays bit-transparent.
     pub fn at_unity(&self) -> bool {
         self.gain.iter().all(|g| (g.target() - 1.0).abs() < EQ_KILL_EPSILON)
+            && self.blend.iter().all(|g| (g.target() - 1.0).abs() < EQ_KILL_EPSILON)
             && (self.filter.target() - 0.5).abs() <= FILTER_DEADZONE
     }
 
@@ -781,9 +877,9 @@ impl DeckEq {
     #[inline]
     pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
         let gains = [
-            self.gain[0].tick(device_rate),
-            self.gain[1].tick(device_rate),
-            self.gain[2].tick(device_rate),
+            self.gain[0].tick(device_rate) * self.blend[0].tick(device_rate),
+            self.gain[1].tick(device_rate) * self.blend[1].tick(device_rate),
+            self.gain[2].tick(device_rate) * self.blend[2].tick(device_rate),
         ];
         self.filter.tick(device_rate);
         let wet = self.wet.tick(device_rate);
@@ -1078,6 +1174,61 @@ mod tests {
         assert!(count >= 8, "the whole buffer must be played back");
     }
 
+    #[test]
+    fn rate_reader_beats_a_straight_line_on_a_curve() {
+        // The interpolator IS the pitch shifter once the stretcher has spent
+        // the tempo, so measure it against the signal it is meant to
+        // reconstruct: a sine read at an awkward ratio, scored against the
+        // sine the read head was actually sitting on.
+        let rate = 48_000.0;
+        let hz = 1_000.0;
+        let step = 1.5_f64;
+        let frames: Vec<[f32; 2]> = (0..4096)
+            .map(|i| {
+                let phase = 2.0 * PI as f64 * hz * i as f64 / rate;
+                [phase.sin() as f32, phase.sin() as f32]
+            })
+            .collect();
+
+        let mut reader = RateReader::default();
+        let mut index = 0usize;
+        let mut pull = || {
+            let out = frames.get(index).copied();
+            index += 1;
+            out
+        };
+        let mut cubic_err = 0.0f64;
+        let mut linear_err = 0.0f64;
+        let mut count = 0usize;
+        // Skip the first few frames: the head has no real history, and the
+        // extrapolated shoulder is a guess by construction.
+        for out_index in 0..2_000 {
+            let Some(got) = reader.read(step, &mut pull) else { break };
+            if out_index < 4 {
+                continue;
+            }
+            let source_pos = out_index as f64 * step;
+            let want = (2.0 * PI as f64 * hz * source_pos / rate).sin();
+            // What a straight line between the same two neighbours gives.
+            let floor = source_pos.floor();
+            let frac = source_pos - floor;
+            let a = frames[floor as usize][0] as f64;
+            let b = frames[floor as usize + 1][0] as f64;
+            let linear = a + (b - a) * frac;
+            cubic_err += (got[0] as f64 - want).powi(2);
+            linear_err += (linear - want).powi(2);
+            count += 1;
+        }
+        assert!(count > 1_000, "the test must actually measure something");
+        let cubic_rms = (cubic_err / count as f64).sqrt();
+        let linear_rms = (linear_err / count as f64).sqrt();
+        assert!(
+            cubic_rms < linear_rms * 0.25,
+            "the cubic should beat a straight line by a wide margin: \
+             cubic {cubic_rms:.6} vs linear {linear_rms:.6}"
+        );
+    }
+
     // ---- EQ --------------------------------------------------------------
 
     fn eq_response(eq: &mut DeckEq, frequency: f64, rate: f64) -> f64 {
@@ -1305,4 +1456,54 @@ mod tests {
             after - before
         );
     }
+    #[test]
+    fn an_engaged_blend_defeats_the_unity_bypass() {
+        let mut eq = DeckEq::new(48_000.0);
+        assert!(eq.at_unity(), "fresh strip is bit-transparent");
+        // The autopilot's hand alone must engage the chain, or a blend on
+        // an untouched strip would be silently bypassed.
+        eq.set_blend_band(0, 0.0);
+        assert!(!eq.at_unity(), "a blended band engages the chain");
+        eq.clear_blend();
+        assert!(eq.at_unity(), "released, the strip is transparent again");
+        // reset_blend is the instant form installs use.
+        eq.set_blend_band(1, 0.3);
+        eq.reset_blend();
+        assert!(eq.at_unity());
+    }
+
+    #[test]
+    fn a_silent_strip_seats_the_blend_instantly_and_an_engaged_one_glides() {
+        // Cued deck (never processed → wet still 0): the pre-mute must be
+        // fully seated the moment it is asked for, so the deck's first
+        // audible frame is already bass-less.
+        let mut eq = DeckEq::new(48000.0);
+        eq.set_blend_band(0, 0.0);
+        assert!((eq.blend_current(0) - 0.0).abs() < 1e-9, "snapped while silent");
+        // Engage the strip (a real band cut, then audio flowing) and the
+        // next blend move glides at the ~80 ms transition slew instead of
+        // the 12 ms operator-engage ramp.
+        eq.set_band(0, 0.5);
+        // The mixer engages the chain per buffer; without prepare_block the
+        // wet target never moves and the strip stays officially silent.
+        eq.prepare_block();
+        for _ in 0..4800 {
+            eq.process([0.0, 0.0], 48000.0);
+        }
+        eq.set_blend_band(0, 1.0);
+        for _ in 0..960 {
+            // 20 ms: a 12 ms ramp would already have landed.
+            eq.process([0.0, 0.0], 48000.0);
+        }
+        let mid = eq.blend_current(0);
+        assert!(
+            mid > 0.05 && mid < 0.5,
+            "20 ms into an 80 ms glide the blend reads {mid}"
+        );
+        for _ in 0..9600 {
+            eq.process([0.0, 0.0], 48000.0);
+        }
+        assert!((eq.blend_current(0) - 1.0).abs() < 1e-6, "landed");
+    }
+
 }
