@@ -46,6 +46,7 @@ use crate::Animate;
 use crate::ButtonAction;
 use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
+use crate::makepad_draw::makepad_platform::DrawShaderId;
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
 use std::collections::{HashMap, HashSet};
@@ -186,6 +187,9 @@ struct TweakSession {
     /// AI, /tweak/apply): the view re-reads its text for those only —
     /// otherwise a person's half-typed edit would be replaced under them.
     fn_override_gen: u64,
+    /// A remote undo (true) / redo (false) request, consumed by the
+    /// tweaker's event loop (Cmd+Z / Shift+Cmd+Z by the bridge).
+    undo_redo: Option<bool>,
     /// Remote pose lock for the state swatches: Some(0..1) freezes every
     /// track at that mix (deterministic grabs), None animates.
     states_lock: Option<f64>,
@@ -1969,6 +1973,133 @@ enum StructKind {
     NoEditor,
 }
 
+/// The compiled shader a widget's draw layer is drawing with, read
+/// through the layer's live draw call (the primary material through the
+/// widget's own area).
+fn layer_shader_id(cx: &Cx, widget: &WidgetRef, layer: &str, primary: bool) -> Option<DrawShaderId> {
+    let area = widget
+        .layer_areas()
+        .into_iter()
+        .find(|(name, _)| *name == layer)
+        .map(|(_, a)| a)
+        .or_else(|| if primary { Some(widget.area()) } else { None })?;
+    let Area::Instance(inst) = area else { return None };
+    if inst.instance_count == 0 {
+        return None;
+    }
+    let draw_list = &cx.draw_lists[inst.draw_list_id];
+    if inst.draw_item_id >= draw_list.draw_items.len() {
+        return None;
+    }
+    Some(draw_list.draw_items[inst.draw_item_id].draw_call()?.draw_shader_id)
+}
+
+/// The hot-patchable constants of one draw layer, as (index, name, doc,
+/// initial, value, loc) — copied out so the caller may use cx freely.
+fn layer_consts(cx: &mut Cx, widget: &WidgetRef, layer: &str, primary: bool) -> Vec<(DrawShaderId, usize, String, String, f32, f32, String)> {
+    let mut out = Vec::new();
+    let Some(shader) = layer_shader_id(cx, widget, layer, primary) else { return out };
+    let raw: Vec<(usize, String, String, f32, f32, ScriptIp)> = cx
+        .shader_const_table(shader)
+        .iter()
+        .enumerate()
+        .map(|(i, tc)| (i, tc.name.clone(), tc.doc.clone(), tc.initial, tc.value, tc.ip))
+        .collect();
+    for (i, name, doc, initial, value, ip) in raw {
+        // ip_to_loc names the line before the literal (the codebase-wide
+        // convention, the same as error messages): +1 is the literal.
+        let loc = cx.with_vm(|vm| vm.bx.code.ip_to_loc(ip)).map(|l| {
+            let base = l.file.rsplit('/').next().unwrap_or(&l.file).to_string();
+            format!("{base}:{}", l.line + 1)
+        });
+        out.push((shader, i, name, doc, initial, value, loc.unwrap_or_else(|| "?".to_string())));
+    }
+    out
+}
+
+/// A shader constant of the widget by name, across its draw layers.
+fn const_lookup(cx: &mut Cx, widget: &WidgetRef, name: &str) -> Option<(DrawShaderId, usize, String, f32, f32)> {
+    let mut layers: Vec<(String, bool)> = widget.layer_areas().into_iter().map(|(n, _)| (n.to_string(), false)).collect();
+    if layers.is_empty() {
+        layers.push(("draw_bg".to_string(), true));
+    } else {
+        layers[0].1 = true;
+    }
+    for (layer, primary) in layers {
+        for (shader, i, cname, _doc, initial, value, loc) in layer_consts(cx, widget, &layer, primary) {
+            if cname == name {
+                return Some((shader, i, loc, initial, value));
+            }
+        }
+    }
+    None
+}
+
+/// Set (Some) or reset (None) a shader constant by name: the GPU takes it
+/// next frame, no recompile, source untouched. Ledgered with the literal's
+/// file:line and scope "shader" — every draw sharing that compiled shader
+/// changes with it. Returns (old, new).
+fn const_set(cx: &mut Cx, widget: &WidgetRef, path: &str, name: &str, value: Option<f64>, origin: &str) -> Result<(f32, f32), String> {
+    let (shader, index, loc, initial, old) = const_lookup(cx, widget, name).ok_or_else(|| format!("no shader constant named {name:?} on this widget"))?;
+    // Every site in the shader annotated with this name is the same knob.
+    let sites: Vec<usize> = cx
+        .shader_const_table(shader)
+        .iter()
+        .enumerate()
+        .filter(|(_, tc)| tc.name == name)
+        .map(|(i, _)| i)
+        .collect();
+    let sites = if sites.is_empty() { vec![index] } else { sites };
+    // A settle that lands on the value already on the GPU (the Ended after
+    // a scrub, a typed value equal to the current) is not an edit.
+    let target = match value {
+        Some(v) => v as f32,
+        None => initial,
+    };
+    if target == old {
+        return Ok((old, old));
+    }
+    let new = match value {
+        Some(v) => {
+            for i in &sites {
+                if !cx.shader_const_patch(shader, *i, v as f32) {
+                    return Err(format!("shader constant {name:?} could not be patched"));
+                }
+            }
+            v as f32
+        }
+        None => {
+            for i in &sites {
+                cx.shader_const_reset(shader, *i);
+            }
+            initial
+        }
+    };
+    let now = cx.seconds_since_app_start();
+    let mut s = session().lock().unwrap();
+    s.suppress_until = now + SUPPRESS_LINGER;
+    s.apply_gen += 1;
+    s.next_seq += 1;
+    let entry = TweakDiffEntry {
+        seq: s.next_seq,
+        path: path.to_string(),
+        prop: format!("const:{name}"),
+        old: fmt_f64(old as f64),
+        new: fmt_f64(new as f64),
+        origin: format!("{loc} \u{00b7} shader {}: every widget drawing with it", shader.index),
+        siblings: 0,
+        scope: "shader".to_string(),
+    };
+    if origin != "undo" && origin != "redo" {
+        log!("TWEAK {} {} {} {} -> {} ({})", origin, entry.path, entry.prop, entry.old, entry.new, entry.origin);
+        track_undo(&mut s, &entry);
+    }
+    s.diff.push(entry);
+    drop(s);
+    cx.redraw_all();
+    Ok((old, new))
+}
+
 /// How many component fields a typed editor has (the position of a field
 /// uid modulo this is its component, whichever copy of the row it sits in).
 fn comp_count(kind: StructKind) -> usize {
@@ -2971,6 +3102,7 @@ pub fn tweak_callback(
             // (a shader that reads draw_pass.time keeps every live pass
             // repainting — the platform's time repaint, the spinner's too).
             out.push_str(&format!(",\"f\":{}", cx.repaint_id()));
+            out.push_str(&format!(",\"shaders\":{}", cx.draw_shaders.shaders.len()));
             {
                 let s = session().lock().unwrap();
                 out.push_str(",\"states\":[");
@@ -2983,6 +3115,11 @@ pub fn tweak_callback(
             }
             out.push('}');
             Ok(out)
+        }
+        "undo" | "redo" => {
+            session().lock().unwrap().undo_redo = Some(op == "undo");
+            cx.redraw_all();
+            Ok(format!("{{\"ok\":1,\"op\":{}}}", json_str(op)))
         }
         "states" => {
             // The state swatches' pose lock: phase=0 (off pose), 1 (on
@@ -3015,6 +3152,7 @@ pub fn tweak_callback(
             let path = arg(args, &["path", "p"]).ok_or("need path=")?.to_string();
             let chunk = match arg(args, &["splash", "s", "chunk"]) {
                 Some(chunk) => chunk.to_string(),
+                None if arg(args, &["const"]).is_some() => String::new(),
                 None => {
                     let prop = arg(args, &["prop"]).ok_or("need splash= or prop=+value=")?;
                     let value = arg(args, &["value", "v"]).ok_or("need value=")?;
@@ -3052,6 +3190,39 @@ pub fn tweak_callback(
                         .join(".")
                 }
             };
+            // A shader constant by name: hot-patched on the GPU (reset=1 puts
+            // the literal back). No chunk, no recompile.
+            if let Some(cname) = arg(args, &["const"]).map(|s| s.to_string()) {
+                let reset = arg(args, &["reset"]).is_some_and(|r| r == "1" || r == "true");
+                let value = if reset {
+                    None
+                } else {
+                    Some(
+                        arg(args, &["value", "v"])
+                            .ok_or("need value= (or reset=1)")?
+                            .trim()
+                            .parse::<f64>()
+                            .map_err(|_| "value= must be a number".to_string())?,
+                    )
+                };
+                let (old, new) = const_set(cx, &widget, &resolved_path, &cname, value, "remote")?;
+                session().lock().unwrap().pinned = Some(TweakPick {
+                    uid: widget.widget_uid().0,
+                    path: resolved_path.clone(),
+                    ty: String::new(),
+                    rect: widget.area().clipped_rect_union(cx),
+                    window_id: 0,
+                    band: None,
+                    level: 0,
+                });
+                return Ok(format!(
+                    "{{\"ok\":1,\"path\":{},\"const\":{},\"old\":{},\"new\":{}}}",
+                    json_str(&resolved_path),
+                    json_str(&cname),
+                    fmt_f64(old as f64),
+                    fmt_f64(new as f64)
+                ));
+            }
             let applied = apply_splash_chunk(cx, &widget, &resolved_path, &chunk, "remote");
             {
                 // The prompt's answer landed (or failed): say so in the panel.
@@ -3600,8 +3771,24 @@ struct RowBinding {
     comp_uids: Vec<u64>,
     /// The uids of a SizeField's Fill/Fit buttons ([fill, fit]).
     mode_uids: Vec<u64>,
-    /// Field uids of this row's TWEAKABLES copy: (uid, is_swatch).
+    /// Field uids of this row's top-section copy: (uid, is_swatch).
     alt_uids: Vec<(u64, bool)>,
+    /// A shader-constant row: an annotated literal inside a draw layer's
+    /// fn body (Cx::shader_const_table), hot-patched on the GPU — never a
+    /// chunk apply.
+    const_ref: Option<ConstRef>,
+}
+
+/// One hot-patchable shader constant of the pinned widget's draw layer.
+#[derive(Clone)]
+struct ConstRef {
+    shader: DrawShaderId,
+    index: usize,
+    layer: String,
+    /// The literal's file:line (ip_to_loc reports the line before it).
+    loc: String,
+    name: String,
+    initial: f32,
 }
 
 /// One visible sidebar entry, with the rects the raw-pointer gestures
@@ -4749,6 +4936,7 @@ impl Tweaker {
                 comp_uids: Vec::new(),
                 mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
+                const_ref: None,
             });
         }
         // Session-original + resettable flags from the diff log.
@@ -4810,6 +4998,45 @@ impl Tweaker {
         {
             let widget = cx.widget_tree().widget(WidgetUid(sel_uid));
             self.row_docs = collect_row_docs(cx, &widget);
+            // SHADER CONSTANTS: the annotated literals inside each draw
+            // layer's fn bodies — actual values IN shader code, listed
+            // per layer with the annotation as their doc.
+            let materials = self.materials.clone();
+            for (mi, layer) in materials.iter().enumerate() {
+                let mut seen: Vec<String> = Vec::new();
+                for (shader, index, name, doc, initial, value, loc) in layer_consts(cx, &widget, layer, mi == 0) {
+                    // One knob per name: a literal annotated at two sites
+                    // in the same shader is one constant (both patch).
+                    if seen.contains(&name) {
+                        continue;
+                    }
+                    seen.push(name.clone());
+                    let prop = if self.rows.iter().any(|r| r.prop == name) {
+                        format!("{layer} \u{00b7} {name}")
+                    } else {
+                        name.clone()
+                    };
+                    self.row_docs.insert(prop.clone(), doc);
+                    self.rows.push(RowBinding {
+                        prop,
+                        kind: RowKind::Num,
+                        value: fmt_f64(value as f64),
+                        quoted: false,
+                        section: SectionKind::Style,
+                        set: true,
+                        changed: value != initial,
+                        original: Some(fmt_f64(initial as f64)),
+                        field_uid: 0,
+                        swatch_uid: 0,
+                        struct_kind: StructKind::None,
+                        comp_vals: Vec::new(),
+                        comp_uids: Vec::new(),
+                        mode_uids: Vec::new(),
+                        alt_uids: Vec::new(),
+                        const_ref: Some(ConstRef { shader, index, layer: layer.clone(), loc, name, initial }),
+                    });
+                }
+            }
             self.origin_levels.clear();
             let mut push = |prop: String, value: String| {
                 self.rows.push(RowBinding {
@@ -4828,6 +5055,7 @@ impl Tweaker {
                     comp_uids: Vec::new(),
                     mode_uids: Vec::new(),
                     alt_uids: Vec::new(),
+                    const_ref: None,
                 });
             };
             let levels = cascade_levels(cx, &widget);
@@ -4929,6 +5157,19 @@ impl Tweaker {
     fn doc_line_for(&self, index: usize) -> String {
         let Some(row) = self.rows.get(index) else { return String::new() };
         let Some(doc) = self.row_docs.get(&row.prop) else { return String::new() };
+        if let Some(cref) = &row.const_ref {
+            let hint = parse_doc_hint(doc);
+            let mut parts = vec![cref.layer.clone()];
+            if let (Some(lo), Some(hi)) = (hint.min, hint.max) {
+                let mut range = format!("{}..{}", fmt_f64(lo), fmt_f64(hi));
+                if let Some(step) = hint.step {
+                    range.push_str(&format!(" step {}", fmt_f64(step)));
+                }
+                parts.push(range);
+            }
+            parts.push(cref.loc.clone());
+            return parts.join(" \u{00b7} ");
+        }
         let first = doc.lines().next().unwrap_or("").trim();
         // The hint rides inside the doc (`gap between icon and label 0..24
         // step 1`): show the prose, then the range in one place.
@@ -4995,20 +5236,17 @@ impl Tweaker {
     fn build_visible(&self) -> Vec<VisKind> {
         let filtering = !self.filter.is_empty();
         let mut out = Vec::new();
-        // TWEAKABLES: every annotated value (a `/** */` doc on the key),
-        // in the same hot-first order, each with its doc line — a person
-        // finds what the author meant to be tweaked without reading source.
+        // SHADER CONSTANTS: the annotated literals inside the draw layers'
+        // fn bodies — "actual values IN shader code" — each with its doc
+        // line. Absent when the widget's shaders carry none. (Annotated
+        // props are not constants: they stay in their sections with the
+        // gold marker and the doc line under the touched row.)
         if !filtering {
             let tweak: Vec<usize> = self
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| {
-                    r.section != SectionKind::Cascade
-                        && r.kind != RowKind::Info
-                        && r.struct_kind != StructKind::NoEditor
-                        && self.row_docs.contains_key(&r.prop)
-                })
+                .filter(|(_, r)| r.const_ref.is_some())
                 .map(|(i, _)| i)
                 .collect();
             if !tweak.is_empty() {
@@ -5026,7 +5264,7 @@ impl Tweaker {
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, row)| row.section == section && self.row_matches_filter(row))
+                .filter(|(_, row)| row.section == section && row.const_ref.is_none() && self.row_matches_filter(row))
                 .map(|(index, _)| index)
                 .collect();
             let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering {
@@ -5577,7 +5815,7 @@ impl Tweaker {
                     VisKind::TweakHeader(count, open) => {
                         item.child(live_id!(title)).set_text(
                             cx,
-                            &format!("{} TWEAKABLES ({count})", if open { "-" } else { "+" }),
+                            &format!("{} SHADER CONSTANTS ({count})", if open { "-" } else { "+" }),
                         );
                     }
                     VisKind::Doc(index) => {
@@ -6327,8 +6565,12 @@ impl Tweaker {
                     session().lock().unwrap().undo.push(step);
                     return;
                 };
-                let chunk = format!("{prop}: {old}");
-                if let Err(error) = eval_chunk(cx, &widget, &chunk) {
+                let undone = if let Some(name) = prop.strip_prefix("const:") {
+                    const_set(cx, &widget, path, name, old.parse::<f64>().ok(), "undo").map(|_| ())
+                } else {
+                    eval_chunk(cx, &widget, &format!("{prop}: {old}"))
+                };
+                if let Err(error) = undone {
                     log!("TWEAK undo failed: {error}");
                     return;
                 }
@@ -6384,10 +6626,13 @@ impl Tweaker {
                     session().lock().unwrap().redo.push(step);
                     return;
                 };
-                let chunk = format!("{prop}: {new}");
-                if let Err(error) = apply_splash_chunk(cx, &widget, path, &chunk, "redo")
-                    .map(|_| ())
-                {
+                let redone = if let Some(name) = prop.strip_prefix("const:") {
+                    const_set(cx, &widget, path, name, new.parse::<f64>().ok(), "redo").map(|_| ())
+                } else {
+                    let chunk = format!("{prop}: {new}");
+                    apply_splash_chunk(cx, &widget, path, &chunk, "redo").map(|_| ())
+                };
+                if let Err(error) = redone {
                     log!("TWEAK redo failed: {error}");
                     return;
                 }
@@ -6645,6 +6890,7 @@ impl Tweaker {
         }
         let mut edits: Vec<Edit> = Vec::new();
         let mut resets: Vec<String> = Vec::new();
+        let mut const_edits: Vec<(usize, Option<f64>)> = Vec::new();
         for action in actions {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
@@ -6846,6 +7092,20 @@ impl Tweaker {
             match binding.kind {
                 // CASCADE rows are read-only labels; nothing to apply.
                 RowKind::Info => {}
+                RowKind::Num if binding.const_ref.is_some() => {
+                    match widget_action.cast::<FabValueInputAction>() {
+                        FabValueInputAction::Changed(v) => const_edits.push((index, Some(v))),
+                        FabValueInputAction::Ended(v) => {
+                            // A typed value arrives only as Ended.
+                            if binding.value.parse::<f64>().ok() != Some(v) {
+                                const_edits.push((index, Some(v)));
+                            }
+                            edits.push(Edit::HoldOff);
+                        }
+                        FabValueInputAction::Reset => const_edits.push((index, None)),
+                        _ => {}
+                    }
+                }
                 RowKind::Num => match widget_action.cast::<FabValueInputAction>() {
                     FabValueInputAction::Changed(v) => {
                         edits.push(Edit::Apply(format!("{}: {}", binding.prop, fmt_f64(v))));
@@ -6948,6 +7208,20 @@ impl Tweaker {
         }
         for prop in resets {
             self.reset_prop(cx, &sel, &prop);
+        }
+        for (index, value) in const_edits {
+            let Some(cref) = self.rows.get(index).and_then(|r| r.const_ref.clone()) else { continue };
+            let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+            match const_set(cx, &widget, &sel.path, &cref.name, value, "sidebar") {
+                Ok((_, new)) => {
+                    if let Some(row) = self.rows.get_mut(index) {
+                        row.value = fmt_f64(new as f64);
+                        row.changed = new != cref.initial;
+                    }
+                    self.redraw_sidebar(cx);
+                }
+                Err(error) => log!("TWEAK shader constant apply failed: {error}"),
+            }
         }
         for edit in edits {
             match edit {
@@ -7281,6 +7555,16 @@ impl Widget for Tweaker {
         }
         if self.live_timer.is_event(event).is_some() {
             self.live_apply(cx);
+        }
+        // The guard must drop before undo/redo take the session lock again
+        // (an `if let` scrutinee's temporary lives for the whole body).
+        let pending_undo = session().lock().unwrap().undo_redo.take();
+        if let Some(undo) = pending_undo {
+            if undo {
+                self.undo(cx);
+            } else {
+                self.redo(cx);
+            }
         }
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
