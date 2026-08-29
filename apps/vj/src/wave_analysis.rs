@@ -70,7 +70,7 @@ const REFERENCE_PERCENTILE: f64 = 0.995;
 const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// Version 4 carries the tempo map; a version 3 sidecar has no record of
 /// whether the track's tempo moves, so it is re-analysed rather than reused.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -120,6 +120,43 @@ impl TrackGrid {
     /// Source time of whole beat `beat`.
     pub fn secs_at_beat(&self, beat: f64) -> f64 {
         self.first_beat_secs + beat * self.beat_secs
+    }
+
+    /// Move `target_secs` by a whole number of `unit_beats` steps so that
+    /// it keeps the same offset into the unit that `phase_ref_secs` has.
+    ///
+    /// This is the QUANT rule, and it is deliberately not a quantize-to-
+    /// grid: the landing is not pulled onto a beat, it is pulled onto the
+    /// reference's own place inside one. Because the translation is
+    /// measured FROM the reference, phase preservation is structural
+    /// rather than arithmetic — and `downbeat_phase` cancels, so a bar is
+    /// just `unit_beats == 4` and nothing here anchors on a downbeat.
+    /// It is also why a wrong-downbeat grid (the common analyser failure)
+    /// cannot move a landing: only differences are read, never absolute
+    /// grid positions.
+    ///
+    /// `unit_beats == 0` is the control's off row, and a track with no
+    /// grid has nothing to measure against; both hand the target back.
+    pub fn snap_translate(&self, target_secs: f64, phase_ref_secs: f64, unit_beats: u32) -> f64 {
+        if unit_beats == 0 || !self.has_grid() {
+            return target_secs;
+        }
+        let unit = unit_beats as f64;
+        let reference = self.beat_at(phase_ref_secs);
+        let steps = ((self.beat_at(target_secs) - reference) / unit).round();
+        let mut secs = self.secs_at_beat(reference + steps * unit);
+        // A landing before the start of the track is not a position. Walk
+        // forward a unit at a time, the way `sync_plan` does, keeping the
+        // phase the caller asked for rather than clamping it away. The cap
+        // is a runaway guard, not a policy.
+        let step_secs = unit * self.beat_secs;
+        for _ in 0..64 {
+            if secs >= 0.0 {
+                break;
+            }
+            secs += step_secs;
+        }
+        secs
     }
 
     /// Fractional position inside the current beat, `[0,1)`.
@@ -266,6 +303,10 @@ pub struct TrackAnalysis {
     /// record here, and the single line in `grid` is then the whole truth.
     pub tempo_map: TempoMap,
     pub tiles: WaveTiles,
+    /// Where the arrangement changes (drops, breaks), source seconds,
+    /// at least four seconds apart. Empty when nothing clears the floor.
+    /// This is the autopilot's phrase map.
+    pub changes_secs: Vec<f64>,
 }
 
 impl TrackAnalysis {
@@ -1601,12 +1642,20 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
         TempoMap::default()
     };
     let tiles = build_tiles(&envelopes, pcm);
+    // The phrase map: the same change points the grid estimator consumes,
+    // published in seconds instead of being thrown away with the hops.
+    let hop_secs = envelopes.hop as f64 / envelopes.sample_rate;
+    let changes_secs = structural_changes(&envelopes)
+        .into_iter()
+        .map(|hop| hop * hop_secs)
+        .collect();
     TrackAnalysis {
         duration_secs: pcm.seconds(),
         sample_rate: pcm.sample_rate,
         grid,
         tempo_map,
         tiles,
+        changes_secs,
     }
 }
 
@@ -1718,6 +1767,10 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
         out.extend_from_slice(&segment.start_beat.to_le_bytes());
         out.extend_from_slice(&segment.period_secs.to_le_bytes());
     }
+    out.extend_from_slice(&(analysis.changes_secs.len() as u32).to_le_bytes());
+    for change in &analysis.changes_secs {
+        out.extend_from_slice(&change.to_le_bytes());
+    }
     out
 }
 
@@ -1775,9 +1828,18 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
             period_secs: f64::from_le_bytes(take(8)?.try_into().unwrap()),
         });
     }
+    let change_count = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+    if change_count > 100_000 {
+        return Err("wave cache change list out of range".into());
+    }
+    let mut changes_secs = Vec::with_capacity(change_count);
+    for _ in 0..change_count {
+        changes_secs.push(f64::from_le_bytes(take(8)?.try_into().unwrap()));
+    }
     Ok(TrackAnalysis {
         duration_secs,
         sample_rate,
+        changes_secs,
         tempo_map: TempoMap { segments },
         grid: TrackGrid {
             bpm,
@@ -2372,9 +2434,20 @@ mod tests {
         assert_eq!(back.tiles, analysis.tiles);
         assert_eq!(back.sample_rate, analysis.sample_rate);
         assert!((back.duration_secs - analysis.duration_secs).abs() < 1e-9);
+        assert_eq!(back.changes_secs, analysis.changes_secs);
+        // A non-empty change list survives the trip even when the fixture's
+        // own detection came back empty.
+        let mut phrased = analysis.clone();
+        phrased.changes_secs = vec![8.0, 24.5, 40.0];
+        let back = decode_analysis(&encode_analysis(&phrased)).expect("decode");
+        assert_eq!(back.changes_secs, vec![8.0, 24.5, 40.0]);
         // Truncation and junk are refused, not misread.
         assert!(decode_analysis(&bytes[..bytes.len() / 2]).is_err());
         assert!(decode_analysis(b"nope").is_err());
+        // An old-version file is re-analysed, never misread.
+        let mut old = encode_analysis(&analysis);
+        old[8..12].copy_from_slice(&4u32.to_le_bytes());
+        assert!(decode_analysis(&old).is_err());
     }
 
     #[test]
@@ -2428,6 +2501,98 @@ mod tests {
         // A path key is stable for the same path.
         let path = std::env::temp_dir().join("makepad-vj-key-fixture.wav");
         assert_eq!(AnalysisKey::from_path(&path), AnalysisKey::from_path(&path));
+    }
+
+    // -----------------------------------------------------------------
+    // snapping: whole-unit translation that preserves the reference phase
+    // -----------------------------------------------------------------
+
+    fn snap_grid(bpm: f64, first_beat_secs: f64, downbeat_phase: u32) -> TrackGrid {
+        TrackGrid {
+            bpm,
+            beat_secs: 60.0 / bpm,
+            first_beat_secs,
+            downbeat_phase,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn snap_keeps_the_references_offset_into_the_unit() {
+        // 120 BPM: a beat is 0.5 s, first beat at 0.25 s.
+        let g = snap_grid(120.0, 0.25, 0);
+        // The reference sits 0.2 s into its beat (40% of the way).
+        let reference = 0.25 + 3.0 * 0.5 + 0.2;
+        // Aim somewhere with a completely different phase.
+        let landed = g.snap_translate(0.25 + 20.0 * 0.5 + 0.37, reference, 1);
+        let phase_ref = g.beat_at(reference).rem_euclid(1.0);
+        let phase_landed = g.beat_at(landed).rem_euclid(1.0);
+        assert!(
+            (phase_ref - phase_landed).abs() < 1e-9,
+            "offset into the beat must survive: {phase_ref} vs {phase_landed}"
+        );
+        // And the move must be a WHOLE number of beats from the reference.
+        let steps = g.beat_at(landed) - g.beat_at(reference);
+        assert!((steps - steps.round()).abs() < 1e-9, "moved {steps} beats");
+    }
+
+    #[test]
+    fn snap_moves_in_whole_units_for_every_size() {
+        let g = snap_grid(128.0, 0.1, 2);
+        let reference = 12.345;
+        for unit in [1u32, 2, 4, 8, 16] {
+            let landed = g.snap_translate(60.0, reference, unit);
+            let steps = (g.beat_at(landed) - g.beat_at(reference)) / unit as f64;
+            assert!(
+                (steps - steps.round()).abs() < 1e-9,
+                "unit {unit}: moved {steps} units, which is not whole"
+            );
+            // The landing is the nearest such step to the target, so never
+            // more than half a unit from where the finger asked for.
+            let half = unit as f64 * g.beat_secs * 0.5;
+            assert!((landed - 60.0).abs() <= half + 1e-9, "unit {unit}: {landed}");
+        }
+    }
+
+    #[test]
+    fn snap_is_blind_to_the_downbeat() {
+        // The whole reason there is no bar special case: a relative
+        // translation cancels downbeat_phase, so all four phases agree.
+        let reference = 9.1;
+        let target = 41.7;
+        let first = snap_grid(120.0, 0.25, 0).snap_translate(target, reference, 4);
+        for phase in [1u32, 2, 3] {
+            let other = snap_grid(120.0, 0.25, phase).snap_translate(target, reference, 4);
+            assert!((first - other).abs() < 1e-9, "phase {phase}: {first} vs {other}");
+        }
+    }
+
+    #[test]
+    fn snap_off_and_gridless_pass_straight_through() {
+        let g = snap_grid(120.0, 0.25, 0);
+        assert_eq!(g.snap_translate(33.7, 9.1, 0), 33.7, "unit 0 is off");
+        let none = TrackGrid::default();
+        assert!(!none.has_grid());
+        assert_eq!(none.snap_translate(33.7, 9.1, 4), 33.7, "no grid, no snap");
+    }
+
+    #[test]
+    fn snap_leaves_an_already_in_phase_target_alone() {
+        let g = snap_grid(120.0, 0.25, 0);
+        let reference = 0.25 + 3.0 * 0.5 + 0.2;
+        let target = reference + 8.0 * 0.5; // exactly 8 beats later
+        assert!((g.snap_translate(target, reference, 4) - target).abs() < 1e-9);
+    }
+
+    #[test]
+    fn snap_steps_forward_when_the_landing_falls_before_zero() {
+        let g = snap_grid(120.0, 0.25, 0);
+        // Reference near the top of the track, target dragged off the front.
+        let landed = g.snap_translate(-30.0, 40.3, 4);
+        assert!(landed >= 0.0, "a landing before zero is not a position: {landed}");
+        // Still a whole number of units from the reference.
+        let steps = (g.beat_at(landed) - g.beat_at(40.3)) / 4.0;
+        assert!((steps - steps.round()).abs() < 1e-9, "moved {steps} units");
     }
 }
 

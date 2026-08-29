@@ -100,6 +100,24 @@ pub struct MediaFile {
     pub size: u64,
 }
 
+/// The tags an imported file carries into the catalog. Folder names become
+/// tags — a tree of "sets/2024/opener" is searchable the moment it lands,
+/// with nobody typing metadata — plus `local` for the lane, `flow` when the
+/// clip was converted, and for AUDIO the music tag: the DJ deck explorer
+/// narrows to `catalog::MUSIC_TAG`, so an import without it lands in a
+/// store the deck browser cannot see.
+pub fn import_tags(file: &MediaFile, converted: bool) -> Vec<String> {
+    let mut tags: Vec<String> = file.dirs.iter().map(|d| slug(d, 32)).collect();
+    tags.push("local".to_string());
+    if file.class == MediaClass::Audio {
+        tags.push(crate::catalog::MUSIC_TAG.to_string());
+    }
+    if converted {
+        tags.push("flow".to_string());
+    }
+    tags
+}
+
 /// A file that was seen and deliberately not imported, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkippedFile {
@@ -637,13 +655,7 @@ pub fn import_file(
     bundle.alias = Some(alias);
     bundle.media_millis = media_millis;
     bundle.categories = vec!["imported".to_string(), file.class.label().to_string()];
-    // Folder names become tags: a tree of "sets/2024/opener" is searchable
-    // the moment it lands, with nobody typing metadata.
-    bundle.tags = file.dirs.iter().map(|d| slug(d, 32)).collect();
-    bundle.tags.push("local".to_string());
-    if converted.is_some() {
-        bundle.tags.push("flow".to_string());
-    }
+    bundle.tags = import_tags(file, converted.is_some());
     bundle.generator = "makepad-vj import".to_string();
     bundle.provenance = provenance;
     bundle.description = format!("Imported from {}", root.display());
@@ -731,6 +743,28 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The deck explorer narrows to the music tag, so the import that FEEDS
+    /// it has to write that tag — audio only: a video import tagged music
+    /// would put clips on the DJ surface.
+    #[test]
+    fn imported_audio_carries_the_music_tag_and_video_does_not() {
+        let file = |class, media| MediaFile {
+            path: PathBuf::from("x"),
+            class,
+            media,
+            stem: "x".into(),
+            dirs: vec!["Dua Lipa".into()],
+            size: 1,
+        };
+        let audio = import_tags(&file(MediaClass::Audio, MediaType::Mp3), false);
+        assert!(audio.contains(&crate::catalog::MUSIC_TAG.to_string()), "{audio:?}");
+        assert!(audio.contains(&"local".to_string()));
+        assert!(audio.contains(&"dua-lipa".to_string()), "dirs stay tags: {audio:?}");
+        let video = import_tags(&file(MediaClass::Video, MediaType::Mp4), true);
+        assert!(!video.contains(&crate::catalog::MUSIC_TAG.to_string()), "{video:?}");
+        assert!(video.contains(&"flow".to_string()), "converted keeps flow: {video:?}");
     }
 
     #[test]
