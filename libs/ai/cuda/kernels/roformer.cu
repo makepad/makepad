@@ -415,18 +415,31 @@ static __global__ void __launch_bounds__(ROT_THREADS, 2) makepad_cuda_roformer_a
                 m_part = fmaxf(m_part, srow[cbeg + c]);
             }
             const float m_new = fmaxf(m_old, fmaxf(m_part, __shfl_xor_sync(0xffffffff, m_part, 1)));
-            float l_part = 0.0f;
 #pragma unroll
             for (int c = 0; c < ROT_BC / 2; c++) {
-                const float p = expf(srow[cbeg + c] - m_new);
-                srow[cbeg + c] = p;
-                l_part += p;
+                srow[cbeg + c] = expf(srow[cbeg + c] - m_new);
             }
-            l_part += __shfl_xor_sync(0xffffffff, l_part, 1);
+            __syncwarp();
             if (half == 0) {
+                // The running denominator is summed by one thread, column 0
+                // upward, which is the order the kernel above uses. Combining
+                // two half-row partials instead would be one ulp out, and a
+                // ViT's residual stream turns one ulp at block 0 into
+                // something the tower's parity gate can see by block 24 —
+                // measured 3.4e-4 relative RMS on the output embeddings,
+                // enough to flip a near-tied token and send a long
+                // transcription down a different path. Every other operation
+                // here already runs in the reference order, so keeping this
+                // one makes the two kernels agree bit for bit. The
+                // exponentials, which are the expensive half, stay parallel.
                 const float corr = expf(m_old - m_new);
+                float l = ls[row] * corr;
+#pragma unroll 8
+                for (int c = 0; c < ROT_BC; c++) {
+                    l += srow[c];
+                }
                 ms[row] = m_new;
-                ls[row] = ls[row] * corr + l_part;
+                ls[row] = l;
                 cs[row] = corr;
             }
         }

@@ -180,7 +180,8 @@ pub unsafe fn roformer_attn_f32(
 /// The same op as [`roformer_attn_f32`], register-tiled for a long key axis.
 ///
 /// Identical contract — same layouts, same f32 arithmetic, same online
-/// softmax over the same tile order — and identical results to rounding. It
+/// softmax over the same tile order, every accumulation in the same order —
+/// and therefore bit-identical results, not merely close ones. It
 /// differs only in how the work is cut up: 4x4 score patches and 4 x D/8
 /// accumulator patches per thread instead of one query row each, which is
 /// what the vision tower's 14k-24k key axis needs and what BS-RoFormer's few
