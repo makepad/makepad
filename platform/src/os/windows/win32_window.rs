@@ -611,11 +611,20 @@ impl Win32Window {
         let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
         let style_ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
 
-        let dpi = with_win32_app(|app| app.dpi_functions.system_dpi_factor() as f64);
-        let x = (position.x * dpi) as i32;
-        let y = (position.y * dpi) as i32;
-        let w = (size.x * dpi) as i32;
-        let h = (size.y * dpi) as i32;
+        // `position` is already in physical screen pixels: the caller builds it by adding the
+        // parent window's physical origin to an offset it has itself scaled by the parent's
+        // per-monitor DPI. Scaling it again here placed the popup at `dpi` times its intended
+        // screen coordinates — exact at 100%, and progressively further away above it.
+        //
+        // The size is deliberately passed through unscaled. It is provisional: `init` runs
+        // `set_inner_size` immediately afterwards, which scales by the window's own
+        // per-monitor DPI now that the HWND exists on its target display. The system DPI used
+        // here before was the primary display's, so on a second display of a different scale
+        // it was the wrong number twice over.
+        let x = position.x as i32;
+        let y = position.y as i32;
+        let w = size.x as i32;
+        let h = size.y as i32;
 
         let hwnd = unsafe {
             CreateWindowExW(
