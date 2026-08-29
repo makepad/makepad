@@ -188,6 +188,21 @@ impl Cx {
                         );
                 }
 
+                {
+                    // A hot-patched table constant moved the scope-uniform
+                    // buffer: refresh this shader's GPU copy before binding.
+                    let sh = &self.draw_shaders.shaders[draw_call.draw_shader_id.index];
+                    if let Some(os_id) = sh.os_shader_id {
+                        let shp = &mut self.draw_shaders.os_shaders[os_id];
+                        if shp.scope_uniforms_gen != sh.mapping.scope_uniforms_gen
+                            && !sh.mapping.scope_uniforms_buf.is_empty()
+                        {
+                            shp.scope_uniforms
+                                .update_with_f32_constant_data(d3d11_cx, &sh.mapping.scope_uniforms_buf);
+                            shp.scope_uniforms_gen = sh.mapping.scope_uniforms_gen;
+                        }
+                    }
+                }
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
@@ -3140,6 +3155,7 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
+            output.const_table = vm.host.cx().shader_const_table_mode();
             output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
@@ -3543,6 +3559,9 @@ pub struct CxOsDrawShader {
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
     pub scope_uniforms: D3d11Buffer,
+    /// `CxDrawShaderMapping::scope_uniforms_gen` the `scope_uniforms`
+    /// buffer was last uploaded from.
+    pub scope_uniforms_gen: u64,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
     pub pixel_shader_blob: Vec<u8>,
@@ -3847,6 +3866,7 @@ impl CxOsDrawShader {
             const_table_uniforms,
             live_uniforms,
             scope_uniforms,
+            scope_uniforms_gen: mapping.scope_uniforms_gen,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
             pixel_shader_blob: ps_bytes,

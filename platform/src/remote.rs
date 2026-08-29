@@ -164,6 +164,20 @@ mod imp {
             tx: Sender<Reply>,
         },
         Quit(Sender<Reply>),
+        /// The hot-patchable constant tables of the compiled shaders (one
+        /// shader, or all that have entries).
+        ShaderConsts {
+            shader: Option<usize>,
+            tx: Sender<Reply>,
+        },
+        /// Patch (or, with `value` None, reset) one table constant. Lands on
+        /// the GPU next frame with no recompile.
+        ShaderConstPatch {
+            shader: usize,
+            index: usize,
+            value: Option<f32>,
+            tx: Sender<Reply>,
+        },
     }
 
     enum Input {
@@ -823,6 +837,29 @@ mod imp {
                 };
                 let _ = tx.send(Reply::Text(dump));
             }
+            Cmd::ShaderConsts { shader, tx } => {
+                let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
+            }
+            Cmd::ShaderConstPatch {
+                shader,
+                index,
+                value,
+                tx,
+            } => {
+                let id = crate::draw_shader::DrawShaderId { index: shader };
+                let ok = match value {
+                    Some(v) => cx.shader_const_patch(id, index, v),
+                    None => cx.shader_const_reset(id, index),
+                };
+                if ok {
+                    let _ = tx.send(Reply::Text(shader_consts_json(cx, Some(shader))));
+                } else {
+                    let _ = tx.send(Reply::Err(format!(
+                        "no table constant {} on shader {}",
+                        index, shader
+                    )));
+                }
+            }
             Cmd::Snap {
                 window,
                 needle,
@@ -1126,9 +1163,100 @@ mod imp {
             // the overlay draws inside the window's own pass, so the ordinary
             // grab pipeline already composites it.
             "/tweak/grab" => route_grab(p),
+            // The shader constant tables: annotated literals compiled into
+            // a hot-patchable uniform buffer (see Cx::shader_const_patch).
+            "/shader/consts" => {
+                let shader = p.get(&["shader", "s"]).and_then(|v| v.parse::<usize>().ok());
+                reply_to_out(ask(move |tx| Cmd::ShaderConsts { shader, tx }, 4))
+            }
+            "/shader/const" => {
+                let Some(shader) = p.get(&["shader", "s"]).and_then(|v| v.parse::<usize>().ok())
+                else {
+                    return err("need shader=ID");
+                };
+                let Some(index) = p.get(&["i", "index"]).and_then(|v| v.parse::<usize>().ok())
+                else {
+                    return err("need i=INDEX");
+                };
+                let value = match p.get(&["v", "value"]) {
+                    Some(v) => match v.parse::<f32>() {
+                        Ok(v) => Some(v),
+                        Err(_) => return err("v= must be a number"),
+                    },
+                    None => {
+                        if p.flag(&["reset"]) {
+                            None
+                        } else {
+                            return err("need v=VALUE or reset=1");
+                        }
+                    }
+                };
+                reply_to_out(ask(
+                    move |tx| Cmd::ShaderConstPatch {
+                        shader,
+                        index,
+                        value,
+                        tx,
+                    },
+                    4,
+                ))
+            }
             "/quit" => reply_to_out(ask(|tx| Cmd::Quit(tx), 4)),
             _ => err("no route"),
         }
+    }
+
+    /// `{"shaders":[{"id":N,"consts":[{"i":0,"name":..,"doc":..,"value":..,"initial":..,
+    /// "min":..,"max":..,"step":..,"file":..,"line":..,"col":..}]}]}` — only shaders
+    /// that carry table constants, or the one asked for.
+    fn shader_consts_json(cx: &mut Cx, only: Option<usize>) -> String {
+        fn opt_num(v: Option<f64>) -> String {
+            match v {
+                Some(v) => format!("{}", v),
+                None => "null".to_string(),
+            }
+        }
+        let mut entries: Vec<(usize, Vec<crate::draw_shader::DrawShaderTableConst>)> = Vec::new();
+        for (id, sh) in cx.draw_shaders.shaders.iter().enumerate() {
+            if only.is_some_and(|o| o != id) || sh.mapping.table_consts.is_empty() {
+                continue;
+            }
+            entries.push((id, sh.mapping.table_consts.clone()));
+        }
+        let mut out = String::from("{\"shaders\":[");
+        for (n, (id, consts)) in entries.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("{{\"id\":{},\"consts\":[", id));
+            for (i, tc) in consts.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let loc = cx.with_vm(|vm| vm.bx.code.ip_to_loc(tc.ip));
+                let (file, line, col) = match loc {
+                    Some(loc) => (loc.file, loc.line, loc.col),
+                    None => (String::new(), 0, 0),
+                };
+                out.push_str(&format!(
+                    "{{\"i\":{},\"name\":{},\"doc\":{},\"value\":{},\"initial\":{},\"min\":{},\"max\":{},\"step\":{},\"file\":{},\"line\":{},\"col\":{}}}",
+                    i,
+                    json_str(&tc.name),
+                    json_str(&tc.doc),
+                    tc.value,
+                    tc.initial,
+                    opt_num(tc.min),
+                    opt_num(tc.max),
+                    opt_num(tc.step),
+                    json_str(&file),
+                    line,
+                    col
+                ));
+            }
+            out.push_str("]}");
+        }
+        out.push_str("]}");
+        out
     }
 
     fn cheat_sheet() -> String {
@@ -1156,6 +1284,8 @@ mod imp {
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
              /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
              /tweak/grab       window grab with the overlay composited (same as /g while tweaking)\n\
+             /shader/consts    the compiled shaders' hot-patchable constants (annotated literals): {{\"shaders\":[{{\"id\",\"consts\":[{{\"i\",\"name\",\"value\",\"min\",\"max\",\"step\",\"file\",\"line\"}}]}}]}}; shader=ID for one\n\
+             /shader/const     ?shader=ID&i=N&v=VALUE patches one constant on the GPU (no recompile, source untouched); reset=1 puts the literal back\n\
              /close?w=ID       close one window the normal way\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\

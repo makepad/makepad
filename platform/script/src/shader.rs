@@ -502,8 +502,11 @@ impl ShaderFnCompiler {
                     self.handle_logic_phi(vm, output);
                     self.handle_if_else_phi(vm, output);
                 } else {
-                    // id or immediate value
-                    self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
+                    // id or immediate value — an annotated float literal
+                    // becomes a table constant under const_table mode
+                    if !(output.const_table && self.try_push_table_const(vm, output, opcode)) {
+                        self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
+                    }
                     self.trap.goto_next();
                     self.handle_logic_phi(vm, output);
                     self.handle_if_else_phi(vm, output);
@@ -741,6 +744,7 @@ impl ShaderFnCompiler {
                                 key: id,
                                 shader_name,
                                 ty: pod_ty,
+                                table_const: None,
                             });
                             // Also add to IO list
                             if !output.io.iter().any(|io| {
@@ -999,6 +1003,84 @@ impl ShaderFnCompiler {
 
         // Final fallback
         unique_name
+    }
+
+    /// Const-table mode: a float literal whose source token carries a
+    /// `/** name … */` value annotation is lifted into the shader's constant
+    /// table — registered as one more scope uniform (`ct<n>`) and read from
+    /// the scope-uniform buffer — so a runtime patch of that slot changes
+    /// the look with no recompile and no source edit. Returns false (fold as
+    /// usual) for anything else: unannotated literals, and int literals,
+    /// which may be loop bounds or array indices a uniform cannot replace.
+    fn try_push_table_const(
+        &mut self,
+        vm: &ScriptVm,
+        output: &mut ShaderOutput,
+        value: ScriptValue,
+    ) -> bool {
+        let Some(v) = value.as_f64() else {
+            return false;
+        };
+        let ip = self.trap.ip;
+        let doc = {
+            let bodies = vm.bx.code.bodies.borrow();
+            let Some(body) = bodies.get(ip.body as usize) else {
+                return false;
+            };
+            let Some(Some(tok)) = body.parser.source_map.get(ip.index as usize) else {
+                return false;
+            };
+            match crate::docs::value_name_at(&body.tokenizer, *tok) {
+                Some(doc) => doc,
+                None => return false,
+            }
+        };
+        let index = output.table_consts.len();
+        // `ct<n>` never collides with a scope value's field name in practice;
+        // step past one if it does.
+        let mut n = index;
+        let shader_name = loop {
+            let text = format!("ct{}", n);
+            let name = LiveId::from_str_with_lut(&text).unwrap_or_else(|_| LiveId::from_str(&text));
+            if !output.io.iter().any(|io| io.name == name) {
+                break name;
+            }
+            n += 1000;
+        };
+        let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+        output.table_consts.push(ShaderTableConst {
+            shader_name,
+            doc,
+            value: v,
+            ip,
+        });
+        output.scope_uniforms.push(ScopeUniformSource {
+            source_obj: ScriptObject::ZERO,
+            key: shader_name,
+            shader_name,
+            ty: pod_f32,
+            table_const: Some(index),
+        });
+        output.io.push(ShaderIo {
+            kind: ShaderIoKind::ScopeUniform,
+            name: shader_name,
+            ty: pod_f32,
+            buffer_index: None,
+        });
+        let mut s = self.stack.new_string();
+        let (_, prefix) = output
+            .backend
+            .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
+        match prefix {
+            ShaderIoPrefix::Prefix(prefix) => {
+                let io_name = output.backend.map_io_name(shader_name);
+                write!(s, "{}{}", prefix, io_name).ok()
+            }
+            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+        };
+        self.stack.push(self.trap.pass(), ShaderType::Pod(pod_f32), s);
+        true
     }
 
     fn push_immediate(

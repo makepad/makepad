@@ -556,6 +556,151 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         },
     );
 
+    // Test seam for the constant table: compile a draw shader for a named
+    // backend with the table on or off and return the emitted source (the
+    // scope-uniform declaration plus every function body), so a test can
+    // assert exactly what the literal became.
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(test_compile_draw_source),
+        script_args!(io_self = NIL, backend = NIL, const_table = NIL),
+        |vm, args| {
+            let io_self = script_value!(vm, args.io_self);
+            let backend_val = script_value!(vm, args.backend);
+            let const_table = script_value!(vm, args.const_table)
+                .as_bool()
+                .unwrap_or(false);
+            let backend_name = vm
+                .bx
+                .heap
+                .string_with(backend_val, |_heap, s| s.to_string())
+                .unwrap_or_default();
+            let backend = match backend_name.as_str() {
+                "metal" => ShaderBackend::Metal,
+                "hlsl" => ShaderBackend::Hlsl,
+                "glsl" => ShaderBackend::Glsl,
+                "wgsl" => ShaderBackend::Wgsl,
+                other => {
+                    return format!("unknown backend {}", other).script_to_value(vm);
+                }
+            };
+            let Some(io_self) = io_self.as_object() else {
+                return "no shader object".to_string().script_to_value(vm);
+            };
+            let mut output = ShaderOutput::default();
+            output.backend = backend;
+            output.use_vulkan = false;
+            output.const_table = const_table;
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+            for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(io_self, entry.into(), vm.bx.threads.cur_ref().trap.pass())
+                    .as_object()
+                {
+                    output.mode = mode;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        entry,
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+            }
+            if output.has_errors {
+                return format!("ERRORS: {}", output.error_report()).script_to_value(vm);
+            }
+            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+            let mut out = String::new();
+            match backend {
+                ShaderBackend::Metal => {
+                    output.create_struct_defs(vm, &mut out);
+                    output.metal_create_scope_uniform_struct(vm, &mut out);
+                }
+                ShaderBackend::Hlsl => {
+                    output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
+                }
+                ShaderBackend::Glsl => {
+                    let mut shared_defs = String::new();
+                    output.create_struct_defs(vm, &mut shared_defs);
+                    output.glsl_create_fragment_shader(vm, &shared_defs, &mut out);
+                }
+                ShaderBackend::Wgsl => {
+                    match crate::shader_wgsl::compile_draw_shader_wgsl_source(vm, io_self, &output, false) {
+                        Ok(src) => out.push_str(&src.wgsl),
+                        Err(e) => return format!("ERRORS: {}", e).script_to_value(vm),
+                    }
+                }
+                _ => {}
+            }
+            for f in &output.functions {
+                out.push_str(&f.out);
+                out.push('\n');
+            }
+            out.script_to_value(vm)
+        },
+    );
+
+    // Test seam: the constant table a draw shader compiles to (Metal, table
+    // on), one line per entry: `name|doc|value|file:line:col`.
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(test_compile_draw_const_table),
+        script_args!(io_self = NIL),
+        |vm, args| {
+            let io_self = script_value!(vm, args.io_self);
+            let Some(io_self) = io_self.as_object() else {
+                return "no shader object".to_string().script_to_value(vm);
+            };
+            let mut output = ShaderOutput::default();
+            output.backend = ShaderBackend::Metal;
+            output.use_vulkan = false;
+            output.const_table = true;
+            output.pre_collect_rust_instance_io(vm, io_self);
+            output.pre_collect_shader_io(vm, io_self);
+            for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(io_self, entry.into(), vm.bx.threads.cur_ref().trap.pass())
+                    .as_object()
+                {
+                    output.mode = mode;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        entry,
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+            }
+            if output.has_errors {
+                return format!("ERRORS: {}", output.error_report()).script_to_value(vm);
+            }
+            let mut out = String::new();
+            for tc in &output.table_consts {
+                let loc = vm
+                    .bx
+                    .code
+                    .ip_to_loc(tc.ip)
+                    .map(|l| format!("{}:{}:{}", l.file, l.line, l.col))
+                    .unwrap_or_default();
+                out.push_str(&format!("{}|{}|{}|{}\n", tc.shader_name, tc.doc, tc.value, loc));
+            }
+            out.script_to_value(vm)
+        },
+    );
+
     native.add_method(
         heap,
         shader,

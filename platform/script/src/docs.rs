@@ -336,6 +336,30 @@ pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> 
         .collect()
 }
 
+/// The value-position annotation naming the literal at `token`, if any:
+/// a doc whose next token is that literal, or a `-` directly before it
+/// (`/**x*/ -0.5` names the `0.5`). The shader compiler asks this per
+/// immediate when it lifts annotated literals into its constant table.
+pub fn value_name_at(tokenizer: &ScriptTokenizer, token: u32) -> Option<String> {
+    let toks = &tokenizer.tokens;
+    if !toks.get(token as usize).is_some_and(|tp| is_value_token(&tp.token)) {
+        return None;
+    }
+    tokenizer.docs.iter().find_map(|d| {
+        if d.next_token == token {
+            return Some(clean_block_text(&d.text));
+        }
+        if d.next_token + 1 == token
+            && toks.get(d.next_token as usize).is_some_and(|tp| {
+                matches!(tp.token, ScriptToken::Operator(id) if id == id!(-))
+            })
+        {
+            return Some(clean_block_text(&d.text));
+        }
+        None
+    })
+}
+
 impl ScriptCode {
     /// The `/**name*/` value-position annotations of one body.
     pub fn resolve_body_value_names(&self, body_index: u16) -> Vec<ScriptValueName> {

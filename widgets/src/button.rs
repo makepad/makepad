@@ -180,7 +180,7 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_fill = vec2(
                         self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                         self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
@@ -200,7 +200,7 @@ script_mod! {
                 let mut color_stroke_disabled = self.border_color_disabled
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_border = vec2(
                         self.pos.x + dither
                         self.pos.y + dither

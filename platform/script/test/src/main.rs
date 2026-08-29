@@ -5159,6 +5159,112 @@ pub fn main() {
             );
         }
 
+        // 2b. The constant table: a `/** name … */`-annotated float literal in
+        // a fn body compiles to a scope-uniform read (`ct0`) on EVERY backend
+        // when the table is on, folds to the literal when it is off, and an
+        // unannotated or int literal always folds. The table lists the entry
+        // with its doc and the literal's exact source line.
+        {
+            let base = r#"
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let sh = #(0){
+            vertex_pos: shader.vertex_position(vec4f)
+            fb0: shader.fragment_output(0, vec4f)
+            vertex: fn() {
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }
+            fragment: fn() {
+                let radius = /** corner radius 0..24 step 0.5 */ 4.125
+                let plain = 3.375
+                let count = /** count */ 7
+                let steps = count + 1
+                let off = /** offset */ -1.5
+                self.fb0 = vec4(radius + plain, off, 0.0, 1.0)
+            }
+        }
+"#;
+            let literal_line = base
+                .lines()
+                .position(|l| l.contains("4.125"))
+                .expect("annotated literal line")
+                + 1;
+            for backend in ["metal", "hlsl", "glsl", "wgsl"] {
+                let on = eval_to_string(
+                    vm,
+                    format!("{base}\n        shader.test_compile_draw_source(sh, \"{backend}\", true)"),
+                );
+                assert!(
+                    !on.starts_with("ERRORS"),
+                    "{backend}: const-table compile reported: {on}"
+                );
+                assert!(
+                    on.contains("ct0"),
+                    "{backend}: annotated literal must read the table slot ct0, got:\n{on}"
+                );
+                assert!(
+                    !on.contains("4.125"),
+                    "{backend}: annotated literal must not be folded with the table on:\n{on}"
+                );
+                assert!(
+                    on.contains("3.375"),
+                    "{backend}: an unannotated literal still folds with the table on:\n{on}"
+                );
+                let off = eval_to_string(
+                    vm,
+                    format!("{base}\n        shader.test_compile_draw_source(sh, \"{backend}\", false)"),
+                );
+                assert!(
+                    off.contains("4.125") && !off.contains("ct0"),
+                    "{backend}: table off must fold the annotated literal and emit no table read:\n{off}"
+                );
+            }
+            let table = eval_to_string(
+                vm,
+                format!("{base}\n        shader.test_compile_draw_const_table(sh)"),
+            );
+            let lines: Vec<&str> = table.lines().collect();
+            assert_eq!(
+                lines.len(),
+                2,
+                "two float literals are annotated (the int one folds), got:\n{table}"
+            );
+            assert!(
+                lines[0].starts_with("ct0|corner radius 0..24 step 0.5|4.125|shader_capacity_gen.rs:"),
+                "first table entry: {}",
+                lines[0]
+            );
+            let entry_line = |entry: &str| -> usize {
+                entry
+                    .rsplit(':')
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .expect("entry has file:line:col")
+            };
+            // A ScriptMod's `line` is the line the macro sits on; script rows
+            // count from the next line, so the literal's row 13 reports as 14.
+            assert_eq!(
+                entry_line(lines[0]),
+                literal_line + 1,
+                "table entry names the literal's source line"
+            );
+            assert!(
+                lines[1].starts_with("ct1|offset|"),
+                "second table entry is the negated literal: {}",
+                lines[1]
+            );
+            assert_eq!(
+                entry_line(lines[1]),
+                entry_line(lines[0]) + 4,
+                "the second entry sits four rows below the first"
+            );
+            let hint = makepad_script::docs::parse_doc_hint("corner radius 0..24 step 0.5");
+            assert_eq!(hint.name, "corner radius");
+            assert_eq!((hint.min, hint.max, hint.step), (Some(0.0), Some(24.0), Some(0.5)));
+        }
+
         // 3. The emitted-size ceiling (MAX_EMITTED_BYTES) must also REPORT.
         // The overflow error was queued on a nested fn compiler's trap that
         // nobody ever drained — has_errors with zero diagnostics, the
