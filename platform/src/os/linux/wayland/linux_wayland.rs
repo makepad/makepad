@@ -786,15 +786,10 @@ impl WaylandCx {
                     {
                         if window.window_geom.is_fullscreen {
                             crate::error!(
-                                "ResizeWindow ignored: a maximized or fullscreen Wayland toplevel must keep the \n                                 size the compositor configured."
+                                "ResizeWindow ignored: a maximized or fullscreen Wayland toplevel \
+                                 must keep the size the compositor configured."
                             );
-                        } else if !(size.x >= 1.0 && size.y >= 1.0) {
-                            crate::error!(
-                                "ResizeWindow ignored: {}x{} is not a usable surface extent.",
-                                size.x,
-                                size.y
-                            );
-                        } else {
+                        } else if let Some(size) = crate::screen::sanitize_resize(size) {
                             // Wayland surface coordinates are already logical points, so unlike
                             // X11 and Win32 -- which scale the request into device pixels -- the
                             // requested size is the surface extent as-is.
@@ -809,6 +804,12 @@ impl WaylandCx {
                             if let Some(main_pass_id) = cx_window.main_pass_id {
                                 cx.redraw_pass_and_child_passes(main_pass_id);
                             }
+                        } else {
+                            crate::error!(
+                                "ResizeWindow ignored: {}x{} is not a usable surface extent.",
+                                size.x,
+                                size.y
+                            );
                         }
                     }
                 }

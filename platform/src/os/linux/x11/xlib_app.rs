@@ -507,21 +507,29 @@ pub struct XlibApp {
 /// process is never the proportionate response.
 ///
 /// The return value is ignored by Xlib; returning 0 is the convention.
+///
+/// Reporting is wrapped because this is an `extern "C"` frame: a panic cannot unwind out of one
+/// and aborts the process instead. Logging panics if stdout is a closed pipe — `app | head` is
+/// enough — which would make an error here fatal again, and more abruptly than the `exit(1)` this
+/// handler exists to prevent.
 unsafe extern "C" fn x11_error_handler(
     _display: *mut x11_sys::Display,
     event: *mut x11_sys::XErrorEvent,
 ) -> c_int {
-    if let Some(event) = unsafe { event.as_ref() } {
-        crate::error!(
-            "X11 protocol error: error_code={} request_code={} minor_code={} resource=0x{:x}",
-            event.error_code,
-            event.request_code,
-            event.minor_code,
-            event.resourceid,
-        );
-    } else {
-        crate::error!("X11 protocol error with no event record");
-    }
+    let event = unsafe { event.as_ref() }.copied();
+    let _ = std::panic::catch_unwind(|| {
+        if let Some(event) = event {
+            crate::error!(
+                "X11 protocol error: error_code={} request_code={} minor_code={} resource=0x{:x}",
+                event.error_code,
+                event.request_code,
+                event.minor_code,
+                event.resourceid,
+            );
+        } else {
+            crate::error!("X11 protocol error with no event record");
+        }
+    });
     0
 }
 

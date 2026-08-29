@@ -4,7 +4,7 @@ use {
         area::Area, cursor::MouseCursor, event::*,
         makepad_math::{dvec2, Rect, Vec2d},
         os::linux::x11::x11_screen::x11_screens,
-        screen::fit_window_rect_to_screens,
+        screen::{fit_window_rect_to_screens, sanitize_resize},
         window::WindowId,
     },
     std::{
@@ -839,6 +839,17 @@ impl XlibWindow {
     /// pretending to a precision it does not have.
     pub fn set_inner_size(&self, size: Vec2d) {
         let Some(window) = self.window else {
+            return;
+        };
+        // A request that carries no usable size is refused rather than clamped: flooring a zero
+        // or a negative to the CARD16 minimum would produce a one-pixel window, which is a worse
+        // answer than leaving the window alone. Matches what the Wayland backend does.
+        let Some(size) = sanitize_resize(size) else {
+            crate::error!(
+                "ResizeWindow ignored: {}x{} is not a usable window extent.",
+                size.x,
+                size.y
+            );
             return;
         };
         unsafe {
