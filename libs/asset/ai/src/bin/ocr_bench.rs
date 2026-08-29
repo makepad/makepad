@@ -4,7 +4,7 @@
 //! ```text
 //! ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir>
 //!               [--limit N] [--resume] [--prompt text|layout|<custom>] [--prompt-file <path>]
-//!               [--max-tokens N] [--retries N]
+//!               [--max-tokens N] [--retries N] [--pipeline]
 //! ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]
 //! ```
 //!
@@ -16,8 +16,21 @@
 //! `<out>/<class>/<stem>.html`, appends a row to `<out>/results.tsv`
 //! (sizes, image/output tokens, attempts, looped, encode/prefill/decode
 //! seconds) and ends with the aggregate: pages, wall seconds per page,
-//! pages per second, decode tokens per second. `--resume` skips pages whose
-//! HTML already exists, so a long batch can be run in bounded slices.
+//! pages per second, decode tokens per second, and whether `--pipeline` was
+//! on. `--resume` skips pages whose HTML already exists, so a long batch
+//! can be run in bounded slices.
+//!
+//! `--pipeline` (off by default) runs the batch through
+//! `OcrBackend::ocr_pages` instead of one `ocr_page` call per page: the
+//! next page's CPU fit/preprocess and vision-tower encode overlap the
+//! current page's language-session prefill/decode, one page of lookahead,
+//! so wall time per page approaches max(encode, prefill+decode) instead of
+//! their sum. Every other part of `run` — the HTML written, the
+//! results.tsv columns, the aggregate line — is unchanged; with the same
+//! model and a greedy first attempt, a page's HTML is expected to be
+//! byte-identical with and without `--pipeline` (same fit, same encode,
+//! same prefill/decode/retry sequence, same sampler seeds — the pipeline
+//! only changes which thread and when, never the computation).
 //!
 //! `score` ranks transcriptions: for every page that has a `.ocr.txt`
 //! reference (the corpus' own OCR — a machine transcription too, so this is
@@ -46,7 +59,7 @@ fn main() {
         Some("score") => score(&args[1..]),
         _ => {
             eprintln!(
-                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]"
+                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N] [--pipeline]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]"
             );
             2
         }
@@ -186,6 +199,13 @@ fn run(args: &[String]) -> i32 {
         (true, Ok(existing)) if existing.starts_with(header) => existing,
         _ => String::from(header),
     };
+    let pipeline = has_flag(args, "--pipeline");
+
+    // Started before any page work (decode included) in either mode, so
+    // the two are timed over the same span: per-page disk decode was never
+    // part of what `--pipeline` overlaps (that's the tower's fit/encode vs
+    // the session's prefill/decode), so it stays inside the clock either
+    // way rather than quietly dropping out of the pipelined total.
     let t_all = Instant::now();
     let mut done = 0usize;
     let mut sum_total = 0.0f64;
@@ -194,30 +214,21 @@ fn run(args: &[String]) -> i32 {
     let mut sum_image_tokens = 0usize;
     let mut looped_pages = 0usize;
     let mut retried_pages = 0usize;
-    for (index, (_, path, class, stem)) in decoded.iter().enumerate() {
-        let bytes = std::fs::read(path).expect("read page");
-        let (rgb, w, h) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
-        let t_page = Instant::now();
-        let page = match backend.ocr_page(
-            OcrRequest {
-                prompt: prompt.clone(),
-                rgb,
-                width: w,
-                height: h,
-                max_new_tokens,
-                retries,
-            },
-            &CancelToken::new(),
-            &mut |_, _| {},
-            &mut |_| {},
-        ) {
-            Ok(page) => page,
-            Err(e) => {
-                eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display());
-                continue;
-            }
-        };
-        let total_s = t_page.elapsed().as_secs_f64();
+
+    // Shared by both paths below: write the page's HTML, append its
+    // results.tsv row, and fold it into the running aggregate — the exact
+    // same bookkeeping over the exact same `OcrPage` shape either way.
+    // Only `total_s` is measured differently at the two call sites (see
+    // each branch), and only the encode/prefill/decode numbers themselves
+    // can differ if the pipeline restructure changed anything.
+    let mut record_page = |index: usize,
+                            path: &Path,
+                            class: &str,
+                            stem: &str,
+                            w: usize,
+                            h: usize,
+                            page: makepad_asset_ai::ocr_backend::OcrPage,
+                            total_s: f64| {
         let class_dir = out_dir.join(class);
         let _ = std::fs::create_dir_all(&class_dir);
         let html_path = class_dir.join(format!("{stem}.html"));
@@ -269,19 +280,96 @@ fn run(args: &[String]) -> i32 {
             total_s,
             page.output_tokens as f64 / page.decode_s.max(1e-6)
         );
+    };
+
+    if pipeline {
+        eprintln!(
+            "[bench] --pipeline: tower fit/encode for page N+1 overlaps session prefill/decode for page N (lookahead 1)"
+        );
+        // Decoded from disk eagerly here (bench-only simplification —
+        // `OcrBackend::ocr_pages` itself accepts a lazy iterator; a batch
+        // this size, a few hundred MB of raw RGB8 at most, is fine to hold
+        // at once). `dims` carries each page's pre-fit (width, height) —
+        // `OcrPage` does not — for the results.tsv row.
+        let mut requests: Vec<OcrRequest> = Vec::with_capacity(decoded.len());
+        let mut dims: Vec<(usize, usize)> = Vec::with_capacity(decoded.len());
+        for (_, path, _, _) in &decoded {
+            let bytes = std::fs::read(path).expect("read page");
+            let (rgb, w, h) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
+            dims.push((w, h));
+            requests.push(OcrRequest {
+                prompt: prompt.clone(),
+                rgb,
+                width: w,
+                height: h,
+                max_new_tokens,
+                retries,
+            });
+        }
+        let cancel = CancelToken::new();
+        // Per-page `total_s` under pipelining: the gap since the previous
+        // page finished (or since the batch started, for page 0) — pages
+        // still sum to the batch wall time, same as the serial path's
+        // per-page elapsed does, but a value no longer tied to one page's
+        // own start (pages overlap, so there isn't a single one).
+        let mut last_done = Instant::now();
+        if let Err(e) = backend.ocr_pages(requests, &cancel, |index, result| {
+            let now = Instant::now();
+            let total_s = now.duration_since(last_done).as_secs_f64();
+            last_done = now;
+            let (_, path, class, stem) = &decoded[index];
+            let (w, h) = dims[index];
+            match result {
+                Ok(page) => record_page(index, path, class, stem, w, h, page, total_s),
+                Err(e) => eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display()),
+            }
+        }) {
+            eprintln!("run: pipeline failed: {e}");
+            return 1;
+        }
+    } else {
+        for (index, (_, path, class, stem)) in decoded.iter().enumerate() {
+            let bytes = std::fs::read(path).expect("read page");
+            let (rgb, w, h) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
+            let t_page = Instant::now();
+            let page = match backend.ocr_page(
+                OcrRequest {
+                    prompt: prompt.clone(),
+                    rgb,
+                    width: w,
+                    height: h,
+                    max_new_tokens,
+                    retries,
+                },
+                &CancelToken::new(),
+                &mut |_, _| {},
+                &mut |_| {},
+            ) {
+                Ok(page) => page,
+                Err(e) => {
+                    eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display());
+                    continue;
+                }
+            };
+            let total_s = t_page.elapsed().as_secs_f64();
+            record_page(index, path, class, stem, w, h, page, total_s);
+        }
     }
+    drop(record_page);
+
     let wall = t_all.elapsed().as_secs_f64();
     if done == 0 {
         eprintln!("[bench] no page transcribed");
         return 1;
     }
     println!(
-        "pages {done}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}",
+        "pages {done}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}  pipeline={}",
         wall / done as f64,
         done as f64 / wall,
         sum_out_tokens as f64 / sum_decode.max(1e-6),
         sum_image_tokens as f64 / done as f64,
         sum_out_tokens as f64 / done as f64,
+        if pipeline { "on" } else { "off" },
     );
     let _ = sum_total;
     println!("results: {}", results_path.display());
