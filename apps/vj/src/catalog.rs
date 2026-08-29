@@ -49,10 +49,6 @@ pub const INTERMEDIATE_TAG: &str = "intermediate";
 /// generated songs in the same bucket. The importer's constant is the
 /// authority so the two can never drift apart.
 pub const MUSIC_TAG: &str = makepad_asset_importer::music_import::MUSIC_TAG;
-/// Catalog tag the classic game imports stamp on every sound effect. Note
-/// it is a TAG, not a category — no importer writes an `sfx` category, so
-/// a category-based sfx filter lists nothing at all.
-pub const SFX_TAG: &str = "sfx";
 
 /// The playable file a tile's manifest selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,6 +301,8 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     pub error: Option<String>,
     /// Raised by catalog events; the app refreshes on its debounce tick.
     pub refresh_wanted: bool,
+    /// See [`BrowseModel::event_touch`]: publishes hidden by the lane.
+    elsewhere: u32,
     /// Display order of the SETTLED body. Once an asset has a place here
     /// it keeps it until the next re-sort — the operator's hand is on a
     /// pad, and a grid that renumbers itself under that hand is a grid
@@ -340,29 +338,6 @@ impl<C: Clone> BrowseModel<C> {
     /// Character; the surface shows both.
     pub fn dance() -> BrowseModel<C> {
         Self::new_multi(vec![AssetKind::Mesh, AssetKind::Character], "")
-    }
-
-    /// The DJ deck explorer: every MUSIC-tagged audio asset in the store,
-    /// whatever its namespace — a generated song is as loadable as an
-    /// imported one. The classic-import sound effects (tagged [`SFX_TAG`])
-    /// stay on the SFX surface: they outnumber the music and sort ahead of
-    /// it by alias, so an unfiltered deck browser opens on pages of door
-    /// hinges and shotgun noises with the user's library six pages deep.
-    /// The tag narrowing rides BESIDE the default intermediate-artifact
-    /// exclusion (`tag` and `exclude` are separate wire fields).
-    pub fn music() -> BrowseModel<C> {
-        let mut model = Self::new(AssetKind::Audio, "");
-        model.tag = MUSIC_TAG.to_string();
-        model
-    }
-
-    /// The SFX surface: sound-effect-tagged audio. A TAG filter — the old
-    /// `sfx` CATEGORY filter matched nothing (no importer writes one), so
-    /// the surface listed an empty store.
-    pub fn sfx() -> BrowseModel<C> {
-        let mut model = Self::new(AssetKind::Audio, "");
-        model.tag = SFX_TAG.to_string();
-        model
     }
 
     /// Every kind that can land on A/B: video clips, stills, 3D, sprites
@@ -409,6 +384,9 @@ impl<C: Clone> BrowseModel<C> {
         self.kinds = kinds;
         self.tag = tag;
         self.exclude = exclude;
+        // The new lane re-queries below, so anything it was hiding is
+        // about to be listed: the backlog is spent, not carried.
+        self.elsewhere = 0;
         self.next_cursors = vec![None; self.kinds.len()];
         self.refresh()
     }
@@ -440,6 +418,7 @@ impl<C: Clone> BrowseModel<C> {
             resolve_width: MAX_RESOLVING,
             error: None,
             refresh_wanted: false,
+            elsewhere: 0,
             order: Vec::new(),
             stamps: HashMap::new(),
             pending: Vec::new(),
@@ -1030,12 +1009,31 @@ impl<C: Clone> BrowseModel<C> {
 
     /// A committed catalog event touched this surface's kind (or an unknown
     /// kind): schedule a debounced refresh.
+    /// A publish landed. The current LANE decides whether it belongs on
+    /// screen — but a publish this lane filters out is not nothing, and
+    /// pretending it is was the whole bug: a run would finish, its clip
+    /// would be in the catalog, and the operator watching an EFFECT lane
+    /// (which is where a VJ spends a set) saw absolutely nothing happen,
+    /// on any lane, forever — until they happened to click a video chip
+    /// and it re-queried from scratch.
+    ///
+    /// So: in-lane publishes refresh as before, and out-of-lane publishes
+    /// of kinds this surface CAN show are counted instead, for the surface
+    /// to say so. Nothing moves under the operator; they are just told.
     pub fn event_touch(&mut self, content_kind: Option<AssetKind>) {
         match content_kind {
             None => self.refresh_wanted = true,
             Some(k) if self.kinds.contains(&k) => self.refresh_wanted = true,
+            Some(k) if Self::visual_kinds().contains(&k) => {
+                self.elsewhere = self.elsewhere.saturating_add(1);
+            }
             Some(_) => {}
         }
+    }
+
+    /// Publishes this surface could show that its current lane hides.
+    pub fn elsewhere(&self) -> u32 {
+        self.elsewhere
     }
 }
 
@@ -1314,29 +1312,6 @@ mod tests {
         assert!(!kind_may_be_sheet(None));
     }
 
-    /// The DJ explorer asks the SERVER for music only, the SFX surface for
-    /// sound effects only, and BOTH keep the intermediate-artifact
-    /// exclusion — the tag narrowing and the exclude ride different wire
-    /// fields. This is the whole music/sfx separation: get it wrong and
-    /// the deck browser opens on pages of door hinges again.
-    #[test]
-    fn music_and_sfx_surfaces_narrow_by_tag_and_keep_the_exclusion() {
-        for (mut model, tag) in [
-            (BrowseModel::<u8>::music(), MUSIC_TAG),
-            (BrowseModel::<u8>::sfx(), SFX_TAG),
-        ] {
-            let cmds = model.refresh();
-            assert_eq!(cmds.len(), 1, "{tag}: one audio lane");
-            let CatCmd::SearchPage { query, .. } = &cmds[0] else {
-                panic!("{tag}: expected a search page");
-            };
-            assert_eq!(query.kind, Some(AssetKind::Audio));
-            assert_eq!(query.tag.as_deref(), Some(tag));
-            assert_eq!(query.category, None, "{tag}: narrowing is a TAG (no sfx category exists)");
-            assert_eq!(query.exclude_tag.as_deref(), Some(INTERMEDIATE_TAG));
-        }
-    }
-
     #[test]
     fn tiles_carry_the_lane_kind_when_the_server_omits_it() {
         let mut m = BrowseModel::<u8>::new_multi(
@@ -1383,6 +1358,20 @@ mod tests {
         ));
         assert!(!is_legacy_lump_sprite(doom, None, false));
         assert!(!is_legacy_lump_sprite(doom, Some("trooa1"), false));
+    }
+
+    #[test]
+    /// A publish the lane hides is COUNTED, not dropped — and clicking a
+    /// lane spends the count, because that lane re-queries.
+    fn a_publish_the_lane_hides_is_still_reported() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
+        m.event_touch(Some(AssetKind::Video));
+        assert!(!m.refresh_wanted, "a video does not belong on an effect lane");
+        assert_eq!(m.elsewhere(), 1, "but the operator is told it exists");
+        m.event_touch(Some(AssetKind::Audio));
+        assert_eq!(m.elsewhere(), 1, "audio is not this surface's business at all");
+        m.set_kinds(vec![AssetKind::Video]);
+        assert_eq!(m.elsewhere(), 0, "switching lanes re-queries and spends it");
     }
 
     #[test]

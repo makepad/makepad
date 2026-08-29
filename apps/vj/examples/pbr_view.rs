@@ -176,6 +176,8 @@ impl PbrProbe {
         self.statue = Some(ModelInstance {
             model: "probe".into(),
             transform: trs_yaw(vec3f(0.0, -min.y * scale, 0.0), 0.0, scale),
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
             part_poses: Vec::new(),

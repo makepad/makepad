@@ -271,17 +271,24 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
     if let Some(path) = job.lyrics_file.as_ref() {
         install_lyrics(path, &digest);
     }
-    // Arm the lyrics READ probe (never a bake: the whisper pass reads the
-    // vocals stem out of the span cache, and a fetched track never writes
-    // one). A store lyrics file has just landed in the cache, and a track
-    // this machine transcribed in an earlier session is in there too; both
-    // reach the deck through the one existing path.
+    // Arm the karaoke. A store lyrics file has just landed in the cache, and
+    // a track this machine transcribed in an earlier session is in there too;
+    // both reach the deck through the read probe.
+    //
+    // What this must NOT do is answer for the span cache without looking.
+    // Fetching stems skips separation, so it is true that this run wrote no
+    // spans — but an earlier session may have separated this very track, and
+    // then the whole vocals stem is on disk and the bake can read it. Saying
+    // "incomplete" on that ground alone is what stranded a fetched track on
+    // "waiting for separation" for good: the store had stems and no lyrics,
+    // no bake was ever armed, and the local separator was never asked either.
+    let frames = model_frames(&job.pcm) as u64;
     let _ = out.send(SideChannelMsg::Stems(StemsMsg::Coverage {
         deck: job.deck,
         gen: job.gen,
+        complete: crate::stems::cache_is_complete(&crate::stems::cache_dir(), &digest, frames),
         digest,
-        model_frames: model_frames(&job.pcm) as u64,
-        complete: false,
+        model_frames: frames,
     }));
 }
 

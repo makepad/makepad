@@ -77,7 +77,6 @@ use makepad_widgets::*;
 /// compiled into the effect_gallery example, whose crate root has no
 /// `wave_analysis` — the two must not drift.
 const WAVE_CURVE: f32 = 0.62;
-use std::sync::atomic::Ordering;
 
 /// Texture width: log-spaced FFT bins per spectrogram row, and points per
 /// waveform row.
