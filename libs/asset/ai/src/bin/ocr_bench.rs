@@ -7,6 +7,8 @@
 //!               [--max-tokens N] [--retries N] [--pipeline]
 //!               [--lanes N] [--batch N] [--lane-driver]
 //! ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]
+//! ocr-bench vision-parity --mmproj <mmproj.gguf> --pages <dir> [--limit N] [--tolerance R]
+//!                         [--keep-reference VAR,VAR]
 //! ```
 //!
 //! `run` walks `<dir>` for `.png` / `.jpg` / `.mov` pages (the layout the
@@ -74,6 +76,14 @@
 //! and inserted leaves, so for each page the neighbouring texts (±3) are
 //! tried and the one closest to the first candidate is used for every
 //! candidate; pages that needed an offset are reported.
+//!
+//! `vision-parity` is the gate for a vision-tower kernel change: it encodes
+//! one page per distinct patch grid twice in the same process — once with
+//! every fast CUDA kernel disabled, once with them on — and reports the
+//! relative RMS, largest absolute difference and cosine between the two sets
+//! of embeddings. No LLM is loaded; it measures the tower alone.
+//! `--keep-reference` leaves named kill switches set in the fast arm, which
+//! turns a total into an attribution: one kernel at a time carries the blame.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -84,9 +94,10 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("score") => score(&args[1..]),
+        Some("vision-parity") => vision_parity(&args[1..]),
         _ => {
             eprintln!(
-                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N] [--pipeline] [--lanes N] [--batch N] [--lane-driver]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]"
+                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N] [--pipeline] [--lanes N] [--batch N] [--lane-driver]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]\n  ocr-bench vision-parity --mmproj <mmproj.gguf> --pages <dir> [--limit N] [--tolerance R] [--keep-reference VAR,VAR]"
             );
             2
         }
@@ -558,6 +569,219 @@ impl Tally {
     }
 }
 
+// ------------------------------------------------------------ tower parity
+
+/// The kernel kill switches that put the CUDA vision tower back on the
+/// arithmetic every fast path replaced: the dot-product-per-element f16
+/// matmul instead of cuBLAS, and the stems-shaped attention kernel instead
+/// of the register-tiled one. Setting all of them is the reference; clearing
+/// them is what ships.
+const REFERENCE_KERNEL_ENV: &[&str] =
+    &["MKLLM_DISABLE_GEMM_F16", "MKLLM_DISABLE_ROFORMER_TILED"];
+
+/// Sets every reference switch, or clears all but `keep`.
+///
+/// `keep` is what turns one number into an attribution: leaving a switch set
+/// in the fast arm measures the tower with every kernel but that one
+/// replaced, so a failing total can be charged to the kernel that actually
+/// moved it rather than to the change as a whole.
+fn reference_kernels(on: bool, keep: &[String]) {
+    for var in REFERENCE_KERNEL_ENV {
+        if on || keep.iter().any(|k| k == var) {
+            std::env::set_var(var, "1");
+        } else {
+            std::env::remove_var(var);
+        }
+    }
+}
+
+/// Encodes each page twice in one process — once with the reference kernels,
+/// once with the fast ones — and reports how far apart the two towers land.
+///
+/// This is the gate a vision-tower kernel change has to pass. Measuring it
+/// inside one binary, on the real corpus, at the real patch grids, is the
+/// point: a remembered number from another build cannot tell you whether the
+/// arithmetic you just replaced still agrees with the arithmetic it replaced,
+/// and a synthetic image cannot tell you whether a real page's activations
+/// stay inside the range a narrower dtype can hold.
+///
+/// Two towers rather than one because the kernel choice is made when a graph
+/// is planned, and each tower caches its plan per patch grid; the switches
+/// are set immediately before every encode so a cache miss re-plans into the
+/// configuration that encode is supposed to be measuring.
+fn vision_parity(args: &[String]) -> i32 {
+    use makepad_ai_llm::{preprocess_rgb8, GgufFile, VisionConfig, VisionTower};
+    use makepad_asset_ai::ocr_backend::{page_fit, resample_rgb8, MAX_INPUT_PIXELS};
+    use makepad_asset_ai::vision_backend::decode_image_rgb8_within;
+
+    let Some(mmproj) = flag(args, "--mmproj") else {
+        eprintln!("vision-parity: --mmproj <mmproj.gguf> is required");
+        return 2;
+    };
+    let pages_dir = PathBuf::from(flag(args, "--pages").unwrap_or("local/ocr-bench/pages"));
+    let limit: usize = flag(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let tolerance: f64 = flag(args, "--tolerance").and_then(|v| v.parse().ok()).unwrap_or(2e-3);
+    // Kill switches to leave set in the fast arm, so one kernel at a time can
+    // be charged for the difference it makes.
+    let keep: Vec<String> = flag(args, "--keep-reference")
+        .map(|list| list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    for var in &keep {
+        if !REFERENCE_KERNEL_ENV.contains(&var.as_str()) {
+            eprintln!("vision-parity: --keep-reference {var} is not one of {REFERENCE_KERNEL_ENV:?}");
+            return 2;
+        }
+    }
+    if !keep.is_empty() {
+        println!("keeping reference kernels: {}", keep.join(","));
+    }
+
+    let file = match GgufFile::open(mmproj) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("vision-parity: open mmproj {mmproj}: {e:?}");
+            return 1;
+        }
+    };
+    let config = match VisionConfig::from_gguf(&file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("vision-parity: mmproj vision config: {e:?}");
+            return 1;
+        }
+    };
+    drop(file);
+
+    let mut pages = collect_pages(&pages_dir);
+    if pages.is_empty() {
+        eprintln!("vision-parity: no page images under {}", pages_dir.display());
+        return 1;
+    }
+    // Largest pages first: the shapes a kernel change is most likely to move
+    // are the ones a short run should not skip.
+    let mut decoded: Vec<((usize, usize), PathBuf, String)> = Vec::new();
+    for (path, _, stem) in pages.drain(..) {
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if let Ok((_, w, h)) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS) {
+            decoded.push((page_fit(w, h, 32), path, stem));
+        }
+    }
+    decoded.sort_by(|a, b| (b.0).cmp(&a.0).then(a.1.cmp(&b.1)));
+    // One page per distinct fitted size: two encodes of the same grid drive the
+    // same graph, so extra pages of a size already covered buy nothing.
+    let mut seen = BTreeMap::new();
+    decoded.retain(|(fit, _, _)| seen.insert(*fit, ()).is_none());
+    decoded.truncate(limit);
+
+    let mut towers = Vec::new();
+    for reference in [true, false] {
+        reference_kernels(reference, &keep);
+        match VisionTower::load(mmproj) {
+            Ok(t) => towers.push(t),
+            Err(e) => {
+                eprintln!("vision-parity: load vision tower: {e:?}");
+                return 1;
+            }
+        }
+    }
+    let (fast_tower, ref_tower) = {
+        let mut it = towers.drain(..);
+        let r = it.next().unwrap();
+        (it.next().unwrap(), r)
+    };
+    let mut ref_tower = ref_tower;
+    let mut fast_tower = fast_tower;
+
+    println!(
+        "{:<44} {:>7} {:>9} {:>11} {:>11} {:>12}",
+        "page", "tokens", "grid", "rel_rms", "max_abs", "cosine"
+    );
+    let mut worst = 0f64;
+    let mut shapes = 0usize;
+    for (fit, path, stem) in &decoded {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let Ok((rgb, w, h)) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS) else { continue };
+        let (fw, fh) = *fit;
+        let fitted = resample_rgb8(&rgb, w, h, fw, fh);
+        let mut fitted_config = config.clone();
+        fitted_config.min_pixels = 0;
+        fitted_config.max_pixels = usize::MAX / 4;
+        let prepared = match preprocess_rgb8(&fitted, fw, fh, &fitted_config) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("vision-parity: preprocess {}: {e:?}", path.display());
+                continue;
+            }
+        };
+        drop(fitted);
+
+        reference_kernels(true, &keep);
+        let reference = match ref_tower.encode(&prepared) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("vision-parity: reference encode {}: {e:?}", path.display());
+                return 1;
+            }
+        };
+        reference_kernels(false, &keep);
+        let fast = match fast_tower.encode(&prepared) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("vision-parity: fast encode {}: {e:?}", path.display());
+                return 1;
+            }
+        };
+        if reference.len() != fast.len() {
+            eprintln!(
+                "vision-parity: {} length mismatch {} vs {}",
+                path.display(),
+                reference.len(),
+                fast.len()
+            );
+            return 1;
+        }
+
+        let mut sq_diff = 0f64;
+        let mut sq_ref = 0f64;
+        let mut max_abs = 0f64;
+        let mut dot = 0f64;
+        let mut sq_fast = 0f64;
+        for (&r, &f) in reference.iter().zip(&fast) {
+            let (r, f) = (r as f64, f as f64);
+            let d = r - f;
+            sq_diff += d * d;
+            sq_ref += r * r;
+            sq_fast += f * f;
+            dot += r * f;
+            max_abs = max_abs.max(d.abs());
+        }
+        let rel_rms = (sq_diff / sq_ref.max(f64::MIN_POSITIVE)).sqrt();
+        let cosine = dot / (sq_ref.sqrt() * sq_fast.sqrt()).max(f64::MIN_POSITIVE);
+        worst = worst.max(rel_rms);
+        shapes += 1;
+        println!(
+            "{:<44} {:>7} {:>9} {:>11.3e} {:>11.3e} {:>12.8}",
+            stem.chars().take(44).collect::<String>(),
+            prepared.n_tokens(),
+            format!("{}x{}", prepared.grid_w, prepared.grid_h),
+            rel_rms,
+            max_abs,
+            cosine
+        );
+    }
+    if shapes == 0 {
+        eprintln!("vision-parity: no page encoded");
+        return 1;
+    }
+    println!("shapes {shapes}  worst rel_rms {worst:.3e}  tolerance {tolerance:.3e}");
+    if worst > tolerance {
+        println!("PARITY-FAIL");
+        return 1;
+    }
+    println!("PARITY-OK");
+    0
+}
+
 // ---------------------------------------------------------------- scoring
 
 /// Drops Chandra's picture blocks — `<div ... data-label="Image">` (and
@@ -782,17 +1006,50 @@ fn score(args: &[String]) -> i32 {
         }
     }
     let mut realigned: Vec<String> = Vec::new();
-    if refs.is_empty() {
-        eprintln!("score: no .ocr.txt references beside the pages in {}", pages_dir.display());
-        return 1;
+    // A corpus without exported `.ocr.txt` references can still answer the
+    // question two runs of the same model ask of each other: how far apart are
+    // they? That is the gate a kernel change has to pass — the reference is
+    // the other candidate, not the site's transcription — so fall through to
+    // the pairwise section instead of refusing.
+    let compare_only = refs.is_empty();
+    if compare_only {
+        if candidates.len() < 2 {
+            eprintln!(
+                "score: no .ocr.txt references beside the pages in {} and only one candidate — \
+                 nothing to compare against",
+                pages_dir.display()
+            );
+            return 1;
+        }
+        for (_, class, stem) in &pages {
+            if candidates
+                .iter()
+                .any(|c| c.join(class).join(format!("{stem}.html")).is_file())
+            {
+                refs.insert((class.clone(), stem.clone()), String::new());
+            }
+        }
+        if refs.is_empty() {
+            eprintln!("score: no candidate holds an HTML for any page under {}", pages_dir.display());
+            return 1;
+        }
+        println!(
+            "no .ocr.txt references under {}: comparing {} candidates to each other over {} pages, \
+             {} normalisation",
+            pages_dir.display(),
+            candidates.len(),
+            refs.len(),
+            if loose { "loose" } else { "strict" }
+        );
+    } else {
+        println!(
+            "scoring {} pages with references, {} candidate(s), {} normalisation",
+            refs.len(),
+            candidates.len(),
+            if loose { "loose" } else { "strict" }
+        );
+        println!("(distance to the corpus' own OCR — a machine reference — lower is closer, not necessarily truer)");
     }
-    println!(
-        "scoring {} pages with references, {} candidate(s), {} normalisation",
-        refs.len(),
-        candidates.len(),
-        if loose { "loose" } else { "strict" }
-    );
-    println!("(distance to the corpus' own OCR — a machine reference — lower is closer, not necessarily truer)");
 
     // per candidate: per class + overall; and the per-page rows.
     let mut per_class: Vec<BTreeMap<String, Agg>> =
@@ -800,7 +1057,10 @@ fn score(args: &[String]) -> i32 {
     let mut overall: Vec<Agg> = (0..candidates.len()).map(|_| Agg::default()).collect();
     let mut pair: BTreeMap<(usize, usize), Agg> = BTreeMap::new();
     let mut missing: Vec<usize> = vec![0; candidates.len()];
-    println!("\nper page (CER% strict-or-loose as chosen):");
+    println!(
+        "\nper page (CER% {}):",
+        if compare_only { "against the first candidate" } else { "strict-or-loose as chosen" }
+    );
     println!("{:<44} {:<14} {}", "page", "class", names.join("  "));
     for ((class, stem), reference) in &refs {
         let mut texts: Vec<Option<String>> = Vec::new();
@@ -838,6 +1098,14 @@ fn score(args: &[String]) -> i32 {
                 }
             }
         }
+        // Without a corpus reference the first candidate that has this page
+        // stands in for one, so the per-page column still says how far each
+        // run drifted from the run it is being compared with.
+        if compare_only {
+            if let Some(first) = texts.iter().flatten().next() {
+                reference = first.clone();
+            }
+        }
         let reference = &reference;
         let mut cells = Vec::new();
         for (ci, t) in texts.iter().enumerate() {
@@ -863,24 +1131,33 @@ fn score(args: &[String]) -> i32 {
     if !realigned.is_empty() {
         println!("\nre-aligned references ({}): {}", realigned.len(), realigned.join(", "));
     }
-    println!("\nper class:");
-    let classes: std::collections::BTreeSet<String> = refs.keys().map(|(c, _)| c.clone()).collect();
-    for class in &classes {
-        println!("  {class}");
-        for (ci, name) in names.iter().enumerate() {
-            if let Some(agg) = per_class[ci].get(class) {
-                println!("    {:<24} {}", name, agg.line());
+    if !compare_only {
+        println!("\nper class:");
+        let classes: std::collections::BTreeSet<String> = refs.keys().map(|(c, _)| c.clone()).collect();
+        for class in &classes {
+            println!("  {class}");
+            for (ci, name) in names.iter().enumerate() {
+                if let Some(agg) = per_class[ci].get(class) {
+                    println!("    {:<24} {}", name, agg.line());
+                }
             }
         }
-    }
-    println!("\noverall:");
-    for (ci, name) in names.iter().enumerate() {
-        println!(
-            "  {:<24} {}{}",
-            name,
-            overall[ci].line(),
-            if missing[ci] > 0 { format!("  (missing {})", missing[ci]) } else { String::new() }
-        );
+        println!("\noverall:");
+        for (ci, name) in names.iter().enumerate() {
+            println!(
+                "  {:<24} {}{}",
+                name,
+                overall[ci].line(),
+                if missing[ci] > 0 { format!("  (missing {})", missing[ci]) } else { String::new() }
+            );
+        }
+    } else if missing.iter().any(|m| *m > 0) {
+        println!("\nmissing pages:");
+        for (ci, name) in names.iter().enumerate() {
+            if missing[ci] > 0 {
+                println!("  {:<24} {}", name, missing[ci]);
+            }
+        }
     }
     if !pair.is_empty() {
         println!("\ncandidate vs candidate:");
