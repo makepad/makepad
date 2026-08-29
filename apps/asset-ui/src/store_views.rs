@@ -15,6 +15,7 @@ use crate::library::LibraryMeta;
 use crate::pipeline::{
     format_clock, format_music_duration, stage_display_name, CandidateSet, Pipeline, StageState,
 };
+use crate::runs_chip::{CardKey, RunCard};
 use makepad_asset_ai::fleet::BoxSnapshot;
 use makepad_asset_widgets::{AssetThumb, ThumbMedia};
 use makepad_widgets::*;
@@ -1545,6 +1546,14 @@ pub enum RowAction {
     ToggleStage(u64, usize),
     /// Put that stage's full input on the clipboard.
     CopyStage(u64, usize),
+    /// Unfold (or refold) one run card.
+    ToggleCard(CardKey),
+    /// Stop the spawned unit this card is, whichever engine holds it.
+    CancelCard(CardKey),
+    /// Put the card's whole fold on the clipboard.
+    CopyCard(CardKey),
+    /// Move a queued local run one place up its queue.
+    PromoteCard(CardKey),
 }
 
 /// One concurrent pipeline run as the Runs surface renders it.
@@ -1597,6 +1606,12 @@ pub enum StoreRow {
     },
     /// Honest big empty-state block for missing server data.
     Disconnected { title: String, detail: String },
+    /// ONE spawned unit of work in the one card grammar (`runs_chip.rs`) —
+    /// a store pipeline, a standalone store job, or a run of this app's own
+    /// engine. Boxed: a card is much larger than every other row, and a
+    /// `Vec<StoreRow>` should not pay for that on rows that are three
+    /// strings.
+    Card(Box<RunCard>),
 }
 
 /// PortalList renderer over a caller-provided `Vec<StoreRow>`. One widget
@@ -1752,6 +1767,11 @@ impl Widget for StoreListPanel {
                         item.label(cx, ids!(disc_detail)).set_text(cx, &detail);
                         item
                     }
+                    StoreRow::Card(card) => {
+                        let item = list.item(cx, item_id, id!(CardR));
+                        paint_card(cx, &item, &card);
+                        item
+                    }
                 };
                 item.draw_all_unscoped(cx);
             }
@@ -1783,6 +1803,76 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// The stage-strip chips a card body holds, and the label inside each. Eight
+/// is the store's own stage ceiling; a longer local chain folds its tail
+/// into the last chip rather than growing the row.
+const CARD_CHIPS: [&[LiveId]; 8] = [
+    ids!(cs0),
+    ids!(cs1),
+    ids!(cs2),
+    ids!(cs3),
+    ids!(cs4),
+    ids!(cs5),
+    ids!(cs6),
+    ids!(cs7),
+];
+const CARD_CHIP_LABELS: [&[LiveId]; 8] = [
+    ids!(cs0.cs_label),
+    ids!(cs1.cs_label),
+    ids!(cs2.cs_label),
+    ids!(cs3.cs_label),
+    ids!(cs4.cs_label),
+    ids!(cs5.cs_label),
+    ids!(cs6.cs_label),
+    ids!(cs7.cs_label),
+];
+
+/// Draw ONE card into one `RunCardBody` instance — the same function for a
+/// row of the RUNS panel's list and for a slot on the Create surface, which
+/// is what makes them the same card rather than two things that look alike.
+pub fn paint_card(cx: &mut Cx, item: &WidgetRef, card: &RunCard) {
+    item.label(cx, ids!(card_label)).set_text(cx, &card.label);
+    item.label(cx, ids!(card_excerpt)).set_text(cx, &card.excerpt);
+    item.label(cx, ids!(card_time)).set_text(cx, &card.elapsed);
+    item.label(cx, ids!(card_pct))
+        .set_text(cx, &format!("{}%", card.percent()));
+    item.label(cx, ids!(card_status)).set_text(cx, &card.status);
+    item.view(cx, ids!(card_dot))
+        .set_uniform(cx, live_id!(tone), &card.state.dot());
+    // THE bar — the only one on the card.
+    let bar = item.view(cx, ids!(card_bar));
+    bar.set_uniform(cx, live_id!(progress), &[card.fraction()]);
+    bar.set_uniform(cx, live_id!(color_fill), &card.state.fill());
+    item.button(cx, ids!(card_cancel))
+        .set_visible(cx, card.can_cancel);
+    item.button(cx, ids!(card_up))
+        .set_visible(cx, card.can_promote);
+    // The stage strip: one chip per stage, one style, never a bar. A single
+    // stage has no strip — a strip of one is decoration.
+    item.view(cx, ids!(card_strip))
+        .set_visible(cx, !card.stages.is_empty());
+    for (index, chip_id) in CARD_CHIPS.iter().enumerate() {
+        let chip = item.view(cx, *chip_id);
+        let Some(stage) = card.stages.get(index) else {
+            chip.set_visible(cx, false);
+            continue;
+        };
+        chip.set_visible(cx, true);
+        chip.set_uniform(cx, live_id!(tone), &stage.tone.color());
+        item.label(cx, CARD_CHIP_LABELS[index])
+            .set_text(cx, &stage.text);
+    }
+    // The fold only EXISTS while the card is open: a closed list stays a
+    // list, and nothing diagnostic is ever on the face of a card.
+    let fold = item.label(cx, ids!(card_fold));
+    fold.set_visible(cx, !card.fold.is_empty());
+    if !card.fold.is_empty() {
+        fold.set_text(cx, &card.fold);
+    }
+    item.button(cx, ids!(card_copy))
+        .set_visible(cx, !card.fold.is_empty());
+}
+
 pub fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
@@ -1795,7 +1885,7 @@ pub fn truncate(text: &str, max: usize) -> String {
 /// What one stage was given, as a person reads it. The prompt first and in
 /// FULL — it is the reason the row opens — then the parameters that rode
 /// with it.
-fn stage_detail(stage: &crate::pipeline::StageRun) -> String {
+pub(crate) fn stage_detail(stage: &crate::pipeline::StageRun) -> String {
     if stage.sent_prompt.is_empty() && stage.sent_params.is_empty() {
         return "not sent yet — this stage has not started".to_string();
     }
