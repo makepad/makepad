@@ -1973,6 +1973,26 @@ enum StructKind {
     NoEditor,
 }
 
+/// A history step's widget: the path when it round-trips, else the pinned
+/// selection when the step was recorded against it (paths through
+/// anonymous segments — `-`, list indices — never round-trip the finder,
+/// and every undo of a scrub on such a widget silently did nothing).
+fn resolve_widget_for_history(cx: &mut Cx, path: &str) -> Result<WidgetRef, String> {
+    if let Ok(w) = resolve_widget_by_path(cx, path) {
+        return Ok(w);
+    }
+    let pinned = session().lock().unwrap().pinned.clone();
+    if let Some(p) = pinned {
+        if p.path == path {
+            let w = cx.widget_tree().widget(WidgetUid(p.uid));
+            if !w.is_empty() {
+                return Ok(w);
+            }
+        }
+    }
+    Err(format!("no widget at {path}"))
+}
+
 /// The compiled shader a widget's draw layer is drawing with, read
 /// through the layer's live draw call (the primary material through the
 /// widget's own area).
@@ -6561,7 +6581,7 @@ impl Tweaker {
                 seq_start,
                 ..
             } => {
-                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                let Ok(widget) = resolve_widget_for_history(cx, path) else {
                     session().lock().unwrap().undo.push(step);
                     return;
                 };
@@ -6588,7 +6608,7 @@ impl Tweaker {
                 prop,
                 removed,
             } => {
-                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                let Ok(widget) = resolve_widget_for_history(cx, path) else {
                     session().lock().unwrap().undo.push(step);
                     return;
                 };
@@ -6622,7 +6642,7 @@ impl Tweaker {
             UndoStep::Value {
                 path, prop, new, ..
             } => {
-                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                let Ok(widget) = resolve_widget_for_history(cx, path) else {
                     session().lock().unwrap().redo.push(step);
                     return;
                 };
@@ -6661,7 +6681,7 @@ impl Tweaker {
                 prop,
                 removed,
             } => {
-                let Ok(widget) = resolve_widget_by_path(cx, path) else {
+                let Ok(widget) = resolve_widget_for_history(cx, path) else {
                     session().lock().unwrap().redo.push(step);
                     return;
                 };
