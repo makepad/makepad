@@ -88,6 +88,10 @@ name = "http_operations_http"
 path = "tests/http/operations_http.rs"
 
 [[test]]
+name = "http_pipelines_http"
+path = "tests/http/pipelines_http.rs"
+
+[[test]]
 name = "http_rooms_http"
 path = "tests/http/rooms_http.rs"
 
