@@ -1952,6 +1952,86 @@ struct CascadeLevel {
 /// `/** bevel border thickness 0..4 step 0.5 */` written inside the
 /// draw_bg literal. Closest level wins. Feeds tooltips and the
 /// hints->scrubber wiring (`parse_doc_hint`).
+/// A reflected value that is a structured type gets a typed editor rather
+/// than a `{..}`/`vec2f(..)` text dump. Determined from the dump text —
+/// no reflection change — so it stays a pure display-layer concern.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructKind {
+    None,
+    Vec2,
+    Vec3,
+    Vec4,
+    Inset,
+    Metrics,
+    SizeField,
+    /// Recognized as structured but with no editor yet (a big nested
+    /// struct like a full text_style): shown collapsed, never dumped.
+    NoEditor,
+}
+
+/// The number token after `key:` in a `{..}` dump (`null` reads as 0).
+fn struct_num(text: &str, key: &str) -> Option<f64> {
+    let at = text.find(&format!("{key}:"))?;
+    let rest = text[at + key.len() + 1..].trim_start();
+    let tok: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '}' && *c != ',')
+        .collect();
+    if tok == "null" {
+        return Some(0.0);
+    }
+    tok.parse().ok()
+}
+
+/// Classify a reflected value dump into a typed editor + its component
+/// values (empty for NoEditor). Only dumps reach here — scalars, colours
+/// and bools are already their own row kinds.
+fn parse_struct(value: &str) -> (StructKind, Vec<f64>) {
+    let v = value.trim();
+    for (pfx, k, n) in [
+        ("vec2f(", StructKind::Vec2, 2usize),
+        ("vec3f(", StructKind::Vec3, 3),
+        ("vec4f(", StructKind::Vec4, 4),
+    ] {
+        if let Some(inner) = v.strip_prefix(pfx).and_then(|s| s.strip_suffix(')')) {
+            let nums: Vec<f64> = inner.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            if nums.len() == n {
+                return (k, nums);
+            }
+        }
+    }
+    if v.starts_with('{') && v.ends_with('}') {
+        if v.contains("left:") && v.contains("bottom:") {
+            return (
+                StructKind::Inset,
+                vec![
+                    struct_num(v, "left").unwrap_or(0.0),
+                    struct_num(v, "top").unwrap_or(0.0),
+                    struct_num(v, "right").unwrap_or(0.0),
+                    struct_num(v, "bottom").unwrap_or(0.0),
+                ],
+            );
+        }
+        if v.contains("descender:") {
+            return (
+                StructKind::Metrics,
+                vec![
+                    struct_num(v, "descender").unwrap_or(0.0),
+                    struct_num(v, "line_gap").unwrap_or(0.0),
+                    struct_num(v, "line_scale").unwrap_or(1.0),
+                ],
+            );
+        }
+        if v.contains("min:") && v.contains("max:") {
+            // A Size: Fill carries a weight, Fit does not (a fixed number
+            // is a plain Num row, never a dump).
+            return (StructKind::SizeField, vec![if v.contains("weight:") { 1.0 } else { 0.0 }]);
+        }
+        return (StructKind::NoEditor, Vec::new());
+    }
+    (StructKind::None, Vec::new())
+}
+
 fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let source = widget.script_source();
@@ -3499,6 +3579,15 @@ struct RowBinding {
     field_uid: u64,
     /// The color row's swatch (hex box is `field_uid`).
     swatch_uid: u64,
+    /// A structured value's typed editor (vec/inset/metrics/size); None for
+    /// scalar rows.
+    struct_kind: StructKind,
+    /// Structured value's live component values (vec x/y/z/w, inset legs…).
+    comp_vals: Vec<f64>,
+    /// The uids of the component number fields, in component order.
+    comp_uids: Vec<u64>,
+    /// The uids of a SizeField's Fill/Fit buttons ([fill, fit]).
+    mode_uids: Vec<u64>,
 }
 
 /// One visible sidebar entry, with the rects the raw-pointer gestures
@@ -4450,6 +4539,50 @@ impl Tweaker {
                             }
                             origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
                         }
+                        VecRow := View {
+                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            vx := FabValueInput { width: 46 height: 18 }
+                            vy := FabValueInput { width: 46 height: 18 }
+                            vz_wrap := View { width: Fit height: Fit visible: false
+                                vz := FabValueInput { width: 46 height: 18 }
+                            }
+                            vw_wrap := View { width: Fit height: Fit visible: false
+                                vw := FabValueInput { width: 46 height: 18 }
+                            }
+                        }
+                        InsetRow := View {
+                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 3
+                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            il := FabValueInput { width: 40 height: 18 }
+                            it := FabValueInput { width: 40 height: 18 }
+                            ir := FabValueInput { width: 40 height: 18 }
+                            ib := FabValueInput { width: 40 height: 18 }
+                        }
+                        MetricsRow := View {
+                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            m0 := FabValueInput { width: 44 height: 18 }
+                            m1 := FabValueInput { width: 44 height: 18 }
+                            m2 := FabValueInput { width: 44 height: 18 }
+                        }
+                        SizeFieldRow := View {
+                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            sf_fill := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fill" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            sf_num := FabValueInput { width: 56 height: 18 }
+                        }
+                        NoEditorRow := View {
+                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
+                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            ne := FabLabelSmall { width: Fit text: "no editor yet" }
+                        }
                     }
                     }
                 }
@@ -4544,6 +4677,7 @@ impl Tweaker {
                 (RowKind::Text, value, false)
             };
             let section = classify_prop(&name, &display);
+            let (struct_kind, comp_vals) = parse_struct(&display);
             self.rows.push(RowBinding {
                 prop: name,
                 kind,
@@ -4555,6 +4689,10 @@ impl Tweaker {
                 original: None,
                 field_uid: 0,
                 swatch_uid: 0,
+                struct_kind,
+                comp_vals,
+                comp_uids: Vec::new(),
+                mode_uids: Vec::new(),
             });
         }
         // Session-original + resettable flags from the diff log.
@@ -4629,6 +4767,10 @@ impl Tweaker {
                     original: None,
                     field_uid: 0,
                     swatch_uid: 0,
+                    struct_kind: StructKind::None,
+                    comp_vals: Vec::new(),
+                    comp_uids: Vec::new(),
+                    mode_uids: Vec::new(),
                 });
             };
             let levels = cascade_levels(cx, &widget);
@@ -5266,12 +5408,19 @@ impl Tweaker {
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
-                    VisKind::Prop(index) => match self.rows[index].kind {
-                        RowKind::Num => live_id!(NumRow),
-                        RowKind::Bool => live_id!(BoolRow),
-                        RowKind::Color => live_id!(ColorRow),
-                        RowKind::Text => live_id!(TextRow),
-                        RowKind::Info => live_id!(InfoRow),
+                    VisKind::Prop(index) => match self.rows[index].struct_kind {
+                        StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
+                        StructKind::Inset => live_id!(InsetRow),
+                        StructKind::Metrics => live_id!(MetricsRow),
+                        StructKind::SizeField => live_id!(SizeFieldRow),
+                        StructKind::NoEditor => live_id!(NoEditorRow),
+                        StructKind::None => match self.rows[index].kind {
+                            RowKind::Num => live_id!(NumRow),
+                            RowKind::Bool => live_id!(BoolRow),
+                            RowKind::Color => live_id!(ColorRow),
+                            RowKind::Text => live_id!(TextRow),
+                            RowKind::Info => live_id!(InfoRow),
+                        },
                     },
                 };
                 let (item, existed) = list.item_with_existed(cx, entry_id, template);
@@ -5530,6 +5679,78 @@ impl Tweaker {
                                 None => origin.set_text(cx, ""),
                             }
                         }
+                        let sk = self.rows[index].struct_kind;
+                        if sk != StructKind::None {
+                            self.rows[index].comp_uids.clear();
+                            self.rows[index].mode_uids.clear();
+                            match sk {
+                                StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => {
+                                    let n = match sk {
+                                        StructKind::Vec2 => 2,
+                                        StructKind::Vec3 => 3,
+                                        _ => 4,
+                                    };
+                                    for (c, cid) in [live_id!(vx), live_id!(vy), live_id!(vz), live_id!(vw)]
+                                        .into_iter()
+                                        .enumerate()
+                                    {
+                                        let f = item.child(cid);
+                                        if c == 2 {
+                                            item.child(live_id!(vz_wrap)).set_visible(cx, c < n);
+                                        } else if c == 3 {
+                                            item.child(live_id!(vw_wrap)).set_visible(cx, c < n);
+                                        }
+                                        if c < n {
+                                            self.rows[index].comp_uids.push(f.widget_uid().0);
+                                            let v = self.rows[index].comp_vals.get(c).copied().unwrap_or(0.0);
+                                            let input_opt = f.borrow_mut::<FabValueInput>();
+                                            if let Some(mut input) = input_opt {
+                                                input.set_value(cx, v);
+                                            }
+                                        }
+                                    }
+                                }
+                                StructKind::Inset => {
+                                    for (c, cid) in [live_id!(il), live_id!(it), live_id!(ir), live_id!(ib)]
+                                        .into_iter()
+                                        .enumerate()
+                                    {
+                                        let f = item.child(cid);
+                                        self.rows[index].comp_uids.push(f.widget_uid().0);
+                                        let v = self.rows[index].comp_vals.get(c).copied().unwrap_or(0.0);
+                                        let input_opt = f.borrow_mut::<FabValueInput>();
+                                        if let Some(mut input) = input_opt {
+                                            input.set_value(cx, v);
+                                        }
+                                    }
+                                }
+                                StructKind::Metrics => {
+                                    for (c, cid) in [live_id!(m0), live_id!(m1), live_id!(m2)]
+                                        .into_iter()
+                                        .enumerate()
+                                    {
+                                        let f = item.child(cid);
+                                        self.rows[index].comp_uids.push(f.widget_uid().0);
+                                        let v = self.rows[index].comp_vals.get(c).copied().unwrap_or(0.0);
+                                        let input_opt = f.borrow_mut::<FabValueInput>();
+                                        if let Some(mut input) = input_opt {
+                                            input.set_value(cx, v);
+                                        }
+                                    }
+                                }
+                                StructKind::SizeField => {
+                                    self.rows[index]
+                                        .mode_uids
+                                        .push(item.child(live_id!(sf_fill)).widget_uid().0);
+                                    self.rows[index]
+                                        .mode_uids
+                                        .push(item.child(live_id!(sf_fit)).widget_uid().0);
+                                    let f = item.child(live_id!(sf_num));
+                                    self.rows[index].comp_uids.push(f.widget_uid().0);
+                                }
+                                StructKind::NoEditor | StructKind::None => {}
+                            }
+                        } else {
                         let field = item.child(live_id!(value));
                         self.rows[index].field_uid = field.widget_uid().0;
                         match self.rows[index].kind {
@@ -5600,6 +5821,7 @@ impl Tweaker {
                                 }
                                 drop(swatch);
                             }
+                        }
                         }
                     }
                 }
@@ -5817,6 +6039,43 @@ impl Tweaker {
             let _ = makepad_platform::shader_error::take();
         }
         self.redraw_sidebar(cx);
+    }
+
+    /// The apply chunk for a change to one component of a structured row:
+    /// a vec re-emits the whole vector (its components live together), an
+    /// inset/metrics writes just the touched dotted sub-key.
+    fn struct_component_chunk(&mut self, index: usize, comp: usize, v: f64) -> Option<String> {
+        let kind = self.rows.get(index)?.struct_kind;
+        let prop = self.rows.get(index)?.prop.clone();
+        match kind {
+            StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => {
+                if let Some(slot) = self.rows[index].comp_vals.get_mut(comp) {
+                    *slot = v;
+                }
+                let (n, pfx) = match kind {
+                    StructKind::Vec2 => (2, "vec2f"),
+                    StructKind::Vec3 => (3, "vec3f"),
+                    _ => (4, "vec4f"),
+                };
+                let vals: Vec<String> = self.rows[index]
+                    .comp_vals
+                    .iter()
+                    .take(n)
+                    .map(|x| fmt_f64(*x))
+                    .collect();
+                Some(format!("{prop}: {pfx}({})", vals.join(" ")))
+            }
+            StructKind::Inset => {
+                let key = ["left", "top", "right", "bottom"].get(comp)?;
+                Some(format!("{prop}.{key}: {}", fmt_f64(v)))
+            }
+            StructKind::Metrics => {
+                let key = ["descender", "line_gap", "line_scale"].get(comp)?;
+                Some(format!("{prop}.{key}: {}", fmt_f64(v)))
+            }
+            StructKind::SizeField => Some(format!("{prop}: {}", fmt_f64(v))),
+            StructKind::NoEditor | StructKind::None => None,
+        }
     }
 
     fn sidebar_apply(&mut self, cx: &mut Cx, sel: &TweakPick, chunk: &str) {
@@ -6378,6 +6637,39 @@ impl Tweaker {
             {
                 if let CheckBoxAction::Change(v) = widget_action.cast::<CheckBoxAction>() {
                     self.box_link[link_index] = v;
+                }
+                continue;
+            }
+            // A structured value's component field (vec x/y, inset leg,
+            // metric): apply the whole value (vec) or the touched dotted
+            // sub-key (inset/metrics), which the grammar accepts.
+            if let Some((index, comp)) = self.rows.iter().enumerate().find_map(|(i, b)| {
+                b.comp_uids.iter().position(|u| *u == action_uid).map(|c| (i, c))
+            }) {
+                match widget_action.cast::<FabValueInputAction>() {
+                    FabValueInputAction::Changed(v) => {
+                        if let Some(chunk) = self.struct_component_chunk(index, comp, v) {
+                            edits.push(Edit::Apply(chunk));
+                        }
+                    }
+                    FabValueInputAction::Ended(_) => edits.push(Edit::HoldOff),
+                    _ => {}
+                }
+                continue;
+            }
+            // A SizeField's Fill / Fit button.
+            if let Some((index, is_fill)) = self.rows.iter().enumerate().find_map(|(i, b)| {
+                if b.mode_uids.first() == Some(&action_uid) {
+                    Some((i, true))
+                } else if b.mode_uids.get(1) == Some(&action_uid) {
+                    Some((i, false))
+                } else {
+                    None
+                }
+            }) {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let word = if is_fill { "Fill" } else { "Fit" };
+                    edits.push(Edit::Apply(format!("{}: {}", self.rows[index].prop, word)));
                 }
                 continue;
             }
