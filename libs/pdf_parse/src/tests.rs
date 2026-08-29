@@ -413,6 +413,7 @@ fn test_decode_text_winansi() {
         last_char: 255,
         to_unicode: None,
         default_width: 600.0,
+        cid_widths: None,
     };
     let result = decode_text(&font, b"Hello");
     assert_eq!(result, "Hello");
@@ -430,6 +431,7 @@ fn test_char_width_base14() {
         last_char: 255,
         to_unicode: None,
         default_width: 600.0,
+        cid_widths: None,
     };
     let w = char_width(&font, b'A' as u32);
     assert!(w > 0.0, "char width should be positive");
@@ -596,4 +598,260 @@ fn test_rfind() {
     assert_eq!(Lexer::rfind(data, b"hello"), Some(12));
     assert_eq!(Lexer::rfind(data, b"world"), Some(6));
     assert_eq!(Lexer::rfind(data, b"missing"), None);
+}
+
+// ============================================================
+// Text-space matrix math (the "giant garble" regression class):
+// Td / T* / advances / TJ adjustments compose THROUGH the text
+// matrix. With `Tf 1` + `Tm [s 0 0 s x y]` (the InDesign/Chrome
+// export style) raw e/f addition collapses every run of a line
+// onto one point.
+// ============================================================
+
+#[test]
+fn test_tm_pre_translate_scales_through_matrix() {
+    // Tm [20 0 0 20 152.126 737.8154]; Td 0.533 0 must move 10.66pt.
+    let mut lm = [20.0, 0.0, 0.0, 20.0, 152.126, 737.8154];
+    crate::content::tm_pre_translate(&mut lm, 0.533, 0.0);
+    assert!((lm[4] - (152.126 + 0.533 * 20.0)).abs() < 1e-9);
+    assert!((lm[5] - 737.8154).abs() < 1e-9);
+    // T* with TL 9.342 moves the line 186.84pt down in text space.
+    crate::content::tm_pre_translate(&mut lm, 0.0, -9.342);
+    assert!((lm[5] - (737.8154 - 9.342 * 20.0)).abs() < 1e-9);
+}
+
+#[test]
+fn test_tm_advance_follows_baseline() {
+    let mut tm = [20.0, 0.0, 0.0, 20.0, 100.0, 500.0];
+    crate::content::tm_advance(&mut tm, 0.7); // 0.7 text units = 14pt
+    assert!((tm[4] - 114.0).abs() < 1e-9);
+    assert!((tm[5] - 500.0).abs() < 1e-9);
+    // A rotated baseline advances along its own direction.
+    let (s, c) = (std::f64::consts::FRAC_PI_2.sin(), std::f64::consts::FRAC_PI_2.cos());
+    let mut rot = [c, s, -s, c, 0.0, 0.0]; // 90°: baseline points +y
+    crate::content::tm_advance(&mut rot, 2.0);
+    assert!(rot[4].abs() < 1e-9);
+    assert!((rot[5] - 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_tj_adjustment_advance() {
+    // -1000 thousandths at size 10 = +10 text units to the right.
+    let a = crate::content::tj_adjustment_advance(-1000.0, 10.0, 100.0);
+    assert!((a - 10.0).abs() < 1e-9);
+    // Tz halves it.
+    let a = crate::content::tj_adjustment_advance(-1000.0, 10.0, 50.0);
+    assert!((a - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_mat_scales() {
+    let m = [3.0, 4.0, -8.0, 6.0, 9.0, 9.0];
+    assert!((crate::content::mat_x_scale(&m) - 5.0).abs() < 1e-9);
+    assert!((crate::content::mat_y_scale(&m) - 10.0).abs() < 1e-9);
+}
+
+// ============================================================
+// Encoding /Differences + glyph names + CID widths
+// ============================================================
+
+#[test]
+fn test_glyph_name_component_ligature() {
+    use crate::font::glyph_name_to_string;
+    assert_eq!(glyph_name_to_string("fi"), "\u{FB01}");
+    // Component names decompose: f_i = f + i, f_f_l = f + f + l.
+    assert_eq!(glyph_name_to_string("f_i"), "fi");
+    assert_eq!(glyph_name_to_string("f_f_l"), "ffl");
+    assert_eq!(glyph_name_to_string("odieresis"), "ö");
+    assert_eq!(glyph_name_to_string("uni20AC"), "€");
+    assert_eq!(glyph_name_to_string("a"), "a");
+    assert_eq!(glyph_name_to_string("bogusname"), "");
+}
+
+#[test]
+fn test_differences_decode_over_winansi() {
+    use crate::page::{FontEncoding, FontResource};
+    let mut map = std::collections::HashMap::new();
+    map.insert(31u8, "f_i".to_string());
+    let font = FontResource {
+        subtype: "Type1".into(),
+        base_font: "Test".into(),
+        encoding: FontEncoding::Custom(crate::page::BaseEncoding::WinAnsi, map),
+        widths: vec![],
+        first_char: 31,
+        last_char: 255,
+        to_unicode: None,
+        default_width: 500.0,
+        cid_widths: None,
+    };
+    // 0x1F -> fi ligature via Differences; 0xF6 -> ö via the WinAnsi base.
+    let s = crate::font::decode_text(&font, &[0x1F, b'n', 0xF6]);
+    assert_eq!(s, "finö");
+    let codes = crate::font::decode_codes(&font, &[0x1F, 0xF6]);
+    assert_eq!(codes.len(), 2);
+    assert_eq!(codes[0], (0x1F, "fi".to_string()));
+    assert_eq!(codes[1], (0xF6, "ö".to_string()));
+}
+
+#[test]
+fn test_cid_widths_take_priority() {
+    use crate::page::{FontEncoding, FontResource};
+    let mut cid = std::collections::HashMap::new();
+    cid.insert(5u32, 812.0);
+    let font = FontResource {
+        subtype: "Type0".into(),
+        base_font: "Test".into(),
+        encoding: FontEncoding::Identity,
+        widths: vec![],
+        first_char: 0,
+        last_char: 255,
+        to_unicode: None,
+        default_width: 1000.0,
+        cid_widths: Some(cid),
+    };
+    assert_eq!(crate::font::char_width(&font, 5), 812.0);
+    assert_eq!(crate::font::char_width(&font, 6), 1000.0); // DW fallback
+}
+
+// ============================================================
+// The acceptance file: local/retourformulier-techpunt-ned.pdf
+// (checked into local/; the test skips silently when absent so
+// the suite stays green on trees without local data).
+// ============================================================
+
+#[test]
+fn test_retourformulier_fonts_and_text() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../local/retourformulier-techpunt-ned.pdf");
+    let Ok(data) = std::fs::read(&path) else {
+        return;
+    };
+    let mut doc = PdfDocument::parse(&data).expect("parse");
+    assert_eq!(doc.page_count(), 1);
+    let page = doc.page(0).expect("page");
+    let font = page.fonts.get("T1_0").expect("font T1_0");
+    // The Encoding is a dict with Differences [31 /f_i]; before the fix it
+    // collapsed to plain WinAnsi and code 31 rendered as a control char.
+    match &font.encoding {
+        crate::page::FontEncoding::Custom(_, map) => {
+            assert_eq!(map.get(&31).map(String::as_str), Some("f_i"));
+        }
+        other => panic!("expected Differences encoding, got {:?}", other),
+    }
+    assert_eq!(crate::font::decode_text(font, &[0x1F]), "fi");
+
+    // The title line: Tm [20 0 0 20 152.126 737.8154] with per-run
+    // Td kerning. Simulated through the fixed math, the runs of
+    // "Retourformulier" must be strictly increasing in x and the second
+    // line must sit 9.342*20 = 186.84pt lower.
+    let ops = parse_content_stream(&page.content_data).expect("ops");
+    let mut lm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut tm = lm;
+    let mut fs = 0.0f64;
+    let mut runs: Vec<(String, f64, f64)> = Vec::new();
+    for op in &ops {
+        match op {
+            PdfOp::SetFont(_, s) => fs = *s,
+            PdfOp::SetTextMatrix(m) => {
+                tm = *m;
+                lm = *m;
+            }
+            PdfOp::MoveText(x, y) => {
+                crate::content::tm_pre_translate(&mut lm, *x, *y);
+                tm = lm;
+            }
+            PdfOp::ShowText(bytes) => {
+                let text = crate::font::decode_text(font, bytes);
+                runs.push((text, tm[4], tm[5]));
+                let mut adv = 0.0;
+                for &b in bytes.iter() {
+                    adv += crate::font::char_width(font, b as u32) * fs / 1000.0;
+                }
+                crate::content::tm_advance(&mut tm, adv);
+            }
+            _ => {}
+        }
+    }
+    let title: Vec<&(String, f64, f64)> = runs
+        .iter()
+        .skip_while(|(t, _, _)| t != "R")
+        .take(4)
+        .collect();
+    assert_eq!(title.len(), 4);
+    let joined: String = title.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(joined, "Retourformulier");
+    // Strictly increasing x, each run starting past the previous one.
+    for w in title.windows(2) {
+        assert!(
+            w[1].1 > w[0].1 + 1.0,
+            "runs must not overlap: {:?} then {:?}",
+            w[0],
+            w[1]
+        );
+    }
+    // "Retour" run 2 starts at 152.126 + 0.533*20 = 162.786.
+    assert!((title[1].1 - 162.786).abs() < 0.01, "got {}", title[1].1);
+    // Second title line ("R" of "Retourartikelen") sits 186.84pt lower.
+    let second_r = runs
+        .iter()
+        .filter(|(t, _, _)| t == "R")
+        .nth(1)
+        .expect("second R run");
+    assert!((second_r.2 - (737.8154 - 9.342 * 20.0)).abs() < 0.01);
+}
+
+// ============================================================
+// Codex-review regressions
+// ============================================================
+
+#[test]
+fn test_differences_macroman_base_fallback() {
+    use crate::page::{BaseEncoding, FontEncoding, FontResource};
+    let mut map = std::collections::HashMap::new();
+    map.insert(31u8, "f_i".to_string());
+    let font = FontResource {
+        subtype: "Type1".into(),
+        base_font: "Test".into(),
+        encoding: FontEncoding::Custom(BaseEncoding::MacRoman, map),
+        widths: vec![],
+        first_char: 31,
+        last_char: 255,
+        to_unicode: None,
+        default_width: 500.0,
+        cid_widths: None,
+    };
+    // 0x80 is Ä in MacRoman (€ in WinAnsi) — the base must win.
+    assert_eq!(crate::font::decode_text(&font, &[0x80]), "Ä");
+}
+
+#[test]
+fn test_glyph_name_hex_forms_safe() {
+    use crate::font::glyph_name_to_string;
+    // Multi-group uniXXXXYYYY decodes all groups.
+    assert_eq!(glyph_name_to_string("uni00660069"), "fi");
+    // Non-hex / non-ASCII suffixes must not panic and yield nothing
+    // (a single trailing char falls to the one-char rule only for
+    // one-char names, not uni-prefixed ones).
+    assert_eq!(glyph_name_to_string("uniZZZZ"), "");
+    assert_eq!(glyph_name_to_string("uniéééé"), "");
+    assert_eq!(glyph_name_to_string("minus"), "\u{2212}");
+    assert_eq!(glyph_name_to_string("hyphen"), "-");
+}
+
+#[test]
+fn test_type0_without_w_uses_dw() {
+    use crate::page::{FontEncoding, FontResource};
+    let font = FontResource {
+        subtype: "Type0".into(),
+        base_font: "Test".into(),
+        encoding: FontEncoding::Identity,
+        widths: vec![],
+        first_char: 0,
+        last_char: 255,
+        to_unicode: None,
+        default_width: 725.0,
+        cid_widths: Some(std::collections::HashMap::new()),
+    };
+    // CID 65 ('A' under Identity) must take DW, not a base-14 estimate.
+    assert_eq!(crate::font::char_width(&font, 65), 725.0);
 }
