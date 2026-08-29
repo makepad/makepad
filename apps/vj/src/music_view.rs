@@ -2105,7 +2105,18 @@ script_mod! {
                             }
                             // The transcript, filling the column down to the
                             // transport: the reading copy AND the timing proof.
-                            deck_a_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                            //
+                            // Wrapped in a plain View because the reader is a
+                            // raw-Area widget with no `visible` of its own:
+                            // set_visible on it does nothing, so folded it
+                            // went on being laid out and — being Fill — ate
+                            // whatever room the blocks above it gave up. The
+                            // accordion folds THIS, which does honour it.
+                            deck_a_kar_body := View{
+                                width: Fill
+                                height: Fill
+                                deck_a_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                            }
                         }
                     }
                     // The deck's own transport, at the foot of its column. These
@@ -2587,7 +2598,11 @@ script_mod! {
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
                                 }
                             }
-                            deck_b_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                            deck_b_kar_body := View{
+                                width: Fill
+                                height: Fill
+                                deck_b_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                            }
                         }
                         View{
                             // Fit, not a number: pitch 44, volume 44, the meter
@@ -2674,6 +2689,59 @@ script_mod! {
                 }
             }
 
+            // The grip between the decks and the lists.
+            //
+            // It lies across the flow, whichever way the body runs: a bar under
+            // the decks while they are stacked, and a bar beside them once they
+            // are not. `App::sync_page_body_flow` turns it, and dragging it sets
+            // the lists their size — overriding the automatic allotment, but
+            // never past the point where the mixer would starve.
+            page_splitter := RoundedView{
+                width: Fill
+                height: 7
+                cursor: MouseCursor.RowResize
+                show_bg: true
+                draw_bg +: {
+                    // Visible at rest, not only under the pointer: a
+                    // splitter nobody can see is a splitter nobody drags.
+                    color: #xffffff1f
+                    color_hover: #xffffff5c
+                    border_radius: 3.0
+                    hover: instance(0.0)
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        // A short bar in the middle, not the whole width: it
+                        // reads as a handle rather than a rule across the page.
+                        let w = min(self.rect_size.x, self.rect_size.y) * 0.5 + 22.0
+                        let along = max(self.rect_size.x, self.rect_size.y)
+                        let horizontal = step(self.rect_size.y, self.rect_size.x)
+                        let bar_x = mix(self.rect_size.x * 0.5 - 1.5, along * 0.5 - w * 0.5, horizontal)
+                        let bar_y = mix(along * 0.5 - w * 0.5, self.rect_size.y * 0.5 - 1.5, horizontal)
+                        let bar_w = mix(3.0, w, horizontal)
+                        let bar_h = mix(w, 3.0, horizontal)
+                        sdf.box(bar_x, bar_y, bar_w, bar_h, 1.5)
+                        sdf.fill(self.color.mix(self.color_hover, self.hover))
+                        return sdf.result
+                    }
+                }
+                // `Animator{ state: { default: @off ... } }` — the form the
+                // widgets use. The looser one this first carried parsed to
+                // nothing, so the grip never lit and only the cursor said it
+                // could be dragged.
+                animator: Animator{
+                    hover: {
+                        default: @off
+                        off: AnimatorState{
+                            from: {all: Forward {duration: 0.1}}
+                            apply: { draw_bg: {hover: 0.0} }
+                        }
+                        on: AnimatorState{
+                            from: {all: Forward {duration: 0.08}}
+                            apply: { draw_bg: {hover: 1.0} }
+                        }
+                    }
+                }
+            }
             // The lists and the strip that switches them, as ONE column.
             //
             // The strip has to live in here rather than beside the deck region:

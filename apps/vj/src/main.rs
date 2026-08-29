@@ -6757,6 +6757,18 @@ pub struct App {
     /// Whether the lists are standing beside the decks rather than under.
     #[rust]
     lists_beside: bool,
+    /// The size the operator has dragged the lists to, in layout points —
+    /// one per orientation, because a width the hand chose says nothing
+    /// about the height it would want. `None` means the automatic allotment
+    /// still stands.
+    #[rust]
+    lists_width_set: Option<f64>,
+    #[rust]
+    lists_height_set: Option<f64>,
+    /// The lists' size when the drag began, so the grip tracks the pointer
+    /// rather than accumulating rounding.
+    #[rust]
+    splitter_grab: Option<f64>,
     /// Whether the status bar is standing on two lines.
     #[rust]
     status_bar_wrapped: bool,
@@ -16646,6 +16658,192 @@ p2 {}
         self.ui.redraw(cx);
     }
 
+    /// The width each side actually has, in layout points, after the
+    /// splitter has had its say: `(decks, lists)`.
+    ///
+    /// Measured off the body rather than derived from the window, because
+    /// the operator may have dragged the split anywhere. Reading the body is
+    /// safe — it fills the page and so does not depend on either side — but
+    /// reading the SIDES would not be, and would put the layout back to
+    /// chasing its own tail.
+    fn layout_spans(&mut self, cx: &mut Cx) -> (f64, f64) {
+        let body = self.ui.view(cx, ids!(page_body)).area().rect(cx).size;
+        if !self.lists_beside {
+            return (body.x, body.x);
+        }
+        let lists = self.lists_extent(cx);
+        ((body.x - lists - 7.0).max(1.0), lists)
+    }
+
+    /// Re-decide everything that depends on how the width is divided.
+    ///
+    /// Called on a resize AND on every step of a splitter drag: dragging
+    /// changes what each side has just as surely as resizing does, and the
+    /// stages have to answer to it. Give the decks room and the panels come
+    /// back out of their tabs; take it away and they go in — which is what
+    /// keeps the mixer from being squeezed by a drag.
+    fn resync_layout(&mut self, cx: &mut Cx) {
+        let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
+            return;
+        };
+        if !cx.windows.is_valid(main_id) {
+            return;
+        }
+        let native = cx.windows[main_id].native_dpi_factor();
+        let dpi = cx.windows[main_id].effective_dpi_factor();
+        // The lists' own width decides whether they tab, but the console's
+        // scale is judged on the whole window — so the height that goes with
+        // it is the window's, exactly as `sync_lists_tabs` feeds it.
+        let geom = &cx.windows[main_id].window_geom;
+        let physical_height = geom.inner_size.y * geom.dpi_factor;
+        let (decks, lists) = self.layout_spans(cx);
+
+        let stage = console_scale::console_tabs_for(decks);
+        if stage != self.tab_stage {
+            self.tab_stage = stage;
+            let count = if stage == TabStage::All { 3 } else { 2 };
+            self.deck_tabs.set_decks(count);
+            if stage == TabStage::All {
+                let (target, audible) = (self.tab_target(), self.tab_audible());
+                self.deck_tabs.set_follow(TabFollow::Manual, target, audible);
+            }
+            self.paint_deck_tabs(cx);
+        }
+
+        let tabbed = console_scale::console_lists_tabbed(lists * dpi, physical_height, native);
+        if tabbed != self.lists_tabbed {
+            self.lists_tabbed = tabbed;
+            self.paint_lists_tabs(cx);
+        }
+    }
+
+    /// What the lists get along the body's flow, in layout points: what the
+    /// operator dragged them to, or the automatic allotment.
+    ///
+    /// Clamped either way. A drag may take room from the decks but never
+    /// past the point where they could not hold one panel and a full-width
+    /// middle — the same floor the automatic allotment respects, because a
+    /// grip that could starve the mixer would just be the old bug with a
+    /// handle on it.
+    fn lists_extent(&self, cx: &mut Cx) -> f64 {
+        let (total, set, floor) = if self.lists_beside {
+            let points = self.ui.view(cx, ids!(page_body)).area().rect(cx).size.x;
+            let decks_floor = console_scale::FLANKS_POINTS / 2.0
+                + console_scale::CENTRE_MIN_POINTS;
+            (points, self.lists_width_set, decks_floor)
+        } else {
+            let points = self.ui.view(cx, ids!(page_body)).area().rect(cx).size.y;
+            let fold = match self.deck_sections.fold() {
+                Fold::None => console_scale::ConsoleFold::None,
+                Fold::Pairs => console_scale::ConsoleFold::Pairs,
+                Fold::Singles => console_scale::ConsoleFold::Singles,
+            };
+            (points, self.lists_height_set, console_scale::region_min_points(fold))
+        };
+        if total <= 1.0 {
+            return console_scale::LISTS_MIN_POINTS;
+        }
+        let want = set.unwrap_or_else(|| {
+            if self.lists_beside {
+                console_scale::lists_width_points(total - 6.0)
+            } else {
+                (total - floor).max(console_scale::LISTS_MIN_POINTS)
+            }
+        });
+        let ceiling = (total - floor - 7.0).max(console_scale::LISTS_MIN_POINTS);
+        want.clamp(console_scale::LISTS_MIN_POINTS.min(ceiling), ceiling)
+    }
+
+    /// Push that size onto the lists column, whichever way the body runs.
+    fn paint_splitter(&mut self, cx: &mut Cx) {
+        let extent = self.lists_extent(cx);
+        let beside = self.lists_beside;
+        let column = self.ui.view(cx, ids!(lists_column));
+        let mut column_ref = column.borrow_mut();
+        if let Some(view) = column_ref.as_mut() {
+            if beside {
+                view.walk.width = Size::Fixed(extent);
+                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+            } else {
+                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fixed(extent);
+            }
+        }
+        drop(column_ref);
+
+        // The grip lies ACROSS the flow: a bar under the decks while they
+        // are stacked, beside them when they are not.
+        let grip = self.ui.view(cx, ids!(page_splitter));
+        let mut grip_ref = grip.borrow_mut();
+        if let Some(view) = grip_ref.as_mut() {
+            if beside {
+                view.walk.width = Size::Fixed(7.0);
+                view.walk.height = Size::Fill { weight: 100.0, min: None, max: None };
+                view.cursor = Some(MouseCursor::ColResize);
+            } else {
+                view.walk.width = Size::Fill { weight: 100.0, min: None, max: None };
+                view.walk.height = Size::Fixed(7.0);
+                view.cursor = Some(MouseCursor::RowResize);
+            }
+        }
+        drop(grip_ref);
+        self.ui.redraw(cx);
+    }
+
+    /// Drag the grip: the lists take the size the pointer asks for.
+    fn handle_splitter(&mut self, cx: &mut Cx, actions: &Actions) {
+        let grip = self.ui.view(cx, ids!(page_splitter));
+        // The grip lights under the pointer, painted rather than animated:
+        // the animator state never applied here, and a splitter that gives
+        // no sign it can be grabbed is one nobody grabs. That it lights at
+        // all is also the proof the hover reaches it — the same hit that
+        // sets the resize cursor.
+        for (action, lit) in [(grip.finger_hover_in(actions), true), (grip.finger_hover_out(actions), false)] {
+            if action.is_none() {
+                continue;
+            }
+            let mut view = self.ui.widget(cx, ids!(page_splitter));
+            let color: u32 = if lit { 0xffffff5c } else { 0xffffff1f };
+            script_apply_eval!(cx, view, {
+                draw_bg +: { color: #(color) }
+            });
+            self.ui.redraw(cx);
+        }
+        if grip.finger_down(actions).is_some() {
+            self.splitter_grab = Some(self.lists_extent(cx));
+        }
+        if let Some(moved) = grip.finger_move(actions) {
+            let Some(start) = self.splitter_grab else { return };
+            // The lists lie AFTER the grip, so dragging towards them makes
+            // them smaller.
+            let travel = if self.lists_beside {
+                moved.abs_start.x - moved.abs.x
+            } else {
+                moved.abs_start.y - moved.abs.y
+            };
+            let want = start + travel;
+            if self.lists_beside {
+                self.lists_width_set = Some(want);
+            } else {
+                self.lists_height_set = Some(want);
+            }
+            self.paint_splitter(cx);
+            // The split moved, so what each side can hold moved with it.
+            self.resync_layout(cx);
+        }
+        if grip.finger_up(actions).is_some() {
+            self.splitter_grab = None;
+            // Store what it actually came to, so a size clamped on the way
+            // does not spring back the next time the window changes.
+            let settled = self.lists_extent(cx);
+            if self.lists_beside {
+                self.lists_width_set = Some(settled);
+            } else {
+                self.lists_height_set = Some(settled);
+            }
+        }
+    }
+
     /// The lists stand beside the decks on a wide, short console.
     ///
     /// One property, the same trick as the status bar's wrap: the page body
@@ -16680,23 +16878,9 @@ p2 {}
         }
         drop(body_ref);
 
-        // The lists take exactly what `split_body` allots them and the decks
-        // take the rest. A weight cannot say this: the two are not sharing,
-        // they are being served in an order, and the mixer is served first.
-        let width = if beside {
-            let dpi = console_scale::console_dpi(physical.x, physical.y, native);
-            let gap = 6.0;
-            Size::Fixed(console_scale::lists_width_points(physical.x / dpi - gap))
-        } else {
-            Size::Fill { weight: 100.0, min: None, max: None }
-        };
-        let column = self.ui.view(cx, ids!(lists_column));
-        let mut column_ref = column.borrow_mut();
-        if let Some(view) = column_ref.as_mut() {
-            view.walk.width = width;
-        }
-        drop(column_ref);
-        self.ui.redraw(cx);
+        // Turning the body changes which way the grip lies and which of the
+        // two dragged sizes applies, so the split is re-laid either way.
+        self.paint_splitter(cx);
     }
 
     /// The status bar takes a second line when its controls will not stand
@@ -16771,6 +16955,8 @@ p2 {}
         }
         self.lists_tabbed = tabbed;
         self.paint_lists_tabs(cx);
+        self.paint_splitter(cx);
+        self.resync_layout(cx);
     }
 
     /// Show whichever list is up, and light its tab.
@@ -16921,13 +17107,13 @@ p2 {}
             (ids!(deck_a_stems_head), (ids!(deck_a_stems_chev_up), ids!(deck_a_stems_chev_down)),
              ids!(deck_a_stems_body), DeckSection::Stems),
             (ids!(deck_a_kar_head), (ids!(deck_a_kar_chev_up), ids!(deck_a_kar_chev_down)),
-             ids!(deck_a_lyrics), DeckSection::Karaoke),
+             ids!(deck_a_kar_body), DeckSection::Karaoke),
             (ids!(deck_b_eq_head), (ids!(deck_b_eq_chev_up), ids!(deck_b_eq_chev_down)),
              ids!(deck_b_eq_body), DeckSection::Equalizer),
             (ids!(deck_b_stems_head), (ids!(deck_b_stems_chev_up), ids!(deck_b_stems_chev_down)),
              ids!(deck_b_stems_body), DeckSection::Stems),
             (ids!(deck_b_kar_head), (ids!(deck_b_kar_chev_up), ids!(deck_b_kar_chev_down)),
-             ids!(deck_b_lyrics), DeckSection::Karaoke),
+             ids!(deck_b_kar_body), DeckSection::Karaoke),
         ]
     }
 
@@ -24408,6 +24594,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(splat_score)).clicked(actions) {
             self.handle_splat_action(cx, LoopSplatAction::ToggleScore);
         }
+        self.handle_splitter(cx, actions);
         let (sfx_down, sfx_up) = self.grid_hits(cx, actions, ids!(sfx_grid));
         for (asset, _taps) in sfx_down {
             self.selected_pad = Some(asset);
