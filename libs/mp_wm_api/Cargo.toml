@@ -1,0 +1,18 @@
+# mp-wm-api — the mp* apps' API to the window manager (mpwm).
+#
+# An app hosted as an mpwm tile talks to the compositor over the studio
+# protocol's Custom channel; this crate is the typed vocabulary on both
+# ends: "open a preview of this file", "open this file", "my title/cwd
+# changed", "notify". Standalone (not hosted) the calls fall back sensibly.
+
+[package]
+name = "mp-wm-api"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mp_wm_api"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
