@@ -1969,6 +1969,18 @@ enum StructKind {
     NoEditor,
 }
 
+/// How many component fields a typed editor has (the position of a field
+/// uid modulo this is its component, whichever copy of the row it sits in).
+fn comp_count(kind: StructKind) -> usize {
+    match kind {
+        StructKind::Vec2 => 2,
+        StructKind::Vec3 => 3,
+        StructKind::Vec4 | StructKind::Inset => 4,
+        StructKind::Metrics => 3,
+        _ => 1,
+    }
+}
+
 /// The number token after `key:` in a `{..}` dump (`null` reads as 0).
 fn struct_num(text: &str, key: &str) -> Option<f64> {
     let at = text.find(&format!("{key}:"))?;
@@ -3588,6 +3600,8 @@ struct RowBinding {
     comp_uids: Vec<u64>,
     /// The uids of a SizeField's Fill/Fit buttons ([fill, fit]).
     mode_uids: Vec<u64>,
+    /// Field uids of this row's TWEAKABLES copy: (uid, is_swatch).
+    alt_uids: Vec<(u64, bool)>,
 }
 
 /// One visible sidebar entry, with the rects the raw-pointer gestures
@@ -3640,6 +3654,14 @@ enum VisKind {
     /// A material card header: layer name + live shader preview swatch
     /// (index into Tweaker::materials).
     Material(usize),
+    /// The TWEAKABLES header at the top: every annotated value, hottest
+    /// first, with its doc under it — the designer's surface.
+    TweakHeader(usize, bool),
+    /// An annotated row rendered inside TWEAKABLES (same template as Prop;
+    /// the row keeps a second set of field uids for it).
+    Tweakable(usize),
+    /// The annotation line (doc + range) under a row.
+    Doc(usize),
 }
 
 #[derive(Clone)]
@@ -3821,6 +3843,12 @@ pub struct Tweaker {
     states_frame: NextFrame,
     #[rust]
     states_pause_uid: u64,
+    /// TWEAKABLES fold state (open by default: it is the point).
+    #[rust(true)]
+    tweakables_open: bool,
+    /// The row whose field was last touched: its doc line rides under it.
+    #[rust]
+    doc_row: Option<usize>,
     /// Set by the note button; the next event opens the card.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
@@ -4577,6 +4605,11 @@ impl Tweaker {
                             sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
                             sf_num := FabValueInput { width: 56 height: 18 }
                         }
+                        DocRow := View {
+                            width: Fill height: Fit flow: Right
+                            padding: Inset{left: 18 right: 8 top: 0 bottom: 3}
+                            doc := FabLabelSmall { width: Fill text: "" }
+                        }
                         NoEditorRow := View {
                             width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
@@ -4663,6 +4696,7 @@ impl Tweaker {
             return;
         }
         self.rows.clear();
+        self.doc_row = None;
         for (name, value, is_set) in reflect_flat(cx, &widget) {
             let (kind, display, quoted) = if value.starts_with('#') && parse_hex(&value).is_some()
             {
@@ -4693,6 +4727,7 @@ impl Tweaker {
                 comp_vals,
                 comp_uids: Vec::new(),
                 mode_uids: Vec::new(),
+                alt_uids: Vec::new(),
             });
         }
         // Session-original + resettable flags from the diff log.
@@ -4771,6 +4806,7 @@ impl Tweaker {
                     comp_vals: Vec::new(),
                     comp_uids: Vec::new(),
                     mode_uids: Vec::new(),
+                    alt_uids: Vec::new(),
                 });
             };
             let levels = cascade_levels(cx, &widget);
@@ -4867,6 +4903,43 @@ impl Tweaker {
             || leaf.contains("shadow")
     }
 
+    /// The annotation line under a row: the doc's first sentence, plus the
+    /// range/step the hint declares (`0..24 step 0.5`) for a number.
+    fn doc_line_for(&self, index: usize) -> String {
+        let Some(row) = self.rows.get(index) else { return String::new() };
+        let Some(doc) = self.row_docs.get(&row.prop) else { return String::new() };
+        let first = doc.lines().next().unwrap_or("").trim();
+        // The hint rides inside the doc (`gap between icon and label 0..24
+        // step 1`): show the prose, then the range in one place.
+        let tokens: Vec<&str> = first.split_whitespace().collect();
+        let prose_end = tokens
+            .iter()
+            .position(|tok| tok.contains("..") && tok.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-'))
+            .unwrap_or(tokens.len());
+        let prose = tokens[..prose_end].join(" ");
+        let mut text: String = prose.chars().take(140).collect();
+        if prose.chars().count() > 140 {
+            text.push('\u{2026}');
+        }
+        if row.kind == RowKind::Num {
+            let hint = parse_doc_hint(doc);
+            let mut range = String::new();
+            if let (Some(lo), Some(hi)) = (hint.min, hint.max) {
+                range = format!("{}..{}", fmt_f64(lo), fmt_f64(hi));
+            }
+            if let Some(step) = hint.step {
+                if !range.is_empty() {
+                    range.push(' ');
+                }
+                range.push_str(&format!("step {}", fmt_f64(step)));
+            }
+            if !range.is_empty() {
+                text = format!("{text} \u{00b7} {range}");
+            }
+        }
+        text
+    }
+
     fn row_index(&self, prop: &str) -> Option<usize> {
         self.rows.iter().position(|row| row.prop == prop)
     }
@@ -4901,6 +4974,32 @@ impl Tweaker {
     fn build_visible(&self) -> Vec<VisKind> {
         let filtering = !self.filter.is_empty();
         let mut out = Vec::new();
+        // TWEAKABLES: every annotated value (a `/** */` doc on the key),
+        // in the same hot-first order, each with its doc line — a person
+        // finds what the author meant to be tweaked without reading source.
+        if !filtering {
+            let tweak: Vec<usize> = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.section != SectionKind::Cascade
+                        && r.kind != RowKind::Info
+                        && r.struct_kind != StructKind::NoEditor
+                        && self.row_docs.contains_key(&r.prop)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if !tweak.is_empty() {
+                out.push(VisKind::TweakHeader(tweak.len(), self.tweakables_open));
+                if self.tweakables_open {
+                    for index in tweak {
+                        out.push(VisKind::Tweakable(index));
+                        out.push(VisKind::Doc(index));
+                    }
+                }
+            }
+        }
         for section in SECTION_ORDER {
             let members: Vec<usize> = self
                 .rows
@@ -4973,6 +5072,9 @@ impl Tweaker {
                     }
                 }
                 out.push(VisKind::Prop(index));
+                if self.doc_row == Some(index) && self.row_docs.contains_key(&row.prop) {
+                    out.push(VisKind::Doc(index));
+                }
             }
             if hidden > 0 {
                 out.push(VisKind::More(section, hidden));
@@ -5395,6 +5497,13 @@ impl Tweaker {
                 continue;
             };
             list.set_item_range(cx, 0, entries.len());
+            // A row can draw twice (TWEAKABLES + its home section); every
+            // draw registers its fields, so the sets start empty per frame.
+            for row in &mut self.rows {
+                row.comp_uids.clear();
+                row.mode_uids.clear();
+                row.alt_uids.clear();
+            }
             while let Some(entry_id) = list.next_visible_item(cx) {
                 if entry_id >= entries.len() {
                     continue;
@@ -5408,7 +5517,9 @@ impl Tweaker {
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
-                    VisKind::Prop(index) => match self.rows[index].struct_kind {
+                    VisKind::TweakHeader(..) => live_id!(SectionRow),
+                    VisKind::Doc(_) => live_id!(DocRow),
+                    VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
                         StructKind::Inset => live_id!(InsetRow),
                         StructKind::Metrics => live_id!(MetricsRow),
@@ -5441,6 +5552,16 @@ impl Tweaker {
                     VisKind::More(_, count) => {
                         item.child(live_id!(title))
                             .set_text(cx, &format!("\u{2026} show all ({count})"));
+                    }
+                    VisKind::TweakHeader(count, open) => {
+                        item.child(live_id!(title)).set_text(
+                            cx,
+                            &format!("{} TWEAKABLES ({count})", if open { "-" } else { "+" }),
+                        );
+                    }
+                    VisKind::Doc(index) => {
+                        let text = self.doc_line_for(index);
+                        item.child(live_id!(doc)).set_text(cx, &text);
                     }
                     VisKind::Material(mi) => {
                         let layer = self.materials.get(mi).cloned().unwrap_or_default();
@@ -5629,7 +5750,8 @@ impl Tweaker {
                         item.child(live_id!(xy_label))
                             .set_text(cx, &format!("x {ax:.2}  y {ay:.2}"));
                     }
-                    VisKind::Prop(index) => {
+                    VisKind::Prop(index) | VisKind::Tweakable(index) => {
+                        let as_tweakable = matches!(entry, VisKind::Tweakable(_));
                         let name = item.child(live_id!(name));
                         name.set_text(cx, &self.rows[index].prop);
                         let _ = &name;
@@ -5650,6 +5772,9 @@ impl Tweaker {
                                 Self::level_color(level)
                             } else if self.rows[index].changed {
                                 vec4(1.0, 0.78, 0.42, 1.0)
+                            } else if self.row_docs.contains_key(&self.rows[index].prop) {
+                                // annotated: the author meant this one to be tweaked
+                                vec4(0.86, 0.80, 0.58, 1.0)
                             } else if self.rows[index].set {
                                 // set at the instance level
                                 vec4(0.72, 0.72, 0.72, 1.0)
@@ -5681,8 +5806,6 @@ impl Tweaker {
                         }
                         let sk = self.rows[index].struct_kind;
                         if sk != StructKind::None {
-                            self.rows[index].comp_uids.clear();
-                            self.rows[index].mode_uids.clear();
                             match sk {
                                 StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => {
                                     let n = match sk {
@@ -5752,7 +5875,11 @@ impl Tweaker {
                             }
                         } else {
                         let field = item.child(live_id!(value));
-                        self.rows[index].field_uid = field.widget_uid().0;
+                        if as_tweakable {
+                            self.rows[index].alt_uids.push((field.widget_uid().0, false));
+                        } else {
+                            self.rows[index].field_uid = field.widget_uid().0;
+                        }
                         match self.rows[index].kind {
                             RowKind::Num => {
                                 if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
@@ -5801,7 +5928,11 @@ impl Tweaker {
                                     field.set_text(cx, &self.rows[index].value);
                                 }
                                 let swatch = item.child(live_id!(swatch));
-                                self.rows[index].swatch_uid = swatch.widget_uid().0;
+                                if as_tweakable {
+                                    self.rows[index].alt_uids.push((swatch.widget_uid().0, true));
+                                } else {
+                                    self.rows[index].swatch_uid = swatch.widget_uid().0;
+                                }
                                 let rgba = parse_hex(&self.rows[index].value);
                                 {
                                     if let Some(mut pick) =
@@ -6644,8 +6775,12 @@ impl Tweaker {
             // metric): apply the whole value (vec) or the touched dotted
             // sub-key (inset/metrics), which the grammar accepts.
             if let Some((index, comp)) = self.rows.iter().enumerate().find_map(|(i, b)| {
-                b.comp_uids.iter().position(|u| *u == action_uid).map(|c| (i, c))
+                b.comp_uids
+                    .iter()
+                    .position(|u| *u == action_uid)
+                    .map(|c| (i, c % comp_count(b.struct_kind)))
             }) {
+                self.doc_row = Some(index);
                 match widget_action.cast::<FabValueInputAction>() {
                     FabValueInputAction::Changed(v) => {
                         if let Some(chunk) = self.struct_component_chunk(index, comp, v) {
@@ -6659,14 +6794,12 @@ impl Tweaker {
             }
             // A SizeField's Fill / Fit button.
             if let Some((index, is_fill)) = self.rows.iter().enumerate().find_map(|(i, b)| {
-                if b.mode_uids.first() == Some(&action_uid) {
-                    Some((i, true))
-                } else if b.mode_uids.get(1) == Some(&action_uid) {
-                    Some((i, false))
-                } else {
-                    None
-                }
+                b.mode_uids
+                    .iter()
+                    .position(|u| *u == action_uid)
+                    .map(|p| (i, p % 2 == 0))
             }) {
+                self.doc_row = Some(index);
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     let word = if is_fill { "Fill" } else { "Fit" };
                     edits.push(Edit::Apply(format!("{}: {}", self.rows[index].prop, word)));
@@ -6680,12 +6813,15 @@ impl Tweaker {
                 .find(|(_, b)| {
                     (b.field_uid != 0 && b.field_uid == action_uid)
                         || (b.swatch_uid != 0 && b.swatch_uid == action_uid)
+                        || b.alt_uids.iter().any(|(u, _)| *u == action_uid)
                 })
                 .map(|(i, b)| (i, b.clone()))
             else {
                 continue;
             };
-            let is_swatch = binding.swatch_uid != 0 && binding.swatch_uid == action_uid;
+            self.doc_row = Some(index);
+            let is_swatch = (binding.swatch_uid != 0 && binding.swatch_uid == action_uid)
+                || binding.alt_uids.iter().any(|(u, s)| *u == action_uid && *s);
             match binding.kind {
                 // CASCADE rows are read-only labels; nothing to apply.
                 RowKind::Info => {}
@@ -7197,6 +7333,11 @@ impl Widget for Tweaker {
                                 self.expanded[index] = !self.expanded[index];
                                 self.redraw_sidebar(cx);
                             }
+                            VisKind::TweakHeader(..) => {
+                                self.tweakables_open = !self.tweakables_open;
+                                self.redraw_sidebar(cx);
+                            }
+                            VisKind::Tweakable(_) | VisKind::Doc(_) => {}
                             VisKind::Material(mi) => {
                                 // Thumbnail click: jump to the Shader tab
                                 // with this draw layer loaded.
