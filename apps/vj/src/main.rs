@@ -63,7 +63,7 @@ mod fx_slot;
 // already knows how to animate (digest-keyed disk cache; see fx_thumbs.rs).
 mod fx_thumbs;
 mod import_ui;
-mod expand;
+mod pipelines;
 mod gen;
 mod lanes;
 // LIVECODING: the observed effect-document origins, and the compile answer
@@ -145,7 +145,7 @@ use crate::fx_slot::{
 };
 use crate::midi_learn::{LearnEvent, LearnWrapAction, MidiLearn, VjLearnWrap};
 use makepad_asset_widgets::{VideoAction, VideoView};
-use crate::expand::Expander;
+use crate::pipelines::{PipeDone, PipeReq, Pipelines};
 use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
@@ -2292,7 +2292,7 @@ script_mod! {
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                     View{width: Fill height: 1}
-                                    gen_clear := ChromeButton{text: "Clear"}
+                                    gen_clear := ChromeButton{text: "Stop all"}
                                     gen_fold := ChromeButton{text: "⟨"}
                                 }
                                 gen_prompt := TextInput{
@@ -6224,11 +6224,11 @@ pub struct App {
     gen_size_labels: Vec<String>,
     #[rust]
     gen_model_labels: Vec<String>,
-    /// The DREAM runs' prompt expander (broker turns on worker threads).
+    /// The DREAM runs' pipeline transport: declare, read the record, stop.
     /// Bare type name, not a path: the Script derive's field parser refuses
     /// `foo::Bar`.
     #[rust]
-    expander: Expander,
+    pipelines: Pipelines,
     /// Still revisions a dream run wants a thumbnail for: the manifest hop
     /// that turns a published image into a blob id the thumb cache can
     /// fetch. Bounded by the job list itself (one entry per live run).
@@ -10740,9 +10740,9 @@ p2 {}
         // brings the connection back without anyone noticing twice.
         let now = now_ms();
         let mut runtime_down = false;
-        // Rows whose expansion could not even be started; they go ahead on
-        // the raw prompt as soon as this borrow ends.
-        let mut expand_now: Vec<u64> = Vec::new();
+        // Runs whose declaration could not even be handed to the
+        // transport; they fail honestly as soon as this borrow ends.
+        let mut declare_failed: Vec<u64> = Vec::new();
         {
             let Some(up) = self.up.as_mut() else { return };
             for cmd in cmds {
@@ -10785,32 +10785,56 @@ p2 {}
                             runtime_down = true;
                         }
                     }
-                    GenCmd::Expand { tag, prompt } => {
-                        // Off the catalog runtime entirely: the expander is
-                        // a chat turn, and the runtime speaks catalog and
-                        // jobs. A full expander pool means this run starts
-                        // on the raw prompt NOW rather than waiting — the
-                        // clip is the thing that must not be lost.
-                        let started = self.expander.start(
-                            up.endpoints,
-                            up.token.clone(),
-                            tag,
-                            prompt,
+                    // ---- declared runs ------------------------------
+                    //
+                    // Off the catalog runtime entirely: the runtime speaks a
+                    // fixed request vocabulary that has no pipeline calls,
+                    // and widening it belongs to the client crate rather
+                    // than to this app. `Pipelines` holds the same verified
+                    // endpoints and token on its own thread.
+                    GenCmd::CreatePipeline { tag, namespace, title, prompt, stages } => {
+                        if !self.pipelines.connected() {
+                            self.pipelines.connect(up.endpoints, up.token.clone());
+                        }
+                        // The declaration verbatim — the exact document
+                        // going on the wire, so a run can be read back
+                        // afterwards instead of guessed at.
+                        log!(
+                            "dream {tag}: declaring {}",
+                            crate::pipelines::declaration_json(
+                                &namespace, &title, &prompt, &stages
+                            )
                         );
-                        if !started {
-                            expand_now.push(tag);
+                        let sent = self.pipelines.submit(PipeReq::Create {
+                            tag,
+                            namespace,
+                            title,
+                            prompt,
+                            stages,
+                        });
+                        if !sent {
+                            declare_failed.push(tag);
+                        }
+                    }
+                    GenCmd::PollPipeline { pipeline } => {
+                        // A dropped read costs nothing: the next tick asks
+                        // again, and the record is not going anywhere.
+                        self.pipelines.submit(PipeReq::Detail { pipeline });
+                    }
+                    GenCmd::CancelPipeline { pipeline } => {
+                        if !self.pipelines.submit(PipeReq::Cancel { pipeline }) {
+                            runtime_down = true;
                         }
                     }
                 }
             }
         }
-        for tag in expand_now {
-            let cmds = self.gen.expand_arrived(
+        for tag in declare_failed {
+            self.gen.pipeline_failed_at(
                 tag,
-                None,
-                Some("expander busy — using the prompt as typed".to_string()),
+                "connection lost — reconnecting, press Queue again".to_string(),
+                Some(now),
             );
-            self.run_gen_cmds(cmds);
         }
         if runtime_down && self.session_loss_since.is_none() {
             self.session_loss_since =
@@ -10847,23 +10871,109 @@ p2 {}
         }
     }
 
-    /// Finished expansions become stage-one enqueues.
-    fn pump_expander(&mut self) {
-        for done in self.expander.drain() {
-            // The row shows a clipped brief; the log keeps it whole, which
-            // is the only place the full text an image was rendered from
-            // can be read back afterwards.
-            match (&done.expanded, &done.note) {
-                (Some(text), _) => log!("dream {}: brief: {text}", done.tag),
-                (None, Some(note)) => log!("dream {}: {note}", done.tag),
-                (None, None) => {}
-            }
-            let cmds = self.gen.expand_arrived(done.tag, done.expanded, done.note);
-            if !cmds.is_empty() {
-                self.run_gen_cmds(cmds);
-                self.grids_dirty = true;
+    /// Declared runs: their acceptance, their record, their stop.
+    ///
+    /// This is the whole of the DREAM run's client side now. Nothing here
+    /// enqueues a successor or carries a result — the store's dependency
+    /// gate and its claim-time splice do that, whether or not this app is
+    /// running.
+    fn pump_pipelines(&mut self) {
+        for done in self.pipelines.drain() {
+            match done {
+                PipeDone::Created { tag, result } => match result {
+                    Ok(created) => {
+                        // The declaration, whole, in the log: the only place
+                        // the exact graph a run was spawned with can be read
+                        // back afterwards.
+                        let stages: Vec<String> = created
+                            .stages
+                            .iter()
+                            .map(|s| format!("{}={}", s.name, s.job))
+                            .collect();
+                        log!(
+                            "dream {tag}: declared {} [{}]",
+                            created.pipeline,
+                            stages.join(" ")
+                        );
+                        let cmds = self.gen.pipeline_created_at(
+                            tag,
+                            created.pipeline,
+                            Some(now_ms()),
+                        );
+                        if !cmds.is_empty() {
+                            self.run_gen_cmds(cmds);
+                        }
+                        self.grids_dirty = true;
+                    }
+                    Err(error) => {
+                        // A NEW client on an OLD server reads exactly this,
+                        // and must never quietly fall back to chaining jobs
+                        // by hand — that is the invisible run this lane
+                        // deleted.
+                        log!("dream {tag}: declaration refused: {error}");
+                        self.gen.pipeline_failed_at(tag, error, Some(now_ms()));
+                        self.grids_dirty = true;
+                    }
+                },
+                PipeDone::Detail { pipeline, result } => match result {
+                    Ok(detail) => {
+                        let finish = self.gen.pipeline_arrived_at(&detail, now_ms());
+                        if let Some(finish) = finish {
+                            // The run FINISHED. This is the completion
+                            // signal the grid refresh hangs off now — the
+                            // record's own terminal transition, not a
+                            // publish event that happened to name an asset
+                            // some row was waiting for.
+                            log!(
+                                "dream {}: {} ({}‰)",
+                                finish.tag,
+                                finish.state.as_str(),
+                                detail.permille
+                            );
+                            if let Some(asset) = finish.asset {
+                                // Remember what this session dreamed: those
+                                // clips get their wrap closed when a pad
+                                // cues them.
+                                if self.dream_loops.len() >= 64 {
+                                    self.dream_loops.clear();
+                                }
+                                self.dream_loops.insert(asset);
+                            }
+                            self.grids_dirty = true;
+                            self.refresh_surfaces_after_run();
+                        }
+                    }
+                    Err(error) => {
+                        self.gen.pipeline_failed_read(pipeline, error, now_ms());
+                    }
+                },
+                PipeDone::Cancelled { pipeline, result } => match result {
+                    Ok(cancelled) => {
+                        log!(
+                            "dream: stopped {} — {} stage(s), now {}",
+                            cancelled.pipeline,
+                            cancelled.cancelled,
+                            cancelled.state.as_str()
+                        );
+                        self.gen.pipeline_cancel_confirmed_at(
+                            pipeline,
+                            cancelled.cancelled,
+                            Some(now_ms()),
+                        );
+                        self.grids_dirty = true;
+                    }
+                    Err(error) => log!("dream: stop failed: {error}"),
+                },
             }
         }
+    }
+
+    /// A run finished: re-list the surfaces so its clip is on the grid even
+    /// when the catalog feed's own event for it was missed (a lane the
+    /// operator is not sitting on, a feed that gapped, a publish that
+    /// landed before the row knew what asset it was waiting for).
+    fn refresh_surfaces_after_run(&mut self) {
+        self.video_model.event_touch(None);
     }
 
     fn run_cue_cmds(&mut self, cx: &mut Cx, cmds: Vec<CueCmd>) {
@@ -11764,6 +11874,16 @@ p2 {}
                 SessionMsg::Up(up) => {
                     self.status_text = format!("connected {}", up.server_label);
                     self.up = Some(*up);
+                    // The pipeline transport rides the same verified session
+                    // on its own thread. Re-pointed on every reconnect: a run
+                    // declared before the drop keeps being read and can still
+                    // be stopped, because the record is the store's, not this
+                    // process's.
+                    {
+                        let up = self.up.as_ref().unwrap();
+                        let (endpoints, token) = (up.endpoints, up.token.clone());
+                        self.pipelines.connect(endpoints, token);
+                    }
                     // Seed the bundled vjeffect preset library into the local
                     // store, publish-if-absent (idempotent; a user-edited
                     // revision under a seeded alias is never touched). Runs
@@ -12492,21 +12612,10 @@ p2 {}
                 self.run_gen_cmds(cmds);
             }
             (CatPurpose::JobStatus { .. }, ClientOutput::JobStatus(status)) => {
-                let chain_cmds = self.gen.status_arrived_at(&status, now_ms());
-                if !chain_cmds.is_empty() {
-                    self.run_gen_cmds(chain_cmds);
-                    self.grids_dirty = true;
-                }
-                // Remember what this session dreamed: those clips get their
-                // wrap closed when a pad cues them.
-                let dreamed: Vec<AssetId> =
-                    self.gen.jobs().filter_map(|job| job.dream_video_product()).collect();
-                for asset in dreamed {
-                    if self.dream_loops.len() >= 64 {
-                        self.dream_loops.clear();
-                    }
-                    self.dream_loops.insert(asset);
-                }
+                // Single-job rows only. A DREAM run is a pipeline: its
+                // record arrives through `pump_pipelines`, and nothing here
+                // advances a stage any more.
+                self.gen.status_arrived_at(&status, now_ms());
             }
             (CatPurpose::JobCancel { job }, ClientOutput::JobCancelled(count)) => {
                 self.gen.cancel_confirmed_at(job, count, Some(now_ms()));
@@ -23225,7 +23334,7 @@ impl AppMain for App {
             // Bounded generation-status polling.
             let cmds = self.gen.tick(now_ms());
             self.run_gen_cmds(cmds);
-            self.pump_expander();
+            self.pump_pipelines();
             self.pump_dream_thumbs();
             let cmds = self.gen.ensure_profiles();
             self.run_gen_cmds(cmds);
