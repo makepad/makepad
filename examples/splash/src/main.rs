@@ -2103,7 +2103,7 @@ impl App {
         &mut self,
         cx: &mut Cx,
         flatten: f32,
-        ripple_start: f32,
+        ripple_age: f32,
         ripple_strength: f32,
     ) {
         if let Some(mut glass) = self
@@ -2111,7 +2111,7 @@ impl App {
             .widget(cx, ids!(glass_lens_button_bg))
             .borrow_mut::<GaussRoundedView>()
         {
-            glass.set_press_response(cx, flatten, ripple_start, ripple_strength);
+            glass.set_press_response(cx, flatten, ripple_age, ripple_strength);
         }
     }
 
@@ -2152,18 +2152,13 @@ impl MatchEvent for App {
             let flatten = t * t * (3.0 - 2.0 * t);
             self.lens_press_flatten = flatten;
             let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * (1.0 - flatten * 0.10);
-            self.set_focus_lens_press_response(
-                cx,
-                flatten,
-                self.lens_press_started_at as f32,
-                ripple_strength,
-            );
+            self.set_focus_lens_press_response(cx, flatten, age as f32, ripple_strength);
 
             if age < 1.08 {
                 self.lens_press_next_frame = cx.new_next_frame();
             } else {
                 self.lens_ripple_animating = false;
-                self.set_focus_lens_press_response(cx, 1.0, self.lens_press_started_at as f32, 0.0);
+                self.set_focus_lens_press_response(cx, 1.0, 1000.0, 0.0);
             }
         } else {
             if self.lens_release_started_at <= 0.0 {
@@ -2172,19 +2167,14 @@ impl MatchEvent for App {
             let age = (e.time - self.lens_release_started_at).max(0.0);
             let restore = self.lens_press_flatten.clamp(0.0, 1.0);
             let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * 0.62;
-            self.set_focus_lens_press_response(
-                cx,
-                -restore,
-                self.lens_release_started_at as f32,
-                ripple_strength,
-            );
+            self.set_focus_lens_press_response(cx, -restore, age as f32, ripple_strength);
 
             if age < 1.08 {
                 self.lens_press_next_frame = cx.new_next_frame();
             } else {
                 self.lens_ripple_animating = false;
                 self.lens_press_flatten = 0.0;
-                self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+                self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
                 if self.lens_pending_close {
                     self.lens_pending_close = false;
                     self.ui
@@ -2295,7 +2285,7 @@ impl MatchEvent for App {
             self.lens_ripple_animating = false;
             self.lens_pending_close = false;
             self.lens_press_flatten = 0.0;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
             self.ui
                 .popup_notification(cx, ids!(glass_lens_button_popup))
                 .open(cx);
@@ -2340,7 +2330,7 @@ impl MatchEvent for App {
             self.lens_release_started_at = 0.0;
             self.lens_press_flatten = 0.0;
             self.lens_pending_close = false;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
             self.lens_press_next_frame = cx.new_next_frame();
         }
         if focus_lens_button.released(actions) {
