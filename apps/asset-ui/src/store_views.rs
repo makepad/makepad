@@ -2196,6 +2196,15 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
             .clone()
             .or_else(|| event.asset_id.map(|id| id.to_string()))
             .or_else(|| event.game_id.map(|id| id.to_string()))
+            // A finished run's subject is the RUN, and how it ended — the
+            // namespace alone would say nothing about which one it was.
+            .or_else(|| {
+                let pipeline = event.pipeline?;
+                Some(match event.pipeline_state {
+                    Some(state) => format!("{pipeline} · {}", state.as_str()),
+                    None => pipeline.to_string(),
+                })
+            })
             .unwrap_or_else(|| event.namespace.clone());
         rows.push(StoreRow::Record {
             title: format!("#{} · {}", event.seq, event.kind.as_str()),

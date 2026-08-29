@@ -22,9 +22,13 @@ use makepad_asset_data::{
 // ---- discovery beacon ------------------------------------------------------
 
 /// Catalog-event vocabulary this build speaks (see [`path_events`]). v1 is
-/// the original kind set; v2 adds retirement, and v4 adds in-memory model
-/// part deltas (which older vocabularies are never sent).
-pub const EVENT_VOCABULARY: u32 = 4;
+/// the original kind set; v2 adds retirement, v4 adds in-memory model part
+/// deltas, and v5 adds `pipeline.finished` — a whole declared run reaching a
+/// terminal state, which is the ONE honest signal that a multi-stage run is
+/// over (a publish is per-asset and coincidental, and a run that fails
+/// publishes nothing at all). Kinds above a caller's vocabulary are never
+/// sent to it.
+pub const EVENT_VOCABULARY: u32 = 5;
 
 pub const DISCOVERY_MAGIC: [u8; 8] = *b"MPASDIS1";
 pub const BEACON_LEN: usize = 36;
