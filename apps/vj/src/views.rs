@@ -1744,7 +1744,6 @@ impl JobRowEntry {
         let progress_text = match display.progress_permille {
             Some(value) => format!("{:.1}%", value as f32 / 10.0),
             None => match &job.state {
-                    GenJobState::Expanding => "EXPAND".to_string(),
                 GenJobState::Submitting => "SENDING".to_string(),
                 // A busy fleet is not a broken one: say WHERE the job
                 // stands instead of a vague wait.

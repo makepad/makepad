@@ -6,14 +6,27 @@
 //! poll, many may coexist, and every completion is matched by local tag or
 //! server job id so stale/foreign results die at the boundary.
 //!
-//! The publication signal comes from the CATALOG EVENT STREAM, not from
-//! polling the whole catalog: when a subscriber event names the asset a
-//! job's result document declared, the row flips to "published" and the
-//! video surface (refreshed by the same event) shows the cueable tile.
+//! A single job's publication signal comes from the CATALOG EVENT STREAM,
+//! not from polling the whole catalog: when a subscriber event names the
+//! asset a job's result document declared, the row flips to "published" and
+//! the video surface (refreshed by the same event) shows the cueable tile.
+//!
+//! A DREAM run is not a job: it is a PIPELINE the store owns. One
+//! `create_pipeline` declares expand → image → video with the splices that
+//! join them, and from then on this model only READS the record
+//! (`pipeline_detail`, one request per run per tick). Nothing here advances
+//! a stage, holds a successor's body, or waits for a result to paste
+//! somewhere — the deps gate and the claim-time splice are the advancement,
+//! and they keep running with this app closed. A run's completion is the
+//! record reaching a terminal state, not a publish event that happened to
+//! name the right asset.
 
-use makepad_asset_client::json::{s, Value};
-use makepad_asset_client::{JobId, JobProfileDto, JobStateDto, JobStatusDto};
-use makepad_asset_data::AssetId;
+use makepad_asset_client::json::{obj, s, Value};
+use makepad_asset_client::{
+    stage_ref, JobId, JobProfileDto, JobStateDto, JobStatusDto, PipelineDetailDto, PipelineId,
+    PipelineStageDto, PipelineStageSpec, PipelineStateDto,
+};
+use makepad_asset_data::{AssetId, AssetRevisionId};
 
 /// Local submission tag, valid before the server assigns a [`JobId`].
 pub type GenTag = u64;
@@ -55,6 +68,23 @@ pub const DEFAULT_LENGTH: usize = 1;
 
 /// The "no pin, let the fleet choose" row of the image-model picker.
 pub const AUTO_IMAGE_MODEL: &str = "auto";
+
+/// The declared run's title, as every client that lists pipelines shows it.
+pub const DREAM_TITLE: &str = "DREAM";
+
+/// What the run's prompt tells the writer about MOTION.
+///
+/// A splice replaces a whole value — it cannot append — so the steering
+/// that used to be glued onto the video stage's prompt has to ride the one
+/// text every stage descends from. Putting it in the run's prompt means the
+/// expander writes a brief that is already one-directional, and it survives
+/// the `on_fail: skip` fallback too (the store hands the dependents THIS
+/// text when the expander is refused).
+///
+/// NEVER ask for "flowing back into the first frame": H3 obliges by
+/// animating a literal boomerang and the clip rewinds on screen. The loop
+/// is closed by the end-frame input and the player's wrap, not by the words.
+pub const MOTION_STEER: &str = " — continuous one-directional motion at a steady pace, no reversal, no boomerang, no rewind, no cuts, no camera jumps";
 /// Preferred image model when the fleet advertises it: schnell is the
 /// 4-step distilled flux, which is what makes a DREAM run feel immediate.
 pub const DEFAULT_IMAGE_MODEL: &str = "flux1-schnell";
@@ -233,11 +263,8 @@ pub enum ProfilesState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GenJobState {
-    /// The prompt expander is running on the store's chat broker. There is
-    /// no server job yet — the expanded text IS the first stage's prompt,
-    /// so nothing can be enqueued until it lands (or gives up).
-    Expanding,
-    /// Enqueue request in flight (no server id yet).
+    /// Enqueue (a job) or declaration (a pipeline) in flight — no server id
+    /// yet.
     Submitting,
     Pending,
     Running { permille: u16, note: String },
@@ -298,24 +325,36 @@ pub struct GenJobDisplay {
     pub tone: GenJobTone,
 }
 
-/// The job a finished stage hands its product to.
+/// One stage of a run as the RECORD reports it.
 ///
-/// The store's job queue CANNOT do this for us. `POST /v1/jobs` accepts a
-/// `deps` array, but `deps` is only an ordering-and-doom gate — the claim
-/// query checks `dj.state != 'succeeded'` and nothing anywhere splices a
-/// dependency's RESULT into the dependent's body, which is frozen at
-/// enqueue time by `envelope_build`. (The client crate cannot even send
-/// `deps`: `Api::enqueue_job` posts `{namespace, kind, body}` and nothing
-/// else.) A stage that needs the previous stage's published revision must
-/// therefore be enqueued AFTER that revision exists, by whoever is watching
-/// — which is this model, from the status poll it already runs.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChainNext {
-    pub namespace: String,
-    pub kind: String,
-    /// The successor's body, complete except for `source_revision`, which is
-    /// only knowable once the previous stage publishes.
-    pub body: Vec<(String, Value)>,
+/// Read from `pipeline_detail`, never inferred from what this app enqueued:
+/// a stage the store skipped, retried on another box, or doomed says so
+/// here even though nothing in this process saw it happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenStage {
+    /// The declared stage name — `expand`, `image`, `video`.
+    pub name: String,
+    pub tone: GenJobTone,
+    /// The stage failed and was declared `on_fail: skip`, so the run went
+    /// on without it. The chip says `expand (raw)`.
+    pub skipped: bool,
+}
+
+/// A run reaching a terminal state, reported once.
+///
+/// This is `pipeline.finished` as a POLLING client sees it. The event
+/// itself rides `/v1/events` at vocabulary 5 and this build's subscriber
+/// asks for 4 (`wire::EVENT_VOCABULARY`, in the client crate, which this
+/// app does not own), so the record's own terminal transition is the
+/// signal — same fact, one tick later at worst. What it replaces is the
+/// coincidental publish event: the grid used to refresh because an asset
+/// happened to be named on the feed, which said nothing about the RUN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipelineFinish {
+    pub tag: GenTag,
+    pub state: PipelineStateDto,
+    /// The clip the run published, when it made one.
+    pub asset: Option<AssetId>,
 }
 
 /// How a run's loop gets closed.
@@ -350,40 +389,31 @@ impl LoopStrategy {
     }
 }
 
-/// A multi-stage run, carried on the row that is running its current stage.
+/// A DECLARED run, as its record reads right now.
 ///
-/// One row, one run: the row keeps its tag across the hand-off, so its
-/// elapsed clock covers the whole run and its Stop button always cancels
-/// whatever stage is live. Two rows would have meant two cancel buttons for
-/// one thing the operator thinks of as one thing.
+/// One row, one run: the row is the pipeline, so its elapsed clock covers
+/// every stage and its Stop button cancels the whole graph. Everything in
+/// here except the operator's own choices (canvas, frames, model, loop
+/// strategy) is READ BACK from `pipeline_detail` — this app no longer holds
+/// a successor's body, a pending prompt, or a hand-off of any kind.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GenChain {
-    /// Every stage's chip label, left to right.
-    pub steps: Vec<String>,
-    /// Index into `steps` of the stage running now.
-    pub stage: usize,
-    /// The successor, until it is handed off.
-    pub next: Option<ChainNext>,
-    /// Stage ONE's body and destination, held while the expander runs. The
-    /// expanded text is written into it before it is enqueued.
-    pending_stage_one: Vec<(String, Value)>,
-    namespace: String,
-    kind: String,
-    /// The image the middle stage published: this run's INPUT image, kept
-    /// for the row's thumbnail after `produced` moves on to the video.
-    pub input_image: Option<AssetId>,
-    pub input_revision: Option<makepad_asset_data::AssetRevisionId>,
-    /// What the expander did, in the row's words. Set when it was skipped
-    /// or failed, so the chip never claims an expansion that never ran.
+pub struct GenRun {
+    /// Every declared stage, left to right, as the record reports it.
+    pub stages: Vec<GenStage>,
+    /// The still the image stage published — the revision the row's
+    /// thumbnail is resolved from, and the one the clip is grown from.
+    pub input_revision: Option<AssetRevisionId>,
+    /// Why the expander did not deliver, in the row's words. Set only when
+    /// the record says that stage was SKIPPED, so the chip never claims an
+    /// expansion that never ran.
     pub expand_note: Option<String>,
-    /// The expanded prompt, once it lands (shown under the row).
-    pub expanded: Option<String>,
     /// The image model this run asked for, when the operator pinned one.
     pub image_model: Option<String>,
-    /// The prompt the IMAGE STAGE was actually queued with — read back out
-    /// of the job body rather than recomposed, so what the row shows and
-    /// what the fleet renders cannot drift apart. Either the expansion or,
-    /// in the fallback, the operator's own words.
+    /// The prompt the IMAGE STAGE was actually handed — read out of the
+    /// worker's own stage record when it exists, so what the row shows and
+    /// what the fleet rendered cannot drift apart. Falls back to the
+    /// expander's answer, then to the declared body, then to the words the
+    /// operator typed.
     pub final_prompt: Option<String>,
     /// The canvas every stage of this run shares.
     pub canvas: (u32, u32),
@@ -395,7 +425,12 @@ pub struct GenChain {
 #[derive(Clone, Debug)]
 pub struct GenJob {
     pub tag: GenTag,
+    /// The server job, for a single-job row.
     pub job: Option<JobId>,
+    /// The declared run, for a pipeline row. Exactly one of `job` and
+    /// `pipeline` is ever set: a run is one thing to poll and one thing to
+    /// stop.
+    pub pipeline: Option<PipelineId>,
     /// Prompt excerpt for the row.
     pub title: String,
     pub profile_label: String,
@@ -426,8 +461,8 @@ pub struct GenJob {
     pub produced: Option<AssetId>,
     /// The produced asset appeared on the catalog event stream.
     pub published: bool,
-    /// Set when this row is one run of several chained stages.
-    pub chain: Option<GenChain>,
+    /// Set when this row is a declared multi-stage run.
+    pub run: Option<GenRun>,
 }
 
 /// The product a job kind makes, in a row's words.
@@ -455,37 +490,25 @@ fn capitalize(word: &str) -> String {
 impl GenJob {
     /// The run's stages as chips, left to right. Empty for a plain row —
     /// a single job is not a pipeline and must not be dressed as one.
+    ///
+    /// Every chip's tone is the RECORD's word on that stage. Nothing is
+    /// derived from "the row is running so stage N must be too": a stage
+    /// requeued onto another box, a stage doomed by a sibling's failure and
+    /// a stage skipped all look different here because they ARE different,
+    /// and the store is the only thing that knows which happened.
     pub fn stage_chips(&self) -> Vec<StageChip> {
-        let Some(chain) = &self.chain else { return Vec::new() };
-        let here = match &self.state {
-            GenJobState::Expanding | GenJobState::Submitting | GenJobState::Pending => {
-                GenJobTone::Waiting
-            }
-            GenJobState::Running { .. } | GenJobState::CancelRequested => GenJobTone::Active,
-            GenJobState::Succeeded => GenJobTone::Success,
-            GenJobState::Failed(_) => GenJobTone::Failed,
-            GenJobState::Cancelled => GenJobTone::Cancelled,
-        };
-        chain
-            .steps
+        let Some(run) = &self.run else { return Vec::new() };
+        run.stages
             .iter()
-            .enumerate()
-            .map(|(i, name)| {
+            .map(|stage| StageChip {
                 // The expander is the one stage allowed to fail without
-                // ending the run, so it gets its own honest chip instead of
-                // a green tick it did not earn.
-                if i == 0 && chain.expand_note.is_some() {
-                    return StageChip {
-                        label: "expand (raw)".to_string(),
-                        tone: GenJobTone::Cancelled,
-                    };
-                }
-                let tone = match i.cmp(&chain.stage) {
-                    std::cmp::Ordering::Less => GenJobTone::Success,
-                    std::cmp::Ordering::Equal => here,
-                    std::cmp::Ordering::Greater => GenJobTone::Waiting,
-                };
-                StageChip { label: name.clone(), tone }
+                // ending the run, so a skipped one says so instead of
+                // showing a green tick it did not earn.
+                label: match stage.skipped {
+                    true => format!("{} (raw)", stage.name),
+                    false => stage.name.clone(),
+                },
+                tone: stage.tone,
             })
             .collect()
     }
@@ -493,28 +516,28 @@ impl GenJob {
     /// The finished video of a DREAM run, once it has published one. This
     /// is what the pads close the loop on.
     pub fn dream_video_product(&self) -> Option<AssetId> {
-        let chain = self.chain.as_ref()?;
-        // The last stage, finished: `next` is spent and the row succeeded.
-        if chain.next.is_some() || !matches!(self.state, GenJobState::Succeeded) {
+        self.run.as_ref()?;
+        // The whole run succeeded — every stage of it, publish included.
+        if !matches!(self.state, GenJobState::Succeeded) {
             return None;
         }
         self.produced
     }
 
     /// The still this run made for its video stage, once it exists.
-    pub fn input_revision(&self) -> Option<makepad_asset_data::AssetRevisionId> {
-        self.chain.as_ref().and_then(|c| c.input_revision)
+    pub fn input_revision(&self) -> Option<AssetRevisionId> {
+        self.run.as_ref().and_then(|r| r.input_revision)
     }
 
-    /// The prompt this run's image stage was actually queued with.
+    /// The prompt this run's image stage was actually handed.
     pub fn final_prompt(&self) -> Option<&str> {
-        self.chain.as_ref().and_then(|c| c.final_prompt.as_deref())
+        self.run.as_ref().and_then(|r| r.final_prompt.as_deref())
     }
 
     /// True when that prompt is the operator's raw words because the
-    /// expander did not deliver.
+    /// expander stage was skipped.
     pub fn prompt_is_raw(&self) -> bool {
-        self.chain.as_ref().is_some_and(|c| c.expand_note.is_some())
+        self.run.as_ref().is_some_and(|r| r.expand_note.is_some())
     }
 
     pub fn elapsed_ms(&self, now_ms: u64) -> u64 {
@@ -526,9 +549,6 @@ impl GenJob {
     pub fn display(&self, now_ms: u64) -> GenJobDisplay {
         let elapsed_ms = self.elapsed_ms(now_ms);
         let assignment = match (&self.state, self.worker_assigned, self.node_state) {
-            (GenJobState::Expanding, _, _) => {
-                "expander: on the chat broker · no gpu job yet".to_string()
-            }
             (GenJobState::Submitting, _, _) => {
                 "worker: not assigned · node: not assigned".to_string()
             }
@@ -544,18 +564,28 @@ impl GenJob {
             },
             (_, true, GenNodeState::Finished) => "worker: finished · node: finished".to_string(),
         };
+        let declared = self.run.is_some();
         let (stage, mut message, progress_permille, tone) = match &self.state {
-            GenJobState::Expanding => (
-                "Expanding the prompt".to_string(),
-                "Asking the language model to turn the prompt into a full \
-                 generation brief.".to_string(),
+            GenJobState::Submitting if declared => (
+                "Declaring the run".to_string(),
+                "Handing the whole graph to the store: expand, then the still, \
+                 then the clip grown from it.".to_string(),
                 None,
-                GenJobTone::Active,
+                GenJobTone::Waiting,
             ),
             GenJobState::Submitting => (
                 "Submitting to the generation queue".to_string(),
                 "Waiting for the server to accept the job.".to_string(),
                 None,
+                GenJobTone::Waiting,
+            ),
+            GenJobState::Pending if declared => (
+                "Queued — waiting for a worker".to_string(),
+                "The whole run is declared and on the queue; it starts when a \
+                 compatible worker is free.".to_string(),
+                // The record's aggregate is honest from the instant the run
+                // is declared: finished stages already count.
+                Some(self.last_progress_permille),
                 GenJobTone::Waiting,
             ),
             GenJobState::Pending => (
@@ -570,7 +600,12 @@ impl GenJob {
             }
             GenJobState::Succeeded => {
                 let product = product_word(&self.kind);
-                if self.published {
+                // A DECLARED run's last stage publishes BEFORE its job
+                // succeeds (the worker's 900–1000 band is fetch/annotate/
+                // publish), so a succeeded record is a published clip. A
+                // single job still waits for the catalog event that names
+                // its asset.
+                if self.published || declared {
                     (
                         format!("{} ready", capitalize(product)),
                         format!("Published — the {product}'s tile is on its grid, click to cue it."),
@@ -610,29 +645,27 @@ impl GenJob {
         // words, so the row shows both what was asked and what was sent.
         // A failed or cancelled run keeps its reason instead: at that point
         // why it stopped outranks what it was going to draw.
-        if let Some(chain) = &self.chain {
+        if let Some(run) = &self.run {
             let stopped = matches!(
                 self.state,
                 GenJobState::Failed(_) | GenJobState::Cancelled | GenJobState::CancelRequested
             );
-            match (&chain.final_prompt, stopped) {
+            match (&run.final_prompt, stopped) {
                 (Some(prompt), false) => {
                     // Marked when it is the raw prompt, and marked with the
                     // REASON: "raw" alone tells the operator the expansion
-                    // is missing but not that the expander timed out.
-                    let label = match &chain.expand_note {
-                        // The note reads "expander timed out — using the
-                        // prompt as typed"; only the cause rides along, and
-                        // the line says what happens NEXT: this text went
-                        // out for the worker to expand, so it is what was
-                        // sent, not what will be rendered.
+                    // is missing but not that the expander was refused.
+                    let label = match &run.expand_note {
+                        // The store skipped the expand stage and rewrote the
+                        // dependents' splices to the words the operator
+                        // typed, so this text IS what the fleet rendered.
                         Some(note) => {
                             let cause = note.split(" — ").next().unwrap_or(note);
-                            format!("sent raw, worker expanding ({cause})")
+                            format!("raw prompt ({cause})")
                         }
                         None => "brief".to_string(),
                     };
-                    let model = match &chain.image_model {
+                    let model = match &run.image_model {
                         Some(model) => format!("{model} · "),
                         None => String::new(),
                     };
@@ -641,9 +674,9 @@ impl GenJob {
                         clip_chars(prompt, MAX_SUBTITLE_CHARS)
                     );
                 }
-                // Still expanding, or stopped: say what the expander did.
+                // Nothing sent yet, or stopped: say what the expander did.
                 _ => {
-                    if let Some(note) = &chain.expand_note {
+                    if let Some(note) = &run.expand_note {
                         if !message.is_empty() {
                             message.push_str(" · ");
                         }
@@ -658,13 +691,13 @@ impl GenJob {
             }
             message.push_str(warning);
         }
-        let canvas = match &self.chain {
-            Some(chain) => format!(
+        let canvas = match &self.run {
+            Some(run) => format!(
                 "{}x{} · {:.1}s loop · {}",
-                chain.canvas.0,
-                chain.canvas.1,
-                clip_seconds(chain.frames),
-                chain.loop_strategy.as_str(),
+                run.canvas.0,
+                run.canvas.1,
+                clip_seconds(run.frames),
+                run.loop_strategy.as_str(),
             ),
             None => String::new(),
         };
@@ -718,6 +751,83 @@ fn humanize_stage(stage: &str) -> String {
     text
 }
 
+/// One record stage as the chip strip reads it.
+fn stage_view(stage: &PipelineStageDto) -> GenStage {
+    let tone = if stage.skipped {
+        // Skipped is not failed and not finished: the run went on WITHOUT
+        // this stage, which is its own thing and gets its own tone.
+        GenJobTone::Cancelled
+    } else {
+        match stage.state {
+            JobStateDto::Pending => GenJobTone::Waiting,
+            JobStateDto::Running => GenJobTone::Active,
+            JobStateDto::Succeeded => GenJobTone::Success,
+            JobStateDto::Failed => GenJobTone::Failed,
+            JobStateDto::Cancelled => GenJobTone::Cancelled,
+        }
+    };
+    GenStage { name: stage.name.clone(), tone, skipped: stage.skipped }
+}
+
+/// Why a stage ended the way it did, in the row's words: the worker's own
+/// error document if it left one, else the recorded outcome word.
+fn stage_reason(stage: &PipelineStageDto) -> String {
+    let Some(result) = &stage.result else {
+        return "no reason recorded".to_string();
+    };
+    let text = result
+        .body
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| result.outcome.clone());
+    match text.trim().is_empty() {
+        true => "no reason recorded".to_string(),
+        false => clip_chars(text.trim(), 120),
+    }
+}
+
+/// A run's failure, named by the stage it happened at — "the video stage
+/// failed" is a different fact from "the still failed", and a bar that
+/// stopped at 20% says nothing about which.
+fn failure_reason(detail: &PipelineDetailDto) -> String {
+    match detail
+        .stages
+        .iter()
+        .find(|stage| stage.state == JobStateDto::Failed && !stage.skipped)
+    {
+        Some(stage) => format!("{} stage failed: {}", stage.name, stage_reason(stage)),
+        None => "the run failed".to_string(),
+    }
+}
+
+/// A stage's DECLARED prompt, when it is a plain string. While a splice is
+/// still unresolved this is the `{"$from": …}` object, which is not a
+/// prompt and must never be shown as one.
+fn declared_prompt(stage: &PipelineStageDto) -> Option<String> {
+    stage
+        .declared
+        .as_ref()?
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// The asset a stage's recorded result declared, if it published one.
+fn result_asset(stage: &PipelineStageDto) -> Option<AssetId> {
+    use std::str::FromStr;
+    let body = &stage.result.as_ref()?.body;
+    AssetId::from_str(body.get("asset_id")?.as_str()?).ok()
+}
+
+/// The revision a stage's recorded result declared — the one a later
+/// stage's splice was pointed at.
+fn result_revision(stage: &PipelineStageDto) -> Option<AssetRevisionId> {
+    use std::str::FromStr;
+    let body = &stage.result.as_ref()?.body;
+    AssetRevisionId::from_str(body.get("revision")?.as_str()?).ok()
+}
+
 fn node_state_from_note(note: &str) -> GenNodeState {
     let note = note.trim();
     if note.starts_with("waiting-for-fleet") || note.starts_with("waiting-for-vram") {
@@ -732,13 +842,26 @@ fn node_state_from_note(note: &str) -> GenNodeState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GenCmd {
     FetchProfiles { domain: &'static str },
-    /// Run the prompt expander for `tag` and report back through
-    /// [`GenModel::expand_arrived`]. Not a job: the store has no expander
-    /// kind, so the host does this on the chat broker.
-    Expand { tag: GenTag, prompt: String },
     Enqueue { tag: GenTag, namespace: String, kind: String, body: Value },
     PollStatus { job: JobId },
     Cancel { job: JobId },
+    /// Declare a whole multi-stage run in ONE request. Every stage, every
+    /// dependency and every `$from_stage` splice goes up front; from here
+    /// on nothing in this app advances anything.
+    CreatePipeline {
+        tag: GenTag,
+        namespace: String,
+        title: String,
+        /// The words the run falls back to when a `on_fail: skip` stage
+        /// fails — the store rewrites its dependents' splices to this.
+        prompt: String,
+        stages: Vec<PipelineStageSpec>,
+    },
+    /// One read of the record: state, weighted bar, every stage. One
+    /// request draws the whole row.
+    PollPipeline { pipeline: PipelineId },
+    /// Stop every non-terminal stage of a declared run, in one request.
+    CancelPipeline { pipeline: PipelineId },
 }
 
 /// Built-in VJ pipes. Always offered; server profiles only overlay defaults.
@@ -786,6 +909,103 @@ impl GenPipe {
     pub fn has_image_model(&self) -> bool {
         self.kind == "image.generate"
     }
+}
+
+/// The DREAM declaration: three stages, the two splices that join them,
+/// and the weights the client's shared table gives each kind.
+///
+/// This is the whole run. It is enqueued in one request and then nobody
+/// carries anything: the store's claim-time splice puts the expander's
+/// answer into the image body, and the image's published revision into the
+/// video body — both as `source_revision` (the still the clip grows from)
+/// and as the `last_frame` named input (the still the clip ends on, which
+/// is what makes the wrap nearly closed before the player blends it).
+///
+/// `expand` is `on_fail: skip`: when the writer refuses, the store rewrites
+/// the dependents' references to the run's own prompt and detaches the
+/// edge. The never-lose-a-run law, structurally, instead of a client
+/// remembering to do it.
+///
+/// `image_extra` is whatever the server profile declared that the pickers
+/// do not own; the caller has already dropped the keys it decides itself.
+pub fn dream_stages(
+    prompt: &str,
+    canvas: (u32, u32),
+    frames: u32,
+    steps: u32,
+    image_model: Option<&str>,
+    image_extra: Vec<(String, Value)>,
+) -> Vec<PipelineStageSpec> {
+    let (w, h) = (Value::Int(canvas.0 as i64), Value::Int(canvas.1 as i64));
+    // The expander is told what the expansion is FOR. `video` is right for
+    // BOTH stages here: the still is the clip's first frame, so one brief
+    // has to describe one shot — two briefs would be two pictures spliced
+    // together.
+    let expand = PipelineStageSpec::new(
+        "expand",
+        "text.expand",
+        obj(vec![
+            ("prompt", s(prompt.to_string())),
+            ("target_domain", s("video")),
+        ]),
+    )
+    .on_fail_skip();
+
+    let mut image: Vec<(String, Value)> = image_extra;
+    image.retain(|(key, _)| {
+        // The pickers own the canvas and the model; the prompt is spliced.
+        key != "prompt" && key != "width" && key != "height" && key != "model"
+    });
+    image.push(("width".to_string(), w.clone()));
+    image.push(("height".to_string(), h.clone()));
+    if let Some(model) = image_model {
+        image.push(("model".to_string(), s(model.to_string())));
+    }
+    // NOTE: no `expand: true`. The worker-side pre-step is for single jobs;
+    // here the expansion is a stage of its own and expanding again would be
+    // expanding a rewrite.
+    image.push(("prompt".to_string(), stage_ref("expand", "prompt")));
+    let image = PipelineStageSpec::new(
+        "image",
+        "image.generate",
+        Value::Obj(image),
+    );
+
+    let still = || stage_ref("image", "revision");
+    let video = PipelineStageSpec::new(
+        "video",
+        "video.generate",
+        obj(vec![
+            ("width", w),
+            ("height", h),
+            ("frames", Value::Int(frames as i64)),
+            ("steps", Value::Int(steps as i64)),
+            // The VJ is a visuals instrument: no clip it generates carries
+            // an audio track.
+            ("audio", Value::Bool(false)),
+            ("tags", Value::Arr(vec![s("loop"), s("dream")])),
+            ("prompt", stage_ref("expand", "prompt")),
+            ("source_revision", still()),
+            (
+                "inputs",
+                Value::Arr(vec![obj(vec![
+                    ("name", s("last_frame")),
+                    ("content_type", s("image/png")),
+                    ("source_revision", still()),
+                ])]),
+            ),
+            ("loop_closure", s("end_frame_if_available")),
+        ]),
+    )
+    // Deliberately NO `model` pin: the stock video profiles default to the
+    // un-suffixed `minimax-h3`, which pins to the ONE box advertising that
+    // exact id. Six boxes can serve this queue; domain affinity picks.
+    //
+    // Both earlier stages: the prompt comes from `expand`, the still from
+    // `image`, and a splice may only read a stage this one waited for.
+    .with_deps(["expand", "image"]);
+
+    vec![expand, image, video]
 }
 
 pub const GEN_PIPES: &[GenPipe] = &[
@@ -856,7 +1076,10 @@ pub const GEN_PIPES: &[GenPipe] = &[
         label: "DREAM: expand → flux → video",
         kind: "image.generate",
         namespace: "gen",
-        expand: true,
+        // NOT the worker's pre-step flag: a dream run's expansion is a
+        // STAGE of its own, declared with the rest of the graph. This pipe
+        // never reaches the single-job body this flag rides.
+        expand: false,
         alpha: false,
         loop_video: false,
         enhance: false,
@@ -1303,6 +1526,13 @@ impl GenModel {
         if let Some(model) = &image_model {
             pairs.push(("model".to_string(), s(model.clone())));
         }
+        // DREAM is not a job. `pairs` is already the image stage's body
+        // (profile defaults, canvas, model) minus its prompt, which is a
+        // splice — so the whole graph can be declared right here and this
+        // method never touches it again.
+        if pipe.dream {
+            return self.declare_dream(pipe, &prompt, pairs, image_model, now_ms);
+        }
         if pipe.enhance {
             let (revision, _) = self.enhance_source.clone().expect("guarded above");
             pairs.push(("source_revision".to_string(), s(revision)));
@@ -1343,77 +1573,8 @@ impl GenModel {
         };
         pairs.push(("prompt".to_string(), s(body_prompt.clone())));
 
-        // DREAM: `pairs` is stage ONE (the flux1 still). Build stage TWO now,
-        // while the operator's choices are in hand — it is enqueued later,
-        // when stage one publishes and its revision finally exists.
-        let chain = pipe.dream.then(|| {
-            let canvas = self.selected_size().unwrap_or(VIDEO_SIZES[0]);
-            let (frames, steps) = VIDEO_LENGTHS[self.video_length.min(VIDEO_LENGTHS.len() - 1)];
-            let mut video: Vec<(String, Value)> = Vec::new();
-            // Deliberately NO `model`: the stock video profiles default to
-            // the un-suffixed `minimax-h3`, which is a PIN, and the only box
-            // advertising that exact id is the big one. Six boxes can serve
-            // this queue; pinning would funnel every dream through one of
-            // them. Domain affinity picks, as it does for everything else.
-            video.push(("width".to_string(), Value::Int(canvas.0 as i64)));
-            video.push(("height".to_string(), Value::Int(canvas.1 as i64)));
-            video.push(("frames".to_string(), Value::Int(frames as i64)));
-            video.push(("steps".to_string(), Value::Int(steps as i64)));
-            video.push(("audio".to_string(), Value::Bool(false)));
-            // Findable as a loop on the grids, like the loop pipe's own
-            // products.
-            video.push(("tags".to_string(), Value::Arr(vec![s("loop"), s("dream")])));
-            // The model has no loop mode and no end-frame conditioning, so
-            // the only thing the PROMPT can do for a loop is keep the motion
-            // even — the wrap itself is closed at playback (`loop_close`).
-            // Never ask it to "return to the first frame": H3 obliges by
-            // animating a boomerang and the clip visibly rewinds.
-            video.push((
-                "prompt".to_string(),
-                s(format!(
-                    "{body_prompt} — continuous one-directional motion at a steady \
-                     pace, no reversal, no boomerang, no rewind, no cuts, no camera jumps"
-                )),
-            ));
-            GenChain {
-                steps: vec!["expand".to_string(), "image".to_string(), "video".to_string()],
-                stage: 0,
-                next: Some(ChainNext {
-                    namespace: pipe.namespace.to_string(),
-                    kind: "video.generate".to_string(),
-                    body: video,
-                }),
-                pending_stage_one: pairs.clone(),
-                namespace: pipe.namespace.to_string(),
-                kind: pipe.kind.to_string(),
-                input_image: None,
-                input_revision: None,
-                expand_note: None,
-                expanded: None,
-                image_model: image_model.clone(),
-                final_prompt: None,
-                canvas,
-                frames,
-                // The video body asks for end-frame conditioning, which
-                // the fleet now honours; the player blends the wrap on top
-                // regardless (see LoopStrategy).
-                loop_strategy: LoopStrategy::EndFrame,
-            }
-        });
-
-        // Bound the visible rows: drop the oldest terminal row; refuse when
-        // every slot is an ACTIVE job.
-        if self.jobs.len() >= MAX_JOBS {
-            match self.jobs.iter().position(|j| j.state.is_terminal()) {
-                Some(oldest_terminal) => {
-                    self.jobs.remove(oldest_terminal);
-                }
-                None => {
-                    self.last_error =
-                        Some(format!("{MAX_JOBS} generations already in flight"));
-                    return Vec::new();
-                }
-            }
+        if !self.make_room() {
+            return Vec::new();
         }
         self.next_tag += 1;
         let tag = self.next_tag;
@@ -1422,15 +1583,12 @@ impl GenModel {
         self.jobs.push(GenJob {
             tag,
             job: None,
+            pipeline: None,
             title,
             profile_label: pipe.label.to_string(),
             kind: pipe.kind.to_string(),
             node_tag: None,
-            state: if chain.is_some() {
-                GenJobState::Expanding
-            } else {
-                GenJobState::Submitting
-            },
+            state: GenJobState::Submitting,
             last_poll_ms: now_ms,
             submitted_ms: now_ms,
             queued_ms: None,
@@ -1443,17 +1601,8 @@ impl GenModel {
             status_warning: None,
             produced: None,
             published: false,
-            chain,
+            run: None,
         });
-        if pipe.dream {
-            // The expander runs FIRST and off the job queue (the store has
-            // no expander job kind — `expand` in a job body is read by
-            // nothing, which is why the older "expand → …" pipes never
-            // actually expanded anything). The host runs it on the chat
-            // broker and comes back through `expand_arrived`, which is what
-            // finally enqueues stage one.
-            return vec![GenCmd::Expand { tag, prompt: body_prompt }];
-        }
         vec![GenCmd::Enqueue {
             tag,
             namespace: pipe.namespace.to_string(),
@@ -1462,90 +1611,321 @@ impl GenModel {
         }]
     }
 
-    /// The expander answered (or gave up: `expanded` is `None`).
+    /// DREAM: declare the whole run and open its row.
     ///
-    /// LAW: a failed expansion never loses the run. The raw prompt is what
-    /// stage one gets, and the chip says so — an expander that times out
-    /// mid-set must cost the operator a better prompt, never their clip.
-    pub fn expand_arrived(
+    /// One request, three stages, two splices. What used to happen instead:
+    /// a chat-broker turn on a worker thread, then an image job, then — from
+    /// a status poll, with the app obliged to still be running — a video job
+    /// built by hand from the revision that had just appeared. All of that
+    /// was correctness machinery pretending to be presentation; the store
+    /// owns it now.
+    fn declare_dream(
         &mut self,
-        tag: GenTag,
-        expanded: Option<String>,
-        note: Option<String>,
+        pipe: &'static GenPipe,
+        prompt: &str,
+        image_extra: Vec<(String, Value)>,
+        image_model: Option<String>,
+        now_ms: u64,
     ) -> Vec<GenCmd> {
-        let Some(row) = self.jobs.iter_mut().find(|j| j.tag == tag) else {
-            return Vec::new();
-        };
-        // Stop pressed while the expander was thinking: the run ends here,
-        // having cost the fleet nothing.
-        if matches!(row.state, GenJobState::CancelRequested) {
-            row.state = GenJobState::Cancelled;
+        let canvas = self.selected_size().unwrap_or(VIDEO_SIZES[0]);
+        let (frames, steps) = VIDEO_LENGTHS[self.video_length.min(VIDEO_LENGTHS.len() - 1)];
+        // The run's prompt: the operator's words plus the motion steering.
+        // This is both what the expander is asked to expand AND what the
+        // store falls back to if it refuses, so the steering survives the
+        // skip.
+        let run_prompt = format!("{prompt}{MOTION_STEER}");
+        let stages = dream_stages(
+            &run_prompt,
+            canvas,
+            frames,
+            steps,
+            image_model.as_deref(),
+            image_extra,
+        );
+        if !self.make_room() {
             return Vec::new();
         }
-        if !matches!(row.state, GenJobState::Expanding) {
-            return Vec::new();
+        self.next_tag += 1;
+        let tag = self.next_tag;
+        self.jobs.push(GenJob {
+            tag,
+            job: None,
+            pipeline: None,
+            // The row's title stays the operator's own words; the steering
+            // and the expansion belong on the subtitle, which reads back
+            // out of the record.
+            title: clip_chars(prompt, 48),
+            profile_label: pipe.label.to_string(),
+            // The run's PRODUCT is the clip, whatever its first stages
+            // make, so the row's copy names a video from the start.
+            kind: "video.generate".to_string(),
+            node_tag: None,
+            state: GenJobState::Submitting,
+            last_poll_ms: now_ms,
+            submitted_ms: now_ms,
+            queued_ms: None,
+            started_ms: None,
+            finished_ms: None,
+            last_update_ms: now_ms,
+            worker_assigned: false,
+            node_state: GenNodeState::Waiting,
+            last_progress_permille: 0,
+            status_warning: None,
+            produced: None,
+            published: false,
+            run: Some(GenRun {
+                // Declared order, so the chip strip is drawn from the
+                // instant GENERATE is pressed — the record replaces these
+                // the moment it first answers.
+                stages: stages
+                    .iter()
+                    .map(|s| GenStage {
+                        name: s.name.clone(),
+                        tone: GenJobTone::Waiting,
+                        skipped: false,
+                    })
+                    .collect(),
+                input_revision: None,
+                expand_note: None,
+                image_model,
+                final_prompt: None,
+                canvas,
+                frames,
+                // The video stage asks for end-frame conditioning, which the
+                // fleet honours; the player blends the wrap on top
+                // regardless (see LoopStrategy).
+                loop_strategy: LoopStrategy::EndFrame,
+            }),
+        });
+        vec![GenCmd::CreatePipeline {
+            tag,
+            namespace: pipe.namespace.to_string(),
+            title: DREAM_TITLE.to_string(),
+            prompt: run_prompt,
+            stages,
+        }]
+    }
+
+    /// Bound the visible rows: drop the oldest terminal row; refuse when
+    /// every slot is an ACTIVE run.
+    fn make_room(&mut self) -> bool {
+        if self.jobs.len() < MAX_JOBS {
+            return true;
         }
-        let Some(chain) = row.chain.as_mut() else { return Vec::new() };
-        let mut body = std::mem::take(&mut chain.pending_stage_one);
-        if body.is_empty() {
-            return Vec::new(); // already handed off (duplicate answer)
-        }
-        // The operator's own words, as they stand in the body right now.
-        let typed = body
-            .iter()
-            .find(|(key, _)| key == "prompt")
-            .and_then(|(_, value)| value.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let expanded = expanded.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-        match &expanded {
-            Some(text) => {
-                chain.expanded = Some(text.clone());
-                // The worker expands `expand: true` bodies itself now. A
-                // client that already expanded says so by sending the
-                // person's words as `prompt_original`, and the worker then
-                // keeps them for the row instead of rewriting a rewrite —
-                // without this the brief would be expanded TWICE and the
-                // text on the row would not be the text that drew the
-                // picture.
-                body.push(("prompt_original".to_string(), s(typed.clone())));
-                // Both stages render the SAME brief: the still is the
-                // video's first frame, so a different prompt on each would
-                // be two different pictures spliced together.
-                for (key, value) in body.iter_mut() {
-                    if key == "prompt" {
-                        *value = s(text.clone());
-                    }
-                }
-                if let Some(next) = chain.next.as_mut() {
-                    for (key, value) in next.body.iter_mut() {
-                        if key == "prompt" {
-                            *value = s(text.clone());
-                        }
-                    }
-                }
+        match self.jobs.iter().position(|j| j.state.is_terminal()) {
+            Some(oldest_terminal) => {
+                self.jobs.remove(oldest_terminal);
+                true
             }
             None => {
-                // No `prompt_original`, so the worker's own expander takes
-                // the run from here — a second chance on the box about to
-                // do the work, and it cannot lose the run either. The row
-                // must not claim the raw text is final, because it is not.
-                chain.expand_note =
-                    Some(note.unwrap_or_else(|| "expander unavailable".to_string()));
+                self.last_error = Some(format!("{MAX_JOBS} generations already in flight"));
+                false
             }
         }
-        // The single source of truth for "what did this run actually ask
-        // for": whatever `prompt` says in the body about to be enqueued.
-        chain.final_prompt = body
-            .iter()
-            .find(|(key, _)| key == "prompt")
-            .and_then(|(_, value)| value.as_str())
-            .map(str::to_string);
-        chain.stage = 1;
-        let namespace = chain.namespace.clone();
-        let kind = chain.kind.clone();
-        row.state = GenJobState::Submitting;
-        vec![GenCmd::Enqueue { tag, namespace, kind, body: Value::Obj(body) }]
+    }
+
+    /// The declaration was accepted: the row now has a pipeline to poll and
+    /// to stop. A Stop pressed while the declaration was in flight fires
+    /// here.
+    pub fn pipeline_created(&mut self, tag: GenTag, pipeline: PipelineId) -> Vec<GenCmd> {
+        self.pipeline_created_at(tag, pipeline, None)
+    }
+
+    pub fn pipeline_created_at(
+        &mut self,
+        tag: GenTag,
+        pipeline: PipelineId,
+        now_ms: Option<u64>,
+    ) -> Vec<GenCmd> {
+        let Some(row) = self.job_by_tag(tag) else { return Vec::new() };
+        row.pipeline = Some(pipeline);
+        let at = now_ms.unwrap_or(row.submitted_ms);
+        row.queued_ms = Some(at);
+        row.last_update_ms = at;
+        row.status_warning = None;
+        match row.state {
+            GenJobState::CancelRequested => vec![GenCmd::CancelPipeline { pipeline }],
+            _ => {
+                row.state = GenJobState::Pending;
+                Vec::new()
+            }
+        }
+    }
+
+    /// The declaration was refused. There is no half-created run to clean
+    /// up: the store creates a pipeline whole or not at all.
+    pub fn pipeline_failed_at(&mut self, tag: GenTag, error: String, now_ms: Option<u64>) {
+        self.enqueue_failed_at(tag, error, now_ms);
+    }
+
+    /// One read of a run's record. Returns the run's completion, once, the
+    /// tick it becomes terminal.
+    ///
+    /// EVERYTHING the row shows comes from here — states, the weighted
+    /// aggregate, which stage is live, the prompt the fleet was handed, the
+    /// still, the clip. Nothing is enqueued, advanced or handed off: a
+    /// record read is a read.
+    pub fn pipeline_arrived_at(
+        &mut self,
+        detail: &PipelineDetailDto,
+        now_ms: u64,
+    ) -> Option<PipelineFinish> {
+        let Some(row) = self.jobs.iter_mut().find(|j| j.pipeline == Some(detail.pipeline))
+        else {
+            return None;
+        };
+        if row.state.is_terminal() {
+            return None; // late duplicate
+        }
+        let run = row.run.as_mut()?;
+        row.last_update_ms = now_ms;
+        row.status_warning = None;
+
+        // ---- the chip strip, straight off the record ----------------------
+        run.stages = detail.stages.iter().map(stage_view).collect();
+
+        // ---- what the expander did ---------------------------------------
+        run.expand_note = detail
+            .stage("expand")
+            .filter(|stage| stage.skipped)
+            .map(|stage| format!("expander skipped — {}", stage_reason(stage)));
+
+        // ---- the prompt the fleet was actually handed ----------------------
+        // Best truth first: what the IMAGE worker recorded it sent. Then the
+        // expander's own answer, then the declared body (which is the raw
+        // prompt once a skip has rewritten it), then the run's own text.
+        run.final_prompt = detail
+            .stage("image")
+            .and_then(|stage| {
+                stage
+                    .records
+                    .iter()
+                    .rev()
+                    .map(|record| record.prompt.clone())
+                    .find(|prompt| !prompt.is_empty())
+                    .or_else(|| declared_prompt(stage))
+            })
+            .or_else(|| {
+                detail
+                    .stage("expand")
+                    .and_then(|stage| stage.result.as_ref())
+                    .and_then(|result| result.body.get("prompt"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| (!detail.prompt.is_empty()).then(|| detail.prompt.clone()));
+
+        // ---- the still, and the clip --------------------------------------
+        if let Some(image) = detail.stage("image") {
+            run.input_revision = result_revision(image).or(run.input_revision);
+        }
+        let produced = detail.stage("video").and_then(result_asset);
+        if produced.is_some() {
+            row.produced = produced;
+        }
+
+        // ---- the bar, monotone across the whole run -----------------------
+        // The server's aggregate already floors a finished stage at its
+        // whole weight; the high-water mark here covers the one dip it
+        // cannot: a stage requeued onto another box re-entering its band.
+        row.last_progress_permille = row.last_progress_permille.max(detail.permille.min(1000));
+
+        // ---- placement, from the live stage's note ------------------------
+        let live = detail.current();
+        let mut note = live
+            .and_then(|stage| stage.progress.as_ref())
+            .map(|p| p.note.clone())
+            .unwrap_or_default();
+        if let Some(rest) = note.clone().strip_prefix('@') {
+            if let Some((tag, stage)) = rest.split_once(' ') {
+                row.node_tag = Some(tag.to_string());
+                note = stage.to_string();
+            }
+        }
+        let live_state = live.map(|stage| stage.state);
+        match live_state {
+            Some(JobStateDto::Running) => {
+                row.worker_assigned = true;
+                row.node_state = node_state_from_note(&note);
+                row.started_ms.get_or_insert(now_ms);
+            }
+            Some(JobStateDto::Pending) | None => {
+                row.worker_assigned = false;
+                row.node_state = GenNodeState::Waiting;
+            }
+            Some(_) => {
+                row.node_state = GenNodeState::Finished;
+            }
+        }
+
+        // ---- the run's own state ------------------------------------------
+        let cancelling = matches!(row.state, GenJobState::CancelRequested);
+        row.state = match detail.state {
+            PipelineStateDto::Running if cancelling => GenJobState::CancelRequested,
+            PipelineStateDto::Running => match live_state {
+                Some(JobStateDto::Pending) | None => GenJobState::Pending,
+                _ => GenJobState::Running {
+                    permille: row.last_progress_permille,
+                    note,
+                },
+            },
+            PipelineStateDto::Succeeded => {
+                row.last_progress_permille = 1000;
+                row.worker_assigned = true;
+                row.node_state = GenNodeState::Finished;
+                // The last stage published before its job succeeded, so a
+                // succeeded RECORD is a published clip — no waiting for a
+                // catalog event that may already have gone by.
+                row.published = row.produced.is_some();
+                GenJobState::Succeeded
+            }
+            PipelineStateDto::Failed => GenJobState::Failed(failure_reason(detail)),
+            PipelineStateDto::Cancelled => GenJobState::Cancelled,
+        };
+        if !row.state.is_terminal() {
+            return None;
+        }
+        row.finished_ms = Some(now_ms);
+        Some(PipelineFinish { tag: row.tag, state: detail.state, asset: row.produced })
+    }
+
+    /// A record read failed (transient transport): keep the row, retry on a
+    /// later tick.
+    pub fn pipeline_failed_read(&mut self, pipeline: PipelineId, error: String, now_ms: u64) {
+        let Some(row) = self.jobs.iter_mut().find(|j| j.pipeline == Some(pipeline)) else {
+            return;
+        };
+        if row.state.is_terminal() {
+            return;
+        }
+        let mut error = error;
+        error.truncate(120);
+        row.status_warning = Some(format!("record read delayed: {error}; retrying"));
+        row.last_update_ms = now_ms;
+    }
+
+    /// The store confirmed a run's cancel: `cancelled` is how many stage
+    /// jobs it actually stopped (0 = everything was already terminal, and
+    /// the next read reports the real state).
+    pub fn pipeline_cancel_confirmed_at(
+        &mut self,
+        pipeline: PipelineId,
+        cancelled: u64,
+        now_ms: Option<u64>,
+    ) {
+        let Some(row) = self.jobs.iter_mut().find(|j| j.pipeline == Some(pipeline)) else {
+            return;
+        };
+        if cancelled == 0 || row.state.is_terminal() {
+            return;
+        }
+        row.state = GenJobState::Cancelled;
+        let at = now_ms.unwrap_or(row.last_update_ms);
+        row.finished_ms = Some(at);
+        row.last_update_ms = at;
+        if row.worker_assigned {
+            row.node_state = GenNodeState::Finished;
+        }
     }
 
     /// The enqueue for `tag` returned a server id. A cancel clicked while
@@ -1582,20 +1962,21 @@ impl GenModel {
 
     /// A polled status arrived. Unknown/foreign job ids are ignored.
     pub fn status_arrived(&mut self, status: &JobStatusDto) {
-        let _ = self.status_arrived_at(status, status.created_ms);
+        self.status_arrived_at(status, status.created_ms);
     }
 
-    /// Timestamped status completion. The caller supplies its local clock;
-    /// `status.created_ms` remains remote metadata and never drives elapsed.
+    /// Timestamped status completion for a SINGLE-JOB row. The caller
+    /// supplies its local clock; `status.created_ms` remains remote
+    /// metadata and never drives elapsed.
     ///
-    /// Returns follow-up commands the completion triggers (job CHAINS — a
-    /// finished stage enqueueing its successor). Empty until the chain lane
-    /// lands; the return type is the seam the host already drains.
-    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) -> Vec<GenCmd> {
+    /// There is no hand-off here any more. A multi-stage run is a declared
+    /// pipeline the store advances by itself; this path only ever sees the
+    /// one-job pipes.
+    pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
         let already_published = self.published_assets.clone();
-        let Some(row) = self.job_by_id(status.job) else { return Vec::new() };
+        let Some(row) = self.job_by_id(status.job) else { return };
         if row.state.is_terminal() {
-            return Vec::new(); // late duplicate
+            return; // late duplicate
         }
         row.last_update_ms = now_ms;
         row.status_warning = None;
@@ -1663,78 +2044,6 @@ impl GenModel {
                 GenJobState::Cancelled
             }
         };
-        // ---- the chain hand-off -------------------------------------------
-        //
-        // A stage that succeeded and has a successor is not a finished row:
-        // it is a run moving on. The successor is enqueued HERE, from the
-        // status poll, because this is the first moment the previous
-        // stage's published revision exists and the server will never
-        // splice it in for us.
-        if !matches!(row.state, GenJobState::Succeeded) {
-            return Vec::new();
-        }
-        let Some(chain) = row.chain.as_mut() else { return Vec::new() };
-        let Some(next) = chain.next.take() else { return Vec::new() };
-        let Some(revision) = status.result_revision else {
-            // Succeeded with no revision to hand on: the run cannot
-            // continue, and says so rather than looking finished.
-            chain.next = None;
-            row.state = GenJobState::Failed(
-                "the image stage published nothing to animate".to_string(),
-            );
-            return Vec::new();
-        };
-        // Remember the still: `produced` is about to belong to the video,
-        // but this revision is the run's INPUT IMAGE and the row shows it.
-        chain.input_image = row.produced;
-        chain.input_revision = Some(revision);
-        chain.stage = 2;
-        let mut body = next.body;
-        // The coordinator resolves `source_revision` for EVERY kind, not
-        // just the ones declaring an input: it fetches the row's Texture
-        // PNG and relays it as `input_b64`, which is exactly what H3's
-        // first-frame i2v path consumes. That is why this chain needs no
-        // new job kind — `video.generate` already animates a picture when
-        // it is handed one.
-        body.push(("source_revision".to_string(), s(revision.to_string())));
-        // A LOOP wants the clip to end where it began, and these weights
-        // do it: the FL2VA checkpoint takes a last frame as well as a
-        // first, and the fleet now honours this named input. A revision
-        // reference rather than base64, because resolving a revision to
-        // bytes is the worker's job — it already does exactly that for
-        // `source_revision` — and a job body is no place for a megabyte of
-        // PNG. The playback wrap still runs on top: see LoopStrategy.
-        body.push((
-            "inputs".to_string(),
-            Value::Arr(vec![Value::Obj(vec![
-                ("name".to_string(), s("last_frame")),
-                ("content_type".to_string(), s("image/png")),
-                ("source_revision".to_string(), s(revision.to_string())),
-            ])]),
-        ));
-        body.push(("loop_closure".to_string(), s("end_frame_if_available")));
-        let tag = row.tag;
-        // The row keeps its tag, its title and its elapsed clock; only the
-        // stage changes. Progress restarts because the new stage's progress
-        // is a different number, not a continuation of the old one.
-        row.job = None;
-        row.kind = next.kind.clone();
-        row.state = GenJobState::Submitting;
-        row.produced = None;
-        row.published = false;
-        row.started_ms = None;
-        row.finished_ms = None;
-        row.worker_assigned = false;
-        row.node_state = GenNodeState::Waiting;
-        row.node_tag = None;
-        row.last_progress_permille = 0;
-        row.last_poll_ms = now_ms;
-        vec![GenCmd::Enqueue {
-            tag,
-            namespace: next.namespace,
-            kind: next.kind,
-            body: Value::Obj(body),
-        }]
     }
 
     /// A status poll failed (transient transport): keep the row, retry on a
@@ -1754,21 +2063,29 @@ impl GenModel {
     }
 
     /// Cancel by row tag (works before AND after the server id is known).
+    ///
+    /// A declared run is stopped WHOLE — one request cancels every
+    /// non-terminal stage, and the store's existing per-job chain drops the
+    /// leases, so the box notices within its cancel-check window and the
+    /// pending stages doom at the next claim. Partial results are kept: a
+    /// still that already published stays on the grid.
     pub fn cancel(&mut self, tag: GenTag) -> Vec<GenCmd> {
         let Some(row) = self.job_by_tag(tag) else { return Vec::new() };
         if row.state.is_terminal() {
             return Vec::new();
         }
-        let job = row.job;
+        let (job, pipeline) = (row.job, row.pipeline);
         row.state = GenJobState::CancelRequested;
-        match job {
-            Some(job) => vec![GenCmd::Cancel { job }],
-            None => Vec::new(), // fires when `queued` lands
+        match (pipeline, job) {
+            (Some(pipeline), _) => vec![GenCmd::CancelPipeline { pipeline }],
+            (None, Some(job)) => vec![GenCmd::Cancel { job }],
+            // No server id yet: the cancel fires the moment one lands.
+            (None, None) => Vec::new(),
         }
     }
 
-    /// Stop every live row, then drop finished ones. In-flight cancels stay
-    /// until the server confirms so we do not leak workers.
+    /// STOP ALL: stop every live row, then drop finished ones. In-flight
+    /// cancels stay until the server confirms so we do not leak workers.
     pub fn clear_queue(&mut self) -> Vec<GenCmd> {
         let tags: Vec<GenTag> = self
             .jobs
@@ -1833,10 +2150,23 @@ impl GenModel {
             if row.state.is_terminal() {
                 continue;
             }
-            let Some(job) = row.job else { continue };
-            if now_ms.saturating_sub(row.last_poll_ms) >= POLL_MS {
-                row.last_poll_ms = now_ms;
-                cmds.push(GenCmd::PollStatus { job });
+            if now_ms.saturating_sub(row.last_poll_ms) < POLL_MS {
+                continue;
+            }
+            // ONE request per run per tick: a pipeline's whole record — every
+            // stage, the weighted bar, the live note — comes back in one
+            // read, so a three-stage run costs exactly what a one-job row
+            // costs.
+            match (row.pipeline, row.job) {
+                (Some(pipeline), _) => {
+                    row.last_poll_ms = now_ms;
+                    cmds.push(GenCmd::PollPipeline { pipeline });
+                }
+                (None, Some(job)) => {
+                    row.last_poll_ms = now_ms;
+                    cmds.push(GenCmd::PollStatus { job });
+                }
+                (None, None) => {}
             }
         }
         cmds
@@ -1998,7 +2328,7 @@ mod tests {
     }
 
 
-    // ---- the dream chain ---------------------------------------------------
+    // ---- DREAM: one declared run --------------------------------------
 
     fn dream_model() -> GenModel {
         let mut m = GenModel::new();
@@ -2008,14 +2338,23 @@ mod tests {
     }
 
     /// The tag of whichever first command a generate produced (a dream run
-    /// expands first; everything else enqueues).
-    fn enqueue_or_expand_tag(cmds: &[GenCmd]) -> GenTag {
+    /// declares a pipeline; everything else enqueues a job).
+    fn run_tag(cmds: &[GenCmd]) -> GenTag {
         cmds.iter()
             .find_map(|c| match c {
-                GenCmd::Expand { tag, .. } | GenCmd::Enqueue { tag, .. } => Some(*tag),
+                GenCmd::CreatePipeline { tag, .. } | GenCmd::Enqueue { tag, .. } => Some(*tag),
                 _ => None,
             })
-            .expect("expected an expand or an enqueue")
+            .expect("expected a declaration or an enqueue")
+    }
+
+    fn declaration(cmds: &[GenCmd]) -> (String, Vec<PipelineStageSpec>) {
+        match cmds.first() {
+            Some(GenCmd::CreatePipeline { prompt, stages, .. }) => {
+                (prompt.clone(), stages.clone())
+            }
+            other => panic!("expected a declaration, got {other:?}"),
+        }
     }
 
     fn body_of(cmd: &GenCmd) -> Vec<(String, Value)> {
@@ -2029,108 +2368,593 @@ mod tests {
         pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
-    /// The whole point of the lane: one prompt becomes an expansion, then a
-    /// flux still, then a video GROWN FROM THAT STILL — and the video job
-    /// only exists once the still has a revision to hand it.
+    fn spec_body(stages: &[PipelineStageSpec], name: &str) -> Value {
+        stages
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no stage {name}"))
+            .body
+            .clone()
+    }
+
+    fn pipe_id(seed: u8) -> PipelineId {
+        PipelineId([seed; 16])
+    }
+
+    // ---- record fixtures: what `pipeline_detail` answers -----------------
+
+    fn rec_stage(seq: u32, name: &str, kind: &str, state: JobStateDto) -> PipelineStageDto {
+        PipelineStageDto {
+            name: name.to_string(),
+            seq,
+            job: job_id(seq as u8 + 1),
+            kind: kind.to_string(),
+            state,
+            skipped: false,
+            weight: makepad_asset_client::default_stage_weight(kind),
+            on_fail: match name {
+                "expand" => makepad_asset_client::StageOnFailDto::Skip,
+                _ => makepad_asset_client::StageOnFailDto::Fail,
+            },
+            attempts: u32::from(state != JobStateDto::Pending),
+            progress: None,
+            declared: None,
+            records: Vec::new(),
+            result: None,
+        }
+    }
+
+    fn with_progress(mut stage: PipelineStageDto, permille: u16, note: &str) -> PipelineStageDto {
+        stage.progress = Some(makepad_asset_client::JobProgressDto {
+            permille,
+            note: note.to_string(),
+            updated_ms: None,
+        });
+        stage
+    }
+
+    fn with_result(mut stage: PipelineStageDto, outcome: &str, body: Value) -> PipelineStageDto {
+        stage.result = Some(makepad_asset_client::JobResultDto {
+            outcome: outcome.to_string(),
+            attempt: 1,
+            recorded_ms: 1,
+            body,
+        });
+        stage
+    }
+
+    fn with_sent_prompt(mut stage: PipelineStageDto, prompt: &str) -> PipelineStageDto {
+        stage.records.push(makepad_asset_client::JobStageDto {
+            name: stage.kind.clone(),
+            recorded_ms: 1,
+            model: "flux1-schnell".to_string(),
+            at: ".203".to_string(),
+            prompt: prompt.to_string(),
+            params: String::new(),
+            output: String::new(),
+        });
+        stage
+    }
+
+    /// The whole record, with the aggregate computed exactly as the server
+    /// computes it — so a row that reads this fixture reads what a row
+    /// reads live.
+    fn record(
+        state: PipelineStateDto,
+        current: Option<&str>,
+        stages: Vec<PipelineStageDto>,
+    ) -> PipelineDetailDto {
+        let permille = makepad_asset_client::aggregate_permille(
+            stages.iter().map(|s| (s.weight, s.done_permille())),
+        );
+        PipelineDetailDto {
+            pipeline: pipe_id(1),
+            namespace: "gen".to_string(),
+            title: DREAM_TITLE.to_string(),
+            state,
+            permille,
+            enqueued_by: None,
+            created_ms: 1,
+            prompt: "a chrome koi".to_string() + MOTION_STEER,
+            current_stage: current.map(str::to_string),
+            finished_ms: None,
+            stages,
+        }
+    }
+
+    fn asset_result(seed: u8) -> Value {
+        obj(vec![
+            ("asset_id", s(AssetId::from_bytes([seed; 16]).to_string())),
+            ("revision", s(AssetRevisionId::from_bytes([seed; 32]).to_string())),
+        ])
+    }
+
+    /// The whole point of the lane: GENERATE declares ONE graph — expander,
+    /// still, clip — with the splices that join them, and then this app
+    /// enqueues nothing ever again.
     #[test]
-    fn a_dream_run_walks_expand_then_image_then_video_from_that_image() {
+    fn a_dream_run_is_one_declared_graph_with_its_splices() {
         let mut m = dream_model();
-        // 1. GENERATE asks for an expansion, NOT a job: there is nothing to
-        //    render until the brief exists.
-        let cmds = m.generate(1_000);
-        assert!(
-            matches!(&cmds[..], [GenCmd::Expand { prompt, .. }] if prompt.contains("chrome koi")),
-            "{cmds:?}"
-        );
-        let tag = match &cmds[0] {
-            GenCmd::Expand { tag, .. } => *tag,
-            _ => unreachable!(),
-        };
-        assert_eq!(m.jobs().next().unwrap().state, GenJobState::Expanding);
-
-        // 2. The expansion lands and stage ONE is queued, carrying the
-        //    expanded brief and the picked canvas.
-        let cmds = m.expand_arrived(tag, Some("a chrome koi in a flooded cathedral".into()), None);
-        let image = body_of(&cmds[0]);
-        assert!(matches!(&cmds[0], GenCmd::Enqueue { kind, .. } if kind == "image.generate"));
-        assert_eq!(
-            get(&image, "prompt").and_then(Value::as_str),
-            Some("a chrome koi in a flooded cathedral"),
-            "the still renders the BRIEF, not the terse prompt"
-        );
+        m.set_video_size(2); // 960x544
+        m.set_video_length(0); // 39 frames
         let canvas = m.selected_size().unwrap();
-        assert_eq!(get(&image, "width").and_then(Value::as_i64), Some(canvas.0 as i64));
-        assert_eq!(get(&image, "height").and_then(Value::as_i64), Some(canvas.1 as i64));
+        let cmds = m.generate(1_000);
+        assert_eq!(cmds.len(), 1, "one request declares the whole run: {cmds:?}");
+        let (run_prompt, stages) = declaration(&cmds);
 
-        // 3. Stage one publishes. Its revision becomes the video's source —
-        //    which is the only way the video can be an i2v of this image.
-        m.queued_at(tag, job_id(1), Some(2_000));
-        let mut done = status(job_id(1), JobStateDto::Succeeded);
-        done.kind = "image.generate".to_string();
-        done.result_asset = Some(AssetId::from_bytes([7; 16]));
-        done.result_revision = Some(makepad_asset_data::AssetRevisionId::from_bytes([9; 32]));
-        let cmds = m.status_arrived_at(&done, 3_000);
-        let video = body_of(&cmds[0]);
-        assert!(matches!(&cmds[0], GenCmd::Enqueue { kind, .. } if kind == "video.generate"));
+        // The run's prompt is the operator's words plus the motion steering
+        // — it is what the expander expands AND what the store falls back
+        // to when the expander is skipped.
+        assert!(run_prompt.starts_with("a chrome koi"), "{run_prompt}");
+        assert!(run_prompt.contains("no boomerang"), "{run_prompt}");
+
         assert_eq!(
-            get(&video, "source_revision").and_then(Value::as_str),
-            Some(done.result_revision.unwrap().to_string().as_str()),
-            "the video must be grown from the still that just published"
+            stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["expand", "image", "video"]
+        );
+        assert_eq!(
+            stages.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(),
+            ["text.expand", "image.generate", "video.generate"]
+        );
+        // Weights come from the client's ONE shared table, so the VJ's bar
+        // and the asset UI's bar cannot disagree about the same run.
+        assert_eq!(
+            stages.iter().map(|s| s.weight()).collect::<Vec<_>>(),
+            vec![
+                makepad_asset_client::default_stage_weight("text.expand"),
+                makepad_asset_client::default_stage_weight("image.generate"),
+                makepad_asset_client::default_stage_weight("video.generate"),
+            ]
+        );
+        // The expander is the ONE stage allowed to fail without ending the
+        // run — the never-lose-a-run law, declared rather than remembered.
+        assert_eq!(stages[0].on_fail, makepad_asset_client::StageOnFailDto::Skip);
+        assert_eq!(stages[1].on_fail, makepad_asset_client::StageOnFailDto::Fail);
+        assert_eq!(stages[2].on_fail, makepad_asset_client::StageOnFailDto::Fail);
+        // The video stage reads BOTH earlier stages, so it must declare
+        // both: a splice may only read a stage it waited for.
+        assert_eq!(stages[0].deps, None);
+        assert_eq!(stages[1].deps, None, "the stage before it, by default");
+        assert_eq!(
+            stages[2].deps,
+            Some(vec!["expand".to_string(), "image".to_string()])
+        );
+
+        // ---- the expander stage ----
+        let expand = spec_body(&stages, "expand");
+        assert_eq!(expand.get("prompt").and_then(Value::as_str), Some(run_prompt.as_str()));
+        assert_eq!(expand.get("target_domain").and_then(Value::as_str), Some("video"));
+
+        // ---- the still ----
+        let image = spec_body(&stages, "image");
+        assert_eq!(
+            image.get("prompt"),
+            Some(&stage_ref("expand", "prompt")),
+            "the still renders the expansion, spliced at claim"
+        );
+        assert_eq!(image.get("width").and_then(Value::as_i64), Some(canvas.0 as i64));
+        assert_eq!(image.get("height").and_then(Value::as_i64), Some(canvas.1 as i64));
+        // Never `expand: true`: the expansion is a STAGE now, and the
+        // worker's own pre-step would be expanding a rewrite.
+        assert!(image.get("expand").is_none(), "{image:?}");
+
+        // ---- the clip ----
+        let video = spec_body(&stages, "video");
+        assert_eq!(video.get("prompt"), Some(&stage_ref("expand", "prompt")));
+        assert_eq!(
+            video.get("source_revision"),
+            Some(&stage_ref("image", "revision")),
+            "the clip is grown from the still this run made"
+        );
+        // The end-frame loop closure: the same still, as the LAST frame.
+        let inputs = video.get("inputs").and_then(Value::as_arr).expect("inputs");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].get("name").and_then(Value::as_str), Some("last_frame"));
+        assert_eq!(
+            inputs[0].get("source_revision"),
+            Some(&stage_ref("image", "revision"))
         );
         // Same canvas on both stages: the still IS the first frame, so a
         // different size would be a resample or a crop.
-        assert_eq!(get(&video, "width").and_then(Value::as_i64), Some(canvas.0 as i64));
-        assert_eq!(get(&video, "height").and_then(Value::as_i64), Some(canvas.1 as i64));
-        // Never a model pin: six boxes can serve this, not just the one
-        // advertising the un-suffixed id.
-        assert!(get(&video, "model").is_none(), "{video:?}");
+        assert_eq!(video.get("width").and_then(Value::as_i64), Some(canvas.0 as i64));
+        assert_eq!(video.get("height").and_then(Value::as_i64), Some(canvas.1 as i64));
+        assert_eq!(video.get("frames").and_then(Value::as_i64), Some(39));
+        assert_eq!(video.get("audio").and_then(Value::as_bool), Some(false));
+        // Never a model pin on the clip: six boxes can serve this queue.
+        assert!(video.get("model").is_none(), "{video:?}");
 
-        // ONE row throughout — a run, not three jobs stacked up.
+        // ONE row, from the instant GENERATE is pressed, with its chips.
         assert_eq!(m.jobs().count(), 1);
         let row = m.jobs().next().unwrap();
-        assert_eq!(row.tag, tag, "the row keeps its identity across stages");
-        assert_eq!(row.kind, "video.generate");
-        assert_eq!(row.input_revision(), done.result_revision);
-        assert_eq!(row.submitted_ms, 1_000, "elapsed covers the whole run");
+        assert_eq!(row.title, "a chrome koi", "the title stays the typed prompt");
+        assert_eq!(
+            row.stage_chips().iter().map(|c| c.label.clone()).collect::<Vec<_>>(),
+            ["expand", "image", "video"]
+        );
+        assert_eq!(row.state, GenJobState::Submitting);
+        // The declaration itself is what the whole run is polled and
+        // stopped by, once the store answers.
+        let tag = run_tag(&cmds);
+        assert!(m.pipeline_created_at(tag, pipe_id(1), Some(1_100)).is_empty());
+        assert_eq!(m.jobs().next().unwrap().state, GenJobState::Pending);
     }
 
-    /// The law: a dead expander costs a better prompt, never the run.
+    /// The flux the operator pinned rides the STILL's stage and nothing
+    /// else — the clip stays unpinned so any box can take it.
     #[test]
-    fn a_failed_expansion_queues_the_raw_prompt_and_says_so() {
+    fn the_pinned_flux_rides_the_still_stage_only() {
         let mut m = dream_model();
-        let cmds = m.generate(1_000);
-        let tag = match &cmds[0] {
-            GenCmd::Expand { tag, .. } => *tag,
-            _ => unreachable!(),
-        };
-        let cmds = m.expand_arrived(tag, None, Some("expander timed out".to_string()));
-        let image = body_of(&cmds[0]);
+        m.image_profiles = vec![JobProfileDto {
+            id: "flux1-schnell".to_string(),
+            domain: "image".to_string(),
+            label: "schnell".to_string(),
+            kind: "image.generate".to_string(),
+            namespace: "gen".to_string(),
+            defaults: obj(vec![("model", s("flux1-schnell"))]),
+        }];
+        m.set_image_model(1); // past `auto`
+        let (_, stages) = declaration(&m.generate(1_000));
         assert_eq!(
-            get(&image, "prompt").and_then(Value::as_str),
-            Some("a chrome koi"),
-            "the operator's own words still get rendered"
+            spec_body(&stages, "image").get("model").and_then(Value::as_str),
+            Some("flux1-schnell")
         );
+        assert!(spec_body(&stages, "video").get("model").is_none());
+    }
+
+    /// Every row state is the RECORD's word. Nothing here is inferred from
+    /// what this app sent: the aggregate, the live stage, the still, the
+    /// clip and the prompt the fleet was handed all come off one read.
+    #[test]
+    fn the_record_drives_the_row_through_the_whole_run() {
+        let mut m = dream_model();
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+
+        // 1. Nothing claimed yet: three pending stages, a zero bar, and the
+        //    run is already visible and stoppable.
+        let spawn = record(
+            PipelineStateDto::Running,
+            Some("expand"),
+            vec![
+                rec_stage(0, "expand", "text.expand", JobStateDto::Pending),
+                rec_stage(1, "image", "image.generate", JobStateDto::Pending),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
+        );
+        assert_eq!(m.pipeline_arrived_at(&spawn, 2_000), None, "not finished");
         let row = m.jobs().next().unwrap();
-        // And the chip does not claim an expansion that never happened.
+        assert_eq!(row.state, GenJobState::Pending);
+        assert!(row.stage_chips().iter().all(|c| c.tone == GenJobTone::Waiting));
+
+        // 2. The expander answered and the still is rendering on .203. The
+        //    bar is the server's weighted aggregate; the box comes off the
+        //    note the worker wrote.
+        let mid = record(
+            PipelineStateDto::Running,
+            Some("image"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a flooded cathedral"))]),
+                ),
+                with_sent_prompt(
+                    with_progress(
+                        rec_stage(1, "image", "image.generate", JobStateDto::Running),
+                        500,
+                        "@.203 denoise 2/4",
+                    ),
+                    "a chrome koi in a flooded cathedral",
+                ),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
+        );
+        assert_eq!(m.pipeline_arrived_at(&mid, 3_000), None);
+        let row = m.jobs().next().unwrap();
+        assert!(
+            matches!(&row.state, GenJobState::Running { permille, .. } if *permille == mid.permille),
+            "{:?} vs {}",
+            row.state,
+            mid.permille
+        );
+        assert_eq!(row.node_tag.as_deref(), Some(".203"));
+        assert_eq!(row.final_prompt(), Some("a chrome koi in a flooded cathedral"));
+        let chips = row.stage_chips();
+        assert_eq!(chips[0].tone, GenJobTone::Success);
+        assert_eq!(chips[1].tone, GenJobTone::Active);
+        assert_eq!(chips[2].tone, GenJobTone::Waiting);
+        let display = row.display(3_000);
+        assert!(display.message.contains("flooded cathedral"), "{}", display.message);
+        assert!(display.assignment.contains(".203"), "{}", display.assignment);
+
+        // 3. The still published, the clip is rendering: the row keeps the
+        //    still as its INPUT image (that is the thumbnail) while the
+        //    product moves on.
+        let late = record(
+            PipelineStateDto::Running,
+            Some("video"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a flooded cathedral"))]),
+                ),
+                with_result(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Succeeded),
+                    "succeeded",
+                    asset_result(7),
+                ),
+                with_progress(
+                    rec_stage(2, "video", "video.generate", JobStateDto::Running),
+                    300,
+                    "@.166 denoise 9/30",
+                ),
+            ],
+        );
+        assert_eq!(m.pipeline_arrived_at(&late, 4_000), None);
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.input_revision(), Some(AssetRevisionId::from_bytes([7; 32])));
+        assert!(row.dream_video_product().is_none(), "the clip is not made yet");
+
+        // 4. Done. The record's terminal transition IS the completion
+        //    signal — the last stage published before its job succeeded, so
+        //    the clip is on the grid and no publish event is waited for.
+        let done = record(
+            PipelineStateDto::Succeeded,
+            Some("video"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a flooded cathedral"))]),
+                ),
+                with_result(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Succeeded),
+                    "succeeded",
+                    asset_result(7),
+                ),
+                with_result(
+                    rec_stage(2, "video", "video.generate", JobStateDto::Succeeded),
+                    "succeeded",
+                    asset_result(9),
+                ),
+            ],
+        );
+        let finish = m.pipeline_arrived_at(&done, 5_000).expect("the run finished");
+        assert_eq!(finish.tag, tag);
+        assert_eq!(finish.state, PipelineStateDto::Succeeded);
+        assert_eq!(finish.asset, Some(AssetId::from_bytes([9; 16])));
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.state, GenJobState::Succeeded);
+        assert_eq!(row.dream_video_product(), Some(AssetId::from_bytes([9; 16])));
+        assert!(row.published, "a succeeded record is a published clip");
+        assert_eq!(row.display(5_000).progress_permille, Some(1000));
+        assert_eq!(row.elapsed_ms(9_999), 4_000, "elapsed covers the WHOLE run");
+        // Reported once: a second read of the same record adds nothing.
+        assert_eq!(m.pipeline_arrived_at(&done, 6_000), None);
+    }
+
+    /// The law, now structural: the store skips a refused expander, rewrites
+    /// the dependents' splices to the words the operator typed, and the run
+    /// carries on. The chip says `expand (raw)` and the reason survives.
+    #[test]
+    fn a_skipped_expander_keeps_the_run_and_says_so() {
+        let mut m = dream_model();
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+
+        let mut expand = with_result(
+            rec_stage(0, "expand", "text.expand", JobStateDto::Failed),
+            "failed",
+            obj(vec![("error", s("no text box answered"))]),
+        );
+        expand.skipped = true;
+        let mut image = rec_stage(1, "image", "image.generate", JobStateDto::Running);
+        // The store rewrote the splice to the run's own prompt.
+        image.declared = Some(obj(vec![("prompt", s("a chrome koi".to_string() + MOTION_STEER))]));
+        let skipped = record(
+            PipelineStateDto::Running,
+            Some("image"),
+            vec![
+                expand,
+                with_progress(image, 200, "denoise 1/4"),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
+        );
+        assert_eq!(m.pipeline_arrived_at(&skipped, 2_000), None, "the run lives");
+        let row = m.jobs().next().unwrap();
+        assert!(!row.state.is_terminal());
         let chips = row.stage_chips();
         assert_eq!(chips[0].label, "expand (raw)");
         assert_eq!(chips[0].tone, GenJobTone::Cancelled);
-        assert!(row.display(2_000).message.contains("timed out"));
+        assert!(row.prompt_is_raw());
+        assert!(row.final_prompt().unwrap().starts_with("a chrome koi"));
+        let message = row.display(2_000).message;
+        assert!(message.contains("raw prompt (expander skipped)"), "{message}");
+        assert!(!message.contains("brief:"), "{message}");
+        // A skipped stage still contributes its whole weight, so the bar
+        // does not stall on it.
+        assert!(skipped.permille > 0, "{}", skipped.permille);
     }
 
-    /// Stop during the expansion ends the run before it costs a GPU second.
+    /// A failure names the STAGE it happened at. "the run failed at 20%"
+    /// is the lie this replaces.
     #[test]
-    fn cancelling_while_expanding_never_reaches_the_fleet() {
+    fn a_failed_stage_names_itself_and_freezes_the_bar() {
         let mut m = dream_model();
-        let cmds = m.generate(1_000);
-        let tag = match &cmds[0] {
-            GenCmd::Expand { tag, .. } => *tag,
-            _ => unreachable!(),
-        };
-        assert!(m.cancel(tag).is_empty(), "no server job to cancel yet");
-        let cmds = m.expand_arrived(tag, Some("a very long and detailed brief".into()), None);
-        assert!(cmds.is_empty(), "a cancelled run does not enqueue: {cmds:?}");
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+        let failed = record(
+            PipelineStateDto::Failed,
+            Some("video"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a brief"))]),
+                ),
+                with_result(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Succeeded),
+                    "succeeded",
+                    asset_result(7),
+                ),
+                with_result(
+                    with_progress(
+                        rec_stage(2, "video", "video.generate", JobStateDto::Failed),
+                        620,
+                        "publishing",
+                    ),
+                    "failed",
+                    obj(vec![("error", s("publish refused: annotation control chars"))]),
+                ),
+            ],
+        );
+        let finish = m.pipeline_arrived_at(&failed, 3_000).expect("terminal");
+        assert_eq!(finish.state, PipelineStateDto::Failed);
+        assert_eq!(finish.asset, None);
+        let row = m.jobs().next().unwrap();
+        match &row.state {
+            GenJobState::Failed(reason) => {
+                assert!(reason.starts_with("video stage failed:"), "{reason}");
+                assert!(reason.contains("annotation control chars"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The bar freezes where the work stopped, it does not drop to zero.
+        assert_eq!(row.display(3_000).progress_permille, Some(failed.permille));
+    }
+
+    /// Stop is one request that stops the whole graph, at any phase —
+    /// including before the store has answered with an id.
+    #[test]
+    fn stopping_a_run_cancels_the_whole_graph() {
+        // Stop pressed while the declaration is still in flight: nothing to
+        // cancel YET, and the cancel fires the moment the id lands.
+        let mut m = dream_model();
+        let tag = run_tag(&m.generate(1_000));
+        assert!(m.cancel(tag).is_empty(), "no run to cancel yet");
+        assert_eq!(m.jobs().next().unwrap().state, GenJobState::CancelRequested);
+        assert_eq!(
+            m.pipeline_created_at(tag, pipe_id(1), Some(1_100)),
+            vec![GenCmd::CancelPipeline { pipeline: pipe_id(1) }]
+        );
+
+        // Stop pressed mid-run: one request, and the confirmation is what
+        // makes the row terminal.
+        let mut m = dream_model();
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(2), Some(1_100));
+        assert_eq!(
+            m.cancel(tag),
+            vec![GenCmd::CancelPipeline { pipeline: pipe_id(2) }]
+        );
+        assert_eq!(m.jobs().next().unwrap().state, GenJobState::CancelRequested);
+        // A record that still says running does NOT undo the stop.
+        let running = record(
+            PipelineStateDto::Running,
+            Some("image"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a brief"))]),
+                ),
+                with_progress(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Running),
+                    400,
+                    "denoise 2/4",
+                ),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
+        );
+        let mut running = running;
+        running.pipeline = pipe_id(2);
+        assert_eq!(m.pipeline_arrived_at(&running, 2_000), None);
+        assert_eq!(m.jobs().next().unwrap().state, GenJobState::CancelRequested);
+        m.pipeline_cancel_confirmed_at(pipe_id(2), 2, Some(3_000));
         assert_eq!(m.jobs().next().unwrap().state, GenJobState::Cancelled);
+        // A confirmation that stopped nothing leaves the row alone.
+        m.pipeline_cancel_confirmed_at(pipe_id(2), 0, Some(4_000));
+        assert_eq!(m.jobs().next().unwrap().finished_ms, Some(3_000));
+
+        // STOP ALL: one cancel per live run, and the finished rows go.
+        let mut m = dream_model();
+        let a = run_tag(&m.generate(1_000));
+        let b = run_tag(&m.generate(1_100));
+        m.pipeline_created_at(a, pipe_id(3), Some(1_200));
+        m.pipeline_created_at(b, pipe_id(4), Some(1_200));
+        let cmds = m.clear_queue();
+        assert_eq!(cmds.len(), 2, "{cmds:?}");
+        assert!(cmds.contains(&GenCmd::CancelPipeline { pipeline: pipe_id(3) }));
+        assert!(cmds.contains(&GenCmd::CancelPipeline { pipeline: pipe_id(4) }));
+    }
+
+    /// One request per run per tick, whatever the run is made of — a
+    /// three-stage record costs exactly what a one-job row costs.
+    #[test]
+    fn one_tick_reads_each_run_once() {
+        let mut m = dream_model();
+        let a = run_tag(&m.generate(1_000));
+        let b = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(a, pipe_id(1), Some(1_000));
+        m.pipeline_created_at(b, pipe_id(2), Some(1_000));
+        assert!(m.tick(1_000).is_empty(), "not due yet");
+        let cmds = m.tick(1_000 + POLL_MS);
+        assert_eq!(
+            cmds,
+            vec![
+                GenCmd::PollPipeline { pipeline: pipe_id(1) },
+                GenCmd::PollPipeline { pipeline: pipe_id(2) },
+            ]
+        );
+        assert!(m.tick(1_000 + POLL_MS).is_empty(), "one read per cadence");
+    }
+
+    /// The bar never walks backwards, even when a stage is requeued onto
+    /// another box and re-enters its band from the bottom.
+    #[test]
+    fn the_bar_holds_when_a_stage_starts_over() {
+        let mut m = dream_model();
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_000));
+        let far = record(
+            PipelineStateDto::Running,
+            Some("video"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a brief"))]),
+                ),
+                with_result(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Succeeded),
+                    "succeeded",
+                    asset_result(7),
+                ),
+                with_progress(
+                    rec_stage(2, "video", "video.generate", JobStateDto::Running),
+                    800,
+                    "@.166 denoise 24/30",
+                ),
+            ],
+        );
+        m.pipeline_arrived_at(&far, 2_000);
+        let high = m.jobs().next().unwrap().display(2_000).progress_permille.unwrap();
+
+        // The box died; the stage is back at attempt 2 with nothing done.
+        let mut retry = far.clone();
+        retry.stages[2] = with_progress(
+            rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            0,
+            "",
+        );
+        retry.permille = makepad_asset_client::aggregate_permille(
+            retry.stages.iter().map(|st| (st.weight, st.done_permille())),
+        );
+        assert!(retry.permille < high, "the server's aggregate really did dip");
+        m.pipeline_arrived_at(&retry, 3_000);
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.display(3_000).progress_permille, Some(high), "held");
     }
 
     /// Canvas and length constrain each other, and the drawer never shows a
@@ -2195,23 +3019,35 @@ mod tests {
     /// expansion when there was one, the operator's own words when there
     /// was not, marked with the reason either way. The title stays what
     /// they typed, so the row shows both halves of the story.
+    ///
+    /// And it is read off the WORKER's own stage record, so what the row
+    /// shows and what the box rendered cannot drift apart.
     #[test]
-    fn the_subtitle_is_the_prompt_the_image_stage_really_got() {
-        // Expanded.
+    fn the_subtitle_is_the_prompt_the_fleet_really_got() {
         let mut m = dream_model();
-        let tag = enqueue_or_expand_tag(&m.generate(1_000));
-        let cmds = m.expand_arrived(tag, Some("a chrome koi in a flooded cathedral".into()), None);
-        // The worker must not expand a rewrite: the person's words ride
-        // along as `prompt_original`, which is the signal it looks for.
-        let body = body_of(&cmds[0]);
-        assert_eq!(
-            get(&body, "prompt").and_then(Value::as_str),
-            Some("a chrome koi in a flooded cathedral")
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+        let expanded = record(
+            PipelineStateDto::Running,
+            Some("image"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a flooded cathedral"))]),
+                ),
+                with_sent_prompt(
+                    with_progress(
+                        rec_stage(1, "image", "image.generate", JobStateDto::Running),
+                        400,
+                        "denoise 2/4",
+                    ),
+                    "a chrome koi in a flooded cathedral",
+                ),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
         );
-        assert_eq!(
-            get(&body, "prompt_original").and_then(Value::as_str),
-            Some("a chrome koi")
-        );
+        m.pipeline_arrived_at(&expanded, 2_000);
         let row = m.jobs().next().unwrap();
         assert_eq!(row.title, "a chrome koi", "the title stays the typed prompt");
         assert_eq!(row.final_prompt(), Some("a chrome koi in a flooded cathedral"));
@@ -2219,46 +3055,45 @@ mod tests {
         let message = row.display(2_000).message;
         assert!(message.contains("brief:"), "{message}");
         assert!(message.contains("flooded cathedral"), "{message}");
-
-        // Raw fallback: marked, and the CAUSE survives.
-        let mut m = dream_model();
-        let tag = enqueue_or_expand_tag(&m.generate(1_000));
-        let cmds =
-            m.expand_arrived(tag, None, Some("expander timed out — using the prompt as typed".into()));
-        let body = body_of(&cmds[0]);
-        assert_eq!(get(&body, "prompt").and_then(Value::as_str), Some("a chrome koi"));
-        // No `prompt_original` and `expand: true` still set: the worker's
-        // own expander picks the run up, so a dead client expander costs
-        // nothing at all now.
-        assert!(get(&body, "prompt_original").is_none(), "{body:?}");
-        assert_eq!(get(&body, "expand").and_then(Value::as_bool), Some(true));
-        let row = m.jobs().next().unwrap();
-        assert_eq!(row.final_prompt(), Some("a chrome koi"));
-        assert!(row.prompt_is_raw());
-        let message = row.display(2_000).message;
-        assert!(message.contains("sent raw, worker expanding (expander timed out)"), "{message}");
-        assert!(message.contains("a chrome koi"), "{message}");
-        // And it does not claim the run was expanded.
-        assert!(!message.contains("brief:"), "{message}");
     }
 
     /// The prompt still shows once the run has moved ON to the video stage:
     /// "what is this clip being made from" does not stop being the question
     /// the moment the still is done.
     #[test]
-    fn the_prompt_survives_the_hand_off_to_the_video_stage() {
+    fn the_prompt_stays_on_the_row_through_the_video_stage() {
         let mut m = dream_model();
-        let tag = enqueue_or_expand_tag(&m.generate(1_000));
-        m.expand_arrived(tag, Some("a chrome koi in a flooded cathedral".into()), None);
-        m.queued_at(tag, job_id(1), Some(2_000));
-        let mut done = status(job_id(1), JobStateDto::Succeeded);
-        done.kind = "image.generate".to_string();
-        done.result_asset = Some(AssetId::from_bytes([7; 16]));
-        done.result_revision = Some(makepad_asset_data::AssetRevisionId::from_bytes([9; 32]));
-        m.status_arrived_at(&done, 3_000);
+        let tag = run_tag(&m.generate(1_000));
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+        let late = record(
+            PipelineStateDto::Running,
+            Some("video"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a flooded cathedral"))]),
+                ),
+                with_result(
+                    with_sent_prompt(
+                        rec_stage(1, "image", "image.generate", JobStateDto::Succeeded),
+                        "a chrome koi in a flooded cathedral",
+                    ),
+                    "succeeded",
+                    asset_result(7),
+                ),
+                with_progress(
+                    rec_stage(2, "video", "video.generate", JobStateDto::Running),
+                    100,
+                    "denoise 1/30",
+                ),
+            ],
+        );
+        m.pipeline_arrived_at(&late, 3_000);
         let row = m.jobs().next().unwrap();
-        assert_eq!(row.kind, "video.generate", "the run has moved on");
+        assert_eq!(row.kind, "video.generate", "the row names its product");
         assert!(row.display(4_000).message.contains("flooded cathedral"));
+        assert_eq!(row.stage_chips()[2].tone, GenJobTone::Active);
     }
 
     /// A brief is model prose: em dashes, curly quotes, accents. Clipping it
@@ -2271,9 +3106,30 @@ mod tests {
             let mut m = dream_model();
             // A title long enough to be cut, in multi-byte characters.
             m.set_prompt(format!("{}un café — “brûlé” ", "é".repeat(pad)).repeat(6));
-            let tag = enqueue_or_expand_tag(&m.generate(1_000));
+            let tag = run_tag(&m.generate(1_000));
+            m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
             let brief = format!("{}{}", "x".repeat(pad), "an em—dash and a “quote” ".repeat(40));
-            m.expand_arrived(tag, Some(brief.clone()), None);
+            let running = record(
+                PipelineStateDto::Running,
+                Some("image"),
+                vec![
+                    with_result(
+                        rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                        "succeeded",
+                        obj(vec![("prompt", s(brief.clone()))]),
+                    ),
+                    with_sent_prompt(
+                        with_progress(
+                            rec_stage(1, "image", "image.generate", JobStateDto::Running),
+                            10,
+                            "denoise 1/4",
+                        ),
+                        &brief,
+                    ),
+                    rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+                ],
+            );
+            m.pipeline_arrived_at(&running, 2_000);
             let row = m.jobs().next().unwrap();
             assert!(row.title.chars().count() <= 49, "{}", row.title);
             // The subtitle is clipped by CHARACTERS and is still real text.
@@ -2286,15 +3142,17 @@ mod tests {
     /// A prompt pasted with newlines still reaches the fleet as one line,
     /// so the picture it makes can actually be published.
     #[test]
-    fn a_pasted_multiline_prompt_is_flattened_before_it_is_queued() {
+    fn a_pasted_multiline_prompt_is_flattened_before_it_is_declared() {
         let mut m = dream_model();
         m.set_prompt("a chrome koi\n\nin a flooded cathedral\t— lit from above".to_string());
-        let tag = enqueue_or_expand_tag(&m.generate(1_000));
-        let cmds = m.expand_arrived(tag, None, Some("expander off".into()));
-        let body = body_of(&cmds[0]);
-        let prompt = get(&body, "prompt").and_then(Value::as_str).unwrap();
-        assert!(!prompt.chars().any(char::is_control), "{prompt:?}");
-        assert_eq!(prompt, "a chrome koi in a flooded cathedral — lit from above");
+        let (run_prompt, stages) = declaration(&m.generate(1_000));
+        assert!(!run_prompt.chars().any(char::is_control), "{run_prompt:?}");
+        assert!(
+            run_prompt.starts_with("a chrome koi in a flooded cathedral — lit from above"),
+            "{run_prompt}"
+        );
+        let expand = spec_body(&stages, "expand");
+        assert_eq!(expand.get("prompt").and_then(Value::as_str), Some(run_prompt.as_str()));
         assert!(!m.jobs().next().unwrap().title.chars().any(char::is_control));
     }
 
@@ -2335,14 +3193,34 @@ mod tests {
         // The fast default is chosen for the operator once it is known.
         assert_eq!(m.selected_image_model().as_deref(), Some(DEFAULT_IMAGE_MODEL));
 
-        // The pick reaches the still's job body, and the row says which.
-        let tag = enqueue_or_expand_tag(&m.generate(1_000));
-        let cmds = m.expand_arrived(tag, Some("a chrome koi in a cathedral".into()), None);
-        let body = body_of(&cmds[0]);
+        // The pick reaches the still STAGE's declared body, and the row
+        // says which flux is drawing it.
+        let cmds = m.generate(1_000);
+        let (_, stages) = declaration(&cmds);
         assert_eq!(
-            get(&body, "model").and_then(Value::as_str),
+            spec_body(&stages, "image").get("model").and_then(Value::as_str),
             Some(DEFAULT_IMAGE_MODEL)
         );
+        let tag = run_tag(&cmds);
+        m.pipeline_created_at(tag, pipe_id(1), Some(1_100));
+        let running = record(
+            PipelineStateDto::Running,
+            Some("image"),
+            vec![
+                with_result(
+                    rec_stage(0, "expand", "text.expand", JobStateDto::Succeeded),
+                    "succeeded",
+                    obj(vec![("prompt", s("a chrome koi in a cathedral"))]),
+                ),
+                with_progress(
+                    rec_stage(1, "image", "image.generate", JobStateDto::Running),
+                    100,
+                    "denoise 1/4",
+                ),
+                rec_stage(2, "video", "video.generate", JobStateDto::Pending),
+            ],
+        );
+        m.pipeline_arrived_at(&running, 2_000);
         assert!(m.jobs().next().unwrap().display(2_000).message.contains(DEFAULT_IMAGE_MODEL));
 
         // An operator's own choice is not overwritten by a later fetch.
@@ -2376,6 +3254,7 @@ mod tests {
             outcome: None,
             result_asset: None,
             result_revision: None,
+            stages: Vec::new(),
         }
     }
 
