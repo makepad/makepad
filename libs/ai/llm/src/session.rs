@@ -949,24 +949,10 @@ impl LlamaSession {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            // The grid coordinates are the token's place in the WHOLE page,
-            // not in this chunk: a page taller than one prefill batch would
-            // otherwise restart its rows at every chunk boundary and rope the
-            // bottom of the page on top of the top of it.
-            let mut planes = vec![0i32; batch * MROPE_COMPONENTS];
-            for i in 0..batch {
-                let token_index = offset + i;
-                let y = (token_index / tokens_w) as i64;
-                let x = (token_index % tokens_w) as i64;
-                let clamp = |v: i64| {
-                    i32::try_from(v)
-                        .map_err(|_| LlamaError::format("rope position does not fit in i32"))
-                };
-                planes[i] = clamp(rope_pos0)?;
-                planes[batch + i] = clamp(rope_pos0 + y)?;
-                planes[2 * batch + i] = clamp(rope_pos0 + x)?;
-                // fourth component stays 0 (unused section)
-            }
+            // The same planes the single-stream span writes, from the same
+            // helper, so a lane cannot rope a page differently from the way
+            // the reference path ropes it.
+            let planes = Self::image_rope_planes(rope_pos0, offset, batch, tokens_w)?;
 
             // Windowed on this slot exactly as the token prefill is: the span
             // is within-slot, so lane N pays what lane 0 pays for the same
@@ -1823,6 +1809,48 @@ impl LlamaSession {
     /// with Qwen-VL 2D positions `[pos0, pos0+y, pos0+x, 0]` per token.
     /// Callers surround this with the `<|vision_start|>` / `<|vision_end|>`
     /// text tokens via `append_tokens`.
+    /// The M-RoPE plane vector for one chunk of an image span.
+    ///
+    /// Section-major over the chunk — every token's `t`, then every token's
+    /// `h`, then every token's `w`, with the fourth section unused — because
+    /// that is the encoding the graph reads, not a preference. Written
+    /// token-major instead, each token ropes at a neighbour's coordinate: the
+    /// page is read in an order it was never laid out in, fluently, with
+    /// nothing in a log to see.
+    ///
+    /// `offset` is the token's index in the WHOLE grid rather than in the
+    /// chunk. A page taller than one prefill batch would otherwise restart its
+    /// rows at every chunk boundary and rope its bottom on top of its top.
+    ///
+    /// Shared by the single-stream span and the lane span so the two cannot
+    /// drift: a lane that roped a page differently from the way the reference
+    /// path ropes it would read the same page differently, and the only
+    /// symptom would be a slightly worse transcript.
+    fn image_rope_planes(
+        pos0: i64,
+        offset: usize,
+        batch: usize,
+        tokens_w: usize,
+    ) -> Result<Vec<i32>> {
+        if tokens_w == 0 {
+            return Err(LlamaError::format("an image span needs a nonzero width"));
+        }
+        let clamp = |v: i64| {
+            i32::try_from(v).map_err(|_| LlamaError::format("rope position does not fit in i32"))
+        };
+        let mut planes = vec![0i32; batch * MROPE_COMPONENTS];
+        for i in 0..batch {
+            let token_index = offset + i;
+            let y = (token_index / tokens_w) as i64;
+            let x = (token_index % tokens_w) as i64;
+            planes[i] = clamp(pos0)?;
+            planes[batch + i] = clamp(pos0 + y)?;
+            planes[2 * batch + i] = clamp(pos0 + x)?;
+            // fourth section stays 0 (unused)
+        }
+        Ok(planes)
+    }
+
     pub fn append_image_embeddings(
         &mut self,
         embeddings: &[f32],
@@ -1861,20 +1889,7 @@ impl LlamaSession {
                 .collect::<Result<Vec<_>>>()?;
             let cache_tokens = start + batch_size;
 
-            let mut planes = vec![0i32; batch_size * 4];
-            for i in 0..batch_size {
-                let token_index = offset + i;
-                let y = (token_index / tokens_w) as i64;
-                let x = (token_index % tokens_w) as i64;
-                let clamp = |v: i64| {
-                    i32::try_from(v)
-                        .map_err(|_| LlamaError::format("rope position does not fit in i32"))
-                };
-                planes[i] = clamp(pos0)?;
-                planes[batch_size + i] = clamp(pos0 + y)?;
-                planes[2 * batch_size + i] = clamp(pos0 + x)?;
-                // fourth component stays 0 (unused section)
-            }
+            let planes = Self::image_rope_planes(pos0, offset, batch_size, tokens_w)?;
 
             let graph_params = SessionGraphParams::greedy_embeddings(batch_size, cache_tokens);
             self.ensure_compiled_graph(graph_params)?;
@@ -4209,7 +4224,7 @@ mod tests {
         argmax_penalized, argmax_token_id, draft_head_fill_after, mtp_carry_ring, penalty_window,
         sample_from, sampling_probabilities, slot_lower_bounds, slot_lower_bounds_per_token,
         speculative_acceptance, speculative_residual, LlamaSamplerState, LlamaSamplingParams,
-        SpecLane, Xorshift64,
+        LlamaSession, SpecLane, Xorshift64,
     };
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
@@ -4405,6 +4420,46 @@ mod tests {
     /// Greedy takes the same answer the penalised row would have given,
     /// including the case that matters: the raw argmax is a token the loop has
     /// been repeating, so the winner has to CHANGE.
+    #[test]
+    fn an_image_span_ropes_section_major_over_its_grid() {
+        // The encoding, pinned. A 3x2 grid at pos0 = 7, taken whole:
+        // t is constant over the page, h is the row, w is the column, and
+        // the fourth section is unused. Section-major over the batch — all
+        // six t's, then all six h's, then all six w's — because that is what
+        // the graph reads. Token-major would rope every token at a
+        // neighbour's coordinate and read the page in an order it was never
+        // laid out in.
+        let planes = LlamaSession::image_rope_planes(7, 0, 6, 3).expect("planes");
+        assert_eq!(
+            planes,
+            vec![
+                7, 7, 7, 7, 7, 7, // t: the span's own position, for every token
+                7, 7, 7, 8, 8, 8, // h: row 0 then row 1
+                7, 8, 9, 7, 8, 9, // w: the column within the row
+                0, 0, 0, 0, 0, 0, // unused section
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chunked_image_span_keeps_its_place_in_the_whole_grid() {
+        // A page wider than one prefill batch arrives in chunks, and the
+        // second chunk's coordinates are its place in the PAGE, not in the
+        // chunk. Restarting per chunk would rope the bottom of the page on
+        // top of the top of it — a transcript of a page read twice from the
+        // middle, which looks like a transcript.
+        let whole = LlamaSession::image_rope_planes(0, 0, 6, 3).expect("whole");
+        let second = LlamaSession::image_rope_planes(0, 3, 3, 3).expect("second chunk");
+        // The chunk's h/w sections are the tail of the whole span's.
+        assert_eq!(&second[3..6], &whole[9..12], "h section");
+        assert_eq!(&second[6..9], &whole[15..18], "w section");
+    }
+
+    #[test]
+    fn an_image_span_of_no_width_is_refused() {
+        assert!(LlamaSession::image_rope_planes(0, 0, 4, 0).is_err());
+    }
+
     #[test]
     fn greedy_argmax_agrees_with_the_penalised_row() {
         let logits = [0.0f32, 1.0, 5.0, 4.0];

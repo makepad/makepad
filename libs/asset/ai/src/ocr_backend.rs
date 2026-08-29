@@ -1518,8 +1518,16 @@ mod resident {
                 }
 
                 // 4. One pass over the weights for every lane in the step.
+                //
+                // A lane in `step_lanes` sampled a token, so it holds a job,
+                // so it is decoding, so the plan is not empty. Unreachable —
+                // and it says so rather than looping, because going round
+                // again would re-sample every lane against the same logits
+                // and quietly advance their samplers forever.
                 let Some(plan) = table.plan_step() else {
-                    continue;
+                    return Err(format!(
+                        "lanes {step_lanes:?} have tokens to decode but no lane is decoding"
+                    ));
                 };
                 // Logit row `i` belongs to `plan.slots[i].slot`, and this
                 // loop maps row `i` onto `step_lanes[i]`. Both are built in
