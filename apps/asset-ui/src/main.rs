@@ -5594,6 +5594,7 @@ impl App {
                 .selected_item()
                 .min(ENHANCE_FACTORS.len() - 1)],
             enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
+            video_loop: false,
         }
     }
 
@@ -6113,6 +6114,7 @@ impl App {
                     .selected_item()
                     .min(ENHANCE_FACTORS.len() - 1)],
                 enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
+                video_loop: false,
             },
             input,
         })
@@ -6469,6 +6471,11 @@ impl App {
             PRESETS[run.preset].name,
             truncate(run.prompt.trim(), 160)
         );
+        // Loop-ness lives on the preset row, not the stored spec — a saved
+        // spec pointing at a loop preset loops, and can never carry a stale
+        // flag the other way.
+        let mut gen = run.gen.clone();
+        gen.video_loop = PRESETS[run.preset].video_loop;
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
@@ -6476,7 +6483,7 @@ impl App {
             run.model_overrides.clone(),
             run.box_override.clone(),
             run.voice.clone(),
-            run.gen.clone(),
+            gen,
         );
         let skip = run.input.as_ref().map_or(0, |seed| seed.skip);
         if let Some(seed) = &run.input {

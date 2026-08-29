@@ -154,6 +154,12 @@ pub struct GenParams {
     /// Enhance stage: append the motion-vector `mkfl` box for
     /// arbitrary-rate GPU playback.
     pub enhance_flow: bool,
+    /// Video stage: send the keyframe as BOTH the first frame (`input_b64`)
+    /// and the H3 wire's `last_frame` named input, so the FL2VA conditioning
+    /// lands the clip back on its opening image — a seamless loop (verified
+    /// on fasth3-4step: endpoint delta ≈ adjacent-frame noise). Derived from
+    /// the preset row at dispatch, never persisted in saved specs.
+    pub video_loop: bool,
 }
 
 impl Default for GenParams {
@@ -176,6 +182,7 @@ impl Default for GenParams {
             enhance_upscale: 2,
             enhance_interpolate: 2,
             enhance_flow: true,
+            video_loop: false,
         }
     }
 }
@@ -191,6 +198,9 @@ pub struct Preset {
     /// fan-out followed by an explicit human choice gate. The chosen
     /// artifact is the only output promoted into the linear chain.
     pub fan_out_stage: Option<usize>,
+    /// The video stage of this chain loops: its keyframe rides as first AND
+    /// last frame (see [`GenParams::video_loop`]).
+    pub video_loop: bool,
 }
 
 impl Preset {
@@ -204,6 +214,22 @@ impl Preset {
             domains,
             pins,
             fan_out_stage: None,
+            video_loop: false,
+        }
+    }
+
+    /// A linear chain whose video stage is a seamless loop.
+    const fn looped(
+        name: &'static str,
+        domains: &'static [&'static str],
+        pins: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        Self {
+            name,
+            domains,
+            pins,
+            fan_out_stage: None,
+            video_loop: true,
         }
     }
 
@@ -218,6 +244,7 @@ impl Preset {
             domains,
             pins,
             fan_out_stage: Some(stage),
+            video_loop: false,
         }
     }
 }
@@ -595,6 +622,8 @@ pub const PRESETS: &[Preset] = &[
             ("motion", CHARACTER_MOTION_MODEL),
         ],
     ),
+    Preset::looped("image → video loop", &["image", "video"], &[]),
+    Preset::looped("expand → image → video loop", &["text", "image", "video"], &[]),
 ];
 
 /// Which upstream payload class a stage's request relays as its binary
@@ -1693,6 +1722,20 @@ impl Pipeline {
         if let Some((b64, content_type)) = self.input_for_stage(stage) {
             request.input_b64 = Some(b64);
             request.input_content_type = Some(content_type);
+        }
+        // Loop chains: the SAME keyframe rides as both the first frame
+        // (input_b64, above) and the H3 wire's `last_frame` named input, so
+        // the clip ends where it began. No keyframe = a hard error, never a
+        // silent non-looping clip.
+        if domain == "video" && self.gen.video_loop {
+            let (b64, content_type) = self.input_for_stage(stage).ok_or_else(|| {
+                "video loop needs a keyframe image from an earlier stage or seed".to_string()
+            })?;
+            request.inputs = Some(vec![NamedInputJson {
+                name: "last_frame".to_string(),
+                content_type,
+                data_b64: b64,
+            }]);
         }
         if domain == "inpaint" {
             let (b64, content_type) = self
@@ -4960,6 +5003,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("text", "qwen3.8-27b"),
             ("upscale", "realesrgan-x4plus"),
             ("vision", "qwen3.8-27b-vision"),
+            ("video", "fasth3-4step"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),
