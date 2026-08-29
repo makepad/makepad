@@ -775,6 +775,59 @@ impl<'a> Jobs<'a> {
         Ok(out)
     }
 
+    /// Detach one dependency edge from a still-PENDING job and replace its
+    /// payload, in one transaction.
+    ///
+    /// This exists for exactly one caller: a pipeline stage declared
+    /// `on_fail: skip`, which failed. The stages after it must go on
+    /// WITHOUT it — but a failed dependency dooms its dependents at the
+    /// next claim, and the claim gate refuses a job with an unsucceeded
+    /// dep, so the edge itself has to go; and their bodies still reference
+    /// the skipped stage's result, so the payload has to change with it.
+    /// One transaction, because either both happen or the dependent is
+    /// left waiting on something that will never succeed.
+    ///
+    /// `Ok(false)` = nothing was touched: the job is no longer pending
+    /// (already claimed, already doomed, already terminal), so its body is
+    /// not the transport's to rewrite any more.
+    pub fn detach_dep(
+        &self,
+        job_id: &JobId,
+        depends_on: &JobId,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> ServerResult<bool> {
+        if payload.len() as u64 > self.budgets.max_job_payload_bytes {
+            return Err(ServerError::OverBudget {
+                what: "job payload",
+                limit: self.budgets.max_job_payload_bytes,
+                found: payload.len() as u64,
+            });
+        }
+        self.db.tx(|db| {
+            if self.state(job_id)? != Some(JobState::Pending) {
+                return Ok(false);
+            }
+            let mut s = db.prepare(
+                "detach dep edge",
+                "DELETE FROM job_deps WHERE job_id=?1 AND depends_on=?2",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, &depends_on.0)?;
+            s.run()?;
+            drop(s);
+            let mut s = db.prepare(
+                "detach dep payload",
+                "UPDATE jobs SET payload=?2, updated_ms=?3 WHERE job_id=?1 AND state='pending'",
+            )?;
+            s.bind_blob(1, &job_id.0)?;
+            s.bind_blob(2, payload)?;
+            s.bind_u64(3, now_ms)?;
+            s.run()?;
+            Ok(true)
+        })
+    }
+
     fn lease_of(&self, job_id: &JobId) -> ServerResult<Option<(String, u32)>> {
         let mut s = self.db.prepare(
             "job lease",

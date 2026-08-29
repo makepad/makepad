@@ -60,6 +60,12 @@ pub const KIND_MODEL_PREVIEW: &str = "model_preview";
 /// Drop an in-memory preview session and restore the alias's durable head.
 /// v4 vocabulary.
 pub const KIND_MODEL_PREVIEW_CLEAR: &str = "model_preview_clear";
+/// A whole PIPELINE reached a terminal state: every stage is done, or one
+/// failed, or it was cancelled. The one event a grid or a library should
+/// listen to for "the thing I asked for is finished" — publishes are
+/// per-asset and coincidental, and a pipeline that fails publishes nothing
+/// at all yet still has to stop looking busy. v5 vocabulary.
+pub const KIND_PIPELINE_FINISHED: &str = "pipeline.finished";
 
 const MAX_MODEL_PREVIEW_SESSIONS: usize = 12;
 const MAX_MODEL_PREVIEW_PARTS: usize = 32;
@@ -71,7 +77,7 @@ const WAIT_SLICE_MS: u64 = 250;
 
 /// The newest event vocabulary a subscriber can ask for. A request without
 /// `ev` gets vocabulary 1.
-pub const EVENT_VOCABULARY: u32 = 4;
+pub const EVENT_VOCABULARY: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelPreviewPart {
@@ -131,6 +137,11 @@ pub struct CatalogEvent {
     pub game_revision: Option<String>,
     pub alias: Option<String>,
     pub model_preview: Option<ModelPreviewEvent>,
+    /// Display id of the pipeline this event is about (`pipe_…`).
+    pub pipeline: Option<String>,
+    /// The pipeline's DERIVED state at announcement: `succeeded`, `failed`
+    /// or `cancelled`.
+    pub pipeline_state: Option<&'static str>,
     /// Lowercase content kind (`video`, `audio`, …) when the transport knew
     /// it at emit time (from the asset's annotation); `None` otherwise.
     pub content_kind: Option<&'static str>,
@@ -148,6 +159,8 @@ pub struct EventBody {
     pub game_revision: Option<String>,
     pub alias: Option<String>,
     pub model_preview: Option<ModelPreviewEvent>,
+    pub pipeline: Option<String>,
+    pub pipeline_state: Option<&'static str>,
     pub content_kind: Option<&'static str>,
     pub ts_ms: u64,
 }
@@ -163,6 +176,8 @@ impl EventBody {
             game_revision: None,
             alias: None,
             model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms,
         }
@@ -178,6 +193,32 @@ impl EventBody {
             game_revision: None,
             alias: None,
             model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
+            content_kind: None,
+            ts_ms,
+        }
+    }
+
+    /// A pipeline reached a terminal state. `state` is DERIVED from the
+    /// stage jobs at announcement time, never stored.
+    pub fn pipeline(
+        ns: &str,
+        pipeline: String,
+        state: &'static str,
+        ts_ms: u64,
+    ) -> EventBody {
+        EventBody {
+            kind: KIND_PIPELINE_FINISHED,
+            namespace: ns.to_string(),
+            asset_id: None,
+            revision: None,
+            game_id: None,
+            game_revision: None,
+            alias: None,
+            model_preview: None,
+            pipeline: Some(pipeline),
+            pipeline_state: Some(state),
             content_kind: None,
             ts_ms,
         }
@@ -324,6 +365,8 @@ impl EventHub {
             game_revision: body.game_revision,
             alias: body.alias,
             model_preview: body.model_preview,
+            pipeline: body.pipeline,
+            pipeline_state: body.pipeline_state,
             content_kind: body.content_kind,
             ts_ms: body.ts_ms,
         });
@@ -466,6 +509,8 @@ impl EventHub {
                     game_revision: None,
                     alias: Some(alias),
                     model_preview: Some(event),
+                    pipeline: None,
+                    pipeline_state: None,
                     content_kind: Some("model-program"),
                     ts_ms,
                 },
@@ -537,6 +582,8 @@ impl EventHub {
                     game_revision: None,
                     alias: Some(alias),
                     model_preview: Some(event),
+                    pipeline: None,
+                    pipeline_state: None,
                     content_kind: Some("model-program"),
                     ts_ms,
                 },
@@ -581,6 +628,8 @@ impl EventHub {
                         removed: Vec::new(),
                         renamed: Vec::new(),
                     }),
+                    pipeline: None,
+                    pipeline_state: None,
                     content_kind: Some("model-program"),
                     ts_ms,
                 },
@@ -617,6 +666,8 @@ impl EventHub {
                     removed: Vec::new(),
                     renamed: Vec::new(),
                 }),
+                pipeline: None,
+                pipeline_state: None,
                 content_kind: Some("model-program"),
                 ts_ms: preview.ts_ms,
             })
