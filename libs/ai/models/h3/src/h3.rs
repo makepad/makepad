@@ -59,6 +59,11 @@ const ROPE_SPATIAL_SCALE: f64 = 32.0;
 pub struct H3ShardedWeights {
     pub dir: PathBuf,
     source: H3WeightSource,
+    /// Device weight-cache namespace override for a bf16 shard DiT that is
+    /// NOT the canonical tree (the FastH3 distilled transformer): two shard
+    /// sources would otherwise share `h3dit::<tensor name>` keys and the
+    /// resident cache would silently serve one model's weights to the other.
+    dit_namespace_override: Option<String>,
 }
 
 /// Where one canonical tensor lives in the shard set.
@@ -172,6 +177,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir,
             source: H3WeightSource::Shards { shards, map },
+            dit_namespace_override: None,
         })
     }
 
@@ -186,6 +192,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Gguf(gguf),
+            dit_namespace_override: None,
         })
     }
 
@@ -199,6 +206,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Gguf(gguf),
+            dit_namespace_override: None,
         })
     }
 
@@ -212,6 +220,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Nvfp4(weights),
+            dit_namespace_override: None,
         })
     }
 
@@ -225,6 +234,7 @@ impl H3ShardedWeights {
         Ok(Self {
             dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             source: H3WeightSource::Nvfp4(weights),
+            dit_namespace_override: None,
         })
     }
 
@@ -442,12 +452,28 @@ impl H3ShardedWeights {
     /// source. Variants keep the `h3dit::`-prefixed key space (so the
     /// backend's unload prefixes catch every variant) while making
     /// cross-source cache-key collisions impossible.
-    pub fn dit_namespace(&self) -> &'static str {
+    pub fn dit_namespace(&self) -> &str {
+        if let Some(namespace) = &self.dit_namespace_override {
+            return namespace;
+        }
         match &self.source {
             H3WeightSource::Shards { .. } => "h3dit",
             H3WeightSource::Gguf(_) => "h3dit::gg",
             H3WeightSource::Nvfp4(_) => "h3dit::nv",
         }
+    }
+
+    /// Give a bf16 shard DiT its own `h3dit::`-prefixed namespace (see the
+    /// field doc). The prefix is enforced so the backend's unload sweep
+    /// (`h3dit::` / `h3te::` / `h3vae::`) still retires it.
+    pub fn with_dit_namespace(mut self, namespace: &str) -> Result<Self> {
+        if !namespace.starts_with("h3dit::") || namespace.len() <= "h3dit::".len() {
+            return Err(DiffusionError::workflow(format!(
+                "h3 dit namespace {namespace:?} must be `h3dit::<tag>`"
+            )));
+        }
+        self.dit_namespace_override = Some(namespace.to_string());
+        Ok(self)
     }
 
     /// Same for the text encoder ("h3te::"-prefixed).

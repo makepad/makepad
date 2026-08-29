@@ -1255,6 +1255,83 @@ mod tests {
         assert_eq!(h3.min_vram_gb, None);
         assert_eq!(h3.min_compute_cap, None);
 
+        // The fast video lane: FastVideo FastH3 (DMD2-distilled MiniMax H3)
+        // = the bf16 tree with ONLY the transformer swapped. Every FastH3
+        // file is pinned to the audited revision; every shared component
+        // is the minimax-h3 entry verbatim (same cache path, same identity
+        // — the registry refuses conflicting identities on one path), so a
+        // box holding minimax-h3 pulls only the 70 GB transformer.
+        let fast = registry.find("fasth3-4step").unwrap();
+        assert_eq!(fast.domain, Domain::Video);
+        assert_eq!(fast.backend, "fast");
+        assert!(fast.available && !fast.gated);
+        assert_eq!(fast.min_vram_gb, Some(90.0));
+        assert_eq!(fast.min_compute_cap, Some(8.9));
+        let fast_license = fast.license.as_ref().expect("fast license");
+        assert_eq!(fast_license.name, "MiniMax H3 Community License");
+        assert_eq!(fast_license.restriction, LicenseRestriction::Community);
+        assert_eq!(
+            fast_license.sha256.as_deref(),
+            Some("59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44")
+        );
+        const FAST_REPO: &str = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree";
+        const FAST_REV: &str = "b65818d41939b5085451074fe8ca8b799f8d4921";
+        let (own, shared): (Vec<_>, Vec<_>) = fast
+            .files
+            .iter()
+            .partition(|f| f.cache_as.starts_with("video/FastH3-4step/"));
+        // 14 shards + index + config + LICENSE + provenance + contract.
+        assert_eq!(own.len(), 19);
+        for file in &own {
+            assert_eq!(file.repo, FAST_REPO, "{}", file.cache_as);
+            assert_eq!(file.revision.as_deref(), Some(FAST_REV), "{}", file.cache_as);
+            assert!(file.size.is_some() && file.sha256.is_some(), "{}", file.cache_as);
+            assert!(!file.local);
+        }
+        for role in ["license", "provenance", "inference-contract", "dit-bf16"] {
+            assert!(fast.file_by_role(role).is_some(), "fast lacks the {role} role");
+        }
+        assert_eq!(
+            fast.file_by_role("dit-bf16").unwrap().cache_as,
+            "video/FastH3-4step/transformer/diffusion_pytorch_model.safetensors.index.json"
+        );
+        assert_eq!(fast.file_by_role("license").unwrap().size, Some(17_604));
+        let transformer_bytes: u64 = own
+            .iter()
+            .filter(|f| f.path.ends_with(".safetensors"))
+            .map(|f| f.size.unwrap())
+            .sum();
+        assert_eq!(transformer_bytes, 70_099_582_760);
+        assert_eq!(
+            own.iter().filter(|f| f.path.ends_with(".safetensors")).count(),
+            14
+        );
+        // Shared: every non-transformer minimax-h3 file, verbatim, plus the
+        // RIFE flownet; none of the base transformer.
+        let base_shared: Vec<&FileSpec> = h3
+            .files
+            .iter()
+            .filter(|f| !f.cache_as.starts_with("video/MiniMax-H3/transformer/"))
+            .collect();
+        assert_eq!(shared.len(), base_shared.len());
+        for (a, b) in shared.iter().zip(&base_shared) {
+            assert_eq!(a.cache_as, b.cache_as);
+            assert_eq!(a.repo, b.repo);
+            assert_eq!(a.path, b.path);
+            assert_eq!(a.size, b.size);
+            assert_eq!(a.sha256, b.sha256);
+            assert_eq!(a.revision, b.revision);
+        }
+        assert!(!fast
+            .files
+            .iter()
+            .any(|f| f.cache_as.starts_with("video/MiniMax-H3/transformer/")));
+        assert!(fast
+            .files
+            .iter()
+            .any(|f| f.cache_as == "video/MiniMax-H3/model_index.json"));
+        assert!(fast.note.as_deref().unwrap_or("").contains("DENSE attention"));
+
         // The RIFE v4.26 flownet is an AUXILIARY FILE of every video tier,
         // never a model of its own: the domain must keep exactly one
         // selectable generator per tier, so nothing may register it as an
@@ -1262,7 +1339,7 @@ mod tests {
         assert!(registry.find("rife").is_none());
         assert!(registry.models.iter().all(|model| !model.id.contains("rife")));
         let mut interpolate_files = Vec::new();
-        for tier in [&h3, &q4, &nv4, &bf16] {
+        for tier in [&h3, &q4, &nv4, &bf16, &fast] {
             let file = tier
                 .file_by_role("interpolate")
                 .unwrap_or_else(|| panic!("{} carries no interpolate role", tier.id));

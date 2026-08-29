@@ -1264,7 +1264,8 @@ pub fn backend_compiled(name: &str) -> bool {
         "vision" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
-        "h3" => cfg!(feature = "video"),
+        // The `fast` (FastH3) lane rides the H3 pipeline: same feature.
+        "h3" | "fast" => cfg!(feature = "video"),
         "sa3" => cfg!(feature = "audio"),
         "moss" => cfg!(feature = "audio"),
         "woosh" => cfg!(feature = "audio"),
@@ -1524,6 +1525,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "h3" => Ok(Box::new(crate::h3_backend::H3Backend::new_h3(&spec.id))),
         #[cfg(not(feature = "video"))]
         "h3" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'video' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "video")]
+        "fast" => Ok(Box::new(crate::fast_backend::FastBackend::new_fast(&spec.id))),
+        #[cfg(not(feature = "video"))]
+        "fast" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'video' cargo feature",
             spec.id
         ))),
@@ -1969,12 +1977,12 @@ mod tests {
         let loras = vec![("frosting".to_string(), 1.0f32)];
         assert!(validate_loras_for_backend("flux", &loras).is_ok());
         // No adapters requested: every backend is fine.
-        for backend in ["flux", "flux2", "trellis", "h3", "testpattern"] {
+        for backend in ["flux", "flux2", "trellis", "h3", "fast", "testpattern"] {
             assert!(validate_loras_for_backend(backend, &[]).is_ok(), "{backend}");
         }
         // Adapters requested on a backend that cannot apply them: refused,
         // and the message names both the backend and the adapters.
-        for backend in ["flux2", "trellis", "h3", "testpattern", "llm"] {
+        for backend in ["flux2", "trellis", "h3", "fast", "testpattern", "llm"] {
             let error = validate_loras_for_backend(backend, &loras)
                 .expect_err("{backend} must refuse loras");
             let message = error.to_string();

@@ -193,19 +193,30 @@ pub struct H3KeyframeInput {
     pub picture_label_ids: Vec<u32>,
 }
 
-/// Weight container format of a quantized H3 component file.
+/// Weight container format of an explicitly sourced H3 component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum H3WeightFormat {
     /// GGUF (unsloth/leejet Q4_K family, full or AdaLN-curve pruned).
     Gguf,
     /// ComfyUI/TensorRT-ModelOpt NVFP4 safetensors (Blackwell tier).
     Nvfp4,
+    /// A bf16 diffusers shard dir (or single safetensors file) in the
+    /// canonical tensor spelling — a DiT swapped under the canonical tree,
+    /// such as the FastH3 distilled transformer. Loads through the same
+    /// streamed shard reader as the tree itself.
+    Bf16Shards,
 }
 
 #[derive(Clone, Debug)]
 pub struct H3ComponentFile {
     pub path: PathBuf,
     pub format: H3WeightFormat,
+    /// Device weight-cache namespace for a [`H3WeightFormat::Bf16Shards`]
+    /// DiT (`h3dit::<tag>`). Required for that format: the canonical tree
+    /// caches under plain `h3dit`, and a second bf16 DiT on the same keys
+    /// would be served the other model's tensors. Ignored by the quantized
+    /// formats, which carry their own namespaces.
+    pub dit_namespace: Option<String>,
 }
 
 /// Explicit per-component weight sources for the quantized tiers. `None`
@@ -481,6 +492,15 @@ fn load_dit_weights(
         Some(file) => match file.format {
             H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_dit(&file.path),
             H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_dit(&file.path),
+            H3WeightFormat::Bf16Shards => {
+                let namespace = file.dit_namespace.as_deref().ok_or_else(|| {
+                    DiffusionError::workflow(format!(
+                        "h3 bf16 shard dit {} needs its own dit_namespace",
+                        file.path.display()
+                    ))
+                })?;
+                H3ShardedWeights::load(&file.path)?.with_dit_namespace(namespace)
+            }
         },
         None => H3ShardedWeights::load(models_dir.join("transformer")),
     }
@@ -495,6 +515,7 @@ fn load_te_weights(
         Some(file) => match file.format {
             H3WeightFormat::Gguf => H3ShardedWeights::load_gguf_te(&file.path),
             H3WeightFormat::Nvfp4 => H3ShardedWeights::load_nvfp4_te(&file.path),
+            H3WeightFormat::Bf16Shards => H3ShardedWeights::load(&file.path),
         },
         None => H3ShardedWeights::load(models_dir.join("text_encoder")),
     }

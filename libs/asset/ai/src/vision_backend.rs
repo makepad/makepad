@@ -141,14 +141,17 @@ pub fn validate_vision_params(params: &GenerateParams) -> Result<(), AssetAiErro
     image_kind(&params.input_bytes).map(|_| ())
 }
 
-/// The two container formats the vision domain accepts, identified by magic
+/// The container formats the vision domain accepts, identified by magic
 /// bytes rather than by the caller's `input_content_type` (a client that
 /// mislabels its own PNG should still get an answer; one that labels a zip
-/// "image/png" must still be refused).
+/// "image/png" must still be refused). `Clip` is an mp4/mov whose FIRST
+/// frame is the image: a client whose cache already holds hardware-encoded
+/// intra frames sends its stored bytes untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageKind {
     Png,
     Jpeg,
+    Clip,
 }
 
 /// `Err` (a 400-class `Params`) for anything that is neither.
@@ -160,8 +163,12 @@ pub fn image_kind(bytes: &[u8]) -> Result<ImageKind, AssetAiError> {
     if bytes.starts_with(&[0xff, 0xd8]) {
         return Ok(ImageKind::Jpeg);
     }
+    // ISO-BMFF (mp4/mov): a size-prefixed `ftyp` box leads the file.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Ok(ImageKind::Clip);
+    }
     Err(AssetAiError::Params(
-        "vision: input_b64 is not a PNG or JPEG image".to_string(),
+        "vision: input_b64 is not a PNG or JPEG image or an mp4/mov clip".to_string(),
     ))
 }
 
@@ -188,7 +195,50 @@ pub fn decode_image_rgb8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetA
     match image_kind(bytes)? {
         ImageKind::Png => decode_png(bytes),
         ImageKind::Jpeg => decode_jpeg(bytes),
+        ImageKind::Clip => decode_clip_first_frame(bytes),
     }
+}
+
+/// First frame of an mp4/mov payload via the platform's hardware decoder.
+/// The decoder only opens paths, so the bytes take one round trip through
+/// the service tmp dir; the temp file dies with the call either way.
+#[cfg(feature = "video")]
+fn decode_clip_first_frame(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAMP: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("asset-ai-keyframes");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AssetAiError::Io(format!("vision: clip tmp dir: {e}")))?;
+    let path = dir.join(format!(
+        "vkf-{}-{}.mov",
+        std::process::id(),
+        STAMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        std::fs::write(&path, bytes)
+            .map_err(|e| AssetAiError::Io(format!("vision: clip tmp write: {e}")))?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| AssetAiError::Io("vision: non-utf8 tmp path".to_string()))?;
+        let mut decoder = makepad_video::VideoFileDecoder::open(path_str)
+            .map_err(|e| AssetAiError::Params(format!("vision: clip open: {e}")))?;
+        let frame = decoder
+            .next_frame()
+            .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?
+            .ok_or_else(|| AssetAiError::Params("vision: clip has no frames".to_string()))?;
+        let (w, h) = (frame.width as usize, frame.height as usize);
+        check_image_dimensions(w, h)?;
+        Ok((frame.to_rgb8(), w, h))
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+#[cfg(not(feature = "video"))]
+fn decode_clip_first_frame(_bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+    Err(AssetAiError::Params(
+        "vision: clip inputs need a build with the `video` feature".to_string(),
+    ))
 }
 
 fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {

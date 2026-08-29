@@ -3079,6 +3079,506 @@
      "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
+  },
+  {
+   "id": "fasth3-4step",
+   "domain": "video",
+   "backend": "fast",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MiniMax H3 Community License",
+    "url": "https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree/raw/b65818d41939b5085451074fe8ca8b799f8d4921/LICENSE",
+    "summary": "MiniMax H3 Community License, inherited by the FastH3 distillation (model card: 'This checkpoint inherits the MiniMax H3 Community License'; the LICENSE file ships with the weights under the license role). Same terms as minimax-h3: local generation is the intended use of this OSS stack; review the acceptable-use and commercial-authorization clauses before shipping a product on these weights.",
+    "restriction": "community",
+    "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+   },
+   "vram_gb": 74.0,
+   "min_vram_gb": 90.0,
+   "min_compute_cap": 8.9,
+   "note": "FastVideo FastH3 4-step Preview v1 (VSA, data-free DMD2; step-1300 student of MiniMaxAI/MiniMax-H3@9bfb6693f2cf6de171db46d1aa586f67d773a1da) on the in-repo H3 stack: the SAME 35B MiniMax H3 transformer architecture (56x128 heads, 50 blocks + 2 refiner blocks, hidden 5376, ffn 14336, 24/32 in-channels, patch 1x2x2, shifts 12/3) with distilled bf16 weights - 688 tensors, 70.1 GB = the 638 base tensors + 50 attn.to_gate_compress - swapped under the canonical bf16 tree through the dit-bf16 role. Text encoder, video/audio VAEs, tokenizer and processor are byte-identical to MiniMax-H3 (same LFS objects) and share its cache paths, so a box holding minimax-h3 downloads only the transformer. Trained schedule = the stock H3 rectified-flow scheduler (linspace grid, shift 12 video / 3 audio) at FIVE sigma-grid points = FOUR DiT forwards, guidance 1.0 (fastvideo_inference.json: transformer_forwards 4, num_inference_steps 5, dmd_denoising_steps [999,749,500,250]). Request 'steps' = DiT forwards: default 4, an explicit 1..8 is honoured, a larger H3-style count (30/50) runs the trained 4 and logs it. ATTENTION: the checkpoint card requires FastVideo's VSA-H3 backend (video sparse attention, tile 64, 90% sparsity, trained compression gates); this service runs the pipeline's DENSE attention and never reads the gate tensors - the same thing FastVideo's FLASH_ATTN route does with this checkpoint. Quality vs the trained VSA policy is unmeasured here (open item, not a silent default). SCOPE per the card: text-to-audio-video was distilled; FL2VA (first/last-frame i2v) and Ref2VA were NOT - i2v requests still run through the base fl2va conditioning path but sit outside the student's training. Same VRAM class as minimax-h3-bf16-96g (f32 activation spine; DiT+VAE stay warm across jobs, TE re-streams per prompt; gate weights are never uploaded). Provenance rides along: provenance.json (provenance role), fastvideo_inference.json (inference-contract role), LICENSE (license role). Output: HEVC (or H264) mp4, 24 fps, stereo AAC. Optional post-stage: interpolate=2 or 4 (native RIFE v4.26, 'interpolate' role).",
+   "files": [
+    {
+     "role": "license",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "LICENSE",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/LICENSE",
+     "size": 17604,
+     "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
+     "role": "provenance",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "provenance.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/provenance.json",
+     "size": 986,
+     "sha256": "db0ec52026d3344603df22482c504dc24167406e468eb9426bac4d781064d976"
+    },
+    {
+     "role": "inference-contract",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "fastvideo_inference.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/fastvideo_inference.json",
+     "size": 859,
+     "sha256": "07745b19fd0387562eb1f9e3b3753db4dffa4d22acb97102fe49f57472c5c22f"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/config.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/config.json",
+     "size": 546,
+     "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
+    },
+    {
+     "role": "dit-bf16",
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 70079,
+     "sha256": "5be1367650e2faf79edf1f106a8354d1a7ef2e3ff45df40c4514b4ae97e1136b"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "size": 5331008552,
+     "sha256": "d4563741673a7f95a1b54bcb952527f6452c4df63931da9cb67732c75290b4c3"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "size": 5318721256,
+     "sha256": "8920795048b28c1109f0c64bd357bd662d3651ac840ccc6e47746bf63e6903df"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "size": 5318721248,
+     "sha256": "15b4102c4bf16a46098df64a9fb14f756f59c5b6187ece71d4781da36d2ad85f"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "size": 4875566048,
+     "sha256": "793ce754a4185fd49da4684fb0ad439b387d2afae0e64320931a87d648549862"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "size": 5318505992,
+     "sha256": "b91266bb970e3c653e222b3a6be88f455a04dcba0a77fcb4b39a37e8b95631ef"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "size": 5164580688,
+     "sha256": "219cf3f31b51e336483dcd192613479854c536146aa0cf6a8d53ae0637145d23"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "size": 5318721240,
+     "sha256": "583020d48bf97bb872b581272fd992f11c0da4579b096764920f494a3ab406ce"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "size": 5318721248,
+     "sha256": "7edf1065d51a9c80c47ca23315081d76e5b282976cfef3ecd71b0fbe84a607ae"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "size": 4875566056,
+     "sha256": "dc9a291ef15c8a575d54888d50b408dbc26a0f6fe31ddb2914865d8d86501457"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "size": 5318505984,
+     "sha256": "10c1b817392968bc2a8817f51c91029cb9de1a96e27cfe99ac7181fa679bf1b4"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "size": 5164580688,
+     "sha256": "ba7a12ac11e63d801db7d34f7f8840bdbcd6594c54091b1780614c7d2f01767c"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "size": 5318721256,
+     "sha256": "cea2d272d196fd8dc9b812b3397d63bb9bc2dd7b92dfa7e22513d1463597a887"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "size": 5318721208,
+     "sha256": "efbbe1952958a7e9a31e956221aeb8bbd91761f03b29432034efed517c30577d"
+    },
+    {
+     "repo": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+     "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "revision": "b65818d41939b5085451074fe8ca8b799f8d4921",
+     "cache_as": "video/FastH3-4step/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "size": 2138941296,
+     "sha256": "c4c204080a1f7a29d7f65a2b9a54d3c41ad2d994028923804d28c29102c2b71c"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
+     "size": 96,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "cache_as": "video/MiniMax-H3/audio_vae/config.json",
+     "size": 2271,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
+     "size": 605429340,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "model_index.json",
+     "cache_as": "video/MiniMax-H3/model_index.json",
+     "size": 2936,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "modular_model_index.json",
+     "cache_as": "video/MiniMax-H3/modular_model_index.json",
+     "size": 2935,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/chat_template.json",
+     "cache_as": "video/MiniMax-H3/processor/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/merges.txt",
+     "cache_as": "video/MiniMax-H3/processor/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/vocab.json",
+     "cache_as": "video/MiniMax-H3/processor/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
+     "size": 97,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/chat_template.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/config.json",
+     "size": 1474,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/merges.txt",
+     "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00001-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
+     "size": 4932328944,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00002-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
+     "size": 4875990528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00003-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
+     "size": 4875990552,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00004-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00005-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00006-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00007-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00008-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00009-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00010-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00011-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00012-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00013-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00014-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
+     "size": 3270697008,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
+     "size": 97831,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/vocab.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/merges.txt",
+     "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/vocab.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/config.json",
+     "cache_as": "video/MiniMax-H3/vae/config.json",
+     "size": 2011,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "size": 5061033024,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "size": 4955986528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "size": 398539336,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
+     "size": 74228,
+     "sha256": null
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
+    }
+   ]
   }
  ]
 }

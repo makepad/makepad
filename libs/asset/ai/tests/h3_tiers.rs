@@ -28,12 +28,17 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     let nv4 = registry.find("minimax-h3-nvfp4-32g").unwrap();
     let bf16 = registry.find("minimax-h3-bf16-96g").unwrap();
     let legacy = registry.find("minimax-h3").unwrap();
+    let fast = registry.find("fasth3-4step").unwrap();
 
     // Role-driven tier selection.
     assert_eq!(tier_plan_for_spec(q4).unwrap().kind, H3TierKind::GgufQ4);
     assert_eq!(tier_plan_for_spec(nv4).unwrap().kind, H3TierKind::Nvfp4);
     assert_eq!(tier_plan_for_spec(bf16).unwrap().kind, H3TierKind::Bf16Tree);
     assert_eq!(tier_plan_for_spec(legacy).unwrap().kind, H3TierKind::Bf16Tree);
+    // The fast lane = the tree with its DiT swapped: unstaged, no ceiling.
+    let fast_plan = tier_plan_for_spec(fast).unwrap();
+    assert_eq!(fast_plan.kind, H3TierKind::Bf16Dit);
+    assert!(!fast_plan.staged && fast_plan.max_pixel_frames.is_none());
     assert!(tier_plan_for_spec(q4).unwrap().staged);
     assert!(tier_plan_for_spec(nv4).unwrap().staged);
     assert!(!tier_plan_for_spec(bf16).unwrap().staged);
@@ -54,6 +59,10 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     assert!(gate(bf16, &rtx4090).is_err());
     assert!(gate(bf16, &rtx5090).is_err());
     assert!(gate(bf16, &rtx6000).is_ok());
+    // Same VRAM class as the bf16 tree: the 96GB box only.
+    assert!(gate(fast, &rtx4090).is_err());
+    assert!(gate(fast, &rtx5090).is_err());
+    assert!(gate(fast, &rtx6000).is_ok());
 
     // Service discovery and the fleet scheduler add the safety reserve to
     // `vram_gb`. Pin this second gate against the actual NVML totals: the

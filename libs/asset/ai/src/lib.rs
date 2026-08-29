@@ -39,6 +39,7 @@ pub mod download;
 pub mod error;
 pub mod fleet;
 pub mod gpu;
+pub mod fast_backend;
 pub mod h3_backend;
 pub mod http_client;
 pub mod jobs;

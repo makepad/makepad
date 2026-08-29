@@ -622,6 +622,42 @@ pub fn is_synthetic_backend(backend: &str) -> bool {
     backend == "testpattern"
 }
 
+/// The backend a domain PREFERS when a request names no model and more than
+/// one real backend could serve it. Only the video domain has one today:
+/// `fast` (FastVideo FastH3, four DiT forwards) over `h3` (the 49-forward
+/// base) — the same clip class in a fraction of the time, so every unpinned
+/// text-to-video and image-to-video job lands there by default while the
+/// H3 tiers stay reachable by exact model id.
+///
+/// Preference is applied only where it is free: a preferred model wins when
+/// its weights are ON DISK (`ready` or `loaded`) on a hardware-compatible
+/// box. It never triggers a download in front of a warm alternative — an
+/// absent/downloading preferred model ranks by plain affinity like any
+/// other.
+const DOMAIN_PREFERRED_BACKENDS: &[(&str, &str)] = &[("video", "fast")];
+
+/// True when `model` is its domain's preferred backend (see
+/// [`DOMAIN_PREFERRED_BACKENDS`]).
+pub fn is_preferred_backend(model: &ModelInfoJson) -> bool {
+    is_preferred_domain_backend(&model.domain, &model.backend)
+}
+
+/// [`is_preferred_backend`] by `(domain, backend)` name pair.
+pub fn is_preferred_domain_backend(domain: &str, backend: &str) -> bool {
+    DOMAIN_PREFERRED_BACKENDS
+        .iter()
+        .any(|(preferred_domain, preferred_backend)| {
+            domain == *preferred_domain && backend == *preferred_backend
+        })
+}
+
+/// Sort key element for domain routing: the preferred backend with its
+/// weights on disk outranks every other model in the domain regardless of
+/// warmth; otherwise 0 and the affinity score decides.
+fn preferred_on_disk(model: &ModelInfoJson, score: u32) -> bool {
+    is_preferred_backend(model) && score >= 3
+}
+
 /// Reference/oracle backends are intentionally callable by exact model id,
 /// but must never enter domain-wide affinity selection. Otherwise a loaded
 /// Python/Torch oracle could silently outrank the canonical native runtime.
@@ -636,7 +672,7 @@ pub fn pick_for_domain_scored(
     snapshots: &[BoxSnapshot],
     domain: &str,
 ) -> Option<(usize, String, u32)> {
-    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, bool, u32, u32, u64, usize, &str)> = None;
     for (i, snap) in snapshots.iter().enumerate() {
         if !snap.is_up() || !role_allows(&snap.base_url, domain) {
             continue;
@@ -652,21 +688,22 @@ pub fn pick_for_domain_scored(
                 continue;
             };
             let real = !is_synthetic_fallback(model);
+            let preferred = preferred_on_disk(model, score);
             let pending = snap.jobs_pending();
             let speed = gpu_rank(snap);
             let better = match &best {
                 None => true,
-                Some((br, bs, bg, bp, bi, _)) => {
-                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bf, bs, bg, bp, bi, _)) => {
+                    (real, preferred, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bf, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, speed, pending, i, model.id.as_str()));
+                best = Some((real, preferred, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, _, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 /// Aggregate admission state for automatic domain routing on one node.
@@ -725,7 +762,7 @@ pub fn pick_for_domain_admitted_scored(
                     && vram_admission_for_model(snapshot, model).is_hardware_compatible()
             })
     });
-    let mut best: Option<(bool, u32, u32, u64, usize, &str)> = None;
+    let mut best: Option<(bool, bool, u32, u32, u64, usize, &str)> = None;
     for (i, snapshot) in snapshots.iter().enumerate() {
         if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
             continue;
@@ -744,21 +781,22 @@ pub fn pick_for_domain_admitted_scored(
             if !vram_admission_for_model(snapshot, model).is_admitted() {
                 continue;
             }
+            let preferred = preferred_on_disk(model, score);
             let pending = snapshot.jobs_pending();
             let speed = gpu_rank(snapshot);
             let better = match &best {
                 None => true,
-                Some((br, bs, bg, bp, bi, _)) => {
-                    (real, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
-                        > (*br, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
+                Some((br, bf, bs, bg, bp, bi, _)) => {
+                    (real, preferred, score, speed, std::cmp::Reverse(pending), std::cmp::Reverse(i))
+                        > (*br, *bf, *bs, *bg, std::cmp::Reverse(*bp), std::cmp::Reverse(*bi))
                 }
             };
             if better {
-                best = Some((real, score, speed, pending, i, model.id.as_str()));
+                best = Some((real, preferred, score, speed, pending, i, model.id.as_str()));
             }
         }
     }
-    best.map(|(_, score, _, _, i, id)| (i, id.to_string(), score))
+    best.map(|(_, _, score, _, _, i, id)| (i, id.to_string(), score))
 }
 
 pub fn pick_for_domain_admitted(
@@ -858,6 +896,66 @@ mod tests {
         assert_eq!(affinity(&snaps[0], "minimax-h3-q4-24g"), None);
         assert_eq!(model_admission(&snaps[0], "minimax-h3-q4-24g"), None);
         assert_eq!(domain_admission(&snaps[0], "video"), None);
+    }
+
+    /// The video domain prefers the `fast` backend (FastH3) wherever its
+    /// weights are on disk — over a LOADED H3 on another box — and falls
+    /// back to plain affinity when the fast weights are absent everywhere.
+    #[test]
+    fn video_domain_prefers_the_fast_backend_when_its_weights_are_on_disk() {
+        let fast = |state: &str| {
+            let mut model = m("fasth3-4step", "video", state, 74.0);
+            model.backend = "fast".to_string();
+            model
+        };
+        let h3 = |state: &str| {
+            let mut model = m("minimax-h3-bf16-96g", "video", state, 74.0);
+            model.backend = "h3".to_string();
+            model
+        };
+        let big = |url: &str, models: Vec<ModelInfoJson>| {
+            let mut snapshot = snap(url, 96 * 1024, 96 * 1024);
+            snapshot.models = models;
+            snapshot
+        };
+        // Loaded H3 on box 0, merely READY fast on box 1: fast wins.
+        let snaps = vec![
+            big("http://a", vec![h3(MODEL_STATE_LOADED)]),
+            big("http://b", vec![fast(MODEL_STATE_READY)]),
+        ];
+        assert_eq!(
+            pick_for_domain_scored(&snaps, "video"),
+            Some((1, "fasth3-4step".to_string(), 3))
+        );
+        assert_eq!(
+            pick_for_domain_admitted(&snaps, "video"),
+            Some((1, "fasth3-4step".to_string()))
+        );
+        // Same box, both on disk: fast wins even listed second.
+        let snaps = vec![big("http://a", vec![h3(MODEL_STATE_LOADED), fast(MODEL_STATE_READY)])];
+        assert_eq!(pick_for_domain(&snaps, "video"), Some((0, "fasth3-4step".to_string())));
+        // Fast weights absent everywhere: preference never orders a 70 GB
+        // download in front of a warm H3.
+        let snaps = vec![
+            big("http://a", vec![h3(MODEL_STATE_LOADED)]),
+            big("http://b", vec![fast(MODEL_STATE_ABSENT)]),
+        ];
+        assert_eq!(
+            pick_for_domain(&snaps, "video"),
+            Some((0, "minimax-h3-bf16-96g".to_string()))
+        );
+        assert_eq!(
+            pick_for_domain_admitted(&snaps, "video"),
+            Some((0, "minimax-h3-bf16-96g".to_string()))
+        );
+        // Downloading is not on disk either.
+        let snaps = vec![big("http://a", vec![h3(MODEL_STATE_READY), fast(MODEL_STATE_DOWNLOADING)])];
+        assert_eq!(pick_for_domain(&snaps, "video"), Some((0, "minimax-h3-bf16-96g".to_string())));
+        // An explicit pin is untouched by preference.
+        let snaps = vec![big("http://a", vec![h3(MODEL_STATE_READY), fast(MODEL_STATE_READY)])];
+        assert_eq!(pick_box(&snaps, "minimax-h3-bf16-96g"), Some(0));
+        assert!(is_preferred_backend(&fast(MODEL_STATE_READY)));
+        assert!(!is_preferred_backend(&h3(MODEL_STATE_READY)));
     }
 
     #[test]

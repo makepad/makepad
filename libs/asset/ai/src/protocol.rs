@@ -356,6 +356,10 @@ pub struct GenerateRequestJson {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub seed: Option<u64>,
+    /// Sampler steps in the model's own unit: sigma-grid points for the H3
+    /// tiers (`minimax-h3*`, default 50 = 49 DiT forwards), DiT FORWARDS
+    /// for the distilled `fasth3-4step` (default 4; 1..=8 honoured, larger
+    /// H3-style counts run the trained 4 — see `fast_backend`).
     pub steps: Option<u32>,
     pub guidance: Option<f64>,
     /// "queue" (default): wait behind earlier jobs. "reject": fail with

@@ -58,6 +58,13 @@ pub const DEFAULT_STEPS: u32 = 50;
 #[cfg(any(feature = "video", test))]
 const H3_GPU_NAMESPACE_PREFIXES: [&str; 3] = ["h3te::", "h3dit::", "h3vae::"];
 
+/// Device weight-cache namespace of a [`ROLE_DIT_BF16`] DiT: under the
+/// `h3dit::` prefix (so the unload sweep retires it) and keyed on the
+/// registry model id (so two bf16 DiTs never alias each other's tensors).
+pub fn bf16_dit_namespace(model_id: &str) -> String {
+    format!("h3dit::{model_id}")
+}
+
 /// Truthful device-residency bookkeeping kept separate from tokenizer and
 /// conditioning caches. Those small host-side helpers may survive a staged
 /// run, but they must never let the admission gate skip its VRAM check.
@@ -109,6 +116,15 @@ pub const ROLE_VIDEO_VAE: &str = "video-vae";
 pub const ROLE_AUDIO_VAE: &str = "audio-vae";
 pub const ROLE_AUDIO_VAE_CONFIG: &str = "audio-vae-config";
 pub const ROLE_TOKENIZER_JSON: &str = "tokenizer-json";
+/// A bf16 diffusers DiT swapped under the canonical bf16 tree: the role
+/// names the shard set's `diffusion_pytorch_model.safetensors.index.json`,
+/// and its directory becomes the DiT source while the text encoder, VAEs,
+/// tokenizer and processor stay the tree's own. This is how the `fast`
+/// backend (FastVideo FastH3, a DMD2-distilled MiniMax H3 transformer with
+/// identical architecture) shares ~77 GB of unchanged components with the
+/// H3 tiers instead of duplicating them. Exclusive with the quantized DiT
+/// roles.
+pub const ROLE_DIT_BF16: &str = "dit-bf16";
 /// Auxiliary role carried by every H3 tier: the Practical-RIFE v4.26
 /// flownet used by the optional interpolation post-stage. It is a file of
 /// the video models, never a model of its own — the domain must keep
@@ -124,6 +140,9 @@ pub enum H3TierKind {
     GgufQ4,
     /// ComfyUI/ModelOpt NVFP4 (Blackwell 32GB class), staged.
     Nvfp4,
+    /// The canonical bf16 tree with its DiT replaced by another bf16 shard
+    /// set ([`ROLE_DIT_BF16`]) — unstaged like the tree, same VRAM class.
+    Bf16Dit,
 }
 
 /// Everything `ensure_loaded` derives from a registry entry before any file
@@ -148,22 +167,36 @@ const NVFP4_MAX_PIXEL_FRAMES: u64 = 1344 * 768 * 124;
 /// contradictory or incomplete quantized manifests.
 pub fn tier_plan_for_spec(spec: &ModelSpec) -> Result<H3TierPlan, AssetAiError> {
     let has = |role: &str| spec.file_by_role(role).is_some();
-    let quant_kind = match (has(ROLE_DIT_GGUF), has(ROLE_DIT_NVFP4)) {
-        (false, false) => {
+    let dit_roles = [ROLE_DIT_GGUF, ROLE_DIT_NVFP4, ROLE_DIT_BF16]
+        .into_iter()
+        .filter(|role| has(role))
+        .collect::<Vec<_>>();
+    if dit_roles.len() > 1 {
+        return Err(AssetAiError::Registry(format!(
+            "model {}: {} present — a tier manifest carries exactly one DiT",
+            spec.id,
+            dit_roles.join(" and ")
+        )));
+    }
+    let quant_kind = match dit_roles.first().copied() {
+        None => {
             return Ok(H3TierPlan {
                 kind: H3TierKind::Bf16Tree,
                 staged: false,
                 max_pixel_frames: None,
             })
         }
-        (true, true) => {
-            return Err(AssetAiError::Registry(format!(
-                "model {}: both {ROLE_DIT_GGUF} and {ROLE_DIT_NVFP4} present — a tier manifest carries exactly one DiT",
-                spec.id
-            )))
+        Some(ROLE_DIT_BF16) => {
+            // The swapped DiT streams like the tree's own; everything else
+            // IS the tree, so the tree's residency and (absent) ceiling apply.
+            return Ok(H3TierPlan {
+                kind: H3TierKind::Bf16Dit,
+                staged: false,
+                max_pixel_frames: None,
+            });
         }
-        (true, false) => H3TierKind::GgufQ4,
-        (false, true) => H3TierKind::Nvfp4,
+        Some(ROLE_DIT_GGUF) => H3TierKind::GgufQ4,
+        Some(_) => H3TierKind::Nvfp4,
     };
     let te_role = match quant_kind {
         H3TierKind::GgufQ4 => ROLE_TE_GGUF,
@@ -238,10 +271,17 @@ pub fn check_canvas_within_tier(
 /// ```
 pub const H3_LAST_FRAME_INPUT: &str = "last_frame";
 
-/// Decode one keyframe PNG into `(rgb8, width, height)`. Empty bytes = the
-/// keyframe was not supplied; a bad content type or a bad PNG is a loud
+/// Decode one keyframe into `(rgb8, width, height)`. Empty bytes = the
+/// keyframe was not supplied; a bad content type or a bad payload is a loud
 /// Params error, never a silent downgrade to a workflow with fewer anchors.
-fn decode_keyframe_png(
+///
+/// `image/png` decodes in place. `video/mp4` / `video/quicktime` take the
+/// FIRST frame of the clip: a client whose cache already holds
+/// hardware-encoded intra frames sends its stored bytes untouched instead
+/// of re-encoding a PNG on its own CPU, and the box's hardware decoder
+/// unpacks them here.
+fn decode_keyframe(
+    model_id: &str,
     what: &str,
     bytes: &[u8],
     content_type: &str,
@@ -249,9 +289,14 @@ fn decode_keyframe_png(
     if bytes.is_empty() {
         return Ok(None);
     }
-    if !content_type.starts_with("image/png") && !content_type.is_empty() {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.starts_with("video/mp4") || ct.starts_with("video/quicktime") {
+        return decode_keyframe_clip(model_id, what, bytes).map(Some);
+    }
+    if !ct.starts_with("image/png") && !ct.is_empty() {
         return Err(AssetAiError::Params(format!(
-            "minimax-h3: {what} content type {content_type:?} not supported (image/png only)"
+            "{model_id}: {what} content type {content_type:?} not supported \
+             (image/png, video/mp4 or video/quicktime)"
         )));
     }
     let (rgba, w, h) = crate::trellis_backend::decode_png_rgba8(bytes)?;
@@ -260,6 +305,54 @@ fn decode_keyframe_png(
         dst.copy_from_slice(&src[..3]);
     }
     Ok(Some((rgb, w as u32, h as u32)))
+}
+
+/// First frame of a clip keyframe via the platform's hardware decoder. The
+/// decoder only opens paths, so the bytes take one round trip through the
+/// service tmp dir; the temp file dies with the call, success or failure.
+#[cfg(feature = "video")]
+fn decode_keyframe_clip(
+    model_id: &str,
+    what: &str,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, u32, u32), AssetAiError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAMP: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("asset-ai-keyframes");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AssetAiError::Io(format!("{model_id}: {what} tmp dir: {e}")))?;
+    let path = dir.join(format!(
+        "kf-{}-{}.mov",
+        std::process::id(),
+        STAMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        std::fs::write(&path, bytes)
+            .map_err(|e| AssetAiError::Io(format!("{model_id}: {what} tmp write: {e}")))?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| AssetAiError::Io(format!("{model_id}: non-utf8 tmp path")))?;
+        let mut decoder = makepad_video::VideoFileDecoder::open(path_str)
+            .map_err(|e| AssetAiError::Params(format!("{model_id}: {what} clip open: {e}")))?;
+        let frame = decoder
+            .next_frame()
+            .map_err(|e| AssetAiError::Params(format!("{model_id}: {what} clip decode: {e}")))?
+            .ok_or_else(|| AssetAiError::Params(format!("{model_id}: {what} clip has no frames")))?;
+        Ok((frame.to_rgb8(), frame.width, frame.height))
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+#[cfg(not(feature = "video"))]
+fn decode_keyframe_clip(
+    model_id: &str,
+    what: &str,
+    _bytes: &[u8],
+) -> Result<(Vec<u8>, u32, u32), AssetAiError> {
+    Err(AssetAiError::Params(format!(
+        "{model_id}: {what} clip keyframes need a build with the `video` feature"
+    )))
 }
 
 /// One generation request handed to the generator.
@@ -574,7 +667,8 @@ impl ContentBackend for H3Backend {
         // i2v (fl2va): an input image is DECODED HERE so a bad relay fails
         // the job loudly — the pipeline must never silently ignore an image
         // and degrade to t2v.
-        let input_rgb = decode_keyframe_png(
+        let input_rgb = decode_keyframe(
+            &self.model_id,
             "input_b64",
             &params.input_bytes,
             &params.input_content_type,
@@ -590,7 +684,8 @@ impl ContentBackend for H3Backend {
             .find(|input| input.name == H3_LAST_FRAME_INPUT)
         {
             None => None,
-            Some(input) => decode_keyframe_png(
+            Some(input) => decode_keyframe(
+                &self.model_id,
                 H3_LAST_FRAME_INPUT,
                 &input.bytes,
                 &input.content_type,
@@ -639,7 +734,8 @@ impl ContentBackend for H3Backend {
             Some(factor @ (2 | 4)) => factor,
             Some(other) => {
                 return Err(AssetAiError::Params(format!(
-                    "minimax-h3: interpolate must be 1 (off), 2 or 4, got {other}"
+                    "{}: interpolate must be 1 (off), 2 or 4, got {other}",
+                    self.model_id
                 )))
             }
         };
@@ -948,32 +1044,65 @@ mod h3_gen {
             // usually pre-seeded/junctioned; quant tiers: the pinned GGUF or
             // NVFP4 set, ~30-35 GiB).
             ctx.ensure_files()?;
+            let tree_models_dir = || -> Result<PathBuf, AssetAiError> {
+                // The registry lays the diffusers tree out under the dir
+                // that holds model_index.json.
+                let index = ctx
+                    .spec
+                    .files
+                    .iter()
+                    .find(|file| {
+                        file.cache_as.ends_with("/model_index.json")
+                            || file.cache_as == "model_index.json"
+                    })
+                    .ok_or_else(|| {
+                        AssetAiError::Backend(format!(
+                            "model {}: registry lists no model_index.json to anchor the model dir",
+                            ctx.spec.id
+                        ))
+                    })?;
+                index
+                    .dest_path(ctx.cache_dir)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .ok_or_else(|| {
+                        AssetAiError::Backend("model_index.json has no parent dir".to_string())
+                    })
+            };
             let (models_dir, model_set) = match plan.kind {
-                super::H3TierKind::Bf16Tree => {
-                    // The registry lays the diffusers tree out under the dir
-                    // that holds model_index.json.
-                    let index = ctx
-                        .spec
-                        .files
-                        .iter()
-                        .find(|file| {
-                            file.cache_as.ends_with("/model_index.json")
-                                || file.cache_as == "model_index.json"
-                        })
-                        .ok_or_else(|| {
-                            AssetAiError::Backend(format!(
-                                "model {}: registry lists no model_index.json to anchor the model dir",
-                                ctx.spec.id
-                            ))
-                        })?;
-                    let models_dir = index
+                super::H3TierKind::Bf16Tree => (tree_models_dir()?, None),
+                super::H3TierKind::Bf16Dit => {
+                    // The tree supplies everything but the DiT, which
+                    // streams from the shard dir the `dit-bf16` role names.
+                    // Its cache namespace is keyed on the MODEL ID so no two
+                    // bf16 DiTs ever share device-cache keys on one box.
+                    let index = ctx.spec.file_by_role(super::ROLE_DIT_BF16).ok_or_else(|| {
+                        AssetAiError::Backend(format!(
+                            "model {}: tier manifest lost its {:?} role",
+                            ctx.spec.id,
+                            super::ROLE_DIT_BF16
+                        ))
+                    })?;
+                    let dit_dir = index
                         .dest_path(ctx.cache_dir)
                         .parent()
                         .map(|p| p.to_path_buf())
                         .ok_or_else(|| {
-                            AssetAiError::Backend("model_index.json has no parent dir".to_string())
+                            AssetAiError::Backend(format!(
+                                "model {}: {:?} role path has no shard dir",
+                                ctx.spec.id,
+                                super::ROLE_DIT_BF16
+                            ))
                         })?;
-                    (models_dir, None)
+                    let set = H3ModelSet {
+                        dit: Some(H3ComponentFile {
+                            path: dit_dir,
+                            format: H3WeightFormat::Bf16Shards,
+                            dit_namespace: Some(super::bf16_dit_namespace(&ctx.spec.id)),
+                        }),
+                        ..H3ModelSet::default()
+                    };
+                    (tree_models_dir()?, Some(set))
                 }
                 super::H3TierKind::GgufQ4 | super::H3TierKind::Nvfp4 => {
                     let role_path = |role: &str| -> Result<PathBuf, AssetAiError> {
@@ -1024,10 +1153,12 @@ mod h3_gen {
                         dit: Some(H3ComponentFile {
                             path: role_path(dit_role)?,
                             format,
+                            dit_namespace: None,
                         }),
                         text_encoder: Some(H3ComponentFile {
                             path: role_path(te_role)?,
                             format,
+                            dit_namespace: None,
                         }),
                         video_vae_path: Some(role_path(super::ROLE_VIDEO_VAE)?),
                         audio_vae_dir: Some(audio_vae_dir),
@@ -1866,6 +1997,17 @@ mod tests {
         assert!(err.to_string().contains(ROLE_TE_NVFP4), "{err}");
         // Two DiTs in one manifest is a registry bug, not a choice.
         assert!(tier_plan_for_spec(&tier_spec("both", &[ROLE_DIT_GGUF, ROLE_DIT_NVFP4])).is_err());
+
+        // A swapped bf16 DiT is the tree's plan (unstaged, no ceiling)
+        // with the DiT taken from the role; it never mixes with a quant DiT.
+        let plan = tier_plan_for_spec(&tier_spec("bf16-dit", &[ROLE_DIT_BF16])).unwrap();
+        assert_eq!(plan.kind, H3TierKind::Bf16Dit);
+        assert!(!plan.staged && plan.max_pixel_frames.is_none());
+        for other in [ROLE_DIT_GGUF, ROLE_DIT_NVFP4] {
+            let err = tier_plan_for_spec(&tier_spec("mixed", &[ROLE_DIT_BF16, other])).unwrap_err();
+            assert!(err.to_string().contains(ROLE_DIT_BF16), "{err}");
+        }
+        assert_eq!(bf16_dit_namespace("fasth3-4step"), "h3dit::fasth3-4step");
     }
 
     /// The GPU gate refuses below-spec AND unknown GPUs (fail closed) and
