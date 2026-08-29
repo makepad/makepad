@@ -4,7 +4,7 @@
 //! ```text
 //! ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir>
 //!               [--limit N] [--resume] [--prompt text|layout|<custom>] [--prompt-file <path>]
-//!               [--max-tokens N] [--retries N]
+//!               [--max-tokens N] [--retries N] [--lanes N] [--batch N]
 //! ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]
 //! ```
 //!
@@ -18,6 +18,16 @@
 //! seconds) and ends with the aggregate: pages, wall seconds per page,
 //! pages per second, decode tokens per second. `--resume` skips pages whose
 //! HTML already exists, so a long batch can be run in bounded slices.
+//!
+//! `--lanes N` holds N pages in the session at once and decodes them
+//! together — one pass over the weights per step shared by every lane, which
+//! is the whole of the aggregate win, since a single stream spends almost all
+//! of its time on that pass and almost none on its own arithmetic. The
+//! context DIVIDES: N lanes of `MAX_CONTEXT / N` each, so a page that no
+//! longer fits a lane is refused by name rather than half-read. `--lanes 1`
+//! is the single-stream path unchanged, which is the baseline the A/B is
+//! against. `--batch N` bounds how many pages are decoded and held in memory
+//! at once (default `lanes * 4`).
 //!
 //! `score` ranks transcriptions: for every page that has a `.ocr.txt`
 //! reference (the corpus' own OCR — a machine transcription too, so this is
@@ -46,7 +56,7 @@ fn main() {
         Some("score") => score(&args[1..]),
         _ => {
             eprintln!(
-                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]"
+                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N] [--lanes N] [--batch N]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]"
             );
             2
         }
@@ -127,6 +137,17 @@ fn run(args: &[String]) -> i32 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(makepad_asset_ai::ocr_backend::DEFAULT_RETRIES);
     let resume = has_flag(args, "--resume");
+    let lanes: usize = flag(args, "--lanes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    // Pages decoded together, and therefore held decoded in memory together.
+    // Four lanes' worth keeps every lane busy across a refill without turning
+    // a 500-page run into 25 GB of RGB.
+    let batch: usize = flag(args, "--batch")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(lanes * 4)
+        .max(lanes);
 
     use makepad_asset_ai::backend::CancelToken;
     use makepad_asset_ai::ocr_backend::{page_fit, OcrBackend, OcrRequest, MAX_INPUT_PIXELS};
@@ -165,15 +186,23 @@ fn run(args: &[String]) -> i32 {
 
     let mut backend = OcrBackend::new("ocr-bench");
     let t_load = Instant::now();
-    if let Err(e) = backend.load_from_paths(
+    if let Err(e) = backend.load_from_paths_with_lanes(
         PathBuf::from(model),
         PathBuf::from(mmproj),
+        lanes,
         &mut |stage, frac| eprintln!("[bench] load {stage} {:.0}%", frac * 100.0),
     ) {
         eprintln!("run: load failed: {e}");
         return 1;
     }
-    eprintln!("[bench] loaded in {:.1}s", t_load.elapsed().as_secs_f64());
+    eprintln!(
+        "[bench] loaded in {:.1}s: {lanes} lane(s) x {} tokens",
+        t_load.elapsed().as_secs_f64(),
+        makepad_asset_ai::ocr_backend::context_for_lanes(
+            makepad_asset_ai::ocr_backend::MAX_CONTEXT,
+            lanes
+        )
+    );
 
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         eprintln!("run: cannot create {}: {e}", out_dir.display());
@@ -182,51 +211,179 @@ fn run(args: &[String]) -> i32 {
     let results_path = out_dir.join("results.tsv");
     let header = "file\tclass\twidth\theight\tfed_width\tfed_height\timage_tokens\toutput_tokens\tattempts\tlooped\tencode_s\tprefill_s\tdecode_s\ttotal_s\n";
     // A resumed run appends to the earlier rows instead of restarting them.
-    let mut rows = match (resume, std::fs::read_to_string(&results_path)) {
+    let rows = match (resume, std::fs::read_to_string(&results_path)) {
         (true, Ok(existing)) if existing.starts_with(header) => existing,
         _ => String::from(header),
     };
     let t_all = Instant::now();
-    let mut done = 0usize;
-    let mut sum_total = 0.0f64;
-    let mut sum_decode = 0.0f64;
-    let mut sum_out_tokens = 0usize;
-    let mut sum_image_tokens = 0usize;
-    let mut looped_pages = 0usize;
-    let mut retried_pages = 0usize;
-    for (index, (_, path, class, stem)) in decoded.iter().enumerate() {
-        let bytes = std::fs::read(path).expect("read page");
-        let (rgb, w, h) = decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
-        let t_page = Instant::now();
-        let page = match backend.ocr_page(
-            OcrRequest {
-                prompt: prompt.clone(),
-                rgb,
-                width: w,
-                height: h,
-                max_new_tokens,
-                retries,
-            },
-            &CancelToken::new(),
-            &mut |_, _| {},
-            &mut |_| {},
-        ) {
-            Ok(page) => page,
-            Err(e) => {
-                eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display());
-                continue;
+    let mut tally = Tally {
+        rows,
+        results_path: results_path.clone(),
+        pages_dir: pages_dir.clone(),
+        out_dir: out_dir.clone(),
+        total,
+        ..Tally::default()
+    };
+    if lanes == 1 {
+        // The single-stream path, unchanged: the baseline the lane numbers
+        // are read against, and the transcripts the lane outputs are
+        // compared to.
+        for (index, (_, path, class, stem)) in decoded.iter().enumerate() {
+            let bytes = std::fs::read(path).expect("read page");
+            let (rgb, w, h) =
+                decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
+            let t_page = Instant::now();
+            let page = match backend.ocr_page(
+                OcrRequest {
+                    prompt: prompt.clone(),
+                    rgb,
+                    width: w,
+                    height: h,
+                    max_new_tokens,
+                    retries,
+                },
+                &CancelToken::new(),
+                &mut |_, _| {},
+                &mut |_| {},
+            ) {
+                Ok(page) => page,
+                Err(e) => {
+                    eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display());
+                    continue;
+                }
+            };
+            let total_s = t_page.elapsed().as_secs_f64();
+            tally.record(index, path, class, stem, w, h, &page, total_s);
+        }
+    } else {
+        // Lanes: `batch` pages decoded together, refilled as they finish.
+        for (group_index, group) in decoded.chunks(batch).enumerate() {
+            let mut requests = Vec::with_capacity(group.len());
+            let mut sizes = Vec::with_capacity(group.len());
+            for (_, path, _, _) in group {
+                let bytes = std::fs::read(path).expect("read page");
+                let (rgb, w, h) =
+                    decode_image_rgb8_within(&bytes, MAX_INPUT_PIXELS).expect("decode page");
+                sizes.push((w, h));
+                requests.push(OcrRequest {
+                    prompt: prompt.clone(),
+                    rgb,
+                    width: w,
+                    height: h,
+                    max_new_tokens,
+                    retries,
+                });
             }
-        };
-        let total_s = t_page.elapsed().as_secs_f64();
-        let class_dir = out_dir.join(class);
+            let mut landed: Vec<Option<Result<_, String>>> =
+                (0..group.len()).map(|_| None).collect();
+            if let Err(e) = backend.ocr_pages(
+                requests,
+                &CancelToken::new(),
+                &mut |_, _| {},
+                &mut |index, page| {
+                    landed[index] = Some(page);
+                },
+            ) {
+                eprintln!("[bench] batch failed: {e}");
+                return 1;
+            }
+            for (offset, ((_, path, class, stem), landed)) in
+                group.iter().zip(landed.into_iter()).enumerate()
+            {
+                let index = group_index * batch + offset;
+                let (w, h) = sizes[offset];
+                match landed {
+                    Some(Ok(page)) => {
+                        // The wall clock is shared, so a page's own cost is
+                        // its own slices: its encode, its prefill, and its
+                        // share of every step it took part in. Those sum back
+                        // to the batch's wall time.
+                        let total_s = page.encode_s + page.prefill_s + page.decode_s;
+                        tally.record(index, path, class, stem, w, h, &page, total_s);
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("[bench] {}/{total} {} FAILED: {e}", index + 1, path.display())
+                    }
+                    None => eprintln!(
+                        "[bench] {}/{total} {} produced no result",
+                        index + 1,
+                        path.display()
+                    ),
+                }
+            }
+        }
+    }
+    let wall = t_all.elapsed().as_secs_f64();
+    let Tally {
+        done,
+        sum_total,
+        sum_decode,
+        sum_out_tokens,
+        sum_image_tokens,
+        looped_pages,
+        retried_pages,
+        ..
+    } = tally;
+    if done == 0 {
+        eprintln!("[bench] no page transcribed");
+        return 1;
+    }
+    println!(
+        "pages {done}  lanes {lanes}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}",
+        wall / done as f64,
+        done as f64 / wall,
+        sum_out_tokens as f64 / sum_decode.max(1e-6),
+        sum_image_tokens as f64 / done as f64,
+        sum_out_tokens as f64 / done as f64,
+    );
+    let _ = sum_total;
+    println!("results: {}", results_path.display());
+    0
+}
+
+/// The bench's running totals and the `results.tsv` it grows.
+///
+/// One place, because a page's row and its contribution to the aggregate must
+/// not be able to disagree between the single-stream loop and the lane loop —
+/// an A/B whose two arms count differently measures the counting.
+#[derive(Default)]
+struct Tally {
+    rows: String,
+    results_path: PathBuf,
+    pages_dir: PathBuf,
+    out_dir: PathBuf,
+    total: usize,
+    done: usize,
+    sum_total: f64,
+    sum_decode: f64,
+    sum_out_tokens: usize,
+    sum_image_tokens: usize,
+    looped_pages: usize,
+    retried_pages: usize,
+}
+
+impl Tally {
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &mut self,
+        index: usize,
+        path: &Path,
+        class: &str,
+        stem: &str,
+        w: usize,
+        h: usize,
+        page: &makepad_asset_ai::ocr_backend::OcrPage,
+        total_s: f64,
+    ) {
+        let class_dir = self.out_dir.join(class);
         let _ = std::fs::create_dir_all(&class_dir);
         let html_path = class_dir.join(format!("{stem}.html"));
         if let Err(e) = std::fs::write(&html_path, &page.html) {
             eprintln!("[bench] cannot write {}: {e}", html_path.display());
         }
-        rows.push_str(&format!(
+        self.rows.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\n",
-            path.strip_prefix(&pages_dir).unwrap_or(path).display(),
+            path.strip_prefix(&self.pages_dir).unwrap_or(path).display(),
             class,
             w,
             h,
@@ -241,21 +398,22 @@ fn run(args: &[String]) -> i32 {
             page.decode_s,
             total_s
         ));
-        let _ = std::fs::write(&results_path, &rows);
-        done += 1;
-        sum_total += total_s;
-        sum_decode += page.decode_s;
-        sum_out_tokens += page.output_tokens;
-        sum_image_tokens += page.image_tokens;
+        let _ = std::fs::write(&self.results_path, &self.rows);
+        self.done += 1;
+        self.sum_total += total_s;
+        self.sum_decode += page.decode_s;
+        self.sum_out_tokens += page.output_tokens;
+        self.sum_image_tokens += page.image_tokens;
         if page.looped {
-            looped_pages += 1;
+            self.looped_pages += 1;
         }
         if page.attempts > 1 {
-            retried_pages += 1;
+            self.retried_pages += 1;
         }
         eprintln!(
-            "[bench] {}/{total} {} {}x{} -> {} img tok, {} out tok, {} att{}, enc {:.2}s pre {:.2}s dec {:.2}s = {:.1}s ({:.1} tok/s)",
+            "[bench] {}/{} {} {}x{} -> {} img tok, {} out tok, {} att{}, enc {:.2}s pre {:.2}s dec {:.2}s = {:.1}s ({:.1} tok/s)",
             index + 1,
+            self.total,
             stem,
             w,
             h,
@@ -270,22 +428,6 @@ fn run(args: &[String]) -> i32 {
             page.output_tokens as f64 / page.decode_s.max(1e-6)
         );
     }
-    let wall = t_all.elapsed().as_secs_f64();
-    if done == 0 {
-        eprintln!("[bench] no page transcribed");
-        return 1;
-    }
-    println!(
-        "pages {done}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}",
-        wall / done as f64,
-        done as f64 / wall,
-        sum_out_tokens as f64 / sum_decode.max(1e-6),
-        sum_image_tokens as f64 / done as f64,
-        sum_out_tokens as f64 / done as f64,
-    );
-    let _ = sum_total;
-    println!("results: {}", results_path.display());
-    0
 }
 
 // ---------------------------------------------------------------- scoring

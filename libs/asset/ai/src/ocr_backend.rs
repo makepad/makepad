@@ -77,6 +77,22 @@ pub const MAX_CONTEXT: u32 = 20_480;
 /// service default is tighter and `OcrRequest::retries` can raise it.
 pub const DEFAULT_RETRIES: u32 = 3;
 
+/// Decode context a lane must keep free for the answer after the page and
+/// the prompt are in. Under this a page is refused rather than half-read:
+/// truncating at 200 tokens produces a plausible fragment of a transcript,
+/// which is worse than an error because nothing downstream can tell.
+pub const MIN_OUTPUT_ROOM: usize = 256;
+
+/// Per-lane context for `lanes` lanes out of the [`MAX_CONTEXT`] budget.
+///
+/// The lanes DIVIDE the arena; they do not multiply it. The attention arena
+/// is `lanes * per-lane`, so two lanes of the full budget would ask for twice
+/// the KV the box was sized for and fail at load — after the weights are
+/// already resident.
+pub fn context_for_lanes(total: u32, lanes: usize) -> u32 {
+    (total / lanes.max(1) as u32).max(1)
+}
+
 /// The tags Chandra's prompt allows, in the order and Python list rendering
 /// (`['math', 'br', ...]`) the weights were trained against.
 const ALLOWED_TAGS: &str = "['math', 'br', 'i', 'b', 'u', 'del', 'sup', 'sub', 'table', 'tr', 'td', 'p', 'th', 'div', 'pre', 'h1', 'h2', 'h3', 'h4', 'h5', 'ul', 'ol', 'li', 'input', 'a', 'span', 'img', 'hr', 'tbody', 'small', 'caption', 'strong', 'thead', 'big', 'code', 'chem']";
@@ -496,7 +512,7 @@ mod resident {
     pub struct OcrBackend {
         model_id: String,
         worker: Option<worker::OcrWorker>,
-        loaded: Option<(PathBuf, PathBuf)>,
+        loaded: Option<(PathBuf, PathBuf, usize)>,
     }
 
     impl OcrBackend {
@@ -508,6 +524,11 @@ mod resident {
             }
         }
 
+        /// Lanes the resident session was built for, or 0 while unloaded.
+        pub fn lanes(&self) -> usize {
+            self.loaded.as_ref().map(|(_, _, lanes)| *lanes).unwrap_or(0)
+        }
+
         /// Brings the tower + session up from an explicit file pair.
         /// Idempotent for an unchanged pair; a changed pair drops the old
         /// session BEFORE loading the new one.
@@ -517,17 +538,68 @@ mod resident {
             mmproj: PathBuf,
             progress: &mut dyn FnMut(&str, f64),
         ) -> Result<(), AssetAiError> {
-            let want = (gguf.clone(), mmproj.clone());
+            self.load_from_paths_with_lanes(gguf, mmproj, 1, progress)
+        }
+
+        /// [`load_from_paths`](Self::load_from_paths) for a session that holds
+        /// `lanes` pages at once.
+        ///
+        /// The lane count is fixed at load because it decides the shape of the
+        /// caches: the attention arena is `lanes * per-lane context` rows and
+        /// the recurrent arena one block per lane. Changing it means new
+        /// weights on the device, so it belongs here and not on a request.
+        pub fn load_from_paths_with_lanes(
+            &mut self,
+            gguf: PathBuf,
+            mmproj: PathBuf,
+            lanes: usize,
+            progress: &mut dyn FnMut(&str, f64),
+        ) -> Result<(), AssetAiError> {
+            let lanes = lanes.max(1);
+            let want = (gguf.clone(), mmproj.clone(), lanes);
             if self.worker.is_some() && self.loaded.as_ref() == Some(&want) {
                 return Ok(());
             }
             self.worker = None;
             self.loaded = None;
-            let worker = worker::OcrWorker::spawn(gguf, mmproj, self.model_id.clone(), progress)
-                .map_err(|e| AssetAiError::Backend(format!("ocr load: {e}")))?;
+            let worker =
+                worker::OcrWorker::spawn(gguf, mmproj, lanes, self.model_id.clone(), progress)
+                    .map_err(|e| AssetAiError::Backend(format!("ocr load: {e}")))?;
             self.worker = Some(worker);
             self.loaded = Some(want);
             Ok(())
+        }
+
+        /// Transcribe a batch of pages with every lane of the session
+        /// resident at once, and hand each page back as it finishes.
+        ///
+        /// The aggregate is what improves, not the individual page: a lane
+        /// decodes no faster than it did alone, but N of them share one pass
+        /// over the weights per step, and that pass is what a single stream
+        /// spends almost all of its time on. A finished lane is refilled from
+        /// the queue while the others keep decoding.
+        ///
+        /// `on_page` is called with the submission index, so results can be
+        /// put back in order however they finish.
+        pub fn ocr_pages(
+            &self,
+            requests: Vec<OcrRequest>,
+            cancel: &CancelToken,
+            on_stage: &mut dyn FnMut(&str, f64),
+            on_page: &mut dyn FnMut(usize, Result<OcrPage, String>),
+        ) -> Result<(), AssetAiError> {
+            let worker = self.worker.as_ref().ok_or_else(|| {
+                AssetAiError::Backend("ocr backend used before ensure_loaded".to_string())
+            })?;
+            worker
+                .ask_batch(requests, cancel, on_stage, on_page)
+                .map_err(|e| {
+                    if e == "cancelled" {
+                        AssetAiError::Cancelled
+                    } else {
+                        AssetAiError::Backend(format!("ocr: {e}"))
+                    }
+                })
         }
 
         /// Transcribe one decoded page. This is the whole request path
@@ -561,13 +633,14 @@ mod resident {
             ctx.ensure_files()?;
             let gguf = ctx.path_by_role("llm-gguf")?;
             let mmproj = ctx.path_by_role("mmproj")?;
-            if self.worker.is_some() && self.loaded.as_ref() == Some(&(gguf.clone(), mmproj.clone()))
+            if self.worker.is_some()
+                && self.loaded.as_ref() == Some(&(gguf.clone(), mmproj.clone(), 1))
             {
                 return Ok(());
             }
             let gb = std::fs::metadata(&gguf).map(|m| m.len() as f64 / 1e9).unwrap_or(0.0);
             (ctx.progress)(&format!("load ocr gguf ({gb:.1}GB) + tower"), 0.1);
-            self.load_from_paths(gguf, mmproj, ctx.progress)?;
+            self.load_from_paths_with_lanes(gguf, mmproj, 1, ctx.progress)?;
             (ctx.progress)("ocr session ready", 0.9);
             Ok(())
         }
@@ -653,8 +726,9 @@ mod resident {
         use super::*;
         use makepad_ai_llm::{
             preprocess_rgb8, GgufFile, LlamaSamplerState, LlamaSamplingParams, LlamaSession,
-            LlamaSessionConfig, VisionConfig, VisionTower,
+            LlamaSessionConfig, LlamaTextDecoder, SlotTable, VisionConfig, VisionTower,
         };
+        use std::collections::VecDeque;
         use std::sync::mpsc;
         use std::time::Instant;
 
@@ -665,8 +739,17 @@ mod resident {
             Done(Result<OcrPage, String>),
         }
 
+        /// What a batch run reports back, page by page as lanes finish.
+        pub enum BatchEvent {
+            Stage(String, f64),
+            /// Submission index and its result.
+            Page(usize, Result<OcrPage, String>),
+            Done(Result<(), String>),
+        }
+
         enum WorkerMsg {
             Ask(OcrRequest, CancelToken, mpsc::Sender<WorkerEvent>),
+            AskBatch(Vec<OcrRequest>, CancelToken, mpsc::Sender<BatchEvent>),
         }
 
         /// Handle to the thread that owns the resident tower + session
@@ -679,6 +762,7 @@ mod resident {
             pub fn spawn(
                 gguf: PathBuf,
                 mmproj: PathBuf,
+                lanes: usize,
                 model_id: String,
                 progress: &mut dyn FnMut(&str, f64),
             ) -> Result<Self, String> {
@@ -703,7 +787,13 @@ mod resident {
                             let session = LlamaSession::load_with_progress(
                                 &gguf,
                                 LlamaSessionConfig {
-                                    max_context: Some(MAX_CONTEXT),
+                                    // Lanes divide the budget: the arena is
+                                    // `lanes * max_context` rows, so asking
+                                    // each lane for the whole of it would
+                                    // size the KV for a box that is not
+                                    // there.
+                                    max_context: Some(context_for_lanes(MAX_CONTEXT, lanes)),
+                                    max_sequences: lanes.max(1) as u32,
                                     // A page is 3-6k image tokens of prefill;
                                     // the session default (32) is a chat
                                     // turn's shape and made prefill the
@@ -730,11 +820,12 @@ mod resident {
                         let (mut tower, mut session, config) = match loaded {
                             Ok(parts) => {
                                 eprintln!(
-                                    "[ocr] {model_id} resident on {}: page fit up to {}x{}, max_context {}",
+                                    "[ocr] {model_id} resident on {}: page fit up to {}x{}, \
+                                     {lanes} lane(s) x {} tokens",
                                     parts.0.device_description(),
                                     MAX_FIT.0,
                                     MAX_FIT.1,
-                                    MAX_CONTEXT
+                                    context_for_lanes(MAX_CONTEXT, lanes)
                                 );
                                 let _ = boot_tx.send(BootEvt::Ready(Ok(())));
                                 parts
@@ -744,10 +835,22 @@ mod resident {
                                 return;
                             }
                         };
-                        while let Ok(WorkerMsg::Ask(ask, cancel, events)) = rx.recv() {
-                            let result =
-                                run_page(&mut tower, &mut session, &config, ask, &cancel, &events);
-                            let _ = events.send(WorkerEvent::Done(result));
+                        while let Ok(msg) = rx.recv() {
+                            match msg {
+                                WorkerMsg::Ask(ask, cancel, events) => {
+                                    let result = run_page(
+                                        &mut tower, &mut session, &config, ask, &cancel, &events,
+                                    );
+                                    let _ = events.send(WorkerEvent::Done(result));
+                                }
+                                WorkerMsg::AskBatch(asks, cancel, events) => {
+                                    let result = run_pages(
+                                        &mut tower, &mut session, &config, lanes, asks, &cancel,
+                                        &events,
+                                    );
+                                    let _ = events.send(BatchEvent::Done(result));
+                                }
+                            }
                         }
                     })
                     .map_err(|e| format!("spawn ocr worker: {e}"))?;
@@ -778,6 +881,27 @@ mod resident {
                         Ok(WorkerEvent::Stage(stage, frac)) => on_stage(&stage, frac),
                         Ok(WorkerEvent::Text(text)) => on_text(&text),
                         Ok(WorkerEvent::Done(result)) => return result,
+                        Err(_) => return Err("ocr worker dropped the reply".to_string()),
+                    }
+                }
+            }
+
+            pub fn ask_batch(
+                &self,
+                asks: Vec<OcrRequest>,
+                cancel: &CancelToken,
+                on_stage: &mut dyn FnMut(&str, f64),
+                on_page: &mut dyn FnMut(usize, Result<OcrPage, String>),
+            ) -> Result<(), String> {
+                let (event_tx, event_rx) = mpsc::channel();
+                self.tx
+                    .send(WorkerMsg::AskBatch(asks, cancel.clone(), event_tx))
+                    .map_err(|_| "ocr worker thread is gone".to_string())?;
+                loop {
+                    match event_rx.recv() {
+                        Ok(BatchEvent::Stage(stage, frac)) => on_stage(&stage, frac),
+                        Ok(BatchEvent::Page(index, page)) => on_page(index, page),
+                        Ok(BatchEvent::Done(result)) => return result,
                         Err(_) => return Err("ocr worker dropped the reply".to_string()),
                     }
                 }
@@ -985,6 +1109,489 @@ mod resident {
             }
             Ok(page)
         }
+
+        // ------------------------------------------------------------------
+        // Multi-lane decode: several pages resident in one session at once.
+        // ------------------------------------------------------------------
+
+        /// One page while it occupies a lane.
+        ///
+        /// Everything the tower and the tokenizer produced lives here, so a
+        /// hotter retry re-seats the SAME embeddings instead of re-encoding a
+        /// page the vision side already read correctly.
+        struct LaneJob {
+            /// Submission index, so results can be put back in order.
+            index: usize,
+            prefix_ids: Vec<i32>,
+            suffix_ids: Vec<i32>,
+            embeddings: Vec<f32>,
+            tokens_w: usize,
+            tokens_h: usize,
+            max_new: usize,
+            attempt: u32,
+            attempts: u32,
+            /// Set when this lane looped and has an attempt left: it keeps the
+            /// lane, and the next refill pass re-seats it hotter.
+            needs_reseat: bool,
+            page: OcrPage,
+            text: String,
+            decoder: LlamaTextDecoder,
+            sampler: LlamaSamplerState,
+            params: LlamaSamplingParams,
+            /// The row this lane samples its next token from: the tail of its
+            /// prefill, then the tail of every step it takes part in.
+            logits: Vec<f32>,
+            generated: usize,
+        }
+
+        /// Sampling knobs for attempt `attempt` — the single-stream path's
+        /// schedule verbatim: greedy first, then Chandra's hotter retries.
+        fn attempt_params(attempt: u32) -> LlamaSamplingParams {
+            let temperature = if attempt == 0 {
+                0.0
+            } else {
+                (RETRY_TEMPERATURE_STEP * attempt as f32).min(RETRY_TEMPERATURE_MAX)
+            };
+            LlamaSamplingParams {
+                temperature,
+                top_p: if attempt == 0 { 0.1 } else { RETRY_TOP_P },
+                top_k: 0,
+                seed: 0x0c8a + attempt as u64,
+                ..LlamaSamplingParams::default()
+            }
+        }
+
+        /// Fit, resample, encode and tokenize one page — everything that has
+        /// to happen before a lane is involved. Serial, because there is one
+        /// tower and a page is one graph through it.
+        fn prepare_job(
+            tower: &mut VisionTower,
+            session: &LlamaSession,
+            config: &VisionConfig,
+            index: usize,
+            ask: OcrRequest,
+        ) -> Result<LaneJob, String> {
+            let (fw, fh) = page_fit(ask.width, ask.height, config.align_size());
+            if fw == 0 || fh == 0 {
+                return Err("empty page".to_string());
+            }
+            let fitted = resample_rgb8(&ask.rgb, ask.width, ask.height, fw, fh);
+            let mut fitted_config = config.clone();
+            fitted_config.min_pixels = 0;
+            fitted_config.max_pixels = usize::MAX / 4;
+            let prepared = preprocess_rgb8(&fitted, fw, fh, &fitted_config)
+                .map_err(|e| format!("preprocess: {e:?}"))?;
+            drop(fitted);
+            if (prepared.width, prepared.height) != (fw, fh) {
+                return Err(format!(
+                    "preprocess resized the fitted page {fw}x{fh} to {}x{}",
+                    prepared.width, prepared.height
+                ));
+            }
+            let t_encode = Instant::now();
+            let embeddings = tower.encode(&prepared).map_err(|e| format!("encode: {e:?}"))?;
+            let encode_s = t_encode.elapsed().as_secs_f64();
+
+            let vocab = session.vocab();
+            let prefix_ids = vocab
+                .tokenize(OCR_PREFIX, false, true)
+                .map_err(|e| format!("tokenize prefix: {e:?}"))?;
+            let suffix = ocr_suffix(&ask.prompt.text());
+            let suffix_ids = vocab
+                .tokenize(&suffix, false, true)
+                .map_err(|e| format!("tokenize prompt: {e:?}"))?;
+
+            let image_tokens = prepared.tokens_w() * prepared.tokens_h();
+            let prompt_tokens = prefix_ids.len() + image_tokens + suffix_ids.len();
+            // A LANE's context, not the session's total — `max_context` IS the
+            // per-lane figure once the session is built for several. Refused
+            // by name, because a page that does not fit is not a page to
+            // half-read: 200 tokens of a transcript look like a transcript.
+            let lane_context = session.max_context();
+            let room = lane_context.saturating_sub(prompt_tokens);
+            if room < MIN_OUTPUT_ROOM {
+                return Err(format!(
+                    "page needs {prompt_tokens} tokens ({image_tokens} image + {} prompt) and a \
+                     lane holds {lane_context}, leaving {room} for the answer; run fewer lanes",
+                    prefix_ids.len() + suffix_ids.len()
+                ));
+            }
+            let max_new = (ask.max_new_tokens.max(1) as usize).min(room);
+
+            Ok(LaneJob {
+                index,
+                prefix_ids,
+                suffix_ids,
+                embeddings,
+                tokens_w: prepared.tokens_w(),
+                tokens_h: prepared.tokens_h(),
+                max_new,
+                attempt: 0,
+                attempts: 1 + ask.retries,
+                needs_reseat: false,
+                page: OcrPage {
+                    fed_width: fw,
+                    fed_height: fh,
+                    image_tokens,
+                    encode_s,
+                    ..OcrPage::default()
+                },
+                text: String::new(),
+                decoder: session.vocab().text_decoder(),
+                sampler: LlamaSamplerState::new(attempt_params(0).seed),
+                params: attempt_params(0),
+                logits: Vec::new(),
+                generated: 0,
+            })
+        }
+
+        /// Seat a prepared job in a lane: clear what the lane carried over,
+        /// then prefill prefix, page and prompt into its own rows.
+        ///
+        /// Nothing here touches another lane. The recurrent state is cleared
+        /// for THIS lane only — the whole-session `reset` the single-stream
+        /// path uses would take every neighbour's page with it — and every
+        /// prefill graph is windowed on this lane's rows, so a lane can be
+        /// refilled while the others are mid-answer.
+        fn seat_job(
+            session: &mut LlamaSession,
+            table: &mut SlotTable,
+            lane: usize,
+            job: &mut LaneJob,
+        ) -> Result<(), String> {
+            fn cursor(table: &SlotTable, lane: usize) -> Result<(usize, usize, usize, i64), String> {
+                let slot = table
+                    .slot(lane)
+                    .ok_or_else(|| format!("lane {lane} is outside the slot table"))?;
+                Ok((
+                    slot.kv_base(),
+                    slot.live_state_row(),
+                    slot.fill(),
+                    slot.rope_pos_next(),
+                ))
+            }
+            session
+                .clear_slot_state(lane)
+                .map_err(|e| format!("clear lane {lane}: {e:?}"))?;
+            table
+                .admit_at(lane)
+                .map_err(|e| format!("admit lane {lane}: {e:?}"))?;
+
+            let mut logits = Vec::new();
+            for chunk in job.prefix_ids.chunks(PREFILL_BATCH) {
+                let (kv_base, state_row, fill, rope) = cursor(table, lane)?;
+                logits = session
+                    .prefill_slot_chunk_at_rope(lane, kv_base, state_row, fill, rope, chunk)
+                    .map_err(|e| format!("prefill prefix: {e:?}"))?;
+                table
+                    .advance(lane, chunk.len())
+                    .map_err(|e| format!("advance lane {lane}: {e:?}"))?;
+            }
+            {
+                let (kv_base, state_row, fill, rope) = cursor(table, lane)?;
+                logits = session
+                    .prefill_slot_image_embeddings(
+                        lane,
+                        kv_base,
+                        state_row,
+                        fill,
+                        rope,
+                        &job.embeddings,
+                        job.tokens_w,
+                        job.tokens_h,
+                    )
+                    .map_err(|e| format!("prefill page: {e:?}"))?;
+                // The counter split the whole lane path rests on: the page is
+                // `tokens_w * tokens_h` cache rows but only
+                // `max(tokens_w, tokens_h)` M-RoPE positions.
+                table
+                    .advance_image_span(
+                        lane,
+                        job.tokens_w * job.tokens_h,
+                        job.tokens_w.max(job.tokens_h),
+                    )
+                    .map_err(|e| format!("advance lane {lane} over the page: {e:?}"))?;
+            }
+            for chunk in job.suffix_ids.chunks(PREFILL_BATCH) {
+                let (kv_base, state_row, fill, rope) = cursor(table, lane)?;
+                logits = session
+                    .prefill_slot_chunk_at_rope(lane, kv_base, state_row, fill, rope, chunk)
+                    .map_err(|e| format!("prefill prompt: {e:?}"))?;
+                table
+                    .advance(lane, chunk.len())
+                    .map_err(|e| format!("advance lane {lane}: {e:?}"))?;
+            }
+            table
+                .begin_decoding(lane)
+                .map_err(|e| format!("lane {lane} cannot decode: {e:?}"))?;
+
+            job.page.attempts = job.attempt + 1;
+            job.params = attempt_params(job.attempt);
+            job.sampler = LlamaSamplerState::new(job.params.seed);
+            job.decoder = session.vocab().text_decoder();
+            job.text.clear();
+            job.generated = 0;
+            job.logits = logits;
+            Ok(())
+        }
+
+        /// What a lane that stopped generating should do next.
+        enum LaneEnd {
+            /// Its answer stands. The lane is free.
+            Done,
+            /// It looped and has a hotter attempt left. It KEEPS the lane and
+            /// the next refill pass re-seats it — the neighbours never learn
+            /// it happened.
+            Reseat,
+        }
+
+        /// Close out a lane's attempt, deciding between the two.
+        fn end_attempt(job: &mut LaneJob, looped: bool) -> LaneEnd {
+            let looped = looped || looks_looped(&job.text);
+            job.page.html = job.text.trim().to_string();
+            job.page.output_tokens = job.generated;
+            job.page.looped = looped;
+            if looped && job.attempt + 1 < job.attempts {
+                job.attempt += 1;
+                job.needs_reseat = true;
+                eprintln!(
+                    "[ocr] lane loop detected after {} tokens, retrying at temperature {:.1}",
+                    job.generated,
+                    attempt_params(job.attempt).temperature
+                );
+                LaneEnd::Reseat
+            } else {
+                LaneEnd::Done
+            }
+        }
+
+        /// Transcribe a batch with every lane of the session resident.
+        ///
+        /// The loop is: refill idle lanes from the queue (serial — one tower,
+        /// one page at a time), sample one token per decoding lane, take the
+        /// lanes that stopped out of the step, and step the rest together.
+        /// The aggregate is what improves: one step is one pass over the
+        /// weights shared by every lane in it, and that pass is where a single
+        /// stream spends almost all of its time.
+        fn run_pages(
+            tower: &mut VisionTower,
+            session: &mut LlamaSession,
+            config: &VisionConfig,
+            lanes: usize,
+            asks: Vec<OcrRequest>,
+            cancel: &CancelToken,
+            events: &mpsc::Sender<BatchEvent>,
+        ) -> Result<(), String> {
+            let cancelled = || "cancelled".to_string();
+            let total = asks.len();
+            if total == 0 {
+                return Ok(());
+            }
+            let lanes = lanes.max(1).min(session.slot_count());
+            // Chandra ends its turn with <|im_end|> but its generation config
+            // names only <|endoftext|>, so the reference runner adds both.
+            let mut stops: Vec<i32> = session.stop_tokens();
+            for name in ["<|im_end|>", "<|endoftext|>"] {
+                if let Some(id) = session.vocab().token_id(name) {
+                    if !stops.contains(&id) {
+                        stops.push(id);
+                    }
+                }
+            }
+            let mut table = session
+                .new_slot_table()
+                .map_err(|e| format!("slot table: {e:?}"))?;
+            let mut queue: VecDeque<(usize, OcrRequest)> = asks.into_iter().enumerate().collect();
+            let mut jobs: Vec<Option<LaneJob>> = (0..lanes).map(|_| None).collect();
+            let mut finished = 0usize;
+
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+
+                // 1. Refill: re-seat the lanes that looped, then fill the
+                //    empty ones from the queue. Both stall whoever is still
+                //    decoding — that is the cost of a refill, and it is why a
+                //    lane is only ever refilled once it has actually stopped.
+                for lane in 0..lanes {
+                    if let Some(job) = jobs[lane].as_mut() {
+                        if !job.needs_reseat {
+                            continue;
+                        }
+                        job.needs_reseat = false;
+                        let t_prefill = Instant::now();
+                        match seat_job(session, &mut table, lane, jobs[lane].as_mut().unwrap()) {
+                            Ok(()) => {
+                                if let Some(job) = jobs[lane].as_mut() {
+                                    job.page.prefill_s += t_prefill.elapsed().as_secs_f64();
+                                }
+                            }
+                            Err(err) => {
+                                let index = jobs[lane].as_ref().map(|job| job.index).unwrap_or(0);
+                                jobs[lane] = None;
+                                let _ = table.retire(lane);
+                                finished += 1;
+                                let _ = events.send(BatchEvent::Page(index, Err(err)));
+                            }
+                        }
+                        continue;
+                    }
+                    let Some((index, ask)) = queue.pop_front() else {
+                        continue;
+                    };
+                    let _ = events.send(BatchEvent::Stage(
+                        format!("page {} of {total} into lane {lane}", index + 1),
+                        finished as f64 / total as f64,
+                    ));
+                    let mut job = match prepare_job(tower, session, config, index, ask) {
+                        Ok(job) => job,
+                        Err(err) => {
+                            finished += 1;
+                            let _ = events.send(BatchEvent::Page(index, Err(err)));
+                            continue;
+                        }
+                    };
+                    let t_prefill = Instant::now();
+                    match seat_job(session, &mut table, lane, &mut job) {
+                        Ok(()) => {
+                            job.page.prefill_s += t_prefill.elapsed().as_secs_f64();
+                            jobs[lane] = Some(job);
+                        }
+                        Err(err) => {
+                            let _ = table.retire(lane);
+                            finished += 1;
+                            let _ = events.send(BatchEvent::Page(index, Err(err)));
+                        }
+                    }
+                }
+
+                if jobs.iter().all(|job| job.is_none()) {
+                    if queue.is_empty() {
+                        return Ok(());
+                    }
+                    // Every lane refused its page and the queue still has
+                    // work: go round and take the next one.
+                    continue;
+                }
+
+                // 2. One token per decoding lane, from the row that lane owns.
+                //    A lane that stops here does not join the step.
+                let mut step_lanes: Vec<usize> = Vec::with_capacity(lanes);
+                let mut step_tokens: Vec<i32> = Vec::with_capacity(lanes);
+                let mut stopped: Vec<usize> = Vec::new();
+                let mut failed: Vec<(usize, String)> = Vec::new();
+                for lane in 0..lanes {
+                    let Some(job) = jobs[lane].as_mut() else {
+                        continue;
+                    };
+                    if job.generated >= job.max_new {
+                        stopped.push(lane);
+                        continue;
+                    }
+                    match job.sampler.sample_logits(&job.logits, job.params) {
+                        Ok(token) if stops.contains(&token) => stopped.push(lane),
+                        Ok(token) => {
+                            step_lanes.push(lane);
+                            step_tokens.push(token);
+                        }
+                        Err(e) => failed.push((lane, format!("sample: {e:?}"))),
+                    }
+                }
+                for (lane, err) in failed {
+                    let index = jobs[lane].as_ref().map(|job| job.index).unwrap_or(0);
+                    jobs[lane] = None;
+                    let _ = table.retire(lane);
+                    finished += 1;
+                    let _ = events.send(BatchEvent::Page(index, Err(err)));
+                }
+
+                // 3. Take the finishers out BEFORE planning, so the step is
+                //    exactly as wide as the lanes that still have something to
+                //    say. `park` and `retire` both leave the phase idle, which
+                //    is what keeps them out of `plan_step`.
+                for lane in stopped {
+                    close_lane(&mut jobs, &mut table, lane, false, &mut finished, events);
+                }
+                if step_lanes.is_empty() {
+                    continue;
+                }
+
+                // 4. One pass over the weights for every lane in the step.
+                let Some(plan) = table.plan_step() else {
+                    continue;
+                };
+                if plan.slots.len() != step_lanes.len() {
+                    return Err(format!(
+                        "planned {} lanes for a step of {} tokens",
+                        plan.slots.len(),
+                        step_lanes.len()
+                    ));
+                }
+                let t_step = Instant::now();
+                let rows = session
+                    .step_slots(&plan, &step_tokens)
+                    .map_err(|e| format!("decode step: {e:?}"))?;
+                // The step's cost is shared, so it is shared out: an equal
+                // slice each, which makes the per-page decode times sum back
+                // to the wall clock the batch actually spent.
+                let share = t_step.elapsed().as_secs_f64() / step_lanes.len() as f64;
+
+                let mut looped: Vec<usize> = Vec::new();
+                for (row, (&lane, &token)) in rows
+                    .into_iter()
+                    .zip(step_lanes.iter().zip(step_tokens.iter()))
+                {
+                    table
+                        .advance(lane, 1)
+                        .map_err(|e| format!("advance lane {lane}: {e:?}"))?;
+                    let Some(job) = jobs[lane].as_mut() else {
+                        continue;
+                    };
+                    job.logits = row;
+                    job.generated += 1;
+                    job.page.decode_s += share;
+                    if let Some(chunk) = job.decoder.push_token(session.vocab(), token) {
+                        job.text.push_str(&chunk);
+                    }
+                    if job.generated % LOOP_CHECK_EVERY == 0 && detect_repeat(&job.text, 0) {
+                        looped.push(lane);
+                    }
+                }
+                for lane in looped {
+                    close_lane(&mut jobs, &mut table, lane, true, &mut finished, events);
+                }
+            }
+        }
+
+        /// End a lane's attempt and either free the lane or hold it for a
+        /// hotter re-seat. Either way the lane leaves the decoding phase, so
+        /// the next step is planned without it.
+        fn close_lane(
+            jobs: &mut [Option<LaneJob>],
+            table: &mut SlotTable,
+            lane: usize,
+            looped: bool,
+            finished: &mut usize,
+            events: &mpsc::Sender<BatchEvent>,
+        ) {
+            let Some(job) = jobs[lane].as_mut() else {
+                return;
+            };
+            match end_attempt(job, looped) {
+                LaneEnd::Reseat => {
+                    let _ = table.park(lane);
+                }
+                LaneEnd::Done => {
+                    let index = job.index;
+                    let page = job.page.clone();
+                    jobs[lane] = None;
+                    let _ = table.retire(lane);
+                    *finished += 1;
+                    let _ = events.send(BatchEvent::Page(index, Ok(page)));
+                }
+            }
+        }
     }
 }
 
@@ -1123,6 +1730,42 @@ mod tests {
         assert!(!detect_repeat(&fine, 0));
         assert!(!detect_repeat("", 0));
         assert!(!detect_repeat("abc", 50));
+    }
+
+    #[test]
+    fn lanes_divide_the_page_budget_they_do_not_multiply_it() {
+        // The attention arena is `lanes * per-lane`, so per-lane must DIVIDE.
+        // Getting this backwards asks a box for twice the KV it was sized for
+        // and fails at load, with the weights already resident.
+        assert_eq!(context_for_lanes(MAX_CONTEXT, 1), MAX_CONTEXT);
+        assert_eq!(context_for_lanes(MAX_CONTEXT, 2), MAX_CONTEXT / 2);
+        assert_eq!(context_for_lanes(MAX_CONTEXT, 4), MAX_CONTEXT / 4);
+        for lanes in 1..=8 {
+            let per = context_for_lanes(MAX_CONTEXT, lanes);
+            assert!(
+                per * lanes as u32 <= MAX_CONTEXT,
+                "{lanes} lanes x {per} overruns the {MAX_CONTEXT} budget"
+            );
+        }
+        assert_eq!(context_for_lanes(MAX_CONTEXT, 0), MAX_CONTEXT, "zero lanes reads as one");
+        assert!(context_for_lanes(4, 8) >= 1, "never a zero-length context");
+    }
+
+    #[test]
+    fn two_lanes_still_hold_a_page_and_an_answer() {
+        // The claim the two-lane run rests on: at 20480 total, two lanes of
+        // 10240 fit the largest page this backend will feed (6144 image
+        // tokens) plus its prompt plus a real answer. If this stops holding,
+        // two lanes stop being an honest default rather than silently
+        // truncating transcripts.
+        let per_lane = context_for_lanes(MAX_CONTEXT, 2) as usize;
+        let largest_page = 6144 + 512;
+        let room = per_lane - largest_page;
+        assert!(
+            room >= 3_500,
+            "a lane of {per_lane} leaves only {room} tokens for the answer"
+        );
+        assert!(room >= MIN_OUTPUT_ROOM);
     }
 
     #[test]
