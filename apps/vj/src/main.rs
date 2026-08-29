@@ -11707,6 +11707,10 @@ p2 {}
         self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
+        // Fresh playheads in hand, hold the sync group together: the
+        // deck-to-deck lock is a continuous rate servo, not a one-shot.
+        let cmds = self.decks.hold_deck_sync();
+        self.run_deck_cmds(cx, cmds);
         self.pump_autopilot(cx);
         self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
@@ -18561,6 +18565,9 @@ p2 {}
                     true => format!("EXT {:.0}", self.beat_clock.nominal_bpm()),
                     false => "EXT —".to_string(),
                 },
+                // The reference deck says so — dimly even when it was
+                // pinned by the OTHER deck's press, lit once claimed.
+                _ if self.decks.sync_master() == Some(deck) => "MSTR".to_string(),
                 _ => "SYNC".to_string(),
             };
             if self.label_cache.get(&(base + 9)).map(String::as_str) != Some(sync_text.as_str()) {
@@ -20488,9 +20495,15 @@ p2 {}
                 let cmds = self.decks.toggle_mute(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.sync.clicked(actions) {
-                // OFF → SYNC (the other deck) → EXT (the room) → OFF.
-                let cmds = self.decks.cycle_sync(deck);
+            if let Some(km) = refs.sync.clicked_modifiers(actions) {
+                // SYNC is a plain toggle: lock to the group's master (or
+                // claim master with nothing to follow), press again to let
+                // go. Alt+click toggles EXT — follow the room's clock.
+                let cmds = if km.alt {
+                    self.decks.toggle_ext_sync(deck)
+                } else {
+                    self.decks.toggle_sync(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
@@ -21609,6 +21622,10 @@ impl MatchEvent for App {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1);
         self.decks.seed_shuffle(seed);
+        // A sync landing is computed from playheads that keep moving while
+        // the seek crosses to the audio thread — place it where the lock
+        // will be true when it arrives (UI pump + one audio block).
+        self.decks.land_lookahead_secs = 0.012;
         self.poll_timer = cx.start_interval(0.05);
         self.refresh_timer = cx.start_interval(1.0);
         self.video_loop = true;
