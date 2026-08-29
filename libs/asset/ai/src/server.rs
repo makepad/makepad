@@ -623,6 +623,13 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
         return error_json(400, e.to_string());
     }
+    // The vision domain fails closed without an image: say so here, with a
+    // 400, rather than queueing a job that can only fail on the worker.
+    if spec.domain == crate::registry::Domain::Vision {
+        if let Err(e) = crate::vision_backend::validate_vision_params(&params) {
+            return error_json(400, e.to_string());
+        }
+    }
     // Admission class. Chat rides the lane worker, which serves several turns
     // from one resident model, so those turns admit alongside each other and
     // alongside heavy work. Everything else keeps one-at-a-time.
@@ -1517,9 +1524,14 @@ fn execute_job(
         if first.content_type.starts_with("text/plain") {
             if let Ok(text) = std::str::from_utf8(&first.bytes) {
                 if !text.is_empty() {
-                    shared
-                        .jobs
-                        .with(|store| store.set_partial_text(job_id, text.to_string()));
+                    shared.jobs.with(|store| {
+                        // `partial_text` catches up to the final answer for a
+                        // client that was streaming it; `text` is the answer
+                        // itself, which is what a caller polling for a result
+                        // reads (see JobStatusJson::text).
+                        store.set_partial_text(job_id, text.to_string());
+                        store.set_text(job_id, text.to_string());
+                    });
                 }
             }
         }
@@ -1960,7 +1972,7 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
     {
         match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
             Ok(count) => progress(&format!(
-                "vram-release: evicted {count} cached weight buffers + idle pool"
+                "vram-release: evicted {count} cached weight buffers + idle pool on the service worker thread"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }

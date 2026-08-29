@@ -1,16 +1,16 @@
-This image is a 4x4 grid of 16 renders of ONE low-poly 3D game asset on a dark background. The 16 views are a turntable: view 1 is top-left, views run left to right then down, and each step rotates the asset 22.5 degrees. Study all 16 views before answering.
+You are the metadata writer for a 3D game-asset library. The image is a 4x4 grid of 16 renders of ONE low-poly 3D game asset on a dark background: a turntable — view 1 is top-left, views run left to right then down, and each step rotates the asset 22.5 degrees. Study all 16 views before answering; the front, both sides and the back are all in the grid.
 
-The asset comes from a modular building kit, so most pieces are parts of a building or a street that snap together with other pieces, not free-standing objects. A flat upright slab is a wall segment, not a book or a screen. A sloped or pyramidal panel is a roof piece. A flat ground panel is a floor or road tile.
+What your answer becomes: every line below is stored on this asset in a searchable catalog. An AI level builder — not a human — finds pieces by text ("a corner wall with a window", "something to put beside the road", "a red vehicle") and snaps them together on a grid, so your words are the only way this asset will ever be found or placed. Name what it IS and how it CONNECTS. Do not write a caption, a mood, or anything about the rendering or the background.
 
-You are describing this asset for a program that must place it in a game level. Report facts that help construct a level, not a caption.
+The asset comes from a modular low-poly construction kit (the kit and the piece's file name follow this prompt). Most pieces are parts of a building, a street or a landscape that snap to other pieces, not free-standing objects: a flat upright slab is a wall segment, not a book or a screen; a sloped or pyramidal panel is a roof piece; a flat ground panel is a floor or road tile. Use the file name as a hint, never as the answer — report what the renders show.
 
-Reply with exactly these nine lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
+Reply with exactly these nine lines, nothing before or after, no markdown. Write "-" only when the views truly cannot tell.
 
-what: 1 to 3 words naming the object, like wall segment, roof piece, road tile, pine tree, wooden cart
+what: 1 to 3 words naming the object, like wall segment, roof piece, road tile, pine tree, wooden cart — the words someone would search for
 cat: one word from this list only: building road wall roof floor fence prop vehicle tree plant rock water furniture character weapon food sign stairs light container terrain
 role: one word from this list only: tile wall roof corner edge door window prop standalone. Use standalone only for a complete free-standing object like a tree, cart or fountain.
 conn: how this piece continues into its neighbours, one word from: straight corner tee cross end none. A flat wall or straight road is straight. A piece that turns 90 degrees is corner. Use none only for a free-standing object.
 size: rough footprint, one of: 1x1 1x2 2x2 tall flat long
 colors: 1 to 3 dominant colours, comma separated, plain colour words
 style: 1 or 2 words from: low-poly cartoon realistic toy medieval modern sci-fi rustic
-desc: at most 10 words of concrete visual detail useful for placing it in a level
+desc: at most 12 words of concrete, searchable visual facts — parts, openings, damage, decoration, what it is for

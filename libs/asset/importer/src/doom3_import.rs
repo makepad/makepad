@@ -19,8 +19,11 @@ use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// id Tech 4 units are roughly inches; 1/32 ≈ metre-scale indoor rooms.
-const SCALE: f32 = 1.0 / 32.0;
+/// id Tech 4 units ARE inches: the engine's own `DOOM_TO_METERS(x)` is
+/// `x * 0.0254` (`Game_local.h`), the 74-unit player (`pm_normalheight`)
+/// stands 1.88 m and looks out at 68 u = 1.73 m. It was 1/32 (a 2.31 m
+/// marine) until 2026-08-26.
+const SCALE: f32 = 0.0254;
 
 // ---------------------------------------------------------------------------
 // PK4 = zip (same container as Q3 PK3)
@@ -1439,6 +1442,9 @@ fn convert_md5_billboard(
         states,
         frames,
         sheet: None,
+        actor: None,
+        weapon: None,
+        metres_per_pixel: 0.0,
     };
     let rel_path = format!("{key}.billboard");
     // One packed sheet per actor, never one PNG per rendered pose.

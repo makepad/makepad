@@ -373,6 +373,13 @@ pub struct GenerateRequestJson {
     /// "reference_image" PNG). Single-input models keep using `input_b64`;
     /// a model that requires named inputs visibly refuses requests missing
     /// them — it never infers or falls back to `input_b64`.
+    ///
+    /// H3 video reads one optional name here, `last_frame` (`image/png`):
+    /// the LAST-frame keyframe, beside the first frame on `input_b64`. The
+    /// weights are FL2VA, so first only, last only, both or neither are all
+    /// valid — see `h3_backend::H3_LAST_FRAME_INPUT`. Names H3 does not know
+    /// stay ignored rather than failing the job, so a caller can send
+    /// `last_frame` to a node that may predate it.
     pub inputs: Option<Vec<NamedInputJson>>,
     /// Image-to-image denoise strength 0..=1 for image/edit models that
     /// start from `input_b64` instead of pure noise (1.0 = ignore the
@@ -651,6 +658,16 @@ pub struct JobStatusJson {
     /// here: a client that does not know it ignores it, and a service that
     /// does not fill it is simply an older service. Absent on non-chat jobs.
     pub serving: Option<ServingStatusJson>,
+    /// The FINAL text answer of a text-producing job (the vision domain's
+    /// answer, an llm expansion or chat reply), present from the moment the
+    /// job reaches `done`.
+    ///
+    /// Distinct from `partial_text` on purpose: `partial_text` is a snapshot
+    /// that exists to be watched and may be a prefix of anything, while this
+    /// is the completed answer a caller can act on without also having to
+    /// check `state`, fetch `/artifact/<id>` and decode the bytes. Absent on
+    /// jobs that produce no text, and while one is still running.
+    pub text: Option<String>,
 }
 
 /// What a chat turn is actually doing, for a client that would otherwise have

@@ -10,7 +10,7 @@
 use makepad_micro_serde::*;
 use std::collections::HashMap;
 use std::net::UdpSocket;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Fixed LAN port beacons are sent to and clients listen on.
@@ -135,7 +135,19 @@ impl Discovered {
 /// VJ, the Asset UI and a game on one machine all see the fleet (an
 /// exclusive bind left every app but the first with an empty set that never
 /// filled); a bind failure still logs and returns that empty set.
+///
+/// ONE listener per process: every caller gets a handle to the same socket
+/// and set. The job loop re-opens its LAN fleet source on every refresh,
+/// and a fresh bind per call leaked a socket plus a thread each time (the
+/// Asset UI sat on 22 sockets bound to :41830 after ten minutes, growing).
+/// The filter reads `MAKEPAD_AI_FLEET` per beacon, so sharing across
+/// callers changes nothing they observe.
 pub fn start_listener() -> Discovered {
+    static SHARED: OnceLock<Discovered> = OnceLock::new();
+    SHARED.get_or_init(spawn_listener).clone()
+}
+
+fn spawn_listener() -> Discovered {
     let discovered = Discovered::default();
     let nodes = discovered.nodes.clone();
     std::thread::spawn(move || {
@@ -209,6 +221,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         let b = mint_node_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn listener_is_one_per_process() {
+        let a = start_listener();
+        let b = start_listener();
+        assert!(Arc::ptr_eq(&a.nodes, &b.nodes));
     }
 
     #[test]

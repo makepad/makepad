@@ -84,11 +84,21 @@ fn providers_list_is_honest_and_secretless() {
         assert!(!raw.contains(leak), "provider list leaked {leak}: {raw}");
     }
     let rows = r.json().get("providers").and_then(Value::as_arr).unwrap().to_vec();
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 6);
     let kinds: Vec<&str> = rows.iter().filter_map(|r| r.get("kind").and_then(Value::as_str)).collect();
-    assert_eq!(kinds, vec!["fleet-qwen", "openai", "grok"]);
-    for row in &rows {
+    assert_eq!(kinds, vec!["fleet-qwen", "openai", "grok", "claude-cli", "codex-cli", "grok-cli"]);
+    // Only the fleet is local; every vendor — keyed API or host CLI — is
+    // cloud, and the server says so per row.
+    let localities: Vec<&str> =
+        rows.iter().filter_map(|r| r.get("locality").and_then(Value::as_str)).collect();
+    assert_eq!(localities, vec!["local", "cloud", "cloud", "cloud", "cloud", "cloud"]);
+    for row in &rows[..3] {
         assert_eq!(row.get("state").and_then(Value::as_str), Some("available"));
+        assert!(row.get("detail").is_none());
+    }
+    // The scripted fixture has no CLI lanes: unavailable, no path leaked.
+    for row in &rows[3..] {
+        assert_eq!(row.get("state").and_then(Value::as_str), Some("unavailable"));
         assert!(row.get("detail").is_none());
     }
 }

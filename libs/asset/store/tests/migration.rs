@@ -86,7 +86,13 @@ fn ann(title: &str) -> AssetAnnotation {
 }
 
 fn q(text: &str) -> SearchQuery<'_> {
-    SearchQuery { text, filters: SearchFilters::default(), page_size: 10, facets: 0 }
+    SearchQuery {
+        text,
+        filters: SearchFilters::default(),
+        expand: false,
+        page_size: 10,
+        facets: 0,
+    }
 }
 
 const ANYONE: SearchViewer<'static> = SearchViewer { principal: None, scope: ViewerScope::All };
@@ -439,6 +445,87 @@ fn hot_paths_use_the_scale_indices() {
         let p = plan(sql);
         assert!(p.contains("asset_aliases_by_asset"), "{sql} => {p}");
     }
+}
+
+/// The v11 annotation table exactly before `data` widened its kind CHECK.
+const LEGACY_SEARCH_V11_ANNOTATIONS: &str = "
+CREATE TABLE search_annotations(
+    asset_id BLOB PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    kind TEXT CHECK(kind IS NULL OR kind IN
+    ('mesh','character','weapon','vehicle','prop','texture','material',
+     'audio','video','skybox','world','prefab','billboard','game','vjeffect')),
+    visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
+    owner BLOB,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    creator TEXT NOT NULL,
+    generator TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    live INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    canon_alias TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX search_annotations_by_ns ON search_annotations(namespace);
+CREATE INDEX search_annotations_by_kind ON search_annotations(kind);
+CREATE INDEX search_annotations_by_canon ON search_annotations(canon_alias, asset_id);
+";
+
+#[test]
+fn v11_root_migrates_kind_check_to_appended_kinds_with_rows_intact() {
+    let (root, db) = fixture_root(
+        "data_kind_v11",
+        &format!(
+            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V11_ANNOTATIONS}\
+             INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
+             INSERT INTO search_annotations(asset_id, namespace, kind, visibility, owner,\
+                title, description, creator, generator, backend, model, prompt, provenance,\
+                live, updated_ms, canon_alias)\
+              VALUES({ID1_HEX},'rik2','vjeffect','public',NULL,'Legacy document','','','','',\
+                '','','',0,1,'');\
+             PRAGMA user_version=11;"
+        ),
+    );
+
+    let core = AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
+    let before = core.search().annotation(&asset_id_n(1)).unwrap().unwrap();
+    assert_eq!((before.title.as_str(), before.kind), ("Legacy document", Some(AssetKind::VjEffect)));
+
+    let mut data = ann("Migrated data document");
+    data.kind = Some(AssetKind::Data);
+    core.search().set_annotation(&asset_id_n(1), &data, NOW).unwrap();
+    let mut by_data = q("");
+    by_data.filters = SearchFilters { kind: Some(AssetKind::Data), ..Default::default() };
+    let page = core.search().search(&by_data, &ANYONE, None).unwrap();
+    assert_eq!((page.total, page.hits[0].kind), (1, Some(AssetKind::Data)));
+
+    let mut model_program = ann("Migrated editable CSG model");
+    model_program.kind = Some(AssetKind::ModelProgram);
+    core.search().set_annotation(&asset_id_n(1), &model_program, NOW + 1).unwrap();
+    let mut by_model_program = q("");
+    by_model_program.filters = SearchFilters {
+        kind: Some(AssetKind::ModelProgram),
+        ..Default::default()
+    };
+    let page = core.search().search(&by_model_program, &ANYONE, None).unwrap();
+    assert_eq!(
+        (page.total, page.hits[0].kind),
+        (1, Some(AssetKind::ModelProgram))
+    );
+    drop(core);
+
+    assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
+    let ddl = raw::exec(
+        &db,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='search_annotations'",
+    );
+    assert!(ddl[0].contains("'data'"), "migrated CHECK: {}", ddl[0]);
+    assert!(ddl[0].contains("'model-program'"), "migrated CHECK: {}", ddl[0]);
+    AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
+    assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
 }
 
 #[test]

@@ -64,6 +64,7 @@ pub mod seed;
 pub mod server;
 pub mod variants;
 mod sqlite;
+mod synonyms;
 
 pub use auth::{token_hash, Auth, Capability, PrincipalId, Scope};
 pub use blobrefs::{BlobRef, BlobRefs, RefScan, RefState};
@@ -85,8 +86,8 @@ pub use variants::{
     DerivationOutcome, DerivationStatus, DerivedResult, Variants, MAX_DERIVATION_ROUNDS,
 };
 pub use search::{
-    kind_name, kind_parse, AssetAnnotation, Search, SearchFilters, SearchHit, SearchPage,
-    SearchQuery, SearchViewer, ViewerScope, Visibility,
+    kind_name, kind_parse, AssetAnnotation, BacklogRow, Search, SearchFilters, SearchHit,
+    SearchPage, SearchQuery, SearchViewer, ViewerScope, Visibility, ANNOTATABLE_KINDS,
 };
 pub use seed::{stock_asset_id, SeedAsset, SeedReport, StockSeedSource};
 pub use server::{

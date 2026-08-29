@@ -221,11 +221,28 @@ impl ContentBackend for InpaintBackend {
     }
 
     fn unload(&mut self) -> Result<(), AssetAiError> {
-        if let Some((generation, worker)) = self.worker.take() {
-            fill_worker::FluxFillWorker::retire_shared(generation);
-            drop(worker);
+        let Some((generation, worker)) = self.worker.take() else {
+            return Ok(());
+        };
+        // Ask the pipeline thread to free its own residency and WAIT for the
+        // acknowledgement: dropping the handle is not a release (the device
+        // weight cache and the CUDA idle pool are that thread's thread-locals),
+        // and the admission gate is about to promise the VRAM to another model.
+        let released = worker.release();
+        fill_worker::FluxFillWorker::retire_shared(generation);
+        drop(worker);
+        match released {
+            Ok(line) => {
+                eprintln!("[asset-ai] {line}");
+                Ok(())
+            }
+            Err(fill_worker::FluxFillWorkerError::WorkerGone(message)) => {
+                eprintln!("[asset-ai] flux-fill release skipped: {message}");
+                Ok(())
+            }
+            Err(fill_worker::FluxFillWorkerError::Cancelled) => Ok(()),
+            Err(fill_worker::FluxFillWorkerError::Other(message)) => Err(AssetAiError::Backend(message)),
         }
-        Ok(())
     }
 
     fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
@@ -412,13 +429,52 @@ mod fill_worker {
         events: mpsc::Sender<WorkerEvent>,
     }
 
+    /// What the backend may ask the pipeline thread to do. `Release` frees the
+    /// thread-LOCAL device weight cache and CUDA idle pool that nothing on the
+    /// server's worker thread can reach — see `flux_fill_worker`'s note; dropping the
+    /// handle alone returned no VRAM the admission gate could see.
+    enum WorkerCmd {
+        Run(WorkerMsg),
+        Release(mpsc::Sender<String>),
+    }
+
     #[derive(Clone)]
     pub struct FluxFillWorker {
-        tx: mpsc::Sender<WorkerMsg>,
+        tx: mpsc::Sender<WorkerCmd>,
     }
 
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<FluxFillWorker>)> =
         std::sync::Mutex::new((0, None));
+
+    /// Upper bound on a release acknowledgement (it queues behind whatever the
+    /// thread is doing; the free itself is well under a second).
+    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Frees every device allocation this pipeline thread owns — the resident
+    /// pipeline's checkpoint weight-cache namespaces, any residual dense-linear
+    /// weight buffer, and the idle CUDA block pool — ON this thread, the only
+    /// place they can be freed from. Dropping the pipeline alone releases only
+    /// its HOST arenas by design.
+    fn release_device_residency(warm: &mut Option<FluxFillPipeline>) -> String {
+        let checkpoint = match warm.take() {
+            Some(pipeline) => {
+                let freed = pipeline.evict_device_caches();
+                drop(pipeline);
+                freed
+            }
+            None => 0,
+        };
+        let (residual, trouble) =
+            match makepad_ai_common::backend::release_gpu_runtime_namespaces(&[""]) {
+                Ok(count) => (count, String::new()),
+                Err(error) => (0, format!(", release error: {error}")),
+            };
+        makepad_ai_common::backend::gpu_pool_clear();
+        format!(
+            "flux-fill vram-release on the pipeline thread: {checkpoint} checkpoint weight buffers, \
+             {residual} residual weight buffers, idle pool cleared{trouble}"
+        )
+    }
 
     impl FluxFillWorker {
         pub fn shared() -> Result<(u64, Self), AssetAiError> {
@@ -437,16 +493,47 @@ mod fill_worker {
             }
         }
 
+        /// Frees the thread's device residency and BLOCKS for the
+        /// acknowledgement, so the caller can honestly report the VRAM back.
+        pub fn release(&self) -> Result<String, FluxFillWorkerError> {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            self.tx
+                .send(WorkerCmd::Release(ack_tx))
+                .map_err(|_| FluxFillWorkerError::WorkerGone("flux-fill worker thread is gone".to_string()))?;
+            ack_rx
+                .recv_timeout(RELEASE_TIMEOUT)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        FluxFillWorkerError::WorkerGone("flux-fill dropped the release reply".to_string())
+                    }
+                    mpsc::RecvTimeoutError::Timeout => FluxFillWorkerError::Other(format!(
+                        "flux-fill worker did not acknowledge the device release within {}s",
+                        RELEASE_TIMEOUT.as_secs()
+                    )),
+                })
+        }
+
         fn spawn() -> Result<Self, AssetAiError> {
-            let (tx, rx) = mpsc::channel::<WorkerMsg>();
+            let (tx, rx) = mpsc::channel::<WorkerCmd>();
             std::thread::Builder::new()
                 .name("flux-fill-pipeline".to_string())
                 .spawn(move || {
                     let mut warm: Option<FluxFillPipeline> = None;
-                    while let Ok(WorkerMsg { job, cancel, events }) = rx.recv() {
-                        let result = run_generate(&mut warm, job, &cancel, &events);
-                        let _ = events.send(WorkerEvent::Done(result));
+                    while let Ok(cmd) = rx.recv() {
+                        match cmd {
+                            WorkerCmd::Run(WorkerMsg { job, cancel, events }) => {
+                                let result = run_generate(&mut warm, job, &cancel, &events);
+                                let _ = events.send(WorkerEvent::Done(result));
+                            }
+                            WorkerCmd::Release(ack) => {
+                                let _ = ack.send(release_device_residency(&mut warm));
+                            }
+                        }
                     }
+                    eprintln!(
+                        "[asset-ai] flux-fill worker thread exiting: {}",
+                        release_device_residency(&mut warm)
+                    );
                 })
                 .map_err(|e| AssetAiError::Backend(format!("spawn flux-fill worker: {e}")))?;
             Ok(Self { tx })
@@ -460,11 +547,11 @@ mod fill_worker {
         ) -> Result<FluxFillPipelineGenerateRun, FluxFillWorkerError> {
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
-                .send(WorkerMsg {
+                .send(WorkerCmd::Run(WorkerMsg {
                     job,
                     cancel,
                     events: event_tx,
-                })
+                }))
                 .map_err(|_| {
                     FluxFillWorkerError::WorkerGone("flux-fill worker thread is gone".to_string())
                 })?;

@@ -37,10 +37,25 @@
 //!
 //! One turn at a time per session is unchanged — that is the session
 //! engine's law, not a threading artifact.
+//!
+//! ## Keyed (durable) sessions
+//!
+//! A create that carries `client_key` + `context_key` is CREATE-OR-RESUME:
+//! the registry keeps one conversation per `(principal, client_key,
+//! context_key)`. A live one comes back as it is; a persisted one
+//! (`chat_store`, one JSONL file per key under `<root>/chat/`) is rebuilt
+//! with the SAME session id and its transcript, on a fresh provider. The
+//! worker appends every new history row to the file as it publishes, so
+//! an idle-evicted worker (`KEYED_IDLE_TTL`, or cap pressure) and a server
+//! restart both lose nothing. `DELETE` on a keyed session is a Clear: the
+//! file goes with the worker. Retiring an asset drops every conversation
+//! whose `context_key` is that asset (`drop_context`). Unkeyed sessions
+//! are exactly what they were: in memory, gone with the worker.
 
 use super::api::principal_str;
+use super::chat_store::{ChatStore, Header, Persisted, SessionFile, SessionKey};
 use super::config::{ChatConfig, ChatScript, ScriptedLane, ScriptedTurn};
-use super::util::log;
+use super::util::{log, now_ms};
 use makepad_asset_chat::catalog_sql::CatalogReader;
 use makepad_asset_chat::context::{self, ClientProfile};
 use makepad_asset_chat::dispatch::AssetServerTools;
@@ -50,7 +65,9 @@ use makepad_asset_chat::session::{
     CancelFlag, ExecCtx, SendRefusal, Session, SessionId, ToolExecutor,
 };
 use makepad_asset_chat::tools::{self, ConsultTask, ContentToolCall, ToolDef};
+use makepad_asset_chat::transcript::{self, TranscriptRow};
 use makepad_asset_chat::wire::{
+    Locality,
     sanitize_public_error, AttachmentBinding, ChatEvent, ChatMessage, ChatRole,
     ProviderAvailability, ProviderKind, ToolOutcome, MAX_MESSAGE_BYTES,
 };
@@ -88,6 +105,16 @@ const CANCEL_ACK: Duration = Duration::from_secs(2);
 /// Resolved client-tool call ids remembered per session for the idempotent
 /// late-post acknowledgement.
 const RESOLVED_MEMORY: usize = 8;
+/// A KEYED session whose transcript is on disk is retired from memory
+/// after this long idle (no command, no turn); create-or-resume rebuilds
+/// it with the same id. Bounds the worker-thread count for a player who
+/// visits many games.
+const KEYED_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+/// Transcript route budget: the LAST rows that fit. The client's JSON
+/// ceiling is 256 KiB, so the text budget stays well under it.
+pub const TRANSCRIPT_MAX_ROWS: usize = 128;
+pub const TRANSCRIPT_MAX_TEXT_BYTES: usize = 192 * 1024;
+pub const TRANSCRIPT_MAX_ROW_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct ChatHandle {
@@ -95,8 +122,22 @@ pub struct ChatHandle {
     stop_tx: Sender<()>,
 }
 
+/// `GET …/transcript`: the durable conversation as rows to render.
+pub struct TranscriptView {
+    pub id: SessionId,
+    pub provider: ProviderKind,
+    pub turn: u64,
+    pub rows: Vec<TranscriptRow>,
+    /// Older rows were dropped to fit the budget.
+    pub truncated: bool,
+}
+
 pub struct ProviderStatus {
     pub kind: ProviderKind,
+    /// Local (our asset-ai fleet) or cloud (a vendor, by key or by a CLI
+    /// logged in on this host). On the wire so clients can enforce a
+    /// "local AI only" lock without knowing the kinds.
+    pub locality: Locality,
     pub available: bool,
     pub model: Option<String>,
     pub reason: Option<String>,
@@ -110,11 +151,22 @@ pub struct SessionView {
     pub state: &'static str,
     pub turn: u64,
     pub idle: bool,
+    /// Both set on a keyed (durable) session, both absent otherwise.
+    pub client_key: Option<String>,
+    pub context_key: Option<String>,
 }
 
 pub enum ChatFail {
     Down,
     NotFound,
+    /// The caller lacks the Chat capability on the conversation's ORIGINAL
+    /// namespace: resuming/rebinding it through another namespace would
+    /// recover history the principal is no longer authorized for.
+    Forbidden,
+    /// The durable transcript could not be read or committed. NEVER mapped
+    /// to "no conversation": a corrupt file must refuse the resume, not be
+    /// overwritten.
+    Persist { message: String },
     Busy,
     Sealed { reason: String },
     ProviderUnavailable { reason: String },
@@ -150,6 +202,14 @@ struct Status {
     /// app for a slow answer turned a hiccup into a user-visible dead turn
     /// (play-session-1 entry 13). Bounded.
     resolved: Vec<String>,
+    /// Last command or turn activity; keyed sessions idle past
+    /// `KEYED_IDLE_TTL` are evicted to disk.
+    last_active: Instant,
+    /// The last durable write FAILED: the on-disk transcript is behind the
+    /// session. The worker retries every pump; until it succeeds the
+    /// session is not evictable — evicting it would lose the unflushed
+    /// tail while claiming it is safe on disk.
+    persist_dirty: bool,
 }
 
 struct Shared {
@@ -157,12 +217,27 @@ struct Shared {
     owner: PrincipalId,
     namespace: String,
     provider: ProviderKind,
+    profile: ClientProfile,
+    /// Both set on a keyed (durable) session.
+    client_key: Option<String>,
+    context_key: Option<String>,
     tx: Sender<SessionCmd>,
     /// Raised from ANY thread to interrupt a long tool immediately; the
     /// Cancel command that follows does the state transition.
     cancel: CancelFlag,
     status: Mutex<Status>,
     events: Mutex<Vec<ChatEvent>>,
+    /// The session's history as the worker last published it — what the
+    /// transcript route renders, never touching the worker.
+    transcript: Mutex<Vec<ChatMessage>>,
+    /// Keyed sessions: the on-disk file. The worker appends under this
+    /// lock; retire wipes under it, so a Clear is never resurrected.
+    file: Option<Mutex<SessionFile>>,
+    /// Set (before Shutdown is queued) when the session leaves the
+    /// registry: the worker refuses any Send/ToolResult still in its queue
+    /// instead of running a turn on a detached session while its
+    /// replacement loads the same file.
+    retired: AtomicBool,
 }
 
 impl Shared {
@@ -172,6 +247,18 @@ impl Shared {
 
     fn events(&self) -> MutexGuard<'_, Vec<ChatEvent>> {
         self.events.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn transcript(&self) -> MutexGuard<'_, Vec<ChatMessage>> {
+        self.transcript.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn key(&self) -> Option<SessionKey> {
+        Some(SessionKey {
+            owner: self.owner,
+            client_key: self.client_key.clone()?,
+            context_key: self.context_key.clone()?,
+        })
     }
 
     fn view(&self) -> SessionView {
@@ -184,6 +271,8 @@ impl Shared {
             state: status.state,
             turn: status.turn,
             idle: status.idle,
+            client_key: self.client_key.clone(),
+            context_key: self.context_key.clone(),
         }
     }
 }
@@ -192,6 +281,7 @@ enum SessionCmd {
     Send {
         text: String,
         attachments: Vec<AttachmentBinding>,
+        dynamic_context: Option<String>,
         reply: Sender<Result<u64, ChatFail>>,
     },
     ToolResult {
@@ -217,10 +307,26 @@ struct Slot {
 #[derive(Default)]
 struct Inner {
     sessions: HashMap<SessionId, Slot>,
+    /// Live keyed sessions by their durable identity.
+    keyed: HashMap<SessionKey, SessionId>,
     /// Owners of creates that reserved a slot but have not landed yet, so
     /// concurrent creates cannot both slip past the cap.
     creating: Vec<PrincipalId>,
-    /// Workers of retired sessions, joined by the supervisor.
+    /// Keyed creates in flight: two create-or-resumes for one key must not
+    /// both rebuild it.
+    creating_keys: Vec<SessionKey>,
+    /// DRAINING keyed workers: detached from the registry (evicted, or a
+    /// provider/namespace rebind retired them) but possibly still flushing
+    /// their durable file. One writer per file means a create-or-resume
+    /// for the same key must JOIN its entry here before loading; the
+    /// supervisor joins the rest as they finish.
+    draining: Vec<(SessionKey, JoinHandle<()>)>,
+    /// Context tombstones: `drop_context` is deleting every conversation
+    /// about these assets right now. Keyed creates for them are refused,
+    /// and one that already landed is re-checked against this list before
+    /// it is published.
+    dropping_contexts: Vec<String>,
+    /// Workers of retired UNKEYED sessions, joined by the supervisor.
     graveyard: Vec<JoinHandle<()>>,
     closed: bool,
 }
@@ -232,6 +338,22 @@ impl Inner {
             self.creating.remove(i);
         }
     }
+
+    /// Take a session out of the registry (and its key out of the index).
+    fn detach(&mut self, id: &SessionId) -> Option<Slot> {
+        let slot = self.sessions.remove(id)?;
+        if let Some(key) = slot.shared.key() {
+            if self.keyed.get(&key) == Some(id) {
+                self.keyed.remove(&key);
+            }
+        }
+        Some(slot)
+    }
+
+    fn live_keyed(&self, key: &SessionKey) -> Option<Arc<Shared>> {
+        let id = self.keyed.get(key)?;
+        self.sessions.get(id).map(|slot| slot.shared.clone())
+    }
 }
 
 struct Registry {
@@ -239,6 +361,8 @@ struct Registry {
     cfg: ChatConfig,
     factory: Arc<dyn ProviderFactory>,
     catalog_db: Option<PathBuf>,
+    /// Durable keyed transcripts under `<root>/chat/`.
+    store: ChatStore,
     log_enabled: bool,
     stop: Arc<AtomicBool>,
     inner: Mutex<Inner>,
@@ -259,29 +383,82 @@ impl Registry {
 
     /// Reserve one session slot against both caps, atomically with every
     /// other create in flight.
+    ///
+    /// A cap that is only full of IDLE KEYED sessions is not full: their
+    /// transcripts are on disk, so the longest-idle one is evicted to make
+    /// room (and comes back, same id, on its next create-or-resume).
+    /// Unkeyed sessions are never evicted — they have nowhere to go.
     fn reserve(&self, owner: PrincipalId) -> Result<(), ChatFail> {
         let mut inner = self.inner();
         if inner.closed {
             return Err(ChatFail::Down);
         }
-        let live = inner.sessions.len() + inner.creating.len();
-        if live >= self.cfg.max_sessions {
+        if inner.sessions.len() + inner.creating.len() >= self.cfg.max_sessions
+            && !self.evict_longest_idle_keyed(&mut inner, None)
+        {
             return Err(ChatFail::OverBudget { what: "chat sessions" });
         }
-        let owned = inner.sessions.values().filter(|s| s.shared.owner == owner).count()
-            + inner.creating.iter().filter(|o| **o == owner).count();
-        if owned >= self.cfg.max_sessions_per_owner {
+        let owned = |inner: &Inner| {
+            inner.sessions.values().filter(|s| s.shared.owner == owner).count()
+                + inner.creating.iter().filter(|o| **o == owner).count()
+        };
+        if owned(&inner) >= self.cfg.max_sessions_per_owner
+            && !self.evict_longest_idle_keyed(&mut inner, Some(owner))
+        {
             return Err(ChatFail::OverBudget { what: "chat sessions per owner" });
         }
         inner.creating.push(owner);
         Ok(())
     }
 
+    /// Evict the idle keyed session (of `owner`, when given) that has been
+    /// idle the longest. False when there is none to evict. A session
+    /// whose durable file is BEHIND (`persist_dirty`) is never a
+    /// candidate: its transcript is not actually safe on disk.
+    fn evict_longest_idle_keyed(&self, inner: &mut Inner, owner: Option<PrincipalId>) -> bool {
+        let pick = inner
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.shared.file.is_some())
+            .filter(|(_, s)| owner.map_or(true, |o| s.shared.owner == o))
+            .filter_map(|(id, s)| {
+                let status = s.shared.status();
+                (status.idle && !status.persist_dirty).then(|| (status.last_active, id.clone()))
+            })
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, id)| id);
+        match pick {
+            Some(id) => {
+                self.evict_locked(inner, &id, "cap pressure");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Retire a session's WORKER, keeping its file: the registry lock is
+    /// held by the caller. The keyed worker parks in `draining` so the
+    /// next create-or-resume of its key JOINS it (durable flush included)
+    /// before loading the same file.
+    fn evict_locked(&self, inner: &mut Inner, id: &SessionId, why: &str) {
+        if let Some(slot) = inner.detach(id) {
+            slot.shared.retired.store(true, Ordering::Relaxed);
+            slot.shared.cancel.cancel();
+            let _ = slot.shared.tx.send(SessionCmd::Shutdown);
+            match slot.shared.key() {
+                Some(key) => inner.draining.push((key, slot.join)),
+                None => inner.graveyard.push(slot.join),
+            }
+            log(self.log_enabled, &format!("chat[{}] evicted to disk ({why})", id.as_str()));
+        }
+    }
+
     /// Join every worker that already finished; called from the supervisor.
     ///
     /// Also drops any session whose worker is gone without being retired —
     /// a panicked worker would otherwise hold a slot against the caps
-    /// forever while answering every route with a 503.
+    /// forever while answering every route with a 503 — and evicts keyed
+    /// sessions idle past `KEYED_IDLE_TTL`.
     fn reap(&self) {
         let mut inner = self.inner();
         let dead: Vec<SessionId> = inner
@@ -291,9 +468,22 @@ impl Registry {
             .map(|(id, _)| id.clone())
             .collect();
         for id in dead {
-            if let Some(slot) = inner.sessions.remove(&id) {
+            if let Some(slot) = inner.detach(&id) {
                 let _ = slot.join.join();
             }
+        }
+        let stale: Vec<SessionId> = inner
+            .sessions
+            .iter()
+            .filter(|(_, slot)| slot.shared.file.is_some())
+            .filter(|(_, slot)| {
+                let status = slot.shared.status();
+                status.idle && !status.persist_dirty && status.last_active.elapsed() >= KEYED_IDLE_TTL
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.evict_locked(&mut inner, &id, "idle");
         }
         let mut still = Vec::new();
         for join in inner.graveyard.drain(..) {
@@ -304,6 +494,32 @@ impl Registry {
             }
         }
         inner.graveyard = still;
+        let mut still = Vec::new();
+        for (key, join) in inner.draining.drain(..) {
+            if join.is_finished() {
+                let _ = join.join();
+            } else {
+                still.push((key, join));
+            }
+        }
+        inner.draining = still;
+    }
+
+    /// Take (and remove) every draining worker of `key`; the caller joins
+    /// them OUTSIDE the registry lock.
+    fn take_draining(&self, key: &SessionKey) -> Vec<JoinHandle<()>> {
+        let mut inner = self.inner();
+        let mut out = Vec::new();
+        let mut kept = Vec::new();
+        for (k, join) in inner.draining.drain(..) {
+            if &k == key {
+                out.push(join);
+            } else {
+                kept.push((k, join));
+            }
+        }
+        inner.draining = kept;
+        out
     }
 
     fn shutdown_all(&self) {
@@ -311,7 +527,8 @@ impl Registry {
             let mut inner = self.inner();
             inner.closed = true;
             let slots: Vec<Slot> = inner.sessions.drain().map(|(_, slot)| slot).collect();
-            let graveyard: Vec<JoinHandle<()>> = inner.graveyard.drain(..).collect();
+            let mut graveyard: Vec<JoinHandle<()>> = inner.graveyard.drain(..).collect();
+            graveyard.extend(inner.draining.drain(..).map(|(_, join)| join));
             (slots, graveyard)
         };
         // Raise every cancel flag FIRST so workers inside a long tool start
@@ -334,12 +551,17 @@ pub fn spawn_broker(
     endpoints: ApiEndpoints,
     cfg: ChatConfig,
     catalog_db: Option<PathBuf>,
+    root: &std::path::Path,
     log_enabled: bool,
     stop: Arc<AtomicBool>,
 ) -> Result<(ChatHandle, JoinHandle<()>), crate::ServerError> {
     let factory: Arc<dyn ProviderFactory> = match cfg.script.clone() {
         Some(script) => Arc::new(ScriptedFactory::new(script)),
-        None => Arc::new(EnvFactory::new(cfg.fleet_bases.clone(), cfg.fleet.clone())),
+        None => Arc::new(EnvFactory::new(
+            cfg.fleet_bases.clone(),
+            cfg.fleet.clone(),
+            log_enabled,
+        )),
     };
     let reg = Arc::new(Registry {
         endpoints,
@@ -349,6 +571,7 @@ pub fn spawn_broker(
         // `assets.query` reads the SAME file the store serves, through
         // makepad-sqlite's read-only WAL snapshot reads.
         catalog_db,
+        store: ChatStore::new(root),
         log_enabled,
         stop,
         inner: Mutex::new(Inner::default()),
@@ -381,7 +604,7 @@ pub fn spawn_broker(
 
 impl ChatHandle {
     pub fn list_providers(&self) -> Result<Vec<ProviderStatus>, ChatFail> {
-        Ok([ProviderKind::FleetQwen, ProviderKind::OpenAi, ProviderKind::Grok]
+        Ok(ProviderKind::ALL
             .into_iter()
             .map(|kind| public_status(kind, self.reg.factory.probe(kind)))
             .collect())
@@ -392,6 +615,21 @@ impl ChatHandle {
     /// cell. The probe, the tools connect and `Session::new` happen on the
     /// new session's own worker, so no other session can delay this and this
     /// can delay no other session.
+    ///
+    /// With `keys` (`client_key`, `context_key`) this is CREATE-OR-RESUME.
+    /// The bool says whether an existing conversation came back (live, or
+    /// rebuilt from disk with its id and transcript) rather than a fresh
+    /// one. A live session on a different provider/namespace/profile is
+    /// rebuilt on the requested one — the conversation belongs to the
+    /// (client, game), the provider is the client's current choice — but
+    /// only while idle; mid-turn it answers `Busy`.
+    ///
+    /// `authorize_ns` is the route's live capability check. Resuming or
+    /// rebinding a conversation whose CURRENT namespace differs from the
+    /// requested one requires the Chat capability on the ORIGINAL
+    /// namespace too — without this, a principal that lost namespace A
+    /// could recover its A conversations through any namespace it still
+    /// holds.
     pub fn create(
         &self,
         owner: PrincipalId,
@@ -399,11 +637,79 @@ impl ChatHandle {
         token: String,
         provider: ProviderKind,
         profile: ClientProfile,
-    ) -> Result<SessionView, ChatFail> {
-        self.reg.reserve(owner)?;
-        // Every exit of spawn_session releases the reservation, together
-        // with whatever it does to the session map.
-        self.spawn_session(owner, namespace, token, provider, profile)
+        keys: Option<(String, String)>,
+        authorize_ns: &dyn Fn(&str) -> bool,
+    ) -> Result<(SessionView, bool), ChatFail> {
+        let Some((client_key, context_key)) = keys else {
+            self.reg.reserve(owner)?;
+            // Every exit of spawn_session releases the reservation,
+            // together with whatever it does to the session map.
+            return self
+                .spawn_session(owner, namespace, token, provider, profile, None, None)
+                .map(|view| (view, false));
+        };
+        let key = SessionKey { owner, client_key, context_key };
+        if let Some(live) = self.reg.inner().live_keyed(&key) {
+            if live.provider == provider && live.namespace == namespace && live.profile == profile {
+                return Ok((live.view(), true));
+            }
+            if live.namespace != namespace && !authorize_ns(&live.namespace) {
+                return Err(ChatFail::Forbidden);
+            }
+            if !live.status().idle {
+                return Err(ChatFail::Busy);
+            }
+            // Same conversation, new binding: the worker goes, the file
+            // stays, and the rebuild below picks it up.
+            self.retire_inner(Some(owner), &live.id, false)?;
+        }
+        {
+            let mut inner = self.reg.inner();
+            if inner.closed {
+                return Err(ChatFail::Down);
+            }
+            if inner.dropping_contexts.iter().any(|c| c == &key.context_key) {
+                // The asset is being retired this very moment.
+                return Err(ChatFail::NotFound);
+            }
+            if inner.creating_keys.contains(&key) || inner.keyed.contains_key(&key) {
+                return Err(ChatFail::Busy);
+            }
+            inner.creating_keys.push(key.clone());
+        }
+        let result = (|| {
+            // ONE WRITER PER FILE: a worker of this key retired moments ago
+            // (eviction, rebind) may still be flushing. Join it before the
+            // file is read or reopened.
+            for join in self.reg.take_draining(&key) {
+                let _ = join.join();
+            }
+            self.reg.reserve(owner)?;
+            let persisted = self
+                .reg
+                .store
+                .load(&key)
+                .map_err(|message| ChatFail::Persist { message })?;
+            if let Some(p) = &persisted {
+                if p.header.namespace != namespace && !authorize_ns(&p.header.namespace) {
+                    self.reg.inner().release(&owner);
+                    return Err(ChatFail::Forbidden);
+                }
+            }
+            let resumed = persisted.is_some();
+            let view = self.spawn_session(
+                owner,
+                namespace,
+                token,
+                provider,
+                profile,
+                Some(key.clone()),
+                persisted,
+            )?;
+            Ok((view, resumed))
+        })();
+        self.reg.inner().creating_keys.retain(|k| k != &key);
+        result
     }
 
     fn spawn_session(
@@ -413,6 +719,8 @@ impl ChatHandle {
         token: String,
         provider: ProviderKind,
         profile: ClientProfile,
+        key: Option<SessionKey>,
+        persisted: Option<Persisted>,
     ) -> Result<SessionView, ChatFail> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Arc<Shared>, ChatFail>>();
@@ -423,6 +731,8 @@ impl ChatHandle {
             token,
             provider,
             profile,
+            key,
+            persisted,
             tx: cmd_tx,
             rx: cmd_rx,
             ready: ready_tx,
@@ -441,9 +751,28 @@ impl ChatHandle {
                 inner.release(&owner);
                 if inner.closed {
                     drop(inner);
+                    shared.retired.store(true, Ordering::Relaxed);
                     let _ = shared.tx.send(SessionCmd::Shutdown);
                     let _ = join.join();
                     return Err(ChatFail::Down);
+                }
+                if let Some(key) = shared.key() {
+                    // Re-check the context tombstone before publishing: a
+                    // drop_context that started after our load must not
+                    // have this conversation resurrect behind its scan.
+                    if inner.dropping_contexts.iter().any(|c| c == &key.context_key) {
+                        drop(inner);
+                        if let Some(file) = &shared.file {
+                            file.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .wipe(self.reg.store.dir());
+                        }
+                        shared.retired.store(true, Ordering::Relaxed);
+                        let _ = shared.tx.send(SessionCmd::Shutdown);
+                        let _ = join.join();
+                        return Err(ChatFail::NotFound);
+                    }
+                    inner.keyed.insert(key, shared.id.clone());
                 }
                 inner.sessions.insert(shared.id.clone(), Slot { shared, join });
                 Ok(view)
@@ -462,6 +791,64 @@ impl ChatHandle {
                 Err(ChatFail::Down)
             }
         }
+    }
+
+    /// The durable conversation of one session, rendered for a screen and
+    /// cut to the transcript budget (the LAST rows that fit).
+    pub fn transcript(&self, owner: PrincipalId, id: SessionId) -> Result<TranscriptView, ChatFail> {
+        let shared = self.reg.lookup(&owner, &id)?;
+        let history = shared.transcript().clone();
+        let rows = transcript::render(&history);
+        let (rows, truncated) = budget_rows(rows);
+        let turn = shared.status().turn;
+        Ok(TranscriptView { id: shared.id.clone(), provider: shared.provider, turn, rows, truncated })
+    }
+
+    /// An asset was retired: every conversation about it — live or on
+    /// disk, whoever's — goes. Returns how many were dropped.
+    ///
+    /// Serialized against keyed creates by a CONTEXT TOMBSTONE: while it
+    /// stands, a create for this context is refused, and one that already
+    /// landed re-checks it before publishing. Every retired worker of the
+    /// context is JOINED before the disk scan, so no late flush can
+    /// resurrect a file behind it.
+    pub fn drop_context(&self, context_key: &str) -> usize {
+        let victims: Vec<Arc<Shared>> = {
+            let mut inner = self.reg.inner();
+            inner.dropping_contexts.push(context_key.to_string());
+            inner
+                .sessions
+                .values()
+                .filter(|slot| slot.shared.context_key.as_deref() == Some(context_key))
+                .map(|slot| slot.shared.clone())
+                .collect()
+        };
+        let mut dropped = 0;
+        for shared in victims {
+            if self.retire_inner(None, &shared.id, true).is_ok() {
+                dropped += 1;
+            }
+        }
+        let handles: Vec<JoinHandle<()>> = {
+            let mut inner = self.reg.inner();
+            let mut out = Vec::new();
+            let mut kept = Vec::new();
+            for (key, join) in inner.draining.drain(..) {
+                if key.context_key == context_key {
+                    out.push(join);
+                } else {
+                    kept.push((key, join));
+                }
+            }
+            inner.draining = kept;
+            out
+        };
+        for join in handles {
+            let _ = join.join();
+        }
+        let removed = self.reg.store.drop_context(context_key);
+        self.reg.inner().dropping_contexts.retain(|c| c != context_key);
+        dropped + removed
     }
 
     /// Deliver the client's outcome for a parked client-executed tool.
@@ -526,6 +913,7 @@ impl ChatHandle {
         id: SessionId,
         text: String,
         attachments: Vec<AttachmentBinding>,
+        dynamic_context: Option<String>,
     ) -> Result<u64, ChatFail> {
         let shared = self.reg.lookup(&owner, &id)?;
         // One turn at a time is the session engine's law; refusing here
@@ -537,7 +925,7 @@ impl ChatHandle {
         let (tx, rx) = mpsc::channel();
         shared
             .tx
-            .send(SessionCmd::Send { text, attachments, reply: tx })
+            .send(SessionCmd::Send { text, attachments, dynamic_context, reply: tx })
             .map_err(|_| ChatFail::Down)?;
         rx.recv_timeout(CALL_TIMEOUT).map_err(|_| ChatFail::Down)?
     }
@@ -581,23 +969,52 @@ impl ChatHandle {
         Ok(shared.view())
     }
 
+    /// `DELETE`: forget the session — and for a keyed one, its transcript
+    /// too (this is the client's Clear).
     pub fn retire(&self, owner: PrincipalId, id: SessionId) -> Result<bool, ChatFail> {
+        self.retire_inner(Some(owner), &id, true)
+    }
+
+    /// `owner: None` skips the ownership check (internal callers only).
+    /// `wipe` deletes a keyed session's file; without it the file stays
+    /// for a later create-or-resume.
+    fn retire_inner(
+        &self,
+        owner: Option<PrincipalId>,
+        id: &SessionId,
+        wipe: bool,
+    ) -> Result<bool, ChatFail> {
         let slot = {
             let mut inner = self.reg.inner();
-            match inner.sessions.get(&id) {
-                Some(slot) if slot.shared.owner == owner => {}
+            match inner.sessions.get(id) {
+                Some(slot) if owner.map_or(true, |o| slot.shared.owner == o) => {}
                 Some(_) | None => return Err(ChatFail::NotFound),
             }
-            inner.sessions.remove(&id)
+            inner.detach(id)
         };
         let Some(slot) = slot else {
             return Ok(false);
         };
+        if wipe {
+            if let Some(file) = &slot.shared.file {
+                // Under the file lock: the worker's next sync sees `wiped`
+                // and writes nothing, so the Clear is final.
+                file.lock().unwrap_or_else(|e| e.into_inner()).wipe(self.reg.store.dir());
+            }
+        }
+        slot.shared.retired.store(true, Ordering::Relaxed);
         slot.shared.cancel.cancel();
         let _ = slot.shared.tx.send(SessionCmd::Shutdown);
         // The worker retires its own tools on the way out. Joining here
-        // would make DELETE wait on whatever tool is in flight.
-        self.reg.inner().graveyard.push(slot.join);
+        // would make DELETE wait on whatever tool is in flight — a keyed
+        // worker parks in `draining` instead, where the next
+        // create-or-resume of its key (or drop_context) joins it before
+        // touching the file.
+        let mut inner = self.reg.inner();
+        match slot.shared.key() {
+            Some(key) => inner.draining.push((key, slot.join)),
+            None => inner.graveyard.push(slot.join),
+        }
         Ok(true)
     }
 
@@ -616,6 +1033,10 @@ struct SessionInit {
     token: String,
     provider: ProviderKind,
     profile: ClientProfile,
+    /// Set for a keyed (durable) session.
+    key: Option<SessionKey>,
+    /// The conversation to resume, when the key had one on disk.
+    persisted: Option<Persisted>,
     tx: Sender<SessionCmd>,
     rx: mpsc::Receiver<SessionCmd>,
     ready: Sender<Result<Arc<Shared>, ChatFail>>,
@@ -624,7 +1045,8 @@ struct SessionInit {
 /// Build the session (probe, provider, tools) and then own it for life.
 /// Every blocking step here is this session's own cost.
 fn run_session(reg: Arc<Registry>, init: SessionInit) {
-    let SessionInit { owner, namespace, token, provider, profile, tx, rx, ready } = init;
+    let SessionInit { owner, namespace, token, provider, profile, key, persisted, tx, rx, ready } =
+        init;
     match reg.factory.probe(provider) {
         ProviderAvailability::Unavailable { reason } => {
             let _ = ready.send(Err(ChatFail::ProviderUnavailable {
@@ -652,23 +1074,77 @@ fn run_session(reg: Arc<Registry>, init: SessionInit) {
             return;
         }
     };
-    let session = Session::new(principal_str(&owner), boxed);
+    // A persisted conversation comes back under its OWN id with its
+    // transcript (sealed stays sealed); the provider is fresh either way.
+    let created_ms = persisted.as_ref().map(|p| p.header.created_ms).unwrap_or_else(now_ms);
+    let session = match persisted {
+        Some(p) => Session::resume(
+            p.header.session,
+            principal_str(&owner),
+            boxed,
+            p.history,
+            p.turn,
+            p.sealed,
+        ),
+        None => Session::new(principal_str(&owner), boxed),
+    };
+    let file = match key.as_ref() {
+        None => None,
+        Some(key) => {
+            let header = Header {
+                session: session.id().clone(),
+                provider,
+                namespace: namespace.clone(),
+                profile,
+                client_key: key.client_key.clone(),
+                context_key: key.context_key.clone(),
+                created_ms,
+            };
+            let mut file = SessionFile::new(reg.store.path(key), header);
+            // The file exists from the first moment the session is live,
+            // with the binding it has NOW (a resume may have changed the
+            // provider) and the history as trimmed for the resume. A
+            // KEYED session whose very first commit fails does not come
+            // up at all: "durable" that starts life unpersisted is a lie
+            // the client cannot see.
+            if let Err(e) = file.rewrite(session.history(), session.turn(), session.sealed_reason())
+            {
+                let message = format!("transcript write failed: {e}");
+                log(
+                    reg.log_enabled,
+                    &format!("chat[{}] {message}", session.id().as_str()),
+                );
+                let _ = ready.send(Err(ChatFail::Persist { message }));
+                return;
+            }
+            Some(Mutex::new(file))
+        }
+    };
     let shared = Arc::new(Shared {
         id: session.id().clone(),
         owner,
         namespace,
         provider,
+        profile,
+        client_key: key.as_ref().map(|k| k.client_key.clone()),
+        context_key: key.as_ref().map(|k| k.context_key.clone()),
         tx,
         cancel: session.cancel_flag(),
         status: Mutex::new(Status {
-            state: "idle",
-            turn: 0,
+            state: if session.is_sealed() { "sealed" } else { "idle" },
+            turn: session.turn(),
             idle: true,
             awaiting: None,
             resolved: Vec::new(),
+            last_active: Instant::now(),
+            persist_dirty: false,
         }),
         events: Mutex::new(Vec::new()),
+        transcript: Mutex::new(session.history().to_vec()),
+        file,
+        retired: AtomicBool::new(false),
     });
+    let published_len = session.history().len();
     let mut worker = Worker {
         shared: shared.clone(),
         session,
@@ -681,6 +1157,8 @@ fn run_session(reg: Arc<Registry>, init: SessionInit) {
         event_cap: reg.cfg.event_cap,
         log_enabled: reg.log_enabled,
         client_wait: None,
+        published_len,
+        persist_dirty: false,
     };
     if ready.send(Ok(shared)).is_err() {
         // The creator gave up (or the broker closed) before we landed.
@@ -721,6 +1199,14 @@ struct Worker {
     log_enabled: bool,
     /// When a client-executed tool parked the turn: since when.
     client_wait: Option<Instant>,
+    /// How much of the session's history the shared transcript SNAPSHOT
+    /// carries. The keyed file keeps its own durable cursor
+    /// (`SessionFile::written`), which only advances on successful writes.
+    published_len: usize,
+    /// The last durable write failed; retried every pump (idle included)
+    /// and mirrored into the published status so the session is not
+    /// evictable meanwhile.
+    persist_dirty: bool,
 }
 
 impl Worker {
@@ -757,11 +1243,35 @@ impl Worker {
     }
 
     fn handle(&mut self, cmd: SessionCmd) {
+        self.shared.status().last_active = Instant::now();
+        // A command that raced into the queue before this worker's
+        // Shutdown must not start work on a DETACHED session: its
+        // replacement may already be loading the same durable file.
+        if self.shared.retired.load(Ordering::Relaxed) {
+            match cmd {
+                SessionCmd::Send { reply, .. } => {
+                    let _ = reply.send(Err(ChatFail::Down));
+                }
+                SessionCmd::ToolResult { reply, .. } => {
+                    let _ = reply.send(Err(ChatFail::Down));
+                }
+                SessionCmd::Cancel { reply } => {
+                    let _ = reply.send(());
+                }
+                SessionCmd::Shutdown => {}
+            }
+            return;
+        }
         match cmd {
-            SessionCmd::Send { text, attachments, reply } => {
+            SessionCmd::Send { text, attachments, dynamic_context, reply } => {
                 let result = {
                     let mut exec = executor!(self);
-                    self.session.send(&text, &attachments, &mut exec)
+                    self.session.send_with_context(
+                        &text,
+                        &attachments,
+                        dynamic_context.as_deref().unwrap_or(""),
+                        &mut exec,
+                    )
                 };
                 self.publish();
                 let _ = reply.send(result.map_err(map_send));
@@ -800,6 +1310,11 @@ impl Worker {
     fn pump(&mut self) {
         if self.session.is_idle() {
             self.client_wait = None;
+            // A failed durable write keeps retrying while idle — the file
+            // must catch up before this session may be evicted.
+            if self.persist_dirty {
+                self.sync_transcript();
+            }
             return;
         }
         // A turn parked on a client-executed tool does not pump; it waits
@@ -848,7 +1363,11 @@ impl Worker {
                 "streaming"
             };
             status.awaiting = self.session.awaiting_client_tool().map(str::to_string);
+            if !status.idle {
+                status.last_active = Instant::now();
+            }
         }
+        self.sync_transcript();
         let drained = self.session.drain_events();
         if drained.is_empty() {
             return;
@@ -861,6 +1380,65 @@ impl Worker {
         if events.len() > self.event_cap {
             let drop_n = events.len() - self.event_cap;
             events.drain(..drop_n);
+        }
+    }
+
+    /// Bring the shared transcript snapshot and (for a keyed session) the
+    /// on-disk file up to the session's history. The history only ever
+    /// grows at the tail — or loses its tail when a refused send pops its
+    /// user row — so this is a length compare per pump and a tail copy
+    /// when something changed.
+    ///
+    /// The in-memory snapshot cursor (`published_len`) and the durable
+    /// cursor (`SessionFile::written`) are SEPARATE on purpose: the file's
+    /// cursor advances only when its write succeeded, so a failed write is
+    /// retried on the next call instead of being skipped because the
+    /// snapshot already moved on. Until the retry lands, `persist_dirty`
+    /// keeps the session non-evictable.
+    fn sync_transcript(&mut self) {
+        let history = self.session.history();
+        let len = history.len();
+        if len != self.published_len {
+            {
+                let mut snapshot = self.shared.transcript();
+                if len < self.published_len {
+                    snapshot.truncate(len);
+                } else {
+                    snapshot.extend_from_slice(&history[self.published_len..]);
+                }
+            }
+            self.published_len = len;
+        }
+        if let Some(file) = &self.shared.file {
+            let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+            match file.sync(history, self.session.turn(), self.session.sealed_reason()) {
+                Ok(()) => {
+                    if self.persist_dirty {
+                        self.persist_dirty = false;
+                        self.shared.status().persist_dirty = false;
+                        log(
+                            self.log_enabled,
+                            &format!(
+                                "chat[{}] transcript write recovered",
+                                self.session.id().as_str()
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !self.persist_dirty {
+                        self.persist_dirty = true;
+                        self.shared.status().persist_dirty = true;
+                    }
+                    log(
+                        self.log_enabled,
+                        &format!(
+                            "chat[{}] transcript write failed (will retry): {e}",
+                            self.session.id().as_str()
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -921,6 +1499,31 @@ fn clip(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Keep the NEWEST rows that fit the transcript budget (row count and
+/// total text), each row's text clipped to its own cap. Chronological
+/// order is preserved; the flag says whether ANYTHING was cut — older
+/// rows dropped, or any kept row's text clipped.
+fn budget_rows(rows: Vec<TranscriptRow>) -> (Vec<TranscriptRow>, bool) {
+    let total = rows.len();
+    let mut kept: Vec<TranscriptRow> = Vec::new();
+    let mut bytes = 0usize;
+    let mut clipped = false;
+    for mut row in rows.into_iter().rev() {
+        if row.text.len() > TRANSCRIPT_MAX_ROW_BYTES {
+            row.text = clip(&row.text, TRANSCRIPT_MAX_ROW_BYTES).to_string();
+            clipped = true;
+        }
+        if kept.len() >= TRANSCRIPT_MAX_ROWS || bytes + row.text.len() > TRANSCRIPT_MAX_TEXT_BYTES {
+            break;
+        }
+        bytes += row.text.len();
+        kept.push(row);
+    }
+    let truncated = clipped || kept.len() < total;
+    kept.reverse();
+    (kept, truncated)
+}
+
 fn map_send(e: SendRefusal) -> ChatFail {
     match e {
         SendRefusal::ProviderUnavailable { reason } => {
@@ -942,12 +1545,14 @@ fn public_status(kind: ProviderKind, av: ProviderAvailability) -> ProviderStatus
     match av {
         ProviderAvailability::Available { model, detail: _ } => ProviderStatus {
             kind,
+            locality: kind.locality(),
             available: true,
             model: Some(sanitize_public_error(&model)),
             reason: None,
         },
         ProviderAvailability::Unavailable { reason } => ProviderStatus {
             kind,
+            locality: kind.locality(),
             available: false,
             model: None,
             reason: Some(public_reason(&reason)),
@@ -1047,14 +1652,14 @@ impl SessionTools<'_> {
             None => out.push_str("Asset tools are not connected.\n"),
         }
         out.push_str("\nExternal generative consult:\n");
-        if matches!(self.primary, ProviderKind::OpenAi | ProviderKind::Grok) {
+        if self.primary.locality() == Locality::Cloud {
             out.push_str(
                 "llm.consult is unavailable: this session is already on an external provider.\n",
             );
             return out;
         }
         let mut any = false;
-        for kind in [ProviderKind::OpenAi, ProviderKind::Grok] {
+        for kind in ProviderKind::ALL.into_iter().filter(|k| k.locality() == Locality::Cloud) {
             match self.factory.probe(kind) {
                 ProviderAvailability::Available { model, .. } => {
                     out.push_str("- ");
@@ -1166,7 +1771,11 @@ fn run_catalog_query(catalog: &mut CatalogReader, sql: &str) -> ToolOutcome {
                         "(0 rows) Check the vocabulary: SELECT kind, COUNT(*) FROM \
                          search_annotations WHERE live=1 GROUP BY kind — models are \
                          kind 'mesh'; browse one kit with canon_alias LIKE \
-                         'kenney/<kit>/%'.",
+                         'kenney/<kit>/%'. Classic-game actors (Doom monsters, \
+                         weapons, pickups) are kind 'billboard' under \
+                         '<game>/<wad>/billboards/%' — search their LABELS, not \
+                         titles: JOIN search_labels l ON l.asset_id=a.asset_id AND \
+                         l.label IN ('imp','demon','monster','character').",
                     ),
                 ),
             ]),
@@ -1210,7 +1819,7 @@ impl SessionTools<'_> {
         if *self.consult_depth > 0 {
             return ToolOutcome::Refused { what: "nested llm.consult is not allowed".into() };
         }
-        if matches!(self.primary, ProviderKind::OpenAi | ProviderKind::Grok) {
+        if self.primary.locality() == Locality::Cloud {
             return ToolOutcome::Unavailable {
                 reason: "session is already on the external provider".into(),
             };
@@ -1316,14 +1925,20 @@ impl SessionTools<'_> {
 
     fn pick_consult(&mut self, requested: Option<ProviderKind>) -> Result<ProviderKind, ToolOutcome> {
         let candidates = match requested {
-            Some(ProviderKind::OpenAi) => vec![ProviderKind::OpenAi],
-            Some(ProviderKind::Grok) => vec![ProviderKind::Grok],
-            Some(ProviderKind::FleetQwen) => {
+            Some(kind) if kind.locality() == Locality::Local => {
                 return Err(ToolOutcome::Refused {
                     what: "llm.consult cannot target the local provider".into(),
                 });
             }
-            None => vec![ProviderKind::Grok, ProviderKind::OpenAi],
+            Some(kind) => vec![kind],
+            // Keyed APIs first (cheapest to probe), then the CLIs.
+            None => vec![
+                ProviderKind::Grok,
+                ProviderKind::OpenAi,
+                ProviderKind::ClaudeCli,
+                ProviderKind::GrokCli,
+                ProviderKind::CodexCli,
+            ],
         };
         let mut reasons = Vec::new();
         for kind in candidates {
@@ -1459,20 +2074,43 @@ impl ProbeCell {
 
 struct EnvFactory {
     fleet_bases: Vec<String>,
+    /// Configured fleet name; empty follows `MAKEPAD_AI_FLEET` (see
+    /// `fleet_discovery::resolve_wanted_fleet`).
     fleet: String,
     /// One node/model pick shared by every fleet provider this factory
     /// opens: N sessions probe the box once, not N times.
     picks: Arc<FleetPickCache>,
     cells: Mutex<Vec<(ProviderKind, Arc<ProbeCell>)>>,
+    log_enabled: bool,
+    /// One "no nodes for fleet X" line per empty streak, not one per probe
+    /// (availability re-probes every session send).
+    warned_empty: AtomicBool,
 }
 
+/// A probe that lands in the listener's first seconds waits this long for
+/// the first beacon (boxes beacon every 2 s) instead of reporting an empty
+/// fleet. `fleet_discovery::live_bases_within` only waits while the
+/// listener is cold, so a warm server never pays this.
+const FIRST_BEACON_GRACE: Duration = Duration::from_secs(3);
+
 impl EnvFactory {
-    fn new(fleet_bases: Vec<String>, fleet: String) -> EnvFactory {
+    fn new(fleet_bases: Vec<String>, fleet: String, log_enabled: bool) -> EnvFactory {
+        // Start hearing beacons NOW, at broker start — not at the first
+        // chat, which used to be answered from a listener spawned that
+        // very instant (empty by construction, then cached as unavailable).
+        {
+            use makepad_asset_chat::fleet_discovery;
+            fleet_discovery::set_wanted_fleet(fleet_discovery::resolve_wanted_fleet(&fleet));
+            fleet_discovery::seed_bases(fleet_bases.clone());
+            fleet_discovery::start_listening();
+        }
         EnvFactory {
             fleet_bases,
             fleet,
             picks: Arc::new(FleetPickCache::new()),
             cells: Mutex::new(Vec::new()),
+            log_enabled,
+            warned_empty: AtomicBool::new(false),
         }
     }
 
@@ -1487,9 +2125,30 @@ impl EnvFactory {
     }
 
     fn bases(&self) -> Vec<String> {
-        makepad_asset_chat::fleet_discovery::set_wanted_fleet(&self.fleet);
-        makepad_asset_chat::fleet_discovery::seed_bases(self.fleet_bases.clone());
-        makepad_asset_chat::fleet_discovery::live_bases()
+        use makepad_asset_chat::fleet_discovery;
+        let wanted = fleet_discovery::resolve_wanted_fleet(&self.fleet);
+        fleet_discovery::set_wanted_fleet(&wanted);
+        fleet_discovery::seed_bases(self.fleet_bases.clone());
+        let bases = fleet_discovery::live_bases_within(FIRST_BEACON_GRACE);
+        if bases.is_empty() {
+            if !self.warned_empty.swap(true, Ordering::Relaxed) {
+                log(
+                    self.log_enabled,
+                    &format!(
+                        "chat: no fleet nodes for fleet '{wanted}' — no seeds \
+                         (MAKEPAD_CHAT_FLEET / --chat-fleet) and no LAN beacon carries \
+                         fleet \"{wanted}\"; the boxes must beacon that name, or tell this \
+                         server theirs (MAKEPAD_AI_FLEET / --chat-fleet-name)"
+                    ),
+                );
+            }
+        } else if self.warned_empty.swap(false, Ordering::Relaxed) {
+            log(
+                self.log_enabled,
+                &format!("chat: fleet '{wanted}' has {} node(s) again", bases.len()),
+            );
+        }
+        bases
     }
 
     /// The unwrapped (synchronous) provider — status probes only.
@@ -1502,6 +2161,17 @@ impl EnvFactory {
             )),
             ProviderKind::OpenAi => Box::new(makepad_asset_chat::openai::from_env()),
             ProviderKind::Grok => Box::new(makepad_asset_chat::grok::from_env()),
+            // The vendor CLIs logged in on THIS host: found or not, never
+            // keyed. Availability is a file check; a turn is a process.
+            ProviderKind::ClaudeCli => {
+                Box::new(makepad_asset_chat::claude::ClaudeCodeChatProvider::new(None))
+            }
+            ProviderKind::CodexCli => {
+                Box::new(makepad_asset_chat::codex_cli::CodexCliChatProvider::new(None))
+            }
+            ProviderKind::GrokCli => {
+                Box::new(makepad_asset_chat::grok_cli::GrokCliChatProvider::new(None))
+            }
         }
     }
 }
@@ -1539,6 +2209,18 @@ impl ProviderFactory for EnvFactory {
                 let inner = makepad_asset_chat::grok::from_env();
                 Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
             }
+            ProviderKind::ClaudeCli => {
+                let inner = makepad_asset_chat::claude::ClaudeCodeChatProvider::new(None);
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
+            ProviderKind::CodexCli => {
+                let inner = makepad_asset_chat::codex_cli::CodexCliChatProvider::new(None);
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
+            ProviderKind::GrokCli => {
+                let inner = makepad_asset_chat::grok_cli::GrokCliChatProvider::new(None);
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
         }
     }
 }
@@ -1556,6 +2238,9 @@ struct ScriptedFactory {
     fleet_qwen: ScriptedLane,
     openai: ScriptedLane,
     grok: ScriptedLane,
+    claude_cli: ScriptedLane,
+    codex_cli: ScriptedLane,
+    grok_cli: ScriptedLane,
     /// Fixture stand-in for a serving tier's parallel capacity: at most this
     /// many scripted turns run at once across ALL sessions (0 = unlimited).
     gate: Arc<TurnGate>,
@@ -1567,6 +2252,9 @@ impl ScriptedFactory {
             fleet_qwen: script.fleet_qwen,
             openai: script.openai,
             grok: script.grok,
+            claude_cli: script.claude_cli,
+            codex_cli: script.codex_cli,
+            grok_cli: script.grok_cli,
             gate: Arc::new(TurnGate::new(script.max_concurrent_turns)),
         }
     }
@@ -1576,6 +2264,9 @@ impl ScriptedFactory {
             ProviderKind::FleetQwen => &self.fleet_qwen,
             ProviderKind::OpenAi => &self.openai,
             ProviderKind::Grok => &self.grok,
+            ProviderKind::ClaudeCli => &self.claude_cli,
+            ProviderKind::CodexCli => &self.codex_cli,
+            ProviderKind::GrokCli => &self.grok_cli,
         }
     }
 }

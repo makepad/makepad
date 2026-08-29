@@ -14,7 +14,7 @@
 use crate::wire::{ident_ok, ProviderKind, MAX_MESSAGE_BYTES, MAX_TOOL_JSON_BYTES, MAX_TRANSFORM_INPUTS};
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::OperationId;
-use makepad_asset_data::{AssetAlias, AssetId, AssetRevisionId};
+use makepad_asset_data::{AssetAlias, AssetId, AssetRevisionId, ScalePreset};
 use std::str::FromStr;
 
 /// Prompt-facing description of one tool (rendered into the provider's
@@ -33,6 +33,63 @@ pub struct ToolDef {
     /// typed parser is the security boundary.
     pub parameters: Value,
 }
+
+/// The complete reviewed CSG teaching payload. Keep this one block small
+/// enough to sit beside the whole game API in a 12k local-model context.
+pub const CSG_MODEL_TOOL_DOC: &str = r#"CSG MODELLING (csg.* only inside model.build source). Every model you build is STORED under its title (alias gen/csg/<title-slug>) with its editable source. So when the user asks for something you may have modelled before ("a dog" again), asset.search the noun FIRST: found and good as-is -> place it with world.place; found but needs changes (color, size, style) -> model.fetch its source, edit, model.build with the SAME title (revises the same asset) or a NEW title for a variant. Only model from scratch when search finds nothing usable. Build SOLIDS from primitives, shape them with booleans/transforms, then name them into PARTS; the parts ARE the model. Metres, Y-up, y=0 floor. Solids are immutable values. One color per part: differently colored details are separate overlapping parts. box/cylinder/extrude stand on y=0 centered x,z; sphere/torus center at origin; lathe uses profile y. Declare at least one part. Budgets enforce ops, parts, triangles and 30 s.
+csg.box({size}) -> solid; size vec3 metres
+csg.sphere({r, seg}) -> solid
+csg.cylinder({r, h, r2, seg}) -> solid; r2 tapers top (0 cone); low seg makes prisms
+csg.torus({r, tube, seg}) -> solid; flat ring
+csg.extrude([vec2(x,z),...], {h, twist, taper, seg}) -> solid; closed CCW outline upward
+csg.lathe([vec2(r,y),...], {angle, seg}) -> solid; spin profile around Y
+csg.union(a,b,...) -> solid
+csg.difference(a,b,...) -> solid; a minus the rest
+csg.intersect(a,b,...) -> solid
+csg.move(s, vec3) -> solid
+csg.rotate(s, {x,y,z}) -> solid; degrees x then y then z, before move
+csg.scale(s, n | vec3) -> solid
+csg.mirror(s, "x"|"y"|"z") -> solid
+csg.implicit(fn, {bounds:[vec3(min),vec3(max)], res, uniforms?}) -> solid; sample pure signed-distance math; res power-of-two 8..128
+csg.part(name, solid, {color, parent, pivot}); parent must be an earlier part, pivot defaults AABB center
+csg.anim(part, {kind:"swing"|"spin"|"bob", axis:"x"|"y"|"z", degrees, hz, amp}); idle motion through pivot
+Defaults: seg 24 (3..64), color #cccccc, angle 360, taper 1, twist 0; anim axis x, degrees 25, hz 2, amp 0.1. Part names match [a-z0-9-]{1,24}.
+
+SMOOTH IMPLICIT BLEND (smin idiom):
+let field=|p,c,k| {let a=length(p-c)-0.55 let b=length(p+c)-0.55 let h=clamp(0.5+0.5*(b-a)/k,0,1) mix(b,a,h)-k*h*(1-h)}
+let blob=csg.implicit(field,{bounds:[vec3(-1,-0.8,-0.8),vec3(1,0.8,0.8)],res:32,uniforms:[vec3(0.32,0,0),0.22]})
+csg.part("blend",blob,{color:#55aadd})
+
+MUG:
+let outer = csg.cylinder({r: 0.045, h: 0.09})
+let handle = csg.move(csg.rotate(csg.torus({r: 0.03, tube: 0.008}), {x: 90}), vec3(0.055, 0.045, 0))
+let bore = csg.move(csg.cylinder({r: 0.038, h: 0.09}), vec3(0, 0.008, 0))
+csg.part("mug", csg.difference(csg.union(outer, handle), bore), {color: #4477aa})
+
+FACING: author every model FACING +Z (head/nose/windshield toward +z) —
+the engine turns it to its travel direction; anything else walks sideways.
+Animated limbs must be PARTS — geometry unioned into a solid cannot move.
+
+DOG (hierarchy, +z facing, animated legs; diagonal legs share phase):
+csg.part("body",csg.move(csg.box({size:vec3(0.24,0.22,0.5)}),vec3(0,0.28,0)),{color:#8b5a2b})
+let leg=csg.cylinder({r:0.035,h:0.24})
+for i in 0..4 {
+  let x=if i%2==0 {-0.08} else {0.08}
+  let z=if i<2 {0.17} else {-0.17}
+  let n=["fl","fr","bl","br"][i]
+  csg.part(n,csg.move(leg,vec3(x,0,z)),{color:#5a351d,parent:"body",pivot:vec3(x,0.26,z)})
+  csg.anim(n,{kind:"swing",axis:"x",degrees:if i==0||i==3 {30} else {-30},hz:2})
+}
+csg.part("head",csg.union(csg.move(csg.sphere({r:0.11}),vec3(0,0.52,0.3)),csg.move(csg.box({size:vec3(0.1,0.08,0.12)}),vec3(0,0.44,0.38))),{color:#8b5a2b,parent:"body",pivot:vec3(0,0.5,0.26)})
+csg.part("nose",csg.move(csg.sphere({r:0.025}),vec3(0,0.5,0.45)),{color:#1a1a1a,parent:"head"})
+let ear=csg.box({size:vec3(0.05,0.1,0.03)})
+csg.part("ear-l",csg.move(ear,vec3(-0.09,0.54,0.27)),{color:#5a351d,parent:"head",pivot:vec3(-0.09,0.64,0.27)})
+csg.part("ear-r",csg.move(ear,vec3(0.09,0.54,0.27)),{color:#5a351d,parent:"head",pivot:vec3(0.09,0.64,0.27)})
+let tail=csg.rotate(csg.cylinder({r:0.025,r2:0.008,h:0.18}),{x:-40})
+csg.part("tail",csg.move(tail,vec3(-0.25,0.36,0)),{color:#8b5a2b,parent:"body",pivot:vec3(-0.25,0.36,0)})
+csg.anim("ear-l",{kind:"swing",axis:"x",degrees:25,hz:1.2})
+csg.anim("ear-r",{kind:"swing",axis:"x",degrees:25,hz:1.2})
+csg.anim("tail",{kind:"swing",axis:"y",degrees:40,hz:3})"#;
 
 /// The allowlist, in the order it is documented to the model.
 pub fn definitions() -> Vec<ToolDef> {
@@ -163,12 +220,30 @@ pub fn definitions() -> Vec<ToolDef> {
             api_name: "music_generate",
             description: "Generate a full song from a text prompt. \
                           Use for music, score, or a track — not short SFX.",
-            args_doc: r#"{"prompt": "lofi rain loop, warm keys", "model": "minimax-music3", "seconds": 180}"#,
+            args_doc: r#"{"prompt": "warm neo-soul, Rhodes, intimate male vocal", "lyrics": "[Verse]\nMorning settles on the floor\n\n[Chorus]\nWe can rise into the day", "model": "minimax-music3", "seconds": 180}"#,
             parameters: schema_object(
                 vec![
                     (
                         "prompt",
-                        schema_string_len("musical description", 1, 2048),
+                        schema_string_len(
+                            "musical description: genre, mood, tempo, instruments, \
+                             vocal type, production. Never put lyric words here",
+                            1,
+                            2048,
+                        ),
+                    ),
+                    (
+                        // The field that makes a song a song. Empty means
+                        // instrumental to both music backends, so a vocal
+                        // request that leaves it out comes back as a hum.
+                        "lyrics",
+                        schema_string_len(
+                            "the sung words, as a temporal script: section tags such as \
+                             [Verse]/[Chorus] alone on their own lines. \
+                             \"[Instrumental]\" for instrumental music",
+                            1,
+                            4096,
+                        ),
                     ),
                     (
                         "model",
@@ -177,6 +252,14 @@ pub fn definitions() -> Vec<ToolDef> {
                     (
                         "seconds",
                         schema_integer_range("song length 5..=300; omit for 180", 5, 300),
+                    ),
+                    (
+                        "steps",
+                        schema_integer_range("diffusion steps 1..=64; omit for the model's own", 1, 64),
+                    ),
+                    (
+                        "seed",
+                        schema_integer_range("reproducibility seed; omit for a fresh one", 0, i64::MAX),
                     ),
                 ],
                 &["prompt"],
@@ -276,7 +359,8 @@ pub fn definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "asset.search",
             api_name: "asset_search",
-            description: "Search the asset catalog.",
+            description: "Search the asset catalog. Judge hits: a title merely CONTAINING \
+                          the word is not the thing (corn-dog is not a dog).",
             args_doc: r#"{"query": "text", "limit": 10}"#,
             parameters: schema_object(
                 vec![
@@ -465,11 +549,10 @@ pub const MAX_QUERY_SQL_BYTES: usize = 4096;
 /// not one call per segment — tool rounds are budgeted).
 pub const MAX_WORLD_PLACEMENTS: usize = 64;
 
-/// The GAME session's tool vocabulary. Phase 1 is EXISTING assets only:
-/// catalog lookups plus the game extension — no generation tools and no
-/// llm.consult (both are later phases; generation will additionally need a
-/// user-facing cost confirmation before any enqueue). Keeping them out of
-/// the taught surface also keeps the context small.
+/// The GAME session's tool vocabulary: catalog lookups, one deliberately
+/// narrow queued-generation entry point, and the game extension. The richer
+/// Asset UI generation controls remain app-local and `llm.consult` remains
+/// unavailable here.
 pub fn game_definitions() -> Vec<ToolDef> {
     const KEEP: &[&str] = &["asset.search", "asset.inspect"];
     definitions()
@@ -485,7 +568,37 @@ pub fn game_definitions() -> Vec<ToolDef> {
 /// round trip). NOT part of [`definitions`] — only sessions created with
 /// the game profile advertise these.
 pub fn sandbox_definitions() -> Vec<ToolDef> {
-    vec![
+    let mut defs = vec![
+        ToolDef {
+            name: "content.generate",
+            api_name: "content_generate",
+            description: "Queue ONE expensive asset-generation pipeline after searching the \
+                          library and finding no suitable asset. Returns immediately with a job \
+                          id; the asset appears in the library when the pipeline finishes. Tell \
+                          the player it is generating. Never call speculatively.",
+            args_doc: r#"{"kind": "character", "prompt": "...", "dim_height": 1.75}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "kind",
+                        schema_string_enum(
+                            "the finished asset the game needs",
+                            &["character", "prop", "sound"],
+                        ),
+                    ),
+                    (
+                        "prompt",
+                        schema_string_len("concise generation brief", 1, 2048),
+                    ),
+                    (
+                        "dim_height",
+                        schema_number("optional intended height in metres, 0.01..=100"),
+                    ),
+                ],
+                &["kind", "prompt"],
+                Some(false),
+            ),
+        },
         ToolDef {
             name: "assets.query",
             api_name: "query_assets",
@@ -514,6 +627,31 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           notes. Call this before writing SQL for assets.query.",
             args_doc: r#"{}"#,
             parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "model.build",
+            api_name: "model_build",
+            description: CSG_MODEL_TOOL_DOC,
+            args_doc: r#"{"title":"Blue Mug","source":"let outer=csg.cylinder({r:0.045,h:0.09})\nlet bore=csg.move(csg.cylinder({r:0.038,h:0.09}),vec3(0,0.008,0))\ncsg.part(\"mug\",csg.difference(outer,bore),{color:#4477aa})"}"#,
+            parameters: schema_object(
+                vec![
+                    ("title", schema_string_len("model title; also supplies its stable alias slug", 1, MAX_MODEL_TITLE_BYTES as i64)),
+                    ("source", schema_string_len("complete bounded CSG Splash program", 1, MAX_MODEL_SOURCE_BYTES as i64)),
+                ],
+                &["title", "source"],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "model.fetch",
+            api_name: "model_fetch",
+            description: "Fetch the editable CSG Splash source stored in a published model-program asset. Use before editing, then pass the complete edited program to model.build with the same title so the same alias and asset receive a new revision.",
+            args_doc: r#"{"alias":"gen/csg/copper-mug"}"#,
+            parameters: schema_object(
+                vec![("alias", schema_string_len("gen/csg/<slug> alias", 9, 128))],
+                &["alias"],
+                Some(false),
+            ),
         },
         ToolDef {
             name: "world.place",
@@ -594,12 +732,21 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           the player — THE way to do 'give me / add an X'. No source \
                           read, no rewrite, nothing else in the world changes. The game \
                           picks the right form automatically: vehicles spawn DRIVEABLE, \
-                          rigged characters spawn as wandering NPCs, everything else is \
-                          a grounded prop at a sane scale. Query the catalog for the \
-                          canon_alias first. Use world.set_source only for NEW levels or \
+                          rigged characters spawn as wanderers (the ambient behaviour \
+                          class — a later game.chaser/sentry/follower call retunes \
+                          them), everything else is a grounded prop at a sane scale. Use \
+                          form: \"follower\" for a character body that follows the player; \
+                          rigged and unrigged loadable models both work as bodies. Query the catalog for the \
+                          canon_alias first. If no suitable creature asset exists and a \
+                          primitive part-built creature is wanted, use world.add_addon \
+                          with the worked game-context example instead. Use \
+                          world.set_source only for NEW levels or \
                           GAME-LOGIC changes (rules, scoring, objectives) — never for \
-                          adding content.",
-            args_doc: r#"{"model": "kenney/car-kit/ambulance"}"#,
+                          adding content. A 'small car' is world.spawn with scale: 0.5 \
+                          or \"small\" and stays driveable; world.place makes static scenery. \
+                          Color tints any model instance; hue rotates textured colors, so ten \
+                          differently-colored copies of one asset need no rebuilds.",
+            args_doc: r##"{"model": "kenney/car-kit/ambulance", "scale": "small", "color": "#44aaff", "hue": 30}"##,
             parameters: schema_object(
                 vec![
                     (
@@ -611,10 +758,16 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                         ),
                     ),
                     ("pos", schema_pos()),
+                    ("scale", schema_spawn_scale()),
+                    (
+                        "color",
+                        schema_string_len("instance tint as #rrggbb or #rrggbbaa", 7, 9),
+                    ),
+                    ("hue", schema_number("albedo hue rotation in degrees")),
                     (
                         "form",
                         schema_string_len(
-                            "optional override: car | character | prop (default: derived \
+                            "optional override: car | character | follower | prop (default: derived \
                              from the asset)",
                             1,
                             16,
@@ -634,10 +787,20 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           named addon marker — THE way to do 'make me a forest', 'add \
                           a crowd', or a primitive build the library lacks. The chunk \
                           evaluates against the LIVE world: nothing resets, nothing \
-                          else changes, and world.remove({tag: name}) undoes it. The \
+                          else changes, and world.remove({tag: name}) undoes it. The same \
+                          name replaces its existing marker block on retry. Splash has NO \
+                          ternary `?:` — use if/else; loops are `for i in 0..n {}`. The \
                           chunk may not re-declare the world (no game.terrain / \
                           game.sky / game.map / game.player_character) — those are \
-                          world.set_source territory.",
+                          world.set_source territory. BIG builds: prefer 2-3 \
+                          world.add_addon chunks over one giant world.set_source — long \
+                          single calls can truncate. For a primitive creature, make ONE \
+                          mover body, create owner-local game.part attachments once, add \
+                          game.part_swing for gait, and give the body a follower/chaser/ \
+                          pacer class. Never reposition parts from game.on_tick. PLACE \
+                          spawned creatures NEAR THE PLAYER: `let p = game.player_pos()` \
+                          then pos: p + vec3(2, 0.55, 0) — an absolute guess like \
+                          vec3(0,0,2) lands 50 m away where nobody sees it.",
             args_doc: r#"{"name": "forest", "src": "for i in 0..12 {\n  game.model(\"kenney/nature-kit/tree_oak\", {pos: vec3(i * 3, 0, 8), scale: 2})\n}"}"#,
             parameters: schema_object(
                 vec![
@@ -645,7 +808,7 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                     (
                         "src",
                         schema_string_len(
-                            "self-contained splash lines to append",
+                            "self-contained splash lines to install under this name",
                             1,
                             MAX_ADDON_SRC_BYTES as i64,
                         ),
@@ -699,7 +862,16 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           on an eval error the previous world keeps running and the error \
                           comes back so you can fix the source and retry. Reference store \
                           content by alias via game.model(\"<canon_alias>\", ...). Keep the \
-                          source under 12000 bytes.",
+                          source under 12000 bytes. Splash has NO ternary `?:` — use \
+                          if/else; loops are `for i in 0..n {}`. BIG builds: prefer 2-3 \
+                          world.add_addon chunks over one giant world.set_source — long \
+                          single calls can truncate. EVERY level starts with \
+                          game.terrain({...}) (or streams a map with game.map): \
+                          game.village / game.city / game.town / game.scatter place \
+                          buildings but create NO ground — the engine adds a flat \
+                          default terrain to a floorless level and tells you. Only when \
+                          the user EXPLICITLY asks for no ground (space, skydiving) put \
+                          the line `// ground: none` in the source.",
             args_doc: r#"{"source": "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})\n...", "note": "village level v1"}"#,
             parameters: schema_object(
                 vec![
@@ -714,6 +886,42 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                     ("note", schema_string_len("short change description", 1, 200)),
                 ],
                 &["source"],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "world.new_level",
+            api_name: "world_new_level",
+            description: "Create a NEW game from this source and switch the player to it — \
+                          for a new level/world; the current conversation ends there (the \
+                          new game has its own chat). Use world.set_source only for edits of \
+                          the CURRENT game. `source` is a COMPLETE splash level (same rules \
+                          as world.set_source: game.terrain or game.map first, models by \
+                          canon_alias, under 12000 bytes); `title` names the new game. The \
+                          game publishes it, switches, and answers with the new game's \
+                          asset_id, alias and title — report those and stop.",
+            args_doc: r#"{"title": "Quarry Arena", "source": "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})\n...", "note": "first cut"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "title",
+                        schema_string_len(
+                            "the new game's title",
+                            1,
+                            MAX_NEW_LEVEL_TITLE_BYTES as i64,
+                        ),
+                    ),
+                    (
+                        "source",
+                        schema_string_len(
+                            "the complete splash source of the new level",
+                            1,
+                            MAX_WORLD_SOURCE_BYTES as i64,
+                        ),
+                    ),
+                    ("note", schema_string_len("short description", 1, 200)),
+                ],
+                &["title", "source"],
                 Some(false),
             ),
         },
@@ -738,17 +946,42 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                 Some(false),
             ),
         },
-    ]
+    ];
+    for def in &mut defs {
+        if def.name.starts_with("world.") && def.name != "world.new_level" {
+            add_optional_sub(&mut def.parameters);
+        }
+    }
+    defs
+}
+
+fn add_optional_sub(schema: &mut Value) {
+    let Value::Obj(root) = schema else { return };
+    let Some((_, Value::Obj(properties))) = root.iter_mut().find(|(key, _)| key == "properties")
+    else { return };
+    properties.push((
+        "sub".into(),
+        schema_string_len(
+            "named sub-world; omit for the conversation/player default",
+            1,
+            64,
+        ),
+    ));
 }
 
 /// Most bytes of splash source `world.set_source` accepts (the tool wire
 /// caps whole argument objects at 16 KiB; escaping needs headroom).
 pub const MAX_WORLD_SOURCE_BYTES: usize = 12_000;
 
+/// `world.new_level` title: a game name, not a paragraph.
+pub const MAX_NEW_LEVEL_TITLE_BYTES: usize = 80;
+
 /// An addon is a SMALL self-contained chunk by design — a bulk add is
 /// 10-30 lines. Anything larger is a level, and levels go through
 /// `world.set_source` with its own cap.
 pub const MAX_ADDON_SRC_BYTES: usize = 4_000;
+pub const MAX_MODEL_SOURCE_BYTES: usize = 12_000;
+pub const MAX_MODEL_TITLE_BYTES: usize = 80;
 
 fn schema_world_place_item() -> Value {
     schema_object(
@@ -774,6 +1007,26 @@ fn schema_pos() -> Value {
         3,
         schema_number("coordinate in metres"),
     )
+}
+
+fn schema_spawn_scale() -> Value {
+    json::obj(vec![
+        (
+            "description",
+            json::s("driveable/character play scale: number 0.2..=3 or dimensions preset"),
+        ),
+        (
+            "anyOf",
+            Value::Arr(vec![
+                json::obj(vec![
+                    ("type", json::s("number")),
+                    ("minimum", Value::F64(0.2)),
+                    ("maximum", Value::F64(3.0)),
+                ]),
+                schema_string_enum("dimensions scale preset", &["real", "comic", "small", "handheld"]),
+            ]),
+        ),
+    ])
 }
 
 fn schema_number(description: &str) -> Value {
@@ -825,6 +1078,7 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "mesh_generate" => Some("mesh.generate"),
         "world_generate" => Some("world.generate"),
         "character_generate" => Some("character.generate"),
+        "content_generate" => Some("content.generate"),
         "defaults_get" => Some("defaults.get"),
         "defaults_set" => Some("defaults.set"),
         "fleet_introspect" => Some("fleet.introspect"),
@@ -845,10 +1099,13 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_list" => Some("world.list"),
         "world_get_source" => Some("world.get_source"),
         "world_set_source" => Some("world.set_source"),
+        "world_new_level" => Some("world.new_level"),
         "world_set_player_model" => Some("world.set_player_model"),
         "world_spawn" => Some("world.spawn"),
         "world_tune" => Some("world.tune"),
         "world_add_addon" => Some("world.add_addon"),
+        "model_build" => Some("model.build"),
+        "model_fetch" => Some("model.fetch"),
         _ => None,
     }
 }
@@ -1165,6 +1422,12 @@ pub enum ContentToolCall {
         prompt: String,
         model: Option<String>,
         seconds: Option<u32>,
+        /// The sung words. Separate from `prompt` because both music
+        /// backends take them separately — and because an empty lyric field
+        /// is exactly what makes MiniMax generate an instrumental.
+        lyrics: Option<String>,
+        steps: Option<u32>,
+        seed: Option<u64>,
     },
     MeshGenerate {
         prompt: String,
@@ -1183,6 +1446,11 @@ pub enum ContentToolCall {
     CharacterGenerate {
         prompt: String,
         model: Option<String>,
+    },
+    ContentGenerate {
+        kind: ContentGenerateKind,
+        prompt: String,
+        dim_height: Option<f64>,
     },
     DefaultsGet,
     DefaultsSet {
@@ -1214,6 +1482,10 @@ pub enum ContentToolCall {
     AssetsQuery { sql: String },
     /// Catalog table/column summary (sandbox sessions only).
     AssetsSchema,
+    /// Build or revise a bounded local exact-polygonal CSG program.
+    ModelBuild { title: String, source: String },
+    /// Fetch the authoritative CSG source for an existing generated alias.
+    ModelFetch { alias: AssetAlias },
     /// Place models into the running game world (sandbox sessions only).
     WorldPlace { items: Vec<WorldPlaceItem> },
     /// Remove placements by id or by tag (exactly one of the two).
@@ -1228,6 +1500,10 @@ pub enum ContentToolCall {
     /// primary path (sandbox sessions only; evaluated with last-good
     /// rollback on the client).
     WorldSetSource { source: String, note: Option<String> },
+    /// Publish `source` as a NEW game and switch the player to it (sandbox
+    /// sessions only; client-executed). The turn ENDS on the client's
+    /// answer — the new game has its own conversation.
+    WorldNewLevel { title: String, source: String, note: Option<String> },
     /// Swap the player's character rig in place — no source round-trip,
     /// structurally incapable of resetting the world (the cheap §4.5-style
     /// verb; sandbox sessions only).
@@ -1242,6 +1518,9 @@ pub enum ContentToolCall {
         model: String,
         pos: Option<[f64; 3]>,
         form: Option<SpawnForm>,
+        scale: Option<SpawnScale>,
+        color: Option<String>,
+        hue: Option<f64>,
         tag: Option<String>,
     },
     /// Adjust a WORLD knob on the running level in one cheap call (§4.5
@@ -1257,16 +1536,60 @@ pub enum ContentToolCall {
     /// no source echo, addon-lane eval, removable by name. The client
     /// refuses chunks that re-declare the world.
     WorldAddAddon { name: String, src: String },
+    /// An explicit named source target around any ordinary `world.*` call.
+    /// Keeping targeting orthogonal prevents the command variants and their
+    /// execution semantics from drifting apart.
+    WorldInSub { sub: String, call: Box<ContentToolCall> },
+}
+
+/// The three game-facing, publishable pipeline families. This is closed on
+/// purpose: the game profile cannot turn arbitrary strings into store jobs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentGenerateKind {
+    Character,
+    Prop,
+    Sound,
+}
+
+impl ContentGenerateKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Character => "character",
+            Self::Prop => "prop",
+            Self::Sound => "sound",
+        }
+    }
+
+    pub fn job_kind(self) -> &'static str {
+        match self {
+            // These are the composite pipeline profiles used by the Asset
+            // UI scheduler; audio is already a single publishable stage.
+            Self::Character => "character.generate",
+            Self::Prop => "mesh_from_image",
+            Self::Sound => "audio.generate",
+        }
+    }
 }
 
 /// The spawn form override of [`ContentToolCall::WorldSpawn`]. Absent, the
 /// game derives it from the asset (rigged → character, vehicle kit → car,
-/// else prop).
+/// else prop). `Follower` is an explicit character body plus the player-follow
+/// class; its model may be rigged or rigid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnForm {
     Car,
     Character,
+    Follower,
     Prop,
+}
+
+/// A world-spawn play size, preserved as authored until the client maps it to
+/// a driveable or character verb. Presets are the shared dimensions-contract
+/// vocabulary; exact values use the engine's safe 0.2..=3 band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpawnScale {
+    Exact(f64),
+    Preset(ScalePreset),
 }
 
 impl SpawnForm {
@@ -1274,6 +1597,7 @@ impl SpawnForm {
         match s {
             "car" | "vehicle" => Some(SpawnForm::Car),
             "character" | "npc" => Some(SpawnForm::Character),
+            "follower" => Some(SpawnForm::Follower),
             "prop" | "model" => Some(SpawnForm::Prop),
             _ => None,
         }
@@ -1337,6 +1661,7 @@ impl ContentToolCall {
             ContentToolCall::MeshGenerate { .. } => "mesh.generate",
             ContentToolCall::WorldGenerate { .. } => "world.generate",
             ContentToolCall::CharacterGenerate { .. } => "character.generate",
+            ContentToolCall::ContentGenerate { .. } => "content.generate",
             ContentToolCall::DefaultsGet => "defaults.get",
             ContentToolCall::DefaultsSet { .. } => "defaults.set",
             ContentToolCall::FleetIntrospect { .. } => "fleet.introspect",
@@ -1351,16 +1676,20 @@ impl ContentToolCall {
             ContentToolCall::LlmConsult { .. } => "llm.consult",
             ContentToolCall::AssetsQuery { .. } => "assets.query",
             ContentToolCall::AssetsSchema => "assets.schema",
+            ContentToolCall::ModelBuild { .. } => "model.build",
+            ContentToolCall::ModelFetch { .. } => "model.fetch",
             ContentToolCall::WorldPlace { .. } => "world.place",
             ContentToolCall::WorldRemove { .. } => "world.remove",
             ContentToolCall::WorldMove { .. } => "world.move",
             ContentToolCall::WorldList => "world.list",
             ContentToolCall::WorldGetSource => "world.get_source",
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
+            ContentToolCall::WorldNewLevel { .. } => "world.new_level",
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
             ContentToolCall::WorldSpawn { .. } => "world.spawn",
             ContentToolCall::WorldTune { .. } => "world.tune",
             ContentToolCall::WorldAddAddon { .. } => "world.add_addon",
+            ContentToolCall::WorldInSub { call, .. } => call.name(),
         }
     }
 
@@ -1374,6 +1703,31 @@ impl ContentToolCall {
         }
         if args.to_json().len() > MAX_TOOL_JSON_BYTES {
             return Err("tool arguments too large".to_string());
+        }
+        if name.starts_with("world.")
+            && name != "world.generate"
+            && name != "world.new_level"
+            && args.get("sub").is_some()
+        {
+            let sub = need_str(args, "sub", 64)?;
+            if sub == "main"
+                || (!sub.is_empty()
+                    && sub != "."
+                    && sub != ".."
+                    && sub.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+                    }))
+            {
+                let Value::Obj(pairs) = args else { unreachable!() };
+                let stripped = Value::Obj(
+                    pairs.iter().filter(|(key, _)| key != "sub").cloned().collect(),
+                );
+                return Ok(ContentToolCall::WorldInSub {
+                    sub,
+                    call: Box::new(ContentToolCall::parse(name, &stripped)?),
+                });
+            }
+            return Err("sub must be 1..64 ASCII letters/digits/dash/underscore/dot".into());
         }
         match name {
             "image.generate" => {
@@ -1418,11 +1772,21 @@ impl ContentToolCall {
                 })
             }
             "music.generate" => {
-                check_known(args, &["prompt", "model", "seconds"], "music.generate argument")?;
+                check_known(
+                    args,
+                    &["prompt", "model", "seconds", "lyrics", "steps", "seed"],
+                    "music.generate argument",
+                )?;
                 Ok(ContentToolCall::MusicGenerate {
                     prompt: need_prompt(args)?,
                     model: optional_str(args, "model")?.map(str::to_string),
                     seconds: optional_u32(args, "seconds", 5, 300)?,
+                    lyrics: optional_str(args, "lyrics")?
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string),
+                    steps: optional_u32(args, "steps", 1, 64)?,
+                    seed: optional_u64(args, "seed")?,
                 })
             }
             "mesh.generate" => {
@@ -1450,6 +1814,26 @@ impl ContentToolCall {
                 Ok(ContentToolCall::CharacterGenerate {
                     prompt: need_prompt(args)?,
                     model: optional_str(args, "model")?.map(str::to_string),
+                })
+            }
+            "content.generate" => {
+                check_known(
+                    args,
+                    &["kind", "prompt", "dim_height"],
+                    "content.generate argument",
+                )?;
+                let kind_text = need_str(args, "kind", 16)?;
+                let kind = match kind_text.as_str() {
+                    "character" => ContentGenerateKind::Character,
+                    "prop" => ContentGenerateKind::Prop,
+                    "sound" => ContentGenerateKind::Sound,
+                    _ => return Err("'kind' must be character, prop, or sound".to_string()),
+                };
+                let dim_height = optional_bounded_number(args, "dim_height", 0.01, 100.0)?;
+                Ok(ContentToolCall::ContentGenerate {
+                    kind,
+                    prompt: need_prompt(args)?,
+                    dim_height,
                 })
             }
             "defaults.get" => {
@@ -1552,11 +1936,17 @@ impl ContentToolCall {
                 }
                 let provider = match optional_str(args, "provider")? {
                     None => None,
-                    Some("openai") => Some(ProviderKind::OpenAi),
-                    Some("grok") => Some(ProviderKind::Grok),
-                    Some(_) => {
-                        return Err("provider must be openai or grok".to_string());
-                    }
+                    Some(slug) => match ProviderKind::from_slug(slug) {
+                        Some(kind) if kind.locality() == crate::wire::Locality::Cloud => {
+                            Some(kind)
+                        }
+                        _ => {
+                            return Err(
+                                "provider must be openai, grok, claude-cli, codex-cli or grok-cli"
+                                    .to_string(),
+                            );
+                        }
+                    },
                 };
                 Ok(ContentToolCall::LlmConsult { task, prompt, provider })
             }
@@ -1661,6 +2051,28 @@ impl ContentToolCall {
                 check_known(args, &[], "world.get_source argument")?;
                 Ok(ContentToolCall::WorldGetSource)
             }
+            "model.build" => {
+                check_known(args, &["title", "source"], "model.build argument")?;
+                let title = need_str(args, "title", MAX_MODEL_TITLE_BYTES)?;
+                if title.trim().is_empty() || title.chars().any(char::is_control) {
+                    return Err("title must be display text".to_string());
+                }
+                let source = need_str(args, "source", MAX_MODEL_SOURCE_BYTES)?;
+                if source.trim().is_empty() || source.contains('\u{0}') {
+                    return Err("source must be non-empty text without NUL".to_string());
+                }
+                Ok(ContentToolCall::ModelBuild { title, source })
+            }
+            "model.fetch" => {
+                check_known(args, &["alias"], "model.fetch argument")?;
+                let text = need_str(args, "alias", 128)?;
+                let alias = AssetAlias::from_str(&text)
+                    .map_err(|_| "alias must be a valid gen/csg/<slug> alias".to_string())?;
+                if !alias.as_str().starts_with("gen/csg/") {
+                    return Err("alias must start with gen/csg/".to_string());
+                }
+                Ok(ContentToolCall::ModelFetch { alias })
+            }
             "world.set_source" => {
                 check_known(args, &["source", "note"], "world.set_source argument")?;
                 let source = need_str(args, "source", MAX_WORLD_SOURCE_BYTES)?;
@@ -1677,6 +2089,27 @@ impl ContentToolCall {
                     })
                     .transpose()?;
                 Ok(ContentToolCall::WorldSetSource { source, note })
+            }
+            "world.new_level" => {
+                check_known(args, &["title", "source", "note"], "world.new_level argument")?;
+                let title = need_str(args, "title", MAX_NEW_LEVEL_TITLE_BYTES)?;
+                if title.trim().is_empty() || title.chars().any(char::is_control) {
+                    return Err("title must be display text".to_string());
+                }
+                let source = need_str(args, "source", MAX_WORLD_SOURCE_BYTES)?;
+                if source.contains('\u{0}') {
+                    return Err("source must not contain NUL".to_string());
+                }
+                let note = optional_str(args, "note")?
+                    .map(|n| {
+                        if n.len() > 200 {
+                            Err("note too long".to_string())
+                        } else {
+                            Ok(n.to_string())
+                        }
+                    })
+                    .transpose()?;
+                Ok(ContentToolCall::WorldNewLevel { title, source, note })
             }
             "world.set_player_model" => {
                 check_known(args, &["model"], "world.set_player_model argument")?;
@@ -1712,7 +2145,11 @@ impl ContentToolCall {
                 Ok(ContentToolCall::WorldTune { time, car_speed })
             }
             "world.spawn" => {
-                check_known(args, &["model", "pos", "form", "tag"], "world.spawn argument")?;
+                check_known(
+                    args,
+                    &["model", "pos", "form", "scale", "color", "hue", "tag"],
+                    "world.spawn argument",
+                )?;
                 let model = need_str(args, "model", MAX_MODEL_REF_CHARS)?;
                 check_model_ref(&model)?;
                 let pos = match args.get("pos") {
@@ -1722,9 +2159,23 @@ impl ContentToolCall {
                 let form = match optional_str(args, "form")? {
                     None => None,
                     Some(s) => Some(SpawnForm::from_slug(s).ok_or_else(|| {
-                        "form must be car, character, or prop".to_string()
+                        "form must be car, character, follower, or prop".to_string()
                     })?),
                 };
+                let scale = optional_spawn_scale(args)?;
+                let color = match optional_str(args, "color")? {
+                    None => None,
+                    Some(value) => {
+                        let hex = value.strip_prefix('#').unwrap_or(value);
+                        if !matches!(hex.len(), 6 | 8)
+                            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        {
+                            return Err("color must be #rrggbb or #rrggbbaa".to_string());
+                        }
+                        Some(format!("#{hex}"))
+                    }
+                };
+                let hue = optional_bounded_number(args, "hue", -36_000.0, 36_000.0)?;
                 let tag = match optional_str(args, "tag")? {
                     None => None,
                     Some(t) if ident_ok(t) => Some(t.to_string()),
@@ -1732,7 +2183,15 @@ impl ContentToolCall {
                         return Err("tag must be a short lowercase identifier".to_string())
                     }
                 };
-                Ok(ContentToolCall::WorldSpawn { model, pos, form, tag })
+                Ok(ContentToolCall::WorldSpawn {
+                    model,
+                    pos,
+                    form,
+                    scale,
+                    color,
+                    hue,
+                    tag,
+                })
             }
             "world.add_addon" => {
                 check_known(args, &["name", "src"], "world.add_addon argument")?;
@@ -1816,6 +2275,43 @@ fn optional_scale(v: &Value) -> Result<Option<f64>, String> {
             let n = json_num(n).ok_or_else(|| "'scale' must be a number".to_string())?;
             if !n.is_finite() || !(0.001..=1000.0).contains(&n) {
                 return Err("'scale' must be 0.001..=1000".to_string());
+            }
+            Ok(Some(n))
+        }
+    }
+}
+
+fn optional_spawn_scale(v: &Value) -> Result<Option<SpawnScale>, String> {
+    match v.get("scale") {
+        None => Ok(None),
+        Some(Value::Str(name)) => ScalePreset::parse(name)
+            .map(SpawnScale::Preset)
+            .map(Some)
+            .ok_or_else(|| "'scale' must be 0.2..=3 or real/comic/small/handheld".to_string()),
+        Some(value) => {
+            let n = json_num(value).ok_or_else(|| {
+                "'scale' must be 0.2..=3 or real/comic/small/handheld".to_string()
+            })?;
+            if !n.is_finite() || !(0.2..=3.0).contains(&n) {
+                return Err("'scale' must be 0.2..=3 or real/comic/small/handheld".to_string());
+            }
+            Ok(Some(SpawnScale::Exact(n)))
+        }
+    }
+}
+
+fn optional_bounded_number(
+    v: &Value,
+    key: &'static str,
+    min: f64,
+    max: f64,
+) -> Result<Option<f64>, String> {
+    match v.get(key) {
+        None => Ok(None),
+        Some(n) => {
+            let n = json_num(n).ok_or_else(|| format!("'{key}' must be a number"))?;
+            if !n.is_finite() || !(min..=max).contains(&n) {
+                return Err(format!("'{key}' must be {min}..={max}"));
             }
             Ok(Some(n))
         }
@@ -2122,6 +2618,13 @@ fn encode_prompt_model(prompt: &str, model: &Option<String>) -> Value {
 /// Encode a typed call back to its wire argument object (used when
 /// re-rendering history and in tests).
 pub fn encode_args(call: &ContentToolCall) -> Value {
+    if let ContentToolCall::WorldInSub { sub, call } = call {
+        let mut value = encode_args(call);
+        if let Value::Obj(pairs) = &mut value {
+            pairs.push(("sub".into(), json::s(sub.clone())));
+        }
+        return value;
+    }
     match call {
         ContentToolCall::ImageGenerate { prompt, then, model, width, height, steps } => {
             encode_image_prompt(prompt, model, width, height, steps, *then)
@@ -2156,13 +2659,22 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             Value::Obj(pairs)
         }
-        ContentToolCall::MusicGenerate { prompt, model, seconds } => {
+        ContentToolCall::MusicGenerate { prompt, model, seconds, lyrics, steps, seed } => {
             let mut pairs = match encode_prompt_model(prompt, model) {
                 Value::Obj(p) => p,
                 other => return other,
             };
+            if let Some(text) = lyrics {
+                pairs.push(("lyrics".into(), json::s(text.clone())));
+            }
             if let Some(s) = seconds {
                 pairs.push(("seconds".into(), Value::Int(*s as i64)));
+            }
+            if let Some(s) = steps {
+                pairs.push(("steps".into(), Value::Int(*s as i64)));
+            }
+            if let Some(s) = seed {
+                pairs.push(("seed".into(), Value::Int(*s as i64)));
             }
             Value::Obj(pairs)
         }
@@ -2173,6 +2685,16 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             encode_image_prompt(prompt, model, width, height, steps, None)
         }
         ContentToolCall::CharacterGenerate { prompt, model } => encode_prompt_model(prompt, model),
+        ContentToolCall::ContentGenerate { kind, prompt, dim_height } => {
+            let mut pairs = vec![
+                ("kind", json::s(kind.as_str())),
+                ("prompt", json::s(prompt.clone())),
+            ];
+            if let Some(height) = dim_height {
+                pairs.push(("dim_height", Value::F64(*height)));
+            }
+            json::obj(pairs)
+        }
         ContentToolCall::DefaultsGet => Value::Obj(Vec::new()),
         ContentToolCall::DefaultsSet { image_model, width, height, steps, then } => {
             let mut pairs = Vec::new();
@@ -2288,6 +2810,13 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         }
         ContentToolCall::AssetsQuery { sql } => json::obj(vec![("sql", json::s(sql.clone()))]),
         ContentToolCall::AssetsSchema => Value::Obj(Vec::new()),
+        ContentToolCall::ModelBuild { title, source } => json::obj(vec![
+            ("title", json::s(title.clone())),
+            ("source", json::s(source.clone())),
+        ]),
+        ContentToolCall::ModelFetch { alias } => {
+            json::obj(vec![("alias", json::s(alias.to_string()))])
+        }
         ContentToolCall::WorldPlace { items } => json::obj(vec![(
             "items",
             Value::Arr(
@@ -2347,6 +2876,16 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
+        ContentToolCall::WorldNewLevel { title, source, note } => {
+            let mut pairs = vec![
+                ("title", json::s(title.clone())),
+                ("source", json::s(source.clone())),
+            ];
+            if let Some(n) = note {
+                pairs.push(("note", json::s(n.clone())));
+            }
+            json::obj(pairs)
+        }
         ContentToolCall::WorldSetPlayerModel { model } => {
             json::obj(vec![("model", json::s(model.clone()))])
         }
@@ -2360,7 +2899,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
-        ContentToolCall::WorldSpawn { model, pos, form, tag } => {
+        ContentToolCall::WorldSpawn { model, pos, form, scale, color, hue, tag } => {
             let mut pairs = vec![("model", json::s(model.clone()))];
             if let Some(p) = pos {
                 pairs.push(("pos", encode_pos(p)));
@@ -2369,9 +2908,25 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
                 let slug = match f {
                     SpawnForm::Car => "car",
                     SpawnForm::Character => "character",
+                    SpawnForm::Follower => "follower",
                     SpawnForm::Prop => "prop",
                 };
                 pairs.push(("form", json::s(slug)));
+            }
+            if let Some(scale) = scale {
+                pairs.push((
+                    "scale",
+                    match scale {
+                        SpawnScale::Exact(n) => Value::F64(*n),
+                        SpawnScale::Preset(preset) => json::s(preset.as_str()),
+                    },
+                ));
+            }
+            if let Some(color) = color {
+                pairs.push(("color", json::s(color.clone())));
+            }
+            if let Some(hue) = hue {
+                pairs.push(("hue", Value::F64(*hue)));
             }
             if let Some(t) = tag {
                 pairs.push(("tag", json::s(t.clone())));
@@ -2382,6 +2937,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             ("name", json::s(name.clone())),
             ("src", json::s(src.clone())),
         ]),
+        ContentToolCall::WorldInSub { .. } => unreachable!(),
     }
 }
 
