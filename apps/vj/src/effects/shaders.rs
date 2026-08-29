@@ -947,14 +947,17 @@ script_mod! {
                 return vec3(cos(ang) * rad, y, sin(ang) * rad)
             }
             if mode < 6.5 {
-                // IMAGE: home on a square picture-plane grid (equal spacing
-                // both axes); a swirl carries the pixels away and back.
+                // IMAGE: home on a 16:9 picture-plane grid with square
+                // cells (shape.w = sqrt(count*16/9), rows = w*9/16); a
+                // swirl carries the pixels away and back. Spans keep the
+                // square look's area: 1.6 x 0.9 = 1.2^2 * 16/9 aspect.
                 let w = self.shape.w
+                let h = ceil(w * 0.5625)
                 let gx = modf(id, w)
                 let gy = floor(id / w)
                 let home = vec3(
-                    (gx / w - 0.5) * spread * 1.2,
-                    (0.5 - gy / w) * spread * 1.2,
+                    (gx / w - 0.5) * spread * 1.6,
+                    (0.5 - gy / h) * spread * 0.9,
                     0.0
                 )
                 let diss = 0.5 - 0.5 * cos(self.time_beat.y * 0.7853982)
@@ -1079,7 +1082,8 @@ script_mod! {
                 // IMAGE mode: the tint IS the texel this particle carries.
                 // Vertex-stage fetch, explicit lod (vertex-legal sampler).
                 let w = self.shape.w
-                let uv = vec2(modf(id, w) / w, floor(id / w) / w)
+                let h = ceil(w * 0.5625)
+                let uv = vec2(modf(id, w) / w, floor(id / w) / h)
                 let texel = self.tex0.sample_nearest(uv, 0.0)
                 tint = vec4(texel.xyz * (1.0 + self.time_beat.w * 0.5), 1.0)
             }

@@ -2230,6 +2230,7 @@ impl Widget for FlowTweenView {
                     cx.end_pass(&st.pass);
                 }
                 stage += 1;
+                _ = stage;
             }};
         }
         for op in derive_ops {
