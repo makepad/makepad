@@ -5374,11 +5374,13 @@ pub struct App {
     fx_prefab: HashMap<String, Texture>,
     #[rust(BrowseModel::visual())]
     video_model: BrowseModel,
-    // The deck explorer lists EVERY audio asset in the store, whatever its
-    // namespace or category: a generated song is as loadable as an imported
-    // one. Only the intermediate-artifact exclusion applies (that is in the
-    // query itself). The sfx surface keeps its own narrower model.
-    #[rust(BrowseModel::new(AssetKind::Audio, ""))]
+    // The deck explorer opens on MUSIC: every publisher of a song — the
+    // music importer and the music-domain generators alike — writes
+    // category "music", so the filter loses nothing a DJ would load, and
+    // without it the store's hundreds of one-shot SFX bury the tracks
+    // (the startup view was a wall of doom effects). The category box is
+    // seeded with the same word; clearing it widens to all audio.
+    #[rust(BrowseModel::new(AssetKind::Audio, "music"))]
     music_model: BrowseModel,
     #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
     sfx_model: BrowseModel,
