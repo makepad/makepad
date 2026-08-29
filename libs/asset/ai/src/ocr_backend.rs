@@ -1301,8 +1301,10 @@ mod resident {
 
         /// Prefill rows per step for the page's image tokens.
         const PREFILL_BATCH: usize = 512;
-        /// Activation arena reserved beside the weights for those steps.
-        const EXTRA_ACTIVATION_BYTES: usize = 1 << 30;
+        /// Activation arena reserved beside the weights for those steps —
+        /// sized for the widest model this backend serves (the 27B's
+        /// 512-row prefill outgrew 1 GiB by 15 MB).
+        const EXTRA_ACTIVATION_BYTES: usize = 2 << 30;
         /// How often a growing answer is published as `partial_text`.
         const TEXT_SNAPSHOT_EVERY: usize = 16;
         /// How often the tail is checked for a loop while decoding. The
