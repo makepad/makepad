@@ -2000,6 +2000,39 @@ enum StructKind {
     NoEditor,
 }
 
+/// The app's theme palette: every `color_*` in `mod.theme`, with the
+/// level that defines it. Read once per session from the script cascade.
+fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
+    let mut out: Vec<(String, u32, String)> = Vec::new();
+    cx.with_vm(|vm| {
+        let theme = vm.module(id!(theme));
+        let chain = vm.construction_chain(theme.into());
+        let mut keys: Vec<(LiveId, String)> = Vec::new();
+        for lvl in &chain {
+            let loc = lvl
+                .loc
+                .as_ref()
+                .map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line))
+                .unwrap_or_default();
+            for key in &lvl.own_keys {
+                if !keys.iter().any(|(k, _)| k == key) {
+                    keys.push((*key, loc.clone()));
+                }
+            }
+        }
+        for (key, loc) in keys {
+            let name = live_id_token(key);
+            if !name.starts_with("color") {
+                continue;
+            }
+            if let Some(color) = vm.bx.heap.value(theme, key.into(), NoTrap).as_color() {
+                out.push((name, color, loc));
+            }
+        }
+    });
+    out
+}
+
 /// Selected state by fill, never by brackets in the label.
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
@@ -2748,6 +2781,12 @@ pub fn apply_splash_chunk(
             s.last_sidebar_log = Some((path.to_string(), prop.to_string(), now));
             true
         };
+        // A `prop: theme.color_x` chunk ledgers the REFERENCE, not the hex
+        // the reflection resolves it to — the AI writes the reference into
+        // source.
+        let theme_ref = single_prop_chunk(chunk)
+            .filter(|(_, value)| value.trim().starts_with("theme."))
+            .map(|(prop, value)| (prop, value.trim().to_string()));
         for (name, new_value, _) in &after {
             let old_value = before
                 .iter()
@@ -2756,12 +2795,16 @@ pub fn apply_splash_chunk(
                 .unwrap_or_else(|| "-".to_string());
             if &old_value != new_value {
                 s.next_seq += 1;
+                let shown_new = match &theme_ref {
+                    Some((p, reference)) if p == name => reference.clone(),
+                    _ => new_value.clone(),
+                };
                 let entry = TweakDiffEntry {
                     seq: s.next_seq,
                     path: path.to_string(),
                     prop: name.clone(),
                     old: old_value,
-                    new: new_value.clone(),
+                    new: shown_new,
                     origin: origin_site.clone(),
                     siblings,
                     scope: scope_name.to_string(),
@@ -3900,6 +3943,10 @@ struct RowBinding {
     /// fn body (Cx::shader_const_table), hot-patched on the GPU — never a
     /// chunk apply.
     const_ref: Option<ConstRef>,
+    /// The theme colour this row's value equals, when one does.
+    theme_match: Option<String>,
+    /// The row's "≈ theme.color_x" button uid (click = use the reference).
+    theme_uid: u64,
 }
 
 /// One hot-patchable shader constant of the pinned widget's draw layer.
@@ -4178,6 +4225,9 @@ pub struct Tweaker {
     /// The Props list's viewport (props_wrap below the scope control).
     #[rust]
     props_viewport: Option<Rect>,
+    /// The theme's colour palette (name, rgba, defined-at), read once.
+    #[rust]
+    theme_colors: Vec<(String, u32, String)>,
     /// A scroll-to-selection servo: each tree draw reports where the
     /// selected row landed and the error is corrected until it is inside
     /// the viewport (estimates and clamping cannot diverge it).
@@ -4371,6 +4421,10 @@ impl Tweaker {
     fn ensure_sidebar(&mut self, cx: &mut Cx) {
         if self.sidebar.is_some() {
             return;
+        }
+        if self.theme_colors.is_empty() {
+            self.theme_colors = theme_palette(cx);
+            log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
         // The shader source view is a plain multiline TextInput, on purpose:
         // the real code editor as a sidebar child would put a CodeView in
@@ -4722,6 +4776,9 @@ impl Tweaker {
                     swatch := FabColorPick {
                         width: 28
                         height: 16
+                    }
+                    tname_wrap := View { width: Fit height: Fit visible: false
+                        tname := Button { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                     }
                     origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
                 }
@@ -5170,6 +5227,8 @@ impl Tweaker {
                 mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
                 const_ref: None,
+                theme_match: None,
+                theme_uid: 0,
             });
         }
         // Session-original + resettable flags from the diff log.
@@ -5267,6 +5326,8 @@ impl Tweaker {
                         mode_uids: Vec::new(),
                         alt_uids: Vec::new(),
                         const_ref: Some(ConstRef { shader, index, layer: layer.clone(), loc, name, initial }),
+                        theme_match: None,
+                        theme_uid: 0,
                     });
                 }
             }
@@ -6477,6 +6538,24 @@ impl Tweaker {
                                     self.rows[index].swatch_uid = swatch.widget_uid().0;
                                 }
                                 let rgba = parse_hex(&self.rows[index].value);
+                                // Theme mapping: a value that IS a theme
+                                // colour names it, and one click makes the
+                                // property say `theme.color_x` in splash.
+                                let matched = rgba.and_then(|(c, _)| {
+                                    let packed = ((c[0] * 255.0).round() as u32) << 24
+                                        | ((c[1] * 255.0).round() as u32) << 16
+                                        | ((c[2] * 255.0).round() as u32) << 8
+                                        | ((c[3] * 255.0).round() as u32);
+                                    self.theme_colors.iter().find(|(_, tc, _)| *tc == packed).map(|(n, _, _)| n.clone())
+                                });
+                                let wrap = item.child(live_id!(tname_wrap));
+                                wrap.set_visible(cx, matched.is_some());
+                                if let Some(name) = &matched {
+                                    let btn = wrap.child(live_id!(tname));
+                                    btn.set_text(cx, &format!("\u{2248} theme.{name}"));
+                                    self.rows[index].theme_uid = btn.widget_uid().0;
+                                }
+                                self.rows[index].theme_match = matched;
                                 {
                                     if let Some(mut pick) =
                                         swatch.borrow_mut::<FabColorPick>()
@@ -7208,6 +7287,18 @@ impl Tweaker {
                     log!("TWEAK scope {}", if all { "all — every widget of the type" } else { "this — specialise this instance" });
                     self.rows_uid = 0;
                     self.redraw_sidebar(cx);
+                }
+                continue;
+            }
+            if let Some((index, name)) = self.rows.iter().enumerate().find_map(|(i, b)| {
+                if b.theme_uid != 0 && b.theme_uid == action_uid {
+                    b.theme_match.clone().map(|n| (i, n))
+                } else {
+                    None
+                }
+            }) {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    edits.push(Edit::Apply(format!("{}: theme.{}", self.rows[index].prop, name)));
                 }
                 continue;
             }
