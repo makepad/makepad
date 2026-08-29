@@ -4008,7 +4008,7 @@ impl Tweaker {
                         tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
                     }
-                    shader_col := View {
+                    shader_col := ScrollYView {
                         width: Fill
                         height: Fill
                         flow: Down
@@ -4031,34 +4031,34 @@ impl Tweaker {
                         states_row := View {
                             width: Fill
                             height: Fit
-                            flow: Flow.Right{wrap: true}
-                            spacing: 6
+                            flow: Down
+                            spacing: 8
                             visible: false
-                            st0 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
-                            st1 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
-                            st2 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
-                            st3 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
-                            st4 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
-                            st5 := View { width: Fit height: Fit flow: Down spacing: 2 visible: false
-                                sw := TweakMaterialSwatch { width: 56 height: 36 }
-                                lbl := FabLabelSmall { text: "" }
-                            }
                             states_pause := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            st0 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
+                            st1 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
+                            st2 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
+                            st3 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
+                            st4 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
+                            st5 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
+                                lbl := FabLabelSmall { text: "" }
+                                sw := TweakMaterialSwatch { width: Fill height: 150 }
+                            }
                         }
                         src_fold := Button {
                             width: Fit
@@ -4067,9 +4067,9 @@ impl Tweaker {
                             text: "+ source"
                             draw_text +: { text_style +: { font_size: 8.0 } }
                         }
-                        src_scroll := ScrollYView {
+                        src_scroll := View {
                             width: Fill
-                            height: Fill
+                            height: Fit
                             show_bg: true
                             draw_bg +: { color: #x1b1b1b }
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
@@ -5067,9 +5067,6 @@ impl Tweaker {
                         && (cx.has_key_focus(editor.area()) || editor.text() == self.live_last_applied);
                     if editor.text() != text && !typing {
                         editor.set_text(cx, &text);
-                        // Line 1 visible: new text, viewport home (the
-                        // scroll lives on the wrapping ScrollYView now).
-                        col.child(live_id!(src_scroll)).set_scroll_pos(cx, dvec2(0.0, 0.0));
                         self.live_last_applied = text.clone();
                         self.live_last_good = text.clone();
                     }
