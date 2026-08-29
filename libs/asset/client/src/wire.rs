@@ -386,6 +386,55 @@ pub fn path_jobs_list(
     p
 }
 
+// ---- pipelines (declared multi-stage runs) ---------------------------------
+
+/// Transport pipeline id prefix; the full shape is `pipe_<32 lowercase hex>`
+/// (the server's `api::PIPELINE_PREFIX`).
+pub const PIPELINE_PREFIX: &str = "pipe_";
+
+/// Most stages one declared pipeline may carry (the server's
+/// `MAX_PIPELINE_STAGES`, which is the job graph's depth budget).
+pub const MAX_PIPELINE_STAGES: usize = 8;
+/// Longest pipeline title the server accepts.
+pub const MAX_PIPELINE_TITLE_BYTES: usize = 200;
+/// Longest recorded pipeline prompt — the words the PERSON typed, which is
+/// also what an `on_fail: skip` stage falls back to.
+pub const MAX_PIPELINE_PROMPT_BYTES: usize = 4000;
+/// Declared stage weight bounds; the server refuses `0` and anything above.
+pub const MAX_STAGE_WEIGHT: u16 = 1000;
+/// Most rows one `GET /v1/pipelines` page may ask for (server cap).
+pub const MAX_PIPELINE_LIST_LIMIT: u64 = 200;
+
+pub fn path_pipelines() -> String {
+    "/v1/pipelines".to_string()
+}
+
+/// `pipeline` is the canonical `pipe_<32 lowercase hex>` display spelling.
+pub fn path_pipeline(pipeline: &str) -> String {
+    format!("/v1/pipelines/{pipeline}")
+}
+
+pub fn path_pipeline_cancel(pipeline: &str) -> String {
+    format!("/v1/pipelines/{pipeline}/cancel")
+}
+
+/// Scoped pipeline listing. With `ns` the server requires a job capability
+/// on that namespace; without it the caller's own runs are listed.
+///
+/// `active_only` is the state filter the global runs surface polls: the
+/// server answers it from a partial index and then re-derives every row, so
+/// "the runs still moving" is exact no matter how much finished history sits
+/// in front of them.
+pub fn path_pipelines_list(ns: Option<&str>, active_only: bool, limit: u64) -> String {
+    let mut p = format!("/v1/pipelines?limit={limit}");
+    if let Some(ns) = ns {
+        p.push_str("&ns=");
+        p.push_str(ns);
+    }
+    p.push_str(if active_only { "&state=active" } else { "&state=all" });
+    p
+}
+
 /// Resumable long-poll over the committed-catalog event journal. Every
 /// parameter travels in the query string, so every value must already be
 /// query-charset safe (cursors are validated on receipt, kind names are a

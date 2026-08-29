@@ -1364,9 +1364,17 @@ pub fn sanitize_stage_text(text: &str, max: usize) -> String {
 }
 
 fn parse_job_stages(v: &Value) -> Vec<JobStageDto> {
-    let Some(items) = v.get("stages").and_then(Value::as_arr) else {
-        return Vec::new();
-    };
+    match v.get("stages").and_then(Value::as_arr) {
+        Some(items) => parse_stage_records(items),
+        None => Vec::new(),
+    }
+}
+
+/// The `[{name, recorded_ms, record:{…}}]` array of worker stage-input
+/// records, wherever it appears: `stages` on a job read, `records` on one
+/// stage of a pipeline read. Lenient by design — a record this build cannot
+/// read is a record it does not show, never a refused response.
+fn parse_stage_records(items: &[Value]) -> Vec<JobStageDto> {
     let mut out = Vec::new();
     for item in items.iter().take(32) {
         let Some(name) = item.get("name").and_then(Value::as_str) else {
@@ -1597,26 +1605,30 @@ pub fn parse_job_detail(v: &Value) -> ClientResult<JobDetailDto> {
         }
     };
     let progress = parse_progress(v)?;
-    let result = match v.get("result") {
-        None | Some(Value::Null) => None,
-        Some(r) => {
-            let outcome_s = need_str(r, "outcome", 64, "job result outcome")?;
-            check_display(outcome_s, "job result outcome")?;
-            let attempt = need_u64(r, "attempt", "job result attempt")?;
-            if attempt == 0 || attempt > u32::MAX as u64 {
-                return Err(ClientError::Protocol { what: "job result attempt" });
-            }
-            let recorded_ms = need_u64(r, "recorded_ms", "job result recorded_ms")?;
-            let body = r.get("body").cloned().unwrap_or(Value::Null);
-            Some(JobResultDto {
-                outcome: outcome_s.to_string(),
-                attempt: attempt as u32,
-                recorded_ms,
-                body,
-            })
-        }
-    };
+    let result = parse_job_result(v)?;
     Ok(JobDetailDto { status, enqueued_by, attempts, progress, result })
+}
+
+/// The recorded terminal `result` block of a job document, wherever it
+/// appears (the job detail read, and one stage of a pipeline read).
+fn parse_job_result(v: &Value) -> ClientResult<Option<JobResultDto>> {
+    let Some(r) = v.get("result").filter(|r| !matches!(r, Value::Null)) else {
+        return Ok(None);
+    };
+    let outcome_s = need_str(r, "outcome", 64, "job result outcome")?;
+    check_display(outcome_s, "job result outcome")?;
+    let attempt = need_u64(r, "attempt", "job result attempt")?;
+    if attempt == 0 || attempt > u32::MAX as u64 {
+        return Err(ClientError::Protocol { what: "job result attempt" });
+    }
+    let recorded_ms = need_u64(r, "recorded_ms", "job result recorded_ms")?;
+    let body = r.get("body").cloned().unwrap_or(Value::Null);
+    Ok(Some(JobResultDto {
+        outcome: outcome_s.to_string(),
+        attempt: attempt as u32,
+        recorded_ms,
+        body,
+    }))
 }
 
 /// One row of the scoped job listing (`GET /v1/jobs`).
@@ -1678,6 +1690,490 @@ pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
         });
     }
     Ok(out)
+}
+
+// ---- pipelines (declared multi-stage runs) ---------------------------------
+
+/// Client-side pipeline identity: the transport's `pipe_<32 lowercase hex>`
+/// spelling, parsed strictly (mirrors [`JobId`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PipelineId(pub [u8; 16]);
+
+impl PipelineId {
+    pub fn parse(text: &str) -> Option<PipelineId> {
+        let hex = text.strip_prefix(crate::wire::PIPELINE_PREFIX)?;
+        Some(PipelineId(from_hex_exact::<16>(hex)?))
+    }
+}
+
+impl std::fmt::Display for PipelineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", crate::wire::PIPELINE_PREFIX, crate::util::to_hex(&self.0))
+    }
+}
+
+/// A pipeline's state. DERIVED by the server from its stage jobs on every
+/// read and never stored, so it cannot drift from the work:
+///
+/// - `Failed` if any stage failed and was not declared `on_fail: skip` —
+///   immediately, without waiting for doom propagation to reach the stages
+///   that depended on it;
+/// - else `Running` while any stage is still non-terminal;
+/// - else `Cancelled` if any stage was cancelled;
+/// - else `Succeeded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelineStateDto {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl PipelineStateDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// What a stage declared should happen to the run when the stage fails:
+/// `Fail` takes the whole pipeline down at that stage (the default), `Skip`
+/// lets the run continue — the store rewrites the dependents' spliced
+/// references to the prompt the person typed and detaches the edge, so an
+/// expander that refuses can never lose a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageOnFailDto {
+    Fail,
+    Skip,
+}
+
+impl StageOnFailDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Skip => "skip",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "fail" => Self::Fail,
+            "skip" => Self::Skip,
+            _ => return None,
+        })
+    }
+}
+
+/// One row of `GET /v1/pipelines` — everything one run CARD needs in one
+/// request: what it is, the words the person typed, where it got to, and
+/// what it is doing right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineRowDto {
+    pub pipeline: PipelineId,
+    pub namespace: String,
+    pub title: String,
+    pub state: PipelineStateDto,
+    /// Weighted aggregate over the declared stages, `0..=1000`.
+    pub permille: u16,
+    /// How many stages the run declared.
+    pub stages: u32,
+    pub enqueued_by: Option<PrincipalDto>,
+    pub created_ms: u64,
+    /// The person's own words, display-bounded to 256 chars by the server
+    /// (the whole text comes back on the single read).
+    pub prompt: Option<String>,
+    /// The failure point if there is one, else the stage running now, else
+    /// the next pending one.
+    pub current_stage: Option<String>,
+    /// The current stage's progress note — the explanation for a flat bar
+    /// (`@.166 queued behind 1 run`, `waiting-for-vram: …`). Empty when the
+    /// stage has not reported one.
+    pub note: String,
+    /// When the run reached a terminal state, once it has.
+    pub finished_ms: Option<u64>,
+}
+
+impl PipelineRowDto {
+    /// Percent for display, floored — the same number the card shows.
+    pub fn percent(&self) -> u16 {
+        self.permille / 10
+    }
+}
+
+/// One stage of `GET /v1/pipelines/<id>`: the declared row joined to what
+/// its job actually did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineStageDto {
+    pub name: String,
+    /// Declaration order, `0`-based.
+    pub seq: u32,
+    pub job: JobId,
+    pub kind: String,
+    pub state: JobStateDto,
+    /// The stage failed and was declared `on_fail: skip`: the run went on
+    /// without it. Derived server-side, never stored.
+    pub skipped: bool,
+    pub weight: u16,
+    pub on_fail: StageOnFailDto,
+    pub attempts: u32,
+    pub progress: Option<JobProgressDto>,
+    /// The body this stage was ENQUEUED with, read back from the job
+    /// payload — present while the stage is still pending, which is what
+    /// makes a spawned run inspectable at t=0. `$from_stage` references
+    /// appear here in their rewritten `{"$from": "job_…", "field": …}` wire
+    /// form until the claim splices them.
+    pub declared: Option<Value>,
+    /// What the worker recorded it actually SENT, once the stage was
+    /// dispatched (the schema-v5 `job_stages` records).
+    pub records: Vec<JobStageDto>,
+    /// The recorded terminal result document, once the stage is terminal.
+    pub result: Option<JobResultDto>,
+}
+
+impl PipelineStageDto {
+    /// This stage's own contribution to the aggregate bar, `0..=1000`:
+    /// a full band for a succeeded or skipped stage, nothing for a pending
+    /// one, and wherever the work stopped for everything else.
+    pub fn done_permille(&self) -> u16 {
+        if self.state == JobStateDto::Succeeded || self.skipped {
+            return 1000;
+        }
+        if self.state == JobStateDto::Pending {
+            return 0;
+        }
+        self.progress.as_ref().map(|p| p.permille).unwrap_or(0)
+    }
+}
+
+/// `GET /v1/pipelines/<id>` — the whole run in one request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineDetailDto {
+    pub pipeline: PipelineId,
+    pub namespace: String,
+    pub title: String,
+    pub state: PipelineStateDto,
+    /// The server's weighted aggregate, `0..=1000`.
+    pub permille: u16,
+    pub enqueued_by: Option<PrincipalDto>,
+    pub created_ms: u64,
+    /// The person's whole text, at full length.
+    pub prompt: String,
+    pub current_stage: Option<String>,
+    pub finished_ms: Option<u64>,
+    /// Every declared stage, in declaration order.
+    pub stages: Vec<PipelineStageDto>,
+}
+
+impl PipelineDetailDto {
+    pub fn percent(&self) -> u16 {
+        self.permille / 10
+    }
+
+    pub fn stage(&self, name: &str) -> Option<&PipelineStageDto> {
+        self.stages.iter().find(|s| s.name == name)
+    }
+
+    /// The stage the run is at: the failure point if there is one, else the
+    /// first running stage, else the next pending one, else the last.
+    pub fn current(&self) -> Option<&PipelineStageDto> {
+        match &self.current_stage {
+            Some(name) => self.stage(name),
+            None => None,
+        }
+    }
+
+    /// The same weighted aggregate the server reports, recomputed locally:
+    /// `Σ(weight × done) / Σ(weight)`. Not a substitute for [`Self::permille`]
+    /// — it exists so a client that draws LOCAL runs with the same card
+    /// grammar computes the bar exactly one way.
+    pub fn aggregate_permille(&self) -> u16 {
+        aggregate_permille(self.stages.iter().map(|s| (s.weight, s.done_permille())))
+    }
+}
+
+/// `Σ(weight × done) / Σ(weight)`, floored and clamped to `1000` — the one
+/// implementation of the pipeline bar, shared by the server-recorded runs
+/// and any client-local one drawn beside them. An empty (or weightless) run
+/// is `0`; a completed stage contributes its whole weight, so the aggregate
+/// never falls across a stage boundary.
+pub fn aggregate_permille(stages: impl Iterator<Item = (u16, u16)>) -> u16 {
+    let mut total = 0u64;
+    let mut done = 0u64;
+    for (weight, permille) in stages {
+        total += weight as u64;
+        done += weight as u64 * permille.min(1000) as u64;
+    }
+    if total == 0 {
+        return 0;
+    }
+    (done / total).min(1000) as u16
+}
+
+/// `POST /v1/pipelines` — the run that now exists, and the job behind each
+/// declared stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineCreatedDto {
+    pub pipeline: PipelineId,
+    /// One entry per declared stage, in declaration order.
+    pub stages: Vec<PipelineStageJobDto>,
+}
+
+impl PipelineCreatedDto {
+    pub fn job_of(&self, stage: &str) -> Option<JobId> {
+        self.stages.iter().find(|s| s.name == stage).map(|s| s.job)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineStageJobDto {
+    pub name: String,
+    pub job: JobId,
+}
+
+/// `POST /v1/pipelines/<id>/cancel` — how many stage jobs the server stopped
+/// (`0` = the run was already terminal) and the state the run now reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineCancelDto {
+    pub pipeline: PipelineId,
+    pub cancelled: u64,
+    pub state: PipelineStateDto,
+}
+
+fn need_pipeline_id(v: &Value, what: &'static str) -> ClientResult<PipelineId> {
+    PipelineId::parse(need_str(v, "pipeline", 64, what)?)
+        .ok_or(ClientError::Protocol { what })
+}
+
+fn need_permille(v: &Value, what: &'static str) -> ClientResult<u16> {
+    let permille = need_u64(v, "permille", what)?;
+    if permille > 1000 {
+        return Err(ClientError::Protocol { what });
+    }
+    Ok(permille as u16)
+}
+
+/// Optional display text kept as WRITTEN except for the control characters
+/// that have no business in it: a pipeline prompt is the person's own words
+/// and its line breaks are part of them (lyrics, shot lists).
+fn opt_prompt(
+    v: &Value,
+    key: &'static str,
+    max: usize,
+    what: &'static str,
+) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.len() > max {
+                return Err(ClientError::Protocol { what });
+            }
+            Ok(Some(sanitize_stage_text(s, max)))
+        }
+    }
+}
+
+fn opt_stage_name(
+    v: &Value,
+    key: &'static str,
+    what: &'static str,
+) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.is_empty() || s.len() > 64 {
+                return Err(ClientError::Protocol { what });
+            }
+            check_display(s, what)?;
+            Ok(Some(s.to_string()))
+        }
+    }
+}
+
+pub fn parse_pipeline_created(v: &Value) -> ClientResult<PipelineCreatedDto> {
+    let pipeline = need_pipeline_id(v, "created pipeline id")?;
+    let rows = need(v, "stages", "created pipeline stages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "created pipeline stages" })?;
+    if rows.is_empty() || rows.len() > crate::wire::MAX_PIPELINE_STAGES {
+        return Err(ClientError::Protocol { what: "created pipeline stages" });
+    }
+    let mut stages = Vec::with_capacity(rows.len());
+    for r in rows {
+        let name = need_str(r, "name", 64, "created stage name")?;
+        check_display(name, "created stage name")?;
+        let job = JobId::parse(need_str(r, "job", 64, "created stage job")?)
+            .ok_or(ClientError::Protocol { what: "created stage job" })?;
+        stages.push(PipelineStageJobDto { name: name.to_string(), job });
+    }
+    Ok(PipelineCreatedDto { pipeline, stages })
+}
+
+pub fn parse_pipeline_cancel(v: &Value) -> ClientResult<PipelineCancelDto> {
+    Ok(PipelineCancelDto {
+        pipeline: need_pipeline_id(v, "cancelled pipeline id")?,
+        cancelled: need_u64(v, "cancelled", "pipeline cancelled count")?,
+        state: PipelineStateDto::parse(need_str(v, "state", 16, "pipeline state")?)
+            .ok_or(ClientError::Protocol { what: "pipeline state" })?,
+    })
+}
+
+pub fn parse_pipelines_page(v: &Value) -> ClientResult<Vec<PipelineRowDto>> {
+    let rows = need(v, "pipelines", "pipeline rows")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "pipeline rows" })?;
+    if rows.len() > MAX_PAGE_ENTRIES {
+        return Err(ClientError::Protocol { what: "pipelines page too large" });
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let namespace =
+            need_str(r, "namespace", MAX_NAMESPACE_BYTES, "pipeline row namespace")?.to_string();
+        check_display(&namespace, "pipeline row namespace")?;
+        let title = need_str(
+            r,
+            "title",
+            crate::wire::MAX_PIPELINE_TITLE_BYTES,
+            "pipeline row title",
+        )?
+        .to_string();
+        check_display(&title, "pipeline row title")?;
+        let stages = need_u64(r, "stages", "pipeline row stage count")?;
+        if stages == 0 || stages as usize > crate::wire::MAX_PIPELINE_STAGES {
+            return Err(ClientError::Protocol { what: "pipeline row stage count" });
+        }
+        let note = match r.get("note") {
+            None | Some(Value::Null) => String::new(),
+            Some(n) => {
+                let text =
+                    n.as_str().ok_or(ClientError::Protocol { what: "pipeline row note" })?;
+                sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
+            }
+        };
+        out.push(PipelineRowDto {
+            pipeline: need_pipeline_id(r, "pipeline row id")?,
+            namespace,
+            title,
+            state: PipelineStateDto::parse(need_str(r, "state", 16, "pipeline row state")?)
+                .ok_or(ClientError::Protocol { what: "pipeline row state" })?,
+            permille: need_permille(r, "pipeline row permille")?,
+            stages: stages as u32,
+            enqueued_by: opt_principal(r, "enqueued_by", "pipeline row enqueued_by")?,
+            created_ms: need_u64(r, "created_ms", "pipeline row created_ms")?,
+            prompt: opt_prompt(r, "prompt", 256, "pipeline row prompt")?,
+            current_stage: opt_stage_name(r, "current_stage", "pipeline row current stage")?,
+            note,
+            finished_ms: opt_u64(r, "finished_ms", "pipeline row finished_ms")?,
+        });
+    }
+    Ok(out)
+}
+
+pub fn parse_pipeline_detail(v: &Value) -> ClientResult<PipelineDetailDto> {
+    let namespace =
+        need_str(v, "namespace", MAX_NAMESPACE_BYTES, "pipeline namespace")?.to_string();
+    check_display(&namespace, "pipeline namespace")?;
+    let title =
+        need_str(v, "title", crate::wire::MAX_PIPELINE_TITLE_BYTES, "pipeline title")?.to_string();
+    check_display(&title, "pipeline title")?;
+    let rows = need(v, "stages", "pipeline stages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "pipeline stages" })?;
+    if rows.is_empty() || rows.len() > crate::wire::MAX_PIPELINE_STAGES {
+        return Err(ClientError::Protocol { what: "pipeline stages" });
+    }
+    let mut stages = Vec::with_capacity(rows.len());
+    let mut last_seq: Option<u64> = None;
+    for r in rows {
+        let name = need_str(r, "name", 64, "pipeline stage name")?.to_string();
+        check_display(&name, "pipeline stage name")?;
+        let seq = need_u64(r, "seq", "pipeline stage seq")?;
+        // The server reports stages in declaration order; anything else
+        // cannot be rendered as the strip a person reads left to right.
+        if seq as usize >= crate::wire::MAX_PIPELINE_STAGES
+            || last_seq.map(|last| seq <= last).unwrap_or(false)
+        {
+            return Err(ClientError::Protocol { what: "pipeline stage seq" });
+        }
+        last_seq = Some(seq);
+        let weight = need_u64(r, "weight", "pipeline stage weight")?;
+        if weight == 0 || weight > crate::wire::MAX_STAGE_WEIGHT as u64 {
+            return Err(ClientError::Protocol { what: "pipeline stage weight" });
+        }
+        let kind = need_str(r, "kind", 64, "pipeline stage kind")?.to_string();
+        check_display(&kind, "pipeline stage kind")?;
+        let records = match r.get("records") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(x) => {
+                let items =
+                    x.as_arr().ok_or(ClientError::Protocol { what: "pipeline stage records" })?;
+                parse_stage_records(items)
+            }
+        };
+        let declared = match r.get("declared") {
+            None | Some(Value::Null) => None,
+            Some(d @ Value::Obj(_)) => Some(d.clone()),
+            Some(_) => return Err(ClientError::Protocol { what: "pipeline stage declared body" }),
+        };
+        stages.push(PipelineStageDto {
+            name,
+            seq: seq as u32,
+            job: JobId::parse(need_str(r, "job", 64, "pipeline stage job")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage job" })?,
+            kind,
+            state: JobStateDto::parse(need_str(r, "state", 16, "pipeline stage state")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage state" })?,
+            skipped: matches!(r.get("skipped"), Some(Value::Bool(true))),
+            weight: weight as u16,
+            on_fail: StageOnFailDto::parse(need_str(r, "on_fail", 16, "pipeline stage on_fail")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage on_fail" })?,
+            attempts: u32::try_from(need_u64(r, "attempts", "pipeline stage attempts")?)
+                .map_err(|_| ClientError::Protocol { what: "pipeline stage attempts" })?,
+            progress: parse_progress(r)?,
+            declared,
+            records,
+            result: parse_job_result(r)?,
+        });
+    }
+    Ok(PipelineDetailDto {
+        pipeline: need_pipeline_id(v, "pipeline id")?,
+        namespace,
+        title,
+        state: PipelineStateDto::parse(need_str(v, "state", 16, "pipeline state")?)
+            .ok_or(ClientError::Protocol { what: "pipeline state" })?,
+        permille: need_permille(v, "pipeline permille")?,
+        enqueued_by: opt_principal(v, "enqueued_by", "pipeline enqueued_by")?,
+        created_ms: need_u64(v, "created_ms", "pipeline created_ms")?,
+        prompt: opt_prompt(
+            v,
+            "prompt",
+            crate::wire::MAX_PIPELINE_PROMPT_BYTES,
+            "pipeline prompt",
+        )?
+        .unwrap_or_default(),
+        current_stage: opt_stage_name(v, "current_stage", "pipeline current stage")?,
+        finished_ms: opt_u64(v, "finished_ms", "pipeline finished_ms")?,
+        stages,
+    })
 }
 
 /// `GET /v1/annotate/summary`: how much of the catalog the vision pass has
