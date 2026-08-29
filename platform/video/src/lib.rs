@@ -45,6 +45,7 @@
 //! interleaved with video or in one block at the end for short clips.
 
 pub mod annex_b;
+pub mod mp4_first_frame;
 pub mod nv12;
 pub mod stream_decoder;
 pub mod stream_encoder;
@@ -403,6 +404,47 @@ impl DecodedVideoFrame {
     }
 }
 
+/// Hardware-decodes the FIRST video frame of an in-memory mp4/mov — no temp
+/// file anywhere. Windows reads the container through a Media Foundation
+/// source reader over an in-RAM byte stream (hardware transforms enabled,
+/// same path as [`VideoFileDecoder::open`]); macOS demuxes the first sample
+/// with [`mp4_first_frame`] and feeds it to the VideoToolbox stream decoder.
+pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, VideoFileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut decoder = VideoFileDecoder::open_bytes(bytes)?;
+        return decoder
+            .next_frame()?
+            .ok_or_else(|| VideoFileError::new("first frame decode: container has no frames"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let au = mp4_first_frame::first_access_unit(bytes)?;
+        let mut decoder = VideoStreamDecoder::new(au.codec)?;
+        let mut frames = decoder.push_packet(&au.annex_b, 0)?;
+        if frames.is_empty() {
+            frames = decoder.flush()?;
+        }
+        let frame = frames
+            .into_iter()
+            .next()
+            .ok_or_else(|| VideoFileError::new("first frame decode: decoder produced no frame"))?;
+        return Ok(DecodedVideoFrame {
+            pts_100ns: frame.pts_100ns,
+            width: frame.width,
+            height: frame.height,
+            nv12: frame.nv12,
+        });
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = bytes;
+        Err(VideoFileError::new(
+            "in-memory first frame decode is not implemented on this platform yet",
+        ))
+    }
+}
+
 /// One decoded chunk of interleaved 16-bit PCM audio.
 pub struct DecodedAudioChunk {
     pub pts_100ns: i64,
@@ -443,6 +485,20 @@ impl VideoFileDecoder {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
         }
+    }
+
+    /// Open an in-memory mp4 for decoding, never touching the filesystem.
+    /// Windows only: Media Foundation reads any container from a RAM byte
+    /// stream; the other platforms' demuxers are file-bound, so a single
+    /// frame goes through [`decode_first_frame_from_bytes`] instead.
+    #[cfg(target_os = "windows")]
+    pub fn open_bytes(bytes: &[u8]) -> Result<Self, VideoFileError> {
+        let os = OsVideoFileDecoder::open_bytes(bytes)?;
+        Ok(Self {
+            os,
+            pending_video: None,
+            pending_audio: None,
+        })
     }
 
     pub fn info(&self) -> &VideoFileInfo {

@@ -307,41 +307,18 @@ fn decode_keyframe(
     Ok(Some((rgb, w as u32, h as u32)))
 }
 
-/// First frame of a clip keyframe via the platform's hardware decoder. The
-/// decoder only opens paths, so the bytes take one round trip through the
-/// service tmp dir; the temp file dies with the call, success or failure.
+/// First frame of a clip keyframe, decoded from RAM by the platform's
+/// hardware decoder — no temp file anywhere (Media Foundation byte stream
+/// on Windows, mp4 demux + VideoToolbox stream session on macOS).
 #[cfg(feature = "video")]
 fn decode_keyframe_clip(
     model_id: &str,
     what: &str,
     bytes: &[u8],
 ) -> Result<(Vec<u8>, u32, u32), AssetAiError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STAMP: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join("asset-ai-keyframes");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AssetAiError::Io(format!("{model_id}: {what} tmp dir: {e}")))?;
-    let path = dir.join(format!(
-        "kf-{}-{}.mov",
-        std::process::id(),
-        STAMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        std::fs::write(&path, bytes)
-            .map_err(|e| AssetAiError::Io(format!("{model_id}: {what} tmp write: {e}")))?;
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| AssetAiError::Io(format!("{model_id}: non-utf8 tmp path")))?;
-        let mut decoder = makepad_video::VideoFileDecoder::open(path_str)
-            .map_err(|e| AssetAiError::Params(format!("{model_id}: {what} clip open: {e}")))?;
-        let frame = decoder
-            .next_frame()
-            .map_err(|e| AssetAiError::Params(format!("{model_id}: {what} clip decode: {e}")))?
-            .ok_or_else(|| AssetAiError::Params(format!("{model_id}: {what} clip has no frames")))?;
-        Ok((frame.to_rgb8(), frame.width, frame.height))
-    })();
-    let _ = std::fs::remove_file(&path);
-    result
+    let frame = makepad_video::decode_first_frame_from_bytes(bytes)
+        .map_err(|e| AssetAiError::Params(format!("{model_id}: {what} clip decode: {e}")))?;
+    Ok((frame.to_rgb8(), frame.width, frame.height))
 }
 
 #[cfg(not(feature = "video"))]

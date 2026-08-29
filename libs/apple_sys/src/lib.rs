@@ -445,6 +445,16 @@ extern "C" {
         formatDescriptionOut: *mut CMFormatDescriptionRef,
     ) -> OSStatus;
 
+    pub fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        allocator: *const c_void,
+        parameterSetCount: usize,
+        parameterSetPointers: *const *const u8,
+        parameterSetSizes: *const usize,
+        nalUnitHeaderLength: i32,
+        extensions: CFDictionaryRef,
+        formatDescriptionOut: *mut CMFormatDescriptionRef,
+    ) -> OSStatus;
+
     pub fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
         videoDesc: CMFormatDescriptionRef,
         parameterSetIndex: usize,

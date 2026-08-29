@@ -34579,6 +34579,28 @@ pub unsafe fn MFCreateAttributes(ppmfattributes: *mut Option<IMFAttributes>, cin
     windows_core::link!("mfplat.dll" "system" fn MFCreateAttributes(ppmfattributes : *mut * mut core::ffi::c_void, cinitialsize : u32) -> windows_core::HRESULT);
     unsafe { MFCreateAttributes(core::mem::transmute(ppmfattributes), cinitialsize).ok() }
 }
+pub unsafe fn MFCreateMFByteStreamOnStream<P0>(pstream: P0) -> windows_core::Result<IMFByteStream>
+where
+    P0: windows_core::Param<super::super::System::Com::IStream>,
+{
+    windows_core::link!("mfplat.dll" "system" fn MFCreateMFByteStreamOnStream(pstream : * mut core::ffi::c_void, ppbytestream : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        MFCreateMFByteStreamOnStream(pstream.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+    }
+}
+pub unsafe fn MFCreateSourceReaderFromByteStream<P0, P1>(pbytestream: P0, pattributes: P1) -> windows_core::Result<IMFSourceReader>
+where
+    P0: windows_core::Param<IMFByteStream>,
+    P1: windows_core::Param<IMFAttributes>,
+{
+    windows_core::link!("mfreadwrite.dll" "system" fn MFCreateSourceReaderFromByteStream(pbytestream : * mut core::ffi::c_void, pattributes : * mut core::ffi::c_void, ppsourcereader : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        MFCreateSourceReaderFromByteStream(pbytestream.param().abi(), pattributes.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+    }
+}
+pub const MF_BYTESTREAM_CONTENT_TYPE: windows_core::GUID = windows_core::GUID::from_u128(0xfc358288_3cb6_460c_a424_b6681260375a);
 #[inline]
 pub unsafe fn MFCreateDXGIDeviceManager(resettoken: *mut u32, ppdevicemanager: *mut Option<IMFDXGIDeviceManager>) -> windows_core::Result<()> {
     windows_core::link!("mfplat.dll" "system" fn MFCreateDXGIDeviceManager(resettoken : *mut u32, ppdevicemanager : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
@@ -35463,6 +35485,12 @@ impl IMFAttributes {
     }
     pub unsafe fn GetAllocatedString(&self, guidkey: *const windows_core::GUID, ppwszvalue: *mut windows_core::PWSTR, pcchlength: *mut u32) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).GetAllocatedString)(windows_core::Interface::as_raw(self), guidkey, ppwszvalue as _, pcchlength as _).ok() }
+    }
+    pub unsafe fn SetString<P0>(&self, guidkey: *const windows_core::GUID, wszvalue: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::PCWSTR>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetString)(windows_core::Interface::as_raw(self), guidkey, wszvalue.param().abi()).ok() }
     }
     pub unsafe fn SetUINT32(&self, guidkey: *const windows_core::GUID, unvalue: u32) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetUINT32)(windows_core::Interface::as_raw(self), guidkey, unvalue).ok() }
@@ -48574,6 +48602,14 @@ pub struct XINPUT_STATE {
 }
 }
 pub mod Shell{
+#[inline]
+pub unsafe fn SHCreateMemStream(pinit: Option<&[u8]>) -> Option<super::super::System::Com::IStream> {
+    windows_core::link!("shlwapi.dll" "system" fn SHCreateMemStream(pinit : *const u8, cbinit : u32) -> * mut core::ffi::c_void);
+    unsafe {
+        let result__ = SHCreateMemStream(pinit.map_or(core::ptr::null(), |slice| slice.as_ptr()), pinit.map_or(0u32, |slice| slice.len() as u32));
+        windows_core::Type::from_abi(result__).ok()
+    }
+}
 #[inline]
 pub unsafe fn SHGetKnownFolderPath(rfid: *const windows_core::GUID, dwflags: KNOWN_FOLDER_FLAG, htoken: Option<super::super::Foundation::HANDLE>) -> windows_core::Result<windows_core::PWSTR> {
     windows_core::link!("shell32.dll" "system" fn SHGetKnownFolderPath(rfid : *const windows_core::GUID, dwflags : u32, htoken : super::super::Foundation:: HANDLE, ppszpath : *mut windows_core::PWSTR) -> windows_core::HRESULT);

@@ -199,39 +199,16 @@ pub fn decode_image_rgb8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetA
     }
 }
 
-/// First frame of an mp4/mov payload via the platform's hardware decoder.
-/// The decoder only opens paths, so the bytes take one round trip through
-/// the service tmp dir; the temp file dies with the call either way.
+/// First frame of an mp4/mov payload, decoded from RAM by the platform's
+/// hardware decoder — no temp file anywhere (Media Foundation byte stream
+/// on Windows, mp4 demux + VideoToolbox stream session on macOS).
 #[cfg(feature = "video")]
 fn decode_clip_first_frame(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STAMP: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join("asset-ai-keyframes");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AssetAiError::Io(format!("vision: clip tmp dir: {e}")))?;
-    let path = dir.join(format!(
-        "vkf-{}-{}.mov",
-        std::process::id(),
-        STAMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        std::fs::write(&path, bytes)
-            .map_err(|e| AssetAiError::Io(format!("vision: clip tmp write: {e}")))?;
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| AssetAiError::Io("vision: non-utf8 tmp path".to_string()))?;
-        let mut decoder = makepad_video::VideoFileDecoder::open(path_str)
-            .map_err(|e| AssetAiError::Params(format!("vision: clip open: {e}")))?;
-        let frame = decoder
-            .next_frame()
-            .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?
-            .ok_or_else(|| AssetAiError::Params("vision: clip has no frames".to_string()))?;
-        let (w, h) = (frame.width as usize, frame.height as usize);
-        check_image_dimensions(w, h)?;
-        Ok((frame.to_rgb8(), w, h))
-    })();
-    let _ = std::fs::remove_file(&path);
-    result
+    let frame = makepad_video::decode_first_frame_from_bytes(bytes)
+        .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?;
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    check_image_dimensions(w, h)?;
+    Ok((frame.to_rgb8(), w, h))
 }
 
 #[cfg(not(feature = "video"))]
