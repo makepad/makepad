@@ -588,6 +588,42 @@
    ]
   },
   {
+   "id": "chandra-ocr-2",
+   "domain": "ocr",
+   "backend": "ocr",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Chandra OpenRAIL-M (modified)",
+    "url": "https://huggingface.co/datalab-to/chandra-ocr-2/blob/main/LICENSE",
+    "summary": "Chandra 2 weights are under Datalab's modified OpenRAIL-M: free for research, personal use and organisations under $2M funding/revenue; not to be used to compete with Datalab's hosted API. Review the LICENSE before a commercial product. The GGUF repack carries the same terms.",
+    "restriction": "community"
+   },
+   "vram_gb": 9.0,
+   "min_vram_gb": 11.0,
+   "note": "Chandra 2 (datalab-to/chandra-ocr-2, a Qwen3.5-4B fine-tune; olmOCR-bench 85.8, Old Scans 51.1, 90+ languages, handwriting) served on the in-repo vision tower + language session at document resolution: the page's short side is raised to 1536 px and its area capped at 3072x2048 (Chandra's own fit), so a scan goes in at ~5-6k image tokens; greedy decode with Chandra's repeat detector and temperature-escalating retry; output is HTML (text/html artifact + job text). prompt empty = transcription, 'layout' = layout blocks with bboxes. Weights: the Q8_0 language GGUF from the prithivMLmods repack and the mmproj from the mradermacher repack - the prithivMLmods 'mmproj-f16' file is BF16 inside (general.file_type 32), which the Metal tower has no matmul kernel for; mradermacher's is true F16 and runs on Metal and CUDA alike. Both pinned by revision and digest. vram_gb is the working estimate for a 24 GB card (5.2 GB weights + 0.7 GB tower + ~2 GB planned activations at the largest fit + KV for a 20k context); min_vram_gb fails closed on a box whose total VRAM is unknown (Metal machines serve it through a cache-dir registry override that drops the field).",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "prithivMLmods/chandra-ocr-2-GGUF",
+     "path": "chandra-ocr-2.Q8_0.gguf",
+     "revision": "faf1327c91b5b4c282b3555ec5277f22b6a8084d",
+     "cache_as": "llm/chandra-ocr-2.Q8_0.gguf",
+     "size": 5157833312,
+     "sha256": "6b9ae4e33d7272496267dc957158098b97988fe66198e762e0a60ed76eb4b281"
+    },
+    {
+     "role": "mmproj",
+     "repo": "mradermacher/chandra-ocr-2-GGUF",
+     "path": "chandra-ocr-2.mmproj-f16.gguf",
+     "revision": "b9bbba6c5ee4eb14e75c114234b21cbb23911115",
+     "cache_as": "llm/chandra-ocr-2.mmproj-f16.gguf",
+     "size": 672423200,
+     "sha256": "9235483343937e5a43aa28e4e2f80ca4c8319062595c6ae0784b461772e5df65"
+    }
+   ]
+  },
+  {
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",

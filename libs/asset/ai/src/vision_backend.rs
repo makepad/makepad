@@ -175,16 +175,26 @@ pub fn image_kind(bytes: &[u8]) -> Result<ImageKind, AssetAiError> {
 /// Refuses a decoded image whose pixel count would be pointless to hold: the
 /// tower sees a few hundred pixels a side no matter what arrives.
 pub fn check_image_dimensions(width: usize, height: usize) -> Result<(), AssetAiError> {
+    check_image_dimensions_within(width, height, MAX_INPUT_PIXELS)
+}
+
+/// The same refusal against a caller-chosen ceiling: the ocr domain feeds
+/// pages at document resolution and admits 33 MP manuscript scans.
+pub fn check_image_dimensions_within(
+    width: usize,
+    height: usize,
+    max_pixels: usize,
+) -> Result<(), AssetAiError> {
     if width == 0 || height == 0 {
         return Err(AssetAiError::Params(
             "vision: input image has a zero dimension".to_string(),
         ));
     }
     let pixels = width.saturating_mul(height);
-    if pixels > MAX_INPUT_PIXELS {
+    if pixels > max_pixels {
         return Err(AssetAiError::Params(format!(
             "vision: input image is {width}x{height} ({pixels} pixels), over the \
-             {MAX_INPUT_PIXELS} pixel limit"
+             {max_pixels} pixel limit"
         )));
     }
     Ok(())
@@ -192,10 +202,18 @@ pub fn check_image_dimensions(width: usize, height: usize) -> Result<(), AssetAi
 
 /// Decodes a PNG or JPEG request payload into tightly packed RGB8.
 pub fn decode_image_rgb8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+    decode_image_rgb8_within(bytes, MAX_INPUT_PIXELS)
+}
+
+/// [`decode_image_rgb8`] with a caller-chosen pixel ceiling.
+pub fn decode_image_rgb8_within(
+    bytes: &[u8],
+    max_pixels: usize,
+) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     match image_kind(bytes)? {
-        ImageKind::Png => decode_png(bytes),
-        ImageKind::Jpeg => decode_jpeg(bytes),
-        ImageKind::Clip => decode_clip_first_frame(bytes),
+        ImageKind::Png => decode_png(bytes, max_pixels),
+        ImageKind::Jpeg => decode_jpeg(bytes, max_pixels),
+        ImageKind::Clip => decode_clip_first_frame(bytes, max_pixels),
     }
 }
 
@@ -203,22 +221,28 @@ pub fn decode_image_rgb8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetA
 /// hardware decoder — no temp file anywhere (Media Foundation byte stream
 /// on Windows, mp4 demux + VideoToolbox stream session on macOS).
 #[cfg(feature = "video")]
-fn decode_clip_first_frame(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+fn decode_clip_first_frame(
+    bytes: &[u8],
+    max_pixels: usize,
+) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     let frame = makepad_video::decode_first_frame_from_bytes(bytes)
         .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?;
     let (w, h) = (frame.width as usize, frame.height as usize);
-    check_image_dimensions(w, h)?;
+    check_image_dimensions_within(w, h, max_pixels)?;
     Ok((frame.to_rgb8(), w, h))
 }
 
 #[cfg(not(feature = "video"))]
-fn decode_clip_first_frame(_bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+fn decode_clip_first_frame(
+    _bytes: &[u8],
+    _max_pixels: usize,
+) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     Err(AssetAiError::Params(
         "vision: clip inputs need a build with the `video` feature".to_string(),
     ))
 }
 
-fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+fn decode_png(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     use makepad_zune_core::options::DecoderOptions;
     use makepad_zune_png::PngDecoder;
     let options = DecoderOptions::default().png_set_strip_to_8bit(true);
@@ -231,7 +255,7 @@ fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
         .cloned()
         .ok_or_else(|| AssetAiError::Params("vision: png decode: no header info".into()))?;
     let (width, height) = (info.width, info.height);
-    check_image_dimensions(width, height)?;
+    check_image_dimensions_within(width, height, max_pixels)?;
     let colorspace = decoder
         .colorspace()
         .ok_or_else(|| AssetAiError::Params("vision: png decode: no colorspace".into()))?;
@@ -247,7 +271,7 @@ fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     Ok((to_rgb8(&pixels, width * height, components), width, height))
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+fn decode_jpeg(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     use makepad_zune_jpeg::makepad_zune_core::bytestream::ZCursor;
     use makepad_zune_jpeg::makepad_zune_core::colorspace::ColorSpace;
     use makepad_zune_jpeg::makepad_zune_core::options::DecoderOptions;
@@ -260,7 +284,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     let (width, height) = decoder
         .dimensions()
         .ok_or_else(|| AssetAiError::Params("vision: jpeg decode: no dimensions".into()))?;
-    check_image_dimensions(width, height)?;
+    check_image_dimensions_within(width, height, max_pixels)?;
     let pixels = decoder
         .decode()
         .map_err(|e| AssetAiError::Params(format!("vision: jpeg decode: {e:?}")))?;
@@ -622,15 +646,9 @@ mod resident {
                                 .map_err(|e| format!("open mmproj: {e:?}"))?;
                             let config = VisionConfig::from_gguf(&file)
                                 .map_err(|e| format!("mmproj vision config: {e:?}"))?;
-                            // The arena is sized for the largest grid this
-                            // tier can produce, which is exactly the tier's
-                            // sheet: every request is downscaled to it, so one
-                            // vision graph is compiled and then reused.
-                            let grid = (tier.sheet_px as usize) / config.patch_size.max(1);
-                            let max_patches = (grid * grid).max(4);
                             let _ = boot_tx
                                 .send(BootEvt::Progress("load vision tower".into(), 0.15));
-                            let tower = VisionTower::load(&mmproj_path, max_patches)
+                            let tower = VisionTower::load(&mmproj_path)
                                 .map_err(|e| format!("load vision tower: {e:?}"))?;
                             let device = tower.device_description();
                             let session = LlamaSession::load_with_progress(

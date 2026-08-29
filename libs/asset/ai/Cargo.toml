@@ -152,3 +152,11 @@ path = "src/bin/chat_bench.rs"
 [[bin]]
 name = "context-ladder"
 path = "src/bin/context_ladder.rs"
+
+# The OCR bench: every page image in a directory through the resident ocr
+# backend (local weights) or through a box's wire, one HTML per page, and
+# the numbers that decide the model — seconds per page, image/output tokens,
+# retries — plus `--score` to rank transcriptions against a reference.
+[[bin]]
+name = "ocr-bench"
+path = "src/bin/ocr_bench.rs"

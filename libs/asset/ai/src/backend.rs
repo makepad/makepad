@@ -1523,6 +1523,7 @@ pub fn backend_compiled(name: &str) -> bool {
         // The vision domain rides the same llama session + the mmproj tower,
         // so it is compiled in exactly when the LLM is.
         "vision" => cfg!(feature = "llm"),
+        "ocr" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
         // The `fast` (FastH3) lane rides the H3 pipeline: same feature.
@@ -1591,6 +1592,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         // The vision tower and its language session have no CPU path: Metal
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),
+        "ocr" => crate::vision_backend::vision_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
@@ -1761,6 +1763,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "vision" => Ok(Box::new(crate::vision_backend::VisionBackend::new(&spec.id))),
         #[cfg(not(feature = "llm"))]
         "vision" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'llm' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "llm")]
+        "ocr" => Ok(Box::new(crate::ocr_backend::OcrBackend::new(&spec.id))),
+        #[cfg(not(feature = "llm"))]
+        "ocr" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'llm' cargo feature",
             spec.id
         ))),

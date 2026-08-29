@@ -630,6 +630,11 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             return error_json(400, e.to_string());
         }
     }
+    if spec.domain == crate::registry::Domain::Ocr {
+        if let Err(e) = crate::ocr_backend::validate_ocr_params(&params) {
+            return error_json(400, e.to_string());
+        }
+    }
     // Admission class. Chat rides the lane worker, which serves several turns
     // from one resident model, so those turns admit alongside each other and
     // alongside heavy work. Everything else keeps one-at-a-time.

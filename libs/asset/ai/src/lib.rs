@@ -51,6 +51,7 @@ pub mod matte_backend;
 pub mod segment_backend;
 pub mod upscale_backend;
 pub mod vision_backend;
+pub mod ocr_backend;
 pub mod enhance_backend;
 pub mod motion_backend;
 #[cfg(feature = "motion-native")]

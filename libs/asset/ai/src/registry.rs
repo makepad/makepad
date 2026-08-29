@@ -186,6 +186,8 @@ pub enum Domain {
     /// chat shape — one prompt in, one answer out, weights resident between
     /// requests — which is why a box that serves chat can serve this.
     Vision,
+    /// Scanned page -> HTML transcription (Chandra 2 on the vision tower).
+    Ocr,
 }
 
 impl Domain {
@@ -212,6 +214,7 @@ impl Domain {
             "enhance" => Some(Domain::Enhance),
             "splat" => Some(Domain::Splat),
             "vision" => Some(Domain::Vision),
+            "ocr" => Some(Domain::Ocr),
             _ => None,
         }
     }
@@ -239,6 +242,7 @@ impl Domain {
             Domain::Enhance => "enhance",
             Domain::Splat => "splat",
             Domain::Vision => "vision",
+            Domain::Ocr => "ocr",
         }
     }
 }
