@@ -1357,7 +1357,7 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                     && !(gqa > 4 && k.ne[1] >= 8192)
                 {
                     KernelSel::FlashVec
-                } else if gqa > 4 {
+                } else if gqa % 4 == 0 {
                     // llama.cpp fattn.cu get_best_fattn_kernel: for D=256 on
                     // Turing+ everything that is not the n_q==1 VEC case goes
                     // to MMA_F16. The old `q.ne[1] >= 20` threshold sent two
@@ -1367,6 +1367,15 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                     // GQA>4 and KV>=8192 — ordinary single-token decode past
                     // 8k context. FlashDecode is ~10x slower per layer here,
                     // which is exactly the long-context decode cliff.
+                    //
+                    // `gqa > 4` was the second half of that same mistake. It
+                    // was not a claim about the kernel family but about the
+                    // one tile shape the launcher had compiled — 8 query
+                    // heads per KV head — which a 4-to-1 model cannot use.
+                    // The launcher now also carries the 16x4 tile, so a ratio
+                    // of exactly 4 gets MMA too. That is the whole of the
+                    // Chandra 2 / Qwen3.5-9B prefill: 16 heads over 4 KV
+                    // heads, 84% of it in the generic kernel at ~1.1 TFLOPS.
                     KernelSel::FlashMma
                 } else {
                     KernelSel::FlashDecode

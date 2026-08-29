@@ -4465,23 +4465,19 @@ static void mkllm_fattn_trace_launch(
     ++prints;
 }
 
-extern "C" cudaError_t mkllm_fattn_mma_f16(
+// The MMA launcher, templated on the tile shape so the GQA ratio can pick
+// it. `ncols2` is how many query heads of one KV head a tile covers, and
+// `ncols1` how many tokens; their product is the 64-column tile every size
+// below is derived from, so a different split costs nothing in shared memory.
+template <int ncols1, int ncols2>
+static cudaError_t mkllm_fattn_mma_launch(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
-        int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
+        int kc, int n_q, int H, int Hkv, float scale,
         size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
-        size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
+        size_t v_nb1, size_t v_nb2, size_t m_nb1,
         int nsm, int cc, float * tmp_fixup, cudaStream_t stream) {
-    (void) d_nb1;
-    (void) d_nb2;
-    if (D != 256 || Dv != 256 || n_q <= 0 || kc <= 0 || H <= 0 || Hkv <= 0
-            || H % Hkv != 0 || q == nullptr || k == nullptr || v == nullptr
-            || mask == nullptr || dst == nullptr) {
-        return cudaErrorInvalidValue;
-    }
     constexpr int DKQ = 256;
     constexpr int DV = 256;
-    constexpr int ncols1 = 8;
-    constexpr int ncols2 = 8;
     constexpr int ncols = ncols1 * ncols2;
     constexpr bool use_logit_softcap = false;
     constexpr bool V_is_K_view = false;
@@ -4548,8 +4544,10 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
     } else {
         blocks_num = dim3(ntiles_x, 1, ntiles_z_gqa * Hkv);
     }
+    char kind[16];
+    snprintf(kind, sizeof(kind), "mma%dx%d", ncols1, ncols2);
     mkllm_fattn_trace_launch(
-        "mma8x8", D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
+        kind, DKQ, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
         use_stream_k ? nblocks_stream_k : 1, ntiles_dst, ntiles_KV,
         use_stream_k ? 1 : 0, blocks_num.x, blocks_num.y, blocks_num.z);
 
@@ -4559,9 +4557,9 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
         (const char *) q, (const char *) k, (const char *) v, (const char *) mask,
         nullptr, nullptr, (float *) dst, use_stream_k ? (float2 *) tmp_fixup : nullptr,
         scale, 0.0f, 1.0f, 1.0f, n_head_log2, 0.0f,
-        D, ne01, H, 1,
+        DKQ, ne01, H, 1,
         (int32_t) q_nb1, (int32_t) q_nb2, 0,
-        D, kc, Hkv, 1,
+        DKQ, kc, Hkv, 1,
         (int32_t) k_nb1, (int32_t) k_nb2, 0,
         (int32_t) v_nb1, (int32_t) v_nb2, 0,
         n_q, 1, 1,
@@ -4580,6 +4578,40 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
         return cudaGetLastError();
     }
     return cudaSuccess;
+}
+
+extern "C" cudaError_t mkllm_fattn_mma_f16(
+        const void * q, const void * k, const void * v, const void * mask, void * dst,
+        int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
+        size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
+        size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
+        int nsm, int cc, float * tmp_fixup, cudaStream_t stream) {
+    (void) d_nb1;
+    (void) d_nb2;
+    if (D != 256 || Dv != 256 || n_q <= 0 || kc <= 0 || H <= 0 || Hkv <= 0
+            || H % Hkv != 0 || q == nullptr || k == nullptr || v == nullptr
+            || mask == nullptr || dst == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    // llama.cpp fattn.cu switch_ncols2: the GQA ratio decides how many query
+    // heads share a tile. Getting this wrong is not slow, it is wrong — a
+    // tile that claims 8 query heads of a 4-to-1 model reads heads that do
+    // not exist — which is why the caller used to hand anything below 8 to
+    // the generic kernel instead. Chandra 2 and Qwen3.5-9B are 16 heads over
+    // 4 KV heads, i.e. exactly the ratio that was being turned away, and
+    // their prefill spent 84% of itself in that generic kernel.
+#define MKLLM_FATTN_MMA_ARGS                                                   \
+    q, k, v, mask, dst, kc, n_q, H, Hkv, scale,                                \
+    q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, nsm, cc, tmp_fixup, stream
+    const int gqa_ratio = H / Hkv;
+    if (gqa_ratio % 8 == 0) {
+        return mkllm_fattn_mma_launch<8, 8>(MKLLM_FATTN_MMA_ARGS);
+    }
+    if (gqa_ratio % 4 == 0) {
+        return mkllm_fattn_mma_launch<16, 4>(MKLLM_FATTN_MMA_ARGS);
+    }
+    return cudaErrorInvalidValue;
+#undef MKLLM_FATTN_MMA_ARGS
 }
 
 extern "C" size_t mkllm_fattn_mma_fixup_bytes(int nsm) {
