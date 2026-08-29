@@ -239,7 +239,16 @@ impl Widget for TipLayer {
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(pass, Layout::flow_down());
         let font_size = 9.0f64;
-        let w = text.chars().count() as f64 * font_size * 0.62 + TIP_PAD_X * 2.0 + 4.0;
+        // MEASURE the run rather than guess it: a per-character estimate
+        // under-measures wide glyphs (all-caps text most of all) and the
+        // bubble then clips its own last letter. The estimate stays only as
+        // the fallback for text the layout engine returns no row for.
+        let text_w = self
+            .draw_text
+            .prepare_single_line_run(cx, &text)
+            .map(|run| run.width_in_lpxs as f64)
+            .unwrap_or_else(|| text.chars().count() as f64 * font_size * 0.62);
+        let w = text_w + TIP_PAD_X * 2.0 + 4.0;
         let h = font_size * 1.5 + TIP_PAD_Y * 2.0;
         self.draw_bg.begin(
             cx,

@@ -67,6 +67,7 @@ pub struct DemoFileTree {
     #[uid]
     uid: WidgetUid,
     #[redraw]
+    #[find]
     #[live]
     pub file_tree: FileTree,
     #[rust]

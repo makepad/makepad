@@ -45,15 +45,20 @@ script_mod! {
         focus: 0.0
         disabled: 0.0
         fill: -1.0
+        flat: 0.0
 
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let w = self.rect_size.x
             let h = self.rect_size.y
             sdf.box(0.5, 0.5, w - 1.0, h - 1.0, fab.radius)
-            let base = fab.color_num.mix(fab.color_num_hover, self.hover).mix(fab.color_input_active, self.down)
+            let reveal = mix(1.0, max(self.hover, max(self.down, self.focus)), self.flat)
+            let mut base = fab.color_num.mix(fab.color_num_hover, self.hover).mix(fab.color_input_active, self.down)
+            base = vec4(base.xyz, base.w * reveal)
             sdf.fill_keep(base)
-            sdf.stroke(fab.color_border.mix(fab.color_focus_ring, self.focus), 1.0)
+            let mut border = fab.color_border.mix(fab.color_focus_ring, self.focus)
+            border = vec4(border.xyz, border.w * reveal)
+            sdf.stroke(border, 1.0)
             if self.fill >= 0.0 {
                 sdf.box(1.0, 1.0, max(2.0, (w - 2.0) * self.fill), h - 2.0, fab.radius)
                 sdf.fill(vec4(fab.color_num_fill.xyz, 0.85))
@@ -113,7 +118,9 @@ script_mod! {
         text_input: TextInput{
             width: Fill
             height: Fill
-            is_numeric_only: true
+            // Read-only display may carry a unit suffix. Editing switches
+            // this back to numeric-only in Rust.
+            is_numeric_only: false
             padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
             margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
             label_align: Align{x: 1.0 y: 0.5}
@@ -175,6 +182,9 @@ pub struct DrawDragNum {
     disabled: f32,
     #[live]
     fill: f32,
+    /// Hide the idle chip; hover/down/focus still reveal the editor surface.
+    #[live]
+    flat: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -464,6 +474,7 @@ impl ScriptHook for FabDragNumber {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         let text = self.format();
         vm.with_cx_mut(|cx| {
+            self.text_input.set_is_numeric_only(cx, false);
             self.text_input.set_text(cx, &text);
             self.text_input.set_is_read_only(cx, true);
         });
@@ -595,6 +606,7 @@ impl FabDragNumber {
         self.drag = None;
         self.editing = true;
         let full = self.format_full();
+        self.text_input.set_is_numeric_only(cx, true);
         self.text_input.set_text(cx, &full);
         self.text_input.set_is_read_only(cx, false);
         self.text_input.set_key_focus(cx);
@@ -606,6 +618,7 @@ impl FabDragNumber {
     fn end_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
         self.text_input.set_is_read_only(cx, true);
+        self.text_input.set_is_numeric_only(cx, false);
         self.sync_text(cx);
         self.animator_play(cx, ids!(focus.off));
         self.draw_bg.redraw(cx);
@@ -701,6 +714,18 @@ impl Widget for FabDragNumber {
         // the press for text selection and the drag never sees a single
         // FingerMove (the "dragging barely moves the value" bug).
         if self.editing {
+            // Focus ownership is the state boundary, not merely an action we
+            // hope to capture. A parent can consume the TextInput's emitted
+            // KeyFocusLost action while focus itself has already moved; in
+            // that case the old code left `editing` latched forever. Commit
+            // valid text (invalid text naturally restores `self.value`) and
+            // return to the read-only drag display immediately.
+            let input_area = self.text_input.area();
+            if input_area != Area::Empty && !cx.has_key_focus(input_area) {
+                let text = self.text_input.text().to_string();
+                self.commit_edit_text(cx, uid, &text);
+                return;
+            }
             for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     TextInputAction::KeyFocus => {

@@ -770,6 +770,11 @@ impl WaylandCx {
                 // the compositor owns placement, so a window here is never left off-screen
                 // by a restored position the way it can be on Windows, macOS and X11.
                 CxOsOp::RepositionWindow(window_id, size) => {}
+                CxOsOp::SetWindowTitle(window_id, title) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_title(title);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {
                     if visuals.backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
