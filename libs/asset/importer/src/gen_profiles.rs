@@ -10,7 +10,9 @@
 //!
 //! The worker covers EVERY kind in [`crate::gen_kinds::GEN_KINDS`], so it
 //! announces all of those domains: covering a domain and advertising
-//! nothing in it is how a stale config profile gets withdrawn.
+//! nothing in it is how a stale config profile gets withdrawn — and it is
+//! also the honest report for a domain whose kind is never offered
+//! (`text`, whose expander a pipeline names and no picker shows).
 
 use crate::gen_kinds::{GenKind, GEN_KINDS};
 use makepad_asset_ai::fleet::BoxSnapshot;
@@ -128,7 +130,7 @@ pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto>
         // An annotation job is minted by the server for an asset that
         // already exists: there is no prompt for a human to write and
         // nothing for a picker to offer.
-        if !row.advertised() {
+        if !row.advertised {
             continue;
         }
         for model in executable_models(snapshots, row) {
@@ -420,10 +422,24 @@ mod tests {
     #[test]
     fn the_worker_covers_every_wired_domain() {
         let domains = covered_domains();
-        assert_eq!(domains.len(), GEN_KINDS.iter().filter(|k| k.advertised()).count());
+        let mut wired: Vec<&str> = GEN_KINDS.iter().map(|k| k.domain).collect();
+        wired.sort_unstable();
+        wired.dedup();
+        assert_eq!(domains.len(), wired.len());
         // Named once, even though `vision` carries two kinds.
         assert_eq!(domains.iter().filter(|d| *d == "vision").count(), 1);
         assert!(domains.iter().any(|d| d == "video"));
+        // COVERED IS NOT OFFERED. The worker executes `text.expand`, so it
+        // says it covers `text`; a picker is still never given a "expand a
+        // prompt" entry, because its product is not a thing a person browses
+        // for.
+        assert!(domains.iter().any(|d| d == "text"));
+        let text_box = vec![snapshot(
+            "http://big",
+            96 * 1024,
+            vec![model("qwen3.8-27b", "text", MODEL_STATE_READY, 24.0)],
+        )];
+        assert!(build_profiles(&text_box, "gen").is_empty());
         // Covering `video` while advertising nothing is what withdraws the
         // deployment's stock H3 profiles when no box holds those weights.
         assert!(build_profiles(&[], "gen").is_empty());
