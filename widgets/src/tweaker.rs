@@ -4047,6 +4047,358 @@ impl Tweaker {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
+
+                // Row templates, hoisted: one source of truth for the Props list,
+                // the Shader tab INPUTS list and the shader-constant rows.
+                let SectionRowT = FabSection {}
+                let MaterialRowT = View {
+                    width: Fill
+                    height: 40
+                    flow: Right
+                    spacing: 6
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 3 bottom: 3}
+                    name := mod.widgets.FabLabelDim {
+                        width: 70
+                        text: ""
+                    }
+                    swatch_bg := View {
+                        width: Fill
+                        height: 30
+                        show_bg: true
+                        padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
+                        draw_bg +: {
+                            color: #x606060
+                        }
+                        swatch := TweakMaterialSwatch {
+                            width: Fill
+                            height: Fill
+                        }
+                    }
+                }
+                let NumRowT = View {
+                    width: Fill
+                    height: 24
+                    flow: Right
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                    spacing: 6
+                    name := FabLabelDim {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                    value := FabValueInput {
+                        width: 150
+                        height: 18
+                    }
+                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                }
+                let BoolRowT = View {
+                    width: Fill
+                    height: 24
+                    flow: Right
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                    spacing: 6
+                    name := FabLabelDim {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                    value := CheckBox {
+                        width: Fit
+                        height: Fit
+                        text: ""
+                    }
+                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                }
+                let TextRowT = View {
+                    width: Fill
+                    height: 24
+                    flow: Right
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                    spacing: 6
+                    name := FabLabelDim {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                    value := TextInput {
+                        width: 150
+                        height: 18
+                        empty_text: ""
+                        draw_bg +: {
+                            color: #x1d1d1d
+                            border_radius: 2.0
+                        }
+                        draw_text +: {
+                            ink_centered: true
+                            color: #xe6e6e6
+                            text_style +: {
+                                font_size: 8.5
+                            }
+                        }
+                    }
+                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                }
+                let InfoRowT = FabPropRow {
+                    value := FabLabelSmall {
+                        width: Fill
+                        margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
+                        text: ""
+                    }
+                }
+                let SizeRowT = FabPropRow {
+                    height: Fit
+                    size_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        w_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_axis := FabLabelSmall { width: 12 text: "W" }
+                            w_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                w_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            w_input := TextInput {
+                                width: Fill
+                                height: 18
+                                empty_text: ""
+                                label_align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #x1d1d1d
+                                    border_radius: 2.0
+                                }
+                                draw_text +: {
+                                    ink_centered: true
+                                    color: #xe6e6e6
+                                    text_style +: { font_size: 8.5 }
+                                }
+                            }
+                        }
+                        h_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_axis := FabLabelSmall { width: 12 text: "H" }
+                            h_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                h_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            h_input := TextInput {
+                                width: Fill
+                                height: 18
+                                empty_text: ""
+                                label_align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #x1d1d1d
+                                    border_radius: 2.0
+                                }
+                                draw_text +: {
+                                    ink_centered: true
+                                    color: #xe6e6e6
+                                    text_style +: { font_size: 8.5 }
+                                }
+                            }
+                        }
+                    }
+                }
+                let BoxRowT = FabPropRow {
+                    height: Fit
+                    margin: Inset{left: 0 right: 0 top: 3 bottom: 9}
+                    box_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        top_row := View {
+                            width: Fill
+                            height: Fit
+                            align: Align{x: 0.5 y: 0.5}
+                            leg_top := FabValueInput { width: 64 height: 16 }
+                        }
+                        mid_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.5 y: 0.5}
+                            leg_left := FabValueInput { width: 64 height: 16 }
+                            frame := View {
+                                width: Fill
+                                height: 20
+                                show_bg: true
+                                draw_bg +: {
+                                    pixel: fn() {
+                                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                        sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 3.0)
+                                        sdf.fill_keep(#x26262600)
+                                        sdf.stroke(#x5a5a5a, 1.0)
+                                        return sdf.result
+                                    }
+                                }
+                            }
+                            leg_right := FabValueInput { width: 64 height: 16 }
+                        }
+                        bot_row := View {
+                            width: Fill
+                            height: Fit
+                            align: Align{x: 0.5 y: 0.5}
+                            leg_bottom := FabValueInput { width: 64 height: 16 }
+                        }
+                    }
+                    link := CheckBox {
+                        width: Fit
+                        height: Fit
+                        text: ""
+                    }
+                }
+                let FlowRowT = FabPropRow {
+                    spacing_input := FabValueInput {
+                        width: 70
+                        height: 18
+                    }
+                    flow_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 6 right: 0 top: 0 bottom: 0}
+                        f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                    }
+                    flow_field := FabLabelSmall {
+                        width: Fill
+                        margin: Inset{left: 4 top: 2 right: 0 bottom: 0}
+                        text: ""
+                    }
+                }
+                let AlignRowT = FabPropRow {
+                    height: Fit
+                    grid := View {
+                        width: Fit
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        row0 := View { width: Fit height: Fit flow: Right spacing: 2
+                            d0 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d1 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d2 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                        }
+                        row1 := View { width: Fit height: Fit flow: Right spacing: 2
+                            d3 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d4 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d5 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                        }
+                        row2 := View { width: Fit height: Fit flow: Right spacing: 2
+                            d6 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d7 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                            d8 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                        }
+                    }
+                    xy_label := FabLabelSmall {
+                        width: Fill
+                        margin: Inset{left: 8 top: 2 right: 0 bottom: 0}
+                        text: ""
+                    }
+                }
+                let MoreRowT = FabSection {}
+                let ColorRowT = View {
+                    width: Fill
+                    height: 24
+                    flow: Right
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                    spacing: 6
+                    name := FabLabelDim {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                    value := TextInput {
+                        width: 110
+                        height: 18
+                        empty_text: "#rrggbbaa"
+                        draw_bg +: {
+                            color: #x1d1d1d
+                            border_radius: 2.0
+                        }
+                        draw_text +: {
+                            ink_centered: true
+                            color: #xe6e6e6
+                            text_style +: {
+                                font_size: 8.5
+                            }
+                        }
+                    }
+                    swatch := FabColorPick {
+                        width: 28
+                        height: 16
+                    }
+                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                }
+                let VecRowT = View {
+                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    vx := FabValueInput { width: 46 height: 18 }
+                    vy := FabValueInput { width: 46 height: 18 }
+                    vz_wrap := View { width: Fit height: Fit visible: false
+                        vz := FabValueInput { width: 46 height: 18 }
+                    }
+                    vw_wrap := View { width: Fit height: Fit visible: false
+                        vw := FabValueInput { width: 46 height: 18 }
+                    }
+                }
+                let InsetRowT = View {
+                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 3
+                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    il := FabValueInput { width: 40 height: 18 }
+                    it := FabValueInput { width: 40 height: 18 }
+                    ir := FabValueInput { width: 40 height: 18 }
+                    ib := FabValueInput { width: 40 height: 18 }
+                }
+                let MetricsRowT = View {
+                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    m0 := FabValueInput { width: 44 height: 18 }
+                    m1 := FabValueInput { width: 44 height: 18 }
+                    m2 := FabValueInput { width: 44 height: 18 }
+                }
+                let SizeFieldRowT = View {
+                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
+                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    sf_fill := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fill" draw_text +: { text_style +: { font_size: 7.0 } } }
+                    sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
+                    sf_num := FabValueInput { width: 56 height: 18 }
+                }
+                let DocRowT = View {
+                    width: Fill height: Fit flow: Right
+                    padding: Inset{left: 18 right: 8 top: 0 bottom: 3}
+                    doc := FabLabelSmall { width: Fill text: "" }
+                }
+                let NoEditorRowT = View {
+                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
+                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    ne := FabLabelSmall { width: Fit text: "no editor yet" }
+                }
                 View {
                     width: Fill
                     height: Fill
@@ -4267,355 +4619,24 @@ impl Tweaker {
                         // fought every field scrub for the gesture. Wheel
                         // and the scrollbar thumb still scroll.
                         drag_scrolling: false
-                        SectionRow := FabSection {}
-                        MaterialRow := View {
-                            width: Fill
-                            height: 40
-                            flow: Right
-                            spacing: 6
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 3 bottom: 3}
-                            name := mod.widgets.FabLabelDim {
-                                width: 70
-                                text: ""
-                            }
-                            swatch_bg := View {
-                                width: Fill
-                                height: 30
-                                show_bg: true
-                                padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
-                                draw_bg +: {
-                                    color: #x606060
-                                }
-                                swatch := TweakMaterialSwatch {
-                                    width: Fill
-                                    height: Fill
-                                }
-                            }
-                        }
-                        NumRow := View {
-                            width: Fill
-                            height: 24
-                            flow: Right
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                            spacing: 6
-                            name := FabLabelDim {
-                                width: Fill
-                                text: ""
-                                max_lines: 1
-                                text_overflow: TextOverflow.Ellipsis
-                            }
-                            value := FabValueInput {
-                                width: 150
-                                height: 18
-                            }
-                            origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
-                        }
-                        BoolRow := View {
-                            width: Fill
-                            height: 24
-                            flow: Right
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                            spacing: 6
-                            name := FabLabelDim {
-                                width: Fill
-                                text: ""
-                                max_lines: 1
-                                text_overflow: TextOverflow.Ellipsis
-                            }
-                            value := CheckBox {
-                                width: Fit
-                                height: Fit
-                                text: ""
-                            }
-                            origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
-                        }
-                        TextRow := View {
-                            width: Fill
-                            height: 24
-                            flow: Right
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                            spacing: 6
-                            name := FabLabelDim {
-                                width: Fill
-                                text: ""
-                                max_lines: 1
-                                text_overflow: TextOverflow.Ellipsis
-                            }
-                            value := TextInput {
-                                width: 150
-                                height: 18
-                                empty_text: ""
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: {
-                                        font_size: 8.5
-                                    }
-                                }
-                            }
-                            origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
-                        }
-                        InfoRow := FabPropRow {
-                            value := FabLabelSmall {
-                                width: Fill
-                                margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
-                                text: ""
-                            }
-                        }
-                        SizeRow := FabPropRow {
-                            height: Fit
-                            size_col := View {
-                                width: Fill
-                                height: Fit
-                                flow: Down
-                                spacing: 2
-                                w_row := View {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 4
-                                    align: Align{x: 0.0 y: 0.5}
-                                    w_axis := FabLabelSmall { width: 12 text: "W" }
-                                    w_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                        w_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                        w_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                        w_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                    }
-                                    w_input := TextInput {
-                                        width: Fill
-                                        height: 18
-                                        empty_text: ""
-                                        label_align: Align{x: 0.5 y: 0.5}
-                                        draw_bg +: {
-                                            color: #x1d1d1d
-                                            border_radius: 2.0
-                                        }
-                                        draw_text +: {
-                                            ink_centered: true
-                                            color: #xe6e6e6
-                                            text_style +: { font_size: 8.5 }
-                                        }
-                                    }
-                                }
-                                h_row := View {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 4
-                                    align: Align{x: 0.0 y: 0.5}
-                                    h_axis := FabLabelSmall { width: 12 text: "H" }
-                                    h_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                        h_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                        h_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                        h_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                    }
-                                    h_input := TextInput {
-                                        width: Fill
-                                        height: 18
-                                        empty_text: ""
-                                        label_align: Align{x: 0.5 y: 0.5}
-                                        draw_bg +: {
-                                            color: #x1d1d1d
-                                            border_radius: 2.0
-                                        }
-                                        draw_text +: {
-                                            ink_centered: true
-                                            color: #xe6e6e6
-                                            text_style +: { font_size: 8.5 }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        BoxRow := FabPropRow {
-                            height: Fit
-                            margin: Inset{left: 0 right: 0 top: 3 bottom: 9}
-                            box_col := View {
-                                width: Fill
-                                height: Fit
-                                flow: Down
-                                spacing: 2
-                                top_row := View {
-                                    width: Fill
-                                    height: Fit
-                                    align: Align{x: 0.5 y: 0.5}
-                                    leg_top := FabValueInput { width: 64 height: 16 }
-                                }
-                                mid_row := View {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 4
-                                    align: Align{x: 0.5 y: 0.5}
-                                    leg_left := FabValueInput { width: 64 height: 16 }
-                                    frame := View {
-                                        width: Fill
-                                        height: 20
-                                        show_bg: true
-                                        draw_bg +: {
-                                            pixel: fn() {
-                                                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                                sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 3.0)
-                                                sdf.fill_keep(#x26262600)
-                                                sdf.stroke(#x5a5a5a, 1.0)
-                                                return sdf.result
-                                            }
-                                        }
-                                    }
-                                    leg_right := FabValueInput { width: 64 height: 16 }
-                                }
-                                bot_row := View {
-                                    width: Fill
-                                    height: Fit
-                                    align: Align{x: 0.5 y: 0.5}
-                                    leg_bottom := FabValueInput { width: 64 height: 16 }
-                                }
-                            }
-                            link := CheckBox {
-                                width: Fit
-                                height: Fit
-                                text: ""
-                            }
-                        }
-                        FlowRow := FabPropRow {
-                            spacing_input := FabValueInput {
-                                width: 70
-                                height: 18
-                            }
-                            flow_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 6 right: 0 top: 0 bottom: 0}
-                                f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                            }
-                            flow_field := FabLabelSmall {
-                                width: Fill
-                                margin: Inset{left: 4 top: 2 right: 0 bottom: 0}
-                                text: ""
-                            }
-                        }
-                        AlignRow := FabPropRow {
-                            height: Fit
-                            grid := View {
-                                width: Fit
-                                height: Fit
-                                flow: Down
-                                spacing: 2
-                                row0 := View { width: Fit height: Fit flow: Right spacing: 2
-                                    d0 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d1 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d2 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                }
-                                row1 := View { width: Fit height: Fit flow: Right spacing: 2
-                                    d3 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d4 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d5 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                }
-                                row2 := View { width: Fit height: Fit flow: Right spacing: 2
-                                    d6 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d7 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                    d8 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                                }
-                            }
-                            xy_label := FabLabelSmall {
-                                width: Fill
-                                margin: Inset{left: 8 top: 2 right: 0 bottom: 0}
-                                text: ""
-                            }
-                        }
-                        MoreRow := FabSection {}
-                        ColorRow := View {
-                            width: Fill
-                            height: 24
-                            flow: Right
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                            spacing: 6
-                            name := FabLabelDim {
-                                width: Fill
-                                text: ""
-                                max_lines: 1
-                                text_overflow: TextOverflow.Ellipsis
-                            }
-                            value := TextInput {
-                                width: 110
-                                height: 18
-                                empty_text: "#rrggbbaa"
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: {
-                                        font_size: 8.5
-                                    }
-                                }
-                            }
-                            swatch := FabColorPick {
-                                width: 28
-                                height: 16
-                            }
-                            origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
-                        }
-                        VecRow := View {
-                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            vx := FabValueInput { width: 46 height: 18 }
-                            vy := FabValueInput { width: 46 height: 18 }
-                            vz_wrap := View { width: Fit height: Fit visible: false
-                                vz := FabValueInput { width: 46 height: 18 }
-                            }
-                            vw_wrap := View { width: Fit height: Fit visible: false
-                                vw := FabValueInput { width: 46 height: 18 }
-                            }
-                        }
-                        InsetRow := View {
-                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 3
-                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            il := FabValueInput { width: 40 height: 18 }
-                            it := FabValueInput { width: 40 height: 18 }
-                            ir := FabValueInput { width: 40 height: 18 }
-                            ib := FabValueInput { width: 40 height: 18 }
-                        }
-                        MetricsRow := View {
-                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            m0 := FabValueInput { width: 44 height: 18 }
-                            m1 := FabValueInput { width: 44 height: 18 }
-                            m2 := FabValueInput { width: 44 height: 18 }
-                        }
-                        SizeFieldRow := View {
-                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            sf_fill := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fill" draw_text +: { text_style +: { font_size: 7.0 } } }
-                            sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
-                            sf_num := FabValueInput { width: 56 height: 18 }
-                        }
-                        DocRow := View {
-                            width: Fill height: Fit flow: Right
-                            padding: Inset{left: 18 right: 8 top: 0 bottom: 3}
-                            doc := FabLabelSmall { width: Fill text: "" }
-                        }
-                        NoEditorRow := View {
-                            width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
-                            name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            ne := FabLabelSmall { width: Fit text: "no editor yet" }
-                        }
+                        SectionRow := SectionRowT {}
+                        MaterialRow := MaterialRowT {}
+                        NumRow := NumRowT {}
+                        BoolRow := BoolRowT {}
+                        TextRow := TextRowT {}
+                        InfoRow := InfoRowT {}
+                        SizeRow := SizeRowT {}
+                        BoxRow := BoxRowT {}
+                        FlowRow := FlowRowT {}
+                        AlignRow := AlignRowT {}
+                        MoreRow := MoreRowT {}
+                        ColorRow := ColorRowT {}
+                        VecRow := VecRowT {}
+                        InsetRow := InsetRowT {}
+                        MetricsRow := MetricsRowT {}
+                        SizeFieldRow := SizeFieldRowT {}
+                        DocRow := DocRowT {}
+                        NoEditorRow := NoEditorRowT {}
                     }
                     }
                 }
