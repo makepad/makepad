@@ -236,7 +236,9 @@ impl Cx {
     /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
     /// (Headless builds write frames to files on their own; this is for the
     /// live GPU-rendered app.)
-    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) {
+    /// Returns the capture's request id, so the caller can later
+    /// [`cancel_frame_capture`](Self::cancel_frame_capture) it.
+    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) -> u64 {
         let request_id = SCREENSHOT_FILE_NEXT_ID
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         screenshot_file_sinks().lock().unwrap().insert(request_id, path);
@@ -246,6 +248,28 @@ impl Cx {
                 kind_id: 0,
             });
         self.redraw_all();
+        request_id
+    }
+
+    /// Forget a pending [`capture_next_frame_to_file`]. The GPU readback
+    /// cannot be recalled once its frame presents, so a request that has
+    /// already been drained keeps its sink entry but with an EMPTY path —
+    /// the writer discards those bytes instead of writing a file the
+    /// caller has stopped watching (and never mistakes them for a studio
+    /// response). A request whose frame has not presented yet is dropped
+    /// outright.
+    pub fn cancel_frame_capture(&mut self, request_id: u64) {
+        let queued = self
+            .screenshot_requests
+            .iter()
+            .any(|request| request.request_id == request_id);
+        let mut sinks = screenshot_file_sinks().lock().unwrap();
+        if queued {
+            self.screenshot_requests.retain(|request| request.request_id != request_id);
+            sinks.remove(&request_id);
+        } else if sinks.contains_key(&request_id) {
+            sinks.insert(request_id, std::path::PathBuf::new());
+        }
     }
 
     #[allow(dead_code)]
@@ -307,6 +331,10 @@ impl Cx {
             let mut sinks = screenshot_file_sinks().lock().unwrap();
             for id in request_ids {
                 if let Some(path) = sinks.remove(&id) {
+                    if path.as_os_str().is_empty() {
+                        // Cancelled after its frame was drained: discard.
+                        continue;
+                    }
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -580,6 +608,57 @@ impl Cx {
                 widgets: widgets.clone(),
             }));
         }
+    }
+
+    /// Hardware-faithful synthetic mouse move (remote `/m?hw=1`): the event
+    /// takes the SAME pointer-lock/pin transform hardware takes
+    /// (`locked_mouse_transform`), so a pinned scrub behaves identically
+    /// under injection. The ordinary injection path bypasses
+    /// send_mouse_move entirely — which is how every bridge verification
+    /// of the pin lied about the physical mouse.
+    pub fn dispatch_hw_mouse_move(
+        &mut self,
+        window_id: crate::window::WindowId,
+        raw: crate::makepad_math::DVec2,
+        delta: crate::makepad_math::DVec2,
+        seed: crate::makepad_math::DVec2,
+        modifiers: crate::event::KeyModifiers,
+        time: f64,
+    ) {
+        // `os::apple` does not exist in a headless build (see os/mod.rs), so
+        // the pointer-lock transform has to be gated on the module's own cfg,
+        // not on the target alone.
+        #[cfg(all(target_os = "macos", not(headless)))]
+        let (abs, lock_delta) = crate::os::apple::macos::macos_app::with_macos_app(|app| {
+            app.locked_mouse_transform(raw, delta, seed)
+        });
+        #[cfg(not(all(target_os = "macos", not(headless))))]
+        let (abs, lock_delta) = {
+            let _ = (delta, seed);
+            (raw, crate::makepad_math::DVec2::default())
+        };
+        self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+            abs,
+            lock_delta,
+            window_id,
+            modifiers,
+            time,
+            handled: Cell::new(Area::Empty),
+        }));
+        self.fingers.cycle_hover_area(live_id!(mouse).into());
+        self.fingers.switch_captures();
+    }
+
+    /// Hardware-faithful synthetic mouse up, part 1: release an active
+    /// scrub pin at the platform layer first — exactly what
+    /// macos_window::send_mouse_up does for a physical up.
+    pub fn dispatch_hw_pin_release(&mut self) {
+        #[cfg(all(target_os = "macos", not(headless)))]
+        crate::os::apple::macos::macos_app::with_macos_app(|app| {
+            if app.pointer_pin_mode {
+                app.set_pointer_pin(false);
+            }
+        });
     }
 
     /// Dispatch a StudioToApp message as an event. Handles input, clipboard,
@@ -985,6 +1064,31 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        // A scrub pin listens for the button-up ITSELF: release must never
+        // depend on a widget hit path. Schedule the cursor release here,
+        // but do NOT clear the capture's pin flag yet — the flag must
+        // survive THIS dispatch so every suppression gate (hover, new
+        // captures, the tweak pick pass) still stands down while the owner
+        // receives its FingerUp; clearing early let the pick pass eat the
+        // up. The flag dies WITH the capture in fingers.mouse_up, which
+        // every platform calls right after this dispatch.
+        if let Event::MouseUp(e) = event {
+            if e.button.is_primary() && self.fingers.has_pinned_capture() {
+                self.platform_ops
+                    .push_back(crate::cx_api::CxOsOp::PinMousePointer(false));
+            }
+        }
+        // The F10 exploded z-layer view is LIVE: the intercept claims only
+        // its own keys and the orbit drag (on raw screen coordinates), then
+        // the router re-addresses every other pointer event to the plane
+        // its ray lands on so ordinary dispatch — hover, wheel scrolling,
+        // the tweaker's pick — works on the exploded app. (After the pin
+        // hook: a mid-drag F10 must never strand a hidden cursor.)
+        if self.sploded_intercept(event) {
+            return;
+        }
+        let routed = self.sploded_route(event);
+        let event = routed.as_ref().unwrap_or(event);
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }

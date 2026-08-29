@@ -682,6 +682,9 @@ impl Cx {
                 CxOsOp::NormalizeWindow(_window_id) => {
                     self.os.from_wasm(FromWasmNormalScreen {});
                 }
+                CxOsOp::SetWindowTitle(_window_id, title) => {
+                    self.os.from_wasm(FromWasmSetDocumentTitle { title });
+                }
                 CxOsOp::SetWindowVisuals(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});

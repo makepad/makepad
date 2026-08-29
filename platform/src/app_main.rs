@@ -269,15 +269,19 @@ macro_rules! _app_main_event_closure {
             std::rc::Rc::new(std::cell::RefCell::new(None));
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
+                $crate::startup_trace("Startup: script_mod begin");
                 *app.borrow_mut() = Some(cx.with_vm(|vm| {
                     let value = <$app as AppMain>::script_mod(vm);
+                    $crate::startup_trace("Startup: script_mod eval done");
                     if let Some(obj) = value.as_object() {
                         *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
                     }
                     let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                    $crate::startup_trace("Startup: app from_value done");
                     <$app as AppMain>::after_new_from_script(vm, &mut app);
                     app
                 }));
+                $crate::startup_trace("Startup: handler done");
                 cx.start_hot_reload_file_observer_if_requested();
             }
             if let Event::LiveEdit = event {
@@ -335,10 +339,12 @@ macro_rules! app_main {
 
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         pub fn app_main() {
+            $crate::startup_trace("main-entered (dyld done)");
             Cx::init_log();
             if Cx::pre_start() {
                 return;
             }
+            $crate::startup_trace("pre_start (objc classes)");
 
             // The event-handler closure (which captures `app` and
             // `app_value` Rcs internally) is shared across all four
@@ -346,13 +352,18 @@ macro_rules! app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(
                 $crate::_app_main_event_closure!($app),
             )));
+            $crate::startup_trace("Cx::new (vm + std script)");
             let studio_http = $crate::resolve_studio_http();
             cx.borrow_mut().init_websockets(&studio_http);
             if $crate::should_run_stdin_loop_from_env() {
                 cx.borrow_mut().in_makepad_studio = true;
+                // A hosted child must never outlive its host, whatever its
+                // event loop happens to be busy with.
+                $crate::memory_watchdog::start_stdin_orphan_watchdog();
             }
             //cx.borrow_mut().init_websockets("");
             cx.borrow_mut().init_cx_os();
+            $crate::startup_trace("init_cx_os (deps loaded)");
             // `--remote`: a localhost HTTP control surface for agents / tests.
             // No-op unless the flag (or MAKEPAD_REMOTE) is present.
             $crate::remote::start_if_requested();

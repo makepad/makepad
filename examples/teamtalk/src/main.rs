@@ -1,146 +1,103 @@
 pub use makepad_widgets;
 
 /*
-TeamTalk is a LAN (wired only) p2p audiochat supporting as many clients as you have bandwidth.
-For 6 clients it should pull about 25 megabits. You can use it to have a super low latency
-helicopter-headset experience, silent disco, and so on.
-This example shows using networking and audio IO
+TeamTalk: LAN p2p voice chat on makepad-teamtalk — a super low latency
+helicopter-headset experience. This example is the thin app shell: it opens
+the default mic (with OS echo cancellation) and speakers, pushes the device
+blocks into a VoiceLink, and prints live stats. All transport, jitter and
+mixing logic lives in libs/teamtalk.
+
+    cargo run -p makepad-example-teamtalk --release -- [flags]
+
+Flags:
+    --device=NAME     input device substring match (default: default mic)
+    --loopback        capture "System Audio" instead of a microphone
+    --vol=0..1        mic volume (cubic taper, default 1.0)
+    --channel=N       team channel to talk on (0 = everyone, default 0)
+    --listen=1,2      team channels to hear (default: all; 0 always plays)
+    --port=N          UDP port (default 41531 — keep it: firewalls know it)
+    --peer=IP:PORT    extra unicast peer (repeatable; e.g. across subnets)
+    --broadcast-audio broadcast audio frames instead of unicasting
+    --frame=N         samples per 48 kHz frame: 120|240|480|960 (default 240)
+    --ogg             send 4-bit ADPCM in Ogg pages (~300 kbit/s) instead of raw
+    --mute            start muted
+
+The UDP protocol carries a codec id (raw i16 now, ogg later), a team channel
+byte, a sender id, sequence numbers and timestamps; see libs/teamtalk.
 */
 
-use makepad_widgets::makepad_platform::{
-    audio::AudioBuffer, audio_stream::AudioStreamSender, makepad_micro_serde::*,
-};
+use makepad_teamtalk::{Delivery, VoiceConfig, VoiceLink};
+use makepad_widgets::makepad_platform::audio::AudioInputOptions;
 use makepad_widgets::*;
-use std::collections::HashMap;
-use std::net::UdpSocket;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-// Network standard sample rate - all audio is transmitted at this rate
-const NETWORK_SAMPLE_RATE: f64 = 44100.0;
-// Maximum samples in a wire packet (640 i16 values = 1280 bytes)
-// For mono: 640 frames, for stereo: 320 frames
-const MAX_WIRE_SAMPLES: usize = 640;
-
-/// Command line arguments for TeamTalk
 struct Args {
     device: Option<String>,
+    loopback: bool,
     vol: f32,
+    channel: u8,
+    listen: Option<Vec<u8>>,
+    port: u16,
+    peers: Vec<std::net::SocketAddr>,
+    broadcast_audio: bool,
+    frame: usize,
+    mute: bool,
+    ogg: bool,
 }
 
 impl Args {
     fn parse() -> Self {
-        let mut device = None;
-        let mut vol = 1.0_f32;
-
+        let mut args = Self {
+            device: None,
+            loopback: false,
+            vol: 1.0,
+            channel: 0,
+            listen: None,
+            port: makepad_teamtalk::DEFAULT_PORT,
+            peers: Vec::new(),
+            broadcast_audio: false,
+            frame: 240,
+            mute: false,
+            ogg: false,
+        };
         for arg in std::env::args().skip(1) {
-            if let Some(d) = arg.strip_prefix("--device=") {
-                device = Some(d.to_string());
+            if let Some(v) = arg.strip_prefix("--device=") {
+                args.device = Some(v.to_string());
+            } else if arg == "--loopback" {
+                args.loopback = true;
             } else if let Some(v) = arg.strip_prefix("--vol=") {
-                if let Ok(parsed) = v.parse::<f32>() {
-                    vol = parsed.clamp(0.0, 1.0);
+                if let Ok(v) = v.parse::<f32>() {
+                    args.vol = v.clamp(0.0, 1.0);
                 }
+            } else if let Some(v) = arg.strip_prefix("--channel=") {
+                args.channel = v.parse().unwrap_or(0);
+            } else if let Some(v) = arg.strip_prefix("--listen=") {
+                args.listen = Some(v.split(',').filter_map(|c| c.trim().parse().ok()).collect());
+            } else if let Some(v) = arg.strip_prefix("--port=") {
+                args.port = v.parse().unwrap_or(makepad_teamtalk::DEFAULT_PORT);
+            } else if let Some(v) = arg.strip_prefix("--peer=") {
+                match v.parse() {
+                    Ok(a) => args.peers.push(a),
+                    Err(_) => println!("bad --peer address: {v}"),
+                }
+            } else if arg == "--broadcast-audio" {
+                args.broadcast_audio = true;
+            } else if let Some(v) = arg.strip_prefix("--frame=") {
+                args.frame = v.parse().unwrap_or(240);
+            } else if arg == "--mute" {
+                args.mute = true;
+            } else if arg == "--ogg" {
+                args.ogg = true;
             }
         }
-
-        Self { device, vol }
+        args
     }
 }
 
-/// Convert linear volume (0.0-1.0) to logarithmic gain
-/// At vol=1.0, gain=1.0; at vol=0.5, gain≈0.1; at vol=0.0, gain=0.0
-fn linear_to_log_gain(linear: f32) -> f32 {
-    if linear <= 0.0 {
-        return 0.0;
-    }
-    if linear >= 1.0 {
-        return 1.0;
-    }
-    // Use a power curve: linear^3 gives a nice logarithmic feel
-    // This maps 0.5 -> 0.125, 0.7 -> 0.343, etc.
-    linear * linear * linear
-}
-
-/// Simple linear interpolation resampler
-fn resample(input: &AudioBuffer, from_rate: f64, to_rate: f64) -> AudioBuffer {
-    if (from_rate - to_rate).abs() < 1.0 {
-        return input.clone();
-    }
-
-    let ratio = to_rate / from_rate;
-    let new_frame_count = ((input.frame_count() as f64 * ratio).round() as usize).max(1);
-    let mut output = AudioBuffer::new_with_size(new_frame_count, input.channel_count());
-
-    for chan in 0..input.channel_count() {
-        let inp = input.channel(chan);
-        let out = output.channel_mut(chan);
-        for i in 0..new_frame_count {
-            let src_pos = i as f64 / ratio;
-            let src_idx = src_pos as usize;
-            let frac = (src_pos - src_idx as f64) as f32;
-
-            let sample0 = inp.get(src_idx).copied().unwrap_or(0.0);
-            let sample1 = inp.get(src_idx + 1).copied().unwrap_or(sample0);
-            out[i] = sample0 + (sample1 - sample0) * frac;
-        }
-    }
-
-    output
-}
-
-/// Smooth limiter with fast attack, slow release
-fn apply_limiter(buf: &mut [f32], limiter_gain: &mut f32) {
-    const MAX_VOLUME: f32 = 0.6;
-    const TARGET_GAIN: f32 = 0.1;
-    const ATTACK_COEF: f32 = 0.3;
-    const RELEASE_COEF: f32 = 0.001;
-
-    for v in buf.iter_mut() {
-        let desired = if v.abs() > MAX_VOLUME {
-            TARGET_GAIN
-        } else {
-            1.0
-        };
-        if desired < *limiter_gain {
-            *limiter_gain += (desired - *limiter_gain) * ATTACK_COEF;
-        } else {
-            *limiter_gain += (desired - *limiter_gain) * RELEASE_COEF;
-        }
-        *v *= *limiter_gain;
-    }
-}
-
-/// Calculate average peak level
-fn calculate_peak(buf: &[f32]) -> f32 {
-    let sum: f32 = buf.iter().map(|v| v.abs()).sum();
-    sum / buf.len() as f32
-}
-
-/// Logarithmic fade-in
-fn apply_fade_in(buf: &mut [f32], fade_samples: usize) {
-    let ramp_len = fade_samples.min(buf.len());
-    let k = 3.0_f32;
-    let norm = k.exp() - 1.0;
-    for i in 0..ramp_len {
-        let t = i as f32 / ramp_len as f32;
-        let gain = ((k * t).exp() - 1.0) / norm;
-        buf[i] *= gain;
-    }
-}
-
-/// Logarithmic fade-out
-fn apply_fade_out(buf: &mut [f32], fade_samples: usize) {
-    let ramp_len = fade_samples.min(buf.len());
-    let k = 3.0_f32;
-    let norm = k.exp() - 1.0;
-    for i in 0..ramp_len {
-        let t = i as f32 / ramp_len as f32;
-        let gain = 1.0 - ((k * t).exp() - 1.0) / norm;
-        buf[i] *= gain;
-    }
-    // Zero remainder after fade
-    for i in ramp_len..buf.len() {
-        buf[i] = 0.0;
-    }
+/// Mic volume 0..1 with a cubic taper (0.5 feels like half loudness).
+fn cubic_gain(v: f32) -> f32 {
+    v * v * v
 }
 
 app_main!(App);
@@ -159,22 +116,8 @@ pub struct App {
     pass: DrawPass,
     #[new]
     main_draw_list: DrawList2d,
-}
-
-// this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
-#[derive(SerBin, DeBin, Debug)]
-enum TeamTalkWire {
-    Silence {
-        client_uid: u64,
-        sequence: u32,
-        frame_count: u32,
-    },
-    Audio {
-        client_uid: u64,
-        sequence: u32,
-        channel_count: u32,
-        data: Vec<i16>,
-    },
+    #[rust]
+    link: Option<Arc<VoiceLink>>,
 }
 
 impl MatchEvent for App {
@@ -182,22 +125,18 @@ impl MatchEvent for App {
         self.window.set_pass(cx, &self.pass);
         self.pass
             .set_window_clear_color(cx, vec4(0.2, 0.2, 0.3, 1.0));
-        self.start_network_stack(cx);
+        self.start_voice(cx);
     }
 
     fn handle_draw_2d(&mut self, cx: &mut Cx2d) {
         if !cx.will_redraw(&mut self.main_draw_list, Walk::default()) {
             return;
         }
-
         cx.begin_pass(&self.pass, None);
         self.main_draw_list.begin_always(cx);
-
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
-
-        // No UI - just audio streaming
-
+        // No UI — audio only; stats go to stdout.
         cx.end_pass_sized_turtle();
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass);
@@ -205,35 +144,31 @@ impl MatchEvent for App {
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
         let args = Args::parse();
-
         for desc in &devices.descs {
             println!("{}", desc)
         }
-
-        // Select input device based on --device= argument or use default
-        let _inputs = if let Some(ref device_name) = args.device {
-            let matched = devices.match_inputs(&[device_name.as_str()]);
+        let inputs = if args.loopback {
+            devices.match_inputs(&["System Audio"])
+        } else if let Some(ref name) = args.device {
+            let matched = devices.match_inputs(&[name.as_str()]);
             if matched.is_empty() {
-                println!(
-                    "Warning: No input device matching '{}', using default",
-                    device_name
-                );
+                println!("No input matching '{name}', using the default mic");
                 devices.default_input()
             } else {
-                println!("Using input device matching: {}", device_name);
                 matched
             }
         } else {
             devices.default_input()
         };
-
-        cx.use_audio_inputs(&devices.match_inputs(&["System Audio"]));
-        //cx.use_audio_inputs(&inputs);
+        // Voice-processing capture: the OS removes what the speakers play
+        // from the mic signal, so a speaker+mic setup does not echo.
+        cx.use_audio_inputs_with_options(
+            &inputs,
+            AudioInputOptions {
+                echo_cancellation: !args.loopback,
+            },
+        );
         cx.use_audio_outputs(&devices.default_output());
-    }
-
-    fn handle_signal(&mut self, _cx: &mut Cx) {
-        // Placeholder for signal handling
     }
 
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
@@ -251,290 +186,128 @@ impl AppMain for App {
 }
 
 impl App {
-    pub fn start_network_stack(&mut self, cx: &mut Cx) {
+    fn start_voice(&mut self, cx: &mut Cx) {
         let args = Args::parse();
-        let mic_gain = linear_to_log_gain(args.vol);
+        let mut link = match VoiceLink::bind(VoiceConfig {
+            port: args.port,
+            static_peers: args.peers.clone(),
+            delivery: if args.broadcast_audio {
+                Delivery::Broadcast
+            } else {
+                Delivery::Unicast
+            },
+            frame_samples: args.frame,
+            codec: if args.ogg {
+                makepad_teamtalk::Codec::Ogg
+            } else {
+                makepad_teamtalk::Codec::RawI16
+            },
+            channel: args.channel,
+            ..VoiceConfig::default()
+        }) {
+            Ok(link) => link,
+            Err(e) => {
+                println!("voice: bind failed: {e}");
+                return;
+            }
+        };
+        link.set_input_gain(cubic_gain(args.vol));
+        link.set_muted(args.mute);
+        match &args.listen {
+            Some(channels) => link.set_listen_channels(channels),
+            None => link.set_listen_all(),
+        }
         println!(
-            "Mic volume: {:.2} (linear) -> {:.4} (gain)",
-            args.vol, mic_gain
+            "voice: {} talk-channel {} frame {} samples ({:.1} ms) {}",
+            link.local_addr(),
+            args.channel,
+            args.frame,
+            args.frame as f64 * 1000.0 / makepad_teamtalk::INTERNAL_RATE,
+            if args.broadcast_audio {
+                "broadcast"
+            } else {
+                "unicast"
+            }
         );
 
-        // not a very good uid, but it'll do.
-        let my_client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).0;
+        let mut capture = link.take_capture().unwrap();
+        let mut playback = link.take_playback().unwrap();
 
-        // AudioStream is an mpsc channel that buffers at the recv side
-        // and allows arbitrary chunksized reads. Little utility struct.
-        // platform2's create_pair takes (min_buf, max_buf) at creation time
-        let (mic_send, mut mic_recv) = AudioStreamSender::create_pair(0, 8);
-        let (_mix_send, mut mix_recv) = AudioStreamSender::create_pair(3, 8);
+        // Device geometry, published by the callbacks for the stats line:
+        // (rate << 20 | channels << 16 | block_frames).
+        let in_geom = Arc::new(AtomicU64::new(0));
+        let out_geom = Arc::new(AtomicU64::new(0));
+        let pack = |rate: f64, chans: usize, frames: usize| {
+            ((rate as u64) << 20) | ((chans as u64) << 16) | frames as u64
+        };
 
-        // the UDP broadcast socket
-        let write_audio = UdpSocket::bind("0.0.0.0:41531").unwrap();
-        write_audio
-            .set_read_timeout(Some(Duration::new(5, 0)))
-            .unwrap();
-        write_audio.set_broadcast(true).unwrap();
+        let geom = in_geom.clone();
+        cx.audio_input(0, move |info, input| {
+            geom.store(
+                pack(info.sample_rate, input.channel_count(), input.frame_count()),
+                Ordering::Relaxed,
+            );
+            capture.push_planar(
+                info.sample_rate,
+                input.frame_count(),
+                input.channel_count(),
+                &input.data,
+            );
+        });
 
-        let read_audio = write_audio.try_clone().unwrap();
+        let geom = out_geom.clone();
+        cx.audio_output(0, move |info, output| {
+            geom.store(
+                pack(info.sample_rate, output.channel_count(), output.frame_count()),
+                Ordering::Relaxed,
+            );
+            output.zero();
+            playback.mix_into_planar(
+                info.sample_rate,
+                output.frame_count(),
+                output.channel_count(),
+                &mut output.data,
+            );
+        });
 
-        // our microphone broadcast network thread
-        // Buffer adapts to input channel count: mono=640 frames, stereo=320 frames
-        std::thread::spawn(move || {
-            let mut wire_data = Vec::new();
-            let mut output_buffer = AudioBuffer::default();
-            let mut was_silent = true;
-            let fade_in_samples = 280; // ~6ms at 44100Hz
-            let mut limiter_gain = 1.0_f32;
-            let mut sequence: u32 = 0;
-
-            loop {
-                mic_recv.recv_stream();
+        let link = Arc::new(link);
+        let stats_link = link.clone();
+        std::thread::Builder::new()
+            .name("teamtalk-stats".into())
+            .spawn(move || {
+                let unpack = |v: u64| (v >> 20, (v >> 16) & 0xF, v & 0xFFFF);
+                let mut last = stats_link.stats();
                 loop {
-                    // Get actual channel count from pending input buffers
-                    let channel_count = mic_recv.channel_count(0).unwrap_or(1);
-                    // Resize buffer: MAX_WIRE_SAMPLES total samples
-                    // mono=640 frames, stereo=320 frames
-                    let frame_count = MAX_WIRE_SAMPLES / channel_count;
-                    output_buffer.resize(frame_count, channel_count);
-
-                    if mic_recv.read_buffer(true, 0, &mut output_buffer) == 0 {
-                        break;
-                    }
-
-                    let channel_count = output_buffer.channel_count();
-                    let frame_count = output_buffer.frame_count();
-
-                    // Process all channels: limiter, silence detection, fades
-                    let mut peak = 0.0_f32;
-                    for ch in 0..channel_count {
-                        let buf = output_buffer.channel_mut(ch);
-                        apply_limiter(buf, &mut limiter_gain);
-                        peak = peak.max(calculate_peak(buf));
-                    }
-
-                    let is_active = peak > 0.001;
-                    let wire_packet = match (is_active, was_silent) {
-                        (true, true) => {
-                            // Fade in from silence
-                            for ch in 0..channel_count {
-                                apply_fade_in(output_buffer.channel_mut(ch), fade_in_samples);
-                            }
-                            was_silent = false;
-                            TeamTalkWire::Audio {
-                                client_uid: my_client_uid,
-                                sequence,
-                                channel_count: channel_count as u32,
-                                data: output_buffer.to_i16(),
-                            }
-                        }
-                        (true, false) => {
-                            // Active, no transition
-                            was_silent = false;
-                            TeamTalkWire::Audio {
-                                client_uid: my_client_uid,
-                                sequence,
-                                channel_count: channel_count as u32,
-                                data: output_buffer.to_i16(),
-                            }
-                        }
-                        (false, false) => {
-                            // Fade out to silence
-                            for ch in 0..channel_count {
-                                apply_fade_out(output_buffer.channel_mut(ch), fade_in_samples);
-                            }
-                            was_silent = true;
-                            TeamTalkWire::Audio {
-                                client_uid: my_client_uid,
-                                sequence,
-                                channel_count: channel_count as u32,
-                                data: output_buffer.to_i16(),
-                            }
-                        }
-                        (false, true) => {
-                            // Still silent
-                            TeamTalkWire::Silence {
-                                client_uid: my_client_uid,
-                                sequence,
-                                frame_count: frame_count as u32,
-                            }
-                        }
-                    };
-
-                    sequence = sequence.wrapping_add(1);
-                    wire_data.clear();
-                    wire_packet.ser_bin(&mut wire_data);
-                    let _ = write_audio.send_to(&wire_data, "10.0.0.255:41531");
-                }
-            }
-        });
-
-        // the network audio receiving thread
-        std::thread::spawn(move || {
-            let mut read_buf = [0u8; 4096];
-            // Track expected sequence number per client
-            let mut client_sequences: HashMap<u64, u32> = HashMap::new();
-
-            loop {
-                if let Ok((len, _addr)) = read_audio.recv_from(&mut read_buf) {
-                    let read_buf = &read_buf[0..len];
-
-                    let packet = match TeamTalkWire::deserialize_bin(read_buf) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-
-                    // create an audiobuffer from the data
-                    // Received data keeps its original channel count (mono or stereo)
-                    let (client_uid, sequence, _buffer) = match packet {
-                        TeamTalkWire::Audio {
-                            client_uid,
-                            sequence,
-                            channel_count,
-                            data,
-                        } => {
-                            let buffer = AudioBuffer::from_i16(&data, channel_count as usize);
-                            (client_uid, sequence, buffer)
-                        }
-                        TeamTalkWire::Silence {
-                            client_uid,
-                            sequence,
-                            frame_count,
-                        } => {
-                            // Silence packets are mono (1 channel)
-                            (
-                                client_uid,
-                                sequence,
-                                AudioBuffer::new_with_size(frame_count as usize, 1),
-                            )
-                        }
-                    };
-
-                    if client_uid != my_client_uid {
-                        // Check sequence number for gaps or out-of-order
-                        let expected = client_sequences.entry(client_uid).or_insert(sequence);
-                        if sequence != *expected {
-                            let diff = sequence.wrapping_sub(*expected) as i32;
-                            if diff > 0 && diff < 1000 {
-                                println!(
-                                    "SEQ GAP: client {:016x} expected {} got {} (missed {})",
-                                    client_uid, *expected, sequence, diff
-                                );
-                            } else if diff < 0 && diff > -1000 {
-                                println!(
-                                    "SEQ OUT-OF-ORDER: client {:016x} expected {} got {} ({})",
-                                    client_uid, *expected, sequence, diff
-                                );
-                            } else {
-                                // Large jump - probably reconnect or wrap
-                                println!(
-                                    "SEQ RESET: client {:016x} {} -> {}",
-                                    client_uid, *expected, sequence
-                                );
-                            }
-                        }
-                        *expected = sequence.wrapping_add(1);
-
-                        // platform2 uses send() instead of write_buffer()
-                        //let _ = mix_send.send(client_uid, buffer);
-                    }
-                }
-            }
-        });
-
-        cx.audio_input(0, move |info, input_buffer| {
-            // Keep the input's natural channel count:
-            // - Microphones are typically mono (1 channel)
-            // - Loopback captures stereo (2 channels)
-            // Resample to network rate before sending
-            let mut resampled = resample(input_buffer, info.sample_rate, NETWORK_SAMPLE_RATE);
-
-            // Apply mic volume (logarithmic scaling)
-            if mic_gain < 1.0 {
-                for sample in resampled.data.iter_mut() {
-                    *sample *= mic_gain;
-                }
-            }
-
-            let _ = mic_send.send(0, resampled);
-        });
-
-        let mut last_callback_time: Option<std::time::Instant> = None;
-        let mut expected_interval_us: Option<f64> = None;
-
-        cx.audio_output(0, move |info, output_buffer| {
-            // Timing check: detect if callback interval varies by more than 30%
-            let callback_start = std::time::Instant::now();
-            if let Some(last_time) = last_callback_time {
-                let elapsed_us = last_time.elapsed().as_micros() as f64;
-
-                // Calculate expected interval from buffer size and sample rate
-                let expected = expected_interval_us.get_or_insert_with(|| {
-                    (output_buffer.frame_count() as f64 / info.sample_rate) * 1_000_000.0
-                });
-
-                let deviation = (elapsed_us - *expected).abs() / *expected;
-                if deviation > 0.30 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let s = stats_link.stats();
+                    let (irate, ich, iblk) = unpack(in_geom.load(Ordering::Relaxed));
+                    let (orate, och, oblk) = unpack(out_geom.load(Ordering::Relaxed));
                     println!(
-                        "AUDIO TIMING: expected {:.0}us, got {:.0}us ({:+.1}%)",
-                        *expected,
-                        elapsed_us,
-                        (elapsed_us / *expected - 1.0) * 100.0
+                        "voice: in {irate}Hz {ich}ch block {iblk} | out {orate}Hz {och}ch block {oblk} | tx {}/s ({} B/s) rx {}/s | peers {} | late {} err {}",
+                        (s.packets_sent - last.packets_sent) / 2,
+                        (s.bytes_sent - last.bytes_sent) / 2,
+                        (s.packets_recv - last.packets_recv) / 2,
+                        s.active_peers,
+                        s.filtered,
+                        s.send_errors,
                     );
-                }
-            }
-            last_callback_time = Some(callback_start);
-
-            output_buffer.zero();
-            mix_recv.try_recv_stream();
-
-            let out_channels = output_buffer.channel_count();
-            let out_frames = output_buffer.frame_count();
-
-            // Calculate how many frames we need at network rate to fill output buffer
-            let ratio = NETWORK_SAMPLE_RATE / info.sample_rate;
-            let network_frames = (out_frames as f64 * ratio).ceil() as usize;
-
-            let mut network_buf = AudioBuffer::default();
-            for i in 0..mix_recv.num_routes() {
-                // Get the actual channel count for this route's pending buffers
-                let route_channels = mix_recv.channel_count(i).unwrap_or(2);
-                network_buf.resize(network_frames, route_channels);
-
-                if mix_recv.read_buffer(false, i, &mut network_buf) != 0 {
-                    // Resample from network rate to device rate
-                    let resampled = resample(&network_buf, NETWORK_SAMPLE_RATE, info.sample_rate);
-                    let src_channels = resampled.channel_count();
-                    let copy_frames = resampled.frame_count().min(out_frames);
-
-                    // Mix into output, upmixing mono to stereo if needed
-                    for frame in 0..copy_frames {
-                        for out_ch in 0..out_channels {
-                            // If source is mono, use channel 0 for all output channels
-                            let src_ch = if src_channels == 1 {
-                                0
-                            } else {
-                                out_ch.min(src_channels - 1)
-                            };
-                            let src_sample = resampled.channel(src_ch)[frame];
-                            output_buffer.channel_mut(out_ch)[frame] += src_sample;
-                        }
+                    for p in stats_link.peers() {
+                        println!(
+                            "voice:   peer {:08x} {} ch{} {} buf {:.1}ms target {} late {} dup {}",
+                            p.sender as u32,
+                            p.addr.map(|a| a.to_string()).unwrap_or_default(),
+                            p.channel,
+                            if p.talking { "TALKING" } else { "quiet" },
+                            p.buffered_ms,
+                            p.target_frames,
+                            p.frames_late,
+                            p.frames_duplicate,
+                        );
                     }
+                    last = s;
                 }
-            }
-
-            // Check callback processing time doesn't exceed 50% of expected interval
-            if let Some(expected) = expected_interval_us {
-                let processing_us = callback_start.elapsed().as_micros() as f64;
-                let threshold = expected * 0.5;
-                if processing_us > threshold {
-                    println!(
-                        "CALLBACK TOO SLOW: took {:.0}us (threshold {:.0}us, {:.1}% of interval)",
-                        processing_us,
-                        threshold,
-                        (processing_us / expected) * 100.0
-                    );
-                }
-            }
-        });
+            })
+            .unwrap();
+        self.link = Some(link);
     }
 }

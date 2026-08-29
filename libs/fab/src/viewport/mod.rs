@@ -868,6 +868,8 @@ impl FabViewport {
             vec![ModelInstance {
                 model: self.model_id.clone(),
                 transform: Mat4f::identity(),
+                tint: vec4(1.0, 1.0, 1.0, 1.0),
+                color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                 // Upload-time registration owns the CSM caster list. Keep
                 // architecture static so it never enters the live-mover or
                 // analytic-lamp lanes merely to cast a shadow.
