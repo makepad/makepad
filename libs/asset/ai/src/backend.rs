@@ -803,11 +803,24 @@ impl Default for LiveConfig {
             seed: 0,
             seed_mode: SeedMode::default(),
             references: Vec::new(),
-            camera: CameraMotion::default(),
+            camera: CameraMotion::feedback_default(),
             feedback: 0.7,
             noise_mode: NoiseMode::default(),
             drift: DriftParams::default(),
         }
+    }
+}
+
+impl CameraMotion {
+    /// The session default: a 1% dolly-in and a 0.01 rad roll per feedback
+    /// iteration — the slow tunnel + spiral that keeps a feedback loop
+    /// travelling instead of settling (measured: without it the loop's
+    /// frame-to-frame difference decays toward ~0.9/255 within a minute;
+    /// with it it wanders between 1.1 and 2.3). Only the feedback warp
+    /// reads the camera, so feed sessions are unaffected. Send
+    /// `camera: {dolly: 0, roll: 0}` for a static loop.
+    pub fn feedback_default() -> Self {
+        Self { dolly: 0.2, pan_x: 0.0, pan_y: 0.0, roll: 0.010 }
     }
 }
 
@@ -968,7 +981,7 @@ impl LiveParams {
             seed,
             seed_mode,
             references: Vec::new(),
-            camera: CameraMotion::default(),
+            camera: CameraMotion::feedback_default(),
             feedback: 0.7,
             noise_mode: NoiseMode::Auto,
             drift: DriftParams::default(),

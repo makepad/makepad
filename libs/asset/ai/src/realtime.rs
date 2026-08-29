@@ -944,6 +944,7 @@ pub fn run_live(
     let mut feedback = FeedbackState::default();
     let mut frame_index: u64 = 0;
     let mut last_progress_push = Instant::now();
+    let mut last_log = Instant::now();
     let mut idle_since: Option<Instant> = None;
 
     loop {
@@ -996,12 +997,17 @@ pub fn run_live(
                 if let Some(reference) = session.take_new_reference0(&mut feedback.reference0_seen) {
                     feedback.set_source(reference);
                 }
-                // The loop runs at the previous output's size; the cold
-                // start sizes the source to the (backend-rounded) frame.
-                let (width, height) = match last_output.as_ref() {
-                    Some(previous) => (previous.width, previous.height),
-                    None => (config.width.max(16) / 16 * 16, config.height.max(16) / 16 * 16),
-                };
+                // The loop runs at the (backend-rounded) frame size. A size
+                // change mid-loop — a control width/height — carries the
+                // previous output over to the new size instead of stopping
+                // the session on an init/output mismatch.
+                let width = config.width.max(16) / 16 * 16;
+                let height = config.height.max(16) / 16 * 16;
+                if let Some(previous) = last_output.as_ref() {
+                    if previous.width != width || previous.height != height {
+                        last_output = Some(resize_bilinear(previous, width, height));
+                    }
+                }
                 let Some(prepared) = feedback.prepared(width, height) else {
                     // No source yet: wait for reference slot 0 or the first
                     // pushed frame rather than failing the session.
@@ -1087,6 +1093,17 @@ pub fn run_live(
         if last_progress_push.elapsed() >= Duration::from_millis(100) {
             progress("live", frames_in, frames_out, fps);
             last_progress_push = Instant::now();
+        }
+        if loop_mode == LoopMode::Feedback && last_log.elapsed() >= Duration::from_secs(5) {
+            last_log = Instant::now();
+            eprintln!(
+                "realtime {}: feedback frame {frame_index} {fps:.2} fps, model {:.0} ms (text encode {:.0} ms), \
+                 prep {prep_ms:.0} ms, frame diff {}",
+                session.job_id,
+                out.model_ms,
+                out.text_encode_ms,
+                frame_diff.map_or("n/a".to_string(), |d| format!("{d:.2}")),
+            );
         }
 
         if max_fps > 0.0 {
@@ -1311,6 +1328,16 @@ mod tests {
         assert_eq!(params.config.drift.gain, 0.9);
         assert_eq!(params.config.drift.hue_deg, 0.6);
 
+        // The session camera default is the slow tunnel + spiral; an explicit
+        // zero switches it off.
+        let still = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            camera: Some(CameraUpdateJson { dolly: Some(0.0), roll: Some(0.0), ..Default::default() }),
+            ..Default::default()
+        };
+        let params = LiveParams::from_request(&still).unwrap();
+        assert_eq!(params.config.camera, CameraMotion::default());
+
         let bad = RealtimeRequestJson {
             model: "testpattern".to_string(),
             noise_mode: Some("sometimes".to_string()),
@@ -1318,11 +1345,13 @@ mod tests {
         };
         assert!(LiveParams::from_request(&bad).is_err());
 
-        // Defaults: a plain request is feedback 0.7 / noise auto.
+        // Defaults: a plain request is feedback 0.7 / noise auto / the slow
+        // tunnel + spiral camera.
         let plain = RealtimeRequestJson { model: "testpattern".to_string(), ..Default::default() };
         let params = LiveParams::from_request(&plain).unwrap();
         assert_eq!(params.config.feedback, 0.7);
         assert_eq!(params.config.noise_mode, NoiseMode::Auto);
+        assert_eq!(params.config.camera, CameraMotion::feedback_default());
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feedback), NoiseMode::Hold);
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feed), NoiseMode::Reroll);
     }
@@ -1545,6 +1574,8 @@ mod tests {
         has_init: bool,
         has_anchor: bool,
         anchor_matches_source: bool,
+        init_size: Option<(u32, u32)>,
+        anchor_size: Option<(u32, u32)>,
         strength: f32,
         seed: u64,
         references: usize,
@@ -1579,6 +1610,8 @@ mod tests {
                 has_init: frame.init.is_some(),
                 has_anchor: frame.anchor.is_some(),
                 anchor_matches_source: frame.anchor.map_or(false, |a| a.data == self.source.data),
+                init_size: frame.init.map(|i| (i.width, i.height)),
+                anchor_size: frame.anchor.map(|a| (a.width, a.height)),
                 strength: frame.config.strength,
                 seed: frame.config.seed,
                 references: frame.config.references.len(),
@@ -1709,6 +1742,29 @@ mod tests {
         let second_cold = frames.iter().skip(1).position(|f| !f.has_init).expect("reset cold-starts again") + 1;
         assert_eq!(frames[second_cold].strength, 1.0);
         assert!(frames[second_cold + 1..].iter().all(|f| f.has_init), "one cold start per reset, not a stuck one");
+    }
+
+    #[test]
+    fn run_live_feedback_moves_to_a_new_size_on_a_control_resize() {
+        let source = gradient_image(32, 32);
+        let pushed = source.clone();
+        let frames = run_recording_session(
+            recording_params(LoopMode::Feedback),
+            move |session| {
+                session.push_input_frame(pushed);
+                std::thread::sleep(Duration::from_millis(60));
+                session.handle_text(r#"{"type":"control","width":64,"height":48}"#).unwrap();
+            },
+            |frames| frames.iter().filter(|f| f.init_size == Some((64, 48))).count() >= 3,
+            source,
+        );
+        assert_eq!(frames[1].init_size, Some((32, 32)));
+        let moved = frames.iter().position(|f| f.init_size == Some((64, 48))).unwrap();
+        // The loop carries on at the new size: no cold start, the anchor
+        // follows, and every frame after the switch is the new size.
+        assert!(frames[moved].has_init, "a resize is not a cold start");
+        assert_eq!(frames[moved].anchor_size, Some((64, 48)));
+        assert!(frames[moved..].iter().all(|f| f.init_size == Some((64, 48)) && f.anchor_size == Some((64, 48))));
     }
 
     #[test]
