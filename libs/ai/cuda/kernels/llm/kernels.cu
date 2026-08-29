@@ -3062,28 +3062,47 @@ extern "C" cudaError_t mkllm_cast_f32_bf16(
     return cudaGetLastError();
 }
 
-// The same cast to f16, for GEMMs whose weights are already f16 and so need
-// no dequant slab: only the activations have to be converted before
-// cublasGemmEx can run the pair on tensor cores. f16 rather than bf16
-// because the weight side fixes the type, and f16's 11-bit mantissa is the
-// better half of that trade anyway.
-static __global__ void mkllm_cast_f32_f16_kernel(
-        const uint8_t * __restrict__ src, __half * __restrict__ dst,
+// The activation cast for GEMMs whose weights are already f16 and so need no
+// dequant slab. It writes the activation TWICE — once rounded to f16, once as
+// the f16 of what that rounding threw away — because one f16 copy is not
+// accurate enough for this.
+//
+// A single f16 activation loses 11 bits, and a vision tower is the worst
+// place to lose them: a handful of channels carry activations orders of
+// magnitude larger than the rest, so their absolute rounding error is
+// correspondingly enormous. Measured on the Qwen3-VL tower against the f32
+// reference kernel, a plain f16 cast moved the output embeddings by 8e-4 to
+// 1.7e-2 relative RMS depending on the page — an order of magnitude past the
+// gate, and page-dependent precisely because it is those outliers that decide
+// it.
+//
+// hi + lo is exact to ~2^-22 of the original instead of 2^-11, at the price
+// of running the GEMM twice (the second accumulating on top of the first).
+// The weight side loses nothing either way: it is stored f16, so the f32
+// reference kernel reads exactly these bits too. Both halves are clamped into
+// f16 range so a value past 65504 degrades instead of turning into a NaN.
+static __global__ void mkllm_cast_f32_f16_split_kernel(
+        const uint8_t * __restrict__ src, __half * __restrict__ hi, __half * __restrict__ lo,
         int K, int M, size_t src_nb0, size_t src_nb1) {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     const int m = blockIdx.y;
     if (k >= K || m >= M) return;
     const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
-    dst[(size_t) m * K + k] = __float2half_rn(v);
+    const float clamped = fminf(fmaxf(v, -65504.0f), 65504.0f);
+    const __half h = __float2half_rn(clamped);
+    const float r = fminf(fmaxf(v - __half2float(h), -65504.0f), 65504.0f);
+    const size_t o = (size_t) m * K + k;
+    hi[o] = h;
+    lo[o] = __float2half_rn(r);
 }
 
-extern "C" cudaError_t mkllm_cast_f32_f16(
-        const void * src, void * dst, int K, int M,
+extern "C" cudaError_t mkllm_cast_f32_f16_split(
+        const void * src, void * hi, void * lo, int K, int M,
         size_t src_nb0, size_t src_nb1, cudaStream_t stream) {
     dim3 block(256);
     dim3 grid((K + 255) / 256, M);
-    mkllm_cast_f32_f16_kernel<<<grid, block, 0, stream>>>(
-        (const uint8_t *) src, (__half *) dst, K, M, src_nb0, src_nb1);
+    mkllm_cast_f32_f16_split_kernel<<<grid, block, 0, stream>>>(
+        (const uint8_t *) src, (__half *) hi, (__half *) lo, K, M, src_nb0, src_nb1);
     return cudaGetLastError();
 }
 

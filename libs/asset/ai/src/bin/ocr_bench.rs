@@ -7,6 +7,7 @@
 //!               [--max-tokens N] [--retries N]
 //! ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]
 //! ocr-bench vision-parity --mmproj <mmproj.gguf> --pages <dir> [--limit N] [--tolerance R]
+//!                         [--keep-reference VAR,VAR]
 //! ```
 //!
 //! `run` walks `<dir>` for `.png` / `.jpg` / `.mov` pages (the layout the
@@ -41,6 +42,8 @@
 //! every fast CUDA kernel disabled, once with them on — and reports the
 //! relative RMS, largest absolute difference and cosine between the two sets
 //! of embeddings. No LLM is loaded; it measures the tower alone.
+//! `--keep-reference` leaves named kill switches set in the fast arm, which
+//! turns a total into an attribution: one kernel at a time carries the blame.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,7 +57,7 @@ fn main() {
         Some("vision-parity") => vision_parity(&args[1..]),
         _ => {
             eprintln!(
-                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]\n  ocr-bench vision-parity --mmproj <mmproj.gguf> --pages <dir> [--limit N] [--tolerance R]"
+                "usage:\n  ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir> [--limit N] [--resume] [--prompt text|layout|<custom>] [--max-tokens N] [--retries N]\n  ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]\n  ocr-bench vision-parity --mmproj <mmproj.gguf> --pages <dir> [--limit N] [--tolerance R] [--keep-reference VAR,VAR]"
             );
             2
         }
@@ -303,11 +306,18 @@ fn run(args: &[String]) -> i32 {
 /// matmul instead of cuBLAS, and the stems-shaped attention kernel instead
 /// of the register-tiled one. Setting all of them is the reference; clearing
 /// them is what ships.
-const REFERENCE_KERNEL_ENV: &[&str] = &["MKLLM_DISABLE_GEMM_F16", "MKLLM_DISABLE_ROFORMER_TILED"];
+const REFERENCE_KERNEL_ENV: &[&str] =
+    &["MKLLM_DISABLE_GEMM_F16", "MKLLM_DISABLE_ROFORMER_TILED"];
 
-fn reference_kernels(on: bool) {
+/// Sets every reference switch, or clears all but `keep`.
+///
+/// `keep` is what turns one number into an attribution: leaving a switch set
+/// in the fast arm measures the tower with every kernel but that one
+/// replaced, so a failing total can be charged to the kernel that actually
+/// moved it rather than to the change as a whole.
+fn reference_kernels(on: bool, keep: &[String]) {
     for var in REFERENCE_KERNEL_ENV {
-        if on {
+        if on || keep.iter().any(|k| k == var) {
             std::env::set_var(var, "1");
         } else {
             std::env::remove_var(var);
@@ -341,6 +351,20 @@ fn vision_parity(args: &[String]) -> i32 {
     let pages_dir = PathBuf::from(flag(args, "--pages").unwrap_or("local/ocr-bench/pages"));
     let limit: usize = flag(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
     let tolerance: f64 = flag(args, "--tolerance").and_then(|v| v.parse().ok()).unwrap_or(2e-3);
+    // Kill switches to leave set in the fast arm, so one kernel at a time can
+    // be charged for the difference it makes.
+    let keep: Vec<String> = flag(args, "--keep-reference")
+        .map(|list| list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    for var in &keep {
+        if !REFERENCE_KERNEL_ENV.contains(&var.as_str()) {
+            eprintln!("vision-parity: --keep-reference {var} is not one of {REFERENCE_KERNEL_ENV:?}");
+            return 2;
+        }
+    }
+    if !keep.is_empty() {
+        println!("keeping reference kernels: {}", keep.join(","));
+    }
 
     let file = match GgufFile::open(mmproj) {
         Ok(f) => f,
@@ -381,7 +405,7 @@ fn vision_parity(args: &[String]) -> i32 {
 
     let mut towers = Vec::new();
     for reference in [true, false] {
-        reference_kernels(reference);
+        reference_kernels(reference, &keep);
         match VisionTower::load(mmproj) {
             Ok(t) => towers.push(t),
             Err(e) => {
@@ -421,7 +445,7 @@ fn vision_parity(args: &[String]) -> i32 {
         };
         drop(fitted);
 
-        reference_kernels(true);
+        reference_kernels(true, &keep);
         let reference = match ref_tower.encode(&prepared) {
             Ok(v) => v,
             Err(e) => {
@@ -429,7 +453,7 @@ fn vision_parity(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        reference_kernels(false);
+        reference_kernels(false, &keep);
         let fast = match fast_tower.encode(&prepared) {
             Ok(v) => v,
             Err(e) => {
@@ -712,17 +736,50 @@ fn score(args: &[String]) -> i32 {
         }
     }
     let mut realigned: Vec<String> = Vec::new();
-    if refs.is_empty() {
-        eprintln!("score: no .ocr.txt references beside the pages in {}", pages_dir.display());
-        return 1;
+    // A corpus without exported `.ocr.txt` references can still answer the
+    // question two runs of the same model ask of each other: how far apart are
+    // they? That is the gate a kernel change has to pass — the reference is
+    // the other candidate, not the site's transcription — so fall through to
+    // the pairwise section instead of refusing.
+    let compare_only = refs.is_empty();
+    if compare_only {
+        if candidates.len() < 2 {
+            eprintln!(
+                "score: no .ocr.txt references beside the pages in {} and only one candidate — \
+                 nothing to compare against",
+                pages_dir.display()
+            );
+            return 1;
+        }
+        for (_, class, stem) in &pages {
+            if candidates
+                .iter()
+                .any(|c| c.join(class).join(format!("{stem}.html")).is_file())
+            {
+                refs.insert((class.clone(), stem.clone()), String::new());
+            }
+        }
+        if refs.is_empty() {
+            eprintln!("score: no candidate holds an HTML for any page under {}", pages_dir.display());
+            return 1;
+        }
+        println!(
+            "no .ocr.txt references under {}: comparing {} candidates to each other over {} pages, \
+             {} normalisation",
+            pages_dir.display(),
+            candidates.len(),
+            refs.len(),
+            if loose { "loose" } else { "strict" }
+        );
+    } else {
+        println!(
+            "scoring {} pages with references, {} candidate(s), {} normalisation",
+            refs.len(),
+            candidates.len(),
+            if loose { "loose" } else { "strict" }
+        );
+        println!("(distance to the corpus' own OCR — a machine reference — lower is closer, not necessarily truer)");
     }
-    println!(
-        "scoring {} pages with references, {} candidate(s), {} normalisation",
-        refs.len(),
-        candidates.len(),
-        if loose { "loose" } else { "strict" }
-    );
-    println!("(distance to the corpus' own OCR — a machine reference — lower is closer, not necessarily truer)");
 
     // per candidate: per class + overall; and the per-page rows.
     let mut per_class: Vec<BTreeMap<String, Agg>> =
@@ -730,7 +787,10 @@ fn score(args: &[String]) -> i32 {
     let mut overall: Vec<Agg> = (0..candidates.len()).map(|_| Agg::default()).collect();
     let mut pair: BTreeMap<(usize, usize), Agg> = BTreeMap::new();
     let mut missing: Vec<usize> = vec![0; candidates.len()];
-    println!("\nper page (CER% strict-or-loose as chosen):");
+    println!(
+        "\nper page (CER% {}):",
+        if compare_only { "against the first candidate" } else { "strict-or-loose as chosen" }
+    );
     println!("{:<44} {:<14} {}", "page", "class", names.join("  "));
     for ((class, stem), reference) in &refs {
         let mut texts: Vec<Option<String>> = Vec::new();
@@ -768,6 +828,14 @@ fn score(args: &[String]) -> i32 {
                 }
             }
         }
+        // Without a corpus reference the first candidate that has this page
+        // stands in for one, so the per-page column still says how far each
+        // run drifted from the run it is being compared with.
+        if compare_only {
+            if let Some(first) = texts.iter().flatten().next() {
+                reference = first.clone();
+            }
+        }
         let reference = &reference;
         let mut cells = Vec::new();
         for (ci, t) in texts.iter().enumerate() {
@@ -793,24 +861,33 @@ fn score(args: &[String]) -> i32 {
     if !realigned.is_empty() {
         println!("\nre-aligned references ({}): {}", realigned.len(), realigned.join(", "));
     }
-    println!("\nper class:");
-    let classes: std::collections::BTreeSet<String> = refs.keys().map(|(c, _)| c.clone()).collect();
-    for class in &classes {
-        println!("  {class}");
-        for (ci, name) in names.iter().enumerate() {
-            if let Some(agg) = per_class[ci].get(class) {
-                println!("    {:<24} {}", name, agg.line());
+    if !compare_only {
+        println!("\nper class:");
+        let classes: std::collections::BTreeSet<String> = refs.keys().map(|(c, _)| c.clone()).collect();
+        for class in &classes {
+            println!("  {class}");
+            for (ci, name) in names.iter().enumerate() {
+                if let Some(agg) = per_class[ci].get(class) {
+                    println!("    {:<24} {}", name, agg.line());
+                }
             }
         }
-    }
-    println!("\noverall:");
-    for (ci, name) in names.iter().enumerate() {
-        println!(
-            "  {:<24} {}{}",
-            name,
-            overall[ci].line(),
-            if missing[ci] > 0 { format!("  (missing {})", missing[ci]) } else { String::new() }
-        );
+        println!("\noverall:");
+        for (ci, name) in names.iter().enumerate() {
+            println!(
+                "  {:<24} {}{}",
+                name,
+                overall[ci].line(),
+                if missing[ci] > 0 { format!("  (missing {})", missing[ci]) } else { String::new() }
+            );
+        }
+    } else if missing.iter().any(|m| *m > 0) {
+        println!("\nmissing pages:");
+        for (ci, name) in names.iter().enumerate() {
+            if missing[ci] > 0 {
+                println!("  {:<24} {}", name, missing[ci]);
+            }
+        }
     }
     if !pair.is_empty() {
         println!("\ncandidate vs candidate:");

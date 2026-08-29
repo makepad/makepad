@@ -26,7 +26,7 @@ use makepad_ai_cuda::{
     CUDA_R_16F, CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
 use makepad_ai_cuda::llm_ops::{
-    binary, cast_f32_bf16, cast_f32_f16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
+    binary, cast_f32_bf16, cast_f32_f16_split, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
     get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
@@ -41,8 +41,8 @@ use makepad_ai_cuda::llm_ops::{
     QUANT_Q80 as MKLLM_QUANT_Q80, ROUTE_MMQ, ROUTE_MMVQ,
 };
 use makepad_ai_cuda::roformer_ops::{
-    attn_head_dim_supported, roformer_attn_f32, roformer_attn_f32_tiled, roformer_rope_normal_f32,
-    ATTN_TILED_MIN_KEYS,
+    attn_head_dim_supported, roformer_attn_f32, roformer_attn_f32_tiled,
+    roformer_rope_normal_f32, ATTN_TILED_MIN_KEYS,
 };
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
@@ -77,6 +77,35 @@ const COMPILED_ARCH: &str = match option_env!("MAKEPAD_LLAMA_CUDA_ARCH") {
 /// The canary has to know where that line is to place its cases on both sides
 /// of it, and it must read the line rather than keep a second copy that drifts.
 pub const MMV_MAX_COLUMNS: usize = 8;
+/// The signature every maskless-attention kernel shares, so the dispatch can
+/// pick one by shape and call it once.
+type RoformerAttnFn = unsafe fn(
+    *const c_void,
+    *const c_void,
+    *const c_void,
+    *mut c_void,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    f32,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    cudaStream_t,
+) -> makepad_ai_cuda::llm_ops::CudaError;
+
 /// Transient bf16 weight-slab bound for the GEMM path.
 const GEMM_SLAB_BYTES: usize = 256 << 20;
 /// Narrowest activation an f16 weight is worth casting and handing to cuBLAS
@@ -3353,19 +3382,21 @@ impl ExecView<'_> {
                         LlamaError::format(format!("roformer attention {what} exceeds i32"))
                     })
                 };
-                // Two kernels, same arithmetic, different cut of the work: the
-                // register-tiled one pays off only over a long key axis, which
-                // is the vision tower and never the stems lane. `d % 8` is the
-                // tiled kernel's own extra constraint (its accumulator split);
-                // 72 and 64 satisfy it, and anything that does not falls back
-                // rather than failing.
+                // Two kernels, same arithmetic, different cut of the work:
+                // the register-tiled one pays off only over a long key axis,
+                // which is the vision tower and never the stems lane, so
+                // BS-RoFormer keeps running on exactly the kernel its parity
+                // gate was measured on. `d % 8` is the tiled kernel's own
+                // extra constraint (its accumulator split); 72 and 64 satisfy
+                // it, and anything that does not falls back rather than
+                // failing.
                 let tiled = k.ne[1] >= ATTN_TILED_MIN_KEYS
                     && q.ne[0] % 8 == 0
                     && !disabled_by_env("MKLLM_DISABLE_ROFORMER_TILED");
-                let attn = if tiled {
-                    roformer_attn_f32_tiled
+                let (attn, label): (RoformerAttnFn, &str) = if tiled {
+                    (roformer_attn_f32_tiled, "roformer_attn_tiled")
                 } else {
-                    roformer_attn_f32
+                    (roformer_attn_f32, "roformer_attn")
                 };
                 check(
                     unsafe {
@@ -3396,7 +3427,7 @@ impl ExecView<'_> {
                             stream,
                         )
                     },
-                    if tiled { "roformer_attn_tiled" } else { "roformer_attn" },
+                    label,
                 )
             }
             KernelSel::RopeNormal => {
@@ -3941,16 +3972,27 @@ impl ExecView<'_> {
                 let n = usize::try_from(n_total)
                     .map_err(|_| LlamaError::format("f16 GEMM column count exceeds usize"))?;
                 let (m, k) = (a.ne[1] as usize, a.ne[0] as usize);
-                let act_ptr = self
+                // The activation goes in as f16 hi + f16 lo and the GEMM runs
+                // twice, the second accumulating on top of the first. One f16
+                // copy is 11 bits, and this tower's outlier channels turn that
+                // into up to 1.7e-2 relative RMS on the output embeddings —
+                // page-dependent, an order past the parity gate. Two passes
+                // cost one extra GEMM and land at ~2^-22 of the input, which
+                // is below what the f32 reference kernel itself resolves.
+                let half_bytes = k * n * 2;
+                let scratch = self
                     .state
                     .scratch_acts
                     .borrow_mut()
-                    .ensure(k * n * 2, "f16 GEMM activation scratch")?;
+                    .ensure(half_bytes * 2, "f16 GEMM activation scratch")?;
+                let hi_ptr = scratch;
+                let lo_ptr = unsafe { (scratch as *mut u8).add(half_bytes) as *mut c_void };
                 check(
                     unsafe {
-                        cast_f32_f16(
+                        cast_f32_f16_split(
                             self.ptr_of(b_id)?,
-                            act_ptr,
+                            hi_ptr,
+                            lo_ptr,
                             k as i32,
                             n as i32,
                             b.nb[0],
@@ -3961,32 +4003,35 @@ impl ExecView<'_> {
                     "f16 GEMM activation cast",
                 )?;
                 let alpha = 1.0f32;
-                let beta = 0.0f32;
-                let status = unsafe {
-                    cublasGemmEx(
-                        self.state.blas,
-                        CUBLAS_OP_T,
-                        CUBLAS_OP_N,
-                        m as i32,
-                        n as i32,
-                        k as i32,
-                        &alpha as *const f32 as *const c_void,
-                        self.ptr_of(a_id)?,
-                        CUDA_R_16F,
-                        k as i32,
-                        act_ptr,
-                        CUDA_R_16F,
-                        k as i32,
-                        &beta as *const f32 as *const c_void,
-                        self.ptr_of(node_id)?,
-                        CUDA_R_32F,
-                        m as i32,
-                        CUBLAS_COMPUTE_32F,
-                        CUBLAS_GEMM_DEFAULT_TENSOR_OP,
-                    )
-                };
-                if status != CUBLAS_STATUS_SUCCESS {
-                    return Err(LlamaError::format(format!("cublas f16 gemm failed: {status}")));
+                for (act_ptr, beta) in [(hi_ptr, 0.0f32), (lo_ptr, 1.0f32)] {
+                    let status = unsafe {
+                        cublasGemmEx(
+                            self.state.blas,
+                            CUBLAS_OP_T,
+                            CUBLAS_OP_N,
+                            m as i32,
+                            n as i32,
+                            k as i32,
+                            &alpha as *const f32 as *const c_void,
+                            self.ptr_of(a_id)?,
+                            CUDA_R_16F,
+                            k as i32,
+                            act_ptr,
+                            CUDA_R_16F,
+                            k as i32,
+                            &beta as *const f32 as *const c_void,
+                            self.ptr_of(node_id)?,
+                            CUDA_R_32F,
+                            m as i32,
+                            CUBLAS_COMPUTE_32F,
+                            CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                        )
+                    };
+                    if status != CUBLAS_STATUS_SUCCESS {
+                        return Err(LlamaError::format(format!(
+                            "cublas f16 gemm failed: {status}"
+                        )));
+                    }
                 }
                 Ok(())
             }

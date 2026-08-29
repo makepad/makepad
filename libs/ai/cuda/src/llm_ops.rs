@@ -29,7 +29,7 @@ pub mod names {
     pub const QUANTIZE_MMQ_D4: &str = "quantize_mmq_d4";
     pub const DEQUANT_ROWS_BF16: &str = "dequant_rows_bf16";
     pub const CAST_F32_BF16: &str = "cast_f32_bf16";
-    pub const CAST_F32_F16: &str = "cast_f32_f16";
+    pub const CAST_F32_F16_SPLIT: &str = "cast_f32_f16_split";
     pub const MUL_MAT_BATCHED: &str = "mul_mat_batched";
     pub const GET_ROWS_F32: &str = "get_rows_f32";
     pub const GET_ROWS_QUANT: &str = "get_rows_quant";
@@ -248,9 +248,10 @@ mod ffi {
             src_nb1: usize,
             stream: Stream,
         ) -> CudaError;
-        pub fn mkllm_cast_f32_f16(
+        pub fn mkllm_cast_f32_f16_split(
             src: *const c_void,
-            dst: *mut c_void,
+            hi: *mut c_void,
+            lo: *mut c_void,
             k: i32,
             m: i32,
             src_nb0: usize,
@@ -870,15 +871,16 @@ cuda_forward!(cast_f32_bf16(
     stream: Stream,
 ) -> CudaError { mkllm_cast_f32_bf16 });
 
-cuda_forward!(cast_f32_f16(
+cuda_forward!(cast_f32_f16_split(
     src: *const c_void,
-    dst: *mut c_void,
+    hi: *mut c_void,
+    lo: *mut c_void,
     k: i32,
     m: i32,
     src_nb0: usize,
     src_nb1: usize,
     stream: Stream,
-) -> CudaError { mkllm_cast_f32_f16 });
+) -> CudaError { mkllm_cast_f32_f16_split });
 
 cuda_forward!(mul_mat_batched(
     a_is_f16: i32,
