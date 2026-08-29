@@ -47,7 +47,7 @@ fn allow_duplicate_sibling_names(name: LiveId) -> bool {
     name == LiveId(0)
 }
 
-fn live_id_token(id: LiveId) -> String {
+pub(crate) fn live_id_token(id: LiveId) -> String {
     if id == LiveId(0) {
         return "-".to_string();
     }
@@ -60,7 +60,7 @@ fn live_id_token(id: LiveId) -> String {
     })
 }
 
-fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
+pub(crate) fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
     let mut widget_type_names = HashMap::new();
     let widget_registry = cx.components.get::<WidgetRegistry>();
     for (type_id, (info, _)) in widget_registry.map.iter() {
@@ -143,6 +143,9 @@ struct GraphNode {
     skip_search: bool,
     parent: Option<WidgetUid>,
     children: Vec<WidgetUid>,
+    /// `Cx::nesting_depth` at this widget's last draw while the exploded view
+    /// was up — the plane it renders on. 0 = never stamped.
+    nesting_depth: u32,
 }
 
 #[derive(Clone)]
@@ -325,6 +328,7 @@ impl WidgetTree {
                         skip_search,
                         parent,
                         children: Vec::new(),
+                    nesting_depth: 0,
                     },
                 );
                 node_is_new = true;
@@ -445,6 +449,7 @@ impl WidgetTree {
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
+                    nesting_depth: 0,
                 },
             );
             if inner.root_uid == WidgetUid(0) {
@@ -491,6 +496,7 @@ impl WidgetTree {
                         skip_search: child_skip_search,
                         parent: Some(parent_uid),
                         children: Vec::new(),
+                        nesting_depth: 0,
                     },
                 );
                 child_is_new = true;
@@ -684,6 +690,7 @@ impl WidgetTree {
                 skip_search,
                 parent: None,
                 children: Vec::new(),
+                    nesting_depth: 0,
             },
         );
         if inner.root_uid == WidgetUid(0) {
@@ -746,6 +753,7 @@ impl WidgetTree {
                         skip_search,
                         parent: None,
                         children: Vec::new(),
+                    nesting_depth: 0,
                     },
                 );
                 node_is_new = true;
@@ -829,6 +837,7 @@ impl WidgetTree {
                     skip_search: false,
                     parent: None,
                     children: Vec::new(),
+                    nesting_depth: 0,
                 },
             );
             if inner.root_uid == WidgetUid(0) {
@@ -1433,6 +1442,7 @@ impl WidgetTree {
                             skip_search: child_skip_search,
                             parent: Some(uid),
                             children: Vec::new(),
+                    nesting_depth: 0,
                         },
                     );
                     child_is_new = true;
@@ -1836,6 +1846,33 @@ impl WidgetTree {
     }
 
     /// Build the path of LiveIds from root to the node with the given UID.
+    /// Stamp the plane a widget drew on (exploded view only — see
+    /// `WidgetRef::draw_walk`).
+    pub fn note_nesting_depth(&self, uid: WidgetUid, depth: usize) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = inner.graph.get_mut(&uid) {
+            node.nesting_depth = depth as u32;
+        }
+    }
+
+    pub fn parent_of(&self, uid: WidgetUid) -> Option<WidgetUid> {
+        self.inner.borrow().graph.get(&uid).and_then(|n| n.parent)
+    }
+
+    pub fn name_of(&self, uid: WidgetUid) -> Option<LiveId> {
+        self.inner.borrow().graph.get(&uid).map(|n| n.name)
+    }
+
+    /// The plane a widget last drew on while the exploded view was up.
+    pub fn nesting_depth(&self, uid: WidgetUid) -> Option<usize> {
+        let inner = self.inner.borrow();
+        inner
+            .graph
+            .get(&uid)
+            .filter(|n| n.nesting_depth > 0)
+            .map(|n| n.nesting_depth as usize)
+    }
+
     pub fn path_to(&self, uid: WidgetUid) -> Vec<LiveId> {
         self.sync_dirty();
         let mut inner = self.inner.borrow_mut();
@@ -2353,6 +2390,50 @@ impl WidgetTree {
         widgets
     }
 
+    /// The live widget hierarchy flattened depth-first for the tweaker's
+    /// tree tab: (uid, name, type, depth). Every alive node appears; depth
+    /// is the tree distance from its window root.
+    pub fn flat_tree(&self, cx: &Cx) -> Vec<FlatTreeRow> {
+        self.sync_dirty();
+        let inner = self.inner.borrow();
+        let widget_type_names = widget_type_names(cx);
+        let n = inner.nodes.len();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut roots: Vec<usize> = Vec::new();
+        for (index, node) in inner.nodes.iter().enumerate() {
+            let parent = node.parent as usize;
+            if parent < n && parent != index {
+                children[parent].push(index);
+            } else {
+                roots.push(index);
+            }
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<(usize, u32)> = roots.iter().rev().map(|r| (*r, 0)).collect();
+        while let Some((index, depth)) = stack.pop() {
+            let node = &inner.nodes[index];
+            let Some(widget) = node.widget.upgrade() else {
+                continue;
+            };
+            let name = inner.names[index];
+            let ty = widget
+                .widget_type_id()
+                .and_then(|type_id| widget_type_names.get(&type_id).copied())
+                .unwrap_or(LiveId(0));
+            out.push(FlatTreeRow {
+                uid: widget.widget_uid().0,
+                name: live_id_token(name),
+                ty: live_id_token(ty),
+                depth,
+                has_children: !children[index].is_empty(),
+            });
+            for child in children[index].iter().rev() {
+                stack.push((*child, depth + 1));
+            }
+        }
+        out
+    }
+
     pub fn compact_dump(&self, cx: &Cx) -> String {
         self.sync_dirty();
         let inner = self.inner.borrow();
@@ -2634,12 +2715,23 @@ fn widget_snapshot_callback(cx: &Cx) -> Vec<WidgetSnapshot> {
     cx.widget_tree().snapshot(cx)
 }
 
+/// One row of the flattened widget hierarchy (`WidgetTree::flat_tree`).
+#[derive(Clone, Debug)]
+pub struct FlatTreeRow {
+    pub uid: u64,
+    pub name: String,
+    pub ty: String,
+    pub depth: u32,
+    pub has_children: bool,
+}
+
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
+    cx.tweak_callback = Some(crate::tweaker::tweak_callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }

@@ -31,6 +31,7 @@ script_mod! {
 
     mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
 
+    /** The flat text field: an inset well with text, selection band and caret layers. */
     mod.widgets.TextInputFlat = set_type_default() do mod.widgets.TextInputBase{
         width: Fill
         height: Fit
@@ -48,19 +49,30 @@ script_mod! {
             drag_scrolling: true
         }
 
+        /** The field well: an inset SDF box with a bevel stroke and optional gradient fill. */
         draw_bg +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
             empty: instance(0.0)
 
+            /** corner rounding radius 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
 
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
 
             color: theme.color_inset
@@ -70,6 +82,7 @@ script_mod! {
             color_empty: uniform(theme.color_inset_empty)
             color_disabled: uniform(theme.color_inset_disabled)
 
+            /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             color_2_hover: uniform(theme.color_inset_2_hover)
             color_2_focus: uniform(theme.color_inset_2_focus)
@@ -84,6 +97,7 @@ script_mod! {
             border_color_empty: uniform(theme.color_bevel_empty)
             border_color_disabled: uniform(theme.color_bevel_disabled)
 
+            /** bevel gradient end stop; negative alpha means flat stroke */
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             border_color_2_hover: uniform(theme.color_bevel_inset_2_hover)
             border_color_2_focus: uniform(theme.color_bevel_inset_2_focus)
@@ -180,11 +194,17 @@ script_mod! {
             }
         }
 
+        /** The field ink: the typed text, or the placeholder while empty. */
         draw_text +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
             empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
             color: theme.color_text
@@ -215,15 +235,24 @@ script_mod! {
             }
         }
 
+        /** The selection band: one rounded quad per selected run, drawn behind the ink. */
         draw_selection +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
             empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
+            /** selection band corner rounding 0..8 step 0.5 */
             border_radius: uniform(theme.textselection_corner_radius)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
             color: uniform(theme.color_selection)
@@ -233,6 +262,7 @@ script_mod! {
             color_empty: uniform(theme.color_selection_empty)
             color_disabled: uniform(theme.color_selection_disabled)
 
+            /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
             color_2_hover: uniform(theme.color_selection_hover)
             color_2_focus: uniform(theme.color_selection_focus)
@@ -280,13 +310,20 @@ script_mod! {
             }
         }
 
+        /** The caret: a rounded bar, visible only while focused and between blinks. */
         draw_cursor +: {
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
             empty: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** blink phase; 1 hides the caret 0..1 step 0.01 */
             blink: instance(0.0)
 
+            /** caret corner rounding 0..4 step 0.25 */
             border_radius: uniform(0.5)
 
             color: uniform(theme.color_text_cursor)
@@ -307,6 +344,7 @@ script_mod! {
             }
         }
 
+        /** The IME composition underline: a flat bar under uncommitted text. */
         draw_composition_underline +: {
             color: uniform(#8)
 
@@ -426,6 +464,7 @@ script_mod! {
         }
     }
 
+    /** The standard text field: the flat well plus the theme's inset bevel. */
     mod.widgets.TextInput = mod.widgets.TextInputFlat{
         draw_bg +: {
             border_color: theme.color_bevel_inset_1
@@ -2607,8 +2646,12 @@ impl Widget for TextInput {
                 // In multiline mode, other modifier combos (Alt+Enter, or Ctrl+Enter
                 // on macOS) insert a newline below when not read-only.
                 let has_physical_keyboard = cx.keyboard.has_physical_keyboard();
+                // Ctrl+Enter submits on every platform — on macOS `primary`
+                // is Cmd, and a person who reaches for Ctrl+Enter to send
+                // must not get a newline instead.
                 let should_submit = !self.is_multiline
                     || mods.is_primary()
+                    || mods.control
                     || (has_physical_keyboard && self.submit_on_enter && !mods.any());
                 if should_submit {
                     cx.hide_text_ime();

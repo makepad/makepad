@@ -46,12 +46,16 @@ impl App {
             direct
         };
 
-        let Some(mut inner) = pdf_view.borrow_mut::<PdfView>() else {
-            self.pdf_data = Some(data);
-            self.ui.redraw(cx);
-            return;
-        };
-        inner.load_pdf_data(cx, data);
+        {
+            let Some(mut inner) = pdf_view.borrow_mut::<PdfView>() else {
+                self.pdf_data = Some(data);
+                self.ui.redraw(cx);
+                return;
+            };
+            inner.load_pdf_data(cx, data);
+            // The RefMut must drop before redraw walks the tree and
+            // borrows this widget again.
+        }
         self.ui.redraw(cx);
         cx.redraw_all();
     }

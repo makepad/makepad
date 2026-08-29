@@ -21,6 +21,7 @@ use {
         perf_monitor::PerfMonitor,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
+        sploded::SplodedView,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
@@ -169,6 +170,16 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
+    /// The F10 exploded z-layer inspection view. Inert while off.
+    pub sploded: SplodedView,
+    /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
+    /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
+    /// its siblings, stamped onto every draw call at creation, and used as the
+    /// z axis of the exploded view: one plane per selectable node.
+    pub nesting_depth: usize,
+    /// Deepest `nesting_depth` reached during the last draw. The exploded
+    /// view sizes its fan from this instead of a draw-call count.
+    pub nesting_depth_max: usize,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     #[allow(dead_code)]
@@ -192,6 +203,11 @@ pub struct Cx {
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
     pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
+    /// The tweaker overlay's remote dispatcher (widgets/src/tweaker.rs).
+    /// Registered by the widgets crate at startup, exactly like the widget
+    /// tree callbacks above; the /tweak routes in remote.rs delegate here so
+    /// platform never depends on widgets. `(op, query/body params) -> JSON`.
+    pub tweak_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -497,6 +513,9 @@ impl Cx {
             self_ref: None,
             performance_stats: Default::default(),
             perf_monitor: Default::default(),
+            sploded: Default::default(),
+            nesting_depth: 0,
+            nesting_depth_max: 0,
 
             display_context: Default::default(),
             pending_script_reapply: false,
@@ -511,6 +530,7 @@ impl Cx {
             widget_tree_dump_callback: None,
             widget_query_callback: None,
             widget_snapshot_callback: None,
+            tweak_callback: None,
             net,
 
             script_data: CxScriptData {
@@ -524,5 +544,83 @@ impl Cx {
             },
             script_vm: Some(script_vm),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Startup trace — working-tree instrumentation, gated on MAKEPAD_STARTUP_TRACE.
+//
+// Prints `[startup] <phase> +<ms>` where <ms> is measured from process exec
+// when a launcher exported MAKEPAD_STARTUP_T0 (epoch seconds, f64) just
+// before exec — that is the only way to see the pre-`main` dyld / Gatekeeper
+// window. Without it the clock starts at the first call.
+//
+// Costs nothing when the var is unset: one relaxed atomic load per call.
+// ---------------------------------------------------------------------------
+
+static STARTUP_TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static STARTUP_T0: std::sync::OnceLock<std::time::SystemTime> = std::sync::OnceLock::new();
+static STARTUP_ACC: std::sync::Mutex<Vec<(&'static str, f64, u32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[inline]
+pub fn startup_trace_enabled() -> bool {
+    *STARTUP_TRACE_ON.get_or_init(|| std::env::var_os("MAKEPAD_STARTUP_TRACE").is_some())
+}
+
+fn startup_t0() -> std::time::SystemTime {
+    *STARTUP_T0.get_or_init(|| {
+        std::env::var("MAKEPAD_STARTUP_T0")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|secs| {
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs)
+            })
+            .unwrap_or_else(std::time::SystemTime::now)
+    })
+}
+
+/// Milliseconds since exec (or since the first trace call).
+pub fn startup_since_exec_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(startup_t0())
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// Mark a startup phase.
+pub fn startup_trace(phase: &str) {
+    if !startup_trace_enabled() {
+        return;
+    }
+    eprintln!("[startup] {:<28} +{:9.2} ms", phase, startup_since_exec_ms());
+}
+
+/// Accumulate a repeated sub-cost (shader compiles, font loads, …) under a
+/// bucket name; `startup_trace_flush` prints the totals.
+pub fn startup_acc(bucket: &'static str, ms: f64) {
+    if !startup_trace_enabled() {
+        return;
+    }
+    let mut acc = STARTUP_ACC.lock().unwrap();
+    if let Some(row) = acc.iter_mut().find(|r| r.0 == bucket) {
+        row.1 += ms;
+        row.2 += 1;
+    } else {
+        acc.push((bucket, ms, 1));
+    }
+}
+
+/// Print accumulated buckets and reset them.
+pub fn startup_trace_flush(phase: &str) {
+    if !startup_trace_enabled() {
+        return;
+    }
+    let rows = std::mem::take(&mut *STARTUP_ACC.lock().unwrap());
+    for (bucket, ms, n) in rows {
+        eprintln!(
+            "[startup] {:<28}  {:8.2} ms total over {} ({})",
+            bucket, ms, n, phase
+        );
     }
 }

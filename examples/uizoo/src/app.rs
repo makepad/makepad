@@ -362,6 +362,9 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        // The design tweaker's shader view uses the real code editor when
+        // the app registers it.
+        makepad_code_editor::script_mod(vm);
         crate::layout_templates::script_mod(vm);
         crate::demofiletree::script_mod(vm);
         crate::tab_button::script_mod(vm);

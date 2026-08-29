@@ -141,10 +141,37 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
     })
 }
 
+/// Whether this process may activate itself or make a window key.
+///
+/// USER LAW (2026-08-26): an agent-driven or test instance must never steal
+/// the user's focus — they could not type in their own terminal while lanes
+/// launched and clicked windows. `--remote` therefore means VISIBLE BUT
+/// UNFOCUSED: the window is ordered on screen, never made key, and the app
+/// never activates — the bridge injects input through the event loop, not
+/// the OS, so key-window status is not needed for anything it does.
+/// `MAKEPAD_NO_FOCUS=1` asks for the same without `--remote`;
+/// `MAKEPAD_FOCUS=1` restores activation for a remote run the user wants
+/// in front. Decided once per process.
+pub fn focus_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        if std::env::var_os("MAKEPAD_FOCUS").is_some() {
+            return true;
+        }
+        if std::env::var_os("MAKEPAD_NO_FOCUS").is_some() {
+            return false;
+        }
+        !crate::remote::requested()
+    })
+}
+
 /// Activate one Cocoa window without holding the global `MacosApp` RefCell
 /// borrow across AppKit calls (which can synchronously re-enter delegates).
+/// A no-focus process (see [`focus_allowed`]) never activates: bridge
+/// clicks run through here too, and each one used to raise the window over
+/// whatever the user was typing in.
 pub fn activate_cocoa_window_on_pointer_down(window: ObjcId) -> bool {
-    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
+    if window == nil || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() || !focus_allowed() {
         return false;
     }
     unsafe {
@@ -322,6 +349,20 @@ pub struct MacosApp {
     /// The pin, cocoa global coords (bottom-left origin) — where the locked
     /// cursor must stay.
     pub lock_pin: Option<Vec2d>,
+    /// Where a widget-scoped pointer pin must restore the cursor on
+    /// release: the press point, cocoa-global coords (`set_pointer_pin`).
+    pub pin_restore: Option<Vec2d>,
+    /// True while the lock is a widget-scoped SCRUB pin (not a game FPS
+    /// lock): `abs` integrates the deltas into an unbounded virtual
+    /// position (the drag needs continuous positions; the pressed widget
+    /// holds the finger capture, so routing cannot wander), instead of the
+    /// game model where `abs` stays pinned and motion rides lock_delta.
+    pub pointer_pin_mode: bool,
+    /// Live-path measurement: hardware move events seen under the pin and
+    /// their integrated horizontal travel. Logged at release so a physical
+    /// pass is measurable against the owner's own FingerMove count.
+    pub pin_ns_moves: u64,
+    pub pin_sum_dx: f64,
     //current_ns_event: Option<ObjcId>,
 
     /// Set by `send_command_event()` to avoid sending keyboard events
@@ -365,6 +406,10 @@ impl MacosApp {
                 virtual_mouse: None,
                 pointer_lock_applied: false,
                 lock_pin: None,
+                pin_restore: None,
+                pointer_pin_mode: false,
+                pin_ns_moves: 0,
+                pin_sum_dx: 0.0,
                 terminating_from_app_delegate: false,
                 //current_ns_event: None,
                 menu_command_fired: false,
@@ -554,6 +599,11 @@ impl MacosApp {
         }
     }*/
     pub fn startup_focus_hack(&mut self) {
+        if !focus_allowed() {
+            // Visible-but-unfocused launch: no Dock dance, no activation.
+            self.startup_focus_hack_ran = true;
+            return;
+        }
         return unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
@@ -1040,6 +1090,20 @@ impl MacosApp {
     /// the OS state, tracked in `pointer_lock_applied` so focus churn never
     /// double-hides or double-shows the cursor.
     pub fn apply_pointer_lock_effects(&mut self, on: bool) {
+        // Only an ACTIVE app may take the user's pointer: a bridge-driven,
+        // unfocused instance clicking its own fps view must never hide and
+        // pin the cursor the user is using elsewhere. A real click activates
+        // the app before it arrives here, so players are unaffected.
+        if on {
+            let active: bool = unsafe {
+                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                msg_send![ns_app, isActive]
+            };
+            if !active {
+                self.pointer_lock_applied = false;
+                return;
+            }
+        }
         if self.pointer_lock_applied == on {
             return;
         }
@@ -1098,12 +1162,124 @@ impl MacosApp {
         }
     }
 
+    /// Focus left the window (cmd-tab, a click elsewhere): whatever the
+    /// game thinks, the OS pointer goes back to the user NOW. A lock held
+    /// past focus loss — and re-pinned every frame — left the user with no
+    /// mouse at all (2026-08-26). The game re-locks on its next click.
+    pub fn release_pointer_lock_on_focus_loss(&mut self) {
+        if self.mouse_pointer_lock || self.pointer_lock_applied {
+            self.mouse_pointer_lock = false;
+            self.pointer_lock_applied = false;
+            self.lock_pin = None;
+            // A pin lost to focus loss does not warp anywhere: the pointer
+            // belongs to whoever has focus now. Just forget the restore.
+            self.pin_restore = None;
+            self.pointer_pin_mode = false;
+            self.apply_pointer_lock_effects(false);
+        }
+    }
+
+    /// The one pointer-lock abs transform every mouse move takes — the
+    /// hardware path (send_mouse_move) and the hardware-faithful injection
+    /// path (remote /m?hw=1) both come through here, so they can never
+    /// disagree. Under a scrub pin the delta integrates into an unbounded
+    /// virtual abs (the drag owner needs continuous positions; the finger
+    /// capture keeps routing to the owner). Under a game lock the abs
+    /// stays pinned and motion rides lock_delta.
+    pub fn locked_mouse_transform(
+        &mut self,
+        raw: Vec2d,
+        delta: Vec2d,
+        seed: Vec2d,
+    ) -> (Vec2d, Vec2d) {
+        if !self.mouse_pointer_lock {
+            return (raw, Vec2d::default());
+        }
+        if self.pointer_pin_mode {
+            self.pin_ns_moves += 1;
+            self.pin_sum_dx += delta.x;
+            let mut v = *self.virtual_mouse.get_or_insert(seed);
+            v.x += delta.x;
+            v.y += delta.y;
+            self.virtual_mouse = Some(v);
+            (v, delta)
+        } else {
+            (*self.virtual_mouse.get_or_insert(seed), delta)
+        }
+    }
+
+    /// Widget-scoped pointer pin (value scrubbing): the FPS lock machinery,
+    /// but the cursor pins AT ITS CURRENT POSITION and is restored there on
+    /// release. Engage only when a drag actually starts (the threshold
+    /// crossing), never on the initial press; release on mouse-up. Deltas
+    /// keep flowing (virtual mouse), `repin_pointer` holds the pin each
+    /// frame, and focus loss releases it like any lock.
+    pub fn set_pointer_pin(&mut self, on: bool) {
+        if on {
+            if self.mouse_pointer_lock || self.pointer_lock_applied {
+                return; // an FPS-style lock is already holding the pointer
+            }
+            unsafe {
+                let _ = CGSetLocalEventsSuppressionInterval(0.0);
+            }
+            self.virtual_mouse = None;
+            self.mouse_pointer_lock = true;
+            self.pointer_lock_applied = true;
+            self.pointer_pin_mode = true;
+            self.pin_ns_moves = 0;
+            self.pin_sum_dx = 0.0;
+            unsafe {
+                let loc: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+                self.lock_pin = Some(Vec2d { x: loc.x, y: loc.y });
+                self.pin_restore = Some(Vec2d { x: loc.x, y: loc.y });
+                let () = msg_send![class!(NSCursor), hide];
+                CGAssociateMouseAndMouseCursorPosition(0);
+            }
+        } else {
+            if !self.mouse_pointer_lock && !self.pointer_lock_applied {
+                self.pin_restore = None;
+                return;
+            }
+            crate::log!(
+                "PIN stats: ns_moves={} sum_dx={:.1}",
+                self.pin_ns_moves,
+                self.pin_sum_dx
+            );
+            self.mouse_pointer_lock = false;
+            self.pointer_lock_applied = false;
+            self.pointer_pin_mode = false;
+            self.lock_pin = None;
+            unsafe {
+                CGAssociateMouseAndMouseCursorPosition(1);
+                if let Some(restore) = self.pin_restore.take() {
+                    let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                    let primary: ObjcId = msg_send![screens, firstObject];
+                    let sframe: NSRect = msg_send![primary, frame];
+                    let _ = CGWarpMouseCursorPosition(NSPoint {
+                        x: restore.x,
+                        y: sframe.size.height - restore.y,
+                    });
+                }
+                let () = msg_send![class!(NSCursor), unhide];
+            }
+        }
+    }
+
     /// Per-frame while locked: force the hardware cursor back onto the pin
     /// and re-assert the disassociation. On systems where the association
     /// silently drops (observed live: deadzones the size of the desktop
     /// minus the window), this is the enforcement that actually holds.
+    /// Never while the app is inactive: the pointer belongs to whoever has
+    /// focus, and repinning it from the background is a trap.
     pub fn repin_pointer(&mut self) {
         if !self.mouse_pointer_lock || !self.pointer_lock_applied {
+            return;
+        }
+        let active: bool = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            msg_send![ns_app, isActive]
+        };
+        if !active {
             return;
         }
         let Some(pin) = self.lock_pin else { return };

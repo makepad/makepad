@@ -167,6 +167,19 @@ impl ScriptHeap {
         }
     }
 
+    /// Record the ip of the BEGIN opcode that constructed this object.
+    /// Set by handle_begin_proto / handle_begin_bare; stays
+    /// ScriptIp::UNKNOWN for Rust-built objects.
+    pub fn set_made_at(&mut self, ptr: ScriptObject, ip: ScriptIp) {
+        self.objects[ptr].made_at = ip;
+    }
+
+    /// The construction-site ip of this object (ScriptIp::UNKNOWN if it
+    /// was not built by a script object literal).
+    pub fn made_at(&self, ptr: ScriptObject) -> ScriptIp {
+        self.objects[ptr].made_at
+    }
+
     pub fn new_if_reffed(&mut self, ptr: ScriptObject) -> ScriptObject {
         let obj = &self.objects[ptr];
         if obj.tag.is_reffed() {
