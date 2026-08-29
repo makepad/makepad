@@ -1521,11 +1521,22 @@ mod resident {
                 let Some(plan) = table.plan_step() else {
                     continue;
                 };
-                if plan.slots.len() != step_lanes.len() {
+                // Logit row `i` belongs to `plan.slots[i].slot`, and this
+                // loop maps row `i` onto `step_lanes[i]`. Both are built in
+                // ascending lane order, so they agree — but a disagreement
+                // would put one page's token into another page's lane and
+                // read as fluent text about the wrong book, so it is checked
+                // rather than trusted.
+                if plan.slots.len() != step_lanes.len()
+                    || plan
+                        .slots
+                        .iter()
+                        .zip(step_lanes.iter())
+                        .any(|(planned, &lane)| planned.slot != lane)
+                {
                     return Err(format!(
-                        "planned {} lanes for a step of {} tokens",
-                        plan.slots.len(),
-                        step_lanes.len()
+                        "the planned step covers lanes {:?} but the batch is for {step_lanes:?}",
+                        plan.slots.iter().map(|step| step.slot).collect::<Vec<_>>()
                     ));
                 }
                 let t_step = Instant::now();

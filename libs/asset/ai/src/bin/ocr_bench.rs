@@ -4,7 +4,7 @@
 //! ```text
 //! ocr-bench run --model <llm.gguf> --mmproj <mmproj.gguf> --pages <dir> --out <dir>
 //!               [--limit N] [--resume] [--prompt text|layout|<custom>] [--prompt-file <path>]
-//!               [--max-tokens N] [--retries N] [--lanes N] [--batch N]
+//!               [--max-tokens N] [--retries N] [--lanes N] [--batch N] [--lane-driver]
 //! ocr-bench score --pages <dir> --candidates <outdir> [<outdir>...] [--loose] [--texts <texts.tsv>]
 //! ```
 //!
@@ -28,6 +28,16 @@
 //! is the single-stream path unchanged, which is the baseline the A/B is
 //! against. `--batch N` bounds how many pages are decoded and held in memory
 //! at once (default `lanes * 4`).
+//!
+//! `--lane-driver` runs the lane loop even at one lane, which splits the A/B
+//! in two: the driver's own cost (a slot-windowed prefill, a planned step,
+//! sampling outside the session) against the single-stream path at the same
+//! width, and then width against width. A difference that shows up at one
+//! lane is not a batching effect. It is also the only way to exercise the
+//! lane path where batched decode is unavailable — Metal refuses more than
+//! one sequence per step by design, while every other piece of the lane path
+//! (embedding prefill into a slot, the M-RoPE override, a planned step) runs
+//! there at width 1.
 //!
 //! `score` ranks transcriptions: for every page that has a `.ocr.txt`
 //! reference (the corpus' own OCR — a machine transcription too, so this is
@@ -148,6 +158,7 @@ fn run(args: &[String]) -> i32 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(lanes * 4)
         .max(lanes);
+    let lane_driver = has_flag(args, "--lane-driver") || lanes > 1;
 
     use makepad_asset_ai::backend::CancelToken;
     use makepad_asset_ai::ocr_backend::{page_fit, OcrBackend, OcrRequest, MAX_INPUT_PIXELS};
@@ -224,7 +235,7 @@ fn run(args: &[String]) -> i32 {
         total,
         ..Tally::default()
     };
-    if lanes == 1 {
+    if !lane_driver {
         // The single-stream path, unchanged: the baseline the lane numbers
         // are read against, and the transcripts the lane outputs are
         // compared to.
@@ -329,7 +340,8 @@ fn run(args: &[String]) -> i32 {
         return 1;
     }
     println!(
-        "pages {done}  lanes {lanes}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}",
+        "pages {done}  lanes {lanes}{}  wall {wall:.1}s  {:.2} s/page  {:.3} pages/s  decode {:.1} tok/s  avg {:.0} image tok  avg {:.0} out tok  retried {retried_pages}  still looped {looped_pages}",
+        if lane_driver { " (lane driver)" } else { "" },
         wall / done as f64,
         done as f64 / wall,
         sum_out_tokens as f64 / sum_decode.max(1e-6),
