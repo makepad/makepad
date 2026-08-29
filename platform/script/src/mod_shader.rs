@@ -695,7 +695,20 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
                     .ip_to_loc(tc.ip)
                     .map(|l| format!("{}:{}:{}", l.file, l.line, l.col))
                     .unwrap_or_default();
-                out.push_str(&format!("{}|{}|{}|{}\n", tc.shader_name, tc.doc, tc.value, loc));
+                // raw row/col of the literal's own token plus the mod line,
+                // so a test can pin the line convention exactly
+                let raw = {
+                    let bodies = vm.bx.code.bodies.borrow();
+                    let body = &bodies[tc.ip.body as usize];
+                    let tok = body.parser.source_map.get(tc.ip.index as usize).copied().flatten();
+                    let rc = tok.and_then(|t| body.tokenizer.token_index_to_row_col(t));
+                    let mod_line = match &body.source {
+                        crate::vm::ScriptSource::Mod(m) => m.line as i64,
+                        _ => -1,
+                    };
+                    format!("row={:?} col={:?} modline={}", rc.map(|r| r.0), rc.map(|r| r.1), mod_line)
+                };
+                out.push_str(&format!("{}|{}|{}|{}|{}\n", tc.shader_name, tc.doc, tc.value, loc, raw));
             }
             out.script_to_value(vm)
         },

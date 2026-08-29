@@ -5182,7 +5182,15 @@ pub fn main() {
                 let count = /** count */ 7
                 let steps = count + 1
                 let off = /** offset */ -1.5
-                self.fb0 = vec4(radius + plain, off, 0.0, 1.0)
+                // whole-number floats as binary-op operands and call args:
+                // the parser packs these into the opcode instead of pushing
+                // them, so the lifting path must catch them there too
+                let inset = radius + /** side inset */ 6.
+                let fit = radius - /** fit inset */ 2. - plain
+                let ridge = plain * /** ridge scale */ 4.
+                let arrow = radius - /** arrow inset */ 10.0
+                let boxed = max(/** box pad */ 8., inset)
+                self.fb0 = vec4(radius + plain + inset + fit + ridge + arrow + boxed, off, 0.0, 1.0)
             }
         }
 "#;
@@ -5228,9 +5236,15 @@ pub fn main() {
             let lines: Vec<&str> = table.lines().collect();
             assert_eq!(
                 lines.len(),
-                2,
-                "two float literals are annotated (the int one folds), got:\n{table}"
+                7,
+                "seven float literals are annotated (the int one folds), got:\n{table}"
             );
+            for name in ["side inset", "fit inset", "ridge scale", "arrow inset", "box pad"] {
+                assert!(
+                    lines.iter().any(|l| l.contains(&format!("|{name}|"))),
+                    "packed whole-number literal `{name}` must lift, table:\n{table}"
+                );
+            }
             assert!(
                 lines[0].starts_with("ct0|corner radius 0..24 step 0.5|4.125|shader_capacity_gen.rs:"),
                 "first table entry: {}",
@@ -5243,16 +5257,18 @@ pub fn main() {
                     .and_then(|s| s.parse().ok())
                     .expect("entry has file:line:col")
             };
-            // A ScriptMod's `line` is the line the macro sits on; script rows
-            // count from the next line, so the literal's row 13 reports as 14.
+            // `ScriptMod.line` is the line of the code's first row (here 1),
+            // so a literal on text line 13 reports line 13 — including a float
+            // that ends its line, which the tokenizer used to place on the
+            // next line.
             assert_eq!(
                 entry_line(lines[0]),
-                literal_line + 1,
-                "table entry names the literal's source line"
+                literal_line,
+                "table entry names the literal's exact source line"
             );
             assert!(
-                lines[1].starts_with("ct1|offset|"),
-                "second table entry is the negated literal: {}",
+                lines[1].starts_with("ct1|offset|-1.5|"),
+                "the sign of `/**offset*/ -1.5` folds into the table value: {}",
                 lines[1]
             );
             assert_eq!(
