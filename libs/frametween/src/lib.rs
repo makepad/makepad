@@ -47,6 +47,7 @@ pub mod frame;
 pub mod mode;
 pub mod pair_cache;
 pub mod player;
+pub mod selftest;
 
 pub use flow_tween::{
     ai2_frame_plan, ai3_budget_depth, ai3_complete_depth, ai3_frame_plan, ai3_neural_frames,
