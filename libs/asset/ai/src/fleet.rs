@@ -159,6 +159,19 @@ impl FleetRoles {
         true
     }
 
+    /// Is this box NAMED by the role list — i.e. dedicated to the domains
+    /// it lists rather than a general-purpose node?
+    ///
+    /// Provisioning asks this: a dedicated box's disk is its own business,
+    /// and speculatively pulling weights onto the fleet's chat node is
+    /// exactly the surprise a role exists to prevent. Serving decisions use
+    /// [`FleetRoles::allows`]; this is only for "may we put something NEW
+    /// on this box".
+    pub fn names(&self, base_url: &str) -> bool {
+        let host = host_of(base_url);
+        self.rules.iter().any(|(rule_host, _)| *rule_host == host)
+    }
+
     /// The domains of `advertised` this box's role actually permits.
     pub fn filter_domains(&self, base_url: &str, advertised: &[String]) -> Vec<String> {
         advertised
@@ -199,6 +212,11 @@ pub fn fleet_roles() -> &'static FleetRoles {
 /// May this box serve this domain? Every scheduling path funnels through
 /// here, so a role can never be honoured in one picker and forgotten in
 /// another.
+/// Is this box dedicated (named by the role list)? See [`FleetRoles::names`].
+pub fn role_names(base_url: &str) -> bool {
+    fleet_roles().names(base_url)
+}
+
 pub fn role_allows(base_url: &str, domain: &str) -> bool {
     fleet_roles().allows(base_url, domain)
 }

@@ -316,6 +316,15 @@ pub trait GenFleet {
         None
     }
 
+    /// Every box that holds this job's model is BUSY and the job is
+    /// stacking behind them: acquire another copy. Returns the note the
+    /// waiting job shows while the pull runs, or `None` when there is
+    /// nothing to provision (an idle holder exists, nobody holds it yet, no
+    /// idle box can take it, or one is already in flight).
+    fn provision_for_demand(&mut self, _request: &GenRequest) -> Option<String> {
+        None
+    }
+
     /// Consider the whole fleet for this job from the start, without
     /// waiting for the pinned box to fail it — see [`FleetReach`].
     fn widen_all(&mut self) {}
@@ -1316,7 +1325,17 @@ impl<'f> Coordinator<'f> {
                                         waited.as_secs_f64()
                                     ));
                                 }
-                                None => stuck_since = Some(Instant::now()),
+                                // Nowhere idle to move it. If the reason is
+                                // that every box holding this model is busy,
+                                // the fleet's answer is another copy.
+                                None => {
+                                    if let Some(note) = self.fleet.provision_for_demand(request) {
+                                        self.log(&format!("job {}: {note}", claimed.job));
+                                        wait_stage =
+                                            Some(format!("waiting-for-fleet: {note}"));
+                                    }
+                                    stuck_since = Some(Instant::now());
+                                }
                             }
                         }
                     }
@@ -2262,6 +2281,56 @@ pub struct AssetAiFleet {
 /// How often a queued job may ask its box how deep its queue is.
 const QUEUE_DEPTH_EVERY: Duration = Duration::from_secs(5);
 
+/// How long one provisioning may hold its slot before another may be
+/// started for the same model. A 17 GB pull over the LAN is minutes and
+/// over the internet can be an hour; the record is also cleared the moment
+/// the target reports the model ready, so this is only the backstop for a
+/// box that vanished mid-pull.
+const PROVISION_TTL: Duration = Duration::from_secs(90 * 60);
+
+/// Transfer-ticket lifetime. The whole pull rides one set of tickets and a
+/// big model takes a while, so this is hours rather than the peer lane's
+/// 5-minute interactive default (its own 24 h cap still applies).
+const PROVISION_TICKET_TTL: u64 = 6 * 60 * 60;
+
+/// One in-flight demand-flip provisioning.
+#[derive(Clone, Debug)]
+struct ProvisionRecord {
+    /// Short label of the box being filled (".100").
+    at: String,
+    base_url: String,
+    fleet_job: String,
+    started: Instant,
+}
+
+/// AT MOST ONE PROVISIONING PER MODEL, process-wide.
+///
+/// Every box has its own claim loop and its own fleet adapter, and they all
+/// watch the same fleet: without a shared record, six loops noticing the
+/// same starving queue would start the same 17 GB download on six different
+/// boxes at once. Keyed by model id, because that is what is scarce.
+fn provisioning() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, ProvisionRecord>,
+> {
+    static IN_FLIGHT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ProvisionRecord>>,
+    > = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+/// The fleet's shared transfer secret, coordinator side.
+///
+/// Env only: the coordinator is not a service and has no cache directory of
+/// its own. Run the app with
+/// `MAKEPAD_AI_PEER_SECRET=$(cat <box cache>/peer-secret)` and every pull it
+/// provisions is minted for the LAN; without it the pull still happens, it
+/// just cannot be ticketed and the node falls back to its own sources
+/// (`MAKEPAD_AI_PEER_SOURCES`) or Hugging Face.
+fn coordinator_peer_secret() -> Option<makepad_asset_ai::peer::TransferSecret> {
+    let text = std::env::var("MAKEPAD_AI_PEER_SECRET").ok()?;
+    makepad_asset_ai::peer::TransferSecret::new(text.as_bytes())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GenRoute {
     Admitted {
@@ -2448,6 +2517,156 @@ impl AssetAiFleet {
         }
     }
 
+    /// DEMAND FLIP: start a peer-first model pull on an idle box because
+    /// every box holding the model is busy and this job is stacking behind
+    /// them. Returns the note a waiting job shows while it happens.
+    ///
+    /// The pull is an ordinary node job (`pull_only`), so it queues, reports
+    /// download progress and cancels like anything else — and the queued
+    /// work is NOT moved onto it: it keeps waiting for a box that can run it
+    /// now, and ordinary dispatch picks the new copy up the moment it lands.
+    fn provision_for_demand(&mut self, request: &GenRequest) -> Option<String> {
+        use makepad_asset_ai::client::{ContentProvider, LocalService};
+        use makepad_asset_ai::registry::Domain;
+        let mut boxes = self.boxes();
+        for url in self.overflow_boxes() {
+            if !boxes.contains(&url) {
+                boxes.push(url);
+            }
+        }
+        let (snapshots, _) = self.snapshots_of(&boxes);
+        // Retire finished/stale records first, so a model whose pull landed
+        // can be provisioned again later if the fleet starves again.
+        self.forget_finished_provisioning(&snapshots);
+        let plan = {
+            let in_flight = |model: &str| provisioning().lock().is_ok_and(|map| map.contains_key(model));
+            provision_plan(&snapshots, request.kind.domain, &request.model, &in_flight)?
+        };
+        let target = &snapshots[plan.target];
+        let base_url = boxes[plan.target].clone();
+        let Some(domain) = Domain::parse(request.kind.domain) else {
+            return None;
+        };
+        // Peer sources: the boxes that HOLD it. Bytes come off the LAN, not
+        // out of the internet — that is the whole point of provisioning from
+        // inside the fleet.
+        let sources: Vec<String> = plan
+            .sources
+            .iter()
+            .map(|index| snapshots[*index].base_url.clone())
+            .collect();
+        let tickets = self.peer_tickets_for(&snapshots, &plan, target);
+        let wire = makepad_asset_ai::protocol::GenerateRequestJson {
+            model: plan.model.clone(),
+            pull_only: Some(true),
+            peer_sources: (!sources.is_empty()).then(|| sources.clone()),
+            peer_tickets: (!tickets.is_empty()).then_some(tickets),
+            ..Default::default()
+        };
+        let fleet_job = match LocalService::new(&base_url).request(domain, &wire) {
+            Ok(job) => job,
+            Err(error) => {
+                if self.log {
+                    eprintln!("[asset-worker] provisioning {} on {base_url} refused: {error}", plan.model);
+                }
+                return None;
+            }
+        };
+        let at = short_label(&base_url);
+        let from: Vec<String> = sources.iter().map(|url| short_label(url)).collect();
+        if let Ok(mut map) = provisioning().lock() {
+            map.insert(
+                plan.model.clone(),
+                ProvisionRecord {
+                    at: at.clone(),
+                    base_url: base_url.clone(),
+                    fleet_job,
+                    started: Instant::now(),
+                },
+            );
+        }
+        if self.log {
+            eprintln!(
+                "[asset-worker] every box holding {} is busy — provisioning it on {at} from {}",
+                plan.model,
+                from.join(", ")
+            );
+        }
+        Some(format!(
+            "provisioning {} on {at} from {}",
+            plan.model,
+            if from.is_empty() { "the internet".to_string() } else { from.join(", ") }
+        ))
+    }
+
+    /// One ticket per (source box, pinned file digest) — what the receiver
+    /// needs to ask a peer for those exact bytes. Empty when this process
+    /// holds no fleet secret; the pull then falls back to the node's own
+    /// configured sources or Hugging Face.
+    fn peer_tickets_for(
+        &self,
+        snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+        plan: &ProvisionPlan,
+        target: &makepad_asset_ai::fleet::BoxSnapshot,
+    ) -> Vec<String> {
+        use makepad_asset_ai::peer::PeerTicket;
+        use makepad_asset_ai::registry::Registry;
+        let Some(secret) = coordinator_peer_secret() else {
+            return Vec::new();
+        };
+        let Some(receiver_key) = target.health.as_ref().and_then(|h| h.node_key.clone()) else {
+            return Vec::new();
+        };
+        let Ok(registry) = Registry::embedded() else {
+            return Vec::new();
+        };
+        let Some(spec) = registry.find(&plan.model) else {
+            return Vec::new();
+        };
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + PROVISION_TICKET_TTL;
+        let mut tickets = Vec::new();
+        for index in &plan.sources {
+            let Some(source_key) = snapshots[*index].health.as_ref().and_then(|h| h.node_key.clone())
+            else {
+                continue;
+            };
+            for file in &spec.files {
+                let Some(digest) = file.sha256.as_deref() else {
+                    continue;
+                };
+                tickets.push(PeerTicket::mint(&secret, &source_key, &receiver_key, digest, expires));
+            }
+        }
+        tickets
+    }
+
+    /// Drop provisioning records whose model has landed (or whose pull is
+    /// long gone), so the fleet can provision that model again later.
+    fn forget_finished_provisioning(
+        &self,
+        snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    ) {
+        use makepad_asset_ai::fleet::affinity;
+        let Ok(mut map) = provisioning().lock() else {
+            return;
+        };
+        map.retain(|model, record| {
+            if record.started.elapsed() > PROVISION_TTL {
+                return false;
+            }
+            // Landed: the box it was pulled onto now holds it.
+            let landed = snapshots.iter().any(|snapshot| {
+                snapshot.base_url == record.base_url
+                    && affinity(snapshot, model).is_some_and(|score| score >= WARM_AFFINITY)
+            });
+            !landed
+        });
+    }
+
     /// How many of a box's own runs are in front of a job queued there.
     /// Throttled: a queued job polls every second or so and the answer only
     /// changes when a run ends. `None` = the box did not say.
@@ -2611,6 +2830,91 @@ fn warm_holder(
 /// already has the model.
 fn holding_stage(model: &str, on: &str) -> String {
     format!("waiting-for-fleet: {model} is already on {on} — better than downloading it here")
+}
+
+/// What a demand-flip provisioning would do: pull `model` onto the box at
+/// `target`, sourcing it from the boxes at `sources` (which hold it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProvisionPlan {
+    model: String,
+    target: usize,
+    sources: Vec<usize>,
+}
+
+/// DEMAND FLIP. The anti-download rule ("a cold box never steals a job from
+/// one that has the weights") is right for ONE job and wrong for a QUEUE:
+/// when every box holding the model is busy and work is stacking behind
+/// them, the fleet's answer is not to wait harder, it is to acquire another
+/// copy. So the moment a job is queuing with no idle holder anywhere, the
+/// coordinator provisions the model onto the best idle box — as a job of its
+/// own, visible and cancellable — while the queued work keeps waiting on the
+/// boxes that can actually run it now. When the new copy lands, ordinary
+/// dispatch picks it up; nothing is re-routed by force.
+///
+/// Refuses to plan when:
+/// - nothing holds the model yet (that is a plain cold start, and
+///   [`warm_route`] already downloads it on the box that will run it);
+/// - some holder is IDLE (the job has somewhere to go right now);
+/// - no idle box can take it (hardware-incompatible, already holding it,
+///   or DEDICATED — a box with a role serves what it was given and its disk
+///   is not ours to fill);
+/// - a provisioning of this model is already in flight (`in_flight`).
+fn provision_plan(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+    in_flight: &dyn Fn(&str) -> bool,
+) -> Option<ProvisionPlan> {
+    use makepad_asset_ai::fleet::{
+        affinity, gpu_rank, is_synthetic_backend, role_allows, role_names,
+    };
+    // What would run this work: the pin when the fleet holds it, else the
+    // domain's warm model. Same answer `hold_for_weights` waits for.
+    let (_, model) = warm_holder(snapshots, domain, want_model)?;
+    if in_flight(&model) {
+        return None;
+    }
+    let mut holders = Vec::new();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if affinity(snapshot, &model).is_some_and(|score| score >= WARM_AFFINITY) {
+            // An IDLE holder means nothing is starving: the job can start
+            // there this second.
+            if is_idle(snapshot) {
+                return None;
+            }
+            holders.push(index);
+        }
+    }
+    if holders.is_empty() {
+        return None;
+    }
+    // The best idle box that could hold it but does not.
+    let mut target: Option<(usize, u32)> = None;
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if !is_idle(snapshot) || holders.contains(&index) {
+            continue;
+        }
+        if role_names(&snapshot.base_url) || !role_allows(&snapshot.base_url, domain) {
+            continue;
+        }
+        // It must be able to RUN what it is being given, by the same
+        // hardware rule dispatch uses — and a test pattern is not a model.
+        let Some(spec) = snapshot.models.iter().find(|info| info.id == model) else {
+            continue;
+        };
+        if is_synthetic_backend(&spec.backend)
+            || !makepad_asset_ai::fleet::model_admission(snapshot, &model)
+                .is_some_and(|admission| admission.is_hardware_compatible())
+        {
+            continue;
+        }
+        let rank = gpu_rank(snapshot);
+        if target.is_none_or(|(_, best)| rank > best) {
+            target = Some((index, rank));
+        }
+    }
+    let (target, _) = target?;
+    Some(ProvisionPlan { model, target, sources: holders })
 }
 
 /// A box with nothing queued or running on it.
@@ -4946,6 +5250,133 @@ mod tests {
         );
         drop(server);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------------ the demand flip
+
+    /// The rule that protects a fleet from pointless downloads has to
+    /// invert when work is STACKING: one job waits for the box that has the
+    /// weights, but a queue means the fleet is short of copies.
+    #[test]
+    fn a_queue_behind_every_holder_provisions_another_copy() {
+        let never = |_: &str| false;
+        let holder_busy = busy(
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.235:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_READY)],
+                ),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            2,
+        );
+        let cold_idle_4090 = on_gpu(
+            snapshot(
+                "http://10.0.0.166:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_ABSENT)],
+            ),
+            "NVIDIA GeForce RTX 4090",
+        );
+        let cold_idle_6000 = on_gpu(
+            snapshot(
+                "http://10.0.0.165:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_ABSENT)],
+            ),
+            "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        );
+        let fleet = vec![holder_busy.clone(), cold_idle_4090.clone(), cold_idle_6000.clone()];
+        let plan = provision_plan(&fleet, "music", "minimax-music3-q4", &never)
+            .expect("a starving queue provisions");
+        assert_eq!(plan.model, "minimax-music3-q4");
+        assert_eq!(plan.target, 2, "the fastest idle card takes the copy");
+        assert_eq!(plan.sources, vec![0], "sourced from the box that HAS it");
+
+        // An IDLE holder means nothing is starving: the job has somewhere to
+        // go this second, and a download would be pure waste.
+        let with_idle_holder = vec![
+            holder_busy.clone(),
+            cold_idle_6000.clone(),
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.203:8123",
+                    23 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_READY)],
+                ),
+                "NVIDIA GeForce RTX 4090",
+            ),
+        ];
+        assert_eq!(provision_plan(&with_idle_holder, "music", "minimax-music3-q4", &never), None);
+
+        // Nobody holds it at all: that is a cold start, and ordinary
+        // dispatch already downloads it on the box that will run it.
+        let nobody = vec![cold_idle_4090.clone(), cold_idle_6000.clone()];
+        assert_eq!(provision_plan(&nobody, "music", "minimax-music3-q4", &never), None);
+
+        // One per model, whoever notices first.
+        let already = |model: &str| model == "minimax-music3-q4";
+        assert_eq!(provision_plan(&fleet, "music", "minimax-music3-q4", &already), None);
+    }
+
+    /// Where a copy may NOT go: a box too small to run it, a box that is
+    /// dedicated to something else, and a box already running work.
+    #[test]
+    fn provisioning_respects_hardware_roles_and_idleness() {
+        let never = |_: &str| false;
+        let holder_busy = busy(
+            snapshot(
+                "http://10.0.0.235:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+            ),
+            1,
+        );
+        // 24 GB idle box, 74 GB model: hardware says no, forever.
+        let too_small = snapshot(
+            "http://10.0.0.166:8123",
+            23 * 1024,
+            24 * 1024,
+            vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy.clone(), too_small], "video", "minimax-h3", &never),
+            None
+        );
+
+        // The dedicated chat box is never filled with someone else's
+        // weights, even when it is idle and big enough.
+        let chat_box = snapshot(
+            "http://10.0.0.217:8123",
+            95 * 1024,
+            96 * 1024,
+            vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy.clone(), chat_box], "video", "minimax-h3", &never),
+            None
+        );
+
+        // A busy box is not a place to put a download either.
+        let busy_cold = busy(
+            snapshot(
+                "http://10.0.0.100:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+            ),
+            1,
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy, busy_cold], "video", "minimax-h3", &never),
+            None
+        );
     }
 
     // ------------------------------------------ the music body composer
