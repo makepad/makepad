@@ -133,100 +133,18 @@ impl Drop for DecoderInput {
     }
 }
 
-pub struct Frame {
-    /// Pacing timestamp — monotonic for the clock (synthetic in bounce).
-    pub pts_100ns: i64,
-    /// TRUE clip position of this picture, for the position readout: in
-    /// bounce the pacing stamps climb forever while the picture runs
-    /// backward — the scrub bar follows this, never the pacing stamp.
-    pub clip_100ns: i64,
-    pub px: Pixels,
-}
-
-/// A frame's pixel payload. NV12 is the RESIDENT form — 1.5 bytes per
-/// pixel STRAIGHT OFF THE DECODER, untouched by the CPU anywhere in the
-/// pipeline; the GPU unpacks it to RGBA in a texture-to-texture pass at
-/// present time (the operator's law: never convert 4K in a software
-/// loop). Bgra remains for producers that only have RGBA.
-#[derive(Clone)]
-pub enum Pixels {
-    Bgra(Vec<u32>),
-    Nv12 { data: Vec<u8>, width: u32, height: u32 },
-}
-
-impl Pixels {
-    pub fn byte_len(&self) -> usize {
-        match self {
-            Pixels::Bgra(v) => v.len() * 4,
-            Pixels::Nv12 { data, .. } => data.len(),
-        }
-    }
-
-    /// CPU view of the picture as packed BGRA words — tests and the few
-    /// point-sampling consumers; the presentation path never calls this.
-    pub fn to_bgra(&self) -> Vec<u32> {
-        match self {
-            Pixels::Bgra(v) => v.clone(),
-            Pixels::Nv12 { data, width, height } => {
-                let mut out = Vec::new();
-                nv12::nv12_to_bgra_u32(data, *width, *height, &mut out);
-                out
-            }
-        }
-    }
-}
-
-impl Default for Pixels {
-    fn default() -> Self {
-        Pixels::Bgra(Vec::new())
-    }
-}
-
-/// Sparse mean-abs luma difference between two NV12 frames (0..255): the
-/// scene-cut score. A 24x14 grid is plenty — a hard cut moves most of the
-/// picture, a pan moves edges.
-pub fn nv12_cut_score(a: &[u8], b: &[u8], w: usize, h: usize) -> f32 {
-    if w == 0 || h == 0 || a.len() < w * h || b.len() < w * h {
-        return 0.0;
-    }
-    let (gw, gh) = (24usize, 14usize);
-    let mut sum = 0.0f32;
-    for gy in 0..gh {
-        let y = (gy * h + h / 2) / gh;
-        for gx in 0..gw {
-            let x = (gx * w + w / 2) / gw;
-            let at = y.min(h - 1) * w + x.min(w - 1);
-            sum += (a[at] as f32 - b[at] as f32).abs();
-        }
-    }
-    sum / (gw * gh) as f32
-}
-
-/// Tightly packed RGB8 proxy of an NV12 frame at a reduced resolution —
-/// the RIFE worker's input format. Same nearest-sample BT.709 math as the
-/// BGRA proxy below.
-pub fn nv12_proxy_rgb8(data: &[u8], w: usize, h: usize, pw: usize, ph: usize) -> Vec<u8> {
-    let mut out = vec![0u8; pw * ph * 3];
-    if w == 0 || h == 0 || data.len() < w * h * 3 / 2 {
-        return out;
-    }
-    let (y_plane, uv_plane) = data.split_at(w * h);
-    for py in 0..ph {
-        let sy = ((py * h + h / 2) / ph.max(1)).min(h - 1);
-        let uv_row = &uv_plane[(sy / 2) * w..];
-        for px_i in 0..pw {
-            let sx = ((px_i * w + w / 2) / pw.max(1)).min(w - 1);
-            let c = y_plane[sy * w + sx] as i32 - 16;
-            let d = uv_row[(sx / 2) * 2] as i32 - 128;
-            let e = uv_row[(sx / 2) * 2 + 1] as i32 - 128;
-            let at = (py * pw + px_i) * 3;
-            out[at] = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
-            out[at + 1] = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
-            out[at + 2] = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
-        }
-    }
-    out
-}
+/// The picture a video slot hands the presenter, and the small CPU
+/// helpers that go with it — including `tl_on`: `VJ_TL=1` turns on the
+/// TIMELINE TRACE (stderr), where every transport decision on every
+/// playback path (the flow warp clock, the cache sweep, the seek-bounce
+/// reverse legs) logs its position/rate/mode as it happens, so a jank
+/// report reads straight off the log instead of needing a repro under a
+/// debugger. Off, it costs one relaxed bool load per frame. Both moved into `makepad-frametween` when the
+/// tweener became a library — the tween worker needs them, and one
+/// definition beats two. These are the VJ's names for them, unchanged.
+pub use makepad_frametween::frame::{
+    nv12_cut_score, tl_on, Frame, Pixels,
+};
 
 /// Small BGRA proxy of an NV12 frame for the POINT-SAMPLING consumers
 /// (light zones, loop signatures): nearest-sampled, BT.709 limited — a
@@ -363,16 +281,6 @@ const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 /// after FOUR frames, so every 1.6 s GOP decode served 4 frames and reverse
 /// ran at 1/25 speed. 4 GB holds several such GOPs — and ~2 s of 4K60.
 const REVERSE_WINDOW_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
-
-/// `VJ_TL=1` turns on the TIMELINE TRACE (stderr): every transport decision
-/// on every playback path — the flow warp clock, the cache sweep, the
-/// seek-bounce reverse legs — logs its position/rate/mode as it happens, so
-/// a jank report reads straight off the log instead of needing a repro
-/// under a debugger. Off, it costs one relaxed bool load per frame.
-pub fn tl_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VJ_TL").is_some())
-}
 
 struct SlotShared {
     stop: AtomicBool,

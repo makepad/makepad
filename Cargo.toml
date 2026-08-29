@@ -97,6 +97,10 @@ workspace.members = [
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
     "libs/video_flow",
+    # === realtime frame tweening: the classical GPU optical-flow pass
+    # chain, the RIFE producer behind the same warp, and the mode set
+    # (extracted from the VJ, which is still its reference user) ===
+    "libs/frametween",
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",

@@ -4494,27 +4494,30 @@ fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8>
 }
 
 /// The NEURAL field producer is DEFAULT ON for the eyeball comparison;
-/// Per-deck frame-tween modes, in the deck dropdown's order.
-const TWEEN_NONE: u8 = 0;
-const TWEEN_FADE: u8 = 1;
-const TWEEN_FLOW: u8 = 2;
+/// Per-deck frame-tween modes, in the deck dropdown's order. The codes are
+/// the library's — one definition, and a persisted `tween 3` line in a clip
+/// profile still means AI1 forever.
+use makepad_frametween::Mode as TweenMode;
+const TWEEN_NONE: u8 = TweenMode::None.code();
+const TWEEN_FADE: u8 = TweenMode::Crossfade.code();
+const TWEEN_FLOW: u8 = TweenMode::Flow.code();
 /// Persisted code 3 is the shipped neural-field tier (now labelled AI1).
-const TWEEN_AI: u8 = 3;
-const TWEEN_AI2: u8 = 4;
+const TWEEN_AI: u8 = TweenMode::Ai1.code();
+const TWEEN_AI2: u8 = TweenMode::Ai2.code();
 /// Persisted AI3 adaptive-subdivision tier. Existing profile codes never move.
-const TWEEN_AI3: u8 = 5;
+const TWEEN_AI3: u8 = TweenMode::Ai3.code();
 /// Pair-cache namespace for the luma cut verdict (separate from producers).
 const TWEEN_CUT_TIER: u8 = u8::MAX;
 /// Per-deck neural ladder budget. Exact pair keys make eviction harmless.
 const TWEEN_RIFE_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
 /// Measured sustainable AI production rate, shared by the active AI decks.
-const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
+const TWEEN_RIFE_CAPACITY_FPS: f64 = makepad_frametween::RIFE_CAPACITY_FPS;
 /// Capacity-law GPU duty left to neural production; presentation owns rest.
 const TWEEN_RIFE_GPU_BUDGET: f64 = 0.60;
 
 fn tween_uses_ai(mode: u8) -> bool {
-    mode == TWEEN_AI || mode == TWEEN_AI2 || mode == TWEEN_AI3
+    TweenMode::from_code(mode).uses_ai()
 }
 
 fn parse_tween_mode(value: &str) -> u8 {
@@ -4530,27 +4533,9 @@ fn tween_prefetch_enabled() -> bool {
 
 /// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
 /// per-deck dropdown's AI entry is the opt-in now.
-fn rife_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // Opt-in while the classical tier gets its enhancement pass — the
-    // neural producer's pulse (field handoffs every few pairs) reads
-    *ON.get_or_init(|| std::env::var("VJ_TWEEN_RIFE").map(|v| v != "0").unwrap_or(true))
-}
-
-/// The RIFE checkpoint path: VJ_RIFE_MODEL, or the repo-local default.
-fn rife_model_path() -> std::path::PathBuf {
-    std::env::var_os("VJ_RIFE_MODEL")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("local/ai_models/rife_v4.26.safetensors"))
-}
-
-/// The proxy resolution RIFE sees: 384 wide, aspect-matched height (the
-/// net pads internally; flow upsamples to the video in the warp).
-fn rife_proxy_dims(w: u32, h: u32) -> (usize, usize) {
-    let pw = 384usize;
-    let ph = ((pw as u64 * h as u64) / w.max(1) as u64).clamp(96, 384) as usize;
-    (pw, ph & !1)
-}
+use makepad_frametween::flow_tween::{
+    default_model_path as rife_model_path, rife_enabled, rife_proxy_dims,
+};
 
 /// Realtime frame tweening is DEFAULT ON; VJ_NO_TWEEN=1 switches it off
 /// (the settings row will replace this).
@@ -19901,7 +19886,7 @@ p2 {}
                                     },
                                     _ => flow_tween::RifeProductKind::Field,
                                 },
-                                frames: cache.clone(),
+                                frames: flow_tween::RifeSource::Frames(cache.clone()),
                                 width: pw,
                                 height: ph,
                                 deadline,
@@ -23401,6 +23386,27 @@ mod tween_tier_tests {
         assert_eq!(parse_tween_mode("5"), TWEEN_AI3);
         assert_eq!(parse_tween_mode("255"), TWEEN_AI3);
         assert_eq!(parse_tween_mode("broken"), TWEEN_FLOW);
+    }
+
+    /// The deck chip's faces and its tooltip are typed into the DSL, where
+    /// no test can reach them. Pin the library strings they were copied
+    /// from instead: if the library ever renames a tier, this fails and
+    /// says which two literals in `script_mod!` have to follow.
+    #[test]
+    fn the_deck_chip_still_spells_the_librarys_mode_set() {
+        let faces: Vec<&str> =
+            makepad_frametween::short_modes().iter().map(|(face, _)| *face).collect();
+        assert_eq!(
+            faces,
+            ["OFF", "XF", "FL", "AI1", "AI2", "AI3"],
+            "the tween chip's `labels:` array in script_mod! must match"
+        );
+        assert_eq!(
+            makepad_frametween::tip(),
+            "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, \
+             AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision",
+            "the tween chip's Tip text in script_mod! must match"
+        );
     }
 }
 
