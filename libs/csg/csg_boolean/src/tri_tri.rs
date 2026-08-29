@@ -253,15 +253,38 @@ fn isolate_vertex_indexed(
     let s1 = sign(d1);
     let s2 = sign(d2);
 
-    // If d0 is isolated (different sign from d1 and d2)
+    // Prefer isolating a vertex with NONZERO sign that differs from both
+    // others. Isolating an exactly-on-plane vertex (sign 0) while the other
+    // two straddle collapses the interval to a point (both edge parameters
+    // become t=0) and a real crossing is silently dropped — the chord must
+    // run from the on-plane vertex to the opposite edge's crossing. With a
+    // nonzero isolated vertex, an on-plane neighbor falls out naturally at
+    // t=1. This only changes behavior for the {0,+,-} sign patterns; all
+    // generic patterns take exactly the branches they always took.
+    if s0 != 0 && s0 != s1 && s0 != s2 {
+        return (v0, d0, v1, d1, v2, d2, vi[0], vi[1], vi[2]);
+    }
+    if s1 != 0 && s1 != s0 && s1 != s2 {
+        return (v1, d1, v0, d0, v2, d2, vi[1], vi[0], vi[2]);
+    }
+    if s2 != 0 && s2 != s0 && s2 != s1 {
+        return (v2, d2, v0, d0, v1, d1, vi[2], vi[0], vi[1]);
+    }
+    // One vertex exactly on the plane while the other two straddle. Zero at
+    // v1/v2 was already handled above (v0 was isolated); only zero-at-v0
+    // reaches here: isolate v1 so the interval is [v0 (t=1), crossing(v1,v2)].
+    if s0 == 0 && s1 != 0 && s2 != 0 && s1 != s2 {
+        return (v1, d1, v0, d0, v2, d2, vi[1], vi[0], vi[2]);
+    }
+
+    // Remaining degenerate patterns (vertex touch {0,+,+}, edge in plane
+    // handled above, etc.): keep the historical behavior.
     if s0 != s1 && s0 != s2 {
         return (v0, d0, v1, d1, v2, d2, vi[0], vi[1], vi[2]);
     }
-    // If d1 is isolated
     if s1 != s0 && s1 != s2 {
         return (v1, d1, v0, d0, v2, d2, vi[1], vi[0], vi[2]);
     }
-    // d2 is isolated (or degenerate case)
     (v2, d2, v0, d0, v1, d1, vi[2], vi[0], vi[1])
 }
 

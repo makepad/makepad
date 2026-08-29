@@ -38,7 +38,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 mod surface;
+mod theme;
 use surface::SurfaceBinder;
+use theme::Palette;
 
 app_main!(App);
 
@@ -77,11 +79,18 @@ script_mod! {
             main_window := Window{
                 window.title: "Mixer"
                 window.inner_size: vec2(1268, 716)
-                pass.clear_color: #x07090d
+                // The desk is flat and dark: the pass clears to the theme's
+                // own background, not the stock neutral. `theme.rs` also sets
+                // `color_bg_app`/`color_app_caption_bar` from the same key,
+                // but the clear colour is stated here so a window that never
+                // gets a retint still comes up in the theme.
+                pass.clear_color: mod.mpm.bg_dark
                 body +: {
                     width: Fill
                     height: Fill
                     flow: Down
+                    show_bg: true
+                    draw_bg.color: mod.mpm.bg_dark
 
                     searching := View{
                         width: Fill
@@ -92,17 +101,20 @@ script_mod! {
 
                         Label{
                             text: "Searching for your mixer"
-                            draw_text.color: #xe8eef6
-                            draw_text.text_style: theme.font_bold{font_size: 17.0}
+                            draw_text.color: mod.mpm.fg_bright
+                            draw_text.text_style: theme.font_code{font_size: 15.0}
                         }
                         search_note := Label{
                             text: "listening for a console on the local network"
-                            draw_text.color: #x8d99aa
-                            draw_text.text_style.font_size: 9.0
+                            draw_text.color: mod.mpm.fg_dim
+                            draw_text.text_style: theme.font_code{font_size: 9.0}
                         }
                         LoadingSpinner{
                             width: 34
                             height: 34
+                            draw_bg +: {
+                                color: uniform(mod.mpm.accent)
+                            }
                         }
                     }
 
@@ -154,7 +166,15 @@ impl App {
 
     fn load_layout(&mut self, cx: &mut Cx) {
         let (_label, file) = LAYOUTS[self.layout_idx];
-        let body = load_layout_body(file);
+        // A Splash body runs in its own isolate VM with a FRESH stock
+        // `mod.theme`, so the desktop palette cannot reach a layout through
+        // the theme — the host hands it over as one prepended line binding
+        // `mp` (see theme.rs and the layout headers).
+        let body = format!(
+            "{}{}",
+            Palette::shared().splash_preamble(),
+            load_layout_body(file)
+        );
         let splash = self.splash_ref(cx);
         splash.set_text(cx, &body);
         self.binder.rebind(cx, &splash);
@@ -356,6 +376,8 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        mp_theme::apply(vm);
+        Palette::shared().install(vm);
         self::script_mod(vm)
     }
 

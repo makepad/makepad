@@ -1546,11 +1546,14 @@ mod tests {
     }
 
     fn make_encoded() -> Vec<u8> {
-        const FILE: &'static [u8] = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/benches/binary-8-msb.lzw"
-        ));
-        return Vec::from(FILE);
+        // The vendored tree never carried the upstream benches/binary-8-msb.lzw
+        // fixture; a valid msb-8 stream from our own encoder tests the same
+        // decode paths and keeps the crate self-contained.
+        let data: Vec<u8> = (0u32..4096).map(|i| (i * 7 + i / 13) as u8).collect();
+        let mut out = Vec::new();
+        let mut enc = crate::encode::Encoder::new(BitOrder::Msb, 8);
+        enc.into_stream(&mut out).encode_all(&data[..]).status.unwrap();
+        out
     }
 
     #[test]

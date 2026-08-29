@@ -8,6 +8,7 @@
 //   result.write_stl("output.stl").unwrap();
 
 use makepad_csg_boolean::boolean as corefine_boolean;
+use makepad_csg_boolean::boolean::{BoolOp, FinishParams};
 use makepad_csg_math::{dvec3, BBox3d, Mat4d, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use makepad_csg_mesh::validate::{validate_mesh, MeshReport};
@@ -192,43 +193,87 @@ impl Solid {
 
     /// Union: combine volumes of self and other.
     pub fn union(&self, other: &Solid) -> Solid {
+        self.union_with(other, FinishParams::default())
+    }
+
+    /// Union with explicit finishing parameters (see `FinishParams`).
+    pub fn union_with(&self, other: &Solid, finish: FinishParams) -> Solid {
         if self.is_empty() {
             return other.clone();
         }
         if other.is_empty() {
             return self.clone();
         }
+        if bboxes_disjoint(self, other) {
+            // Far apart: the union is a plain concatenation. The full pipeline
+            // would find zero intersections and change neither operand.
+            return self.merge(other);
+        }
         Solid {
-            mesh: corefine_boolean::union(&self.mesh, &other.mesh),
+            mesh: corefine_boolean::mesh_boolean_with(&self.mesh, &other.mesh, BoolOp::Union, finish),
         }
     }
 
     /// Difference: subtract other from self.
     pub fn difference(&self, other: &Solid) -> Solid {
+        self.difference_with(other, FinishParams::default())
+    }
+
+    /// Difference with explicit finishing parameters (see `FinishParams`).
+    pub fn difference_with(&self, other: &Solid, finish: FinishParams) -> Solid {
         if self.is_empty() {
             return Solid::empty();
         }
         if other.is_empty() {
             return self.clone();
         }
+        if bboxes_disjoint(self, other) {
+            // Far apart: nothing to cut away.
+            return self.clone();
+        }
         Solid {
-            mesh: corefine_boolean::difference(&self.mesh, &other.mesh),
+            mesh: corefine_boolean::mesh_boolean_with(
+                &self.mesh,
+                &other.mesh,
+                BoolOp::Difference,
+                finish,
+            ),
         }
     }
 
     /// Intersection: keep only overlapping volume.
     pub fn intersection(&self, other: &Solid) -> Solid {
+        self.intersection_with(other, FinishParams::default())
+    }
+
+    /// Intersection with explicit finishing parameters (see `FinishParams`).
+    pub fn intersection_with(&self, other: &Solid, finish: FinishParams) -> Solid {
         if self.is_empty() || other.is_empty() {
             return Solid::empty();
         }
+        if bboxes_disjoint(self, other) {
+            // Far apart: no overlapping volume.
+            return Solid::empty();
+        }
         Solid {
-            mesh: corefine_boolean::intersection(&self.mesh, &other.mesh),
+            mesh: corefine_boolean::mesh_boolean_with(
+                &self.mesh,
+                &other.mesh,
+                BoolOp::Intersection,
+                finish,
+            ),
         }
     }
 
     /// Symmetric difference (XOR): volume in either but not both.
     pub fn symmetric_difference(&self, other: &Solid) -> Solid {
-        self.union(other).difference(&self.intersection(other))
+        self.symmetric_difference_with(other, FinishParams::default())
+    }
+
+    /// Symmetric difference with explicit finishing parameters.
+    pub fn symmetric_difference_with(&self, other: &Solid, finish: FinishParams) -> Solid {
+        self.union_with(other, finish)
+            .difference_with(&self.intersection_with(other, finish), finish)
     }
 
     /// Alias for `union` (kept for backwards compatibility).
@@ -471,38 +516,285 @@ impl Solid {
 
 // --- Multi-solid operations ---
 
+/// Separation margin for the bbox-disjoint fast paths. Comfortably exceeds
+/// the boolean pipeline's weld / T-junction tolerance (1e-4), so a skipped
+/// pipeline could not have changed anything: with a gap this wide there are
+/// no candidate triangle pairs, no sub-tolerance vertex pairs to weld, and
+/// no vertex within tolerance of a foreign edge.
+const DISJOINT_MARGIN: f64 = 1e-3;
+
+fn bboxes_disjoint(a: &Solid, b: &Solid) -> bool {
+    let ba = a.mesh.bounding_box();
+    let bb = b.mesh.bounding_box();
+    ba.max.x + DISJOINT_MARGIN < bb.min.x
+        || bb.max.x + DISJOINT_MARGIN < ba.min.x
+        || ba.max.y + DISJOINT_MARGIN < bb.min.y
+        || bb.max.y + DISJOINT_MARGIN < ba.min.y
+        || ba.max.z + DISJOINT_MARGIN < bb.min.z
+        || bb.max.z + DISJOINT_MARGIN < ba.min.z
+}
+
+/// Balanced proximity-paired reduction of `items` with `op`.
+///
+/// A left fold makes N-1 passes over an ever-growing accumulator — quadratic
+/// in N. This reduces level by level as a binary tree: per level, items are
+/// sorted by bbox center along the scene's longest axis (so pairs are spatial
+/// neighbors and intermediate intersection curves stay short) and adjacent
+/// pairs — which are independent — are evaluated on the shared thread pool.
+fn reduce_balanced(
+    mut items: Vec<Solid>,
+    op: fn(&Solid, &Solid, FinishParams) -> Solid,
+    finish: FinishParams,
+) -> Solid {
+    use makepad_csg_math::thread_pool;
+
+    while items.len() > 1 {
+        // Longest axis of the whole scene at this level.
+        let mut scene = BBox3d::empty();
+        for s in &items {
+            scene = scene.union(s.mesh.bounding_box());
+        }
+        let size = scene.size();
+        let axis = if size.x >= size.y && size.x >= size.z {
+            0
+        } else if size.y >= size.z {
+            1
+        } else {
+            2
+        };
+
+        // Sort by bbox center along that axis.
+        let mut keyed: Vec<(f64, Solid)> = items
+            .into_iter()
+            .map(|s| {
+                let c = s.mesh.bounding_box().center();
+                let k = match axis {
+                    0 => c.x,
+                    1 => c.y,
+                    _ => c.z,
+                };
+                (k, s)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Pair adjacent entries (odd item passes through) and evaluate the
+        // level's independent pairs in parallel.
+        let mut tasks: Vec<_> = Vec::with_capacity(keyed.len() / 2 + 1);
+        let mut it = keyed.into_iter().map(|(_, s)| s);
+        while let Some(a) = it.next() {
+            let b = it.next();
+            tasks.push(move || match &b {
+                Some(b) => op(&a, b, finish),
+                None => a,
+            });
+        }
+        items = thread_pool::parallel_for(tasks);
+    }
+    items.pop().unwrap_or_else(Solid::empty)
+}
+
 /// Union of multiple solids.
+///
+/// Balanced proximity-paired reduction instead of a left fold; bbox-disjoint
+/// pairs merge for free. See `reduce_balanced`.
 pub fn union_all(solids: &[Solid]) -> Solid {
-    if solids.is_empty() {
-        return Solid::empty();
+    union_all_with(solids, FinishParams::default())
+}
+
+/// `union_all` with explicit finishing parameters (see `FinishParams`).
+pub fn union_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
+    // Empty solids are the identity of union.
+    let items: Vec<Solid> = solids.iter().filter(|s| !s.is_empty()).cloned().collect();
+    reduce_union(items, finish)
+}
+
+/// Balanced union reduction that only ever unions genuinely interacting
+/// operands.
+///
+/// Per level: sort by bbox center along the scene's longest axis, then pair
+/// each item with the nearest following item whose (grown) bbox overlaps its
+/// own. Items with no overlapping partner pass through to the next level.
+/// When a level finds no overlapping pair at all, every survivor is pairwise
+/// bbox-disjoint and the union is one plain concatenation.
+///
+/// Never pairing disjoint items matters for robustness, not just speed: a
+/// concatenated multi-component operand entering a real boolean reorders the
+/// corefinement edge cache and can flip a marginal case (measured: the same
+/// two far-apart spheres concatenated in one order union cleanly against a
+/// third mesh, in the other order they leave a 3-edge hole — on the old
+/// pipeline too). Overlap-pairing keeps every boolean the same shape the
+/// sequential fold produced. As a second net, a pair whose union fails
+/// validation is retried with the operands swapped (corefinement is not
+/// commutative in its last bits; see `union_smart` in document.rs).
+fn reduce_union(mut items: Vec<Solid>, finish: FinishParams) -> Solid {
+    use makepad_csg_math::thread_pool;
+
+    loop {
+        if items.len() <= 1 {
+            return items.pop().unwrap_or_else(Solid::empty);
+        }
+
+        // Longest axis of the whole scene at this level.
+        let mut scene = BBox3d::empty();
+        for s in &items {
+            scene = scene.union(s.mesh.bounding_box());
+        }
+        let size = scene.size();
+        let axis = if size.x >= size.y && size.x >= size.z {
+            0
+        } else if size.y >= size.z {
+            1
+        } else {
+            2
+        };
+
+        // Sort by bbox center along that axis so partners are near neighbors.
+        let mut keyed: Vec<(f64, BBox3d, Solid)> = items
+            .into_iter()
+            .map(|s| {
+                let b = s.mesh.bounding_box();
+                let c = b.center();
+                let k = match axis {
+                    0 => c.x,
+                    1 => c.y,
+                    _ => c.z,
+                };
+                (k, b.grow(DISJOINT_MARGIN), s)
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Greedy overlap pairing in sorted order.
+        let n = keyed.len();
+        let boxes: Vec<BBox3d> = keyed.iter().map(|(_, b, _)| *b).collect();
+        let mut slots: Vec<Option<Solid>> = keyed.into_iter().map(|(_, _, s)| Some(s)).collect();
+        let mut consumed = vec![false; n];
+        let mut tasks: Vec<_> = Vec::new();
+        let mut passthrough: Vec<Solid> = Vec::new();
+        for i in 0..n {
+            if consumed[i] {
+                continue;
+            }
+            consumed[i] = true;
+            let partner = (i + 1..n).find(|&j| !consumed[j] && boxes[i].intersects(boxes[j]));
+            match partner {
+                Some(j) => {
+                    consumed[j] = true;
+                    let a = slots[i].take().unwrap();
+                    let b = slots[j].take().unwrap();
+                    tasks.push(move || {
+                        let forward = a.union_with(&b, finish);
+                        if forward.is_valid() {
+                            return forward;
+                        }
+                        let reverse = b.union_with(&a, finish);
+                        if reverse.is_valid() {
+                            reverse
+                        } else {
+                            forward
+                        }
+                    });
+                }
+                None => passthrough.push(slots[i].take().unwrap()),
+            }
+        }
+
+        if tasks.is_empty() {
+            // No overlapping pair anywhere: survivors are mutually disjoint,
+            // their union is a plain concatenation.
+            let mut it = passthrough.into_iter();
+            let mut result = it.next().unwrap_or_else(Solid::empty);
+            for s in it {
+                result = result.merge(&s);
+            }
+            return result;
+        }
+
+        items = thread_pool::parallel_for(tasks);
+        items.extend(passthrough);
     }
-    let mut result = solids[0].clone();
-    for s in &solids[1..] {
-        result = result.union(s);
-    }
-    result
 }
 
 /// Difference: subtract all subsequent solids from the first.
+///
+/// Cutters are grouped into mutually bbox-disjoint groups; each group is
+/// concatenated (free) and subtracted with ONE boolean, so M far-apart holes
+/// cost one pass over the accumulator instead of M ever-costlier passes.
 pub fn difference_all(solids: &[Solid]) -> Solid {
+    difference_all_with(solids, FinishParams::default())
+}
+
+/// `difference_all` with explicit finishing parameters (see `FinishParams`).
+pub fn difference_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
     if solids.is_empty() {
         return Solid::empty();
     }
     let mut result = solids[0].clone();
-    for s in &solids[1..] {
-        result = result.difference(s);
+    if result.is_empty() {
+        return Solid::empty();
+    }
+
+    // Greedy grouping: each cutter joins the first group where its (grown)
+    // bbox overlaps no member; otherwise it starts a new group. Cutters that
+    // overlap each other therefore land in different groups and are applied
+    // as separate booleans, exactly like the old fold.
+    let mut groups: Vec<(Vec<&Solid>, Vec<BBox3d>)> = Vec::new();
+    for c in solids[1..].iter().filter(|s| !s.is_empty()) {
+        let cb = c.mesh.bounding_box().grow(DISJOINT_MARGIN);
+        match groups
+            .iter_mut()
+            .find(|(_, boxes)| boxes.iter().all(|b| !b.intersects(cb)))
+        {
+            Some((members, boxes)) => {
+                members.push(c);
+                boxes.push(cb);
+            }
+            None => groups.push((vec![c], vec![cb])),
+        }
+    }
+
+    for (members, _) in groups {
+        if result.is_empty() {
+            break;
+        }
+        if members.len() == 1 {
+            result = result.difference_with(members[0], finish);
+        } else {
+            let mut merged = members[0].clone();
+            for m in &members[1..] {
+                merged = merged.merge(m);
+            }
+            let grouped = result.difference_with(&merged, finish);
+            result = if grouped.is_valid() {
+                grouped
+            } else {
+                // The concatenated cutter reordered corefinement into a
+                // marginal case: fall back to the historical per-cutter fold
+                // for this group.
+                let mut r = result;
+                for m in &members {
+                    r = r.difference_with(m, finish);
+                }
+                r
+            };
+        }
     }
     result
 }
 
 /// Intersection of multiple solids.
+///
+/// Balanced reduction (intersection is associative); any empty operand makes
+/// the whole result empty.
 pub fn intersection_all(solids: &[Solid]) -> Solid {
-    if solids.is_empty() {
+    intersection_all_with(solids, FinishParams::default())
+}
+
+/// `intersection_all` with explicit finishing parameters (see `FinishParams`).
+pub fn intersection_all_with(solids: &[Solid], finish: FinishParams) -> Solid {
+    if solids.is_empty() || solids.iter().any(|s| s.is_empty()) {
         return Solid::empty();
     }
-    let mut result = solids[0].clone();
-    for s in &solids[1..] {
-        result = result.intersection(s);
-    }
-    result
+    reduce_balanced(solids.to_vec(), |a, b, f| a.intersection_with(b, f), finish)
 }

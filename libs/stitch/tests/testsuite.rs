@@ -1,11 +1,11 @@
 use {
     makepad_stitch::{
         Engine, Error, ExternRef, Func, FuncRef, Global, GlobalType, Instance, Limits, Linker, Mem,
-        MemType, Module, Mut, Ref, RefType, Store, Table, TableType, Val, ValType,
+        MemType, Module, Mut, Ref, RefType, Store, Table, TableType, V128, Val, ValType,
     },
     std::{collections::HashMap, sync::Arc},
     wast::{
-        core::{HeapType, NanPattern, WastArgCore, WastRetCore},
+        core::{HeapType, NanPattern, V128Pattern, WastArgCore, WastRetCore},
         parser,
         parser::ParseBuffer,
         QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet, Wat,
@@ -253,6 +253,7 @@ impl WastRunner {
                     WastArgCore::I64(arg) => arg.into(),
                     WastArgCore::F32(arg) => f32::from_bits(arg.bits).into(),
                     WastArgCore::F64(arg) => f64::from_bits(arg.bits).into(),
+                    WastArgCore::V128(arg) => V128::from_bytes(arg.to_le_bytes()).into(),
                     WastArgCore::RefNull(HeapType::Func) => FuncRef::null().into(),
                     WastArgCore::RefNull(HeapType::Extern) => ExternRef::null().into(),
                     WastArgCore::RefExtern(val) => ExternRef::new(&mut self.store, val).into(),
@@ -331,6 +332,84 @@ fn assert_result(store: &Store, actual: Val, expected: WastRet<'_>) {
                     assert_eq!(actual.to_f64().unwrap().to_bits(), expected_result.bits)
                 }
             },
+            WastRetCore::V128(expected) => {
+                let actual = actual.to_v128().unwrap();
+                let bytes = actual.to_bytes();
+                match expected {
+                    V128Pattern::I8x16(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            assert_eq!(bytes[idx] as i8, *expected);
+                        }
+                    }
+                    V128Pattern::I16x8(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            let lane =
+                                i16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().unwrap());
+                            assert_eq!(lane, *expected);
+                        }
+                    }
+                    V128Pattern::I32x4(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            let lane =
+                                i32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap());
+                            assert_eq!(lane, *expected);
+                        }
+                    }
+                    V128Pattern::I64x2(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            let lane =
+                                i64::from_le_bytes(bytes[idx * 8..idx * 8 + 8].try_into().unwrap());
+                            assert_eq!(lane, *expected);
+                        }
+                    }
+                    V128Pattern::F32x4(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            let lane =
+                                u32::from_le_bytes(bytes[idx * 4..idx * 4 + 4].try_into().unwrap());
+                            match expected {
+                                NanPattern::CanonicalNan => {
+                                    assert!(
+                                        lane & 0b0_11111111_11111111111111111111111
+                                            == 0b0_11111111_10000000000000000000000
+                                    );
+                                }
+                                NanPattern::ArithmeticNan => {
+                                    assert!(
+                                        lane & 0b0_11111111_11111111111111111111111
+                                            >= 0b0_11111111_10000000000000000000000
+                                    );
+                                }
+                                NanPattern::Value(expected) => {
+                                    assert_eq!(lane, expected.bits);
+                                }
+                            }
+                        }
+                    }
+                    V128Pattern::F64x2(expected) => {
+                        for (idx, expected) in expected.iter().enumerate() {
+                            let lane =
+                                u64::from_le_bytes(bytes[idx * 8..idx * 8 + 8].try_into().unwrap());
+                            match expected {
+                                NanPattern::CanonicalNan => {
+                                    assert!(
+                                        lane & 0b0_11111111111_1111111111111111111111111111111111111111111111111111
+                                            == 0b0_11111111111_1000000000000000000000000000000000000000000000000000
+                                    );
+                                }
+                                NanPattern::ArithmeticNan => {
+                                    assert!(
+                                        lane & 0b0_11111111111_1111111111111111111111111111111111111111111111111111
+                                            >= 0b0_11111111111_1000000000000000000000000000000000000000000000000000
+                                    );
+                                }
+                                NanPattern::Value(expected) => {
+                                    assert_eq!(lane, expected.bits);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             WastRetCore::RefNull(Some(HeapType::Func)) => {
                 assert_eq!(actual, Val::FuncRef(FuncRef::null()));
             }
@@ -521,4 +600,16 @@ testsuite! {
     utf8_import_field => "utf8-import-field.wast",
     utf8_import_module => "utf8-import-module.wast",
     utf8_invalid_encoding => "utf8-invalid-encoding.wast",
+    // SIMD proposal: the f32x4/v128 subset that stitch implements. The
+    // remaining simd_*.wast files exercise integer lane shapes and load/
+    // store variants that stitch does not implement (they stay in the
+    // commented-out block above).
+    simd_address => "simd_address.wast",
+    simd_bitwise => "simd_bitwise.wast",
+    simd_f32x4 => "simd_f32x4.wast",
+    simd_f32x4_arith => "simd_f32x4_arith.wast",
+    simd_f32x4_cmp => "simd_f32x4_cmp.wast",
+    simd_f32x4_pmin_pmax => "simd_f32x4_pmin_pmax.wast",
+    simd_f32x4_rounding => "simd_f32x4_rounding.wast",
+    simd_store => "simd_store.wast",
 }

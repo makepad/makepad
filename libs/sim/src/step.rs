@@ -725,7 +725,71 @@ fn record_sweep_push(
     });
 }
 
-pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
+/// Which side of body `a` a touching body `b` sits on — the one fact the
+/// classic platformer contact model needs ("from above" is a stomp, "from the
+/// side" is a hit) and that a bare `(a, b)` pair cannot express.
+///
+/// Judged on geometry at the moment of contact, in `a`'s frame: `b`'s feet
+/// above `a`'s centre is `Above`, `b`'s head below `a`'s centre is `Below`,
+/// everything else is `Side`. Movers pass through each other spatially, so
+/// there is no contact normal to read here; the box relation is the honest
+/// answer and it is deterministic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ContactSide {
+    /// `b` came from above `a` (a stomp on `a`).
+    Above,
+    /// `b` is under `a`.
+    Below,
+    /// A flank contact.
+    #[default]
+    Side,
+}
+
+impl ContactSide {
+    pub fn name(self) -> &'static str {
+        match self {
+            ContactSide::Above => "above",
+            ContactSide::Below => "below",
+            ContactSide::Side => "side",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "above" => ContactSide::Above,
+            "below" => ContactSide::Below,
+            "side" => ContactSide::Side,
+            _ => return None,
+        })
+    }
+
+    /// The same contact seen from the other body: `b` above `a` is `a`
+    /// below `b`.
+    pub fn mirror(self) -> Self {
+        match self {
+            ContactSide::Above => ContactSide::Below,
+            ContactSide::Below => ContactSide::Above,
+            ContactSide::Side => ContactSide::Side,
+        }
+    }
+}
+
+/// Where `b` sits relative to `a` — see [`ContactSide`].
+pub fn contact_side_of(a: &Entity, b: &Entity) -> ContactSide {
+    let b_feet = b.pos.y - b.half.y;
+    let b_head = b.pos.y + b.half.y;
+    if b_feet >= a.pos.y {
+        ContactSide::Above
+    } else if b_head <= a.pos.y {
+        ContactSide::Below
+    } else {
+        ContactSide::Side
+    }
+}
+
+/// The touch pairs of this tick, each with the side of the first body the
+/// second one is on. `collect_touches` is this without the side.
+pub fn collect_touches_sided(world: &GameWorld) -> Vec<(u64, u64, ContactSide)> {
     let mut touches = Vec::new();
     for sensor in world
         .entities
@@ -742,7 +806,7 @@ pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
             })
         {
             if overlaps(sensor.pos, sensor.half, other.pos, other.half) {
-                touches.push((sensor.id, other.id));
+                touches.push((sensor.id, other.id, contact_side_of(sensor, other)));
             }
         }
     }
@@ -755,7 +819,11 @@ pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
         .filter(|e| e.hits && !e.non_interactive)
     {
         if hitter.hit_wall != 0 {
-            touches.push((hitter.id, hitter.hit_wall));
+            let side = world
+                .entity(hitter.hit_wall)
+                .map(|w| contact_side_of(hitter, w))
+                .unwrap_or_default();
+            touches.push((hitter.id, hitter.hit_wall, side));
         }
         for other in world.entities.iter() {
             if other.id == hitter.id
@@ -770,11 +838,18 @@ pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
                 continue;
             }
             if overlaps(hitter.pos, hitter.half, other.pos, other.half) {
-                touches.push((hitter.id, other.id));
+                touches.push((hitter.id, other.id, contact_side_of(hitter, other)));
             }
         }
     }
     touches
+}
+
+pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
+    collect_touches_sided(world)
+        .into_iter()
+        .map(|(a, b, _)| (a, b))
+        .collect()
 }
 
 #[cfg(test)]

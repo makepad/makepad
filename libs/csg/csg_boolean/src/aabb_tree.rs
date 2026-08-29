@@ -4,7 +4,7 @@
 // Enables fast O(n log n + k) overlap queries between two meshes, where k is
 // the number of overlapping triangle pairs.
 
-use makepad_csg_math::{BBox3d, Vec3d};
+use makepad_csg_math::{thread_pool, BBox3d, Vec3d};
 
 /// A node in the AABB tree. Internal nodes have children; leaves have a triangle index.
 #[derive(Clone, Debug)]
@@ -107,6 +107,9 @@ impl AabbTree {
         let mut stack = Vec::with_capacity(64);
         stack.push(self.root);
         while let Some(idx) = stack.pop() {
+            if thread_pool::cancelled() {
+                return count;
+            }
             let node = &self.nodes[idx as usize];
             if !node.bbox.ray_intersects(origin, inv_dir) {
                 continue;
@@ -160,7 +163,7 @@ fn build_recursive(
     start: usize,
     end: usize,
 ) -> u32 {
-    if start >= end {
+    if start >= end || thread_pool::cancelled() {
         return u32::MAX;
     }
 
@@ -229,7 +232,7 @@ fn find_overlaps_recursive(
     b_idx: u32,
     pairs: &mut Vec<(u32, u32)>,
 ) {
-    if a_idx == u32::MAX || b_idx == u32::MAX {
+    if a_idx == u32::MAX || b_idx == u32::MAX || thread_pool::cancelled() {
         return;
     }
 

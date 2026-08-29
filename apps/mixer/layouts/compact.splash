@@ -1,17 +1,18 @@
 // COMPACT surface layout (splash) — the proof that the layout seam is real.
 //
-// Same slot contract as lr_mix.splash (see its header), different surface:
-// name plate on top, big fader + meter, dB readout, mute. No EQ/dyn
-// thumbnails, no gain/threshold rows, no pan. The host binds whatever slots
-// and children a layout chooses to show — everything else simply isn't
-// displayed, and nothing a layout writes can name an OSC address.
+// Same slot contract and same injected `mp` palette as lr_mix.splash (see its
+// header), different surface: name plate on top, big fader + meter, dB
+// readout, mute. No EQ/dyn thumbnails, no gain/threshold rows, no pan. The
+// host binds whatever slots and children a layout chooses to show —
+// everything else simply isn't displayed, and nothing a layout writes can
+// name an OSC address.
 
 let ValueLabel = Label{
     width: Fill
     align: Align{x: 0.5}
     text: "—"
-    draw_text.color: #xe6ecf4
-    draw_text.text_style.font_size: 10.0
+    draw_text.color: mp.fg_bright
+    draw_text.text_style: theme.font_code{font_size: 10.0}
 }
 
 let FaderSlider = Slider{
@@ -24,33 +25,35 @@ let FaderSlider = Slider{
     text: ""
     text_input: TextInput{width: 0, height: 0}
     draw_bg +: {
-        body: uniform(#x0b0f15)
-        slot: uniform(#x171e29)
-        cap: uniform(#x9aa3ad)
-        cap_dark: uniform(#x4a5158)
+        body: uniform(mp.bg_dark)
+        slot: uniform(mp.muted)
+        tick: uniform(mp.muted)
+        cap: uniform(mp.fg_dim)
+        cap_edge: uniform(mp.accent)
+        cap_line: uniform(mp.fg_bright)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let h = self.rect_size.y
             let w = self.rect_size.x
-            sdf.box(0.0, 0.0, w, h, 3.0)
+            sdf.rect(0.0, 0.0, w, h)
             sdf.fill(self.body)
             let rel = self.pos.y
             let grid = abs(fract(rel * 8.0 + 0.5) - 0.5) * (h / 8.0)
-            let tick = 1.0 - smoothstep(0.4, 0.9, grid)
+            let mark = 1.0 - smoothstep(0.4, 0.9, grid)
             let px = self.pos.x * w
             if px < 7.0 {
-                sdf.box(0.0, rel * h - 0.4, 6.0, 0.8, 0.2)
-                sdf.fill(vec4(0.55, 0.62, 0.7, 1.0) * tick)
+                sdf.rect(0.0, rel * h - 0.5, 6.0, 1.0)
+                sdf.fill(self.tick * mark)
             }
-            sdf.box(w * 0.5 - 2.0, 3.0, 4.0, h - 6.0, 2.0)
+            sdf.rect(w * 0.5 - 1.0, 3.0, 2.0, h - 6.0)
             sdf.fill(self.slot)
             let cap_h = 26.0
             let cy = (1.0 - self.slide_pos) * (h - cap_h)
-            sdf.box(4.0, cy, w - 8.0, cap_h, 3.0)
-            let rib = 0.75 + 0.25 * smoothstep(0.25, 0.5, abs(fract((self.pos.y * h - cy) / 4.8) - 0.5))
-            sdf.fill(self.cap.mix(self.cap_dark, 1.0 - rib))
-            sdf.box(4.0, cy + cap_h * 0.5 - 1.2, w - 8.0, 2.4, 0.6)
-            sdf.fill(#xf4f7fb)
+            sdf.rect(4.5, cy + 0.5, w - 9.0, cap_h - 1.0)
+            sdf.fill_keep(self.cap)
+            sdf.stroke(self.cap_edge, 1.0)
+            sdf.rect(4.0, cy + cap_h * 0.5 - 1.2, w - 8.0, 2.4)
+            sdf.fill(self.cap_line)
             return sdf.result
         }
     }
@@ -60,6 +63,12 @@ let MeterBar = SolidView{
     width: 14
     height: Fill
     draw_bg +: {
+        gutter: uniform(mp.bg)
+        trough: uniform(mp.bg_dark)
+        low: uniform(mp.green)
+        mid: uniform(mp.yellow)
+        hot: uniform(mp.red)
+        tick: uniform(mp.fg_bright)
         level_db: instance(-90.0)
         peak_db: instance(-90.0)
         pixel: fn() {
@@ -68,24 +77,21 @@ let MeterBar = SolidView{
             let norm = clamp((self.level_db + 60.0) / 60.0, 0.0, 1.0)
             let peakn = clamp((self.peak_db + 60.0) / 60.0, 0.0, 1.0)
             let frac = 1.0 - self.pos.y
-            var col = vec3(0.03, 0.09, 0.045)
-            let seg = 0.85 + 0.15 * smoothstep(0.35, 0.5, abs(fract(frac * 30.0) - 0.5))
+            let ladder = self.low.mix(self.mid, smoothstep(0.70, 0.88, frac))
+                .mix(self.hot, smoothstep(0.88, 0.97, frac))
+            let seg = 0.88 + 0.12 * smoothstep(0.35, 0.5, abs(fract(frac * 30.0) - 0.5))
+            var col = self.trough.mix(self.hot, 0.16 * step(0.955, frac))
             if frac < norm {
-                let hot = smoothstep(0.82, 0.93, frac)
-                col = vec3(0.10, 0.78, 0.28).mix(vec3(1.0, 0.22, 0.16), hot) * seg
-            }
-            if frac > 0.955 {
-                col = col.mix(vec3(0.45, 0.09, 0.07), 0.8)
-                if frac < norm { col = vec3(1.0, 0.25, 0.18) }
+                col = self.trough.mix(ladder, seg)
             }
             if abs(frac - peakn) < 1.5 / h && peakn > 0.01 {
-                col = vec3(0.9, 1.0, 0.9)
+                col = self.tick
             }
             let x = self.pos.x * w
             if x < 1.0 || x > w - 1.0 {
-                col = vec3(0.015, 0.02, 0.03)
+                col = self.gutter
             }
-            return vec4(col, 1.0)
+            return col
         }
     }
 }
@@ -97,20 +103,26 @@ let MutePlate = SolidView{
     new_batch: true
     align: Align{x: 0.5, y: 0.5}
     draw_bg +: {
+        idle: uniform(mp.bg_light)
+        idle_edge: uniform(mp.muted)
+        lit: uniform(mp.red)
+        deep: uniform(mp.bg_dark)
         muted: instance(0.0)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0)
-            let idle = vec4(0.23, 0.07, 0.06, 1.0)
-            let lit = vec4(0.82, 0.13, 0.10, 1.0)
-            sdf.fill(idle.mix(lit, self.muted))
+            sdf.rect(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0)
+            let fill = self.idle.mix(self.lit.mix(self.deep, 0.5), self.muted)
+            // fill_keep, not fill: `fill` clears the shape, so a stroke after
+            // it draws nothing at all.
+            sdf.fill_keep(fill)
+            sdf.stroke(self.idle_edge.mix(self.lit, self.muted), 1.0)
             return sdf.result
         }
     }
     Label{
         text: "MUTE"
-        draw_text.color: #xf3d9d6
-        draw_text.text_style.font_size: 8.5
+        draw_text.color: mp.fg_bright
+        draw_text.text_style: theme.font_code{font_size: 8.5}
     }
 }
 
@@ -121,22 +133,22 @@ let NamePlate = SolidView{
     new_batch: true
     align: Align{x: 0.5, y: 0.5}
     draw_bg +: {
-        plate_rgb: instance(vec3(0.5, 0.5, 0.5))
+        idle: uniform(mp.bg_light)
+        // The muted key, until the console reports its scribble colour.
+        plate_rgb: instance(vec3(0.254, 0.282, 0.408))
         plate_filled: instance(0.0)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, 4.0)
-            let outline = vec4(0.03, 0.04, 0.055, 1.0)
-            let filled = vec4(self.plate_rgb * 0.82, 1.0)
-            sdf.fill(outline.mix(filled, self.plate_filled))
-            sdf.stroke(vec4(self.plate_rgb, 1.0), 1.2)
+            sdf.rect(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0)
+            sdf.fill_keep(self.idle.mix(vec4(self.plate_rgb, 1.0), self.plate_filled))
+            sdf.stroke(vec4(self.plate_rgb, 1.0), 1.0)
             return sdf.result
         }
     }
     name_lbl := Label{
         text: "—"
-        draw_text.color: #xe8edf4
-        draw_text.text_style.font_size: 9.0
+        draw_text.color: mp.fg
+        draw_text.text_style: theme.font_code{font_size: 9.0}
     }
 }
 
@@ -149,12 +161,14 @@ let Strip = View{
     show_bg: true
     new_batch: true
     draw_bg +: {
+        fill: uniform(mp.bg)
+        edge: uniform(mp.muted)
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
-            sdf.fill(#x0e1218)
+            sdf.fill(self.fill)
             sdf.rect(self.rect_size.x - 1.0, 0.0, 1.0, self.rect_size.y)
-            sdf.fill(#x1c232e)
+            sdf.fill(self.edge)
             return sdf.result
         }
     }
@@ -164,8 +178,8 @@ let Strip = View{
         width: Fill
         align: Align{x: 0.5}
         text: ""
-        draw_text.color: #x8d99aa
-        draw_text.text_style.font_size: 8.0
+        draw_text.color: mp.fg_dim
+        draw_text.text_style: theme.font_code{font_size: 8.0}
     }
     fader_db := ValueLabel{}
     fader_block := View{
@@ -186,14 +200,14 @@ View{
     flow: Down
     show_bg: true
     new_batch: true
-    draw_bg.color: #x080a0e
+    draw_bg.color: mp.bg_dark
 
     surface_note := Label{
         width: Fill
         align: Align{x: 0.5}
         text: ""
-        draw_text.color: #x77828f
-        draw_text.text_style.font_size: 8.0
+        draw_text.color: mp.fg_dim
+        draw_text.text_style: theme.font_code{font_size: 8.0}
     }
     strip_row := View{
         width: Fill

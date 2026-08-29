@@ -188,6 +188,7 @@ mod shape_tests {
         }
     }
 
+
     /// Culling is only safe where winding is consistent, so the two facts are
     /// asserted together: every shader that culls draws geometry whose winding
     /// this crate controls and has verified.
@@ -237,6 +238,11 @@ mod shape_tests {
             setting("DrawSceneSkyAnalytic"),
             Some(false),
             "analytic sky is viewed from inside"
+        );
+        assert_eq!(
+            setting("DrawSceneSkyMap"),
+            Some(false),
+            "classic map sky portals are viewed from their underside"
         );
         assert_eq!(setting("DrawSceneFoliage"), Some(false), "foliage is two-sided");
         assert_eq!(setting("DrawSceneAlpha"), Some(false), "alpha is flat/one-sided");

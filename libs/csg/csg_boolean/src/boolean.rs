@@ -12,7 +12,7 @@
 use crate::classify::{classify_triangles, MeshAccel, TriLocation};
 use crate::corefine::corefine;
 use crate::thread_pool;
-use makepad_csg_math::Vec3d;
+use makepad_csg_math::{dvec3, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 
 /// Boolean operation type.
@@ -23,14 +23,58 @@ pub enum BoolOp {
     Intersection,
 }
 
+/// Finishing parameters for `mesh_boolean_with`.
+///
+/// The defaults are tuned for the model scales of the example/golden suite
+/// (units of ~1..100). Callers that author in metres with legitimate
+/// sub-millimetre detail (e.g. LocalGen: a 1e-4 altitude cutoff deleted a
+/// closing face from 35 mm dog legs after the fourth union) should pass finer
+/// values through `mesh_boolean_with` — topology validation downstream stays
+/// the final authority.
+#[derive(Clone, Copy, Debug)]
+pub struct FinishParams {
+    /// Weld / T-junction snapping tolerance for the intersection region.
+    pub tolerance: f64,
+    /// Minimum triangle altitude below which a triangle is dropped as a sliver.
+    pub min_altitude: f64,
+}
+
+impl Default for FinishParams {
+    fn default() -> Self {
+        FinishParams {
+            tolerance: 1e-4,
+            min_altitude: 1e-4,
+        }
+    }
+}
+
 /// Perform a boolean operation on two triangle meshes.
 pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
+    mesh_boolean_with(mesh_a, mesh_b, op, FinishParams::default())
+}
+
+/// Perform a boolean operation with explicit finishing parameters.
+pub fn mesh_boolean_with(
+    mesh_a: &TriMesh,
+    mesh_b: &TriMesh,
+    op: BoolOp,
+    finish: FinishParams,
+) -> TriMesh {
     // Step 1: Corefine both meshes
     let coref = corefine(mesh_a, mesh_b);
+    if thread_pool::cancelled() {
+        return TriMesh::new();
+    }
 
     // Step 2: Classify triangles
     let class_a = classify_triangles(&coref.mesh_a, &coref.mesh_b, &coref.on_boundary_a);
     let class_b = classify_triangles(&coref.mesh_b, &coref.mesh_a, &coref.on_boundary_b);
+    if thread_pool::cancelled()
+        || class_a.len() != coref.mesh_a.triangle_count()
+        || class_b.len() != coref.mesh_b.triangle_count()
+    {
+        return TriMesh::new();
+    }
 
     // Step 3: Select faces based on operation
     //
@@ -43,18 +87,71 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
     // these by checking if +normal is outside the other mesh (surface face)
     // vs inside (interior face). Surface-coplanar Inside faces from B are dropped.
 
-    // Build acceleration structures once for point-in-mesh queries during selection.
-    let mb_clone = coref.mesh_b.clone();
-    let ma_clone = coref.mesh_a.clone();
-    let (accel_b, accel_a): (MeshAccel, MeshAccel) = thread_pool::parallel_do2(
-        move || MeshAccel::build(&mb_clone),
-        move || MeshAccel::build(&ma_clone),
-    );
+    // Did corefinement actually cut anything? With zero intersection segments
+    // both meshes were copied through untouched, no boundary faces exist, and
+    // the whole finishing tail (weld + T-junction repair + sliver removal)
+    // has nothing to repair.
+    let untouched = coref.num_segments == 0;
+
+    // Build acceleration structures once for point-in-mesh queries during
+    // selection. They are only consulted for boundary (surface-coplanar)
+    // faces, so skip the builds entirely when nothing was cut.
+    let (accel_b, accel_a): (Option<MeshAccel>, Option<MeshAccel>) = if untouched {
+        (None, None)
+    } else {
+        let mb_clone = coref.mesh_b.clone();
+        let ma_clone = coref.mesh_a.clone();
+        let (b, a) = thread_pool::parallel_do2(
+            move || MeshAccel::build(&mb_clone),
+            move || MeshAccel::build(&ma_clone),
+        );
+        (Some(b), Some(a))
+    };
 
     let mut result = TriMesh::new();
+    // Per-result-vertex flag: is this vertex referenced by any boundary
+    // (intersection-region) triangle? The finishing passes start from these.
+    let mut active: Vec<bool> = Vec::new();
+    // Lazy old-index -> result-index remaps keep the result mesh indexed
+    // instead of exploding it to 3 vertices per triangle. This is what makes
+    // the `untouched` early return below sound: a zero-segment result is a
+    // verbatim indexed subset of its inputs, not an unindexed triangle soup.
+    let mut remap_a: Vec<u32> = vec![u32::MAX; coref.mesh_a.vertex_count()];
+    let mut remap_b: Vec<u32> = vec![u32::MAX; coref.mesh_b.vertex_count()];
+
+    fn emit_tri(
+        result: &mut TriMesh,
+        active: &mut Vec<bool>,
+        src: &TriMesh,
+        remap: &mut [u32],
+        tri: [u32; 3],
+        boundary: bool,
+        reverse: bool,
+    ) {
+        let mut out = [0u32; 3];
+        for (k, &vi) in tri.iter().enumerate() {
+            let m = &mut remap[vi as usize];
+            if *m == u32::MAX {
+                *m = result.add_vertex(src.vertices[vi as usize]);
+                active.push(false);
+            }
+            if boundary {
+                active[*m as usize] = true;
+            }
+            out[k] = *m;
+        }
+        if reverse {
+            result.add_triangle(out[0], out[2], out[1]);
+        } else {
+            result.add_triangle(out[0], out[1], out[2]);
+        }
+    }
 
     // From mesh A: A has priority for surface-coplanar faces
     for ti in 0..coref.mesh_a.triangle_count() {
+        if thread_pool::cancelled() {
+            return TriMesh::new();
+        }
         let c = class_a[ti];
         let mut keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
@@ -79,7 +176,12 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
             let normal = coref.mesh_a.triangle_normal(ti);
             let eps = 1e-6;
             let outside_point = centroid + normal * eps;
-            if !accel_b.point_inside(outside_point) {
+            // accel_b exists whenever boundary faces exist (untouched == false).
+            let inside = accel_b
+                .as_ref()
+                .map(|acc| acc.point_inside(outside_point))
+                .unwrap_or(false);
+            if !inside {
                 // Surface-coplanar: this face is on B's surface.
                 // Keep it from A (B's duplicate will be dropped).
                 keep = true;
@@ -87,16 +189,23 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
         }
 
         if keep {
-            let (v0, v1, v2) = coref.mesh_a.triangle_vertices(ti);
-            let a = result.add_vertex(v0);
-            let b = result.add_vertex(v1);
-            let c = result.add_vertex(v2);
-            result.add_triangle(a, b, c);
+            emit_tri(
+                &mut result,
+                &mut active,
+                &coref.mesh_a,
+                &mut remap_a,
+                coref.mesh_a.triangles[ti],
+                coref.on_boundary_a[ti],
+                false,
+            );
         }
     }
 
     // From mesh B: keep qualifying faces, drop surface-coplanar duplicates
     for ti in 0..coref.mesh_b.triangle_count() {
+        if thread_pool::cancelled() {
+            return TriMesh::new();
+        }
         let c = class_b[ti];
 
         // Base selection
@@ -124,7 +233,12 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
             let normal = coref.mesh_b.triangle_normal(ti);
             let eps = 1e-6;
             let outside_point = centroid + normal * eps;
-            if !accel_a.point_inside(outside_point) {
+            // accel_a exists whenever boundary faces exist (untouched == false).
+            let inside = accel_a
+                .as_ref()
+                .map(|acc| acc.point_inside(outside_point))
+                .unwrap_or(false);
+            if !inside {
                 // Surface-coplanar: A already has this face.
                 continue;
             }
@@ -135,34 +249,59 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
             continue;
         }
 
-        let (v0, v1, v2) = coref.mesh_b.triangle_vertices(ti);
-        match op {
-            BoolOp::Difference => {
-                let a = result.add_vertex(v0);
-                let b = result.add_vertex(v1);
-                let c = result.add_vertex(v2);
-                result.add_triangle(a, c, b); // reversed winding
-            }
-            _ => {
-                let a = result.add_vertex(v0);
-                let b = result.add_vertex(v1);
-                let c = result.add_vertex(v2);
-                result.add_triangle(a, b, c);
-            }
-        }
+        emit_tri(
+            &mut result,
+            &mut active,
+            &coref.mesh_b,
+            &mut remap_b,
+            coref.mesh_b.triangles[ti],
+            coref.on_boundary_b[ti],
+            op == BoolOp::Difference, // reversed winding for difference
+        );
     }
 
     // Weld near-coincident vertices from independent intersection computations.
-    result.weld_vertices(1e-4);
+    // Only vertices of the intersection region can be near-coincident, but the
+    // weld is a cheap single hash pass on the (now indexed) result, and running
+    // it over the whole mesh keeps behavior identical to the historical
+    // pipeline for touching-but-not-intersecting geometry.
+    let weld_remap = result.weld_vertices_remap(finish.tolerance);
 
-    // Fix T-junctions iteratively.
+    // Translate boundary-activity flags across the weld, and mark every vertex
+    // that survived a merge (its position now stands in for a moved neighbor).
+    let mut welded_active = vec![false; result.vertex_count()];
+    let mut group_size = vec![0u32; result.vertex_count()];
+    for (old, &new) in weld_remap.iter().enumerate() {
+        group_size[new as usize] += 1;
+        if active[old] {
+            welded_active[new as usize] = true;
+        }
+    }
+    for (i, &g) in group_size.iter().enumerate() {
+        if g > 1 {
+            welded_active[i] = true;
+        }
+    }
+    let mut active = welded_active;
+
+    // A boundary vertex from an earlier boolean becomes an ordinary source
+    // vertex in the next boolean, so restricting repair to the *latest*
+    // boundary would miss cascading seams from staged unions (the reviewed
+    // dog's third and fourth leg). An inherited seam is exactly a run of
+    // unpaired (boundary) edges in the welded result: activate their
+    // endpoints too, which keeps the repair local to what is actually broken
+    // instead of re-scanning the whole mesh.
+    mark_open_edge_endpoints(&result, &mut active);
+
+    // Fix T-junctions iteratively, restricted to the active region.
+    // Splitting inserts no new vertices and no degenerate triangles, so the
+    // historical re-weld between rounds was a no-op and is gone.
     for _ in 0..5 {
         let before = result.triangles.len();
-        fix_mesh_t_junctions(&mut result, 1e-4);
+        fix_mesh_t_junctions(&mut result, finish.tolerance, &active);
         if result.triangles.len() == before {
             break;
         }
-        result.weld_vertices(1e-4);
     }
 
     // Final cleanup: remove sliver triangles from floating-point imprecision.
@@ -171,9 +310,45 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
     // base=10 → altitude=4e-6). Real thin triangles from small overlaps or
     // slight radius differences have altitudes >= ~1e-3. Threshold 1e-4 is
     // well within this gap.
-    remove_degenerate_triangles(&mut result, 1e-4);
+    // Metre-scale callers with sub-millimetre detail (LocalGen) pass finer
+    // values through `FinishParams` — see its docs.
+    remove_degenerate_triangles(&mut result, finish.min_altitude);
+    remove_duplicate_triangles(&mut result);
 
     result
+}
+
+/// Mark the endpoints of every unpaired (boundary) edge as active.
+/// After welding, unpaired edges are exactly the broken places: this op's
+/// unstitched T-junction gaps plus any seam inherited from an earlier
+/// boolean's marginal output.
+fn mark_open_edge_endpoints(mesh: &TriMesh, active: &mut [bool]) {
+    let mut count: std::collections::HashMap<(u32, u32), u32> =
+        std::collections::HashMap::new();
+    for &[a, b, c] in &mesh.triangles {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            *count.entry(key).or_insert(0) += 1;
+        }
+    }
+    for (&(u, v), &n) in &count {
+        if n == 1 {
+            active[u as usize] = true;
+            active[v as usize] = true;
+        }
+    }
+}
+
+/// Coplanar corefinement can select the same tiny face through both source
+/// meshes. Once vertices are welded those are byte-identical index triples;
+/// retaining both makes their three edges non-manifold.
+fn remove_duplicate_triangles(mesh: &mut TriMesh) {
+    let mut seen = std::collections::HashSet::new();
+    mesh.triangles.retain(|triangle| {
+        let mut key = *triangle;
+        key.sort_unstable();
+        seen.insert(key)
+    });
 }
 
 /// Union of two meshes using corefinement.
@@ -203,12 +378,15 @@ pub fn intersection(mesh_a: &TriMesh, mesh_b: &TriMesh) -> TriMesh {
 
 /// Fix T-junctions in a welded mesh by splitting triangles at vertices
 /// that lie on their edges.
-fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64) {
+fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64, active: &[bool]) {
     // May need multiple passes since splitting can create new T-junctions.
     // Each pass can expose new T-junctions where a split triangle edge
     // now has a vertex on it.
     for _ in 0..10 {
-        if !fix_t_junctions_pass(mesh, tol) {
+        if thread_pool::cancelled() {
+            return;
+        }
+        if !fix_t_junctions_pass(mesh, tol, active) {
             break;
         }
     }
@@ -217,28 +395,57 @@ fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64) {
 /// Single pass of T-junction fixing. Returns true if any splits were made.
 ///
 /// Uses a spatial grid to avoid O(n*m) brute-force vertex-edge checks.
-/// Each vertex is inserted into a grid cell; for each triangle edge, only
-/// vertices in nearby cells are tested.
-fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
+/// Only ACTIVE vertices (the intersection region: corefinement boundary
+/// vertices plus weld-moved ones) go into the grid, the grid is sized from
+/// the active region's bbox, and triangles away from that region are
+/// rejected with one bbox test — the pass is local to the cut.
+fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool]) -> bool {
     let num_verts = mesh.vertices.len();
     let num_tris = mesh.triangles.len();
     if num_tris == 0 || num_verts == 0 {
         return false;
     }
 
-    // Choose cell size based on mesh extent so we get ~10-50 vertices per cell,
-    // not based on tolerance (which would create a huge grid for tiny tolerances).
-    let bbox = mesh.bounding_box();
-    let extent = (bbox.max - bbox.min).length();
-    // Target: cube root of num_verts cells per axis gives ~1 vert/cell.
-    // Use a bit larger to reduce misses.
-    let cells_per_axis = (num_verts as f64).cbrt().max(4.0);
+    // Bounding box and population of the active (intersection-region)
+    // vertices. Only these can be T-junction vertices: corefinement's boundary
+    // vertices plus anything the weld moved.
+    let mut n_active = 0usize;
+    let mut act_min = dvec3(f64::MAX, f64::MAX, f64::MAX);
+    let mut act_max = dvec3(f64::MIN, f64::MIN, f64::MIN);
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        if active.get(i).copied().unwrap_or(true) {
+            n_active += 1;
+            act_min.x = act_min.x.min(v.x);
+            act_min.y = act_min.y.min(v.y);
+            act_min.z = act_min.z.min(v.z);
+            act_max.x = act_max.x.max(v.x);
+            act_max.y = act_max.y.max(v.y);
+            act_max.z = act_max.z.max(v.z);
+        }
+    }
+    if n_active == 0 {
+        return false;
+    }
+
+    // Choose cell size from the ACTIVE region's extent and population, so we
+    // get about one active vertex per cell there. Sizing from the whole-mesh
+    // bbox made far-apart operands collapse every vertex into a handful of
+    // cells, degenerating each pass toward O(V*E).
+    let extent = (act_max - act_min).length();
+    let cells_per_axis = (n_active as f64).cbrt().max(4.0);
     let cell = (extent / cells_per_axis).max(tol * 2.0);
     let inv_cell = 1.0 / cell;
+
+    // Active-region bounds grown by tol, for cheap per-triangle rejection.
+    let reg_min = act_min - dvec3(tol, tol, tol);
+    let reg_max = act_max + dvec3(tol, tol, tol);
 
     let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<u32>> =
         std::collections::HashMap::new();
     for (i, v) in mesh.vertices.iter().enumerate() {
+        if !active.get(i).copied().unwrap_or(true) {
+            continue;
+        }
         let cx = (v.x * inv_cell).floor() as i64;
         let cy = (v.y * inv_cell).floor() as i64;
         let cz = (v.z * inv_cell).floor() as i64;
@@ -251,6 +458,9 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
     let mut any_split = false;
 
     for ti in 0..num_tris {
+        if thread_pool::cancelled() {
+            return false;
+        }
         if removed[ti] {
             continue;
         }
@@ -258,6 +468,18 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64) -> bool {
         let va = mesh.vertices[ia as usize];
         let vb = mesh.vertices[ib as usize];
         let vc = mesh.vertices[ic as usize];
+
+        // Cheap reject: a triangle whose bbox misses the active region cannot
+        // have an active vertex on any of its edges.
+        if va.x.max(vb.x).max(vc.x) < reg_min.x
+            || va.x.min(vb.x).min(vc.x) > reg_max.x
+            || va.y.max(vb.y).max(vc.y) < reg_min.y
+            || va.y.min(vb.y).min(vc.y) > reg_max.y
+            || va.z.max(vb.z).max(vc.z) < reg_min.z
+            || va.z.min(vb.z).min(vc.z) > reg_max.z
+        {
+            continue;
+        }
 
         let edges = [
             (ia, ib, ic, va, vb),
@@ -358,6 +580,9 @@ fn point_on_edge(p: Vec3d, a: Vec3d, b: Vec3d, tol: f64) -> bool {
 fn remove_degenerate_triangles(mesh: &mut TriMesh, min_altitude: f64) {
     let mut keep = Vec::with_capacity(mesh.triangles.len());
     for &[a, b, c] in &mesh.triangles {
+        if thread_pool::cancelled() {
+            return;
+        }
         if a == b || b == c || c == a {
             continue;
         }

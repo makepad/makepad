@@ -13,7 +13,7 @@
 // or NONE if boundary. This gives O(1) access to the neighboring triangle
 // and the specific shared edge.
 
-use makepad_csg_math::{in_circle, orient2d};
+use makepad_csg_math::{in_circle, orient2d, thread_pool};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -83,7 +83,9 @@ impl CDT {
     pub fn insert_point(&mut self, x: f64, y: f64) -> u32 {
         let idx = self.points.len() as u32;
         self.points.push(Point2 { x, y });
-        self.bowyer_watson_insert(idx);
+        if !thread_pool::cancelled() {
+            self.bowyer_watson_insert(idx);
+        }
         idx
     }
 
@@ -108,6 +110,9 @@ impl CDT {
 
     pub fn finalize(&mut self) {
         for i in 0..self.constraints.len() {
+            if thread_pool::cancelled() {
+                return;
+            }
             let (a, b) = self.constraints[i];
             self.enforce_constraint(a, b);
         }
@@ -140,6 +145,9 @@ impl CDT {
         let mut stack = vec![start];
 
         while let Some(t) = stack.pop() {
+            if thread_pool::cancelled() {
+                return;
+            }
             if visited[t] {
                 continue;
             }
@@ -292,6 +300,9 @@ impl CDT {
 
         let max_steps = self.num_tris() * 2;
         for _ in 0..max_steps {
+            if thread_pool::cancelled() {
+                return None;
+            }
             if self.is_deleted(t) {
                 // Fallback to linear scan if walk hits deleted triangle
                 return self.find_containing_triangle_linear(p);
@@ -370,6 +381,9 @@ impl CDT {
 
         let max_iters = self.num_tris() * self.num_tris() + 100;
         for _ in 0..max_iters {
+            if thread_pool::cancelled() {
+                return;
+            }
             if self.mark_constraint(a, b) {
                 return;
             }

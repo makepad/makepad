@@ -19,7 +19,25 @@ pub fn sdf_to_mesh(
 ) -> TriMesh {
     let sdf: Arc<dyn Sdf3 + Send + Sync> = Arc::new(sdf);
     let grid = SdfGrid3::from_sdf(sdf.clone(), min, max, depth);
-    let octree = from_grid(&grid, sdf.as_ref());
+    mesh_from_grid(&grid, sdf.as_ref())
+}
+
+/// Sequential counterpart of [`sdf_to_mesh`] for a borrowed field. The
+/// generated mesh is identical; only grid construction stays on the caller's
+/// thread. This is what lets the `csg.implicit` interpreter fallback borrow
+/// its capability-stripped splash VM without making that VM `Send`.
+pub fn sdf_to_mesh_ref(
+    sdf: &dyn Sdf3,
+    min: Vec3d,
+    max: Vec3d,
+    depth: usize,
+) -> TriMesh {
+    let grid = SdfGrid3::from_sdf_ref(sdf, min, max, depth);
+    mesh_from_grid(&grid, sdf)
+}
+
+fn mesh_from_grid(grid: &SdfGrid3, sdf: &dyn Sdf3) -> TriMesh {
+    let octree = from_grid(grid, sdf);
 
     let mut vertices: Vec<Vec3d> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
