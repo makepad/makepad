@@ -723,6 +723,11 @@ pub fn window_intercept(
                     tw.splitter_drag = false;
                 }
             } else {
+                if kind == PointerKind::Move {
+                    // Keep the resize cursor for the whole drag, wherever
+                    // the pointer wanders.
+                    cx.set_cursor(MouseCursor::EwResize);
+                }
                 return false;
             }
         }
@@ -746,13 +751,28 @@ pub fn window_intercept(
     // ordinary dispatch — the panel wins INPUT, and the app widget behind
     // it can never be selected through it.
     if !finish_consumed_down {
-        let in_band = tweaker
-            .borrow::<Tweaker>()
-            .map(|tw| tw.band.size.x > 0.0 && tw.band.contains(abs))
-            .unwrap_or(false);
+        let band = tweaker.borrow::<Tweaker>().map(|tw| tw.band).unwrap_or_default();
+        // The panel splitter announces itself: the resize cursor over its
+        // grab band (it is the intercept's own gesture, not a Splitter
+        // widget, so nothing else would set one).
+        if kind == PointerKind::Move
+            && band.size.x > 0.0
+            && abs.x >= band.pos.x - 3.0
+            && abs.x <= band.pos.x + SPLITTER_WIDTH + 3.0
+            && abs.y >= band.pos.y
+        {
+            cx.set_cursor(MouseCursor::EwResize);
+            return false;
+        }
+        let in_band = band.size.x > 0.0 && band.contains(abs);
         if in_band {
             if kind == PointerKind::Down {
                 log!("TWEAK press {:.0},{:.0} in the panel band: not a pick", abs.x, abs.y);
+            }
+            if kind == PointerKind::Move {
+                // The body's pick-hand must not linger over the panel; the
+                // panel's own widgets set theirs (I-beam etc.) after this.
+                cx.set_cursor(MouseCursor::Default);
             }
             return false;
         }
@@ -1830,7 +1850,7 @@ impl MaterialMirror {
         }
     }
 
-    fn draw(&self, cx: &mut Cx2d, rect: Rect) {
+    fn draw(&self, cx: &mut Cx2d, rect: Rect, clip: Option<(Vec2d, Vec2d)>) {
         let draw_vars = &self.draw_vars;
         let Some(mut many) = cx.begin_many_instances(draw_vars) else {
             return;
@@ -1845,10 +1865,16 @@ impl MaterialMirror {
             inst[rs + 1] = rect.size.y as f32;
         }
         if let Some(dc) = self.draw_clip {
-            inst[dc] = rect.pos.x as f32;
-            inst[dc + 1] = rect.pos.y as f32;
-            inst[dc + 2] = (rect.pos.x + rect.size.x) as f32;
-            inst[dc + 3] = (rect.pos.y + rect.size.y) as f32;
+            // The well is its own draw list with a magnifier transform, so
+            // nothing upstream clips it: the caller passes the scroll
+            // viewport's clip mapped into this (pre-transform) space, and a
+            // well scrolling under the panel header is cut off exactly like
+            // a text row.
+            let (min, max) = clip.unwrap_or((rect.pos, rect.pos + rect.size));
+            inst[dc] = min.x.max(rect.pos.x) as f32;
+            inst[dc + 1] = min.y.max(rect.pos.y) as f32;
+            inst[dc + 2] = max.x.min(rect.pos.x + rect.size.x) as f32;
+            inst[dc + 3] = max.y.min(rect.pos.y + rect.size.y) as f32;
         }
         many.instances.extend_from_slice(&inst);
         let area = cx.end_many_instances(many);
@@ -3498,6 +3524,11 @@ pub struct TweakMaterialSwatch {
     /// Rebuild generation the preview was last applied at (MAX = never).
     #[rust(u64::MAX)]
     pub applied_gen: u64,
+    /// The scroll viewport this swatch lives in (screen coords): the
+    /// mirrored draw call is clipped to it (its own draw list escapes the
+    /// scroll view's clipping otherwise).
+    #[rust]
+    pub clip: Option<Rect>,
     /// When set, the swatch shows ONE animator track of the mirrored
     /// widget: the layer's instance slice is posed between the track's off
     /// and on apply values by `mix` (0 = off, 1 = on) before it draws.
@@ -3510,8 +3541,10 @@ pub struct TweakMaterialSwatch {
 impl Widget for TweakMaterialSwatch {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let rect = cx.turtle().rect();
-        self.checker.draw_abs(cx, rect);
+        let turtle_rect = cx.turtle().rect();
+        let aligned = self.checker.area().rect(cx);
+        let rect = if aligned.size.x > 0.0 && aligned.size.y > 0.0 { aligned } else { turtle_rect };
+        self.checker.draw_abs(cx, turtle_rect);
         // Same shader, same inputs: copy the widget's live draw call (its
         // shader id, uniforms, textures and this instance's values —
         // colours, border sizes, hover/focus/down mix factors as they are
@@ -3564,7 +3597,18 @@ impl Widget for TweakMaterialSwatch {
                     };
                     let id = list.id();
                     cx.draw_lists[id].draw_list_uniforms.view_transform = m;
-                    mirror.draw(cx, Rect { pos: dvec2(0.0, 0.0), size: native });
+                    // The scroll viewport's clip, seen through the
+                    // magnifier: (screen - t) / k.
+                    let clip = self.clip.map(|c| {
+                        (
+                            dvec2((c.pos.x - tx) / k, (c.pos.y - ty) / k),
+                            dvec2((c.pos.x + c.size.x - tx) / k, (c.pos.y + c.size.y - ty) / k),
+                        )
+                    });
+                    let visible = clip.map_or(true, |(min, max)| max.x > min.x.max(0.0) && max.y > min.y.max(0.0) && min.x < native.x && min.y < native.y);
+                    if visible {
+                        mirror.draw(cx, Rect { pos: dvec2(0.0, 0.0), size: native }, clip);
+                    }
                     list.end(cx);
                 }
             }
@@ -4127,6 +4171,18 @@ pub struct Tweaker {
     /// The row whose field was last touched: its doc line rides under it.
     #[rust]
     doc_row: Option<usize>,
+    /// The Shader tab's scroll viewport, handed to every well it hosts.
+    /// Captured at event time: mid-draw the rect slots answer zero.
+    #[rust]
+    swatch_clip: Option<Rect>,
+    /// The Props list's viewport (props_wrap below the scope control).
+    #[rust]
+    props_viewport: Option<Rect>,
+    /// A scroll-to-selection servo: each tree draw reports where the
+    /// selected row landed and the error is corrected until it is inside
+    /// the viewport (estimates and clamping cannot diverge it).
+    #[rust]
+    tree_scroll_tries: Option<u8>,
     /// Set by the note button; the next event opens the card.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
@@ -4936,25 +4992,6 @@ impl Tweaker {
                         width: Fill
                         height: Fill
                         flow: Down
-                        scope_row := View {
-                            width: Fill
-                            height: Fit
-                            flow: Down
-                            spacing: 3
-                            padding: Inset{left: 8 right: 8 top: 6 bottom: 4}
-                            scope_line := View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 4
-                                align: Align{x: 0.0 y: 0.5}
-                                scope_label := FabLabelSmall { width: Fit text: "scope" }
-                                scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
-                                scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
-                            }
-                            scope_doc := FabLabelSmall { width: Fill text: "" }
-                            scope_origin := FabLabelSmall { width: Fill text: "" }
-                        }
                         props := PortalList {
                         width: Fill
                         height: Fill
@@ -4992,8 +5029,28 @@ impl Tweaker {
                         flow: Down
                         spacing: 2
                         show_bg: true
-                        draw_bg +: { color: #x262626 }
-                        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                        draw_bg +: { color: #x2b2b30 }
+                        divider := View { width: Fill height: 1 margin: Inset{left: 0 top: 0 right: 0 bottom: 4} show_bg: true draw_bg +: { color: #x4a4a52 } }
+                        padding: Inset{left: 8 right: 8 top: 0 bottom: 6}
+                        scope_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 3
+                            padding: Inset{left: 0 right: 0 top: 0 bottom: 2}
+                            scope_line := View {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 4
+                                align: Align{x: 0.0 y: 0.5}
+                                scope_label := FabLabelSmall { width: Fit text: "scope" }
+                                scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            }
+                            scope_doc := FabLabelSmall { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                            scope_origin := FabLabelSmall { width: Fill text: "" }
+                        }
                         title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                         path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     }
@@ -5357,7 +5414,6 @@ impl Tweaker {
                 if self.tweakables_open {
                     for index in tweak {
                         out.push(VisKind::Tweakable(index));
-                        out.push(VisKind::Doc(index));
                     }
                 }
             }
@@ -5461,9 +5517,6 @@ impl Tweaker {
                     }
                 }
                 out.push(VisKind::Prop(index));
-                if self.doc_row == Some(index) && self.row_docs.contains_key(&row.prop) {
-                    out.push(VisKind::Doc(index));
-                }
             }
             if hidden > 0 {
                 out.push(VisKind::More(section, hidden));
@@ -5526,7 +5579,7 @@ impl Tweaker {
                     .set_text(cx, &shown_path);
                 {
                     let all = session().lock().unwrap().scope_all;
-                    let row = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row));
+                    let row = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row));
                     row.child(live_id!(scope_line)).child(live_id!(scope_this)).set_text(cx, "this");
                     row.child(live_id!(scope_line)).child(live_id!(scope_all)).set_text(cx, &format!("all {}s", sel.ty));
                     set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_this)), !all);
@@ -5570,8 +5623,8 @@ impl Tweaker {
             .child(live_id!(note))
             .widget_uid()
             .0;
-        self.scope_this_uid = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
-        self.scope_all_uid = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
+        self.scope_this_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
+        self.scope_all_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
         let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
         let spread = spread_wrap.child(live_id!(spread));
         self.spread_uid = spread.widget_uid().0;
@@ -5712,6 +5765,7 @@ impl Tweaker {
                 let sw_ref = col.child(live_id!(big));
                 let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
                 if let Some(mut sw) = sw_opt {
+                    sw.clip = self.swatch_clip;
                     if sw.applied_gen != self.rows_gen || sw.layer != layer || sw.mirror_uid != self.rows_uid {
                         let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
                         if !widget.is_empty() {
@@ -5741,7 +5795,6 @@ impl Tweaker {
                         ents.push(VisKind::TweakHeader(consts.len(), true));
                         for i in consts {
                             ents.push(VisKind::Tweakable(i));
-                            ents.push(VisKind::Doc(i));
                         }
                     }
                     let prefix = format!("{layer}.");
@@ -5762,9 +5815,6 @@ impl Tweaker {
                         ents.push(VisKind::InputsHeader(inputs.len()));
                         for i in inputs {
                             ents.push(VisKind::Prop(i));
-                            if self.row_docs.contains_key(&self.rows[i].prop) {
-                                ents.push(VisKind::Doc(i));
-                            }
                         }
                     }
                     col.child(live_id!(shader_rows_wrap)).set_visible(cx, !ents.is_empty());
@@ -5851,7 +5901,18 @@ impl Tweaker {
                 };
                 // First fill (or selection change): open the levels that
                 // make the tree readable / reveal the selection.
+                if self.tree_open_defaults_pending {
+                    self.tree_open_defaults_pending = false;
+                    for row in &self.tree_rows {
+                        if row.has_children && row.depth < 4 {
+                            tree.set_folder_is_open(cx, LiveId(row.uid), true, Animate::No);
+                        }
+                    }
+                }
                 if self.tree_scrolled_uid != sel_uid && sel_uid != 0 {
+                    // The pin (by any route: body click, 3D pick, remote
+                    // uid apply, undo) IS the tree selection.
+                    tree.select_node(cx, LiveId(sel_uid));
                     if let Some(index) =
                         self.tree_rows.iter().position(|row| row.uid == sel_uid)
                     {
@@ -5865,16 +5926,14 @@ impl Tweaker {
                             );
                             cursor = self.tree_parents.get(parent).copied().flatten();
                         }
+                        // Scroll into view: the servo below measures and
+                        // corrects on the next draws.
+                        self.tree_scroll_tries = Some(8);
                     }
                     self.tree_scrolled_uid = sel_uid;
                 }
-                if self.tree_open_defaults_pending {
-                    self.tree_open_defaults_pending = false;
-                    for row in &self.tree_rows {
-                        if row.has_children && row.depth < 4 {
-                            tree.set_folder_is_open(cx, LiveId(row.uid), true, Animate::No);
-                        }
-                    }
+                if self.tree_scroll_tries.is_some() && sel_uid != 0 {
+                    tree.begin_reveal(LiveId(sel_uid));
                 }
                 if filtering {
                     if let Some(keep) = &keep {
@@ -5929,9 +5988,29 @@ impl Tweaker {
                         );
                     }
                 }
+                if let Some(tries) = self.tree_scroll_tries {
+                    let vp = self.props_viewport.unwrap_or(band);
+                    match tree.take_reveal_y() {
+                        Some(y) if tries > 0 => {
+                            let top = vp.pos.y + 8.0;
+                            let bottom = vp.pos.y + vp.size.y - 40.0;
+                            if y < top || y > bottom {
+                                tree.scroll_by(cx, y - (vp.pos.y + vp.size.y * 0.33));
+                                tree.redraw(cx);
+                                self.tree_scroll_tries = Some(tries - 1);
+                            } else {
+                                self.tree_scroll_tries = None;
+                            }
+                        }
+                        _ => {
+                            self.tree_scroll_tries = None;
+                        }
+                    }
+                }
                 continue;
             }
             let in_shader_tab = step_widget.widget_uid().0 == self.shader_list_uid;
+            let list_viewport = self.props_viewport;
             let Some(mut list) = step_widget.borrow_mut::<PortalList>() else {
                 continue;
             };
@@ -6038,6 +6117,7 @@ impl Tweaker {
                         let sw_ref = item.child(live_id!(swatch_bg)).child(live_id!(swatch));
                         let sw_opt = sw_ref.borrow_mut::<TweakMaterialSwatch>();
                         if let Some(mut sw) = sw_opt {
+                            sw.clip = list_viewport;
                             if sw.applied_gen != self.rows_gen || sw.layer != layer || sw.mirror_uid != self.rows_uid {
                                 let widget =
                                     cx.widget_tree().widget(WidgetUid(self.rows_uid));
@@ -6498,6 +6578,7 @@ impl Tweaker {
                     }
                     item.child(live_id!(lbl)).set_text(cx, &label);
                     if let Some(mut sw) = item.child(live_id!(sw)).borrow_mut::<TweakMaterialSwatch>() {
+                        sw.clip = self.swatch_clip;
                         sw.mirror_uid = self.rows_uid;
                         sw.mirror_primary = primary;
                         sw.mirror_layer = layer.clone();
@@ -7625,39 +7706,8 @@ impl Tweaker {
         };
         self.draw_outline.draw_abs(cx, outline_rect);
 
-        // The pick label: id path, type, rect (and spacing band when the
-        // pointer is in the gap).
-        let text = format!(
-            "{} \u{2022} {} \u{2022} {:.0},{:.0} {:.0}\u{00d7}{:.0}{}",
-            pick.path,
-            pick.ty,
-            pick.rect.pos.x,
-            pick.rect.pos.y,
-            pick.rect.size.x,
-            pick.rect.size.y,
-            match &pick.band {
-                Some(band) => format!(" \u{2022} {band}"),
-                None => String::new(),
-            }
-        );
-        let pass_size = cx.current_pass_size();
-        let max_x = self.overlay_max_x(pass_size);
-        let label_height = 16.0;
-        let approx_width = (text.chars().count() as f64) * 5.4 + 10.0;
-        let mut pos = dvec2(pick.rect.pos.x, pick.rect.pos.y - label_height - 2.0);
-        if pos.y < 0.0 {
-            pos.y = (pick.rect.pos.y + pick.rect.size.y + 2.0).min(pass_size.y - label_height);
-        }
-        pos.x = pos.x.clamp(0.0, (max_x - approx_width).max(0.0));
-        self.draw_label_bg.draw_abs(
-            cx,
-            Rect {
-                pos,
-                size: dvec2(approx_width, label_height),
-            },
-        );
-        self.draw_label
-            .draw_abs(cx, pos + dvec2(5.0, 2.0), &text);
+        // No pick banner: the panel footer carries the identity (the
+        // full-path label used to stretch across the app).
     }
 
     /// Corner handles for the radius-like input (the first of the
@@ -7786,6 +7836,26 @@ impl Widget for Tweaker {
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
             self.states_hover(cx, e.abs);
+        }
+        // The wells' scroll viewports, read between frames when the rect
+        // slots hold the drawn values (mid-draw they answer zero).
+        if tweak_is_on() {
+            if let Some(sidebar) = self.sidebar.clone() {
+                let col_rect = sidebar.child(live_id!(shader_col)).area().rect(cx);
+                if col_rect.size.y > 0.0 {
+                    self.swatch_clip = Some(col_rect);
+                }
+                let wrap = sidebar.child(live_id!(props_wrap));
+                let wrap_rect = wrap.area().rect(cx);
+                if wrap_rect.size.y > 0.0 {
+                    let scope = wrap.child(live_id!(scope_row)).area().rect(cx);
+                    let top = if scope.size.y > 0.0 { scope.pos.y + scope.size.y } else { wrap_rect.pos.y };
+                    self.props_viewport = Some(Rect {
+                        pos: dvec2(wrap_rect.pos.x, top),
+                        size: dvec2(wrap_rect.size.x, (wrap_rect.pos.y + wrap_rect.size.y - top).max(0.0)),
+                    });
+                }
+            }
         }
         if self.states_frame.is_event(event).is_some() {
             self.states_tick(cx);
