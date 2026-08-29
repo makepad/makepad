@@ -15,13 +15,16 @@
 //! scaffolding (SlotMap/GameRng/World) is the target shape for later stages;
 //! GameWorld below is the live parity-oracle sim.
 
+pub mod decal;
 pub mod dynamics;
 pub mod entity;
 pub mod heading;
 pub mod hud;
+pub mod level_solid;
 pub mod nav;
 pub mod particles;
 pub mod player;
+pub mod providers;
 pub mod queries;
 pub mod sense;
 pub mod step;
@@ -31,9 +34,14 @@ pub mod voxel;
 pub mod water;
 pub mod world;
 
+pub use decal::*;
 pub use dynamics::*;
 pub use entity::*;
 pub use heading::*;
+pub use level_solid::{
+    wheeled_max_step, LevelSolid, LevelSolidRef, LEVEL_CONTACT_UP_SPEED_MAX,
+    WHEELED_STEP_MIN,
+};
 pub use hud::{
     layout as hud_layout, Crosshair, CrosshairStyle, HudAlign, HudDoc, HudElement, HudKind,
     HudLine, HudPlaced, HudPulse, HudStack, HudValue,
@@ -41,6 +49,7 @@ pub use hud::{
 pub use nav::{FlowField, NavAgent, NavMap};
 pub use particles::*;
 pub use player::*;
+pub use providers::{LosProvider, NavProvider};
 pub use queries::*;
 pub use step::*;
 pub use surface::*;

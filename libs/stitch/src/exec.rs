@@ -13,6 +13,7 @@ use {
         global::UnguardedGlobal,
         mem::UnguardedMem,
         ops::*,
+        simd::V128,
         stack::{Stack, StackGuard, StackSlot},
         store::{Handle, Store, UnguardedInternedFuncType},
         table::UnguardedTable,
@@ -4158,3 +4159,630 @@ impl WriteReg for UnguardedExternRef {
         (x.map_or(ptr::null_mut(), |ptr| ptr.as_ptr()) as Ix, sx, dx)
     }
 }
+
+// Nonstandard scalar float math instructions (0xE0-prefixed opcode space,
+// opt-in via `Extensions::ext_math`).
+
+un_op!(f32_sin_s, f32_sin_r, <f32 as MathOps>::sin);
+un_op!(f32_cos_s, f32_cos_r, <f32 as MathOps>::cos);
+un_op!(f32_tan_s, f32_tan_r, <f32 as MathOps>::tan);
+un_op!(f32_asin_s, f32_asin_r, <f32 as MathOps>::asin);
+un_op!(f32_acos_s, f32_acos_r, <f32 as MathOps>::acos);
+un_op!(f32_atan_s, f32_atan_r, <f32 as MathOps>::atan);
+un_op!(f32_exp_s, f32_exp_r, <f32 as MathOps>::exp);
+un_op!(f32_ln_s, f32_ln_r, <f32 as MathOps>::ln);
+
+un_op!(f64_sin_s, f64_sin_r, <f64 as MathOps>::sin);
+un_op!(f64_cos_s, f64_cos_r, <f64 as MathOps>::cos);
+un_op!(f64_tan_s, f64_tan_r, <f64 as MathOps>::tan);
+un_op!(f64_asin_s, f64_asin_r, <f64 as MathOps>::asin);
+un_op!(f64_acos_s, f64_acos_r, <f64 as MathOps>::acos);
+un_op!(f64_atan_s, f64_atan_r, <f64 as MathOps>::atan);
+un_op!(f64_exp_s, f64_exp_r, <f64 as MathOps>::exp);
+un_op!(f64_ln_s, f64_ln_r, <f64 as MathOps>::ln);
+
+bin_op_noncommutative!(
+    f32_atan2_ss,
+    f32_atan2_rs,
+    f32_atan2_is,
+    f32_atan2_ir,
+    f32_atan2_sr,
+    f32_atan2_si,
+    f32_atan2_ri,
+    <f32 as MathOps>::atan2
+);
+bin_op_noncommutative!(
+    f32_pow_ss,
+    f32_pow_rs,
+    f32_pow_is,
+    f32_pow_ir,
+    f32_pow_sr,
+    f32_pow_si,
+    f32_pow_ri,
+    <f32 as MathOps>::pow
+);
+bin_op_noncommutative!(
+    f32_rmin_ss,
+    f32_rmin_rs,
+    f32_rmin_is,
+    f32_rmin_ir,
+    f32_rmin_sr,
+    f32_rmin_si,
+    f32_rmin_ri,
+    <f32 as MathOps>::rmin
+);
+bin_op_noncommutative!(
+    f32_rmax_ss,
+    f32_rmax_rs,
+    f32_rmax_is,
+    f32_rmax_ir,
+    f32_rmax_sr,
+    f32_rmax_si,
+    f32_rmax_ri,
+    <f32 as MathOps>::rmax
+);
+bin_op_noncommutative!(
+    f32_rem_ss,
+    f32_rem_rs,
+    f32_rem_is,
+    f32_rem_ir,
+    f32_rem_sr,
+    f32_rem_si,
+    f32_rem_ri,
+    <f32 as MathOps>::rem
+);
+bin_op_noncommutative!(
+    f64_rem_ss,
+    f64_rem_rs,
+    f64_rem_is,
+    f64_rem_ir,
+    f64_rem_sr,
+    f64_rem_si,
+    f64_rem_ri,
+    <f64 as MathOps>::rem
+);
+bin_op_noncommutative!(
+    f64_atan2_ss,
+    f64_atan2_rs,
+    f64_atan2_is,
+    f64_atan2_ir,
+    f64_atan2_sr,
+    f64_atan2_si,
+    f64_atan2_ri,
+    <f64 as MathOps>::atan2
+);
+bin_op_noncommutative!(
+    f64_pow_ss,
+    f64_pow_rs,
+    f64_pow_is,
+    f64_pow_ir,
+    f64_pow_sr,
+    f64_pow_si,
+    f64_pow_ri,
+    <f64 as MathOps>::pow
+);
+bin_op_noncommutative!(
+    f64_rmin_ss,
+    f64_rmin_rs,
+    f64_rmin_is,
+    f64_rmin_ir,
+    f64_rmin_sr,
+    f64_rmin_si,
+    f64_rmin_ri,
+    <f64 as MathOps>::rmin
+);
+bin_op_noncommutative!(
+    f64_rmax_ss,
+    f64_rmax_rs,
+    f64_rmax_is,
+    f64_rmax_ir,
+    f64_rmax_sr,
+    f64_rmax_si,
+    f64_rmax_ri,
+    <f64 as MathOps>::rmax
+);
+
+// Vector (v128) instructions
+//
+// `v128` values are never register-resident: every `v128` operand is read
+// from the stack, and every `v128` result is written to a stack slot whose
+// offset is an immediate following the operands. Handlers read all inputs
+// before writing the result, so the result slot may alias an input slot.
+
+/// Reads a 16-byte immediate value (two code slots).
+unsafe fn read_imm_v128(ip: Ip) -> (V128, Ip) {
+    let (lo, ip): (u64, _) = read_imm(ip);
+    let (hi, ip): (u64, _) = read_imm(ip);
+    (V128::from_bits(lo as u128 | (hi as u128) << 64), ip)
+}
+
+/// A helper macro for defining a `v128 -> v128` instruction.
+macro_rules! v128_un_op {
+    ($name:ident, $f:expr) => {
+        threaded_instr!($name(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x, ip): (V128, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = $f(x);
+
+            // Write result
+            let ip = write_stack(ip, sp, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        });
+    };
+}
+
+/// A helper macro for defining a `v128 x v128 -> v128` instruction.
+macro_rules! v128_bin_op {
+    ($name:ident, $f:expr) => {
+        threaded_instr!($name(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x0, ip): (V128, _) = read_stack(ip, sp);
+            let (x1, ip): (V128, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y = $f(x0, x1);
+
+            // Write result
+            let ip = write_stack(ip, sp, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        });
+    };
+}
+
+v128_un_op!(v128_not, V128::not);
+v128_un_op!(f32x4_abs, V128::f32x4_abs);
+v128_un_op!(f32x4_neg, V128::f32x4_neg);
+v128_un_op!(f32x4_sqrt, V128::f32x4_sqrt);
+v128_un_op!(f32x4_ceil, V128::f32x4_ceil);
+v128_un_op!(f32x4_floor, V128::f32x4_floor);
+v128_un_op!(f32x4_trunc, V128::f32x4_trunc);
+v128_un_op!(f32x4_nearest, V128::f32x4_nearest);
+v128_un_op!(f32x4_sin, V128::f32x4_sin);
+v128_un_op!(f32x4_cos, V128::f32x4_cos);
+v128_un_op!(f32x4_tan, V128::f32x4_tan);
+v128_un_op!(f32x4_asin, V128::f32x4_asin);
+v128_un_op!(f32x4_acos, V128::f32x4_acos);
+v128_un_op!(f32x4_atan, V128::f32x4_atan);
+v128_un_op!(f32x4_exp, V128::f32x4_exp);
+v128_un_op!(f32x4_ln, V128::f32x4_ln);
+
+v128_bin_op!(v128_and, V128::and);
+v128_bin_op!(v128_andnot, V128::andnot);
+v128_bin_op!(v128_or, V128::or);
+v128_bin_op!(v128_xor, V128::xor);
+v128_bin_op!(f32x4_eq, V128::f32x4_eq);
+v128_bin_op!(f32x4_ne, V128::f32x4_ne);
+v128_bin_op!(f32x4_lt, V128::f32x4_lt);
+v128_bin_op!(f32x4_gt, V128::f32x4_gt);
+v128_bin_op!(f32x4_le, V128::f32x4_le);
+v128_bin_op!(f32x4_ge, V128::f32x4_ge);
+v128_bin_op!(f32x4_add, V128::f32x4_add);
+v128_bin_op!(f32x4_sub, V128::f32x4_sub);
+v128_bin_op!(f32x4_mul, V128::f32x4_mul);
+v128_bin_op!(f32x4_div, V128::f32x4_div);
+v128_bin_op!(f32x4_min, V128::f32x4_min);
+v128_bin_op!(f32x4_max, V128::f32x4_max);
+v128_bin_op!(f32x4_pmin, V128::f32x4_pmin);
+v128_bin_op!(f32x4_pmax, V128::f32x4_pmax);
+v128_bin_op!(f32x4_atan2, V128::f32x4_atan2);
+v128_bin_op!(f32x4_pow, V128::f32x4_pow);
+v128_bin_op!(f32x4_rmin, V128::f32x4_rmin);
+v128_bin_op!(f32x4_rmax, V128::f32x4_rmax);
+v128_bin_op!(f32x4_rem, V128::f32x4_rem);
+
+/// A helper macro for defining a `v128 x v128 -> f32` reduction
+/// instruction (result goes to the float register, like a scalar op).
+macro_rules! v128_reduce_op {
+    ($name:ident, $f:expr) => {
+        threaded_instr!($name(
+            ip: Ip,
+            sp: Sp,
+            md: Md,
+            ms: Ms,
+            ix: Ix,
+            sx: Sx,
+            dx: Dx,
+            cx: Cx,
+        ) -> ControlFlowBits {
+            // Read operands
+            let (x0, ip): (V128, _) = read_stack(ip, sp);
+            let (x1, ip): (V128, _) = read_stack(ip, sp);
+
+            // Perform operation
+            let y: f32 = $f(x0, x1);
+
+            // Write result
+            let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+            // Execute next instruction
+            next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+        });
+    };
+}
+
+v128_reduce_op!(f32x4_dot2, V128::f32x4_dot::<2>);
+v128_reduce_op!(f32x4_dot3, V128::f32x4_dot::<3>);
+v128_reduce_op!(f32x4_dot4, V128::f32x4_dot::<4>);
+
+copy_stack!(copy_stack_v128, V128);
+
+threaded_instr!(copy_imm_to_stack_v128(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read immediate value (two code slots)
+    let (x, ip) = read_imm_v128(ip);
+
+    // Write value to stack
+    let ip = write_stack(ip, sp, x);
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_load_s(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (dyn_offset, ip): (u32, _) = read_stack(ip, sp);
+    let (static_offset, ip): (u32, _) = read_imm(ip);
+
+    // Perform operation
+    let offset = dyn_offset as u64 + static_offset as u64;
+    if offset + 16 > ms as u64 {
+        return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+    }
+    let mut bytes = [0u8; 16];
+    ptr::copy_nonoverlapping(md.add(offset as usize), bytes.as_mut_ptr(), bytes.len());
+
+    // Write result
+    let ip = write_stack(ip, sp, V128::from_bytes(bytes));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_load_r(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let dyn_offset: u32 = read_reg(ix, sx, dx);
+    let (static_offset, ip): (u32, _) = read_imm(ip);
+
+    // Perform operation
+    let offset = dyn_offset as u64 + static_offset as u64;
+    if offset + 16 > ms as u64 {
+        return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+    }
+    let mut bytes = [0u8; 16];
+    ptr::copy_nonoverlapping(md.add(offset as usize), bytes.as_mut_ptr(), bytes.len());
+
+    // Write result
+    let ip = write_stack(ip, sp, V128::from_bytes(bytes));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_store_ss(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (dyn_offset, ip): (u32, _) = read_stack(ip, sp);
+    let (x, ip): (V128, _) = read_stack(ip, sp);
+    let (static_offset, ip): (u32, _) = read_imm(ip);
+
+    // Perform operation
+    let offset = dyn_offset as u64 + static_offset as u64;
+    if offset + 16 > ms as u64 {
+        return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+    }
+    let bytes = x.to_bytes();
+    ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_store_rs(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let dyn_offset: u32 = read_reg(ix, sx, dx);
+    let (x, ip): (V128, _) = read_stack(ip, sp);
+    let (static_offset, ip): (u32, _) = read_imm(ip);
+
+    // Perform operation
+    let offset = dyn_offset as u64 + static_offset as u64;
+    if offset + 16 > ms as u64 {
+        return ControlFlow::Trap(Trap::MemAccessOutOfBounds).to_bits();
+    }
+    let bytes = x.to_bytes();
+    ptr::copy_nonoverlapping(bytes.as_ptr(), md.add(offset as usize), bytes.len());
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(i8x16_shuffle(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (x0, ip): (V128, _) = read_stack(ip, sp);
+    let (x1, ip): (V128, _) = read_stack(ip, sp);
+    let (lanes, ip) = read_imm_v128(ip);
+
+    // Perform operation
+    let y = x0.i8x16_shuffle(x1, lanes.to_bytes());
+
+    // Write result
+    let ip = write_stack(ip, sp, y);
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(f32x4_splat_s(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (x, ip): (f32, _) = read_stack(ip, sp);
+
+    // Write result
+    let ip = write_stack(ip, sp, V128::f32x4_splat(x));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(f32x4_splat_r(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let x: f32 = read_reg(ix, sx, dx);
+
+    // Write result
+    let ip = write_stack(ip, sp, V128::f32x4_splat(x));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(f32x4_extract_lane_s(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (x, ip): (V128, _) = read_stack(ip, sp);
+    let (lane, ip): (usize, _) = read_imm(ip);
+
+    // Perform operation
+    let y = x.f32x4_extract_lane(lane);
+
+    // Write result
+    let (ix, sx, dx) = write_reg(ix, sx, dx, y);
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(f32x4_replace_lane_ss(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (v, ip): (V128, _) = read_stack(ip, sp);
+    let (x, ip): (f32, _) = read_stack(ip, sp);
+    let (lane, ip): (usize, _) = read_imm(ip);
+
+    // Write result
+    let ip = write_stack(ip, sp, v.f32x4_replace_lane(lane, x));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(f32x4_replace_lane_sr(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (v, ip): (V128, _) = read_stack(ip, sp);
+    let x: f32 = read_reg(ix, sx, dx);
+    let (lane, ip): (usize, _) = read_imm(ip);
+
+    // Write result
+    let ip = write_stack(ip, sp, v.f32x4_replace_lane(lane, x));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_any_true_s(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (x, ip): (V128, _) = read_stack(ip, sp);
+
+    // Write result
+    let (ix, sx, dx) = write_reg(ix, sx, dx, x.any_true());
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(v128_bitselect(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (v1, ip): (V128, _) = read_stack(ip, sp);
+    let (v2, ip): (V128, _) = read_stack(ip, sp);
+    let (c, ip): (V128, _) = read_stack(ip, sp);
+
+    // Write result
+    let ip = write_stack(ip, sp, v1.bitselect(v2, c));
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(select_v128_ss(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let (cond, ip): (u32, _) = read_stack(ip, sp);
+    let (x1, ip): (V128, _) = read_stack(ip, sp);
+    let (x0, ip): (V128, _) = read_stack(ip, sp);
+
+    // Perform operation
+    let y = if cond != 0 { x0 } else { x1 };
+
+    // Write result
+    let ip = write_stack(ip, sp, y);
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});
+
+threaded_instr!(select_v128_sr(
+    ip: Ip,
+    sp: Sp,
+    md: Md,
+    ms: Ms,
+    ix: Ix,
+    sx: Sx,
+    dx: Dx,
+    cx: Cx,
+) -> ControlFlowBits {
+    // Read operands
+    let cond: u32 = read_reg(ix, sx, dx);
+    let (x1, ip): (V128, _) = read_stack(ip, sp);
+    let (x0, ip): (V128, _) = read_stack(ip, sp);
+
+    // Perform operation
+    let y = if cond != 0 { x0 } else { x1 };
+
+    // Write result
+    let ip = write_stack(ip, sp, y);
+
+    // Execute next instruction
+    next_instr(ip, sp, md, ms, ix, sx, dx, cx)
+});

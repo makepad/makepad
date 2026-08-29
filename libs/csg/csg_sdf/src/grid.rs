@@ -33,6 +33,22 @@ impl SdfGrid3 {
 
         SdfGrid3 { root, min, max }
     }
+
+    /// Build the same grid without requiring a `Send + Sync + 'static`
+    /// field. This is the conservative fallback for splash expressions that
+    /// the math AOT rejects: their owning `ScriptVm` must remain on its
+    /// worker thread, so sampling is deliberately sequential.
+    pub fn from_sdf_ref(
+        sdf: &dyn Sdf3,
+        min: Vec3d,
+        max: Vec3d,
+        max_depth: usize,
+    ) -> SdfGrid3 {
+        let corners = cube_corners(min, max);
+        let distances = corners.map(|c| sdf.distance(c));
+        let root = Node::from_sdf_seq(sdf, min, max, distances, 0, max_depth);
+        SdfGrid3 { root, min, max }
+    }
 }
 
 pub enum Node {
@@ -165,7 +181,7 @@ fn build_parallel_depth2(
 impl Node {
     /// Build node sequentially (used by pool workers and for small trees).
     fn from_sdf_seq(
-        sdf: &(dyn Sdf3 + Send + Sync),
+        sdf: &dyn Sdf3,
         min: Vec3d,
         max: Vec3d,
         distances: [f64; 8],
@@ -189,7 +205,7 @@ impl Node {
 
 /// Compute the 19 new distance samples and return the 8 child (min, max, distances) tuples.
 fn compute_child_data(
-    sdf: &(dyn Sdf3 + Send + Sync),
+    sdf: &dyn Sdf3,
     min: Vec3d,
     mid: Vec3d,
     max: Vec3d,

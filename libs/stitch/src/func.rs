@@ -145,12 +145,13 @@ impl FuncType {
     /// [`FuncType`] [] -> [`ValType`?].
     pub(crate) fn from_val_type(type_: Option<ValType>) -> FuncType {
         thread_local! {
-            static TYPES: [FuncType; 7] = [
+            static TYPES: [FuncType; 8] = [
                 FuncType::new(vec![], vec![]),
                 FuncType::new(vec![], vec![ValType::I32]),
                 FuncType::new(vec![], vec![ValType::I64]),
                 FuncType::new(vec![], vec![ValType::F32]),
                 FuncType::new(vec![], vec![ValType::F64]),
+                FuncType::new(vec![], vec![ValType::V128]),
                 FuncType::new(vec![], vec![ValType::FuncRef]),
                 FuncType::new(vec![], vec![ValType::ExternRef]),
             ];
@@ -162,8 +163,9 @@ impl FuncType {
             Some(ValType::I64) => types[2].clone(),
             Some(ValType::F32) => types[3].clone(),
             Some(ValType::F64) => types[4].clone(),
-            Some(ValType::FuncRef) => types[5].clone(),
-            Some(ValType::ExternRef) => types[6].clone(),
+            Some(ValType::V128) => types[5].clone(),
+            Some(ValType::FuncRef) => types[6].clone(),
+            Some(ValType::ExternRef) => types[7].clone(),
         })
     }
 

@@ -1146,9 +1146,15 @@ fn mesh_smooth(field: &VoxelField, key: ChunkKey, grid: &SampleGrid) -> ChunkMes
         // Normal: density gradient across the cell (central-ish difference
         // over the 8 corners) — local to the same samples, so seam vertices
         // get seam-identical normals.
-        let gx = (d[1] + d[3] + d[5] + d[7]) as f32 - (d[0] + d[2] + d[4] + d[6]) as f32;
-        let gy = (d[2] + d[3] + d[6] + d[7]) as f32 - (d[0] + d[1] + d[4] + d[5]) as f32;
-        let gz = (d[4] + d[5] + d[6] + d[7]) as f32 - (d[0] + d[1] + d[2] + d[3]) as f32;
+        // Promote each signed density before summing. Four perfectly solid
+        // i8 corners legitimately exceed i8::MAX; debug builds must produce
+        // the same gradient as release rather than overflow here.
+        let gx = (d[1] as i32 + d[3] as i32 + d[5] as i32 + d[7] as i32) as f32
+            - (d[0] as i32 + d[2] as i32 + d[4] as i32 + d[6] as i32) as f32;
+        let gy = (d[2] as i32 + d[3] as i32 + d[6] as i32 + d[7] as i32) as f32
+            - (d[0] as i32 + d[1] as i32 + d[4] as i32 + d[5] as i32) as f32;
+        let gz = (d[4] as i32 + d[5] as i32 + d[6] as i32 + d[7] as i32) as f32
+            - (d[0] as i32 + d[1] as i32 + d[2] as i32 + d[3] as i32) as f32;
         let glen = (gx * gx + gy * gy + gz * gz).sqrt();
         let n = if glen > 1.0e-6 {
             vec3f(gx / glen, gy / glen, gz / glen)

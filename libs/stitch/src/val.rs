@@ -4,6 +4,7 @@ use {
         extern_ref::{ExternRef, UnguardedExternRef},
         func_ref::{FuncRef, UnguardedFuncRef},
         ref_::{Ref, RefType, UnguardedRef},
+        simd::V128,
         stack::StackSlot,
         store::StoreId,
     },
@@ -17,6 +18,7 @@ pub enum Val {
     I64(i64),
     F32(f32),
     F64(f64),
+    V128(V128),
     FuncRef(FuncRef),
     ExternRef(ExternRef),
 }
@@ -29,6 +31,7 @@ impl Val {
             ValType::I64 => 0i64.into(),
             ValType::F32 => 0f32.into(),
             ValType::F64 => 0f64.into(),
+            ValType::V128 => V128::ZERO.into(),
             ValType::FuncRef => FuncRef::null().into(),
             ValType::ExternRef => ExternRef::null().into(),
         }
@@ -41,6 +44,7 @@ impl Val {
             Val::I64(_) => ValType::I64,
             Val::F32(_) => ValType::F32,
             Val::F64(_) => ValType::F64,
+            Val::V128(_) => ValType::V128,
             Val::FuncRef(_) => ValType::FuncRef,
             Val::ExternRef(_) => ValType::ExternRef,
         }
@@ -64,6 +68,11 @@ impl Val {
     /// Returns `true` if this [`Val`] is an `f64`.
     pub fn is_f64(self) -> bool {
         self.to_f64().is_some()
+    }
+
+    /// Returns `true` if this [`Val`] is a `v128`.
+    pub fn is_v128(self) -> bool {
+        self.to_v128().is_some()
     }
 
     /// Returns `true` if this [`Val`] is a [`Ref`].
@@ -113,6 +122,14 @@ impl Val {
         }
     }
 
+    /// Converts this [`Val`] to a `v128`, if it is one.
+    pub fn to_v128(self) -> Option<V128> {
+        match self {
+            Val::V128(val) => Some(val),
+            _ => None,
+        }
+    }
+
     /// Converts this [`Val`] to a [`Ref`], if it is one.
     pub fn to_ref(self) -> Option<Ref> {
         match self {
@@ -149,6 +166,7 @@ impl Val {
             UnguardedVal::I64(val) => val.into(),
             UnguardedVal::F32(val) => val.into(),
             UnguardedVal::F64(val) => val.into(),
+            UnguardedVal::V128(val) => val.into(),
             UnguardedVal::FuncRef(val) => FuncRef::from_unguarded(val, store_id).into(),
             UnguardedVal::ExternRef(val) => ExternRef::from_unguarded(val, store_id).into(),
         }
@@ -165,6 +183,7 @@ impl Val {
             Val::I64(val) => val.into(),
             Val::F32(val) => val.into(),
             Val::F64(val) => val.into(),
+            Val::V128(val) => val.into(),
             Val::FuncRef(val) => val.to_unguarded(store_id).into(),
             Val::ExternRef(val) => val.to_unguarded(store_id).into(),
         }
@@ -192,6 +211,12 @@ impl From<f32> for Val {
 impl From<f64> for Val {
     fn from(val: f64) -> Self {
         Val::F64(val)
+    }
+}
+
+impl From<V128> for Val {
+    fn from(val: V128) -> Self {
+        Val::V128(val)
     }
 }
 
@@ -223,6 +248,7 @@ pub(crate) enum UnguardedVal {
     I64(i64),
     F32(f32),
     F64(f64),
+    V128(V128),
     FuncRef(UnguardedFuncRef),
     ExternRef(UnguardedExternRef),
 }
@@ -235,6 +261,7 @@ impl UnguardedVal {
             ValType::I64 => (*ptr.cast::<i64>()).into(),
             ValType::F32 => (*ptr.cast::<f32>()).into(),
             ValType::F64 => (*ptr.cast::<f64>()).into(),
+            ValType::V128 => (*ptr.cast::<V128>()).into(),
             ValType::FuncRef => (*ptr.cast::<UnguardedFuncRef>()).into(),
             ValType::ExternRef => (*ptr.cast::<UnguardedExternRef>()).into(),
         };
@@ -248,6 +275,7 @@ impl UnguardedVal {
             UnguardedVal::I64(val) => *ptr.cast() = val,
             UnguardedVal::F32(val) => *ptr.cast() = val,
             UnguardedVal::F64(val) => *ptr.cast() = val,
+            UnguardedVal::V128(val) => *ptr.cast() = val,
             UnguardedVal::FuncRef(val) => *ptr.cast() = val,
             UnguardedVal::ExternRef(val) => *ptr.cast() = val,
         }
@@ -275,6 +303,12 @@ impl From<f32> for UnguardedVal {
 impl From<f64> for UnguardedVal {
     fn from(val: f64) -> Self {
         UnguardedVal::F64(val)
+    }
+}
+
+impl From<V128> for UnguardedVal {
+    fn from(val: V128) -> Self {
+        UnguardedVal::V128(val)
     }
 }
 
@@ -306,6 +340,7 @@ pub enum ValType {
     I64,
     F32,
     F64,
+    V128,
     FuncRef,
     ExternRef,
 }
@@ -333,11 +368,23 @@ impl ValType {
         }
     }
 
+    /// Returns `true` if this [`ValType`] is a vector type.
+    pub fn is_vec(self) -> bool {
+        match self {
+            Self::V128 => true,
+            _ => false,
+        }
+    }
+
     /// Returns the index of the register to be used for [`Val`]s of this [`ValType`].
+    ///
+    /// `v128` values are never stored in a virtual register (they are always
+    /// read from and written to the stack), so they have no register index.
     pub(crate) fn reg_idx(self) -> usize {
         match self {
             ValType::I32 | ValType::I64 | ValType::FuncRef | ValType::ExternRef => 0,
             ValType::F32 | ValType::F64 => 1,
+            ValType::V128 => unreachable!("v128 values are never register-resident"),
         }
     }
 }
@@ -347,6 +394,7 @@ impl Decode for ValType {
         match decoder.read_byte()? {
             0x6F => Ok(Self::ExternRef),
             0x70 => Ok(Self::FuncRef),
+            0x7B => Ok(Self::V128),
             0x7C => Ok(Self::F64),
             0x7D => Ok(Self::F32),
             0x7E => Ok(Self::I64),
@@ -363,6 +411,7 @@ impl fmt::Display for ValType {
             Self::I64 => write!(f, "i64"),
             Self::F32 => write!(f, "f32"),
             Self::F64 => write!(f, "f64"),
+            Self::V128 => write!(f, "v128"),
             Self::FuncRef => write!(f, "funcref"),
             Self::ExternRef => write!(f, "externref"),
         }
