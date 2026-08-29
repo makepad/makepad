@@ -1638,6 +1638,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
         let turtle_align_start = turtle.align_start;
         let turtle_walks_start = turtle.finished_walks_start;
+        // Captured before the alignment pass so the borrow of `turtle` can end
+        // in time for the exploded view's hairline emission below. The box
+        // itself is final after `compute_final_size`; alignment moves this
+        // turtle's CONTENTS, not the turtle.
+        let scope_rect = turtle.rect();
+        let turtle_rows_start = turtle.finished_rows_start;
 
         // Now that the current turtle's rectangle is known, we can align its finished walks.
         match turtle.flow() {
@@ -1840,9 +1846,15 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             }
         }
 
+        // Exploded z-layer view: give this scope a visible frame. Emitted here
+        // — after the scope's own contents are aligned, before the parent's
+        // pass — so it sits inside this turtle's align range and rides every
+        // shift the parent later applies to the whole walk.
+        self.draw_sploded_hairline(scope_rect);
+
         self.align_list.push(AlignEntry::EndClip);
-        self.finished_rows.truncate(turtle.finished_rows_start);
-        self.finished_walks.truncate(turtle.finished_walks_start);
+        self.finished_rows.truncate(turtle_rows_start);
+        self.finished_walks.truncate(turtle_walks_start);
         let turtle = self.turtles.pop().unwrap();
 
         if self.turtles.is_empty() {

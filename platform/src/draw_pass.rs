@@ -518,6 +518,9 @@ pub struct CxDrawPass {
     pub view_scale: Vec2d,
     pub pass_uniforms: DrawPassUniforms,
     pub zbias_step: f32,
+    /// Set while the F10 exploded z-layer view is up on this pass; `None` is
+    /// ordinary flat 2D and leaves `camera_view` the identity it always was.
+    pub sploded: Option<crate::sploded::SplodedParams>,
     pub os: CxOsPass,
     pub(crate) gpu_time_query: Option<GpuTimeQuery>,
 }
@@ -530,6 +533,7 @@ impl Default for CxDrawPass {
             keep_camera_matrix: false,
             debug_name: String::new(),
             zbias_step: 0.001,
+            sploded: None,
             pass_uniforms: DrawPassUniforms::default(),
             color_textures: Vec::new(),
             depth_texture: None,
@@ -584,7 +588,14 @@ impl CxDrawPass {
             1.0,
         );
         self.pass_uniforms.camera_projection = ortho;
-        self.pass_uniforms.camera_view = Mat4f::identity();
+        // The exploded z-layer view is exactly this one substitution: every 2D
+        // vertex ends in `camera_projection * (camera_view * world)`, so a
+        // non-identity `camera_view` tilts the whole window's draw-call stack
+        // without a single shader edit. See `crate::sploded`.
+        self.pass_uniforms.camera_view = match &self.sploded {
+            Some(params) => params.camera_view(offset, size),
+            None => Mat4f::identity(),
+        };
         // Regular 2D passes don't participate in XR scene-depth clipping.
         self.pass_uniforms.depth_projection = zero;
         self.pass_uniforms.depth_projection_r = zero;

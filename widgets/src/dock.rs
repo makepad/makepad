@@ -354,6 +354,13 @@ impl WidgetNode for Dock {
         for (id, (_, widget)) in self.items.iter() {
             visit(*id, widget.clone());
         }
+        // The tabs are widgets too (the design tweaker picks and styles
+        // them); the bars that own them are not, so they surface here.
+        for (_, tab_bar) in self.tab_bars.iter() {
+            for (id, tab) in tab_bar.tab_bar.tab_refs() {
+                visit(id, tab);
+            }
+        }
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
@@ -1835,6 +1842,7 @@ impl Widget for Dock {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let dock_uid = self.widget_uid();
         if self
             .draw_state
             .begin_with(cx, &self.dock_items, |_, dock_items| {
@@ -1904,6 +1912,7 @@ impl Widget for Dock {
                         });
                         if !*hide_tab_bar {
                             let walk = tab_bar.tab_bar.walk(cx);
+                            tab_bar.tab_bar.tree_parent = dock_uid;
                             tab_bar.tab_bar.begin(cx, Some(*selected), walk);
                             stack.push(DrawStackItem::TabLabel { id, index: 0 });
                         } else {

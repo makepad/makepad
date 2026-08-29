@@ -277,6 +277,107 @@ impl Area {
         };
     }
 
+    /// The clipped bounds of EVERY instance in an instance area, not just
+    /// the first. A text run's area spans all its glyphs, and `clipped_rect`
+    /// (first instance only) answers with a single glyph — which is why a
+    /// design pick on a paragraph used to fall through to its container.
+    /// Rect areas and single instances answer exactly as `clipped_rect`.
+    pub fn clipped_rect_union(&self, cx: &Cx) -> Rect {
+        self.clipped_rect_union_inner(cx, false)
+    }
+
+    /// The union rect ignoring the redraw-id freshness guard. Retained draw
+    /// lists (a Dock's tab strip, a cached content view) legitimately keep
+    /// last frame's instances while the global redraw id advances, so their
+    /// widgets' areas read one frame stale — `clipped_rect` then returns
+    /// zero even though the pixels are on screen. A caller that has already
+    /// confirmed the list is ATTACHED (visible this frame) wants the
+    /// geometry regardless; a hidden list is not attached, so this never
+    /// resurrects a stale rect for something off screen.
+    pub fn clipped_rect_union_attached(&self, cx: &Cx) -> Rect {
+        self.clipped_rect_union_inner(cx, true)
+    }
+
+    fn clipped_rect_union_inner(&self, cx: &Cx, ignore_redraw: bool) -> Rect {
+        let Area::Instance(inst) = self else {
+            return self.clipped_rect(cx);
+        };
+        if inst.instance_count == 0 {
+            // A probe, not a draw: an instance-less area is simply "nothing
+            // on screen", not a mark/sweep mistake worth logging.
+            return Rect::default();
+        }
+        let draw_list = &cx.draw_lists[inst.draw_list_id];
+        if !ignore_redraw && draw_list.redraw_id != inst.redraw_id {
+            return Rect::default();
+        }
+        let draw_item = &draw_list.draw_items[inst.draw_item_id];
+        let Some(draw_call) = draw_item.draw_call() else {
+            return Rect::default();
+        };
+        let Some(buf) = draw_item.instances.as_ref() else {
+            return Rect::default();
+        };
+        let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
+        let (Some(rect_pos), Some(rect_size)) = (sh.mapping.rect_pos, sh.mapping.rect_size) else {
+            return self.clipped_rect(cx);
+        };
+        let stride = sh.mapping.instances.total_slots;
+        if stride == 0 {
+            return self.clipped_rect(cx);
+        }
+        let mut union: Option<Rect> = None;
+        for i in 0..inst.instance_count {
+            let o = inst.instance_offset + i * stride;
+            if o + rect_size + 1 >= buf.len() {
+                break;
+            }
+            let mut rect = Rect {
+                pos: dvec2(buf[o + rect_pos] as f64, buf[o + rect_pos + 1] as f64),
+                size: dvec2(buf[o + rect_size] as f64, buf[o + rect_size + 1] as f64),
+            };
+            if let Some(draw_clip) = sh.mapping.draw_clip {
+                rect = rect.clip((
+                    dvec2(buf[o + draw_clip] as f64, buf[o + draw_clip + 1] as f64),
+                    dvec2(buf[o + draw_clip + 2] as f64, buf[o + draw_clip + 3] as f64),
+                ));
+            }
+            if draw_list.draw_list_has_clip {
+                let u = &draw_list.draw_list_uniforms;
+                rect = rect
+                    .translate(dvec2(u.view_shift.x as f64, u.view_shift.y as f64))
+                    .clip((
+                        dvec2(u.view_clip.x as f64, u.view_clip.y as f64),
+                        dvec2(u.view_clip.z as f64, u.view_clip.w as f64),
+                    ));
+            }
+            if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                continue;
+            }
+            union = Some(match union {
+                None => rect,
+                Some(u) => {
+                    let x0 = u.pos.x.min(rect.pos.x);
+                    let y0 = u.pos.y.min(rect.pos.y);
+                    let x1 = (u.pos.x + u.size.x).max(rect.pos.x + rect.size.x);
+                    let y1 = (u.pos.y + u.size.y).max(rect.pos.y + rect.size.y);
+                    Rect { pos: dvec2(x0, y0), size: dvec2(x1 - x0, y1 - y0) }
+                }
+            });
+        }
+        union.unwrap_or_default()
+    }
+
+    /// Is this area on screen right now — its draw list reachable from its
+    /// pass's main list? A page a Dock, StackNavigation or PageFlip has
+    /// hidden keeps its retained draw list and every stale rect in it; a
+    /// design pick that trusts those rects clicks through to widgets that
+    /// are not there.
+    pub fn is_attached(&self, cx: &Cx, attached: &std::collections::HashSet<DrawListId>) -> bool {
+        let _ = cx;
+        self.draw_list_id().is_some_and(|id| attached.contains(&id))
+    }
+
     pub fn rect(&self, cx: &Cx) -> Rect {
         return match self {
             Area::Instance(inst) => {
