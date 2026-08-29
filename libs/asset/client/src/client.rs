@@ -573,9 +573,19 @@ impl AssetClient {
     pub fn list_jobs(
         &self,
         namespace: Option<&str>,
+        kind: Option<&str>,
+        state: Option<crate::dto::JobStateDto>,
         limit: u64,
     ) -> ClientResult<Vec<crate::dto::JobRowDto>> {
-        self.api.list_jobs(namespace, limit)
+        self.api.list_jobs(namespace, kind, state, limit)
+    }
+
+    /// The published thumbnail sheet of an alias, as served.
+    pub fn thumbnail_alias_bytes(
+        &self,
+        alias: &makepad_asset_data::AssetAlias,
+    ) -> ClientResult<Vec<u8>> {
+        self.api.thumbnail_alias_bytes(alias)
     }
 
     pub fn cancel_job(&self, job: &crate::dto::JobId) -> ClientResult<u64> {
@@ -667,6 +677,17 @@ impl AssetClient {
         self.api.room_heartbeat(room, token, ttl_ms)
     }
 
+    /// See the API's `room_heartbeat_with`: heartbeat plus the head count.
+    pub fn room_heartbeat_with(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+        players: Option<u32>,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        self.api.room_heartbeat_with(room, token, ttl_ms, players)
+    }
+
     pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
         self.api.retire_room(room, token)
     }
@@ -718,6 +739,23 @@ impl AssetClient {
 
     pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {
         self.api.chat_retire(id)
+    }
+
+    /// The session's durable conversation as rows to render (see
+    /// `Api::chat_transcript`).
+    pub fn chat_transcript(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<Vec<crate::dto::ChatTranscriptRowDto>> {
+        self.api.chat_transcript(id)
+    }
+
+    /// `chat_transcript` plus provider, turn and the truncation flag.
+    pub fn chat_transcript_full(
+        &self,
+        id: &crate::dto::ChatSessionId,
+    ) -> ClientResult<crate::dto::ChatTranscriptDto> {
+        self.api.chat_transcript_full(id)
     }
 
     /// Answer a client-executed tool call (see `Api::chat_tool_result`).
@@ -848,6 +886,42 @@ impl AssetClient {
         self.api.upload_blob(ns, bytes)
     }
 
+    pub fn open_model_preview(
+        &self,
+        alias: &makepad_asset_data::AssetAlias,
+        session: &str,
+        program: &str,
+    ) -> ClientResult<()> {
+        self.api.open_model_preview(alias, session, program)
+    }
+
+    pub fn update_model_preview(
+        &self,
+        session: &str,
+        program: Option<&str>,
+        removed: &[String],
+        renamed: &[crate::dto::ModelPreviewRenameDto],
+    ) -> ClientResult<()> {
+        self.api.update_model_preview(session, program, removed, renamed)
+    }
+
+    pub fn clear_model_preview(&self, session: &str) -> ClientResult<()> {
+        self.api.clear_model_preview(session)
+    }
+
+    pub fn upload_model_preview_part(
+        &self,
+        session: &str,
+        part: &str,
+        bytes: &[u8],
+    ) -> ClientResult<String> {
+        self.api.upload_model_preview_part(session, part, bytes)
+    }
+
+    pub fn fetch_model_preview_mesh(&self, token: &str) -> ClientResult<Vec<u8>> {
+        self.api.fetch_model_preview_mesh(token)
+    }
+
     /// As [`Self::upload_blob`], but the digest is supplied by the caller
     /// instead of being (re)computed here — see
     /// [`crate::api::Api::upload_blob_with_digest`]. For a caller that
@@ -971,6 +1045,19 @@ impl AssetClient {
         self.api.worker_heartbeat(job, extend_ms, suffix, progress)
     }
 
+    /// [`AssetClient::worker_heartbeat`], also recording what one stage of
+    /// this job was handed — see [`Api::worker_heartbeat_stage`].
+    pub fn worker_heartbeat_stage(
+        &self,
+        job: &crate::dto::JobId,
+        extend_ms: u64,
+        suffix: Option<&str>,
+        progress: Option<(u16, &str)>,
+        stage: Option<&crate::dto::JobStageInput<'_>>,
+    ) -> ClientResult<u64> {
+        self.api.worker_heartbeat_stage(job, extend_ms, suffix, progress, stage)
+    }
+
     pub fn worker_succeed(
         &self,
         job: &crate::dto::JobId,
@@ -988,6 +1075,35 @@ impl AssetClient {
         error: Option<&crate::json::Value>,
     ) -> ClientResult<crate::dto::JobStateDto> {
         self.api.worker_fail(job, suffix, retry_delay_ms, error)
+    }
+
+    // ---- the vision-annotation queue ---------------------------------------
+
+    /// Counts behind the annotation bar; `category` narrows to one kit.
+    pub fn annotate_summary(
+        &self,
+        category: Option<&str>,
+    ) -> ClientResult<crate::dto::AnnotateSummaryDto> {
+        self.api.annotate_summary(category)
+    }
+
+    /// Queue what the vision pass still owes — one request, whole library.
+    pub fn annotate_backlog(
+        &self,
+        limit: u64,
+        category: Option<&str>,
+        epoch: u64,
+    ) -> ClientResult<crate::dto::AnnotateBacklogDto> {
+        self.api.annotate_backlog(limit, category, epoch)
+    }
+
+    /// The annotation record as it stands, for a pass that owns only part
+    /// of it and must carry the rest through.
+    pub fn get_annotation(
+        &self,
+        asset: &makepad_asset_data::AssetId,
+    ) -> ClientResult<crate::dto::AnnotationDto> {
+        self.api.get_annotation(asset)
     }
 
     fn wrap_cursor(&self, raw: Option<String>) -> Option<PageCursor> {

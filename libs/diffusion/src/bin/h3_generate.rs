@@ -21,6 +21,7 @@
 //! reference noise.
 
 use makepad_diffusion::h3::H3_VIDEO_PATCH_DIM;
+use makepad_diffusion::h3::H3KeyframeAnchor;
 use makepad_diffusion::h3_pipeline::{h3_generate, H3GenerateParams, H3KeyframeInput};
 use makepad_diffusion::h3_tokenizer::H3Tokenizer;
 use makepad_zune_core::options::DecoderOptions;
@@ -240,26 +241,32 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         }
     };
 
-    // fl2va keyframe: --image <png> switches the workflow.
-    let keyframe = match opts.get("image").filter(|p| !p.is_empty()) {
-        None => None,
-        Some(path) => {
-            let (rgb, w, h) = load_png_rgb(Path::new(path))?;
-            let tokenizer =
-                H3Tokenizer::load(&models.join("tokenizer")).map_err(|e| e.to_string())?;
-            let picture_label_ids = tokenizer.encode("<Picture 1>: ");
-            println!(
-                "keyframe: {path} {w}x{h} -> canvas {width}x{height} (label {} tokens)",
-                picture_label_ids.len()
-            );
-            Some(H3KeyframeInput {
-                rgb,
-                width: w,
-                height: h,
-                picture_label_ids,
-            })
-        }
-    };
+    // fl2va keyframes: --image <png> is the FIRST frame, --last-image <png>
+    // the LAST one. Either, both or neither; both switch the workflow to
+    // fl2va, and they are packed first-then-last like upstream.
+    let mut keyframes: Vec<H3KeyframeInput> = Vec::new();
+    for (flag, anchor) in [
+        ("image", H3KeyframeAnchor::First),
+        ("last-image", H3KeyframeAnchor::Last),
+    ] {
+        let Some(path) = opts.get(flag).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let (rgb, w, h) = load_png_rgb(Path::new(path))?;
+        let tokenizer = H3Tokenizer::load(&models.join("tokenizer")).map_err(|e| e.to_string())?;
+        let picture_label_ids = tokenizer.encode(&format!("<Picture {}>: ", keyframes.len() + 1));
+        println!(
+            "keyframe[{anchor:?}]: {path} {w}x{h} -> canvas {width}x{height} (label {} tokens)",
+            picture_label_ids.len()
+        );
+        keyframes.push(H3KeyframeInput {
+            rgb,
+            width: w,
+            height: h,
+            anchor,
+            picture_label_ids,
+        });
+    }
 
     // Reference noise when the canvas matches the dump geometry. On an fl2va
     // dump the forward-0 video rows are [condition rows | pure noise]: the
@@ -284,11 +291,7 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
             let latent_frames = (aligned - 5) / 17 * 5 + 2;
             let rows_per_frame = (lh / 2) * (lw / 2);
             let expected = latent_frames * rows_per_frame * H3_VIDEO_PATCH_DIM;
-            let cond_expected = if keyframe.is_some() {
-                rows_per_frame * H3_VIDEO_PATCH_DIM
-            } else {
-                0
-            };
+            let cond_expected = keyframes.len() * rows_per_frame * H3_VIDEO_PATCH_DIM;
             if rows.len() == cond_expected + expected {
                 println!("noise: torch seed-parity rows from dump");
                 if cond_expected > 0 {
@@ -358,7 +361,7 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         num_inference_steps: steps,
         token_ids,
         seed,
-        keyframe,
+        keyframes,
         video_noise_rows: video_noise,
         audio_noise_rows: audio_noise,
         condition_rows_override,

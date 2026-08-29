@@ -61,10 +61,15 @@ use std::path::Path;
 /// - v11: the search kind CHECK accepts `vjeffect` (the VJ's effect
 ///   documents are catalog content like anything else). Same copy+rename
 ///   retrofit v6 and v7 used — SQLite cannot ALTER a CHECK.
+/// - v12: the search kind CHECK accepts `data` (an app-state document: one
+///   Text/Source file its owning app resolves by alias, never a browse
+///   surface). Same copy+rename retrofit again.
+/// - v13: the search kind CHECK accepts `model-program` (editable CSG source
+///   plus its derived render GLB).
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 11;
+pub const SERVER_SCHEMA_VERSION: i64 = 13;
 
 pub struct AssetServerCore {
     db: Db,
@@ -225,10 +230,13 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                 9 => {
                     db.exec("create blob ref schema", crate::blobrefs::BLOBREF_SCHEMA)?;
                 }
-                // v11: the kind CHECK gains `vjeffect`. Identical retrofit to
+                // v11: the kind CHECK gains `vjeffect`.
+                // v12: the kind CHECK gains `data`. Identical retrofit to
                 // v6/v7: rebuild the table with this build's CHECK, which is
-                // idempotent and carries every kind the current list names.
-                10 => {
+                // idempotent and carries every kind the current list names,
+                // so a root passing through v11 already satisfies v12 and
+                // the v12 step is a no-op rebuild.
+                10 | 11 | 12 => {
                     if table_exists(db, "search_annotations")? {
                         db.exec(
                             "rebuild search_annotations kind check",

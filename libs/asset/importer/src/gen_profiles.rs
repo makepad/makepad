@@ -10,7 +10,9 @@
 //!
 //! The worker covers EVERY kind in [`crate::gen_kinds::GEN_KINDS`], so it
 //! announces all of those domains: covering a domain and advertising
-//! nothing in it is how a stale config profile gets withdrawn.
+//! nothing in it is how a stale config profile gets withdrawn — and it is
+//! also the honest report for a domain whose kind is never offered
+//! (`text`, whose expander a pipeline names and no picker shows).
 
 use crate::gen_kinds::{GenKind, GEN_KINDS};
 use makepad_asset_ai::fleet::BoxSnapshot;
@@ -61,9 +63,11 @@ fn presets_for(domain: &str) -> &'static [Preset] {
 }
 
 /// Profile ids are restricted to `[a-z0-9-_]`; model ids are not (`.` shows
-/// up in `ace-step-1.5-xl`). Fold anything else to `-` and collapse runs so
-/// two models can never collide on a shared prefix.
-fn slug(text: &str) -> String {
+/// up in `ace-step-1.5-xl` and in `qwen3.8-27b-vision`). Fold anything else
+/// to `-` and collapse runs so two models can never collide on a shared
+/// prefix. Also the label-safe model identity the annotation pass publishes
+/// as its `vlm-m-<tag>` tag: same charset rule, same answer.
+pub fn slug(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         let c = ch.to_ascii_lowercase();
@@ -104,9 +108,18 @@ fn hardware_fits(snapshots: &[BoxSnapshot], model_id: &str) -> bool {
     })
 }
 
-/// Every domain this worker is authoritative for (the whole wired table).
+/// Every domain this worker is authoritative for (the whole wired table),
+/// each named once — a domain that carries two kinds (`vision`: the
+/// client's question and the catalog's annotation pass) is still one
+/// capability the worker covers.
 pub fn covered_domains() -> Vec<String> {
-    GEN_KINDS.iter().map(|k| k.domain.to_string()).collect()
+    let mut out: Vec<String> = Vec::new();
+    for row in GEN_KINDS {
+        if !out.iter().any(|d| d == row.domain) {
+            out.push(row.domain.to_string());
+        }
+    }
+    out
 }
 
 /// Build the advertisement for one fleet snapshot, in table order. `ns` is
@@ -114,6 +127,12 @@ pub fn covered_domains() -> Vec<String> {
 pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto> {
     let mut out: Vec<JobProfileDto> = Vec::new();
     for row in GEN_KINDS {
+        // An annotation job is minted by the server for an asset that
+        // already exists: there is no prompt for a human to write and
+        // nothing for a picker to offer.
+        if !row.advertised {
+            continue;
+        }
         for model in executable_models(snapshots, row) {
             for preset in presets_for(row.domain) {
                 if let Some(profile) = profile_of(row, &model, preset, ns) {
@@ -133,7 +152,11 @@ pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto>
 fn executable_models(snapshots: &[BoxSnapshot], row: &GenKind) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for snapshot in snapshots {
-        if !snapshot.is_up() {
+        // A box outside its role does not serve this domain, so its copy of
+        // the weights is not a capability the fleet can offer.
+        if !snapshot.is_up()
+            || !makepad_asset_ai::fleet::role_allows(&snapshot.base_url, row.domain)
+        {
             continue;
         }
         for model in &snapshot.models {
@@ -365,11 +388,58 @@ mod tests {
         assert!(profiles[0].label.starts_with("ACE-Step-1.5-XL"));
     }
 
+    /// A box outside its role advertises nothing for the domains it may not
+    /// serve. The dedicated chat node honestly reports `video` in its
+    /// capabilities; that must not turn into a picker entry, and its lone
+    /// copy of a model must not make that model look fleet-available.
+    #[test]
+    fn a_role_excluded_box_advertises_nothing_for_that_domain() {
+        if std::env::var(makepad_asset_ai::fleet::FLEET_ROLES_ENV).is_ok() {
+            return;
+        }
+        let snapshots = vec![
+            snapshot(
+                "http://10.0.0.217:8123",
+                32 * 1024,
+                vec![
+                    model("qwen3.8-27b", "chat", MODEL_STATE_LOADED, 24.0),
+                    model("minimax-h3-q4-24g", "video", MODEL_STATE_READY, 20.0),
+                ],
+            ),
+            snapshot(
+                "http://10.0.0.123:8123",
+                24 * 1024,
+                vec![model("flux1-schnell", "image", MODEL_STATE_READY, 21.0)],
+            ),
+        ];
+        let ids: Vec<String> = build_profiles(&snapshots, "gen")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec!["image-flux1-schnell".to_string()]);
+    }
+
     #[test]
     fn the_worker_covers_every_wired_domain() {
         let domains = covered_domains();
-        assert_eq!(domains.len(), GEN_KINDS.len());
+        let mut wired: Vec<&str> = GEN_KINDS.iter().map(|k| k.domain).collect();
+        wired.sort_unstable();
+        wired.dedup();
+        assert_eq!(domains.len(), wired.len());
+        // Named once, even though `vision` carries two kinds.
+        assert_eq!(domains.iter().filter(|d| *d == "vision").count(), 1);
         assert!(domains.iter().any(|d| d == "video"));
+        // COVERED IS NOT OFFERED. The worker executes `text.expand`, so it
+        // says it covers `text`; a picker is still never given a "expand a
+        // prompt" entry, because its product is not a thing a person browses
+        // for.
+        assert!(domains.iter().any(|d| d == "text"));
+        let text_box = vec![snapshot(
+            "http://big",
+            96 * 1024,
+            vec![model("qwen3.8-27b", "text", MODEL_STATE_READY, 24.0)],
+        )];
+        assert!(build_profiles(&text_box, "gen").is_empty());
         // Covering `video` while advertising nothing is what withdraws the
         // deployment's stock H3 profiles when no box holds those weights.
         assert!(build_profiles(&[], "gen").is_empty());

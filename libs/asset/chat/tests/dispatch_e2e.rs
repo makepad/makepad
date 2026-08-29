@@ -17,7 +17,9 @@ use makepad_asset_store::{AssetServer, ServerConfig};
 use makepad_asset_chat::dispatch::AssetServerTools;
 use makepad_asset_chat::fleet_http;
 use makepad_asset_chat::session::{CancelFlag, ExecCtx, Origin, SessionId, ToolExecutor};
-use makepad_asset_chat::tools::{ContentToolCall, InspectTarget, OperationInputArg, PublicationArg};
+use makepad_asset_chat::tools::{
+    ContentGenerateKind, ContentToolCall, InspectTarget, OperationInputArg, PublicationArg,
+};
 use makepad_asset_chat::wire::ToolOutcome;
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::{
@@ -265,6 +267,35 @@ fn worker_alive(api: &Api) {
 }
 
 // ---------------------------------------------------------------- the tests
+
+#[test]
+fn game_generation_tool_enqueues_immediately_in_the_callers_namespace() {
+    let (mut server, token) = start_server("content_generate");
+    let mut tools = tools_for(&server, &token);
+    let api = worker_api(&server, &token);
+    let call = ContentToolCall::ContentGenerate {
+        kind: ContentGenerateKind::Character,
+        prompt: "a hopping clockwork bunny".into(),
+        dim_height: Some(1.25),
+    };
+
+    let outcome = execute(&mut tools, &HashSet::new(), &call);
+    let value = ok_value(&outcome);
+    let queued = value.get("job_id").and_then(Value::as_str).expect("job id");
+    assert_eq!(value.get("queued").and_then(Value::as_bool), Some(true));
+    assert!(value.get("note").and_then(Value::as_str).unwrap().contains("library"));
+
+    let claimed = api
+        .worker_claim_kinds(60_000, Some("generation-test"), &["character.generate"])
+        .expect("claim")
+        .expect("queued job");
+    assert_eq!(claimed.job.to_string(), queued);
+    assert_eq!(claimed.namespace, "gen");
+    assert_eq!(claimed.body.get("prompt").and_then(Value::as_str), Some("a hopping clockwork bunny"));
+    assert_eq!(claimed.body.get("dim_height").and_then(Value::as_str), Some("1.25"));
+    api.cancel_job(&claimed.job).expect("cancel test job");
+    server.shutdown();
+}
 
 #[test]
 fn operation_tools_publish_mesh_with_lineage_and_inherited_rights() {

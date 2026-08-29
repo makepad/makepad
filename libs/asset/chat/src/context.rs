@@ -21,7 +21,12 @@
 //! tests against base+app+typical dynamic.
 
 /// ~8k tokens at ~4 bytes/token: the ceiling for base + app + dynamic.
-pub const MAX_CONTEXT_BYTES: usize = 32_000;
+// 32_000 until 2026-08-27; raised once when the taught surface grew two
+// verbs (player_pos, ambience), the interiors/door flow, local modelling
+// and a day of incident-earned placement/scale/retry lessons — trimming
+// earned teaching to fit an arbitrary line degrades the small model more
+// than 500 extra tokens do. Still a hard cap; grow it consciously or trim.
+pub const MAX_CONTEXT_BYTES: usize = 34_000;
 
 pub const BASE: &str = include_str!("../context/base.md");
 pub const GAME: &str = include_str!("../context/game.md");
@@ -84,6 +89,9 @@ impl ClientProfile {
     /// sends them there.
     pub fn client_executes(self, call: &crate::tools::ContentToolCall) -> bool {
         use crate::tools::ContentToolCall as C;
+        if let C::WorldInSub { call, .. } = call {
+            return self.client_executes(call);
+        }
         match self {
             ClientProfile::Game => matches!(
                 call,
@@ -93,10 +101,13 @@ impl ClientProfile {
                     | C::WorldList
                     | C::WorldGetSource
                     | C::WorldSetSource { .. }
+                    | C::WorldNewLevel { .. }
                     | C::WorldSetPlayerModel { .. }
                     | C::WorldSpawn { .. }
                     | C::WorldTune { .. }
                     | C::WorldAddAddon { .. }
+                    | C::ModelBuild { .. }
+                    | C::ModelFetch { .. }
             ),
             ClientProfile::Gen => matches!(
                 call,
@@ -191,9 +202,21 @@ mod tests {
             steps: None,
         };
         let search = C::AssetSearch { query: "trawler".into(), limit: 8 };
+        let queued = C::ContentGenerate {
+            kind: crate::tools::ContentGenerateKind::Prop,
+            prompt: "a rusty trawler".into(),
+            dim_height: Some(2.0),
+        };
+        let model_build = C::ModelBuild { title: "mug".into(), source: "csg.part".into() };
+        let model_fetch = C::ModelFetch {
+            alias: "gen/csg/mug".parse().unwrap(),
+        };
 
         assert!(ClientProfile::Game.client_executes(&place));
+        assert!(ClientProfile::Game.client_executes(&model_build));
+        assert!(ClientProfile::Game.client_executes(&model_fetch));
         assert!(!ClientProfile::Game.client_executes(&generate));
+        assert!(!ClientProfile::Game.client_executes(&queued));
         assert!(ClientProfile::Gen.client_executes(&generate));
         assert!(ClientProfile::Gen.client_executes(&C::DefaultsGet));
         assert!(ClientProfile::Gen.client_executes(&C::FleetIntrospect { domain: None }));
@@ -236,6 +259,9 @@ mod tests {
             "- world.get_source:",
             "- world.set_player_model:",
             "- assets.query:",
+            "- content.generate:",
+            "SEARCH FIRST",
+            "Tell the player it is generating",
             // the trained-template guidance the agentic surface gets
             "<parameter=",
         ] {
