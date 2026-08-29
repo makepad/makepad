@@ -1,0 +1,21 @@
+# mpsheets — a spreadsheet as a plain full-window Makepad app, part of the
+# mp* family (mpwm hosts it as a tile; mpterm/mpbrowser/mpfiles/mptask are
+# siblings). The grid is the stock `DataGrid` widget; everything above it —
+# the formula engine, the dependency graph, formats, undo, CSV — lives here.
+#
+# mpsheets runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# the shared --stdin-loop client runtime every Makepad app has.
+
+[package]
+name = "mpsheets"
+version = "0.1.0"
+edition = "2021"
+default-run = "mpsheets"
+
+[[bin]]
+name = "mpsheets"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+mp-theme = { path = "../../libs/mp_theme" }

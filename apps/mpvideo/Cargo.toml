@@ -1,0 +1,37 @@
+# mpvideo — a dumb video player, part of the mp* app family (mpterm, mpwm,
+# mpfiles, mpimage, mptask, mpsheets, route, mixer...).
+#
+# `mpvideo <path>` opens one clip fit-to-window on a dark mp_theme
+# background and plays it, sound and all. Space pauses, Left/Right seek
+# ±5s (Shift ±30s), Up/Down set the volume, M mutes, double-click hides
+# the chrome, Escape/Q quits. `--preview <path>` sizes the window as a
+# popup — that is mpfiles' Quick Look. `--mute` (or MPVIDEO_MUTE=1, or a
+# hidden window) starts silent, so a test run never talks at whoever is
+# sitting at the machine.
+#
+# The decode path is lifted from apps/asset-ui/src/video_player.rs (a
+# detached decode thread over the platform's hardware
+# `makepad_platform::video_file` seam, a small frame ring paced against a
+# wall clock, and the soundtrack mixed into `cx.audio_output`), with the
+# VJ's NV12-on-the-GPU trick (apps/vj/src/nv12_view.rs) replacing the
+# software YUV->BGRA loop: the frames stay NV12 all the way to two plane
+# textures and the pixel shader does the colour conversion.
+
+[package]
+name = "mpvideo"
+version = "0.1.0"
+edition = "2021"
+default-run = "mpvideo"
+
+[lib]
+name = "mpvideo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mpvideo"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+mp-theme = { path = "../../libs/mp_theme" }
+mp-wm-api = { path = "../../libs/mp_wm_api" }
