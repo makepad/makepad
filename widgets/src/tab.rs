@@ -6,12 +6,13 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvgGlyph;
+use crate::widget::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.TabBase = #(Tab::script_component(vm))
+    mod.widgets.TabBase = #(Tab::register_widget(vm))
 
     mod.widgets.Tab = set_type_default() do mod.widgets.TabBase{
         width: Fit
@@ -263,15 +264,26 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook, Animator)]
+/// A tab is a real widget: it has a uid and sits in the widget tree under
+/// its tab bar, so the design tweaker can pick it (in 2D and on its own
+/// plane in the exploded view) and style its template. The tab bar still
+/// drives it directly — `handle_event_with` for actions, `draw` for the
+/// label — the widget seams only add identity.
+#[derive(Script, ScriptHook, Animator, Widget)]
 pub struct Tab {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[rust]
     is_active: bool,
     #[rust]
     is_dragging: bool,
+    /// The label the tab bar hands in before each draw.
+    #[rust]
+    pub name: String,
 
+    #[redraw]
     #[live]
     draw_bg: DrawQuad,
     #[live]
@@ -458,5 +470,19 @@ impl Tab {
             }
             _ => {}
         }
+    }
+}
+
+impl Widget for Tab {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
+        // Driven by `TabBar::handle_event` through `handle_event_with`, which
+        // needs the bar's action sink; nothing to do on the plain seam.
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let name = std::mem::take(&mut self.name);
+        self.draw(cx, &name);
+        self.name = name;
+        DrawStep::done()
     }
 }

@@ -300,16 +300,22 @@ impl<'a> CxDraw<'a> {
 
         let sh = &self.cx.draw_shaders[draw_shader.index];
 
+        // The nesting depth this call belongs to. `depth_target` is Some only
+        // while the exploded view is up, which is what keeps batching — and so
+        // the whole render — byte-identical when the mode is off.
+        let turtle_depth = self.cx.nesting_depth as f32;
+        let depth_target = self.cx.sploded_depth_target();
+
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
 
         if append && !sh.mapping.flags.draw_call_always {
-            if let Some(index) = draw_list.find_appendable_drawcall(sh, draw_vars) {
+            if let Some(index) = draw_list.find_appendable_drawcall(sh, draw_vars, depth_target) {
                 return Some(&mut draw_list.draw_items[index]);
             }
         }
 
-        Some(draw_list.append_draw_call(self.cx.redraw_id, sh, draw_vars))
+        Some(draw_list.append_draw_call(self.cx.redraw_id, sh, draw_vars, turtle_depth))
     }
 
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {

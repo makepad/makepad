@@ -14,6 +14,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static ORPHAN_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// How often the orphan guard looks at its parent. A hosted child must not
+/// outlive its host by more than about a second.
+const ORPHAN_POLL_MS: u64 = 250;
 
 /// Unix seconds of the last message received from the studio host in
 /// `--stdin-loop` mode (0 = never / not in that mode).
@@ -95,6 +100,39 @@ fn orphaned_stdin_app() -> bool {
     {
         false
     }
+}
+
+/// Start the orphan guard every `--stdin-loop` child needs (idempotent,
+/// and a no-op outside that mode).
+///
+/// The host owns the child's whole reason to run: it draws into the host's
+/// swapchain and its only input is the host's message stream. When the host
+/// dies the child must follow, and its own event loop cannot be trusted to
+/// notice — a busy handler (an mpterm tile parsing a `yes` flood) can sit
+/// between two socket reads for minutes, which is exactly how orphans that
+/// burn a core were surviving their mpwm. This is a separate, tiny thread so
+/// the check keeps running no matter what the event loop is doing, and it is
+/// independent of the (opt-in) memory watchdog, which almost no app starts.
+pub fn start_stdin_orphan_watchdog() {
+    if !crate::app_main::should_run_stdin_loop_from_env() {
+        return;
+    }
+    if ORPHAN_WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("stdin-orphan-watchdog".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(ORPHAN_POLL_MS));
+            if orphaned_stdin_app() {
+                crate::error!(
+                    "stdin-loop host is gone (reparented to init) — exiting orphaned app instance"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::process::exit(0);
+            }
+        })
+        .ok();
 }
 
 fn watchdog_main(limits: MemoryLimits) {

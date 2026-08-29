@@ -1,3 +1,4 @@
+use crate::widget_tree::CxWidgetExt;
 use crate::{makepad_derive_widget::*, makepad_draw::*, scroll_bars::ScrollBars, widget::*};
 use std::collections::HashMap;
 
@@ -162,6 +163,9 @@ impl FlatList {
                 Entry::Vacant(vac) => {
                     let widget_ref =
                         cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
+                    // A tree node under the list, so the design tweaker can
+                    // pick the item and style its template.
+                    cx.widget_tree_insert_child(self.uid, id, widget_ref.clone());
                     vac.insert(WidgetItem {
                         template,
                         widget: widget_ref.clone(),

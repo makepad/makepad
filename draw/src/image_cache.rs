@@ -741,6 +741,18 @@ impl ImageCache {
         self.evict_loaded_if_oversized();
     }
 
+    /// Forget one path, returning the entry it held (`None` if it held none).
+    ///
+    /// The size cap below counts ENTRIES, not bytes: 512 thumbnails and 512
+    /// forty-megapixel photographs look the same to it, and the second costs
+    /// gigabytes. An app that knows it is done with an image — a viewer whose
+    /// panel just closed, say — hands it back here rather than waiting for a
+    /// cap that may never be reached. Prefer [`evict_image_from_cache`],
+    /// which also releases the pixels behind the entry.
+    pub fn evict(&mut self, image_path: &Path) -> Option<ImageCacheEntry> {
+        self.map.remove(image_path)
+    }
+
     /// Drop `Loaded` entries once the cache exceeds its cap. This is safe because widgets keep
     /// their own clone of any texture they're currently displaying (via `set_texture`), so
     /// eviction never affects a visible image — a later *fresh* request for an evicted path
@@ -1395,6 +1407,48 @@ mod tests {
     }
 
     #[test]
+    fn evict_removes_one_path_and_leaves_the_rest() {
+        // `Loading` entries need no Cx, and eviction is the same map
+        // operation either way.
+        let mut cache = ImageCache::new();
+        for name in ["a.png", "b.png", "c.png"] {
+            cache
+                .map
+                .insert(PathBuf::from(name), ImageCacheEntry::Loading(4, 4));
+        }
+        assert!(cache.evict(Path::new("b.png")).is_some());
+        assert_eq!(cache.map.len(), 2);
+        assert!(cache.map.contains_key(Path::new("a.png")));
+        assert!(cache.map.contains_key(Path::new("c.png")));
+        // Evicting the same path twice, or one nobody cached, is not an
+        // error — a viewer hands its list back without bookkeeping.
+        assert!(cache.evict(Path::new("b.png")).is_none());
+        assert!(cache.evict(Path::new("never-loaded.png")).is_none());
+        assert_eq!(cache.map.len(), 2);
+    }
+
+    #[test]
+    fn the_entry_cap_still_only_bites_past_512() {
+        // The global behaviour is unchanged by eviction: nothing is shed
+        // until MAX_ENTRIES is exceeded, and then only `Loaded` entries.
+        let mut cache = ImageCache::new();
+        for i in 0..ImageCache::MAX_ENTRIES {
+            cache
+                .map
+                .insert(PathBuf::from(format!("{i}.png")), ImageCacheEntry::Loading(1, 1));
+        }
+        cache.evict_loaded_if_oversized();
+        assert_eq!(cache.map.len(), ImageCache::MAX_ENTRIES);
+        // Over the cap, but every entry is an in-flight decode: dropping
+        // those would orphan the work, so the map is left alone.
+        cache
+            .map
+            .insert(PathBuf::from("one-too-many.png"), ImageCacheEntry::Loading(1, 1));
+        cache.evict_loaded_if_oversized();
+        assert_eq!(cache.map.len(), ImageCache::MAX_ENTRIES + 1);
+    }
+
+    #[test]
     fn test_detect_image_format_recognises_gif89a() {
         assert_eq!(detect_image_format(b"GIF89a"), Some("gif"));
     }
@@ -1748,6 +1802,48 @@ pub fn process_async_image_load(
         }
         cx.get_global::<ImageCache>().map.remove(image_path);
     }
+}
+
+/// Hand one path's decoded image back: the cache forgets it AND the pixels
+/// behind it are released. True when there was something to evict.
+///
+/// Dropping the cache's `Texture` handle alone is not enough. A `Texture` is a
+/// refcounted slot in `Cx`'s texture pool; when the last handle goes the slot
+/// joins the free list, but the `CxTexture` in it — pixel buffer and all —
+/// stays put until some later allocation happens to reuse that slot. The
+/// decoded buffer is the expensive half (a 24-megapixel photo is 96 MB of it,
+/// kept as the upload source for the life of the slot), so this drops it
+/// outright and lets the freed slot be reused for the rest.
+///
+/// Call it only for a path the caller loaded and no longer shows: a widget
+/// still displaying that image holds its own clone of the `Texture`, which
+/// would survive here with nothing left to re-upload from.
+///
+/// "Released" means released to the allocator, which is not the same as
+/// released to the OS: on macOS a freed 96 MB block goes into libmalloc's
+/// large cache and `ps rss` does not move (a plain `vec![0u32; 24_000_000]`
+/// x5, touched then dropped, leaves RSS exactly where it was). What changes
+/// is what the process is still *holding*: the next decode reuses those
+/// pages instead of asking for more, so a viewer dialing through a folder
+/// stops climbing.
+pub fn evict_image_from_cache(cx: &mut Cx, image_path: &Path) -> bool {
+    if !cx.has_global::<ImageCache>() {
+        return false;
+    }
+    let Some(entry) = cx.get_global::<ImageCache>().evict(image_path) else {
+        return false;
+    };
+    if let ImageCacheEntry::Loaded(texture) = entry {
+        // The decoded pixels; the slot itself goes when `texture` drops.
+        match texture.get_format(cx) {
+            TextureFormat::VecBGRAu8_32 { data, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. } => {
+                *data = None;
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 pub fn load_image_from_cache(cx: &mut Cx, image_path: &Path) -> Option<Texture> {

@@ -43,7 +43,25 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
         let mut cast_fields = Vec::new();
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
+        // Every `#[live]` field whose type is a draw shader (`Draw…`): the
+        // widget's material layers, exposed as (name, area) so a design
+        // tool can mirror any layer's live draw call, not only the area's.
+        let mut layer_fields = Vec::new();
         for field in &mut fields {
+            if field.attrs.iter().any(|v| v.name == "live") {
+                let ty = field.ty.to_string();
+                // Draw shader structs only — not the draw-list / pass /
+                // draw-state plumbing that shares the prefix.
+                if ty.starts_with("Draw")
+                    && !ty.contains('<')
+                    && !ty.starts_with("DrawList")
+                    && !ty.starts_with("DrawPass")
+                    && !ty.starts_with("DrawState")
+                    && !ty.starts_with("DrawStep")
+                {
+                    layer_fields.push(field.name.clone());
+                }
+            }
             if field.attrs.iter().any(|v| v.name == "walk") {
                 walk_field = Some(field.name.clone());
             }
@@ -251,6 +269,13 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 return error(
                     "Need either a field marked redraw or deref or wrap to find redraw method",
                 );
+            }
+            if !layer_fields.is_empty() {
+                tb.add("    fn layer_areas(&self) -> Vec<(&'static str, Area)> { vec![");
+                for layer_field in &layer_fields {
+                    tb.add(&format!("(\"{0}\", self.{0}.area()),", layer_field));
+                }
+                tb.add("    ] }");
             }
             if let Some(deref_field) = &deref_field {
                 tb.add("    fn set_scroll_pos(&mut self, cx:&mut Cx, v:Vec2d) { self.")

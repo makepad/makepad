@@ -12,7 +12,7 @@ use {
             apple::apple_util::str_to_nsstring,
             macos::{
                 macos_app::{
-                    activate_cocoa_window_on_pointer_down, get_macos_class_global,
+                    activate_cocoa_window_on_pointer_down, focus_allowed, get_macos_class_global,
                     with_macos_app, MacosApp,
                 },
                 macos_event::MacosEvent,
@@ -221,6 +221,13 @@ impl MacosWindow {
         self.send_change_event();
     }
 
+    pub fn set_title(&mut self, title: &str) {
+        unsafe {
+            let title = str_to_nsstring(title);
+            let () = msg_send![self.window, setTitle: title];
+        }
+    }
+
     fn is_topmost(&self) -> bool {
         let level: i64 = unsafe { msg_send![self.window, level] };
         level > NSNormalWindowLevel
@@ -247,6 +254,7 @@ impl MacosWindow {
         self.macos_config = macos_config.normalized();
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+            crate::startup_trace("NSWindow init begin");
 
             // set the backpointeers
             (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
@@ -327,12 +335,16 @@ impl MacosWindow {
             // real Metal without flashing a window (the occlusion gate only
             // skips the WINDOW pass's present; child passes still render).
             if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
-                if self.is_nonactivating_panel() {
+                // A no-focus process (`--remote`, MAKEPAD_NO_FOCUS) shows the
+                // window without making it key or activating the app —
+                // see `macos_app::focus_allowed`.
+                if self.is_nonactivating_panel() || !focus_allowed() {
                     let () = msg_send![self.window, orderFront: nil];
                 } else {
                     let () = msg_send![self.window, makeKeyAndOrderFront: nil];
                 }
             }
+            crate::startup_trace("NSWindow ordered front");
 
             let rect = NSRect {
                 origin: NSPoint { x: 0., y: 0. },
@@ -939,6 +951,17 @@ impl MacosWindow {
         if self.retired {
             return;
         }
+        // The physical button-up ends a scrub pin UNCONDITIONALLY at the
+        // platform layer: cursor restored at the press point even if event
+        // dispatch drops the up. (Cx's call_event_handler hook clears its
+        // own flag; the owner's later release call no-ops.)
+        if button.is_primary() {
+            with_macos_app(|app| {
+                if app.pointer_pin_mode {
+                    app.set_pointer_pin(false);
+                }
+            });
+        }
         self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
@@ -989,14 +1012,10 @@ impl MacosWindow {
         // and the true motion travels as `lock_delta`. An unbounded virtual
         // position routed clicks into whatever UI it drifted over.
         let (pos, lock_delta) = with_macos_app(|app| {
-            if !app.mouse_pointer_lock {
-                return (pos, Vec2d::default());
-            }
             let (dx, dy): (f64, f64) = unsafe {
                 (msg_send![event, deltaX], msg_send![event, deltaY])
             };
-            let pin = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
-            (pin, Vec2d { x: dx, y: dy })
+            app.locked_mouse_transform(pos, Vec2d { x: dx, y: dy }, self.last_mouse_pos)
         });
         self.last_mouse_pos = pos;
 

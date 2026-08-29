@@ -5430,6 +5430,8 @@ impl CxVulkan {
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
+        // Exploded z-layer view: z is the call's nesting depth, not paint order.
+        let sploded = cx.passes[draw_pass_id].sploded.is_some();
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
@@ -5523,7 +5525,7 @@ impl CxVulkan {
                     cx.demo_time_repaint = true;
                 }
 
-                draw_call.draw_call_uniforms.set_zbias(*zbias);
+                draw_call.resolve_zbias(*zbias, sploded);
                 *zbias += zbias_step;
                 draw_call.instance_dirty = false;
                 draw_call.uniforms_dirty = false;

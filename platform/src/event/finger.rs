@@ -294,6 +294,12 @@ pub struct CxDigitCapture {
     pub switch_capture: Option<Area>,
     pub time: f64,
     pub abs_start: Vec2d,
+    /// A scrub pin rides ON the capture: while set, the hardware cursor is
+    /// hidden+detached and pointer events exist only for this owner (hover
+    /// resolution and new captures are suppressed in hits()). Because the
+    /// state lives on the capture, it structurally cannot outlive the
+    /// button — `mouse_up` releases the capture and the pin with it.
+    pub pinned: bool,
 }
 
 #[derive(Default, Clone)]
@@ -423,6 +429,7 @@ impl CxFingers {
             abs_start,
             has_long_press_occurred: false,
             switch_capture: None,
+            pinned: false,
         })
         /*}*/
     }
@@ -593,6 +600,37 @@ impl CxFingers {
             }
             _ => {}
         }
+    }
+
+    /// True while any capture carries a scrub pin (the owner is the only
+    /// consumer of pointer events).
+    pub fn has_pinned_capture(&self) -> bool {
+        self.captures.iter().any(|c| c.pinned)
+    }
+
+    /// Mark the current mouse capture pinned. Returns false when there is
+    /// no mouse capture to pin (the press was already released).
+    pub(crate) fn pin_mouse_capture(&mut self) -> bool {
+        let digit_id = live_id!(mouse).into();
+        if let Some(c) = self.captures.iter_mut().find(|c| c.digit_id == digit_id) {
+            c.pinned = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear the pin flag on whatever capture carries it (release or
+    /// cancel). Returns true when a pin was actually cleared.
+    pub(crate) fn unpin_captures(&mut self) -> bool {
+        let mut any = false;
+        for c in &mut self.captures {
+            if c.pinned {
+                c.pinned = false;
+                any = true;
+            }
+        }
+        any
     }
 
     pub(crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
@@ -1354,6 +1392,13 @@ impl Event {
                         return event;
                     }
                 } else {
+                    // Absolute pin semantics: while a capture carries a
+                    // scrub pin the pointer exists only for its owner — no
+                    // hover resolution anywhere (the virtual abs must never
+                    // highlight widgets it wanders over).
+                    if cx.fingers.has_pinned_capture() {
+                        return Hit::Nothing;
+                    }
                     let device = DigitDevice::Mouse {
                         button: MouseButton::PRIMARY,
                     };
@@ -1393,6 +1438,14 @@ impl Event {
                 }
             }
             Event::MouseDown(e) => {
+                // Absolute pin semantics: no NEW captures while a capture
+                // carries a scrub pin — a press at the virtual abs must not
+                // engage whatever widget it happens to sit over. (The
+                // owner's own press predates the pin; cancel gestures
+                // listen to raw events, not hits.)
+                if cx.fingers.has_pinned_capture() {
+                    return Hit::Nothing;
+                }
                 let digit_id = live_id!(mouse).into();
 
                 let device = DigitDevice::Mouse { button: e.button };

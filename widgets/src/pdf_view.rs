@@ -1,8 +1,11 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, portal_list::*, view::*, widget::*};
 use makepad_pdf_parse::{
-    content::parse_content_stream,
+    content::{
+        mat_x_scale, mat_y_scale, parse_content_stream, tj_adjustment_advance, tm_advance,
+        tm_pre_translate,
+    },
     document::PdfDocument,
-    font::{char_width, decode_text},
+    font::{char_width, decode_codes, decode_text},
     PdfOp, PdfPage, TextArrayItem,
 };
 use std::rc::Rc;
@@ -170,6 +173,12 @@ script_mod! {
         height: 792
         draw_bg +: {
             color: #fff
+            // `mod.draw.DrawQuad`'s own pixel returns #0000: without a fill
+            // of its own the paper is invisible and the page's black text
+            // lands straight on whatever is behind the view.
+            pixel: fn() {
+                return vec4(self.color.rgb * self.color.a, self.color.a)
+            }
         }
         draw_selection +: {
             color: uniform(#x3399FF66)
@@ -208,6 +217,10 @@ script_mod! {
             Page := View {
                 width: Fill
                 height: Fit
+                // The paper is drawn at its own size; the gutter left and
+                // right of it is a margin the draw code computes, not an
+                // `align`, so that the turtle rect the page renders (and
+                // hit-tests text selection) against is the true one.
                 margin: Inset{ bottom: 8. }
                 new_batch: true
                 page_view := mod.widgets.PdfPageView {}
@@ -221,6 +234,27 @@ script_mod! {
 pub struct CachedPage {
     ops: Vec<PdfOp>,
     page: PdfPage,
+}
+
+impl CachedPage {
+    /// One page, already parsed. Building these is pure data work with no
+    /// `Cx` in sight, so a caller that does not want the parse on the UI
+    /// thread can do it on a worker and hand the results over afterwards
+    /// (see [`PdfView::append_pages`]).
+    pub fn new(page: PdfPage, ops: Vec<PdfOp>) -> Self {
+        Self { ops, page }
+    }
+
+    /// The page box in PDF points, with the usual US-Letter fallback for a
+    /// page whose MediaBox was missing or degenerate.
+    pub fn size(&self) -> DVec2 {
+        let w = self.page.width();
+        let h = self.page.height();
+        dvec2(
+            if w > 0.0 { w } else { 612.0 },
+            if h > 0.0 { h } else { 792.0 },
+        )
+    }
 }
 
 // ---- PdfPageView: renders a single PDF page (TextFlow-like step pattern) ----
@@ -372,8 +406,10 @@ impl Widget for PdfPageView {
 }
 
 impl PdfPageView {
-    /// Render a page's content. Called by PdfView between begin step and end.
-    pub(crate) fn render_page(&mut self, cx: &mut Cx2d, cached: &CachedPage, zoom: f64) {
+    /// Render a page's content. Called by PdfView between begin step and end
+    /// — and by anything else that drives a `PdfPageView` itself (a thumbnail
+    /// strip, a print preview) the same way.
+    pub fn render_page(&mut self, cx: &mut Cx2d, cached: &CachedPage, zoom: f64) {
         let rect = cx.turtle().rect();
         let origin_x = rect.pos.x as f32;
         let origin_y = rect.pos.y as f32;
@@ -448,7 +484,9 @@ impl PdfPageView {
                         st = s;
                     }
                 }
-                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(&st.ctm, m),
+                // `cm` PRE-concatenates: the new transform applies first,
+                // then the existing CTM (row-vector convention, §8.3.4).
+                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(m, &st.ctm),
                 PdfOp::SetLineWidth(w) => st.line_width = *w,
                 PdfOp::SetExtGState(name) => {
                     if let Some(gs) = page.ext_gstate.get(name) {
@@ -577,14 +615,12 @@ impl PdfPageView {
                     st.font_size = *s;
                 }
                 PdfOp::MoveText(tx, ty) => {
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::MoveTextSetLeading(tx, ty) => {
                     st.text_leading = -ty;
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetTextMatrix(m) => {
@@ -592,7 +628,8 @@ impl PdfPageView {
                     st.text_line_matrix = *m;
                 }
                 PdfOp::NextLine => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetCharSpacing(v) => st.char_spacing = *v,
@@ -601,24 +638,38 @@ impl PdfPageView {
                 PdfOp::SetTextRise(v) => st.text_rise = *v,
                 PdfOp::SetHorizScaling(v) => st.horiz_scaling = *v,
                 PdfOp::ShowText(b) => {
-                    st.text_matrix[4] += text_advance(&st, page, b);
+                    let adv = text_advance(&st, page, b);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 PdfOp::ShowTextArray(items) => {
                     for it in items {
                         match it {
                             TextArrayItem::Text(b) => {
-                                st.text_matrix[4] += text_advance(&st, page, b);
+                                let adv = text_advance(&st, page, b);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                             TextArrayItem::Adjustment(a) => {
-                                st.text_matrix[4] -= a / 1000.0 * st.font_size;
+                                let adv = tj_adjustment_advance(*a, st.font_size, st.horiz_scaling);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                         }
                     }
                 }
                 PdfOp::ShowTextNextLine(b) => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
-                    st.text_matrix[4] += text_advance(&st, page, b);
+                    let adv = text_advance(&st, page, b);
+                    tm_advance(&mut st.text_matrix, adv);
+                }
+                PdfOp::ShowTextNextLineSpacing(aw, ac, b) => {
+                    st.word_spacing = *aw;
+                    st.char_spacing = *ac;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
+                    st.text_matrix = st.text_line_matrix;
+                    let adv = text_advance(&st, page, b);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 _ => {}
             }
@@ -649,7 +700,9 @@ impl PdfPageView {
                         st = s;
                     }
                 }
-                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(&st.ctm, m),
+                // `cm` PRE-concatenates: the new transform applies first,
+                // then the existing CTM (row-vector convention, §8.3.4).
+                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(m, &st.ctm),
                 PdfOp::SetExtGState(name) => {
                     if let Some(gs) = page.ext_gstate.get(name) {
                         if let Some(a) = gs.ca {
@@ -695,14 +748,12 @@ impl PdfPageView {
                     st.font_size = *s;
                 }
                 PdfOp::MoveText(tx, ty) => {
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::MoveTextSetLeading(tx, ty) => {
                     st.text_leading = -ty;
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetTextMatrix(m) => {
@@ -710,7 +761,8 @@ impl PdfPageView {
                     st.text_line_matrix = *m;
                 }
                 PdfOp::NextLine => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetCharSpacing(v) => st.char_spacing = *v,
@@ -721,26 +773,41 @@ impl PdfPageView {
 
                 PdfOp::ShowText(bytes) => {
                     self.draw_one_text(cx, &st, page, bytes, ox, oy, zoom, ph);
-                    st.text_matrix[4] += text_advance(&st, page, bytes);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 PdfOp::ShowTextArray(items) => {
                     for it in items {
                         match it {
                             TextArrayItem::Text(bytes) => {
                                 self.draw_one_text(cx, &st, page, bytes, ox, oy, zoom, ph);
-                                st.text_matrix[4] += text_advance(&st, page, bytes);
+                                let adv = text_advance(&st, page, bytes);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                             TextArrayItem::Adjustment(a) => {
-                                st.text_matrix[4] -= a / 1000.0 * st.font_size;
+                                let adv = tj_adjustment_advance(*a, st.font_size, st.horiz_scaling);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                         }
                     }
                 }
                 PdfOp::ShowTextNextLine(bytes) => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
                     self.draw_one_text(cx, &st, page, bytes, ox, oy, zoom, ph);
-                    st.text_matrix[4] += text_advance(&st, page, bytes);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
+                }
+                PdfOp::ShowTextNextLineSpacing(aw, ac, bytes) => {
+                    st.word_spacing = *aw;
+                    st.char_spacing = *ac;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
+                    st.text_matrix = st.text_line_matrix;
+                    self.draw_one_text(cx, &st, page, bytes, ox, oy, zoom, ph);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 _ => {}
             }
@@ -769,22 +836,11 @@ impl PdfPageView {
         zoom: f32,
         ph: f32,
     ) {
-        let font = page.fonts.get(&st.font_name);
-        let text = if let Some(f) = font {
-            decode_text(f, bytes)
-        } else {
-            String::from_utf8_lossy(bytes).to_string()
-        };
-        if text.is_empty() {
-            return;
-        }
-
         let (tm, ctm) = (&st.text_matrix, &st.ctm);
-        let tx = ctm[0] * tm[4] + ctm[2] * tm[5] + ctm[4];
-        let ty = ctm[1] * tm[4] + ctm[3] * tm[5] + ctm[5];
-        let sx = ox + tx as f32 * zoom;
-        let sy = oy + (ph - ty as f32) * zoom;
-        let fs = (st.font_size * tm[3].abs() * ctm[3].abs()) as f32 * zoom;
+        // Scales come from the COMPOSED text-rendering matrix — separate
+        // per-matrix norms are wrong when rotation meets anisotropic scale.
+        let trm = mul_mat(tm, ctm);
+        let fs = (st.font_size * mat_y_scale(&trm)) as f32 * zoom;
         if fs < 0.5 || fs > 500.0 {
             return;
         }
@@ -796,19 +852,67 @@ impl PdfPageView {
             z: c[2],
             w: c[3],
         };
-        let dt = self.pick_draw_text(&st.font_name);
-        dt.color = color;
-        dt.text_style.font_size = fs * 0.75;
-        let text_x = sx as f64;
-        let text_y = sy as f64 - fs as f64 * 0.8;
-        dt.draw_abs(
-            cx,
+
+        // Where a text-space baseline offset lands on screen.
+        let to_screen = |offset: f64| -> DVec2 {
+            let mut m = *tm;
+            tm_advance(&mut m, offset);
+            let tx = ctm[0] * m[4] + ctm[2] * m[5] + ctm[4];
+            let ty = ctm[1] * m[4] + ctm[3] * m[5] + ctm[5];
             DVec2 {
-                x: text_x,
-                y: text_y,
-            },
-            &text,
-        );
+                x: (ox + tx as f32 * zoom) as f64,
+                y: (oy + (ph - ty as f32) * zoom) as f64 - fs as f64 * 0.8,
+            }
+        };
+
+        let font = page.fonts.get(&st.font_name);
+        let Some(f) = font else {
+            let text = String::from_utf8_lossy(bytes).to_string();
+            if text.is_empty() {
+                return;
+            }
+            let pos = to_screen(0.0);
+            let dt = self.pick_draw_text(&st.font_name);
+            dt.color = color;
+            dt.text_style.font_size = fs * 0.75;
+            dt.draw_abs(cx, pos, &text);
+            return;
+        };
+
+        // The page's font is not the one we rasterize with, so our natural
+        // run widths differ from the PDF's metrics and adjacent runs would
+        // overlap or gap. Placing every glyph at its own PDF-metric offset
+        // keeps columns, kerned runs and tables aligned (the substituted
+        // glyph itself may be narrower or wider — that is the trade of a
+        // substitution renderer).
+        let glyph_scale = st.font_size / 1000.0;
+        let th = st.horiz_scaling / 100.0;
+        // Word spacing applies to single-byte code 32 only (§9.3.3).
+        let two = matches!(
+            f.encoding,
+            makepad_pdf_parse::page::FontEncoding::Identity
+        ) || f.subtype == "Type0";
+        let codes = decode_codes(f, bytes);
+        let mut offset = 0.0f64;
+        let font_name = st.font_name.clone();
+        for (code, piece) in codes {
+            let advance = (char_width(f, code) * glyph_scale
+                + st.char_spacing
+                + if code == 0x20 && !two {
+                    st.word_spacing
+                } else {
+                    0.0
+                })
+                * th;
+            if !piece.is_empty() && piece != " " {
+                let pos = to_screen(offset);
+                let dt = self.pick_draw_text(&font_name);
+                dt.color = color;
+                dt.text_style.font_size = fs * 0.75;
+                dt.draw_abs(cx, pos, &piece);
+            }
+            offset += advance;
+        }
     }
 
     /// Compute the screen-space position and size for a text fragment (without drawing).
@@ -830,12 +934,16 @@ impl PdfPageView {
         let ty = ctm[1] * tm[4] + ctm[3] * tm[5] + ctm[5];
         let sx = ox + tx as f32 * zoom;
         let sy = oy + (ph - ty as f32) * zoom;
-        let fs = (st.font_size * tm[3].abs() * ctm[3].abs()) as f32 * zoom;
+        // Composed matrix for both scales (see draw_one_text). The tracker
+        // keeps an AXIS-ALIGNED rect — a known limitation for rotated or
+        // sheared text, where selection geometry approximates the drawn
+        // baseline; lengths are exact along the transformed axes.
+        let trm = mul_mat(tm, ctm);
+        let fs = (st.font_size * mat_y_scale(&trm)) as f32 * zoom;
         if fs < 0.5 || fs > 500.0 {
             return None;
         }
-        // Compute text width from advance
-        let advance = text_advance(st, page, bytes) as f32 * zoom * ctm[0].abs() as f32;
+        let advance = (text_advance(st, page, bytes) * mat_x_scale(&trm)) as f32 * zoom;
         let text_y = sy as f64 - fs as f64 * 0.8;
         Some(Rect {
             pos: dvec2(sx as f64, text_y),
@@ -864,7 +972,9 @@ impl PdfPageView {
                         st = s;
                     }
                 }
-                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(&st.ctm, m),
+                // `cm` PRE-concatenates: the new transform applies first,
+                // then the existing CTM (row-vector convention, §8.3.4).
+                PdfOp::ConcatMatrix(m) => st.ctm = mul_mat(m, &st.ctm),
                 PdfOp::SetExtGState(name) => {
                     if let Some(gs) = page.ext_gstate.get(name) {
                         if let Some(a) = gs.ca {
@@ -885,14 +995,12 @@ impl PdfPageView {
                     st.font_size = *s;
                 }
                 PdfOp::MoveText(tx, ty) => {
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::MoveTextSetLeading(tx, ty) => {
                     st.text_leading = -ty;
-                    st.text_line_matrix[4] += tx;
-                    st.text_line_matrix[5] += ty;
+                    tm_pre_translate(&mut st.text_line_matrix, *tx, *ty);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetTextMatrix(m) => {
@@ -900,7 +1008,8 @@ impl PdfPageView {
                     st.text_line_matrix = *m;
                 }
                 PdfOp::NextLine => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
                 }
                 PdfOp::SetCharSpacing(v) => st.char_spacing = *v,
@@ -911,26 +1020,41 @@ impl PdfPageView {
 
                 PdfOp::ShowText(bytes) => {
                     self.collect_one_segment(&st, page, bytes, ox, oy, zoom, ph);
-                    st.text_matrix[4] += text_advance(&st, page, bytes);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 PdfOp::ShowTextArray(items) => {
                     for it in items {
                         match it {
                             TextArrayItem::Text(bytes) => {
                                 self.collect_one_segment(&st, page, bytes, ox, oy, zoom, ph);
-                                st.text_matrix[4] += text_advance(&st, page, bytes);
+                                let adv = text_advance(&st, page, bytes);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                             TextArrayItem::Adjustment(a) => {
-                                st.text_matrix[4] -= a / 1000.0 * st.font_size;
+                                let adv = tj_adjustment_advance(*a, st.font_size, st.horiz_scaling);
+                                tm_advance(&mut st.text_matrix, adv);
                             }
                         }
                     }
                 }
                 PdfOp::ShowTextNextLine(bytes) => {
-                    st.text_line_matrix[5] -= st.text_leading;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
                     st.text_matrix = st.text_line_matrix;
                     self.collect_one_segment(&st, page, bytes, ox, oy, zoom, ph);
-                    st.text_matrix[4] += text_advance(&st, page, bytes);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
+                }
+                PdfOp::ShowTextNextLineSpacing(aw, ac, bytes) => {
+                    st.word_spacing = *aw;
+                    st.char_spacing = *ac;
+                    let leading = st.text_leading;
+                    tm_pre_translate(&mut st.text_line_matrix, 0.0, -leading);
+                    st.text_matrix = st.text_line_matrix;
+                    self.collect_one_segment(&st, page, bytes, ox, oy, zoom, ph);
+                    let adv = text_advance(&st, page, bytes);
+                    tm_advance(&mut st.text_matrix, adv);
                 }
                 _ => {}
             }
@@ -990,6 +1114,11 @@ pub struct PdfView {
     view: View,
     #[live(1.0)]
     zoom: f64,
+    /// Horizontal offset of the (centered) paper, in pixels. Positive moves
+    /// the page left, revealing its right edge — the only thing a vertical
+    /// list cannot express on its own once the zoom is wider than the view.
+    #[live(0.0)]
+    scroll_x: f64,
     #[rust]
     page_cache: Vec<Rc<CachedPage>>,
     #[rust]
@@ -1042,6 +1171,71 @@ impl PdfView {
         self.view.redraw(cx);
     }
 
+    /// How many pages the document has — including any still being parsed
+    /// by a background loader, so the scroll bar knows the whole extent from
+    /// the start.
+    pub fn page_count(&self) -> usize {
+        self.page_count
+    }
+
+    /// How many pages are actually parsed and drawable so far.
+    pub fn loaded_pages(&self) -> usize {
+        self.page_cache.len()
+    }
+
+    /// The parsed pages, shared: a thumbnail strip renders the very same
+    /// data rather than parsing the file a second time.
+    pub fn pages(&self) -> &[Rc<CachedPage>] {
+        &self.page_cache
+    }
+
+    /// The page box of page `index` in PDF points, if it is parsed yet.
+    pub fn page_size(&self, index: usize) -> Option<DVec2> {
+        self.page_cache.get(index).map(|p| p.size())
+    }
+
+    /// Start a document of `page_count` pages with nothing parsed yet. Pages
+    /// arrive afterwards through [`Self::append_pages`]; until they do, the
+    /// list lays out blank paper so the scroll extent is stable.
+    pub fn begin_load(&mut self, cx: &mut Cx, page_count: usize) {
+        self.page_cache.clear();
+        self.page_count = page_count;
+        self.view.redraw(cx);
+    }
+
+    /// Append the next parsed pages of the document being loaded.
+    pub fn append_pages(&mut self, cx: &mut Cx, pages: Vec<CachedPage>) {
+        for page in pages {
+            self.page_cache.push(Rc::new(page));
+        }
+        if self.page_cache.len() > self.page_count {
+            self.page_count = self.page_cache.len();
+        }
+        self.view.redraw(cx);
+    }
+
+    pub fn zoom(&self) -> f64 {
+        self.zoom
+    }
+
+    pub fn set_zoom(&mut self, cx: &mut Cx, zoom: f64) {
+        if self.zoom != zoom {
+            self.zoom = zoom;
+            self.view.redraw(cx);
+        }
+    }
+
+    pub fn scroll_x(&self) -> f64 {
+        self.scroll_x
+    }
+
+    pub fn set_scroll_x(&mut self, cx: &mut Cx, scroll_x: f64) {
+        if self.scroll_x != scroll_x {
+            self.scroll_x = scroll_x;
+            self.view.redraw(cx);
+        }
+    }
+
     fn draw_pages(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
         if self.page_count == 0 {
             return;
@@ -1049,25 +1243,50 @@ impl PdfView {
 
         list.set_item_range(cx, 0, self.page_count);
         let zoom = self.zoom;
+        // The list's own width: the pages are centered in it by hand (see
+        // the margin below). Its height comes out `Fill`-unresolved here,
+        // which is why only the width is read.
+        let view_width = {
+            let w = cx.turtle().rect().size.x;
+            if w.is_finite() && w > 0.0 {
+                w
+            } else {
+                0.0
+            }
+        };
 
         while let Some(item_id) = list.next_visible_item(cx) {
-            let page_h = if item_id < self.page_cache.len() {
-                let h = self.page_cache[item_id].page.height();
-                if h > 0.0 {
-                    h * zoom
-                } else {
-                    792.0 * zoom
-                }
-            } else {
-                792.0 * zoom
-            };
+            // A page not parsed yet still gets a paper-sized slot, so pages
+            // below it do not jump around as the loader catches up.
+            let size = self
+                .page_cache
+                .get(item_id)
+                .map(|p| p.size())
+                .unwrap_or(dvec2(612.0, 792.0));
 
             let mut item = list.item(cx, item_id, id!(Page));
 
-            // Set the page_view height to match the PDF page
-            let height = page_h;
-            script_apply_eval!(cx, item, {
-                page_view: { height: #(height) }
+            // The page view is exactly the paper: its own width and height,
+            // centered by a left margin and shifted by scroll_x. The apply
+            // has to target the child widget itself — a `page_view: {...}`
+            // key on the item writes a property nothing reads, because `:=`
+            // puts named children in the object's vec, not its map.
+            let width = size.x * zoom;
+            let height = size.y * zoom;
+            // The apply also runs in a bare scope with no `mod.std` in it,
+            // so an `Inset{...}` literal would not resolve — the value is
+            // built here and interpolated whole.
+            let margin = Inset {
+                left: (view_width - width) * 0.5 - self.scroll_x,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            };
+            let mut page_view = item.widget(&**cx, ids!(page_view));
+            script_apply_eval!(cx, page_view, {
+                width: #(width)
+                height: #(height)
+                margin: #(margin)
             });
 
             // Draw the item — the View contains a PdfPageView.
@@ -1090,13 +1309,61 @@ impl PdfViewRef {
             inner.load_pdf_data(cx, data);
         }
     }
+
+    pub fn begin_load(&self, cx: &mut Cx, page_count: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.begin_load(cx, page_count);
+        }
+    }
+
+    pub fn append_pages(&self, cx: &mut Cx, pages: Vec<CachedPage>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.append_pages(cx, pages);
+        }
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.borrow().map(|i| i.page_count()).unwrap_or(0)
+    }
+
+    pub fn loaded_pages(&self) -> usize {
+        self.borrow().map(|i| i.loaded_pages()).unwrap_or(0)
+    }
+
+    pub fn page_size(&self, index: usize) -> Option<DVec2> {
+        self.borrow().and_then(|i| i.page_size(index))
+    }
+
+    pub fn zoom(&self) -> f64 {
+        self.borrow().map(|i| i.zoom()).unwrap_or(1.0)
+    }
+
+    pub fn set_zoom(&self, cx: &mut Cx, zoom: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_zoom(cx, zoom);
+        }
+    }
+
+    pub fn scroll_x(&self) -> f64 {
+        self.borrow().map(|i| i.scroll_x()).unwrap_or(0.0)
+    }
+
+    pub fn set_scroll_x(&self, cx: &mut Cx, scroll_x: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_scroll_x(cx, scroll_x);
+        }
+    }
 }
 
 // ---- Helpers ----
 
+/// A show operation's total baseline displacement in TEXT SPACE (§9.4.4):
+/// `t_x = Σ ((w0/1000)·Tfs + Tc [+ Tw]) · Th`. The caller maps it through
+/// the text matrix (`tm_advance`), which supplies scale and rotation.
 fn text_advance(st: &GfxState, page: &PdfPage, bytes: &[u8]) -> f64 {
     let font = page.fonts.get(&st.font_name);
-    let scale = st.font_size / 1000.0 * (st.horiz_scaling / 100.0);
+    let glyph_scale = st.font_size / 1000.0;
+    let th = st.horiz_scaling / 100.0;
     let mut adv = 0.0;
     if let Some(f) = font {
         let two = matches!(f.encoding, makepad_pdf_parse::page::FontEncoding::Identity)
@@ -1105,24 +1372,23 @@ fn text_advance(st: &GfxState, page: &PdfPage, bytes: &[u8]) -> f64 {
             let mut i = 0;
             while i + 1 < bytes.len() {
                 let code = ((bytes[i] as u32) << 8) | (bytes[i + 1] as u32);
-                adv += char_width(f, code) * scale + st.char_spacing;
-                if code == 0x0020 {
-                    adv += st.word_spacing;
-                }
+                // Word spacing applies only to single-byte code 32
+                // (§9.3.3) — never to 2-byte codes.
+                adv += char_width(f, code) * glyph_scale + st.char_spacing;
                 i += 2;
             }
         } else {
             for &b in bytes {
-                adv += char_width(f, b as u32) * scale + st.char_spacing;
+                adv += char_width(f, b as u32) * glyph_scale + st.char_spacing;
                 if b == b' ' {
                     adv += st.word_spacing;
                 }
             }
         }
     } else {
-        adv = bytes.len() as f64 * 600.0 * scale;
+        adv = bytes.len() as f64 * 600.0 * glyph_scale;
     }
-    adv
+    adv * th
 }
 
 fn mul_mat(a: &[f64; 6], b: &[f64; 6]) -> [f64; 6] {

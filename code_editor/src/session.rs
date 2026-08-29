@@ -81,6 +81,15 @@ impl CodeSession {
         &self.settings
     }
 
+    /// Indent width in columns (the design tweaker's shader view uses 2).
+    pub fn set_tab_column_count(&mut self, tab_column_count: usize) {
+        if self.settings.tab_column_count != tab_column_count {
+            let mut settings = (*self.settings).clone();
+            settings.tab_column_count = tab_column_count.max(1);
+            self.settings = Rc::new(settings);
+        }
+    }
+
     pub fn document(&self) -> &CodeDocument {
         &self.document
     }

@@ -19,16 +19,26 @@ script_mod! {
     }
 
     mod.widgets.ScrollBarBase = #(ScrollBar::script_component(vm))
+    /** The scrollbar: a rounded handle sized and placed by the scroll fraction. */
     mod.widgets.ScrollBar = set_type_default() do mod.widgets.ScrollBarBase{
+        /** track thickness reserved in the layout, in pixels 2..24 step 1 */
         bar_size: 10.0
+        /** gap between handle and container edge in pixels 0..12 step 0.5 */
         bar_side_margin: 3.0
+        /** shortest the handle may shrink, in pixels 8..120 step 1 */
         min_handle_size: 30.0
+        /** The handle material: one rounded bar along the scroll axis. */
         draw_bg +: {
+            /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
 
+            /** drawn handle thickness in pixels 1..20 step 0.5 */
             size: uniform(6.0)
+            /** handle border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** handle corner rounding radius 0..10 step 0.5 */
             border_radius: uniform(1.5)
 
             color: uniform(theme.color_outset)
@@ -119,13 +129,19 @@ script_mod! {
         }
     }
 
+    /** The tab-bar scrollbar: the same handle, invisible until hovered. */
     mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
         draw_bg +: {
+            /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
 
+            /** drawn handle thickness in pixels 1..20 step 0.5 */
             size: uniform(6.0)
+            /** handle border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(1.0)
+            /** handle corner rounding radius 0..10 step 0.5 */
             border_radius: uniform(1.5)
 
             color: uniform(theme.color_u_hidden)

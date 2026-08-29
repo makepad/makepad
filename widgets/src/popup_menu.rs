@@ -2,13 +2,15 @@ use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
+    widget::*,
+    widget_tree::CxWidgetExt,
 };
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.PopupMenuItemBase = #(PopupMenuItem::script_component(vm))
+    mod.widgets.PopupMenuItemBase = #(PopupMenuItem::register_widget(vm))
     mod.widgets.PopupMenuBase = #(PopupMenu::script_component(vm))
 
     mod.widgets.PopupMenuItem = set_type_default() do mod.widgets.PopupMenuItemBase{
@@ -357,11 +359,22 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook, Animator)]
+/// A menu item is a real widget: it has a uid and sits in the widget tree
+/// under the dropdown that opened the menu, so the design tweaker can pick it
+/// (in 2D and on its own plane in the exploded view) and style its template.
+/// The menu still drives it directly — `handle_event_with` for actions,
+/// `draw_item` for the label — the widget seams only add identity.
+#[derive(Script, ScriptHook, Animator, Widget)]
 pub struct PopupMenuItem {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
+    /// The label the menu hands in before each draw.
+    #[rust]
+    pub label: String,
 
+    #[redraw]
     #[live]
     draw_bg: DrawQuad,
     #[live]
@@ -407,8 +420,15 @@ pub struct PopupMenu {
     items: Vec<String>,
     #[rust]
     first_tap: bool,
+    /// Each item is a widget of its own, registered in the widget tree under
+    /// `tree_parent` by its item id (the design tweaker picks them).
     #[rust]
-    menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
+    menu_items: ComponentMap<PopupMenuItemId, WidgetRef>,
+    /// The widget-tree node the items hang under. The menu itself is not a
+    /// tree node (a `DropDown` owns it by value through a global), so the
+    /// dropdown hands in its own uid and the items read as `drop_down.<n>`.
+    #[rust]
+    pub tree_parent: WidgetUid,
     #[rust]
     init_select_item: Option<PopupMenuItemId>,
 
@@ -427,6 +447,9 @@ impl ScriptHook for PopupMenu {
         // Apply menu_item template to existing items
         if !self.menu_item.is_nil() {
             for (_, node) in self.menu_items.iter_mut() {
+                let Some(mut node) = node.borrow_mut::<PopupMenuItem>() else {
+                    continue;
+                };
                 node.script_apply(vm, apply, scope, self.menu_item);
             }
         }
@@ -500,6 +523,20 @@ impl PopupMenuItem {
     }
 }
 
+impl Widget for PopupMenuItem {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
+        // Driven by `PopupMenu::handle_event_with`, which needs the menu's
+        // sweep area and action sink; nothing to do on the plain seam.
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let label = std::mem::take(&mut self.label);
+        self.draw_item(cx, &label);
+        self.label = label;
+        DrawStep::done()
+    }
+}
+
 impl PopupMenu {
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: Vec2d) -> bool {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
@@ -534,10 +571,29 @@ impl PopupMenu {
         self.count += 1;
 
         let menu_item = self.menu_item;
-        let menu_item = self.menu_items.get_or_insert(cx, item_id, |cx| {
-            cx.with_vm(|vm| PopupMenuItem::script_from_value(vm, menu_item))
-        });
-        menu_item.draw_item(cx, label);
+        let item = self
+            .menu_items
+            .get_or_insert(cx, item_id, |cx| {
+                cx.with_vm(|vm| WidgetRef::script_from_value(vm, menu_item))
+            })
+            .clone();
+        if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
+            menu_item.label = label.to_string();
+        }
+        // Re-seat on every draw: one menu instance is shared by every dropdown
+        // that uses the same template, so the items belong to whichever
+        // dropdown has the menu open right now.
+        cx.widget_tree_insert_child(self.tree_parent, item_id.0, item.clone());
+        // Through the widget seam, so the item counts as its own nesting level
+        // and the design tweaker's plane pick lands on it.
+        item.draw_all(cx, &mut Scope::empty());
+    }
+
+    /// The items as widgets, for whoever enumerates children (the DropDown).
+    pub fn item_refs(&self) -> impl Iterator<Item = (LiveId, WidgetRef)> + '_ {
+        self.menu_items
+            .iter()
+            .map(|(id, item)| (id.0, item.clone()))
     }
 
     pub fn init_select_item(&mut self, which_id: PopupMenuItemId) {
@@ -547,6 +603,9 @@ impl PopupMenu {
 
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
+            let Some(mut item) = item.borrow_mut::<PopupMenuItem>() else {
+                continue;
+            };
             if *id == which_id {
                 item.animator_cut(cx, ids!(active.on));
                 item.animator_cut(cx, ids!(hover.on));
@@ -566,6 +625,9 @@ impl PopupMenu {
     ) {
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
+            let Some(mut node) = node.borrow_mut::<PopupMenuItem>() else {
+                continue;
+            };
             node.handle_event_with(cx, event, sweep_area, &mut |_, e| {
                 actions.push((*item_id, e))
             });

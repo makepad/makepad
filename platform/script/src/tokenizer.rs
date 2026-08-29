@@ -226,6 +226,14 @@ pub struct ScriptTokenPos {
     pub preceded_by_newline: bool,
 }
 
+/// One captured `/** ... */` doc annotation (see `ScriptTokenizer::docs`).
+#[derive(Clone, Debug)]
+pub struct ScriptTokDoc {
+    /// Index the NEXT token gets (`tokens.len()` at capture end).
+    pub next_token: u32,
+    pub text: String,
+}
+
 #[derive(Default, Eq, PartialEq)]
 enum State {
     #[default]
@@ -240,6 +248,15 @@ enum State {
     AsciiHexInString(bool),
     BlockComment(usize),
     MaybeEndBlock(usize),
+    /// Just entered `/*`; a following `*` may open a `/**name*/` doc.
+    BlockCommentStart,
+    /// Saw `/**`; the next char decides doc (`/**x`), empty (`/**/`) or
+    /// plain (`/***`, Rust convention).
+    BlockDocStart,
+    /// Inside `/**...*/`: text accumulates into `temp`.
+    BlockDoc,
+    /// Saw `*` inside a block doc; `/` closes it.
+    BlockDocMaybeEnd,
     LineComment,
     Number,
     Color,
@@ -252,6 +269,14 @@ pub struct ScriptTokenizer {
     /// emitted token as `preceded_by_newline`.
     newline_pending: bool,
     pub tokens: Vec<ScriptTokenPos>,
+    /// Captured `/** ... */` doc annotations, keyed by the index the NEXT
+    /// token gets (`tokens.len()` at capture end). ONE form; position
+    /// determines meaning at resolution time (`docs::resolve_docs`):
+    /// before `key:` it documents the field, before an object literal it
+    /// documents the object, immediately before a value literal it names
+    /// that value (`/**glow tint*/ #8f0`). The parser never sees these;
+    /// `//` and `/* */` remain plain discarded comments.
+    pub docs: Vec<ScriptTokDoc>,
     pub original: String,
     unfinished: String,
     temp: String,
@@ -268,6 +293,7 @@ impl ScriptTokenizer {
         self.pos = 0;
         self.newline_pending = false;
         self.tokens.clear();
+        self.docs.clear();
         self.original.clear();
         self.unfinished.clear();
         self.temp.clear();
@@ -786,7 +812,7 @@ impl ScriptTokenizer {
 
                     // Check for comment start
                     if self.temp == "/*" {
-                        self.state = State::BlockComment(0);
+                        self.state = State::BlockCommentStart;
                         self.temp.clear();
                     } else if self.temp == "//" {
                         self.state = State::LineComment;
@@ -902,6 +928,57 @@ impl ScriptTokenizer {
                     if c == '\n' {
                         // end line comment
                         self.state = State::Whitespace;
+                    }
+                }
+                State::BlockCommentStart => {
+                    if c == '*' {
+                        self.state = State::BlockDocStart;
+                    } else if c == '/' {
+                        // `/*/` : half-open plain comment, still open
+                        self.state = State::BlockComment(0);
+                    } else {
+                        self.state = State::BlockComment(0);
+                    }
+                }
+                State::BlockDocStart => {
+                    if c == '/' {
+                        // `/**/` : empty plain comment
+                        self.state = State::Whitespace;
+                    } else if c == '*' {
+                        // `/***` : plain comment, per Rust convention; the
+                        // `*` we saw may begin the closer
+                        self.state = State::MaybeEndBlock(0);
+                    } else {
+                        self.temp.clear();
+                        self.temp.push(c);
+                        self.state = State::BlockDoc;
+                    }
+                }
+                State::BlockDoc => {
+                    if c == '*' {
+                        self.state = State::BlockDocMaybeEnd;
+                    } else {
+                        self.temp.push(c);
+                    }
+                }
+                State::BlockDocMaybeEnd => {
+                    if c == '/' {
+                        let text = self.temp.trim().to_string();
+                        if !text.is_empty() {
+                            self.docs.push(ScriptTokDoc {
+                                next_token: self.tokens.len() as u32,
+                                text,
+                            });
+                        }
+                        self.temp.clear();
+                        self.state = State::Whitespace;
+                    } else if c == '*' {
+                        self.temp.push('*');
+                        // stay: this `*` may begin the closer
+                    } else {
+                        self.temp.push('*');
+                        self.temp.push(c);
+                        self.state = State::BlockDoc;
                     }
                 }
                 State::Number => {

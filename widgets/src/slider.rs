@@ -20,22 +20,33 @@ script_mod! {
         ..mod.draw.DrawQuad // splat in draw quad
     }
 
+    /** The minimal slider: a flat two-band track with a value fill and a hover-grown handle. */
     mod.widgets.SliderMinimal = set_type_default() do mod.widgets.SliderBase{
+        /** lowest value the slider reports */
         min: 0.0
+        /** highest value the slider reports */
         max: 1.0
+        /** value quantization; 0 is continuous 0..1 step 0.01 */
         step: 0.0
         label_align: Align{x: 0., y: 0.}
         margin: theme.mspace_1{top: theme.space_2}
+        /** decimals shown in the value field 0..6 step 1 */
         precision: 2.
         height: 25
         hover_actions_enabled: false
 
+        /** The minimal track material: a shadow band, a highlight band and the value fill. */
         draw_bg +: {
+            /** pointer-hover mix; also grows the handle 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
+            /** track band thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
 
             color: uniform(theme.color_inset_1)
@@ -62,9 +73,12 @@ script_mod! {
             border_color_2_drag: uniform(theme.color_bevel_outset_2)
             border_color_2_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
+            /** track top offset, leaving room for the label in pixels 0..40 step 1 */
             offset_y: uniform(20.)
+            /** handle width at full hover in pixels 0..40 step 1 */
             handle_size: uniform(20.)
 
+            /** the filled-amount color, left of the handle */
             val_color: uniform(theme.color_val)
             val_color_hover: uniform(theme.color_val_hover)
             val_color_focus: uniform(theme.color_val_focus)
@@ -152,11 +166,17 @@ script_mod! {
             }
         }
 
+        /** The slider label ink, state-mixed with the track. */
         draw_text +: {
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** placeholder-showing mix 0..1 step 0.01 */
             empty: instance(0.0)
+            /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
             color: theme.color_label_outer
@@ -333,17 +353,25 @@ script_mod! {
         }
     }
 
+    /** The flat slider: a boxed track with a centre ridge, a value line and a drag handle. */
     mod.widgets.SliderFlat = mod.widgets.SliderMinimal{
         height: 36
 
+        /** The slider face: an inset SDF box with a ridge, a value line and a handle box. */
         draw_bg +: {
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** corner rounding radius 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
 
             color: uniform(theme.color_inset)
@@ -382,6 +410,7 @@ script_mod! {
             border_color_2_drag: uniform(theme.color_bevel_inset_2_drag)
             border_color_2_disabled: uniform(theme.color_bevel_inset_2_disabled)
 
+            /** value line inset from the track edge in pixels 0..20 step 0.5 */
             val_padding: uniform(5.)
 
             val_color: uniform(theme.color_val)
@@ -390,7 +419,9 @@ script_mod! {
             val_color_drag: uniform(theme.color_val_drag)
             val_color_disabled: uniform(theme.color_val_disabled)
 
+            /** handle width in pixels 4..60 step 1 */
             handle_size: uniform(20.)
+            /** draw the value line from the track centre instead of the left 0..1 step 1 */
             bipolar: uniform(0.0)
 
             pixel: fn() {
@@ -623,6 +654,7 @@ script_mod! {
         }
     }
 
+    /** The standard slider: the flat face plus the theme's inset bevel and handle gradient. */
     mod.widgets.Slider = mod.widgets.SliderFlat{
         draw_bg +: {
             handle_color: theme.color_handle_1
@@ -662,26 +694,35 @@ script_mod! {
         }
     }
 
+    /** The round slider: a label column beside a pill track with a capsule value fill. */
     mod.widgets.SliderRoundFlat = mod.widgets.SliderMinimal{
         height: 18.
         margin: theme.mspace_1{top: theme.space_2}
 
+        /** The pill track material: a rounded box with a capped value bar and a dot handle. */
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
             drag: instance(0.0)
             instance_val: instance(0.0)
 
+            /** label column width, left of the track, in pixels 0..200 step 1 */
             label_size: 75.
 
+            /** bevel gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_border_horizontal: uniform(0.0)
+            /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
+            /** exponent biasing the fill gradient along the track 1..20 step 0.5 */
             val_heat: uniform(10.)
 
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** corner rounding radius; the pill wants a large one 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius * 2.)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
 
             color: uniform(theme.color_inset)
@@ -708,6 +749,7 @@ script_mod! {
             border_color_2_disabled: uniform(theme.color_bevel_inset_2_disabled)
             border_color_2_drag: uniform(theme.color_bevel_inset_2_drag)
 
+            /** value bar inset from the track edge in pixels 0..20 step 0.5 */
             val_padding: uniform(2.5)
 
             val_color: uniform(theme.color_val)
@@ -944,6 +986,7 @@ script_mod! {
 
     }
 
+    /** The standard round slider: the pill track plus the theme's inset bevel. */
     mod.widgets.SliderRound = mod.widgets.SliderRoundFlat{
         draw_bg +: {
             border_color: theme.color_bevel_inset_1
@@ -985,6 +1028,7 @@ script_mod! {
         }
     }
 
+    /** The rotary knob: the slider value drawn as an arc with the label below. */
     mod.widgets.RotaryFlat = mod.widgets.SliderMinimal{
         height: 95.
         width: 65.
@@ -998,17 +1042,23 @@ script_mod! {
         text_input: TextInput{
             width: Fit
         }
+        /** The knob material: an arc track with a bottom gap and a bevelled rim. */
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
             drag: instance(0.0)
 
+            /** opening at the bottom of the arc in degrees 0..180 step 5 */
             gap: uniform(90.)
+            /** rim bevel thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
 
+            /** arc thickness in pixels 1..30 step 0.5 */
             val_size: uniform(10.)
+            /** inner arc inset in pixels 0..20 step 0.5 */
             val_padding: uniform(5.)
 
+            /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.)
 
             color: uniform(theme.color_inset)
@@ -1290,6 +1340,7 @@ script_mod! {
         }
     }
 
+    /** The standard rotary: the flat knob plus the theme's inset bevel and value gradient. */
     mod.widgets.Rotary = mod.widgets.RotaryFlat{
         draw_bg +: {
             border_color: theme.color_bevel_inset_1

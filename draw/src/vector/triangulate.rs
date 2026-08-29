@@ -85,6 +85,174 @@ pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
     }
     out
 }
+/// IEEE 754 binary16 decode — inverse of `f16_bits` above.
+#[inline]
+fn f16_bits_to_f32(h: u32) -> f32 {
+    let sign = (h & 0x8000) << 16;
+    let exp = (h >> 10) & 0x1f;
+    let frac = h & 0x3ff;
+    if exp == 0 {
+        if frac == 0 {
+            return f32::from_bits(sign);
+        }
+        let v = frac as f32 * (-24f32).exp2();
+        return if sign != 0 { -v } else { v };
+    }
+    if exp == 0x1f {
+        return f32::from_bits(sign | 0x7f80_0000 | (frac << 13));
+    }
+    f32::from_bits(sign | ((exp + 112) << 23) | (frac << 13))
+}
+
+#[inline]
+fn unpack_pair_f16(v: f32) -> (f32, f32) {
+    let bits = v.to_bits();
+    (f16_bits_to_f32(bits & 0xffff), f16_bits_to_f32(bits >> 16))
+}
+
+#[inline]
+fn unpack_unorm8x4(v: f32) -> [f32; 4] {
+    let b = v.to_bits();
+    [
+        (b & 0xff) as f32 / 255.0,
+        ((b >> 8) & 0xff) as f32 / 255.0,
+        ((b >> 16) & 0xff) as f32 / 255.0,
+        ((b >> 24) & 0xff) as f32 / 255.0,
+    ]
+}
+
+/// Midpoint of two 12-slot PACKED records — every channel is unpacked,
+/// averaged and repacked (clip_radius takes the max, mirroring
+/// `subdivide_face_mesh`). Per-feature constants midpoint to themselves, so
+/// splitting a triangle never changes what the shader sees at a pixel.
+fn midpoint_packed_record(a: &[f32], b: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PER_VERTEX] {
+    let m = |x: f32, y: f32| (x + y) * 0.5;
+    let pair = |x: f32, y: f32| {
+        let (x0, x1) = unpack_pair_f16(x);
+        let (y0, y1) = unpack_pair_f16(y);
+        pack_pair_f16(m(x0, y0), m(x1, y1))
+    };
+    let color = |x: f32, y: f32| {
+        let xc = unpack_unorm8x4(x);
+        let yc = unpack_unorm8x4(y);
+        pack_unorm8x4(m(xc[0], yc[0]), m(xc[1], yc[1]), m(xc[2], yc[2]), m(xc[3], yc[3]))
+    };
+    // slot 8 = pair(param, clip_radius): midpoint the param, MAX the radius.
+    let clip = {
+        let (xp, xr) = unpack_pair_f16(a[8]);
+        let (yp, yr) = unpack_pair_f16(b[8]);
+        pack_pair_f16(m(xp, yp), xr.max(yr))
+    };
+    [
+        m(a[0], b[0]),
+        m(a[1], b[1]),
+        pair(a[2], b[2]),
+        color(a[3], b[3]),
+        m(a[4], b[4]),
+        m(a[5], b[5]),
+        pair(a[6], b[6]),
+        pair(a[7], b[7]),
+        clip,
+        m(a[9], b[9]),
+        m(a[10], b[10]),
+        m(a[11], b[11]),
+    ]
+}
+
+/// Crack-free midpoint refinement of an already-PACKED tile mesh: every
+/// edge longer than `max_edge` (tile-local units) splits until the fixpoint
+/// — shared midpoints via the edge map so neighboring triangles agree, the
+/// same canonical-rotation scheme as `subdivide_face_mesh`. Used by the
+/// space-warp mode, whose curved fold any long flat chord would slice
+/// through; the triangulator itself is untouched — this runs on its output.
+pub fn subdivide_packed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, max_edge: f32) {
+    use std::collections::HashMap;
+    const S: usize = VECTOR_PACKED_FLOATS_PER_VERTEX;
+    if indices.is_empty() || vertices.len() < S || max_edge <= 0.0 {
+        return;
+    }
+    let max_edge_sq = max_edge * max_edge;
+    for _pass in 0..12 {
+        let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut out: Vec<u32> = Vec::with_capacity(indices.len());
+        let mut split_any = false;
+        let need_split = |vertices: &[f32], i: u32, j: u32| -> bool {
+            let (vi, vj) = (i as usize * S, j as usize * S);
+            let d2 = (vertices[vi] - vertices[vj]).powi(2)
+                + (vertices[vi + 1] - vertices[vj + 1]).powi(2);
+            d2 > max_edge_sq
+        };
+        for t in 0..indices.len() / 3 {
+            let (mut a, mut b, mut c) = (indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]);
+            let (mut sab, mut sbc, mut sca) = (
+                need_split(vertices, a, b),
+                need_split(vertices, b, c),
+                need_split(vertices, c, a),
+            );
+            for _ in 0..2 {
+                let rotate = match (sab, sbc, sca) {
+                    (false, true, _) | (false, false, true) => true,
+                    (true, false, true) => true,
+                    _ => false,
+                };
+                if !rotate {
+                    break;
+                }
+                let (na, nb, nc) = (b, c, a);
+                let (nab, nbc, nca) = (sbc, sca, sab);
+                a = na;
+                b = nb;
+                c = nc;
+                sab = nab;
+                sbc = nbc;
+                sca = nca;
+            }
+            let mut mid = |i: u32, j: u32, vertices: &mut Vec<f32>| -> u32 {
+                let key = (i.min(j), i.max(j));
+                if let Some(&midpoint) = midpoints.get(&key) {
+                    return midpoint;
+                }
+                let (vi, vj) = (i as usize * S, j as usize * S);
+                let mut ra = [0f32; S];
+                let mut rb = [0f32; S];
+                ra.copy_from_slice(&vertices[vi..vi + S]);
+                rb.copy_from_slice(&vertices[vj..vj + S]);
+                let record = midpoint_packed_record(&ra, &rb);
+                vertices.extend_from_slice(&record);
+                let midpoint = (vertices.len() / S - 1) as u32;
+                midpoints.insert(key, midpoint);
+                midpoint
+            };
+            match (sab, sbc, sca) {
+                (false, false, false) => out.extend_from_slice(&[a, b, c]),
+                (true, false, false) => {
+                    let m = mid(a, b, vertices);
+                    out.extend_from_slice(&[a, m, c, m, b, c]);
+                    split_any = true;
+                }
+                (true, true, false) => {
+                    let m1 = mid(a, b, vertices);
+                    let m2 = mid(b, c, vertices);
+                    out.extend_from_slice(&[a, m1, c, m1, m2, c, m1, b, m2]);
+                    split_any = true;
+                }
+                (true, true, true) => {
+                    let m1 = mid(a, b, vertices);
+                    let m2 = mid(b, c, vertices);
+                    let m3 = mid(c, a, vertices);
+                    out.extend_from_slice(&[a, m1, m3, m1, b, m2, m3, m2, c, m1, m2, m3]);
+                    split_any = true;
+                }
+                _ => out.extend_from_slice(&[a, b, c]),
+            }
+        }
+        *indices = out;
+        if !split_any {
+            break;
+        }
+    }
+}
+
 pub const VECTOR_ZBIAS_STEP: f32 = 0.000001;
 /// Selects DrawVector's signed-coordinate analytic fill fringe. Ordinary
 /// fills use `1e6`; a distinct sentinel lets the same vertex format carry a

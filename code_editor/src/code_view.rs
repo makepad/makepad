@@ -1,5 +1,5 @@
 use crate::{
-    code_editor::KeepCursorInView, decoration::DecorationSet, history::NewGroup,
+    code_editor::{CodeEditorAction, KeepCursorInView}, decoration::DecorationSet, history::NewGroup,
     makepad_widgets::*, selection::Affinity, session::SelectionMode, text::Position, CodeDocument,
     CodeEditor, CodeSession,
 };
@@ -23,6 +23,15 @@ script_mod! {
     mod.widgets.CodeView = mod.widgets.CodeViewBase {}
 }
 
+/// What a CodeView tells its host.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum CodeViewAction {
+    /// The document changed (a keystroke, a paste, an undo).
+    Changed,
+    #[default]
+    None,
+}
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct CodeView {
     #[uid]
@@ -34,6 +43,10 @@ pub struct CodeView {
     pub session: Option<CodeSession>,
     #[live(false)]
     keep_cursor_at_end: bool,
+    /// Indent width in columns; 4 by default, 2 where the host wants a
+    /// lighter indent (the design tweaker's shader view).
+    #[live(4)]
+    tab_column_count: usize,
 
     #[live]
     text: ArcStringMut,
@@ -52,6 +65,9 @@ impl WidgetNode for CodeView {
     }
     fn redraw(&mut self, cx: &mut Cx) {
         self.editor.redraw(cx)
+    }
+    fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
+        self.editor.set_scroll_pos(cx, v)
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -158,6 +174,10 @@ impl CodeView {
             let dec = DecorationSet::new();
             let doc = CodeDocument::new(self.text.as_ref().into(), dec);
             self.session = Some(CodeSession::new(doc));
+            self.session
+                .as_mut()
+                .unwrap()
+                .set_tab_column_count(self.tab_column_count);
             self.session.as_mut().unwrap().handle_changes();
             if self.keep_cursor_at_end {
                 self.session.as_mut().unwrap().set_cursor_at_file_end();
@@ -214,18 +234,26 @@ impl Widget for CodeView {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.lazy_init_session();
+        let uid = self.uid;
         let session = self.session.as_mut().unwrap();
-        for _action in self
+        for action in self
             .editor
             .handle_event(cx, event, &mut Scope::empty(), session)
         {
-            //cx.widget_action(uid, &scope.path, action);
             session.handle_changes();
+            if let CodeEditorAction::TextDidChange = action {
+                cx.widget_action(uid, CodeViewAction::Changed);
+            }
         }
     }
 
     fn text(&self) -> String {
-        self.text.as_ref().to_string()
+        // The document is the truth once the view is editable: what the
+        // person typed, not what was handed in.
+        match &self.session {
+            Some(session) => session.document().as_text().to_string(),
+            None => self.text.as_ref().to_string(),
+        }
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
