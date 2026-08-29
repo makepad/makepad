@@ -893,6 +893,10 @@ enum Msg {
 enum Cmd {
     CancelPipeline(PipelineId),
     CancelJob(JobId),
+    /// Read the server NOW instead of finishing the nap — sent when the
+    /// event feed says a declared run just ended, so a finished card stops
+    /// claiming to be running within a round trip rather than a poll.
+    ReadNow,
 }
 
 /// Everything the app knows about work in flight anywhere.
@@ -1037,6 +1041,16 @@ impl RunsChip {
         changed
     }
 
+    /// Read the server now. The event feed knows a run ended before this
+    /// poll would: `pipeline.finished` is the ONE end-of-run signal (a
+    /// publish is per-asset and coincidental, and a failed run publishes
+    /// nothing at all), so a card settles on the event, not on the clock.
+    pub fn wake(&self) -> bool {
+        self.cmd_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(Cmd::ReadNow).is_ok())
+    }
+
     /// Stop one spawned unit. LOCAL keys are the app's own business and are
     /// refused here — main.rs routes those to the engine's own cancel.
     pub fn cancel(&self, key: &CardKey) -> bool {
@@ -1174,6 +1188,7 @@ fn poll_loop(
                         let _ = tx.send(Msg::Error(format!("cancel {id}: {error}")));
                     }
                 },
+                Ok(Cmd::ReadNow) => {}
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
             }

@@ -50,8 +50,8 @@
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
     CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest, GcRequest,
-    GcStatusDto, JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
-    SessionHandles, SessionMsg, SessionStatus,
+    GcStatusDto, JobProfileDto, PageCursor, PipelineId, RequestId, RetireDto, SessionConfig,
+    SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
 use makepad_asset_data::{AssetId, AssetRevisionId};
 pub use makepad_asset_data::AssetKind;
@@ -412,6 +412,12 @@ pub struct AssetStore {
     /// drains this to re-open what it is showing: a new revision means a new
     /// blob digest, so re-resolving is the whole of "stay current".
     changed_assets: Vec<AssetId>,
+    /// Declared runs the server announced as OVER since the app last looked
+    /// (`pipeline.finished`). This is the only honest end-of-run signal: a
+    /// publish is per-asset and coincidental, and a run that fails publishes
+    /// nothing at all. Drained by the RUNS chip, which re-reads on it
+    /// instead of waiting out its poll interval.
+    finished_pipelines: Vec<PipelineId>,
     /// In-flight `RetireAsset`/`RetireRevision` requests, tracked only to
     /// surface a failure (or a mismatched output) honestly — success is
     /// applied locally via [`AssetStore::on_retired`] the moment the
@@ -1008,6 +1014,11 @@ impl AssetStore {
     }
 
     /// Take the assets catalog events touched since the last call.
+    /// Runs the server announced as finished since the last call.
+    pub fn take_finished_pipelines(&mut self) -> Vec<PipelineId> {
+        std::mem::take(&mut self.finished_pipelines)
+    }
+
     pub fn take_changed_assets(&mut self) -> Vec<AssetId> {
         std::mem::take(&mut self.changed_assets)
     }
@@ -1376,6 +1387,11 @@ impl AssetStore {
             if let Some(asset_id) = event.asset_id {
                 if !self.changed_assets.contains(&asset_id) {
                     self.changed_assets.push(asset_id);
+                }
+            }
+            if let Some(pipeline) = event.pipeline {
+                if !self.finished_pipelines.contains(&pipeline) {
+                    self.finished_pipelines.push(pipeline);
                 }
             }
             self.events.push_front(event);
@@ -2097,6 +2113,8 @@ mod tests {
             game_revision: None,
             alias: Some(format!("game/asset-{seq}")),
             model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: seq,
         };
@@ -2213,6 +2231,8 @@ mod tests {
             game_revision: None,
             alias: None,
             model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: 1,
         }]);
@@ -2237,6 +2257,8 @@ mod tests {
             game_revision: None,
             alias: None,
             model_preview: None,
+            pipeline: None,
+            pipeline_state: None,
             content_kind: None,
             ts_ms: 2,
         }]);

@@ -882,6 +882,11 @@ pub enum CatalogEventKind {
     GameAliasCleared,
     ModelPreview,
     ModelPreviewClear,
+    /// A whole declared run reached a terminal state (`pipeline.finished`,
+    /// vocabulary 5). The ONE signal that says a multi-stage run is over:
+    /// a publish is per-asset and coincidental, and a run that fails
+    /// publishes nothing at all. Carries `pipeline` + `pipeline_state`.
+    PipelineFinished,
     /// A kind this build does not know (a newer server). Carries no
     /// interpretation on purpose.
     Other,
@@ -904,6 +909,7 @@ impl CatalogEventKind {
             Self::GameAliasCleared => "game_alias_cleared",
             Self::ModelPreview => "model_preview",
             Self::ModelPreviewClear => "model_preview_clear",
+            Self::PipelineFinished => "pipeline.finished",
             Self::Other => "other",
         }
     }
@@ -930,6 +936,10 @@ impl CatalogEventKind {
             "game_alias_cleared" => Self::GameAliasCleared,
             "model_preview" => Self::ModelPreview,
             "model_preview_clear" => Self::ModelPreviewClear,
+            // Spelled with a dot on the wire, unlike the catalog kinds:
+            // it is not a change to an asset, it is a run announcing that
+            // it is over.
+            "pipeline.finished" => Self::PipelineFinished,
             _ => Self::Other,
         }
     }
@@ -971,6 +981,11 @@ pub struct CatalogEventDto {
     pub alias: Option<String>,
     /// In-memory-only part delta for `ModelPreview`/`ModelPreviewClear`.
     pub model_preview: Option<ModelPreviewDto>,
+    /// The run that finished, on a `PipelineFinished` event.
+    pub pipeline: Option<PipelineId>,
+    /// Its DERIVED terminal state — `succeeded`, `failed` or `cancelled`.
+    /// Present exactly when `pipeline` is.
+    pub pipeline_state: Option<PipelineStateDto>,
     /// The asset's declared content kind at emit time, when the server knew
     /// it. `None` means unknown, not "no kind" — kind-filtered subscribers
     /// still receive such events.
@@ -1163,6 +1178,48 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
         {
             return Err(ClientError::Protocol { what: "event preview payload" });
         }
+        // A finished run names itself and says how it ended. Both fields
+        // travel together or not at all: a state with no run is not
+        // addressable, and a run with no state says nothing.
+        let pipeline = match r.get("pipeline") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event pipeline" })?;
+                Some(
+                    PipelineId::parse(text)
+                        .ok_or(ClientError::Protocol { what: "event pipeline" })?,
+                )
+            }
+        };
+        let pipeline_state = match r.get("pipeline_state") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event pipeline state" })?;
+                Some(
+                    PipelineStateDto::parse(text)
+                        .ok_or(ClientError::Protocol { what: "event pipeline state" })?,
+                )
+            }
+        };
+        if pipeline.is_some() != pipeline_state.is_some() {
+            return Err(ClientError::Protocol { what: "event pipeline payload" });
+        }
+        if kind == CatalogEventKind::PipelineFinished {
+            if pipeline.is_none() {
+                return Err(ClientError::Protocol { what: "event pipeline payload" });
+            }
+            // A run that "finished" while still running is a contradiction,
+            // not a state a subscriber should have to reason about.
+            if pipeline_state.is_some_and(|state| !state.is_terminal()) {
+                return Err(ClientError::Protocol { what: "event pipeline state" });
+            }
+        } else if pipeline.is_some() {
+            return Err(ClientError::Protocol { what: "event pipeline kind" });
+        }
         let ts_ms = need_u64(r, "ts_ms", "event ts_ms")?;
         events.push(CatalogEventDto {
             seq,
@@ -1174,6 +1231,8 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
             game_revision,
             alias,
             model_preview,
+            pipeline,
+            pipeline_state,
             content_kind,
             ts_ms,
         });
@@ -4280,6 +4339,70 @@ mod tests {
         assert!(parse_events_page(&json::parse(behind.as_bytes()).unwrap()).is_err());
         let malformed = body.replace("0123456789abcdef-7", "safe-but-not-an-event-cursor");
         assert!(parse_events_page(&json::parse(malformed.as_bytes()).unwrap()).is_err());
+    }
+
+    /// A whole declared run announcing that it is over — the ONE signal a
+    /// grid or a chip should act on, since a publish is per-asset and
+    /// coincidental and a failed run publishes nothing at all.
+    #[test]
+    fn a_finished_run_announces_itself_and_how_it_ended() {
+        let pipeline = format!("pipe_{}", "3c".repeat(16));
+        let page = format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"succeeded","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        );
+        let page = parse_events_page(&json::parse(page.as_bytes()).unwrap()).unwrap();
+        assert_eq!(page.events[0].kind, CatalogEventKind::PipelineFinished);
+        assert_eq!(page.events[0].kind.as_str(), "pipeline.finished");
+        assert_eq!(
+            page.events[0].pipeline.map(|id| id.to_string()),
+            Some(pipeline.clone())
+        );
+        assert_eq!(page.events[0].pipeline_state, Some(PipelineStateDto::Succeeded));
+        // It is not a content change: nothing is dropped from a view on it.
+        assert!(!page.events[0].kind.removes_content());
+
+        let refuse = |body: String| {
+            assert!(
+                parse_events_page(&json::parse(body.as_bytes()).unwrap()).is_err(),
+                "should refuse: {body}"
+            )
+        };
+        // "finished" while still running is a contradiction, not a state a
+        // subscriber should have to reason about.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"running","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        // A state with no run is not addressable; a run with no state says
+        // nothing. Both travel together or not at all.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        refuse(
+            r#"{"events":[{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline_state":"failed","ts_ms":500}],"cursor":"0123456789abcdef-11","gap":false}"#
+                .to_string(),
+        );
+        // A run id smuggled onto an unrelated kind.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"asset_published","ns":"gen","pipeline":"{pipeline}","pipeline_state":"failed","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        refuse(
+            r#"{"events":[{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"pipe_nothex","pipeline_state":"failed","ts_ms":500}],"cursor":"0123456789abcdef-11","gap":false}"#
+                .to_string(),
+        );
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"exploded","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+    }
+
+    /// The vocabulary a build asks for must be the one it can actually read.
+    #[test]
+    fn the_event_request_asks_for_the_vocabulary_this_build_parses() {
+        assert_eq!(crate::wire::EVENT_VOCABULARY, 5);
+        assert!(crate::wire::path_events(None, 100, 10, None).contains("&ev=5"));
+        assert_eq!(
+            CatalogEventKind::parse("pipeline.finished"),
+            CatalogEventKind::PipelineFinished
+        );
     }
 
     #[test]

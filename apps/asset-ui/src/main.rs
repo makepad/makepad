@@ -14528,6 +14528,18 @@ impl AppMain for App {
                     self.adopt_catalog_asset(cx, asset, false);
                 }
             }
+            // A declared run just ended, said so by the server on the
+            // event feed. That is the ONE end-of-run signal — a publish is
+            // per-asset and coincidental, and a failed run publishes
+            // nothing at all — so the card settles on the event rather
+            // than on the next tick of a poll clock.
+            let finished = self.store.take_finished_pipelines();
+            if !finished.is_empty() {
+                for pipeline in &finished {
+                    log!("runs: {pipeline} finished");
+                }
+                self.runs_chip.wake();
+            }
             self.maybe_open_gc_confirm(cx);
             self.maybe_start_annotate_queue();
             self.maybe_start_runs_chip();
