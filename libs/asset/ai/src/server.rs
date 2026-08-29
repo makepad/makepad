@@ -806,6 +806,10 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
         fleet: Some(shared.fleet.clone()),
+        // What a live session on this build can be told. One entry today:
+        // `seed_output`, a feed moving here from another box handing over the
+        // trip it is on (see `crate::realtime_wire::SeedOutputMessageJson`).
+        realtime: Some(vec!["seed_output".to_string()]),
         // Absent whenever no LLM is resident: a box with nothing loaded has no
         // lanes to describe, and "0 of 4 free" would read as busy rather than
         // as not serving this at all.

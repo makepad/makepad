@@ -49,6 +49,11 @@ pub struct HealthJson {
     /// Partition this process belongs to (`--fleet` / `MAKEPAD_ASSET_AI_FLEET`).
     /// Missing on services predating the field; clients treat that as `default`.
     pub fleet: Option<String>,
+    /// Realtime/live wire features this build understands, sorted. A client
+    /// asks before it uses one: an unknown message type is a hard protocol
+    /// error that ENDS the session, so "try it and see" costs a live feed.
+    /// `None` on services predating the field — treat as none of them.
+    pub realtime: Option<Vec<String>>,
     /// Concurrent-decode lane facts for the resident LLM.
     ///
     /// **Absence means one lane, no queue, unknown context ceiling** — which is
