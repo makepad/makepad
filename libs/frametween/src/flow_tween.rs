@@ -34,7 +34,9 @@
 
 use makepad_widgets::*;
 
-use crate::frame::{nv12_proxy_rgb8, rgb8_proxy, tl_on, Frame, Pixels};
+use crate::frame::{
+    bgra32_proxy_rgb8, nv12_proxy_rgb8, rgb8_proxy, rgb8_to_bgra32, tl_on, Frame, Pixels,
+};
 pub use crate::pair_cache::PairKey;
 
 /// THE NEURAL FIELD PRODUCER: one background worker owning the RIFE
@@ -69,6 +71,15 @@ pub enum RifeSource {
     Rgb8 {
         a: std::sync::Arc<Vec<u8>>,
         b: std::sync::Arc<Vec<u8>>,
+        width: usize,
+        height: usize,
+    },
+    /// The same, as the BGRA words a texture upload wants — a host that
+    /// already holds one need not repack a whole frame to ask a question
+    /// about a 384-wide proxy of it.
+    Bgra32 {
+        a: std::sync::Arc<Vec<u32>>,
+        b: std::sync::Arc<Vec<u32>>,
         width: usize,
         height: usize,
     },
@@ -300,6 +311,10 @@ impl RifeService {
                         RifeSource::Rgb8 { a, b, width, height } => (
                             rgb8_proxy(a, *width, *height, job.width, job.height),
                             rgb8_proxy(b, *width, *height, job.width, job.height),
+                        ),
+                        RifeSource::Bgra32 { a, b, width, height } => (
+                            bgra32_proxy_rgb8(a, *width, *height, job.width, job.height),
+                            bgra32_proxy_rgb8(b, *width, *height, job.width, job.height),
                         ),
                     };
                     let record_latency = |seconds: f64| {
@@ -685,14 +700,6 @@ pub fn ai3_frame_plan(depth: u8, t: f32) -> Ai3FramePlan {
     let scaled = t.clamp(0.0, 1.0) * intervals as f32;
     let interval = (scaled.floor() as usize).min(intervals - 1);
     Ai3FramePlan { interval, t: (scaled - interval as f32).clamp(0.0, 1.0) }
-}
-
-fn rgb8_to_bgra32(rgb: &[u8]) -> Vec<u32> {
-    rgb.chunks_exact(3)
-        .map(|px| {
-            0xff00_0000 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
-        })
-        .collect()
 }
 
 /// `VJ_TWEEN_DEBUG=1|2|3` turns the warp into a diagnostic view (flow
@@ -1594,6 +1601,21 @@ impl FlowTweenView {
         planes[slot].put_back_vec_u32(cx, buf, None);
     }
 
+    /// Put ready BGRA words in one endpoint slot, no repacking at all.
+    fn upload_bgra_plane(
+        cx: &mut Cx,
+        planes: &[Texture; 6],
+        slot: usize,
+        data: &[u32],
+        w: usize,
+        h: usize,
+    ) {
+        let mut buf = planes[slot].take_vec_u32(cx);
+        buf.clear();
+        buf.extend_from_slice(&data[..w * h]);
+        planes[slot].put_back_vec_u32(cx, buf, None);
+    }
+
     fn ensure_rgb_plane_ring(&mut self, cx: &mut Cx, width: u32, height: u32) {
         if self.size == (width, height) && self.planes.is_some() && self.rgb_planes {
             return;
@@ -1700,6 +1722,68 @@ impl FlowTweenView {
         self.area.redraw(cx);
     }
 
+    /// The same, from the BGRA words a host already holds.
+    pub fn set_pair_bgra32(
+        &mut self,
+        cx: &mut Cx,
+        a: &[u32],
+        b: &[u32],
+        width: u32,
+        height: u32,
+    ) {
+        let (w, h) = (width as usize, height as usize);
+        if w < 8 || h < 8 || a.len() < w * h || b.len() < w * h {
+            return;
+        }
+        self.ai2_half = None;
+        self.ai3_interval = None;
+        self.prefetch = None;
+        self.ensure_rgb_plane_ring(cx, width, height);
+        let planes = self.planes.clone().unwrap();
+        Self::upload_bgra_plane(cx, &planes, 0, a, w, h);
+        Self::upload_bgra_plane(cx, &planes, 2, b, w, h);
+        self.pair_key = None;
+        self.flow_dirty = true;
+        self.area.redraw(cx);
+    }
+
+    /// Advance a running BGRA feed by one picture (see `push_rgb8`).
+    pub fn push_bgra32(&mut self, cx: &mut Cx, next: &[u32], width: u32, height: u32) -> bool {
+        let (w, h) = (width as usize, height as usize);
+        if w < 8
+            || h < 8
+            || next.len() < w * h
+            || !self.rgb_planes
+            || self.size != (width, height)
+        {
+            return false;
+        }
+        let Some(planes) = self.rotate_ring() else { return false };
+        Self::upload_bgra_plane(cx, &planes, 2, next, w, h);
+        self.planes = Some(planes);
+        self.ai2_half = None;
+        self.ai3_interval = None;
+        self.prefetch = None;
+        self.pair_key = None;
+        self.flow_dirty = true;
+        self.area.redraw(cx);
+        true
+    }
+
+    /// Rotate (A, B, spare) -> (B, spare, A) so a running feed uploads the
+    /// one NEW picture and never re-uploads the one it already has.
+    fn rotate_ring(&mut self) -> Option<[Texture; 6]> {
+        let old = self.planes.take()?;
+        Some([
+            old[2].clone(),
+            old[3].clone(),
+            old[4].clone(),
+            old[5].clone(),
+            old[0].clone(),
+            old[1].clone(),
+        ])
+    }
+
     /// Advance a running RGB feed by ONE picture: what was B becomes A and
     /// the new frame becomes B, so a real frame is uploaded once, not twice.
     /// The fields re-derive; temporal seeding carries the previous pair in.
@@ -1713,16 +1797,7 @@ impl FlowTweenView {
         {
             return false;
         }
-        let Some(old) = self.planes.take() else { return false };
-        // Rotate: (A, B, spare) -> (B, spare, A). Only the new B is written.
-        let planes = [
-            old[2].clone(),
-            old[3].clone(),
-            old[4].clone(),
-            old[5].clone(),
-            old[0].clone(),
-            old[1].clone(),
-        ];
+        let Some(planes) = self.rotate_ring() else { return false };
         Self::upload_rgb_plane(cx, &planes, 2, next, w, h);
         self.planes = Some(planes);
         self.ai2_half = None;

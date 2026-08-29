@@ -24,6 +24,7 @@ use crate::flow_tween::{
     rife_proxy_dims, FlowTweenView, RifeJob, RifeProduct, RifeProductKind, RifeService,
     RifeSource, AI3_BOOTSTRAP_SYNTH_SECS,
 };
+use crate::frame::rgb8_to_bgra32;
 use crate::mode::{ai_ceiling, AiRateGate, Mode};
 use makepad_widgets::*;
 use std::sync::Arc;
@@ -44,10 +45,11 @@ const PERIOD_SMOOTHING: f64 = 0.35;
 pub struct FeedTweener {
     mode: Mode,
     size: (u32, u32),
-    /// The two pictures the current pair is made of, kept for the neural
-    /// worker (the view itself holds them on the GPU).
-    a: Option<Arc<Vec<u8>>>,
-    b: Option<Arc<Vec<u8>>>,
+    /// The two pictures the current pair is made of, as the BGRA words the
+    /// endpoint textures took, kept for the neural worker (which downscales
+    /// them itself, off this thread).
+    a: Option<Arc<Vec<u32>>>,
+    b: Option<Arc<Vec<u32>>>,
     /// When B landed, and how long the pair before it lasted.
     pair_started: Option<Instant>,
     period: f64,
@@ -139,8 +141,7 @@ impl FeedTweener {
         self.gate.admitted() && self.feed_fps() <= ai_ceiling(1)
     }
 
-    /// A real picture landed. What was B becomes A, this becomes B, and the
-    /// tween starts walking the new pair.
+    /// A real picture landed, as packed RGB8.
     pub fn push_frame(
         &mut self,
         cx: &mut Cx,
@@ -153,6 +154,23 @@ impl FeedTweener {
         if w < 8 || h < 8 || rgb.len() < w * h * 3 {
             return false;
         }
+        self.push_frame_bgra32(cx, view, &rgb8_to_bgra32(rgb), width, height)
+    }
+
+    /// A real picture landed, as the BGRA words a texture wants. What was B
+    /// becomes A, this becomes B, and the tween starts walking the new pair.
+    pub fn push_frame_bgra32(
+        &mut self,
+        cx: &mut Cx,
+        view: &mut FlowTweenView,
+        bgra: &[u32],
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let (w, h) = (width as usize, height as usize);
+        if w < 8 || h < 8 || bgra.len() < w * h {
+            return false;
+        }
         let now = Instant::now();
         let resized = self.size != (width, height);
         if resized {
@@ -160,19 +178,19 @@ impl FeedTweener {
             self.b = None;
             self.size = (width, height);
         }
-        let next = Arc::new(rgb.to_vec());
+        let next = Arc::new(bgra.to_vec());
         match self.b.take() {
             // First picture of a feed: there is no pair yet, so both
             // endpoints are it and t sits still until the second lands.
             None => {
-                view.set_pair_rgb8(cx, &next, &next, width, height);
+                view.set_pair_bgra32(cx, &next, &next, width, height);
                 self.a = Some(next.clone());
                 self.b = Some(next);
                 self.pair_started = None;
             }
             Some(previous) => {
-                if !view.push_rgb8(cx, &next, width, height) {
-                    view.set_pair_rgb8(cx, &previous, &next, width, height);
+                if !view.push_bgra32(cx, &next, width, height) {
+                    view.set_pair_bgra32(cx, &previous, &next, width, height);
                 }
                 if let Some(started) = self.pair_started {
                     let measured = now.duration_since(started).as_secs_f64();
@@ -202,16 +220,27 @@ impl FeedTweener {
         if self.b.is_none() {
             return false;
         }
-        self.apply_mode(cx, view);
-        let t = match (self.mode, self.pair_started) {
-            // NONE holds the newest picture and never walks: t = 1 samples
-            // frame B exactly, through every producer's math.
-            (Mode::None, _) | (_, None) => 1.0,
-            (_, Some(started)) => {
+        let t = match self.pair_started {
+            None => 1.0,
+            Some(started) => {
                 let elapsed = now.saturating_duration_since(started).as_secs_f64();
                 (elapsed / self.period.max(MIN_PERIOD)).clamp(0.0, 1.0) as f32
             }
         };
+        self.tick_at(cx, view, t)
+    }
+
+    /// One display frame at a fraction the HOST computed. A host that
+    /// already paces its own transitions (a wall that dissolves each frame
+    /// over the measured gap) owns the clock; this only has to present it.
+    pub fn tick_at(&mut self, cx: &mut Cx, view: &mut FlowTweenView, t: f32) -> bool {
+        if self.b.is_none() {
+            return false;
+        }
+        self.apply_mode(cx, view);
+        // NONE holds the newest picture and never walks: t = 1 samples
+        // frame B exactly, through every producer's math.
+        let t = if self.mode == Mode::None { 1.0 } else { t.clamp(0.0, 1.0) };
         self.last_t = t;
         self.pump_ai(cx, view, t);
         view.set_t(cx, t);
@@ -270,7 +299,7 @@ impl FeedTweener {
                 a: 0,
                 b: 1,
                 kind,
-                frames: RifeSource::Rgb8 {
+                frames: RifeSource::Bgra32 {
                     a,
                     b,
                     width: self.size.0 as usize,

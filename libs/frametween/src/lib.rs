@@ -58,7 +58,8 @@ pub use flow_tween::{
     FIELD_PREFETCH_OPS_PER_FRAME, LEVELS, SWEEPS,
 };
 pub use frame::{
-    nv12_cut_score, nv12_proxy_rgb8, rgb8_cut_score, rgb8_proxy, tl_on, Frame, Pixels,
+    bgra32_proxy_rgb8, nv12_cut_score, nv12_proxy_rgb8, rgb8_cut_score, rgb8_proxy,
+    rgb8_to_bgra32, tl_on, Frame, Pixels,
 };
 pub use mode::{ai_ceiling, modes, short_modes, tip, AiRateGate, Mode, RIFE_CAPACITY_FPS};
 pub use pair_cache::{ClipGeneration, PairCache, PairKey};

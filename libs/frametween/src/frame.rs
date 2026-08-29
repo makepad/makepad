@@ -120,6 +120,36 @@ pub fn rgb8_proxy(data: &[u8], w: usize, h: usize, pw: usize, ph: usize) -> Vec<
     out
 }
 
+/// The same proxy step from packed BGRA words — what a host that already
+/// holds a texture-ready picture has, and what the neural worker is handed
+/// so the downscale happens off the UI thread.
+pub fn bgra32_proxy_rgb8(data: &[u32], w: usize, h: usize, pw: usize, ph: usize) -> Vec<u8> {
+    let mut out = vec![0u8; pw * ph * 3];
+    if w == 0 || h == 0 || data.len() < w * h {
+        return out;
+    }
+    for py in 0..ph {
+        let sy = ((py * h + h / 2) / ph.max(1)).min(h - 1);
+        for px_i in 0..pw {
+            let sx = ((px_i * w + w / 2) / pw.max(1)).min(w - 1);
+            let word = data[sy * w + sx];
+            let at = (py * pw + px_i) * 3;
+            out[at] = (word >> 16) as u8;
+            out[at + 1] = (word >> 8) as u8;
+            out[at + 2] = word as u8;
+        }
+    }
+    out
+}
+
+/// Packed RGB8 into the BGRA words a texture wants: red in the high byte,
+/// opaque alpha. The one place that packing is spelled out.
+pub fn rgb8_to_bgra32(rgb: &[u8]) -> Vec<u32> {
+    rgb.chunks_exact(3)
+        .map(|px| 0xff00_0000 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32)
+        .collect()
+}
+
 /// Sparse mean-abs luma difference between two packed RGB8 frames — the
 /// RGB twin of `nv12_cut_score`, on the same 0..255 scale so one cut
 /// threshold serves both input forms.
