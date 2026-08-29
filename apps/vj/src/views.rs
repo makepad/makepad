@@ -13,7 +13,8 @@
 
 use makepad_asset_data::AssetId;
 use makepad_widgets::*;
-use crate::gen::{GenJob, GenJobState, GenJobTone};
+use crate::decks::{FadeCurve, FADE_CURVES};
+use crate::gen::{GenJob, GenJobState, GenJobTone, StageChip};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -723,6 +724,30 @@ script_mod! {
                     }
                     job_cancel := Button{text: "Stop"}
                 }
+                job_chips := View{
+                    visible: false
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 8
+                    align: Align{y: 0.5}
+                    job_chip0 := Label{text: "" draw_text.text_style.font_size: 8}
+                    job_chip1 := Label{text: "" draw_text.text_style.font_size: 8}
+                    job_chip2 := Label{text: "" draw_text.text_style.font_size: 8}
+                    View{width: Fill height: 1}
+                    job_canvas := Label{
+                        visible: false
+                        text: ""
+                        draw_text.color: #x8a97a6
+                        draw_text.text_style.font_size: 8
+                    }
+                }
+                job_still := Image{
+                    visible: false
+                    width: 132
+                    height: 74
+                    fit: ImageFit.Smallest
+                }
                 job_stage := Label{visible: false width: Fill text: ""}
                 job_message := Label{visible: false width: Fill text: ""}
                 job_meta := Label{visible: false width: Fill text: ""}
@@ -995,6 +1020,9 @@ script_mod! {
         hover: uniform(0.0)
         open: uniform(0.0)
         inert: uniform(0.0)
+        // The drop caret; a chip wedged between its own < > cutters
+        // switches it off — the neighbours already say it has stops.
+        arrow: uniform(1.0)
         color: uniform(#x272e38)
         color_hover: uniform(#x2f3842)
         border_color: uniform(#xffffff26)
@@ -1010,7 +1038,7 @@ script_mod! {
             sdf.line_to(ax + 2.5, ay)
             sdf.line_to(ax, ay + 3.0)
             sdf.close_path()
-            sdf.fill(vec4(0.66, 0.70, 0.75, 1.0 - self.inert * 0.6))
+            sdf.fill(vec4(0.66, 0.70, 0.75, (1.0 - self.inert * 0.6) * self.arrow))
             return sdf.result * (1.0 - self.inert * 0.45)
         }
     }
@@ -1036,6 +1064,45 @@ script_mod! {
         draw_hover +: {
             color: #xff5c39
         }
+    }
+
+    // FADE-CURVE DROPDOWN: the beats chip's twin, wearing the same well and
+    // the same panel — but the rows carry a plot of their own gain law
+    // instead of a word, so they are wider and a little taller.
+    mod.widgets.VjCurveDropBase = #(VjCurveDrop::register_widget(vm))
+    mod.widgets.VjCurveDrop = set_type_default() do mod.widgets.VjCurveDropBase{
+        width: 34
+        height: 22
+        draw_text +: {
+            color: #xf4f7fa
+            text_style: theme.font_bold{font_size: 8}
+        }
+        draw_panel +: {
+            color: #x181c23
+            border_color: #xffffff2e
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.5)
+                sdf.fill(self.color)
+                sdf.stroke(self.border_color, 1.0)
+                return sdf.result
+            }
+        }
+        // The beats list highlights with SOLID orange. Here that would paint
+        // out the icon under it — so the row under the pointer gets a wash
+        // and the drawing survives it.
+        draw_hover +: {
+            color: #xff5c3938
+        }
+        // One file per law, in FADE_CURVES order. The tint replaces the
+        // white the drawings ship with, so they wear the panel's own ink.
+        icon_power +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_power.svg") }
+        icon_linear +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_linear.svg") }
+        icon_dip +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_dip.svg") }
+        icon_slowfade +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_slowfade.svg") }
+        icon_slowcut +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_slowcut.svg") }
+        icon_fastcut +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_fastcut.svg") }
+        icon_transition +: { color: #xd6dee6 svg: crate_resource("self:resources/icons/curve_transition.svg") }
     }
 
     // JOG WHEEL: a horizontal drum seen side-on — vertical ridges spaced
@@ -1647,6 +1714,14 @@ pub struct JobRowEntry {
     /// Engine tag the cancel button reports back.
     pub tag: u64,
     pub title: String,
+    /// A chained run's stages, left to right; empty for a plain job.
+    pub stages: Vec<StageChip>,
+    /// "960x544 · 73f · 3.0 s loop" — what this run is making.
+    pub canvas: String,
+    /// The flux still this run made, once its picture is decoded. This is
+    /// the INPUT IMAGE the video is grown from, and seeing it is how the
+    /// operator knows the dream is going the way they meant.
+    pub still: Option<Texture>,
     pub stage: String,
     pub message: String,
     pub meta: String,
@@ -1658,7 +1733,12 @@ pub struct JobRowEntry {
 }
 
 impl JobRowEntry {
-    pub fn from_job(job: &GenJob, now_ms: u64, queue_ahead: Option<usize>) -> JobRowEntry {
+    pub fn from_job(
+        job: &GenJob,
+        now_ms: u64,
+        queue_ahead: Option<usize>,
+        still: Option<Texture>,
+    ) -> JobRowEntry {
         let display = job.display(now_ms);
         let progress = display.progress_permille.map(|value| value as f32 / 1000.0);
         let progress_text = match display.progress_permille {
@@ -1681,6 +1761,9 @@ impl JobRowEntry {
         JobRowEntry {
             tag: job.tag,
             title: job.title.clone(),
+            stages: display.stages,
+            canvas: display.canvas,
+            still,
             stage: display.stage,
             message: display.message,
             meta: format!("profile: {} · {}", job.profile_label, display.assignment),
@@ -1774,11 +1857,60 @@ impl Widget for VjJobList {
                     bar.set_uniform(cx, live_id!(color_fill), &fill);
                     item.button(cx, ids!(job_cancel))
                         .set_visible(cx, entry.cancellable);
+                    // The canvas line, and the stage chips for a chained
+                    // run. Three chips because a DREAM run has exactly
+                    // three stages — this is the run's shape, not a
+                    // general-purpose pipeline widget.
+                    let canvas = item.label(cx, ids!(job_canvas));
+                    canvas.set_text(cx, &entry.canvas);
+                    canvas.set_visible(cx, !entry.canvas.is_empty());
+                    let chips = item.view(cx, ids!(job_chips));
+                    chips.set_visible(cx, !entry.stages.is_empty());
+                    for (i, path) in
+                        [ids!(job_chip0), ids!(job_chip1), ids!(job_chip2)].into_iter().enumerate()
+                    {
+                        let mut chip = item.label(cx, path);
+                        match entry.stages.get(i) {
+                            Some(StageChip { label, tone }) => {
+                                chip.set_visible(cx, true);
+                                chip.set_text(cx, label);
+                                // `draw_text +:` (merge), never `draw_text:`
+                                // — replacing a typed DrawText with a plain
+                                // object is a runtime type error.
+                                let color = chip_color(*tone);
+                                script_apply_eval!(cx, chip, {
+                                    draw_text +: { color: #(color) }
+                                });
+                            }
+                            None => chip.set_visible(cx, false),
+                        }
+                    }
+                    // The still, the moment its picture is decoded.
+                    let still = item.image(cx, ids!(job_still));
+                    still.set_texture(cx, entry.still.clone());
+                    still.set_visible(cx, entry.still.is_some());
                 }
                 item.draw_all(cx, &mut Scope::empty());
             }
         }
         DrawStep::done()
+    }
+}
+
+/// A stage chip's ink: the same five tones the progress bar uses, so a
+/// chip and a bar never disagree about how a stage is going.
+fn chip_color(tone: GenJobTone) -> Vec4f {
+    let [r, g, b, a] = chip_rgba(tone);
+    Vec4f { x: r, y: g, z: b, w: a }
+}
+
+fn chip_rgba(tone: GenJobTone) -> [f32; 4] {
+    match tone {
+        GenJobTone::Waiting => [0.45, 0.50, 0.57, 1.0],
+        GenJobTone::Active => [0.31, 0.62, 0.91, 1.0],
+        GenJobTone::Success => [0.35, 0.77, 0.63, 1.0],
+        GenJobTone::Failed => [0.88, 0.34, 0.31, 1.0],
+        GenJobTone::Cancelled => [0.42, 0.47, 0.53, 1.0],
     }
 }
 
@@ -2230,6 +2362,19 @@ pub struct DrawVjBeatsChip {
 /// slowest, then free-running.
 const BEATS_ROWS: [(u32, &str); 6] =
     [(1, "1"), (2, "2"), (4, "4"), (8, "8"), (16, "16"), (0, "—")];
+/// The loop-length flavour of the same dropdown: X (manual), the powers
+/// of two, and the bookmark rung.
+const LOOP_ROWS: [(u32, &str); 9] = [
+    (0, "X"),
+    (1, "1"),
+    (2, "2"),
+    (4, "4"),
+    (8, "8"),
+    (16, "16"),
+    (32, "32"),
+    (64, "64"),
+    (u32::MAX, "\u{221e}"),
+];
 const BEATS_ROW_H: f64 = 18.0;
 const BEATS_PANEL_W: f64 = 42.0;
 const BEATS_PANEL_PAD: f64 = 4.0;
@@ -2259,6 +2404,9 @@ pub struct VjBeatsDrop {
     draw_hover: DrawColor,
     #[rust]
     draw_list: Option<DrawList2d>,
+    /// Serve the loop-length ladder instead of the sweep rows.
+    #[live]
+    loop_rows: bool,
     #[rust(1u32)]
     value: u32,
     /// Transient display override (the scratch hand's "—").
@@ -2275,6 +2423,14 @@ pub struct VjBeatsDrop {
 }
 
 impl VjBeatsDrop {
+    fn rows(&self) -> &'static [(u32, &'static str)] {
+        if self.loop_rows {
+            &LOOP_ROWS
+        } else {
+            &BEATS_ROWS
+        }
+    }
+
     fn panel_rect(&self, cx: &mut Cx) -> Rect {
         let chip = self.area.rect(cx);
         Rect {
@@ -2284,7 +2440,7 @@ impl VjBeatsDrop {
             ),
             size: dvec2(
                 BEATS_PANEL_W,
-                BEATS_ROWS.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0,
+                self.rows().len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0,
             ),
         }
     }
@@ -2293,7 +2449,7 @@ impl VjBeatsDrop {
         if self.dash {
             return "—";
         }
-        BEATS_ROWS
+        self.rows()
             .iter()
             .find(|(v, _)| *v == self.value)
             .map(|(_, label)| *label)
@@ -2325,9 +2481,11 @@ impl VjBeatsDrop {
     /// Select the row under `y` (if any), emit, close.
     fn pick_at(&mut self, cx: &mut Cx, uid: WidgetUid, panel: Rect, y: f64) {
         let index = ((y - panel.pos.y - BEATS_PANEL_PAD) / BEATS_ROW_H).floor();
-        if index >= 0.0 && (index as usize) < BEATS_ROWS.len() {
-            let (value, _) = BEATS_ROWS[index as usize];
-            if value != 0 {
+        if index >= 0.0 && (index as usize) < self.rows().len() {
+            let (value, _) = self.rows()[index as usize];
+            // On the sweep rows zero is the free-running dash and keeps the
+            // old value; on the loop rows zero is X, a value like any other.
+            if self.loop_rows || value != 0 {
                 self.value = value;
             }
             cx.widget_action(uid, VjBeatsDropAction::Picked(value));
@@ -2367,12 +2525,15 @@ impl Widget for VjBeatsDrop {
         } else {
             Vec4f::from_u32(0xf4f7faff)
         };
-        // centre the face text, biased left of the drop arrow
+        // centre the face text, biased left of the drop arrow. GLYPHS, not
+        // bytes: the infinity face is one glyph in three bytes, and the
+        // byte count marched it off to the left.
         let face = self.face();
+        let glyphs = face.chars().count() as f64;
         self.draw_text.draw_abs(
             cx,
             dvec2(
-                rect.pos.x + (rect.size.x - 10.0) * 0.5 - 2.0 * face.len() as f64 + 1.0,
+                rect.pos.x + (rect.size.x - 10.0) * 0.5 - 2.0 * glyphs + 1.0,
                 rect.pos.y + 5.0,
             ),
             face,
@@ -2380,13 +2541,16 @@ impl Widget for VjBeatsDrop {
         cx.end_turtle_with_area(&mut self.area);
 
         if self.open {
+            // 'static, so hoisting it out frees `self` for the draw_list
+            // borrow below.
+            let rows = self.rows();
             if let Some(draw_list) = self.draw_list.as_mut() {
                 // The proven popup idiom: turtle content at the overlay
                 // root, shifted under the chip.
                 draw_list.begin_overlay_reuse(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
-                let h = BEATS_ROWS.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0;
+                let h = rows.len() as f64 * BEATS_ROW_H + BEATS_PANEL_PAD * 2.0;
                 self.draw_panel.begin(
                     cx,
                     Walk::fixed(BEATS_PANEL_W, h),
@@ -2405,7 +2569,7 @@ impl Widget for VjBeatsDrop {
                         },
                     );
                 }
-                for (row, (_, label)) in BEATS_ROWS.iter().enumerate() {
+                for (row, (_, label)) in rows.iter().enumerate() {
                     self.draw_text.draw_abs(
                         cx,
                         dvec2(
@@ -2437,7 +2601,10 @@ impl Widget for VjBeatsDrop {
                         let index = ((me.abs.y - panel.pos.y - BEATS_PANEL_PAD)
                             / BEATS_ROW_H)
                             .floor();
-                        (index >= 0.0 && (index as usize) < BEATS_ROWS.len())
+                        // self.rows(), not BEATS_ROWS: the loop ladder is nine
+                        // rungs and the sweep table six, so counting the wrong
+                        // one left 32, 64 and the infinity rung unhighlightable.
+                        (index >= 0.0 && (index as usize) < self.rows().len())
                             .then(|| index as usize)
                     } else {
                         None
@@ -2451,6 +2618,12 @@ impl Widget for VjBeatsDrop {
                 }
                 Event::MouseDown(me) => {
                     if panel.contains(me.abs) {
+                        // The panel floats OVER the library: claim the press
+                        // or the row underneath takes it as well, and picking
+                        // "64" also loads whatever track it happened to
+                        // cover. A claimed press is dead to every later hit
+                        // test (Event::hits refuses a handled press).
+                        me.handled.set(self.area);
                         self.pick_at(cx, uid, panel, me.abs.y);
                     } else {
                         let chip = self.area.rect(cx);
@@ -2490,6 +2663,321 @@ impl Widget for VjBeatsDrop {
                 self.area.redraw(cx);
             }
             Hit::FingerDown(_) if !self.inert => {
+                self.set_open(cx, !self.open);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A pick from the fade-curve dropdown: an index into [`FADE_CURVES`].
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum VjCurveDropAction {
+    Picked(usize),
+    #[default]
+    None,
+}
+
+const CURVE_ROW_H: f64 = 20.0;
+/// Wide enough for the plot, a gap, and "Equal power" — the longest words
+/// on the list — at the 8pt bold the rows are set in.
+const CURVE_PANEL_W: f64 = 120.0;
+const CURVE_PANEL_PAD: f64 = 4.0;
+const CURVE_PANEL_GAP: f64 = 4.0;
+const CURVE_GRAPH_W: f64 = 34.0;
+const CURVE_GRAPH_H: f64 = 16.0;
+
+/// FADE CURVE as a dropdown, built on [`VjBeatsDrop`]'s bones: click the
+/// chip, the list drops into an overlay under it, a row picks and closes.
+///
+/// The difference is that every row draws the curve it names, sampled from
+/// [`crossfader_gains`] itself. Naming eight laws in words asks the operator
+/// to remember which is which; a picture taken from the gain law can't
+/// disagree with what the fader will actually do to the sound.
+#[derive(Script, Widget)]
+pub struct VjCurveDrop {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawVjBeatsChip,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_panel: DrawQuad,
+    #[live]
+    draw_hover: DrawColor,
+    /// One drawn icon per law, in `FADE_CURVES` order. Seven fields rather
+    /// than one that reloads: each keeps its own tessellated geometry, so a
+    /// row costs a draw and not a re-parse.
+    #[live]
+    icon_power: DrawSvg,
+    #[live]
+    icon_linear: DrawSvg,
+    #[live]
+    icon_dip: DrawSvg,
+    #[live]
+    icon_slowfade: DrawSvg,
+    #[live]
+    icon_slowcut: DrawSvg,
+    #[live]
+    icon_fastcut: DrawSvg,
+    #[live]
+    icon_transition: DrawSvg,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust]
+    value: usize,
+    #[rust]
+    open: bool,
+    #[rust]
+    hover_row: Option<usize>,
+    #[rust]
+    area: Area,
+}
+
+impl VjCurveDrop {
+    fn curve(&self) -> FadeCurve {
+        FADE_CURVES[self.value.min(FADE_CURVES.len() - 1)].0
+    }
+
+    fn panel_rect(&self, cx: &mut Cx) -> Rect {
+        let chip = self.area.rect(cx);
+        Rect {
+            pos: dvec2(
+                chip.pos.x + (chip.size.x - CURVE_PANEL_W) * 0.5,
+                chip.pos.y + chip.size.y + CURVE_PANEL_GAP,
+            ),
+            size: dvec2(
+                CURVE_PANEL_W,
+                FADE_CURVES.len() as f64 * CURVE_ROW_H + CURVE_PANEL_PAD * 2.0,
+            ),
+        }
+    }
+
+    /// The icon that stands for row `index`, in [`FADE_CURVES`] order.
+    ///
+    /// Borrowing one field at a time on purpose: the panel loop runs while
+    /// `draw_list` is mutably borrowed, and these are disjoint fields, so
+    /// the two borrows never meet.
+    fn icon(&mut self, index: usize) -> &mut DrawSvg {
+        match index {
+            0 => &mut self.icon_power,
+            1 => &mut self.icon_linear,
+            2 => &mut self.icon_dip,
+            3 => &mut self.icon_slowfade,
+            4 => &mut self.icon_slowcut,
+            5 => &mut self.icon_fastcut,
+            _ => &mut self.icon_transition,
+        }
+    }
+
+    pub fn set_value(&mut self, cx: &mut Cx, index: usize) {
+        let index = index.min(FADE_CURVES.len() - 1);
+        if self.value != index {
+            self.value = index;
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Select the row under `y` (if any), emit, close.
+    fn pick_at(&mut self, cx: &mut Cx, uid: WidgetUid, panel: Rect, y: f64) {
+        let index = ((y - panel.pos.y - CURVE_PANEL_PAD) / CURVE_ROW_H).floor();
+        if index >= 0.0 && (index as usize) < FADE_CURVES.len() {
+            self.value = index as usize;
+            cx.widget_action(uid, VjCurveDropAction::Picked(self.value));
+        }
+        self.set_open(cx, false);
+    }
+
+    fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        if self.open != open {
+            self.open = open;
+            self.hover_row = None;
+            self.draw_bg.set_uniform(cx, id!(open), &[if open { 1.0 } else { 0.0 }]);
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+            self.area.redraw(cx);
+        }
+    }
+}
+
+impl ScriptHook for VjCurveDrop {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+}
+
+impl Widget for VjCurveDrop {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.draw_bg.draw_abs(cx, rect);
+        // There is no room for a word on a 34-point chip, so the icon IS
+        // the face — inside the same 10-point right gutter the beats chip
+        // leaves for its drop arrow.
+        let value = self.value.min(FADE_CURVES.len() - 1);
+        // Smaller than the well it sits in: a drawing that touches the
+        // chip's edges reads as a pressed state rather than as a picture.
+        let face_h = 12.0f64.min(rect.size.y);
+        let face = Rect {
+            pos: dvec2(rect.pos.x + 5.0, rect.pos.y + (rect.size.y - face_h) * 0.5),
+            size: dvec2((rect.size.x - 18.0).max(1.0), face_h),
+        };
+        self.icon(value).draw_abs(cx, face);
+        cx.end_turtle_with_area(&mut self.area);
+
+        if self.open {
+            let value = self.value;
+            // The list is LIFTED out of `self` for the pass and put back
+            // after: the rows draw through `self.icon(row)`, and a method
+            // that borrows all of `self` cannot coexist with a borrow of
+            // one of its fields.
+            let mut lifted = self.draw_list.take();
+            if let Some(draw_list) = lifted.as_mut() {
+                // The proven popup idiom: turtle content at the overlay
+                // root, shifted under the chip.
+                draw_list.begin_overlay_reuse(cx);
+                let size = cx.current_pass_size();
+                cx.begin_root_turtle(size, Layout::flow_down());
+                let h = FADE_CURVES.len() as f64 * CURVE_ROW_H + CURVE_PANEL_PAD * 2.0;
+                self.draw_panel.begin(
+                    cx,
+                    Walk::fixed(CURVE_PANEL_W, h),
+                    Layout::default(),
+                );
+                let panel = cx.turtle().rect();
+                if let Some(row) = self.hover_row {
+                    self.draw_hover.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(
+                                panel.pos.x + 2.0,
+                                panel.pos.y + CURVE_PANEL_PAD + row as f64 * CURVE_ROW_H,
+                            ),
+                            size: dvec2(CURVE_PANEL_W - 4.0, CURVE_ROW_H),
+                        },
+                    );
+                }
+                for (row, (_curve, label)) in FADE_CURVES.iter().enumerate() {
+                    let top = panel.pos.y + CURVE_PANEL_PAD + row as f64 * CURVE_ROW_H;
+                    let cell = Rect {
+                        pos: dvec2(
+                            panel.pos.x + CURVE_PANEL_PAD,
+                            top + (CURVE_ROW_H - CURVE_GRAPH_H) * 0.5,
+                        ),
+                        size: dvec2(CURVE_GRAPH_W, CURVE_GRAPH_H),
+                    };
+                    self.icon(row).draw_abs(cx, cell);
+                    // The chip can only show a shape, so the open list is the
+                    // one place the current pick gets named: it keeps full
+                    // white and the rest step back a shade.
+                    self.draw_text.color = if row == value {
+                        Vec4f::from_u32(0xf4f7faff)
+                    } else {
+                        Vec4f::from_u32(0x9aa4b0ff)
+                    };
+                    self.draw_text.draw_abs(
+                        cx,
+                        dvec2(
+                            panel.pos.x + CURVE_PANEL_PAD + CURVE_GRAPH_W + 6.0,
+                            top + 5.0,
+                        ),
+                        label,
+                    );
+                }
+                self.draw_panel.end(cx);
+                let chip = self.area.rect(cx);
+                cx.end_pass_sized_turtle_with_shift(
+                    self.area,
+                    dvec2((chip.size.x - CURVE_PANEL_W) * 0.5, chip.size.y + CURVE_PANEL_GAP),
+                );
+                draw_list.end(cx);
+            }
+            self.draw_list = lifted;
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        if self.open {
+            let panel = self.panel_rect(cx);
+            match event {
+                Event::MouseMove(me) => {
+                    let row = if panel.contains(me.abs) {
+                        let index = ((me.abs.y - panel.pos.y - CURVE_PANEL_PAD)
+                            / CURVE_ROW_H)
+                            .floor();
+                        // FADE_CURVES.len(), never a row count borrowed from
+                        // the beats table: the two lists are different lengths
+                        // and the bottom rows would go unhighlightable.
+                        (index >= 0.0 && (index as usize) < FADE_CURVES.len())
+                            .then(|| index as usize)
+                    } else {
+                        None
+                    };
+                    if row != self.hover_row {
+                        self.hover_row = row;
+                        if let Some(draw_list) = &self.draw_list {
+                            draw_list.redraw(cx);
+                        }
+                    }
+                }
+                Event::MouseDown(me) => {
+                    if panel.contains(me.abs) {
+                        // The panel floats OVER the transport strip: claim the
+                        // press or whatever is underneath takes it as well, and
+                        // picking a curve also nudges the control it covered. A
+                        // claimed press is dead to every later hit test
+                        // (Event::hits refuses a handled press).
+                        me.handled.set(self.area);
+                        self.pick_at(cx, uid, panel, me.abs.y);
+                    } else {
+                        let chip = self.area.rect(cx);
+                        if !chip.contains(me.abs) {
+                            self.set_open(cx, false);
+                        }
+                    }
+                }
+                Event::MouseUp(me) => {
+                    // THE MENU GESTURE (macOS/DAW standard): press on the
+                    // chip, DRAG onto a row, release = select + close — one
+                    // fluid motion. A release back on the chip keeps the list
+                    // open (the click-then-click mode); a release in dead
+                    // space dismisses.
+                    if panel.contains(me.abs) {
+                        self.pick_at(cx, uid, panel, me.abs.y);
+                    } else {
+                        let chip = self.area.rect(cx);
+                        if !chip.contains(me.abs) {
+                            self.set_open(cx, false);
+                        }
+                    }
+                }
+                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                    self.set_open(cx, false);
+                }
+                _ => {}
+            }
+        }
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(_) => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
+                self.area.redraw(cx);
+            }
+            Hit::FingerDown(_) => {
                 self.set_open(cx, !self.open);
             }
             _ => {}
