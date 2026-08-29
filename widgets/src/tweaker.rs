@@ -1981,6 +1981,33 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     script_apply_eval!(cx, btn, { draw_bg +: { color: #(color) } });
 }
 
+/// The selection's path for people: anonymous segments (`-`, list
+/// indices) read as the widget's type, joined with ›.
+fn display_path(cx: &Cx, uid: u64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = Some(WidgetUid(uid));
+    while let Some(u) = cur {
+        let (name, parent, ty) = {
+            let tree = cx.widget_tree();
+            let name = tree.name_of(u).map(live_id_token).unwrap_or_else(|| "-".to_string());
+            let ty = tree.widget(u).widget_type_id();
+            (name, tree.parent_of(u), ty)
+        };
+        let anon = name == "-" || name.chars().all(|c| c.is_ascii_digit());
+        let label = if anon {
+            ty.and_then(|t| widget_type_names(cx).get(&t).copied())
+                .map(live_id_token)
+                .unwrap_or(name)
+        } else {
+            name
+        };
+        parts.push(label);
+        cur = parent;
+    }
+    parts.reverse();
+    parts.join(" \u{203a} ")
+}
+
 /// Keep the leaf visible: `…` then the last `keep` chars.
 fn tail_ellipsis(s: &str, keep: usize) -> String {
     let n = s.chars().count();
@@ -5387,6 +5414,18 @@ impl Tweaker {
             }
             out.extend(composites.iter().copied());
             let expanded = filtering || self.expanded[section.index()];
+            // A section with no primary row read as an empty header over a
+            // "show all": lead with its first three rows instead.
+            let primary = members
+                .iter()
+                .filter(|&&i| match section {
+                    SectionKind::Style => Self::style_curated(&self.rows[i]),
+                    SectionKind::Layout => !Self::layout_composited(&self.rows[i].prop),
+                    _ => true,
+                })
+                .count();
+            let force_show = if !filtering && !expanded && primary == 0 { 3usize } else { 0 };
+            let mut forced = 0usize;
             let mut hidden = 0usize;
             let mut last_material: Option<String> = None;
             for index in members {
@@ -5399,7 +5438,9 @@ impl Tweaker {
                     SectionKind::Style => !expanded && !Self::style_curated(row),
                     _ => false,
                 };
-                if !filtering && in_tail {
+                if !filtering && in_tail && forced < force_show {
+                    forced += 1;
+                } else if !filtering && in_tail {
                     // Rows folded into composites never re-appear; the
                     // rest count toward the expander.
                     if !(section == SectionKind::Layout && Self::layout_composited(&row.prop))
@@ -5478,7 +5519,11 @@ impl Tweaker {
                 sidebar
                     .child(live_id!(ident_footer)).child(live_id!(title_label))
                     .set_text(cx, &head);
-                sidebar.child(live_id!(ident_footer)).child(live_id!(path_label)).set_text(cx, &tail_ellipsis(&sel.path, 44));
+                let shown_path = tail_ellipsis(&display_path(cx, sel.uid), 48);
+                sidebar
+                    .child(live_id!(ident_footer))
+                    .child(live_id!(path_label))
+                    .set_text(cx, &shown_path);
                 {
                     let all = session().lock().unwrap().scope_all;
                     let row = sidebar.child(live_id!(props_wrap)).child(live_id!(scope_row));
@@ -5969,7 +6014,7 @@ impl Tweaker {
                             let color = Self::level_color(level);
                             script_apply_eval!(cx, chip, { draw_bg +: { color: #(color) } });
                             head.child(live_id!(loc)).set_text(cx, if lvl.file.is_empty() { "native" } else { &lvl.loc });
-                            let own: Vec<&str> = lvl.sets.iter().filter(|(_, o)| !*o).map(|(n, _)| n.as_str()).collect();
+                            let own: Vec<&str> = lvl.sets.iter().map(|(n, _)| n.as_str()).collect();
                             let over: Vec<&str> = lvl.sets.iter().filter(|(_, o)| *o).map(|(n, _)| n.as_str()).collect();
                             item.child(live_id!(sets_wrap)).set_visible(cx, !own.is_empty());
                             item.child(live_id!(overridden_wrap)).set_visible(cx, !over.is_empty());
