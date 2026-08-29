@@ -25,10 +25,18 @@ pub const ACE_CONTEXT_DIM: usize = 128; // src + chunk_mask
 pub const ACE_MIN_SECONDS: f64 = 10.0;
 pub const ACE_MAX_SECONDS: f64 = 600.0;
 pub const ACE_DEFAULT_SECONDS: f64 = 60.0;
-pub const ACE_DEFAULT_STEPS: usize = 50;
+/// The pinned checkpoint is XL **Turbo**, whose model card specifies EIGHT
+/// steps and NO classifier-free guidance — the guidance is distilled into
+/// the weights. This tree defaulted to a 50-step, CFG-7 schedule borrowed
+/// from the non-turbo model: six times the work for a result the checkpoint
+/// was never trained to produce.
+pub const ACE_DEFAULT_STEPS: usize = 8;
 pub const ACE_DEFAULT_SHIFT: f32 = 3.0;
-pub const ACE_DEFAULT_CFG: f32 = 7.0;
-pub const ACE_BASE_CFG: f32 = 7.0;
+/// 1.0 IS "no CFG": the APG/uncond branch is gated on `guidance > 1.0`, so
+/// this both matches the card and stops running a second denoise pass whose
+/// only effect on a turbo checkpoint is to distort it.
+pub const ACE_DEFAULT_CFG: f32 = 1.0;
+pub const ACE_BASE_CFG: f32 = 1.0;
 pub const ACE_APG_MOMENTUM: f32 = -0.75;
 pub const ACE_APG_ETA: f32 = 0.0;
 pub const ACE_APG_NORM_THRESHOLD: f32 = 2.5;

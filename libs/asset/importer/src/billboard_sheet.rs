@@ -369,6 +369,9 @@ mod tests {
             }],
             frames,
             sheet: None,
+            actor: None,
+            weapon: None,
+            metres_per_pixel: 0.0,
         }
     }
 

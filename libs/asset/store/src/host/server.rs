@@ -99,6 +99,9 @@ impl AssetServer {
             // The broker's `assets.query` reads this server's OWN catalog
             // file (read-only WAL snapshots) — same process, same root.
             Some(cfg.root.join("catalog.sqlite3")),
+            // Keyed (per client, per game) transcripts live under
+            // `<root>/chat/` and outlive workers and restarts.
+            &cfg.root,
             cfg.log,
             stop.clone(),
         )?;
@@ -156,6 +159,7 @@ impl AssetServer {
 
         let janitor = Some(spawn_janitor(
             state.clone(),
+            events.clone(),
             cfg.janitor_interval_ms,
             cfg.gc_janitor_steps,
         )?);
@@ -456,6 +460,7 @@ fn serve_conn(stream: TcpStream, rc: &RouteCtx, plane: Plane, stop: &AtomicBool)
 
 fn spawn_janitor(
     state: StateHandle,
+    events: Arc<super::events::EventHub>,
     interval_ms: u64,
     gc_steps: u32,
 ) -> ServerResult<(mpsc::Sender<()>, JoinHandle<()>)> {
@@ -470,6 +475,24 @@ fn spawn_janitor(
                     // Poisoned state returns None; keep ticking, health
                     // reports the outage.
                     let _ = state.call(move |ctx| ctx.core.jobs().expire_leases(now));
+                    // Pipelines whose finish nobody has announced. Most
+                    // finishes are announced by the route that caused them;
+                    // this catches the one that has no route — a pending
+                    // stage doomed inside another job's claim, because its
+                    // dependency failed — and the lease expiry just above,
+                    // which is a terminal transition with no request behind
+                    // it either. Bounded per tick; a READ of a pipeline
+                    // always reports the truthful derived state regardless,
+                    // so the sweep only ever owes the EVENT.
+                    let hub = events.clone();
+                    let _ = state.call(move |ctx| -> crate::ServerResult<()> {
+                        for pipeline in
+                            ctx.pipelines_unannounced(super::routes_control::PIPELINE_SWEEP)?
+                        {
+                            super::routes_control::pipeline_settle(ctx, &hub, &pipeline, now)?;
+                        }
+                        Ok(())
+                    });
                     // A GC run finishes even if nobody polls it: a bounded
                     // number of steps per tick, each one transaction over
                     // one batch, interleaved with every other state call.

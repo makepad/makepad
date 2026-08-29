@@ -41,6 +41,7 @@
 pub use makepad_widgets;
 
 mod analysis;
+mod annotate_queue;
 mod artifact_io;
 mod asset_store_state;
 mod audio;
@@ -59,6 +60,7 @@ mod mesh_view;
 mod music_page;
 use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
+mod runs_chip;
 mod scheduler;
 mod store_views;
 mod thumbnail_renderer;
@@ -70,6 +72,8 @@ use crate::artifact_io::{
     ViewerOpenGate,
 };
 use crate::fleet_poll::FleetPoll;
+use crate::annotate_queue::AnnotateQueue;
+use crate::runs_chip::RunsChip;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
 use crate::music_page::MusicImportPage;
@@ -88,7 +92,7 @@ use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipeline::{
     ENHANCE_FACTORS,
-    consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
+    consumer_only_domain, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
     EDIT_STRENGTHS, LORA_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
@@ -561,6 +565,153 @@ script_mod! {
         width: Fill height: 1
         margin: Inset{top: 8 bottom: 2}
         draw_bg +: { color: #xffffff0d }
+    }
+
+    // ---- the card grammar ---------------------------------------------------
+    // ONE way a spawned task renders, everywhere: the Create surface, the
+    // RUNS panel behind the header chip, and (later) the VJ drawer. A card
+    // is a title row, ONE aggregate bar, one compact stage strip, and a
+    // fold. There is never a second progress representation of the same run
+    // on screen, there are never per-stage bars, and a section with nothing
+    // under it does not render.
+
+    // One stage of a run. Tone rides the BACKGROUND (a uniform, so each
+    // chip keeps its own without a per-frame re-apply); the text stays one
+    // readable grey, because the chip's job is the stage's name and share,
+    // not a second colour code to learn.
+    let CardStageChip = RoundedView{
+        visible: false
+        width: Fit height: Fit
+        padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
+        draw_bg +: {
+            tone: uniform(#x8a939d)
+            border_radius: 2.5
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.border_radius)
+                sdf.fill_keep(vec4(self.tone.rgb, 0.13))
+                sdf.stroke(vec4(self.tone.rgb, 0.42), 1.0)
+                return sdf.result
+            }
+        }
+        cs_label := Label{
+            draw_text +: {
+                color: #xc6cfd8
+                text_style: theme.font_regular{font_size: 7.5}
+            }
+        }
+    }
+
+    // The outer View exists so the CARD has a name of its own: pressing it
+    // anywhere is what opens the fold, and a widget only emits finger
+    // actions when something asks for them by name.
+    let RunCardBody = View{
+        width: Fill height: Fit
+        flow: Down
+        card_body := Card{
+            width: Fill height: Fit
+            flow: Down spacing: 5
+            padding: Inset{left: 10 right: 8 top: 7 bottom: 7}
+            // The whole card is the press target for the fold.
+            cursor: MouseCursor.Hand
+            // Row 1: what this is, in the person's own words, how long it has
+            // been going, and its stop.
+            View{
+                width: Fill height: Fit flow: Right spacing: 7
+                align: Align{y: 0.5}
+                // The state marker. A dot and not a glyph: the theme font has
+                // no play/pause/cancel characters (it has exactly one tick and
+                // one multiplication sign), and this app already says "state"
+                // with a coloured dot on every fleet box.
+                card_dot := SolidView{
+                    width: 8 height: 8
+                    draw_bg +: {
+                        tone: uniform(#x3d9bf0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.35)
+                            sdf.fill(self.tone)
+                            return sdf.result
+                        }
+                    }
+                }
+                card_label := Label{
+                    width: Fit
+                    max_lines: 1
+                    draw_text +: {
+                        color: #xdfe6ec
+                        text_style: theme.font_bold{font_size: 8.5}
+                    }
+                }
+                // The words the PERSON typed, quoted. Never the expanded prompt
+                // — that is fold material.
+                card_excerpt := Label{
+                    width: Fill
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
+                    draw_text +: {
+                        color: #x8a939d
+                        text_style: theme.font_regular{font_size: 8.5}
+                    }
+                }
+                card_time := Label{
+                    draw_text +: {
+                        color: #x6a7178
+                        text_style: theme.font_regular{font_size: 7.5}
+                    }
+                }
+                card_up := GhostButton{ text: "↑" visible: false }
+                card_cancel := DangerButton{ text: "×" visible: false }
+            }
+            // Row 2: THE bar. The percent sits in a fixed box so every card's
+            // bar ends on the same pixel — the misalignment complaint was about
+            // right-floating bars that never lined up with their rows.
+            View{
+                width: Fill height: Fit flow: Right spacing: 7
+                align: Align{y: 0.5}
+                card_bar := ProgressBar{ width: Fill height: 5 }
+                card_pct := Label{
+                    width: 32
+                    draw_text +: {
+                        color: #x99a2ac
+                        text_style: theme.font_regular{font_size: 8}
+                    }
+                }
+            }
+            // The humanized word, or — when it failed — WHY, readable without
+            // unfolding anything.
+            card_status := Label{
+                width: Fill
+                max_lines: 2
+                draw_text +: {
+                    color: #x8a939d
+                    text_style: theme.font_regular{font_size: 8}
+                }
+            }
+            // Row 3: one chip per stage. Only when there is more than one.
+            card_strip := View{
+                visible: false
+                width: Fill height: Fit
+                flow: Flow.Right{wrap: true}
+                spacing: 4
+                cs0 := CardStageChip{}
+                cs1 := CardStageChip{}
+                cs2 := CardStageChip{}
+                cs3 := CardStageChip{}
+                cs4 := CardStageChip{}
+                cs5 := CardStageChip{}
+                cs6 := CardStageChip{}
+                cs7 := CardStageChip{}
+            }
+            // Row 4: the fold. Everything diagnostic lives HERE and only here —
+            // the full sent prompt, params, model and box, job ids, attempts,
+            // declared-but-unsent bodies, the whole error text.
+            card_fold := MonoLabel{
+                width: Fill
+                visible: false
+            }
+            card_copy := GhostButton{ text: "Copy" visible: false }
+        }
     }
 
     // One-click chains: a tiny group tag column + wrapping chips.
@@ -1219,33 +1370,46 @@ script_mod! {
                     }
                 }
             }
+            // Every spawned unit of work, in the one grammar.
+            CardR := RunCardBody{}
             StageR := Card{
-                flow: Right spacing: 8
+                flow: Down spacing: 4
                 padding: Inset{left: 10 right: 6 top: 6 bottom: 6}
-                align: Align{y: 0.5}
-                stage_title := Label{
-                    width: 190
-                    max_lines: 1
-                    text_overflow: TextOverflow.Ellipsis
-                    draw_text +: {
-                        color: #xdfe6ec
-                        text_style: theme.font_regular{font_size: 8.5}
+                View{
+                    width: Fill height: Fit flow: Right spacing: 8
+                    align: Align{y: 0.5}
+                    // The title is the open/close affordance: pressing the
+                    // row is how you read what the stage was handed.
+                    stage_title := ButtonFlatter{
+                        width: 190
+                        draw_text +: {
+                            color: #xdfe6ec
+                            text_style: theme.font_regular{font_size: 8.5}
+                        }
                     }
+                    // ONE line, always: a long status wrapping to two lines
+                    // grew the row and made the whole Loading strip bounce
+                    // while an import streamed status updates.
+                    stage_meta := Label{
+                        width: Fill
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                        draw_text +: {
+                            color: #x8a939d
+                            text_style: theme.font_regular{font_size: 8}
+                        }
+                    }
+                    stage_bar := ProgressBar{ width: 140 height: 4 }
+                    stage_copy := GhostButton{ text: "Copy" visible: false }
+                    stage_cancel := DangerButton{ text: "Stop" visible: false }
                 }
-                // ONE line, always: a long status wrapping to two lines
-                // grew the row and made the whole Loading strip bounce
-                // while an import streamed status updates.
-                stage_meta := Label{
+                // What the stage was GIVEN, in full, once the row is open:
+                // the exact prompt text that went to the model, wrapped and
+                // selectable, never truncated — the whole point.
+                stage_detail := MonoLabel{
                     width: Fill
-                    max_lines: 1
-                    text_overflow: TextOverflow.Ellipsis
-                    draw_text +: {
-                        color: #x8a939d
-                        text_style: theme.font_regular{font_size: 8}
-                    }
+                    visible: false
                 }
-                stage_bar := ProgressBar{ width: 140 height: 4 }
-                stage_cancel := DangerButton{ text: "Stop" visible: false }
             }
             QueuedR := Card{
                 flow: Right spacing: 4
@@ -2016,57 +2180,25 @@ script_mod! {
                         }
 
 
-                        PanelHeading{ text: "Now running" }
-                        now_card := Card{
-                            padding: 8
-                            spacing: 6
-                            now_top := View{
-                                width: Fill height: Fit flow: Right spacing: 4
-                                align: Align{y: 0.5}
-                                now_head := BrightLabel{ text: "Idle — nothing running" }
-                                cancel_btn := DangerButton{ text: "Stop" visible: false }
-                            }
-                            now_bar := ProgressBar{}
-                            now_detail := DimLabel{ text: "" }
+                        // Everything this app has spawned, in the ONE card
+                        // grammar — the same card the RUNS panel draws. This
+                        // replaced three stacked renderings of the same run
+                        // (a "Done in 538.3s" banner card, a column of
+                        // per-stage bars that never lined up with their
+                        // names, and a raw status dump with the routing
+                        // internals inline). Everything diagnostic still
+                        // exists: it is in the fold, one press away.
+                        create_runs_heading := PanelHeading{ text: "Runs" }
+                        create_runs := View{
+                            width: Fill height: Fit flow: Down spacing: 6
+                            rc0 := RunCardBody{ visible: false }
+                            rc1 := RunCardBody{ visible: false }
+                            rc2 := RunCardBody{ visible: false }
+                            rc3 := RunCardBody{ visible: false }
                         }
-
-                        PanelHeading{ text: "Up next" }
-                        queue_panel := View{
-                            width: Fill height: Fit flow: Down spacing: 3
-                            q1_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q1_label := MonoLabel{} q1_up := GhostButton{ text: "↑" } q1_cancel := DangerButton{ text: "×" } }
-                            q2_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q2_label := MonoLabel{} q2_up := GhostButton{ text: "↑" } q2_cancel := DangerButton{ text: "×" } }
-                            q3_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q3_label := MonoLabel{} q3_up := GhostButton{ text: "↑" } q3_cancel := DangerButton{ text: "×" } }
-                            q4_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q4_label := MonoLabel{} q4_up := GhostButton{ text: "↑" } q4_cancel := DangerButton{ text: "×" } }
-                            q5_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q5_label := MonoLabel{} q5_up := GhostButton{ text: "↑" } q5_cancel := DangerButton{ text: "×" } }
-                            q6_row := Card{ flow: Right padding: Inset{left: 8 right: 4 top: 3 bottom: 3} spacing: 4 align: Align{y: 0.5} visible: false
-                                q6_label := MonoLabel{} q6_up := GhostButton{ text: "↑" } q6_cancel := DangerButton{ text: "×" } }
-                        }
-
-                        PanelHeading{ text: "Stage details" }
-                        stage_bars := View{
-                            width: Fill height: Fit flow: Down spacing: 4
-                            s1_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s1_name := DimLabel{ width: 220 } s1_bar := ProgressBar{ height: 4 } }
-                            s2_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s2_name := DimLabel{ width: 220 } s2_bar := ProgressBar{ height: 4 } }
-                            s3_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s3_name := DimLabel{ width: 220 } s3_bar := ProgressBar{ height: 4 } }
-                            s4_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s4_name := DimLabel{ width: 220 } s4_bar := ProgressBar{ height: 4 } }
-                            s5_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s5_name := DimLabel{ width: 220 } s5_bar := ProgressBar{ height: 4 } }
-                            s6_row := View{ width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5} visible: false
-                                s6_name := DimLabel{ width: 220 } s6_bar := ProgressBar{ height: 4 } }
-                        }
-                        stages_scroll := QuietScrollY{
+                        create_runs_note := HintLabel{
                             width: Fill
-                            height: 170
-                            stages_label := DimLabel{ text: "No pipeline yet — pick a chain above and Generate." }
+                            text: "Nothing running — pick a chain above and Generate."
                         }
                             }
                             // Say it in words and the same run appears in the
@@ -2296,6 +2428,36 @@ script_mod! {
                                 text: "SERVER · DISCONNECTED"
                                 draw_text +: {
                                     color: #x6a7178
+                                    text_style: theme.font_bold{font_size: 7}
+                                }
+                            }
+                            // How much of the catalog an AI can actually
+                            // find by asking for it. Visible from every
+                            // surface, because it is a property of the
+                            // store, not of whichever page is open.
+                            annotation_chip := Label{
+                                text: ""
+                                draw_text +: {
+                                    color: #x6a7178
+                                    text_style: theme.font_bold{font_size: 7}
+                                }
+                            }
+                            // Everything this app has in flight, whoever is
+                            // running it: store pipelines, standalone store
+                            // jobs and this app's own engine, counted once
+                            // and weighed once. Always here — "nothing is
+                            // running" is an answer, and a chip that hides
+                            // itself cannot be pressed to see what just
+                            // finished. Press opens the panel.
+                            runs_chip := ButtonFlatter{
+                                text: "RUNS · idle"
+                                margin: 0
+                                padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
+                                draw_text +: {
+                                    color: #x6a7178
+                                    color_hover: #xe6ebf0
+                                    color_down: #xffffff
+                                    color_focus: #x6a7178
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
@@ -2904,6 +3066,7 @@ script_mod! {
                                                     width: Fill height: Fit flow: Right spacing: 6
                                                     align: Align{y: 0.5}
                                                     detail_analyse_btn := GhostButton{ text: "Analyse stems" }
+                                                    detail_reveal_btn := GhostButton{ text: "Reveal file" }
                                                     detail_analyse_lyrics := CheckBox{
                                                         text: "+ lyrics"
                                                         active: false
@@ -3005,8 +3168,12 @@ script_mod! {
                                             HintLabel{ text: "CC BY 4.0 · attribution required" }
                                             LinkLabel{ text: "Terms" url: "https://creativecommons.org/licenses/by/4.0/" }
                                             kenney_pack_drop := FieldDrop2{ width: 180 }
+                                            kenney_annotate_btn := GhostButton{ text: "Annotate" }
+                                            kenney_annotate_all_btn := GhostButton{ text: "Annotate all" }
+                                            kenney_annotate_pause_btn := GhostButton{ text: "Pause" }
                                         }
                                         HintLabel{ text: "© Kenney (kenney.nl). Attribution required on every copy and derivative. Not CC0. Local kits only — this card does not download Kenney." }
+                                        HintLabel{ text: "Annotate queues this kit's turntable sheets for the vision model, which writes the descriptions catalog search hits. A publish queues its own — these buttons are for what is already in. Pause cancels what is still queued and lets the boxes finish what they are on; Resume queues exactly those assets again." }
                                     }
 
                                     freedoom_card := ImportRow{
@@ -3202,6 +3369,45 @@ script_mod! {
                         }
                     }
 
+                    }
+                    kenney_donate_modal := Modal{
+                        can_dismiss: true
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                BrightLabel{
+                                    text: "Consider donating to Kenney"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: "These kits are free (CC BY 4.0) and made by one person. If they end up in your game, a donation keeps them coming."
+                                }
+                                LinkLabel{ text: "kenney.nl/donate" url: "https://kenney.nl/donate" }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    kenney_donate_cancel := ChipButton{ text: "Cancel" }
+                                    kenney_donate_ok := PrimaryButton{ text: "Import" }
+                                }
+                            }
+                        }
                     }
                     license_modal := Modal{
                         can_dismiss: false
@@ -3405,6 +3611,49 @@ script_mod! {
                             }
                         }
                     }
+                    // Everything in flight, one card each, behind the RUNS
+                    // chip. Pipelines, standalone store jobs and this app's
+                    // own runs land in ONE list in ONE grammar; the card is
+                    // the same object the Create surface draws.
+                    runs_panel_modal := Modal{
+                        content +: {
+                            width: 760
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 16
+                                spacing: 8
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{y: 0.5}
+                                    runs_panel_title := BrightLabel{
+                                        width: Fit
+                                        text: "Runs"
+                                        draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                    }
+                                    runs_panel_count := DimLabel{ width: Fill text: "" }
+                                    runs_cancel_all := DangerButton{ text: "Cancel all" visible: false }
+                                    runs_panel_close := ChipButton{ text: "Close" }
+                                }
+                                runs_panel_note := HintLabel{ width: Fill text: "" }
+                                runs_panel_list := mod.widgets.StoreListPanel{
+                                    width: Fill
+                                    height: 470
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3532,7 +3781,6 @@ fn repo_path(rel: &str) -> String {
     format!("{}/../../{}", env!("CARGO_MANIFEST_DIR"), rel)
 }
 
-const QUEUE_ROWS: usize = 6;
 /// Box cards in the Fleet box.
 const FLEET_CARD_SLOTS: usize = 12;
 
@@ -3653,6 +3901,10 @@ struct ActiveRun {
     group_id: String,
     group_label: String,
     prompt: String,
+    /// Wall clock at spawn. The card list sorts store runs and this app's
+    /// own runs into ONE order, and an `Instant` cannot be compared with a
+    /// server's `created_ms`.
+    created_ms: u64,
     pipeline: Pipeline,
 }
 
@@ -3733,6 +3985,17 @@ pub struct App {
     /// The last run spec, for Retry after a failure.
     #[rust]
     last_run: Option<PendingRun>,
+    /// `(run id, stage index)` of every stage row the person has OPENED to
+    /// read what it was handed. Lives here, not in the list: the rows are
+    /// rebuilt from scratch several times a second, so an open row has to
+    /// be remembered by something that outlives them.
+    #[rust]
+    open_stages: Vec<(u64, usize)>,
+    /// Everything in flight ANYWHERE this app can see: store pipelines,
+    /// standalone store jobs and this app's own runs, merged into the one
+    /// card grammar behind the header's RUNS chip.
+    #[rust]
+    runs_chip: RunsChip,
     #[rust]
     fleet_timer: Timer,
     /// LAN beacon listener; polled on the fleet timer.
@@ -3879,6 +4142,9 @@ pub struct App {
     /// Box base_url shown in the fleet box popup + its row → model map.
     #[rust]
     fleet_modal_box: Option<String>,
+    /// Kenney Load / Load all waiting on the "consider donating" popup's OK.
+    #[rust]
+    kenney_donate_pending: Option<ImportJob>,
     #[rust]
     fleet_modal_models: Vec<String>,
     /// Job ids per jobs row in the node column (for Cancel).
@@ -3946,6 +4212,11 @@ pub struct App {
     /// One running import plus a user-editable wait list.
     #[rust]
     import_queue: ImportQueue,
+    /// The store's vision-annotation queue: this app hosts its worker and
+    /// draws its progress. An asset published without a description is
+    /// invisible to every text search the AI level builder makes.
+    #[rust]
+    annotate_queue: AnnotateQueue,
     /// Landings waiting to be written a few at a time so the UI stays live.
     #[rust]
     import_landings: Vec<crate::import::LibraryLanding>,
@@ -4053,6 +4324,19 @@ impl App {
         }
         // One shared, real Asset Server session. Discovery/auth/retry happen
         // off-thread; this call only starts the lifecycle.
+        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
+        // fleet so the sandbox `game` box (.123) never lands in this UI.
+        // Resolved BEFORE the store starts: the embedded server's chat broker
+        // listens for the same fleet name (start_embedded_asset_server_at),
+        // and it used to be pinned to `default` while this panel showed the
+        // `gen` boxes 2/2 up — every game chat got "no fleet nodes configured".
+        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
+            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
+        }
+        log!(
+            "fleet: listening for '{}' beacons (MAKEPAD_AI_FLEET)",
+            makepad_asset_ai::discovery::wanted_fleet()
+        );
         // The store hosts the embedded Asset Server; hand it the library it
         // must publish. Library::open ran above, so the product backfill is
         // already on disk when the watcher's first poll reads index.json.
@@ -4070,11 +4354,6 @@ impl App {
         // empty library changes nothing.
         self.refresh_gallery(cx, true);
 
-        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
-        // fleet so the sandbox `game` box (.123) never lands in this UI.
-        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
-            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
-        }
         self.discovered = Some(makepad_asset_ai::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
         self.maybe_connect_chat(cx);
@@ -4558,6 +4837,15 @@ impl App {
         ids
     }
 
+    /// Kenney kits are free: every Load / Load all first asks for a donation
+    /// (kenney.nl/donate). OK queues the held job, Cancel/dismiss drops it.
+    fn open_kenney_donate_modal(&mut self, cx: &mut Cx, job: ImportJob) {
+        let label = if matches!(job, ImportJob::KenneyAll) { "Import all" } else { "Import" };
+        self.ui.button(cx, ids!(kenney_donate_ok)).set_text(cx, label);
+        self.kenney_donate_pending = Some(job);
+        self.ui.modal(cx, ids!(kenney_donate_modal)).open(cx);
+    }
+
     fn open_license_modal(&mut self, cx: &mut Cx, prompt: LicensePrompt) {
         let kind = match prompt.restriction.as_str() {
             "non-commercial" => "Non-commercial weights. Personal / research use only.",
@@ -4811,8 +5099,17 @@ impl App {
             view.set_visible(cx, true);
             let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
             let who = if ours.iter().any(|id| id == &job.job_id) { "ours" } else { "other client" };
+            // For a job of OUR OWN, say what it was asked for: the box
+            // reports a model and a stage but never the prompt, so this is
+            // the only side that knows.
+            let asked = self
+                .runs
+                .iter()
+                .find_map(|run| run.pipeline.sent_prompt_for_job(&job.job_id))
+                .map(|prompt| format!(" · \u{201c}{}\u{201d}", truncate(prompt, 64)))
+                .unwrap_or_default();
             let text = format!(
-                "{} · {} · {}{} · {} · {}",
+                "{} · {} · {}{} · {} · {}{asked}",
                 job.model.clone().unwrap_or_else(|| "?".to_string()),
                 job.state,
                 job.stage.clone().unwrap_or_default(),
@@ -5597,7 +5894,12 @@ impl App {
     fn current_run_spec(&mut self, cx: &mut Cx) -> Result<PendingRun, String> {
         let mut prompt = self.ui.text_input(cx, ids!(prompt_input)).text();
         if prompt.trim().is_empty() {
+            // A demo prompt stands in for an empty box, but SILENTLY
+            // substituting one reads as "my prompt did not go in" — which is
+            // exactly what it is.
             prompt = "a weathered fishing trawler at dawn, misty harbor".to_string();
+            log!("input: prompt box was empty — using the demo prompt");
+            self.set_caption(cx, "INPUT", "prompt box was empty — used the demo prompt");
         }
         let preset = self.current_preset_index(cx);
         let model_overrides =
@@ -6158,6 +6460,15 @@ impl App {
             .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
             .collect();
         let snapshots = self.routing_snapshots_keeping(&keep);
+        // Every run says WHAT it was asked for, in the person's own words,
+        // the moment it starts. A run whose prompt appears nowhere is a run
+        // that cannot be found again when something goes wrong with it.
+        log!(
+            "run: {} starting {:?} — prompt \"{}\"",
+            run.group_id,
+            PRESETS[run.preset].name,
+            truncate(run.prompt.trim(), 160)
+        );
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
@@ -6224,6 +6535,10 @@ impl App {
             group_id: run.group_id.clone(),
             group_label: run.group_label.clone(),
             prompt: run.prompt.clone(),
+            created_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis() as u64)
+                .unwrap_or(0),
             pipeline,
         });
         self.last_run = Some(run);
@@ -6265,149 +6580,72 @@ impl App {
             .or_else(|| self.runs.last())
     }
 
-    /// NOW card + queue rows + spinner + retry visibility.
+    /// The run cards on the Create surface, the header chip, the spinner
+    /// and Retry.
+    ///
+    /// ONE grammar: every spawned unit of work — a store pipeline, a
+    /// standalone store job, or a run of this app's own engine — is a card
+    /// built by `runs_chip.rs` and drawn by `store_views::paint_card`, here
+    /// and in the RUNS panel alike. What was here before was the same run
+    /// drawn three times over (a "Done in 538.3s" banner, a column of
+    /// per-stage bars, a raw status dump with the routing internals inline)
+    /// and that is what this replaced.
     fn refresh_run_ui(&mut self, cx: &mut Cx) {
         let active_running = self.any_run_running();
-        let concurrent = self.active_run_count();
         self.ui
             .widget(cx, ids!(spinner))
             .set_visible(cx, active_running);
-        let display_pipeline = self.display_run().map(|run| &run.pipeline);
-        let failed = display_pipeline.is_some_and(|p| {
-            p.stages
-                .iter()
-                .any(|s| matches!(s.state, StageState::Failed(_)))
-        });
+        let failed = self
+            .display_run()
+            .is_some_and(|run| {
+                run.pipeline
+                    .stages
+                    .iter()
+                    .any(|s| matches!(s.state, StageState::Failed(_)))
+            });
         self.ui
             .widget(cx, ids!(retry_btn))
             .set_visible(cx, failed && !active_running && self.last_run.is_some());
 
-        // NOW card: the newest active stage front and center — what's
-        // running, where, its live detail, and a real bar. Concurrent runs
-        // are counted here and itemized on the Runs surface.
-        let (head, detail, fraction) = match display_pipeline {
-            Some(p) if p.is_running() => {
-                let s = &p.stages[p.current];
-                let stage_name = if s.domain == "music" {
-                    format!(
-                        "{} ({} target)",
-                        stage_display_name(&s.domain),
-                        format_music_duration(p.gen.music_seconds),
-                    )
-                } else {
-                    stage_display_name(&s.domain).to_string()
-                };
-                let where_ = if s.box_url.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " — {} @ {}",
-                        s.model,
-                        s.box_url.trim_start_matches("http://")
-                    )
-                };
-                let elapsed_s = s.started.map(|t0| t0.elapsed().as_secs_f64()).unwrap_or(0.0);
-                let frac = s.progress.clamp(0.0, 1.0);
-                let eta = if frac > 0.02 && frac < 0.999 && elapsed_s > 1.0 {
-                    let left = elapsed_s * (1.0 - frac) / frac;
-                    format!(" · ~{} left", format_clock(left))
-                } else {
-                    String::new()
-                };
-                let elapsed = if elapsed_s > 0.0 {
-                    format!(" · {}", format_clock(elapsed_s))
-                } else {
-                    String::new()
-                };
-                let state = match &s.state {
-                    StageState::Waiting => "waiting".to_string(),
-                    StageState::FanOut => s.detail.clone(),
-                    StageState::AwaitingChoice => s.detail.clone(),
-                    StageState::Submitting => "submitting…".to_string(),
-                    StageState::Polling => s.detail.clone(),
-                    StageState::Fetching => "fetching artifacts…".to_string(),
-                    StageState::Done => "done".to_string(),
-                    StageState::Failed(e) => format!("FAILED: {e}"),
-                };
-                let others = if concurrent > 1 {
-                    format!(" · {concurrent} runs live", )
-                } else {
-                    String::new()
-                };
-                (
-                    format!(
-                        "Stage {}/{} · {} · {:>5.1}%{}{}{}{others}",
-                        p.current + 1,
-                        p.stages.len(),
-                        stage_name,
-                        frac * 100.0,
-                        where_,
-                        elapsed,
-                        eta
-                    ),
-                    state,
-                    frac,
-                )
-            }
-            Some(p) if failed => {
-                let e = p
-                    .stages
-                    .iter()
-                    .find_map(|s| match &s.state {
-                        StageState::Failed(e) => Some(e.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                ("Failed".to_string(), format!("FAILED: {e}"), 0.0)
-            }
-            Some(p) => {
-                let total: f64 = p
-                    .stages
-                    .iter()
-                    .filter_map(|s| match (s.started, s.finished) {
-                        (Some(t0), Some(t1)) => Some((t1 - t0).as_secs_f64()),
-                        _ => None,
-                    })
-                    .sum();
-                (format!("Done in {total:.1}s"), String::new(), 1.0)
-            }
-            None => ("Idle — nothing running".to_string(), String::new(), 0.0),
-        };
-        self.ui.label(cx, ids!(now_head)).set_text(cx, &head);
-        self.ui.label(cx, ids!(now_detail)).set_text(cx, &detail);
+        let cards = self.run_cards();
+        // The chip is always readable, whatever surface is open.
         self.ui
-            .widget(cx, ids!(cancel_btn))
-            .set_visible(cx, active_running);
-        self.ui
-            .view(cx, ids!(now_bar))
-            .set_uniform(cx, live_id!(progress), &[fraction as f32]);
+            .button(cx, ids!(runs_chip))
+            .set_text(cx, &crate::runs_chip::chip_text(&cards));
 
-        // Queue rows: waiting runs only — the active run lives in the card.
-        let rows = [
-            (ids!(q1_row), ids!(q1_label)),
-            (ids!(q2_row), ids!(q2_label)),
-            (ids!(q3_row), ids!(q3_label)),
-            (ids!(q4_row), ids!(q4_label)),
-            (ids!(q5_row), ids!(q5_label)),
-            (ids!(q6_row), ids!(q6_label)),
-        ];
-        let texts: Vec<String> = self
-            .run_queue
-            .iter()
-            .map(|run| {
-                format!(
-                    "{} — \"{}\"",
-                    PRESETS[run.preset].name,
-                    truncate(&run.prompt, 28)
-                )
-            })
-            .collect();
-        for (k, (row, label)) in rows.iter().enumerate() {
-            let visible = k < texts.len();
-            self.ui.widget(cx, *row).set_visible(cx, visible);
-            if visible {
-                self.ui.label(cx, *label).set_text(cx, &texts[k]);
+        // Create surface: the newest few, in full. The rest are one press
+        // away in the panel — a left panel is not a place to scroll a
+        // hundred runs.
+        let slots = [ids!(rc0), ids!(rc1), ids!(rc2), ids!(rc3)];
+        for (index, slot) in slots.iter().enumerate() {
+            let widget = self.ui.widget(cx, *slot);
+            match cards.get(index) {
+                Some(card) => {
+                    widget.set_visible(cx, true);
+                    crate::store_views::paint_card(cx, &widget, card);
+                }
+                None => widget.set_visible(cx, false),
             }
+        }
+        self.ui
+            .widget(cx, ids!(create_runs_heading))
+            .set_visible(cx, !cards.is_empty());
+        let note = if cards.is_empty() {
+            "Nothing running — pick a chain above and Generate.".to_string()
+        } else if cards.len() > slots.len() {
+            format!(
+                "+{} more — press RUNS in the header for all of them.",
+                cards.len() - slots.len()
+            )
+        } else {
+            String::new()
+        };
+        let note_label = self.ui.label(cx, ids!(create_runs_note));
+        note_label.set_visible(cx, !note.is_empty());
+        note_label.set_text(cx, &note);
+
+        if self.runs_chip.panel_open {
+            self.refresh_runs_modal(cx, &cards);
         }
         if self.surface == Surface::Runs {
             self.refresh_runs_panel(cx);
@@ -6415,28 +6653,137 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    /// Every spawned unit of work this app can see, merged into one list in
+    /// one order. The store's own runs come from the poll thread; the app's
+    /// own engine is lent to the builder by reference, so nothing is copied
+    /// several times a second.
+    fn run_cards(&mut self) -> Vec<crate::runs_chip::RunCard> {
+        let local: Vec<crate::runs_chip::LocalRun> = self
+            .runs
+            .iter()
+            .map(|run| crate::runs_chip::LocalRun {
+                id: run.id,
+                label: run.group_label.as_str(),
+                prompt: run.prompt.as_str(),
+                created_ms: run.created_ms,
+                pipeline: &run.pipeline,
+            })
+            .collect();
+        let queued: Vec<crate::runs_chip::LocalQueued> = self
+            .run_queue
+            .iter()
+            .enumerate()
+            .map(|(index, run)| crate::runs_chip::LocalQueued {
+                index,
+                label: PRESETS[run.preset].name,
+                prompt: run.prompt.as_str(),
+            })
+            .collect();
+        self.runs_chip.cards(&local, &queued)
+    }
+
+    /// The RUNS panel: the same cards, all of them, with a cancel-all.
+    fn refresh_runs_modal(&mut self, cx: &mut Cx, cards: &[crate::runs_chip::RunCard]) {
+        let active = cards.iter().filter(|card| card.is_active()).count();
+        self.ui
+            .label(cx, ids!(runs_panel_count))
+            .set_text(cx, &crate::runs_chip::chip_text(cards));
+        self.ui
+            .button(cx, ids!(runs_cancel_all))
+            .set_visible(cx, active > 0);
+        // The annotation backlog has its own chip beside this one; naming it
+        // here and listing it would make this panel a second, worse copy.
+        let mut note = String::new();
+        if self.runs_chip.annotate_pending > 0 {
+            note = format!(
+                "{} annotation jobs queued — that backlog is the SEARCHABLE chip's.",
+                self.runs_chip.annotate_pending
+            );
+        }
+        if let Some(error) = &self.runs_chip.error {
+            note = format!("the store did not answer: {error}");
+        }
+        let note_label = self.ui.label(cx, ids!(runs_panel_note));
+        note_label.set_visible(cx, !note.is_empty());
+        note_label.set_text(cx, &note);
+
+        let rows: Vec<StoreRow> = if cards.is_empty() {
+            vec![StoreRow::Note(
+                "Nothing has been spawned yet. A run started anywhere — here, the chat, the VJ — shows up in this list the moment it is enqueued.".into(),
+            )]
+        } else {
+            cards
+                .iter()
+                .map(|card| StoreRow::Card(Box::new(card.clone())))
+                .collect()
+        };
+        if let Some(mut list) = self
+            .ui
+            .widget(cx, ids!(runs_panel_list))
+            .borrow_mut::<StoreListPanel>()
+        {
+            list.set_rows(cx, rows);
+        }
+    }
+
+    fn open_runs_panel(&mut self, cx: &mut Cx) {
+        self.runs_chip.set_panel_open(true);
+        self.ui.modal(cx, ids!(runs_panel_modal)).open(cx);
+        let cards = self.run_cards();
+        self.refresh_runs_modal(cx, &cards);
+    }
+
+    fn close_runs_panel(&mut self, cx: &mut Cx) {
+        self.runs_chip.set_panel_open(false);
+        self.ui.modal(cx, ids!(runs_panel_modal)).close(cx);
+    }
+
+    /// Stop one spawned unit, whichever engine holds it. The store does the
+    /// heavy lifting for its own (a pipeline cancel drops every non-terminal
+    /// stage job in one closure); a local run gets the engine's own cancel;
+    /// a queued local run simply never starts.
+    /// What a press on one card body means. The × and ↑ are checked FIRST:
+    /// they sit inside the card, and the card itself is the fold's press
+    /// target, so a stop must never also open the fold.
+    fn card_press(
+        &self,
+        cx: &mut Cx,
+        item: &WidgetRef,
+        card: &crate::runs_chip::RunCard,
+        actions: &Actions,
+    ) -> Option<RowAction> {
+        if card.can_cancel && item.button(cx, ids!(card_cancel)).clicked(actions) {
+            return Some(RowAction::CancelCard(card.key.clone()));
+        }
+        if card.can_promote && item.button(cx, ids!(card_up)).clicked(actions) {
+            return Some(RowAction::PromoteCard(card.key.clone()));
+        }
+        if card.open && item.button(cx, ids!(card_copy)).clicked(actions) {
+            return Some(RowAction::CopyCard(card.key.clone()));
+        }
+        item.view(cx, ids!(card_body))
+            .finger_down(actions)
+            .map(|_| RowAction::ToggleCard(card.key.clone()))
+    }
+
+    fn cancel_card(&mut self, cx: &mut Cx, key: &crate::runs_chip::CardKey) {
+        match key {
+            crate::runs_chip::CardKey::Local(run_id) => self.cancel_run(cx, *run_id),
+            crate::runs_chip::CardKey::LocalQueued(index) => self.cancel_row(cx, *index),
+            key => {
+                if !self.runs_chip.cancel(key) {
+                    log!("runs: nothing to cancel for {}", key.as_text());
+                }
+                self.refresh_run_ui(cx);
+            }
+        }
+    }
+
     fn cancel_row(&mut self, cx: &mut Cx, row: usize) {
         if row < self.run_queue.len() {
             self.run_queue.remove(row);
         }
         self.refresh_run_ui(cx);
-    }
-
-    /// Stop button on the NOW card: cancels the run the card is showing
-    /// (the newest running one). Queued service jobs drop immediately;
-    /// running jobs raise the cancel flag and unwind within seconds.
-    fn cancel_active(&mut self, cx: &mut Cx) {
-        let newest_running = self
-            .runs
-            .iter()
-            .rev()
-            .find(|run| run.pipeline.is_running())
-            .map(|run| run.id);
-        if let Some(run_id) = newest_running {
-            self.cancel_run(cx, run_id);
-        } else {
-            self.refresh_run_ui(cx);
-        }
     }
 
     /// Per-run Stop from the Runs surface — each concurrent run cancels
@@ -6672,105 +7019,6 @@ impl App {
         {
             Ok(events) => self.on_run_events(cx, run_id, events),
             Err(error) => self.set_caption(cx, "RETRY", &error),
-        }
-    }
-
-    fn refresh_stages(&mut self, cx: &mut Cx) {
-        // Slim per-stage bars: one row per chain stage, accent fill (red on
-        // failure). The text log below keeps the full routing detail.
-        let rows = [
-            (ids!(s1_row), ids!(s1_name), ids!(s1_bar)),
-            (ids!(s2_row), ids!(s2_name), ids!(s2_bar)),
-            (ids!(s3_row), ids!(s3_name), ids!(s3_bar)),
-            (ids!(s4_row), ids!(s4_name), ids!(s4_bar)),
-            (ids!(s5_row), ids!(s5_name), ids!(s5_bar)),
-            (ids!(s6_row), ids!(s6_name), ids!(s6_bar)),
-        ];
-        let stages: Vec<(String, f64, bool)> = self
-            .display_run()
-            .map(|run| {
-                run.pipeline
-                    .stages
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        let (fraction, is_failed) = match &s.state {
-                            StageState::Done => (1.0, false),
-                            StageState::AwaitingChoice => (1.0, false),
-                            StageState::Failed(_) => (1.0, true),
-                            _ => (s.progress, false),
-                        };
-                        let activity = match &s.state {
-                            StageState::Waiting if !s.detail.is_empty() => s.detail.as_str(),
-                            StageState::Waiting => "waiting",
-                            StageState::FanOut => s.detail.as_str(),
-                            StageState::AwaitingChoice => s.detail.as_str(),
-                            StageState::Submitting => "submitting",
-                            StageState::Polling if !s.detail.is_empty() => s.detail.as_str(),
-                            StageState::Polling => s.service_state.as_str(),
-                            StageState::Fetching => "fetching artifacts",
-                            StageState::Done => "done",
-                            StageState::Failed(_) => "FAILED",
-                        };
-                        let elapsed = match (s.started, s.finished) {
-                            (Some(t0), Some(t1)) => {
-                                format!("{:.1}s", (t1 - t0).as_secs_f64())
-                            }
-                            (Some(t0), None) => format!("{:.0}s", t0.elapsed().as_secs_f64()),
-                            _ => String::new(),
-                        };
-                        let stage_name = if s.domain == "music" {
-                            format!(
-                                "{} ({} target)",
-                                stage_display_name(&s.domain),
-                                format_music_duration(run.pipeline.gen.music_seconds),
-                            )
-                        } else {
-                            stage_display_name(&s.domain).to_string()
-                        };
-                        let mut label = format!(
-                            "{} · {} · {:>5.1}% · {}",
-                            i + 1,
-                            stage_name,
-                            fraction.clamp(0.0, 1.0) * 100.0,
-                            truncate(activity, 22),
-                        );
-                        if !elapsed.is_empty() {
-                            label.push_str(&format!(" · {elapsed}"));
-                        }
-                        (label, fraction, is_failed)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (k, (row, name, bar)) in rows.iter().enumerate() {
-            let visible = k < stages.len();
-            self.ui.widget(cx, *row).set_visible(cx, visible);
-            if !visible {
-                continue;
-            }
-            let (label, fraction, is_failed) = &stages[k];
-            let fill: [f32; 4] = if *is_failed {
-                [0.85, 0.35, 0.32, 1.0]
-            } else {
-                [0.24, 0.61, 0.94, 1.0]
-            };
-            self.ui.label(cx, *name).set_text(cx, label);
-            let bar = self.ui.view(cx, *bar);
-            bar.set_uniform(cx, live_id!(progress), &[*fraction as f32]);
-            bar.set_uniform(cx, live_id!(color_fill), &fill);
-        }
-        if let Some(run) = self.display_run() {
-            let others = self.active_run_count().saturating_sub(
-                usize::from(run.pipeline.is_running()),
-            );
-            let mut text = format!("run: {}\n{}", run.group_label, run.pipeline.status_text());
-            if others > 0 {
-                text.push_str(&format!(
-                    "\n+{others} more running — see RUNS + WORKERS for each"
-                ));
-            }
-            self.ui.label(cx, ids!(stages_label)).set_text(cx, &text);
         }
     }
 
@@ -7057,7 +7305,6 @@ impl App {
                 }
             }
         }
-        self.refresh_stages(cx);
         self.refresh_run_ui(cx);
         if done_or_failed {
             if self.auto.capture.is_some()
@@ -11162,8 +11409,9 @@ impl App {
                 &fleet.snapshots,
                 &fleet.latency_ms,
                 &self.store,
+                &self.open_stages,
             ),
-            None => runs_rows(&run_views, &queued, &[], &[], &self.store),
+            None => runs_rows(&run_views, &queued, &[], &[], &self.store, &self.open_stages),
         };
         if let Some(mut list) = self
             .ui
@@ -11203,6 +11451,14 @@ impl App {
         self.ui
             .button(cx, ids!(queue_clear_btn))
             .set_visible(cx, !self.import_queue.pending.is_empty() || self.import_busy());
+        // The Pause/Resume button says which of the two it will do, and is
+        // only worth showing while the catalog still owes descriptions.
+        let pause_btn = self.ui.button(cx, ids!(kenney_annotate_pause_btn));
+        pause_btn.set_visible(cx, self.annotate_queue.has_work());
+        pause_btn.set_text(
+            cx,
+            if self.annotate_queue.paused { "Resume" } else { "Pause" },
+        );
         let kenney_job = ImportJob::Kenney {
             pack: self.import_page.selected_pack_id().0,
             pack_index: self.import_page.kenney_pack_index,
@@ -11523,12 +11779,31 @@ impl App {
                 progress,
                 failed,
                 cancel: Some(RowAction::StopImport),
+                detail: String::new(),
+                expand: None,
+                copy: None,
             });
         }
         for item in &self.import_queue.pending {
             rows.push(StoreRow::Queued {
                 title: format!("waiting · {}", item.job.title()),
                 cancel: RowAction::RemoveQueuedImport(item.id),
+            });
+        }
+        // The annotation queue is the store's, not this window's: it gets
+        // its own row for the same reason the analysis bake below does —
+        // the work outlives the import that queued it, and an operator
+        // watching a load wants to see the descriptions arriving too.
+        if self.annotate_queue.has_work() {
+            rows.push(StoreRow::Stage {
+                title: "Annotation".into(),
+                meta: self.annotate_queue.status_line(),
+                progress: self.annotate_queue.progress_fraction(),
+                failed: self.annotate_queue.error.is_some(),
+                cancel: None,
+                detail: String::new(),
+                expand: None,
+                copy: None,
             });
         }
         // The analysis bake is its own lane beside the imports: it outlives
@@ -11543,6 +11818,9 @@ impl App {
                     progress: queue.progress_fraction(),
                     failed: false,
                     cancel: None,
+                    detail: String::new(),
+                    expand: None,
+                    copy: None,
                 });
             }
         }
@@ -11813,6 +12091,47 @@ impl App {
                 self.refresh_import_ui(cx);
             }
         }
+    }
+
+    /// Host the annotation worker as soon as there is a server to talk to.
+    ///
+    /// The same shape as the generation job loop: this process runs the
+    /// store, so this process drains the store's queues. A deployment that
+    /// wants the vision work elsewhere runs
+    /// `makepad-asset-annotate --worker` on that box instead — same loop,
+    /// same claim, and this one simply finds an empty queue.
+    fn maybe_start_annotate_queue(&mut self) {
+        if self.annotate_queue.running() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        // Scratch and client cache beside THIS instance's store root, never
+        // at a fixed repo path: a second instance on an isolated root must
+        // not write its sheets into the operator's.
+        let home = crate::asset_store_state::default_asset_server_root()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(crate::asset_store_state::asset_ui_home);
+        self.annotate_queue.start(
+            session.endpoints,
+            Some(session.server_id),
+            session.token,
+            home,
+        );
+    }
+
+    /// Start reading everything in flight from the server this process is
+    /// talking to. Idempotent; a no-op until there is a session.
+    fn maybe_start_runs_chip(&mut self) {
+        if self.runs_chip.running() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        self.runs_chip.start(session.endpoints, session.token);
     }
 
     fn import_server_session(&self) -> Option<crate::import::ServerSession> {
@@ -12772,8 +13091,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(kenney_import_btn)).clicked(actions) {
             let (pack, _) = self.import_page.selected_pack_id();
-            log!("import: queue Kenney {pack}");
-            self.enqueue_import(
+            self.open_kenney_donate_modal(
                 cx,
                 ImportJob::Kenney {
                     pack,
@@ -12783,8 +13101,56 @@ impl MatchEvent for App {
             );
         }
         if self.ui.button(cx, ids!(kenney_import_all_btn)).clicked(actions) {
-            log!("import: queue Kenney all");
-            self.enqueue_import(cx, ImportJob::KenneyAll);
+            self.open_kenney_donate_modal(cx, ImportJob::KenneyAll);
+        }
+        // No donate prompt on these two: they load nothing from Kenney,
+        // they ask the SERVER to queue descriptions for what is already in
+        // the catalog. One request each — the queue outlives this window.
+        if self.ui.button(cx, ids!(kenney_annotate_btn)).clicked(actions) {
+            let (kit, _) = self.import_page.selected_pack_id();
+            log!("annotate: sweeping {kit} into the queue");
+            self.annotate_queue.sweep(Some(kit));
+            self.refresh_import_ui(cx);
+        }
+        if self.ui.button(cx, ids!(kenney_annotate_all_btn)).clicked(actions) {
+            log!("annotate: sweeping the whole catalog into the queue");
+            self.annotate_queue.sweep(None);
+            self.refresh_import_ui(cx);
+        }
+        // One button, two states: an operator either wants the backlog to
+        // stop or to carry on, and both are the same place on screen.
+        if self.ui.button(cx, ids!(kenney_annotate_pause_btn)).clicked(actions) {
+            if self.annotate_queue.paused {
+                log!("annotate: resuming the backlog");
+                self.annotate_queue.resume();
+            } else {
+                log!("annotate: pausing the backlog");
+                self.annotate_queue.pause();
+            }
+            self.refresh_import_ui(cx);
+        }
+        let donate_modal = self.ui.modal(cx, ids!(kenney_donate_modal));
+        if self.ui.button(cx, ids!(kenney_donate_ok)).clicked(actions) {
+            donate_modal.close(cx);
+            match self.kenney_donate_pending.take() {
+                Some(ImportJob::Kenney { pack, pack_index, path }) => {
+                    log!("import: queue Kenney {pack}");
+                    self.enqueue_import(cx, ImportJob::Kenney { pack, pack_index, path });
+                }
+                Some(job) => {
+                    log!("import: queue Kenney all");
+                    self.enqueue_import(cx, job);
+                }
+                None => {}
+            }
+        }
+        if self.ui.button(cx, ids!(kenney_donate_cancel)).clicked(actions)
+            || donate_modal.dismissed(actions)
+        {
+            if self.kenney_donate_pending.take().is_some() {
+                log!("import: Kenney load cancelled at the donate prompt");
+            }
+            donate_modal.close(cx);
         }
         if self.ui.button(cx, ids!(queue_clear_btn)).clicked(actions) {
             self.import_queue.clear_pending();
@@ -13192,6 +13558,21 @@ impl MatchEvent for App {
                 self.enqueue_analysis(cx, vec![(analysis::BakeTarget::Asset(asset), title)], lyrics);
             }
         }
+        // "Reveal file": the selected track's materialised payload, selected
+        // in Finder — from there it drags into a chat app or a DAW.
+        if self.ui.button(cx, ids!(detail_reveal_btn)).clicked(actions) {
+            if let Some(asset) = self.store.selected {
+                let file = store_file_id(&asset);
+                match self.catalog_work.get(&file).and_then(|item| item.payload.clone()) {
+                    Some(path) => {
+                        let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+                    }
+                    None => {
+                        log!("library: no materialised file yet for {file} — select it and let the preview load, then reveal");
+                    }
+                }
+            }
+        }
         if self
             .ui
             .check_box(cx, ids!(detail_analyse_lyrics))
@@ -13267,17 +13648,108 @@ impl MatchEvent for App {
             self.store.gc_collect(retain);
             self.refresh_gc_ui(cx);
         }
+        // The header chip opens the panel; the panel is the same cards.
+        if self.ui.button(cx, ids!(runs_chip)).clicked(actions) {
+            if self.runs_chip.panel_open {
+                self.close_runs_panel(cx);
+            } else {
+                self.open_runs_panel(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(runs_panel_close)).clicked(actions)
+            || self.ui.modal(cx, ids!(runs_panel_modal)).dismissed(actions)
+        {
+            self.close_runs_panel(cx);
+        }
+        if self.ui.button(cx, ids!(runs_cancel_all)).clicked(actions) {
+            // Everything still owed, in one gesture. Each key goes to
+            // whichever engine holds it; nothing is left orphaned, and a
+            // finished run is left alone.
+            let keys: Vec<crate::runs_chip::CardKey> = self
+                .run_cards()
+                .iter()
+                .filter(|card| card.can_cancel)
+                .map(|card| card.key.clone())
+                .collect();
+            log!("runs: cancel all — {} still owed", keys.len());
+            for key in keys {
+                self.cancel_card(cx, &key);
+            }
+        }
+        // Run cards, in the panel's list and in the Create surface's slots:
+        // ONE grammar means one handler.
+        let mut card_action: Option<RowAction> = None;
+        let panel_widget = self.ui.widget(cx, ids!(runs_panel_list));
+        let panel_portal = panel_widget.portal_list(cx, ids!(list));
+        for (row_id, item) in panel_portal.items_with_actions(actions) {
+            let Some(StoreRow::Card(card)) = panel_widget
+                .borrow::<StoreListPanel>()
+                .and_then(|panel| panel.row_at(row_id))
+            else {
+                continue;
+            };
+            if let Some(action) = self.card_press(cx, &item, &card, actions) {
+                card_action = Some(action);
+                break;
+            }
+        }
+        if card_action.is_none() {
+            let cards = self.run_cards();
+            for (index, slot) in [ids!(rc0), ids!(rc1), ids!(rc2), ids!(rc3)]
+                .iter()
+                .enumerate()
+            {
+                let Some(card) = cards.get(index) else { break };
+                let item = self.ui.widget(cx, *slot);
+                if let Some(action) = self.card_press(cx, &item, card, actions) {
+                    card_action = Some(action);
+                    break;
+                }
+            }
+        }
+        match card_action {
+            Some(RowAction::CancelCard(key)) => self.cancel_card(cx, &key),
+            Some(RowAction::ToggleCard(key)) => {
+                self.runs_chip.toggle_open(&key);
+                self.refresh_run_ui(cx);
+            }
+            Some(RowAction::CopyCard(key)) => {
+                // The fold is long by design; the clipboard is how it leaves.
+                if let Some(card) = self.run_cards().iter().find(|card| card.key == key) {
+                    cx.copy_to_clipboard(&card.fold);
+                    log!("runs: the whole run copied to the clipboard");
+                }
+            }
+            Some(RowAction::PromoteCard(crate::runs_chip::CardKey::LocalQueued(index))) => {
+                self.move_row_up(cx, index)
+            }
+            _ => {}
+        }
         // Runs list: cancel the active stage / drop a queued run.
         let runs_widget = self.ui.widget(cx, ids!(runs_list));
         let runs_portal = runs_widget.portal_list(cx, ids!(list));
         let mut runs_action = None;
+        let mut runs_open: Option<StoreRow> = None;
+        let mut runs_copy: Option<StoreRow> = None;
         for (row_id, item) in runs_portal.items_with_actions(actions) {
+            let row = || {
+                runs_widget
+                    .borrow::<StoreListPanel>()
+                    .and_then(|panel| panel.row_at(row_id))
+            };
             if item.button(cx, ids!(stage_cancel)).clicked(actions)
                 || item.button(cx, ids!(queued_cancel)).clicked(actions)
             {
-                runs_action = runs_widget
-                    .borrow::<StoreListPanel>()
-                    .and_then(|panel| panel.row_at(row_id));
+                runs_action = row();
+                break;
+            }
+            // Pressing the stage's name opens it: what went into the model.
+            if item.button(cx, ids!(stage_title)).clicked(actions) {
+                runs_open = row();
+                break;
+            }
+            if item.button(cx, ids!(stage_copy)).clicked(actions) {
+                runs_copy = row();
                 break;
             }
         }
@@ -13291,6 +13763,25 @@ impl MatchEvent for App {
                 ..
             }) => self.cancel_row(cx, index),
             _ => {}
+        }
+        if let Some(StoreRow::Stage {
+            expand: Some(RowAction::ToggleStage(run_id, index)),
+            ..
+        }) = runs_open
+        {
+            let key = (run_id, index);
+            match self.open_stages.iter().position(|open| *open == key) {
+                Some(at) => {
+                    self.open_stages.remove(at);
+                }
+                None => self.open_stages.push(key),
+            }
+            self.refresh_runs_panel(cx);
+        }
+        if let Some(StoreRow::Stage { detail, copy: Some(_), .. }) = runs_copy {
+            // The text is long by design; the clipboard is how it leaves.
+            cx.copy_to_clipboard(&detail);
+            log!("runs: stage input copied to the clipboard");
         }
         // Server catalog rows (only ever populated by a real transport).
         let server_widget = self.ui.widget(cx, ids!(lib_server_list));
@@ -13350,9 +13841,6 @@ impl MatchEvent for App {
             .is_some()
         {
             self.start_generate(cx);
-        }
-        if self.ui.button(cx, ids!(cancel_btn)).clicked(actions) {
-            self.cancel_active(cx);
         }
         if self.ui.button(cx, ids!(alpha_btn)).clicked(actions) {
             self.alpha_view = !self.alpha_view;
@@ -13910,26 +14398,6 @@ impl MatchEvent for App {
                 self.refresh_fleet_cards(cx);
             }
         }
-        // Run-queue rows: cancel / move up.
-        for (k, (cancel, up)) in [
-            (ids!(q1_cancel), ids!(q1_up)),
-            (ids!(q2_cancel), ids!(q2_up)),
-            (ids!(q3_cancel), ids!(q3_up)),
-            (ids!(q4_cancel), ids!(q4_up)),
-            (ids!(q5_cancel), ids!(q5_up)),
-            (ids!(q6_cancel), ids!(q6_up)),
-        ]
-        .iter()
-        .enumerate()
-        {
-            if self.ui.button(cx, *cancel).clicked(actions) {
-                self.cancel_row(cx, k);
-            }
-            if self.ui.button(cx, *up).clicked(actions) {
-                self.move_row_up(cx, k);
-            }
-        }
-        let _ = QUEUE_ROWS;
     }
 }
 
@@ -14060,7 +14528,35 @@ impl AppMain for App {
                     self.adopt_catalog_asset(cx, asset, false);
                 }
             }
+            // A declared run just ended, said so by the server on the
+            // event feed. That is the ONE end-of-run signal — a publish is
+            // per-asset and coincidental, and a failed run publishes
+            // nothing at all — so the card settles on the event rather
+            // than on the next tick of a poll clock.
+            let finished = self.store.take_finished_pipelines();
+            if !finished.is_empty() {
+                for pipeline in &finished {
+                    log!("runs: {pipeline} finished");
+                }
+                self.runs_chip.wake();
+            }
             self.maybe_open_gc_confirm(cx);
+            self.maybe_start_annotate_queue();
+            self.maybe_start_runs_chip();
+            // The RUNS chip and its panel: the poll thread's picture landing
+            // is the only thing that can change a store run on screen.
+            if self.runs_chip.poll() {
+                self.refresh_run_ui(cx);
+            }
+            let annotate_poll = self.annotate_queue.poll();
+            if annotate_poll {
+                self.ui
+                    .label(cx, ids!(annotation_chip))
+                    .set_text(cx, &self.annotate_queue.chip());
+                if self.surface == Surface::Import {
+                    self.refresh_import_ui(cx);
+                }
+            }
             let kenney_poll = self.import_page.poll();
             let classic_poll = self.classic_import_page.poll();
             let music_poll = self.music_import_page.poll();
@@ -14251,7 +14747,7 @@ impl AppMain for App {
             }
             // Live elapsed timers while any run is active.
             if self.any_run_running() {
-                self.refresh_stages(cx);
+                self.refresh_run_ui(cx);
                 if self.surface == Surface::Runs {
                     self.refresh_runs_panel(cx);
                 }

@@ -36,6 +36,10 @@ makepad-asset-client = { path = "../client" }
 # resolve; without these entries cargo never compiles them.
 #
 [[test]]
+name = "http_annotate_http"
+path = "tests/http/annotate_http.rs"
+
+[[test]]
 name = "http_blob_refs_http"
 path = "tests/http/blob_refs_http.rs"
 
@@ -50,6 +54,10 @@ path = "tests/http/chat_client_e2e.rs"
 [[test]]
 name = "http_chat_concurrency"
 path = "tests/http/chat_concurrency.rs"
+
+[[test]]
+name = "http_chat_persist_http"
+path = "tests/http/chat_persist_http.rs"
 
 [[test]]
 name = "http_client_e2e"
@@ -78,6 +86,10 @@ path = "tests/http/observe_http.rs"
 [[test]]
 name = "http_operations_http"
 path = "tests/http/operations_http.rs"
+
+[[test]]
+name = "http_pipelines_http"
+path = "tests/http/pipelines_http.rs"
 
 [[test]]
 name = "http_rooms_http"

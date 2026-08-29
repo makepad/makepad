@@ -99,6 +99,8 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "billboard" => AssetKind::Billboard,
         "game" => AssetKind::Game,
         "vjeffect" => AssetKind::VjEffect,
+        "data" => AssetKind::Data,
+        "model-program" => AssetKind::ModelProgram,
         _ => return None,
     })
 }
@@ -120,6 +122,8 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -643,6 +647,9 @@ pub struct RoomDto {
     pub game: String,
     pub invite: String,
     pub host: String,
+    /// People in the world right now, host included (1 when the server or
+    /// the host predates the count).
+    pub players: u32,
     pub created_ms: u64,
     pub expires_ms: u64,
 }
@@ -681,6 +688,13 @@ pub fn parse_room(v: &Value) -> ClientResult<RoomDto> {
         invite: room_text(v, "invite", crate::wire::MAX_ROOM_INVITE_BYTES, "room invite")?
             .to_string(),
         host: room_text(v, "host", crate::wire::MAX_ROOM_HOST_BYTES, "room host")?.to_string(),
+        players: match v.get("players") {
+            None => 1,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| (1..=1024).contains(n))
+                .ok_or(ClientError::Protocol { what: "room players" })? as u32,
+        },
         created_ms: need_u64(v, "created_ms", "room created_ms")?,
         expires_ms: need_u64(v, "expires_ms", "room expires_ms")?,
     })
@@ -866,6 +880,13 @@ pub enum CatalogEventKind {
     GameQuarantined,
     GameAliasSet,
     GameAliasCleared,
+    ModelPreview,
+    ModelPreviewClear,
+    /// A whole declared run reached a terminal state (`pipeline.finished`,
+    /// vocabulary 5). The ONE signal that says a multi-stage run is over:
+    /// a publish is per-asset and coincidental, and a run that fails
+    /// publishes nothing at all. Carries `pipeline` + `pipeline_state`.
+    PipelineFinished,
     /// A kind this build does not know (a newer server). Carries no
     /// interpretation on purpose.
     Other,
@@ -886,6 +907,9 @@ impl CatalogEventKind {
             Self::GameQuarantined => "game_quarantined",
             Self::GameAliasSet => "game_alias_set",
             Self::GameAliasCleared => "game_alias_cleared",
+            Self::ModelPreview => "model_preview",
+            Self::ModelPreviewClear => "model_preview_clear",
+            Self::PipelineFinished => "pipeline.finished",
             Self::Other => "other",
         }
     }
@@ -910,12 +934,40 @@ impl CatalogEventKind {
             "game_quarantined" => Self::GameQuarantined,
             "game_alias_set" => Self::GameAliasSet,
             "game_alias_cleared" => Self::GameAliasCleared,
+            "model_preview" => Self::ModelPreview,
+            "model_preview_clear" => Self::ModelPreviewClear,
+            // Spelled with a dot on the wire, unlike the catalog kinds:
+            // it is not a change to an asset, it is a run announcing that
+            // it is over.
+            "pipeline.finished" => Self::PipelineFinished,
             _ => Self::Other,
         }
     }
 }
 
 /// One committed catalog change from `/v1/events`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewPartDto {
+    pub name: String,
+    pub mesh_token: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewRenameDto {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPreviewDto {
+    pub session: String,
+    pub open: bool,
+    pub program: Option<String>,
+    pub parts: Vec<ModelPreviewPartDto>,
+    pub removed: Vec<String>,
+    pub renamed: Vec<ModelPreviewRenameDto>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogEventDto {
     pub seq: u64,
@@ -927,6 +979,13 @@ pub struct CatalogEventDto {
     pub game_revision: Option<GameRevisionId>,
     /// Asset or game alias in display spelling, for events that involve one.
     pub alias: Option<String>,
+    /// In-memory-only part delta for `ModelPreview`/`ModelPreviewClear`.
+    pub model_preview: Option<ModelPreviewDto>,
+    /// The run that finished, on a `PipelineFinished` event.
+    pub pipeline: Option<PipelineId>,
+    /// Its DERIVED terminal state — `succeeded`, `failed` or `cancelled`.
+    /// Present exactly when `pipeline` is.
+    pub pipeline_state: Option<PipelineStateDto>,
     /// The asset's declared content kind at emit time, when the server knew
     /// it. `None` means unknown, not "no kind" — kind-filtered subscribers
     /// still receive such events.
@@ -1012,6 +1071,155 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
                 Some(kind_parse(name).ok_or(ClientError::Protocol { what: "event content_kind" })?)
             }
         };
+        let model_preview = match r.get("preview_session") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                if !matches!(kind, CatalogEventKind::ModelPreview | CatalogEventKind::ModelPreviewClear) {
+                    return Err(ClientError::Protocol { what: "event preview kind" });
+                }
+                let session = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event preview session" })?;
+                if session.is_empty()
+                    || session.len() > 64
+                    || !session.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'-' | b'_')
+                    })
+                {
+                    return Err(ClientError::Protocol { what: "event preview session" });
+                }
+                let open = need_bool(r, "preview_open", "event preview open")?;
+                let program = match r.get("preview_program") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => {
+                        let value = value
+                            .as_str()
+                            .ok_or(ClientError::Protocol { what: "event preview program" })?;
+                        if value.len() > 12_000 {
+                            return Err(ClientError::Protocol { what: "event preview program" });
+                        }
+                        Some(value.to_string())
+                    }
+                };
+                let parse_name = |value: &Value| -> ClientResult<String> {
+                    let value = value
+                        .as_str()
+                        .ok_or(ClientError::Protocol { what: "event preview part name" })?;
+                    if value.is_empty()
+                        || value.len() > 24
+                        || !value.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                    {
+                        return Err(ClientError::Protocol { what: "event preview part name" });
+                    }
+                    Ok(value.to_string())
+                };
+                let part_rows = need(r, "preview_parts", "event preview parts")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview parts" })?;
+                if part_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview parts" });
+                }
+                let mut parts = Vec::with_capacity(part_rows.len());
+                for row in part_rows {
+                    let name = parse_name(need(row, "name", "event preview part name")?)?;
+                    let mesh_token = need_str(
+                        row,
+                        "mesh_token",
+                        70,
+                        "event preview mesh token",
+                    )?;
+                    let valid_token = mesh_token.strip_prefix("pmesh_").is_some_and(|hex| {
+                        hex.len() == 64
+                            && hex.bytes().all(|byte| {
+                                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                            })
+                    });
+                    if !valid_token {
+                        return Err(ClientError::Protocol { what: "event preview mesh token" });
+                    }
+                    parts.push(ModelPreviewPartDto { name, mesh_token: mesh_token.to_string() });
+                }
+                let removed_rows = need(r, "preview_removed", "event preview removed")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview removed" })?;
+                if removed_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview removed" });
+                }
+                let removed = removed_rows.iter().map(parse_name).collect::<ClientResult<_>>()?;
+                let rename_rows = need(r, "preview_renamed", "event preview renamed")?
+                    .as_arr()
+                    .ok_or(ClientError::Protocol { what: "event preview renamed" })?;
+                if rename_rows.len() > 32 {
+                    return Err(ClientError::Protocol { what: "event preview renamed" });
+                }
+                let mut renamed = Vec::with_capacity(rename_rows.len());
+                for row in rename_rows {
+                    renamed.push(ModelPreviewRenameDto {
+                        from: parse_name(need(row, "from", "event preview rename from")?)?,
+                        to: parse_name(need(row, "to", "event preview rename to")?)?,
+                    });
+                }
+                Some(ModelPreviewDto {
+                    session: session.to_string(),
+                    open,
+                    program,
+                    parts,
+                    removed,
+                    renamed,
+                })
+            }
+        };
+        if matches!(kind, CatalogEventKind::ModelPreview | CatalogEventKind::ModelPreviewClear)
+            && model_preview.is_none()
+        {
+            return Err(ClientError::Protocol { what: "event preview payload" });
+        }
+        // A finished run names itself and says how it ended. Both fields
+        // travel together or not at all: a state with no run is not
+        // addressable, and a run with no state says nothing.
+        let pipeline = match r.get("pipeline") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event pipeline" })?;
+                Some(
+                    PipelineId::parse(text)
+                        .ok_or(ClientError::Protocol { what: "event pipeline" })?,
+                )
+            }
+        };
+        let pipeline_state = match r.get("pipeline_state") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or(ClientError::Protocol { what: "event pipeline state" })?;
+                Some(
+                    PipelineStateDto::parse(text)
+                        .ok_or(ClientError::Protocol { what: "event pipeline state" })?,
+                )
+            }
+        };
+        if pipeline.is_some() != pipeline_state.is_some() {
+            return Err(ClientError::Protocol { what: "event pipeline payload" });
+        }
+        if kind == CatalogEventKind::PipelineFinished {
+            if pipeline.is_none() {
+                return Err(ClientError::Protocol { what: "event pipeline payload" });
+            }
+            // A run that "finished" while still running is a contradiction,
+            // not a state a subscriber should have to reason about.
+            if pipeline_state.is_some_and(|state| !state.is_terminal()) {
+                return Err(ClientError::Protocol { what: "event pipeline state" });
+            }
+        } else if pipeline.is_some() {
+            return Err(ClientError::Protocol { what: "event pipeline kind" });
+        }
         let ts_ms = need_u64(r, "ts_ms", "event ts_ms")?;
         events.push(CatalogEventDto {
             seq,
@@ -1022,6 +1230,9 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
             game_id,
             game_revision,
             alias,
+            model_preview,
+            pipeline,
+            pipeline_state,
             content_kind,
             ts_ms,
         });
@@ -1103,6 +1314,74 @@ impl JobStateDto {
 /// publish convention (`{"asset_id": …, "revision": …}`); anything else is
 /// simply `None` — the catalog event stream, not the job result, is the
 /// authority for publication.
+/// What ONE STAGE of a job was given — the record a person opens a run to
+/// read. The prompt is kept at FULL LENGTH deliberately: a truncated prompt
+/// answers none of the questions anyone asks a finished run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JobStageDto {
+    /// The stage's kind (`music.generate`, `text.expand`, `annotate.asset`).
+    pub name: String,
+    pub recorded_ms: u64,
+    /// The model this stage was handed to.
+    pub model: String,
+    /// Short label of the box that ran it (".165"), empty when unknown.
+    pub at: String,
+    /// THE POINT: the exact final text handed to the model, in full.
+    pub prompt: String,
+    /// The parameters that rode beside it, one `key=value` per line.
+    pub params: String,
+    /// What a text stage answered (an expansion), when it answered.
+    pub output: String,
+}
+
+/// One stage record on its way TO the store (the borrowed counterpart of
+/// [`JobStageDto`]). Every field is sanitized here, not by the caller:
+/// control characters go, line breaks and tabs stay, and each text is
+/// bounded so one stage can never blow the store's record budget.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JobStageInput<'a> {
+    /// `[a-z0-9._-]`, 1..=64 bytes — the kind of work this stage is.
+    pub name: &'a str,
+    pub model: &'a str,
+    /// Short box label (".165"); never a URL.
+    pub at: &'a str,
+    /// The exact final text handed to the model.
+    pub prompt: &'a str,
+    /// `key=value` per line.
+    pub params: &'a str,
+    /// What a text stage answered, once it has.
+    pub output: &'a str,
+}
+
+impl JobStageInput<'_> {
+    /// The wire document, or `InvalidInput` when the name is not a name.
+    pub fn to_value(&self) -> ClientResult<Value> {
+        let ok_name = (1..=64).contains(&self.name.len())
+            && self.name.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+            });
+        if !ok_name {
+            return Err(ClientError::InvalidInput { what: "stage name" });
+        }
+        // The store bounds the whole record; these bounds keep any single
+        // field from being the reason it is refused.
+        let mut pairs = vec![("name", crate::json::s(self.name))];
+        for (key, text, max) in [
+            ("model", self.model, 128usize),
+            ("at", self.at, 64),
+            ("prompt", self.prompt, 8 * 1024),
+            ("params", self.params, 2 * 1024),
+            ("output", self.output, 4 * 1024),
+        ] {
+            let text = sanitize_stage_text(text, max);
+            if !text.is_empty() {
+                pairs.push((key, crate::json::s(text)));
+            }
+        }
+        Ok(crate::json::obj(pairs))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobStatusDto {
     pub job: JobId,
@@ -1117,6 +1396,68 @@ pub struct JobStatusDto {
     pub outcome: Option<String>,
     pub result_asset: Option<AssetId>,
     pub result_revision: Option<AssetRevisionId>,
+    /// What each stage was given, in the order the stages ran. Empty on the
+    /// listing endpoints and on jobs a pre-stage worker ran.
+    pub stages: Vec<JobStageDto>,
+}
+
+/// Longest single text a stage record may carry back (the server bounds the
+/// whole record at 16 KB; this bounds one field of a hostile one).
+const MAX_STAGE_TEXT_BYTES: usize = 16 * 1024;
+
+/// Stage text, kept as written except for the control characters that have
+/// no business in it. Line breaks and tabs SURVIVE — a music prompt with
+/// lyrics is exactly the text this feature exists to show.
+pub fn sanitize_stage_text(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn parse_job_stages(v: &Value) -> Vec<JobStageDto> {
+    match v.get("stages").and_then(Value::as_arr) {
+        Some(items) => parse_stage_records(items),
+        None => Vec::new(),
+    }
+}
+
+/// The `[{name, recorded_ms, record:{…}}]` array of worker stage-input
+/// records, wherever it appears: `stages` on a job read, `records` on one
+/// stage of a pipeline read. Lenient by design — a record this build cannot
+/// read is a record it does not show, never a refused response.
+fn parse_stage_records(items: &[Value]) -> Vec<JobStageDto> {
+    let mut out = Vec::new();
+    for item in items.iter().take(32) {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let record = item.get("record");
+        let field = |key: &str| {
+            record
+                .and_then(|r| r.get(key))
+                .and_then(Value::as_str)
+                .map(|text| sanitize_stage_text(text, MAX_STAGE_TEXT_BYTES))
+                .unwrap_or_default()
+        };
+        out.push(JobStageDto {
+            name: sanitize_text(name, 64),
+            recorded_ms: item.get("recorded_ms").and_then(Value::as_u64).unwrap_or(0),
+            model: field("model"),
+            at: field("at"),
+            prompt: field("prompt"),
+            params: field("params"),
+            output: field("output"),
+        });
+    }
+    out
 }
 
 pub fn parse_job_status(v: &Value) -> ClientResult<JobStatusDto> {
@@ -1175,6 +1516,7 @@ pub fn parse_job_status(v: &Value) -> ClientResult<JobStatusDto> {
         outcome,
         result_asset,
         result_revision,
+        stages: parse_job_stages(v),
     })
 }
 
@@ -1273,6 +1615,27 @@ impl JobDetailDto {
     }
 }
 
+/// The typed progress block of a job document, wherever it appears (the
+/// detail read and every row of the listing report the same shape).
+fn parse_progress(v: &Value) -> ClientResult<Option<JobProgressDto>> {
+    let Some(p) = v.get("progress").filter(|p| !matches!(p, Value::Null)) else {
+        return Ok(None);
+    };
+    let permille = need_u64(p, "permille", "job progress permille")?;
+    if permille > 1000 {
+        return Err(ClientError::Protocol { what: "job progress permille" });
+    }
+    let note = match p.get("note") {
+        None | Some(Value::Null) => String::new(),
+        Some(n) => {
+            let text = n.as_str().ok_or(ClientError::Protocol { what: "job note" })?;
+            sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
+        }
+    };
+    let updated_ms = opt_u64(p, "updated_ms", "job progress updated_ms")?;
+    Ok(Some(JobProgressDto { permille: permille as u16, note, updated_ms }))
+}
+
 pub fn parse_job_detail(v: &Value) -> ClientResult<JobDetailDto> {
     let status = parse_job_status(v)?;
     let enqueued_by = opt_principal(v, "enqueued_by", "job enqueued_by")?;
@@ -1300,44 +1663,31 @@ pub fn parse_job_detail(v: &Value) -> ClientResult<JobDetailDto> {
             out
         }
     };
-    let progress = match v.get("progress") {
-        None | Some(Value::Null) => None,
-        Some(p) => {
-            let permille = need_u64(p, "permille", "job progress permille")?;
-            if permille > 1000 {
-                return Err(ClientError::Protocol { what: "job progress permille" });
-            }
-            let note = match p.get("note") {
-                None | Some(Value::Null) => String::new(),
-                Some(n) => {
-                    let text = n.as_str().ok_or(ClientError::Protocol { what: "job note" })?;
-                    sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
-                }
-            };
-            let updated_ms = opt_u64(p, "updated_ms", "job progress updated_ms")?;
-            Some(JobProgressDto { permille: permille as u16, note, updated_ms })
-        }
-    };
-    let result = match v.get("result") {
-        None | Some(Value::Null) => None,
-        Some(r) => {
-            let outcome_s = need_str(r, "outcome", 64, "job result outcome")?;
-            check_display(outcome_s, "job result outcome")?;
-            let attempt = need_u64(r, "attempt", "job result attempt")?;
-            if attempt == 0 || attempt > u32::MAX as u64 {
-                return Err(ClientError::Protocol { what: "job result attempt" });
-            }
-            let recorded_ms = need_u64(r, "recorded_ms", "job result recorded_ms")?;
-            let body = r.get("body").cloned().unwrap_or(Value::Null);
-            Some(JobResultDto {
-                outcome: outcome_s.to_string(),
-                attempt: attempt as u32,
-                recorded_ms,
-                body,
-            })
-        }
-    };
+    let progress = parse_progress(v)?;
+    let result = parse_job_result(v)?;
     Ok(JobDetailDto { status, enqueued_by, attempts, progress, result })
+}
+
+/// The recorded terminal `result` block of a job document, wherever it
+/// appears (the job detail read, and one stage of a pipeline read).
+fn parse_job_result(v: &Value) -> ClientResult<Option<JobResultDto>> {
+    let Some(r) = v.get("result").filter(|r| !matches!(r, Value::Null)) else {
+        return Ok(None);
+    };
+    let outcome_s = need_str(r, "outcome", 64, "job result outcome")?;
+    check_display(outcome_s, "job result outcome")?;
+    let attempt = need_u64(r, "attempt", "job result attempt")?;
+    if attempt == 0 || attempt > u32::MAX as u64 {
+        return Err(ClientError::Protocol { what: "job result attempt" });
+    }
+    let recorded_ms = need_u64(r, "recorded_ms", "job result recorded_ms")?;
+    let body = r.get("body").cloned().unwrap_or(Value::Null);
+    Ok(Some(JobResultDto {
+        outcome: outcome_s.to_string(),
+        attempt: attempt as u32,
+        recorded_ms,
+        body,
+    }))
 }
 
 /// One row of the scoped job listing (`GET /v1/jobs`).
@@ -1349,6 +1699,14 @@ pub struct JobRowDto {
     pub state: JobStateDto,
     pub enqueued_by: Option<PrincipalDto>,
     pub created_ms: u64,
+    /// Bounded display prompt when the enqueued body carries one. Optional
+    /// for compatibility with older servers and non-generation jobs.
+    pub prompt: Option<String>,
+    /// Last worker heartbeat on this job, when the server reports one. A
+    /// listing of running work is a status board — "which box, how far,
+    /// how long" lives in the note, and asking per row would be N more
+    /// requests for the same page.
+    pub progress: Option<JobProgressDto>,
 }
 
 pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
@@ -1371,9 +1729,642 @@ pub fn parse_jobs_page(v: &Value) -> ClientResult<Vec<JobRowDto>> {
             .ok_or(ClientError::Protocol { what: "job row state" })?;
         let enqueued_by = opt_principal(r, "enqueued_by", "job row enqueued_by")?;
         let created_ms = need_u64(r, "created_ms", "job row created_ms")?;
-        out.push(JobRowDto { job, namespace, kind, state, enqueued_by, created_ms });
+        let prompt = match r.get("prompt") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let prompt = v.as_str().ok_or(ClientError::Protocol { what: "job row prompt" })?;
+                Some(sanitize_text(prompt, 256))
+            }
+        };
+        let progress = parse_progress(r)?;
+        out.push(JobRowDto {
+            job,
+            namespace,
+            kind,
+            state,
+            enqueued_by,
+            created_ms,
+            prompt,
+            progress,
+        });
     }
     Ok(out)
+}
+
+// ---- pipelines (declared multi-stage runs) ---------------------------------
+
+/// Client-side pipeline identity: the transport's `pipe_<32 lowercase hex>`
+/// spelling, parsed strictly (mirrors [`JobId`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PipelineId(pub [u8; 16]);
+
+impl PipelineId {
+    pub fn parse(text: &str) -> Option<PipelineId> {
+        let hex = text.strip_prefix(crate::wire::PIPELINE_PREFIX)?;
+        Some(PipelineId(from_hex_exact::<16>(hex)?))
+    }
+}
+
+impl std::fmt::Display for PipelineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", crate::wire::PIPELINE_PREFIX, crate::util::to_hex(&self.0))
+    }
+}
+
+/// A pipeline's state. DERIVED by the server from its stage jobs on every
+/// read and never stored, so it cannot drift from the work:
+///
+/// - `Failed` if any stage failed and was not declared `on_fail: skip` —
+///   immediately, without waiting for doom propagation to reach the stages
+///   that depended on it;
+/// - else `Running` while any stage is still non-terminal;
+/// - else `Cancelled` if any stage was cancelled;
+/// - else `Succeeded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelineStateDto {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl PipelineStateDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// What a stage declared should happen to the run when the stage fails:
+/// `Fail` takes the whole pipeline down at that stage (the default), `Skip`
+/// lets the run continue — the store rewrites the dependents' spliced
+/// references to the prompt the person typed and detaches the edge, so an
+/// expander that refuses can never lose a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageOnFailDto {
+    Fail,
+    Skip,
+}
+
+impl StageOnFailDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Skip => "skip",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "fail" => Self::Fail,
+            "skip" => Self::Skip,
+            _ => return None,
+        })
+    }
+}
+
+/// One row of `GET /v1/pipelines` — everything one run CARD needs in one
+/// request: what it is, the words the person typed, where it got to, and
+/// what it is doing right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineRowDto {
+    pub pipeline: PipelineId,
+    pub namespace: String,
+    pub title: String,
+    pub state: PipelineStateDto,
+    /// Weighted aggregate over the declared stages, `0..=1000`.
+    pub permille: u16,
+    /// How many stages the run declared.
+    pub stages: u32,
+    pub enqueued_by: Option<PrincipalDto>,
+    pub created_ms: u64,
+    /// The person's own words, display-bounded to 256 chars by the server
+    /// (the whole text comes back on the single read).
+    pub prompt: Option<String>,
+    /// The failure point if there is one, else the stage running now, else
+    /// the next pending one.
+    pub current_stage: Option<String>,
+    /// The current stage's progress note — the explanation for a flat bar
+    /// (`@.166 queued behind 1 run`, `waiting-for-vram: …`). Empty when the
+    /// stage has not reported one.
+    pub note: String,
+    /// When the run reached a terminal state, once it has.
+    pub finished_ms: Option<u64>,
+}
+
+impl PipelineRowDto {
+    /// Percent for display, floored — the same number the card shows.
+    pub fn percent(&self) -> u16 {
+        self.permille / 10
+    }
+}
+
+/// One stage of `GET /v1/pipelines/<id>`: the declared row joined to what
+/// its job actually did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineStageDto {
+    pub name: String,
+    /// Declaration order, `0`-based.
+    pub seq: u32,
+    pub job: JobId,
+    pub kind: String,
+    pub state: JobStateDto,
+    /// The stage failed and was declared `on_fail: skip`: the run went on
+    /// without it. Derived server-side, never stored.
+    pub skipped: bool,
+    pub weight: u16,
+    pub on_fail: StageOnFailDto,
+    pub attempts: u32,
+    pub progress: Option<JobProgressDto>,
+    /// The body this stage was ENQUEUED with, read back from the job
+    /// payload — present while the stage is still pending, which is what
+    /// makes a spawned run inspectable at t=0. `$from_stage` references
+    /// appear here in their rewritten `{"$from": "job_…", "field": …}` wire
+    /// form until the claim splices them.
+    pub declared: Option<Value>,
+    /// What the worker recorded it actually SENT, once the stage was
+    /// dispatched (the schema-v5 `job_stages` records).
+    pub records: Vec<JobStageDto>,
+    /// The recorded terminal result document, once the stage is terminal.
+    pub result: Option<JobResultDto>,
+}
+
+impl PipelineStageDto {
+    /// This stage's own contribution to the aggregate bar, `0..=1000`:
+    /// a full band for a succeeded or skipped stage, nothing for a pending
+    /// one, and wherever the work stopped for everything else.
+    pub fn done_permille(&self) -> u16 {
+        if self.state == JobStateDto::Succeeded || self.skipped {
+            return 1000;
+        }
+        if self.state == JobStateDto::Pending {
+            return 0;
+        }
+        self.progress.as_ref().map(|p| p.permille).unwrap_or(0)
+    }
+}
+
+/// `GET /v1/pipelines/<id>` — the whole run in one request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineDetailDto {
+    pub pipeline: PipelineId,
+    pub namespace: String,
+    pub title: String,
+    pub state: PipelineStateDto,
+    /// The server's weighted aggregate, `0..=1000`.
+    pub permille: u16,
+    pub enqueued_by: Option<PrincipalDto>,
+    pub created_ms: u64,
+    /// The person's whole text, at full length.
+    pub prompt: String,
+    pub current_stage: Option<String>,
+    pub finished_ms: Option<u64>,
+    /// Every declared stage, in declaration order.
+    pub stages: Vec<PipelineStageDto>,
+}
+
+impl PipelineDetailDto {
+    pub fn percent(&self) -> u16 {
+        self.permille / 10
+    }
+
+    pub fn stage(&self, name: &str) -> Option<&PipelineStageDto> {
+        self.stages.iter().find(|s| s.name == name)
+    }
+
+    /// The stage the run is at: the failure point if there is one, else the
+    /// first running stage, else the next pending one, else the last.
+    pub fn current(&self) -> Option<&PipelineStageDto> {
+        match &self.current_stage {
+            Some(name) => self.stage(name),
+            None => None,
+        }
+    }
+
+    /// The same weighted aggregate the server reports, recomputed locally:
+    /// `Σ(weight × done) / Σ(weight)`. Not a substitute for [`Self::permille`]
+    /// — it exists so a client that draws LOCAL runs with the same card
+    /// grammar computes the bar exactly one way.
+    pub fn aggregate_permille(&self) -> u16 {
+        aggregate_permille(self.stages.iter().map(|s| (s.weight, s.done_permille())))
+    }
+}
+
+/// `Σ(weight × done) / Σ(weight)`, floored and clamped to `1000` — the one
+/// implementation of the pipeline bar, shared by the server-recorded runs
+/// and any client-local one drawn beside them. An empty (or weightless) run
+/// is `0`; a completed stage contributes its whole weight, so the aggregate
+/// never falls across a stage boundary.
+pub fn aggregate_permille(stages: impl Iterator<Item = (u16, u16)>) -> u16 {
+    let mut total = 0u64;
+    let mut done = 0u64;
+    for (weight, permille) in stages {
+        total += weight as u64;
+        done += weight as u64 * permille.min(1000) as u64;
+    }
+    if total == 0 {
+        return 0;
+    }
+    (done / total).min(1000) as u16
+}
+
+/// `POST /v1/pipelines` — the run that now exists, and the job behind each
+/// declared stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineCreatedDto {
+    pub pipeline: PipelineId,
+    /// One entry per declared stage, in declaration order.
+    pub stages: Vec<PipelineStageJobDto>,
+}
+
+impl PipelineCreatedDto {
+    pub fn job_of(&self, stage: &str) -> Option<JobId> {
+        self.stages.iter().find(|s| s.name == stage).map(|s| s.job)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineStageJobDto {
+    pub name: String,
+    pub job: JobId,
+}
+
+/// `POST /v1/pipelines/<id>/cancel` — how many stage jobs the server stopped
+/// (`0` = the run was already terminal) and the state the run now reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineCancelDto {
+    pub pipeline: PipelineId,
+    pub cancelled: u64,
+    pub state: PipelineStateDto,
+}
+
+fn need_pipeline_id(v: &Value, what: &'static str) -> ClientResult<PipelineId> {
+    PipelineId::parse(need_str(v, "pipeline", 64, what)?)
+        .ok_or(ClientError::Protocol { what })
+}
+
+fn need_permille(v: &Value, what: &'static str) -> ClientResult<u16> {
+    let permille = need_u64(v, "permille", what)?;
+    if permille > 1000 {
+        return Err(ClientError::Protocol { what });
+    }
+    Ok(permille as u16)
+}
+
+/// Optional display text kept as WRITTEN except for the control characters
+/// that have no business in it: a pipeline prompt is the person's own words
+/// and its line breaks are part of them (lyrics, shot lists).
+fn opt_prompt(
+    v: &Value,
+    key: &'static str,
+    max: usize,
+    what: &'static str,
+) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.len() > max {
+                return Err(ClientError::Protocol { what });
+            }
+            Ok(Some(sanitize_stage_text(s, max)))
+        }
+    }
+}
+
+fn opt_stage_name(
+    v: &Value,
+    key: &'static str,
+    what: &'static str,
+) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.is_empty() || s.len() > 64 {
+                return Err(ClientError::Protocol { what });
+            }
+            check_display(s, what)?;
+            Ok(Some(s.to_string()))
+        }
+    }
+}
+
+pub fn parse_pipeline_created(v: &Value) -> ClientResult<PipelineCreatedDto> {
+    let pipeline = need_pipeline_id(v, "created pipeline id")?;
+    let rows = need(v, "stages", "created pipeline stages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "created pipeline stages" })?;
+    if rows.is_empty() || rows.len() > crate::wire::MAX_PIPELINE_STAGES {
+        return Err(ClientError::Protocol { what: "created pipeline stages" });
+    }
+    let mut stages = Vec::with_capacity(rows.len());
+    for r in rows {
+        let name = need_str(r, "name", 64, "created stage name")?;
+        check_display(name, "created stage name")?;
+        let job = JobId::parse(need_str(r, "job", 64, "created stage job")?)
+            .ok_or(ClientError::Protocol { what: "created stage job" })?;
+        stages.push(PipelineStageJobDto { name: name.to_string(), job });
+    }
+    Ok(PipelineCreatedDto { pipeline, stages })
+}
+
+pub fn parse_pipeline_cancel(v: &Value) -> ClientResult<PipelineCancelDto> {
+    Ok(PipelineCancelDto {
+        pipeline: need_pipeline_id(v, "cancelled pipeline id")?,
+        cancelled: need_u64(v, "cancelled", "pipeline cancelled count")?,
+        state: PipelineStateDto::parse(need_str(v, "state", 16, "pipeline state")?)
+            .ok_or(ClientError::Protocol { what: "pipeline state" })?,
+    })
+}
+
+pub fn parse_pipelines_page(v: &Value) -> ClientResult<Vec<PipelineRowDto>> {
+    let rows = need(v, "pipelines", "pipeline rows")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "pipeline rows" })?;
+    if rows.len() > MAX_PAGE_ENTRIES {
+        return Err(ClientError::Protocol { what: "pipelines page too large" });
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let namespace =
+            need_str(r, "namespace", MAX_NAMESPACE_BYTES, "pipeline row namespace")?.to_string();
+        check_display(&namespace, "pipeline row namespace")?;
+        let title = need_str(
+            r,
+            "title",
+            crate::wire::MAX_PIPELINE_TITLE_BYTES,
+            "pipeline row title",
+        )?
+        .to_string();
+        check_display(&title, "pipeline row title")?;
+        let stages = need_u64(r, "stages", "pipeline row stage count")?;
+        if stages == 0 || stages as usize > crate::wire::MAX_PIPELINE_STAGES {
+            return Err(ClientError::Protocol { what: "pipeline row stage count" });
+        }
+        let note = match r.get("note") {
+            None | Some(Value::Null) => String::new(),
+            Some(n) => {
+                let text =
+                    n.as_str().ok_or(ClientError::Protocol { what: "pipeline row note" })?;
+                sanitize_text(text, crate::wire::MAX_PROGRESS_NOTE_BYTES)
+            }
+        };
+        out.push(PipelineRowDto {
+            pipeline: need_pipeline_id(r, "pipeline row id")?,
+            namespace,
+            title,
+            state: PipelineStateDto::parse(need_str(r, "state", 16, "pipeline row state")?)
+                .ok_or(ClientError::Protocol { what: "pipeline row state" })?,
+            permille: need_permille(r, "pipeline row permille")?,
+            stages: stages as u32,
+            enqueued_by: opt_principal(r, "enqueued_by", "pipeline row enqueued_by")?,
+            created_ms: need_u64(r, "created_ms", "pipeline row created_ms")?,
+            prompt: opt_prompt(r, "prompt", 256, "pipeline row prompt")?,
+            current_stage: opt_stage_name(r, "current_stage", "pipeline row current stage")?,
+            note,
+            finished_ms: opt_u64(r, "finished_ms", "pipeline row finished_ms")?,
+        });
+    }
+    Ok(out)
+}
+
+pub fn parse_pipeline_detail(v: &Value) -> ClientResult<PipelineDetailDto> {
+    let namespace =
+        need_str(v, "namespace", MAX_NAMESPACE_BYTES, "pipeline namespace")?.to_string();
+    check_display(&namespace, "pipeline namespace")?;
+    let title =
+        need_str(v, "title", crate::wire::MAX_PIPELINE_TITLE_BYTES, "pipeline title")?.to_string();
+    check_display(&title, "pipeline title")?;
+    let rows = need(v, "stages", "pipeline stages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "pipeline stages" })?;
+    if rows.is_empty() || rows.len() > crate::wire::MAX_PIPELINE_STAGES {
+        return Err(ClientError::Protocol { what: "pipeline stages" });
+    }
+    let mut stages = Vec::with_capacity(rows.len());
+    let mut last_seq: Option<u64> = None;
+    for r in rows {
+        let name = need_str(r, "name", 64, "pipeline stage name")?.to_string();
+        check_display(&name, "pipeline stage name")?;
+        let seq = need_u64(r, "seq", "pipeline stage seq")?;
+        // The server reports stages in declaration order; anything else
+        // cannot be rendered as the strip a person reads left to right.
+        if seq as usize >= crate::wire::MAX_PIPELINE_STAGES
+            || last_seq.map(|last| seq <= last).unwrap_or(false)
+        {
+            return Err(ClientError::Protocol { what: "pipeline stage seq" });
+        }
+        last_seq = Some(seq);
+        let weight = need_u64(r, "weight", "pipeline stage weight")?;
+        if weight == 0 || weight > crate::wire::MAX_STAGE_WEIGHT as u64 {
+            return Err(ClientError::Protocol { what: "pipeline stage weight" });
+        }
+        let kind = need_str(r, "kind", 64, "pipeline stage kind")?.to_string();
+        check_display(&kind, "pipeline stage kind")?;
+        let records = match r.get("records") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(x) => {
+                let items =
+                    x.as_arr().ok_or(ClientError::Protocol { what: "pipeline stage records" })?;
+                parse_stage_records(items)
+            }
+        };
+        let declared = match r.get("declared") {
+            None | Some(Value::Null) => None,
+            Some(d @ Value::Obj(_)) => Some(d.clone()),
+            Some(_) => return Err(ClientError::Protocol { what: "pipeline stage declared body" }),
+        };
+        stages.push(PipelineStageDto {
+            name,
+            seq: seq as u32,
+            job: JobId::parse(need_str(r, "job", 64, "pipeline stage job")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage job" })?,
+            kind,
+            state: JobStateDto::parse(need_str(r, "state", 16, "pipeline stage state")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage state" })?,
+            skipped: matches!(r.get("skipped"), Some(Value::Bool(true))),
+            weight: weight as u16,
+            on_fail: StageOnFailDto::parse(need_str(r, "on_fail", 16, "pipeline stage on_fail")?)
+                .ok_or(ClientError::Protocol { what: "pipeline stage on_fail" })?,
+            attempts: u32::try_from(need_u64(r, "attempts", "pipeline stage attempts")?)
+                .map_err(|_| ClientError::Protocol { what: "pipeline stage attempts" })?,
+            progress: parse_progress(r)?,
+            declared,
+            records,
+            result: parse_job_result(r)?,
+        });
+    }
+    Ok(PipelineDetailDto {
+        pipeline: need_pipeline_id(v, "pipeline id")?,
+        namespace,
+        title,
+        state: PipelineStateDto::parse(need_str(v, "state", 16, "pipeline state")?)
+            .ok_or(ClientError::Protocol { what: "pipeline state" })?,
+        permille: need_permille(v, "pipeline permille")?,
+        enqueued_by: opt_principal(v, "enqueued_by", "pipeline enqueued_by")?,
+        created_ms: need_u64(v, "created_ms", "pipeline created_ms")?,
+        prompt: opt_prompt(
+            v,
+            "prompt",
+            crate::wire::MAX_PIPELINE_PROMPT_BYTES,
+            "pipeline prompt",
+        )?
+        .unwrap_or_default(),
+        current_stage: opt_stage_name(v, "current_stage", "pipeline current stage")?,
+        finished_ms: opt_u64(v, "finished_ms", "pipeline finished_ms")?,
+        stages,
+    })
+}
+
+/// `GET /v1/annotate/summary`: how much of the catalog the vision pass has
+/// described, and what its queue is doing about the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotateSummaryDto {
+    /// The tag that means "described at the current annotator version".
+    pub version_tag: String,
+    /// Annotatable, live, still undescribed.
+    pub owed: u64,
+    pub annotated: u64,
+    pub pending: u64,
+    pub running: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
+impl AnnotateSummaryDto {
+    /// Assets the queue is working on or waiting to work on.
+    pub fn queued(&self) -> u64 {
+        self.pending + self.running
+    }
+}
+
+pub fn parse_annotate_summary(v: &Value) -> ClientResult<AnnotateSummaryDto> {
+    let version_tag = need_str(v, "version_tag", 48, "annotate version tag")?.to_string();
+    check_display(&version_tag, "annotate version tag")?;
+    let jobs = need(v, "jobs", "annotate jobs")?;
+    Ok(AnnotateSummaryDto {
+        version_tag,
+        owed: need_u64(v, "owed", "annotate owed")?,
+        annotated: need_u64(v, "annotated", "annotate annotated")?,
+        pending: need_u64(jobs, "pending", "annotate pending")?,
+        running: need_u64(jobs, "running", "annotate running")?,
+        succeeded: need_u64(jobs, "succeeded", "annotate succeeded")?,
+        failed: need_u64(jobs, "failed", "annotate failed")?,
+        cancelled: need_u64(jobs, "cancelled", "annotate cancelled")?,
+    })
+}
+
+/// `POST /v1/annotate/backlog`: what one sweep queued, and what is left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotateBacklogDto {
+    pub enqueued: u64,
+    /// Already queued or already described — the idempotent no-op.
+    pub skipped: u64,
+    pub remaining: u64,
+    pub annotated: u64,
+}
+
+pub fn parse_annotate_backlog(v: &Value) -> ClientResult<AnnotateBacklogDto> {
+    Ok(AnnotateBacklogDto {
+        enqueued: need_u64(v, "enqueued", "backlog enqueued")?,
+        skipped: need_u64(v, "skipped", "backlog skipped")?,
+        remaining: need_u64(v, "remaining", "backlog remaining")?,
+        annotated: need_u64(v, "annotated", "backlog annotated")?,
+    })
+}
+
+/// `GET /v1/assets/{ast}/annotation`: the record as it stands, so a pass
+/// that owns only some of its fields can carry the rest through unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationDto {
+    pub title: String,
+    pub description: String,
+    pub kind: Option<AssetKind>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub creator: String,
+    pub generator: String,
+    pub backend: String,
+    pub model: String,
+    /// Owner-only fields; empty for a viewer who is not the owner or root.
+    pub prompt: String,
+    pub provenance: String,
+    pub private: bool,
+}
+
+pub fn parse_annotation(v: &Value) -> ClientResult<AnnotationDto> {
+    let text = |key: &'static str, max: usize, what: &'static str| -> ClientResult<String> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+                if s.len() > max {
+                    return Err(ClientError::Protocol { what });
+                }
+                Ok(s.to_string())
+            }
+        }
+    };
+    let labels = |key: &'static str, what: &'static str| -> ClientResult<Vec<String>> {
+        let Some(arr) = v.get(key).and_then(Value::as_arr) else {
+            return Ok(Vec::new());
+        };
+        if arr.len() > 64 {
+            return Err(ClientError::Protocol { what });
+        }
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let s = item.as_str().ok_or(ClientError::Protocol { what })?;
+            if s.len() > 64 {
+                return Err(ClientError::Protocol { what });
+            }
+            check_display(s, what)?;
+            out.push(s.to_string());
+        }
+        Ok(out)
+    };
+    let kind = match v.get("kind") {
+        None | Some(Value::Null) => None,
+        Some(x) => Some(
+            x.as_str()
+                .and_then(kind_parse)
+                .ok_or(ClientError::Protocol { what: "annotation kind" })?,
+        ),
+    };
+    Ok(AnnotationDto {
+        title: text("title", 200, "annotation title")?,
+        description: text("description", 4096, "annotation description")?,
+        kind,
+        categories: labels("categories", "annotation categories")?,
+        tags: labels("tags", "annotation tags")?,
+        creator: text("creator", 128, "annotation creator")?,
+        generator: text("generator", 128, "annotation generator")?,
+        backend: text("backend", 128, "annotation backend")?,
+        model: text("model", 128, "annotation model")?,
+        prompt: text("prompt", 8192, "annotation prompt")?,
+        provenance: text("provenance", 4096, "annotation provenance")?,
+        private: matches!(v.get("visibility").and_then(Value::as_str), Some("private")),
+    })
 }
 
 /// One claimed job from `POST /v1/worker/claim` — everything a fleet
@@ -1951,6 +2942,11 @@ pub enum ChatProviderKind {
     FleetQwen,
     OpenAi,
     Grok,
+    /// Vendor CLIs logged in on the SERVER host; no key ever reaches a
+    /// client.
+    ClaudeCli,
+    CodexCli,
+    GrokCli,
 }
 
 impl ChatProviderKind {
@@ -1959,6 +2955,9 @@ impl ChatProviderKind {
             Self::FleetQwen => "fleet-qwen",
             Self::OpenAi => "openai",
             Self::Grok => "grok",
+            Self::ClaudeCli => "claude-cli",
+            Self::CodexCli => "codex-cli",
+            Self::GrokCli => "grok-cli",
         }
     }
 
@@ -1967,6 +2966,50 @@ impl ChatProviderKind {
             "fleet-qwen" => Some(Self::FleetQwen),
             "openai" => Some(Self::OpenAi),
             "grok" => Some(Self::Grok),
+            "claude-cli" => Some(Self::ClaudeCli),
+            "codex-cli" => Some(Self::CodexCli),
+            "grok-cli" => Some(Self::GrokCli),
+            _ => None,
+        }
+    }
+
+    /// Human label for a picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FleetQwen => "Qwen · asset-ai fleet",
+            Self::OpenAi => "OpenAI · API",
+            Self::Grok => "Grok · API",
+            Self::ClaudeCli => "Claude Code · CLI on server",
+            Self::CodexCli => "Codex · CLI on server",
+            Self::GrokCli => "Grok · CLI on server",
+        }
+    }
+
+    /// What the server reports when a row carries no `locality` (older
+    /// servers): only the fleet is local.
+    pub fn default_locality(self) -> ChatProviderLocality {
+        match self {
+            Self::FleetQwen => ChatProviderLocality::Local,
+            _ => ChatProviderLocality::Cloud,
+        }
+    }
+}
+
+/// Where a provider's model runs — the server's word, carried per row.
+/// `Local` = the asset-ai fleet on the LAN; `Cloud` = a vendor, whether by
+/// API key or by a CLI logged in on the server host. A "local AI only"
+/// lock filters on this and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatProviderLocality {
+    Local,
+    Cloud,
+}
+
+impl ChatProviderLocality {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Self::Local),
+            "cloud" => Some(Self::Cloud),
             _ => None,
         }
     }
@@ -1981,6 +3024,7 @@ pub enum ChatProviderStateDto {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatProviderDto {
     pub kind: ChatProviderKind,
+    pub locality: ChatProviderLocality,
     pub state: ChatProviderStateDto,
 }
 
@@ -2019,6 +3063,66 @@ pub struct ChatSessionDto {
     pub state: ChatSessionStateDto,
     pub turn: u64,
     pub idle: bool,
+    /// Present on a KEYED (durable, create-or-resume) session: the
+    /// `client_key` / `context_key` it is stored under. Both absent on an
+    /// ephemeral session.
+    pub client_key: Option<String>,
+    pub context_key: Option<String>,
+}
+
+/// One row of a session's transcript (`GET …/transcript`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatTranscriptRole {
+    User,
+    Assistant,
+    System,
+    /// A tool chip: `text` is its short title (`world.set_source · ok`);
+    /// `tool` / `outcome` on the row carry the parts.
+    Tool,
+}
+
+impl ChatTranscriptRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
+/// The durable conversation as the client should render it: thinking
+/// stripped, tool rounds folded into one `tool` chip each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatTranscriptRowDto {
+    pub role: ChatTranscriptRole,
+    pub text: String,
+    /// `tool` rows only: the dotted tool name (`world.set_source`).
+    pub tool: Option<String>,
+    /// `tool` rows only: `ok | unavailable | denied | refused | failed`.
+    pub outcome: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatTranscriptDto {
+    pub session: ChatSessionId,
+    pub provider: ChatProviderKind,
+    pub turn: u64,
+    /// Chronological; the server keeps the LAST rows that fit its budget.
+    pub messages: Vec<ChatTranscriptRowDto>,
+    /// Older rows were dropped to fit the server's budget.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2093,8 +3197,23 @@ pub fn parse_chat_providers(v: &Value) -> ClientResult<Vec<ChatProviderDto>> {
     }
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let kind = ChatProviderKind::parse(need_str(row, "kind", 32, "chat provider kind")?)
-            .ok_or(ClientError::Protocol { what: "chat provider kind" })?;
+        // A NEWER server may list provider kinds this client predates.
+        // Skip the unknown row instead of refusing the whole list: the
+        // fail-closed parser once turned one new server-side kind into
+        // "no providers at all" on every deployed client (the claude-cli
+        // rollout), and a provider this client cannot name is a provider
+        // it could never select anyway.
+        let Some(kind) = ChatProviderKind::parse(need_str(row, "kind", 32, "chat provider kind")?)
+        else {
+            continue;
+        };
+        let locality = match row.get("locality") {
+            None => kind.default_locality(),
+            Some(v) => v
+                .as_str()
+                .and_then(ChatProviderLocality::parse)
+                .ok_or(ClientError::Protocol { what: "chat provider locality" })?,
+        };
         let state = match need_str(row, "state", 16, "chat provider state")? {
             "available" => {
                 if row.get("detail").is_some() {
@@ -2117,7 +3236,7 @@ pub fn parse_chat_providers(v: &Value) -> ClientResult<Vec<ChatProviderDto>> {
             }
             _ => return Err(ClientError::Protocol { what: "chat provider state" }),
         };
-        out.push(ChatProviderDto { kind, state });
+        out.push(ChatProviderDto { kind, locality, state });
     }
     Ok(out)
 }
@@ -2135,7 +3254,35 @@ pub fn parse_chat_session(v: &Value) -> ClientResult<ChatSessionDto> {
         .ok_or(ClientError::Protocol { what: "chat session state" })?;
     let turn = need_u64(v, "turn", "chat turn")?;
     let idle = need_bool(v, "idle", "chat idle")?;
-    Ok(ChatSessionDto { session, namespace, provider, owner, state, turn, idle })
+    let client_key = opt_chat_key(v, "client_key", "chat client key")?;
+    let context_key = opt_chat_key(v, "context_key", "chat context key")?;
+    Ok(ChatSessionDto {
+        session,
+        namespace,
+        provider,
+        owner,
+        state,
+        turn,
+        idle,
+        client_key,
+        context_key,
+    })
+}
+
+/// A session key echoed by the server: absent (or null) on an ephemeral
+/// session; on a keyed one it must have the shape this client would have
+/// sent (see `wire::chat_key_ok`) — anything else is a protocol refusal.
+fn opt_chat_key(v: &Value, key: &'static str, what: &'static str) -> ClientResult<Option<String>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(x) => {
+            let s = x.as_str().ok_or(ClientError::Protocol { what })?;
+            if !crate::wire::chat_key_ok(s) {
+                return Err(ClientError::Protocol { what });
+            }
+            Ok(Some(s.to_string()))
+        }
+    }
 }
 
 pub fn parse_chat_send(v: &Value) -> ClientResult<u64> {
@@ -2144,6 +3291,66 @@ pub fn parse_chat_send(v: &Value) -> ClientResult<u64> {
 
 pub fn parse_chat_retired(v: &Value) -> ClientResult<bool> {
     need_bool(v, "retired", "chat retired")
+}
+
+/// Most transcript rows one response may carry, and the most text per row
+/// (the chat wire's message ceiling). The server stays under both.
+const MAX_CHAT_TRANSCRIPT_ROWS: usize = 256;
+const MAX_CHAT_TRANSCRIPT_TEXT: usize = 16 * 1024;
+
+pub fn parse_chat_transcript(v: &Value) -> ClientResult<ChatTranscriptDto> {
+    let session = ChatSessionId::parse(need_str(v, "session", 32, "chat transcript session")?)
+        .ok_or(ClientError::Protocol { what: "chat transcript session" })?;
+    let provider = ChatProviderKind::parse(need_str(v, "provider", 32, "chat transcript provider")?)
+        .ok_or(ClientError::Protocol { what: "chat transcript provider" })?;
+    let turn = need_u64(v, "turn", "chat transcript turn")?;
+    let rows = need(v, "messages", "chat transcript messages")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "chat transcript messages" })?;
+    if rows.len() > MAX_CHAT_TRANSCRIPT_ROWS {
+        return Err(ClientError::Protocol { what: "chat transcript count" });
+    }
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = ChatTranscriptRole::parse(need_str(row, "role", 16, "chat transcript role")?)
+            .ok_or(ClientError::Protocol { what: "chat transcript role" })?;
+        let text = need_str(row, "text", MAX_CHAT_TRANSCRIPT_TEXT, "chat transcript text")?;
+        // Control characters other than the line/tab structure of a
+        // message are hostile in text meant for a screen.
+        if text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+            return Err(ClientError::Protocol { what: "chat transcript text" });
+        }
+        let tool = match row.get("tool") {
+            None | Some(Value::Null) => None,
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what: "chat transcript tool" })?;
+                if s.is_empty() || s.len() > MAX_CHAT_TOOL_NAME {
+                    return Err(ClientError::Protocol { what: "chat transcript tool" });
+                }
+                check_display(s, "chat transcript tool")?;
+                Some(s.to_string())
+            }
+        };
+        let outcome = match row.get("outcome") {
+            None | Some(Value::Null) => None,
+            Some(x) => {
+                let s = x.as_str().ok_or(ClientError::Protocol { what: "chat transcript outcome" })?;
+                if !matches!(s, "ok" | "unavailable" | "denied" | "refused" | "failed") {
+                    return Err(ClientError::Protocol { what: "chat transcript outcome" });
+                }
+                Some(s.to_string())
+            }
+        };
+        if role != ChatTranscriptRole::Tool && (tool.is_some() || outcome.is_some()) {
+            return Err(ClientError::Protocol { what: "chat transcript tool" });
+        }
+        messages.push(ChatTranscriptRowDto { role, text: text.to_string(), tool, outcome });
+    }
+    let truncated = match v.get("truncated") {
+        None | Some(Value::Null) => false,
+        Some(x) => x.as_bool().ok_or(ClientError::Protocol { what: "chat transcript truncated" })?,
+    };
+    Ok(ChatTranscriptDto { session, provider, turn, messages, truncated })
 }
 
 pub fn parse_chat_events(v: &Value) -> ClientResult<ChatEventsPageDto> {
@@ -2673,16 +3880,37 @@ mod tests {
             &json::parse(
                 br#"{"providers":[
                     {"kind":"fleet-qwen","state":"available","model":"qwen-scripted"},
-                    {"kind":"openai","state":"unavailable","reason":"OPENAI_API_KEY is not set"}
+                    {"kind":"openai","state":"unavailable","reason":"OPENAI_API_KEY is not set"},
+                    {"kind":"claude-cli","locality":"cloud","state":"available","model":"claude-code"}
                 ]}"#,
             )
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(providers.len(), 2);
+        assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].kind, ChatProviderKind::FleetQwen);
+        // No locality on the row: the fleet is local, everything else cloud.
+        assert_eq!(providers[0].locality, ChatProviderLocality::Local);
+        assert_eq!(providers[1].locality, ChatProviderLocality::Cloud);
+        assert_eq!(providers[2].kind, ChatProviderKind::ClaudeCli);
+        assert_eq!(providers[2].locality, ChatProviderLocality::Cloud);
+        // An UNKNOWN provider kind (a newer server) is skipped, never a
+        // refusal of the whole list — one new server-side kind must not
+        // blank every old client's provider picker.
+        let skewed = parse_chat_providers(
+            &json::parse(
+                br#"{"providers":[
+                    {"kind":"gemini","state":"available","model":"x"},
+                    {"kind":"fleet-qwen","state":"available","model":"qwen"}
+                ]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(skewed.len(), 1);
+        assert_eq!(skewed[0].kind, ChatProviderKind::FleetQwen);
         assert!(parse_chat_providers(
-            &json::parse(br#"{"providers":[{"kind":"claude","state":"available","model":"x"}]}"#)
+            &json::parse(br#"{"providers":[{"kind":"fleet-qwen","locality":"nearby","state":"available","model":"x"}]}"#)
                 .unwrap(),
         )
         .is_err());
@@ -2771,6 +3999,115 @@ mod tests {
     }
 
     #[test]
+    fn keyed_chat_session_and_transcript_parse_fail_closed() {
+        let sid = "chat_0123456789abcdef";
+        // An ephemeral session: no keys on the document, none on the DTO.
+        let plain = parse_chat_session(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":0,"idle":true}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plain.client_key, None);
+        assert_eq!(plain.context_key, None);
+        // A keyed one echoes both keys verbatim.
+        let keyed = parse_chat_session(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":3,"idle":true,"client_key":"ip:10.0.0.7","context_key":"ast_0123456789abcdef0123456789abcdef"}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(keyed.client_key.as_deref(), Some("ip:10.0.0.7"));
+        assert_eq!(keyed.context_key.as_deref(), Some("ast_0123456789abcdef0123456789abcdef"));
+        assert_eq!(keyed.turn, 3);
+        // A key the client could never have sent is a protocol refusal,
+        // not a display surprise.
+        for bad in [r#""a b""#, r#""../x""#, r#""""#, "7", r#""x\n""#] {
+            let doc = format!(
+                r#"{{"session":"{sid}","namespace":"gen","provider":"fleet-qwen","owner":"prin_aa","state":"idle","turn":0,"idle":true,"client_key":{bad},"context_key":"g"}}"#
+            );
+            assert!(parse_chat_session(&json::parse(doc.as_bytes()).unwrap()).is_err(), "{bad}");
+        }
+
+        let transcript = parse_chat_transcript(
+            &json::parse(
+                format!(
+                    r#"{{"session":"{sid}","provider":"fleet-qwen","turn":2,"messages":[
+                        {{"role":"user","text":"make a level"}},
+                        {{"role":"assistant","text":"Building it."}},
+                        {{"role":"tool","text":"world.set_source · ok","tool":"world.set_source","outcome":"ok"}},
+                        {{"role":"assistant","text":"Done — the level is live.\nEnjoy."}}
+                    ],"truncated":false}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transcript.session.to_string(), sid);
+        assert_eq!(transcript.provider, ChatProviderKind::FleetQwen);
+        assert_eq!(transcript.turn, 2);
+        assert!(!transcript.truncated);
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(transcript.messages[0].role, ChatTranscriptRole::User);
+        assert_eq!(transcript.messages[0].tool, None);
+        assert_eq!(
+            transcript.messages[2],
+            ChatTranscriptRowDto {
+                role: ChatTranscriptRole::Tool,
+                text: "world.set_source · ok".into(),
+                tool: Some("world.set_source".into()),
+                outcome: Some("ok".into()),
+            }
+        );
+        // `truncated` is optional (older servers), the rest is not.
+        let minimal = parse_chat_transcript(
+            &json::parse(
+                format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[]}}"#).as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(minimal.messages.is_empty());
+        assert!(!minimal.truncated);
+        for bad in [
+            // unknown role
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"narrator","text":"x"}}]}}"#),
+            // tool fields on a non-tool row
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user","text":"x","tool":"world.list"}}]}}"#),
+            // unknown outcome vocabulary
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"tool","text":"x","tool":"world.list","outcome":"maybe"}}]}}"#),
+            // control byte in text
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user","text":"x\u0007"}}]}}"#),
+            // missing text
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{{"role":"user"}}]}}"#),
+            // wrong id family
+            r#"{"session":"op_0123456789abcdef0123456789abcdef","provider":"grok","turn":0,"messages":[]}"#.to_string(),
+            // messages not an array
+            format!(r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":{{}}}}"#),
+        ] {
+            assert!(parse_chat_transcript(&json::parse(bad.as_bytes()).unwrap()).is_err(), "{bad}");
+        }
+        // Over the row ceiling refuses rather than rendering a runaway list.
+        let many: Vec<String> = (0..MAX_CHAT_TRANSCRIPT_ROWS + 1)
+            .map(|_| r#"{"role":"user","text":"x"}"#.to_string())
+            .collect();
+        let doc = format!(
+            r#"{{"session":"{sid}","provider":"grok","turn":0,"messages":[{}]}}"#,
+            many.join(",")
+        );
+        assert!(parse_chat_transcript(&json::parse(doc.as_bytes()).unwrap()).is_err());
+    }
+
+    #[test]
     fn health_roundtrip_and_refusals() {
         let good = format!(r#"{{"server_id":"{}","protocol_version":1}}"#, "ab".repeat(16));
         let h = parse_health(&json::parse(good.as_bytes()).unwrap()).unwrap();
@@ -2788,19 +4125,50 @@ mod tests {
     }
 
     #[test]
+    fn asset_kind_wire_names_round_trip_and_unknowns_refuse() {
+        let all = [
+            AssetKind::Mesh,
+            AssetKind::Character,
+            AssetKind::Weapon,
+            AssetKind::Vehicle,
+            AssetKind::Prop,
+            AssetKind::Texture,
+            AssetKind::Material,
+            AssetKind::Audio,
+            AssetKind::Video,
+            AssetKind::Skybox,
+            AssetKind::World,
+            AssetKind::Prefab,
+            AssetKind::Billboard,
+            AssetKind::Game,
+            AssetKind::VjEffect,
+            AssetKind::Data,
+            AssetKind::ModelProgram,
+        ];
+        for kind in all {
+            assert_eq!(kind_parse(kind_name(kind)), Some(kind));
+        }
+        assert_eq!(kind_name(AssetKind::Data), "data");
+        assert_eq!(kind_name(AssetKind::ModelProgram), "model-program");
+        for unknown in ["", "Data", "blob", "unknown"] {
+            assert_eq!(kind_parse(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
     fn catalog_page_parses_and_bounds() {
         let body = format!(
-            r#"{{"hits":[{{"asset_id":"{}","namespace":"stock","kind":"mesh","title":"Rocket","snippet":"a rocket","score":90,"live":true}}],"total":1,"cursor":null}}"#,
+            r#"{{"hits":[{{"asset_id":"{}","namespace":"stock","kind":"data","title":"Rocket","snippet":"a rocket","score":90,"live":true}}],"total":1,"cursor":null}}"#,
             asset_id_str()
         );
         let page = parse_catalog_page(&json::parse(body.as_bytes()).unwrap()).unwrap();
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.total, 1);
         assert!(page.cursor.is_none());
-        assert_eq!(page.hits[0].kind, Some(AssetKind::Mesh));
+        assert_eq!(page.hits[0].kind, Some(AssetKind::Data));
 
         // Unknown kind refused; missing fields refused; control chars refused.
-        let bad_kind = body.replace("\"mesh\"", "\"blob\"");
+        let bad_kind = body.replace("\"data\"", "\"blob\"");
         assert!(parse_catalog_page(&json::parse(bad_kind.as_bytes()).unwrap()).is_err());
         let bad_title = body.replace("Rocket", "Ro\\u0007cket");
         assert!(parse_catalog_page(&json::parse(bad_title.as_bytes()).unwrap()).is_err());
@@ -2944,6 +4312,18 @@ mod tests {
         assert_eq!(page.events[0].kind, CatalogEventKind::AssetPublished);
         assert_eq!(page.events[0].content_kind, Some(AssetKind::Video));
 
+        let token = format!("pmesh_{}", "55".repeat(32));
+        let preview = format!(
+            r#"{{"events":[{{"seq":8,"kind":"model_preview","ns":"gen","alias":"gen/csg/mug","preview_session":"session-a","preview_open":true,"preview_program":"csg.part('body', csg.box(vec3(1,1,1)))","preview_parts":[{{"name":"body","mesh_token":"{token}"}}],"preview_removed":[],"preview_renamed":[],"content_kind":"model-program","ts_ms":100}}],"cursor":"0123456789abcdef-8","gap":false}}"#
+        );
+        let preview = parse_events_page(&json::parse(preview.as_bytes()).unwrap()).unwrap();
+        assert_eq!(preview.events[0].kind, CatalogEventKind::ModelPreview);
+        let payload = preview.events[0].model_preview.as_ref().unwrap();
+        assert!(payload.open);
+        assert_eq!(payload.parts[0].name, "body");
+        assert_eq!(payload.parts[0].mesh_token, token);
+        assert_eq!(preview.events[0].content_kind, Some(AssetKind::ModelProgram));
+
         // Build an explicit duplicate because whitespace changes should not
         // be part of the parser contract.
         let row = format!(
@@ -2959,6 +4339,70 @@ mod tests {
         assert!(parse_events_page(&json::parse(behind.as_bytes()).unwrap()).is_err());
         let malformed = body.replace("0123456789abcdef-7", "safe-but-not-an-event-cursor");
         assert!(parse_events_page(&json::parse(malformed.as_bytes()).unwrap()).is_err());
+    }
+
+    /// A whole declared run announcing that it is over — the ONE signal a
+    /// grid or a chip should act on, since a publish is per-asset and
+    /// coincidental and a failed run publishes nothing at all.
+    #[test]
+    fn a_finished_run_announces_itself_and_how_it_ended() {
+        let pipeline = format!("pipe_{}", "3c".repeat(16));
+        let page = format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"succeeded","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        );
+        let page = parse_events_page(&json::parse(page.as_bytes()).unwrap()).unwrap();
+        assert_eq!(page.events[0].kind, CatalogEventKind::PipelineFinished);
+        assert_eq!(page.events[0].kind.as_str(), "pipeline.finished");
+        assert_eq!(
+            page.events[0].pipeline.map(|id| id.to_string()),
+            Some(pipeline.clone())
+        );
+        assert_eq!(page.events[0].pipeline_state, Some(PipelineStateDto::Succeeded));
+        // It is not a content change: nothing is dropped from a view on it.
+        assert!(!page.events[0].kind.removes_content());
+
+        let refuse = |body: String| {
+            assert!(
+                parse_events_page(&json::parse(body.as_bytes()).unwrap()).is_err(),
+                "should refuse: {body}"
+            )
+        };
+        // "finished" while still running is a contradiction, not a state a
+        // subscriber should have to reason about.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"running","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        // A state with no run is not addressable; a run with no state says
+        // nothing. Both travel together or not at all.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        refuse(
+            r#"{"events":[{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline_state":"failed","ts_ms":500}],"cursor":"0123456789abcdef-11","gap":false}"#
+                .to_string(),
+        );
+        // A run id smuggled onto an unrelated kind.
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"asset_published","ns":"gen","pipeline":"{pipeline}","pipeline_state":"failed","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+        refuse(
+            r#"{"events":[{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"pipe_nothex","pipeline_state":"failed","ts_ms":500}],"cursor":"0123456789abcdef-11","gap":false}"#
+                .to_string(),
+        );
+        refuse(format!(
+            r#"{{"events":[{{"seq":11,"kind":"pipeline.finished","ns":"gen","pipeline":"{pipeline}","pipeline_state":"exploded","ts_ms":500}}],"cursor":"0123456789abcdef-11","gap":false}}"#
+        ));
+    }
+
+    /// The vocabulary a build asks for must be the one it can actually read.
+    #[test]
+    fn the_event_request_asks_for_the_vocabulary_this_build_parses() {
+        assert_eq!(crate::wire::EVENT_VOCABULARY, 5);
+        assert!(crate::wire::path_events(None, 100, 10, None).contains("&ev=5"));
+        assert_eq!(
+            CatalogEventKind::parse("pipeline.finished"),
+            CatalogEventKind::PipelineFinished
+        );
     }
 
     #[test]
@@ -3065,11 +4509,12 @@ mod tests {
         let prin = format!("prin_{}", "cd".repeat(16));
         let body = format!(
             r#"{{"jobs":[{{"job":"{id}","namespace":"gen","kind":"video.generate",
-                "state":"running","enqueued_by":"{prin}","created_ms":7}}]}}"#
+                "state":"running","enqueued_by":"{prin}","created_ms":7,"prompt":"moonlit harbor"}}]}}"#
         );
         let rows = parse_jobs_page(&json::parse(body.as_bytes()).unwrap()).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, JobStateDto::Running);
+        assert_eq!(rows[0].prompt.as_deref(), Some("moonlit harbor"));
         assert_eq!(rows[0].enqueued_by.unwrap().to_string(), prin);
         assert_eq!(rows[0].kind, "video.generate");
 

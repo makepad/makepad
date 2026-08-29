@@ -369,6 +369,7 @@ fn run_turn(
     let request = ChatSendRequest {
         text: text.to_string(),
         attachments: attachments.to_vec(),
+        dynamic_context: None,
     };
     if let Err(e) = client.chat_send(&id, &request) {
         // A sealed/expired session starts over cleanly on the next message.

@@ -34,8 +34,10 @@ pub const QUAKE2_LICENSE: &str = "id-Software-shareware";
 pub const QUAKE2_HOME: &str = "https://www.idsoftware.com/";
 pub const QUAKE2_CREDITS: &str = "id Software Quake II demo / shareware";
 
-/// Quake II units → metres (engine Y-up).
-pub const SCALE: f32 = 1.0 / 64.0;
+/// Quake II units → metres (engine Y-up): the 56-unit player (`mins.z −24`
+/// to `maxs.z 32`) stands `PERSON_HEIGHT`, so 1/32 m — the id Tech 2 unit
+/// every other id importer uses. It was 1/64 until 2026-08-26.
+pub const SCALE: f32 = crate::dimensions::PERSON_HEIGHT / 56.0;
 
 const SURF_SKY: i32 = 0x4;
 const SURF_WARP: i32 = 0x8;
@@ -3061,16 +3063,16 @@ mod tests {
         let js = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
 
         // --- door -----------------------------------------------------
-        // 64 units tall, `angle -1` (up), default lip 8 -> 56 units = 0.875 m.
+        // 64 units tall, `angle -1` (up), default lip 8 -> 56 units = 1.75 m.
         let door = node(&js, "door_1");
         let extras = door.get("extras").expect("door extras");
         assert_eq!(extras.get("kind").and_then(Value::as_str), Some("door"));
         assert_eq!(extras.get("default").and_then(Value::as_str), Some("open"));
         assert_eq!(extras.get("axis").and_then(Value::as_str), Some("y"));
-        assert!((num(extras.get("travel").unwrap()) - 0.875).abs() < 1e-5);
+        assert!((num(extras.get("travel").unwrap()) - (56.0 * SCALE) as f64).abs() < 1e-5);
         let rest = door.get("translation").and_then(Value::as_arr).unwrap();
         assert!(
-            (num(&rest[1]) - 0.875).abs() < 1e-5 && num(&rest[0]).abs() < 1e-6,
+            (num(&rest[1]) - (56.0 * SCALE) as f64).abs() < 1e-5 && num(&rest[0]).abs() < 1e-6,
             "a door rests OPEN: {rest:?}"
         );
         // One LINEAR translation clip: t=0 CLOSED (the authored pose) ->
@@ -3098,17 +3100,17 @@ mod tests {
         assert_eq!(times.len(), 2, "two keyframes: closed and open");
         assert_eq!(values.len(), 6);
         assert_eq!(&values[0..3], &[0.0, 0.0, 0.0], "t=0 is the closed pose");
-        assert!((values[4] - 0.875).abs() < 1e-5, "t=end is the open pose");
+        assert!((values[4] - 56.0 * SCALE).abs() < 1e-5, "t=end is the open pose");
 
         // --- lift -----------------------------------------------------
-        // 32 units tall, default lip 8 -> drops 24 units = 0.375 m.
+        // 32 units tall, default lip 8 -> drops 24 units.
         let lift = node(&js, "lift_1");
         let extras = lift.get("extras").expect("lift extras");
         assert_eq!(extras.get("kind").and_then(Value::as_str), Some("lift"));
         assert_eq!(extras.get("default").and_then(Value::as_str), Some("up"));
-        // Brush centre z = 16 units = 0.25 m up, dropping to -0.125 m.
-        assert!((num(extras.get("up").unwrap()) - 0.25).abs() < 1e-5);
-        assert!((num(extras.get("down").unwrap()) + 0.125).abs() < 1e-5);
+        // Brush centre z = 16 units up, dropping 24 units.
+        assert!((num(extras.get("up").unwrap()) - (16.0 * SCALE) as f64).abs() < 1e-5);
+        assert!((num(extras.get("down").unwrap()) + (8.0 * SCALE) as f64).abs() < 1e-5);
         assert!(
             lift.get("translation").is_none(),
             "a lift rests UP, where the level is baked"
@@ -3208,36 +3210,36 @@ mod tests {
         // origin 16 units up, eye 22 above a 24-unit origin offset.
         let start = &nav.starts[0];
         assert_eq!(start.name, "player_start");
-        assert!((start.pos[0] - 0.5).abs() < 1e-4, "{start:?}");
-        assert!((start.pos[1] - (16.0 + 22.0) / 64.0).abs() < 1e-4, "{start:?}");
-        assert!((start.pos[2] + 0.5).abs() < 1e-4, "{start:?}");
+        assert!((start.pos[0] - 32.0 * SCALE).abs() < 1e-4, "{start:?}");
+        assert!((start.pos[1] - (16.0 + 22.0) * SCALE).abs() < 1e-4, "{start:?}");
+        assert!((start.pos[2] + 32.0 * SCALE).abs() < 1e-4, "{start:?}");
         assert!((start.yaw - (std::f32::consts::FRAC_PI_2 - 90f32.to_radians())).abs() < 1e-4);
         // The sidecar quotes four decimals, so these are compared as such.
         let near = |got: Option<f32>, want: f32| got.is_some_and(|v| (v - want).abs() < 1e-4);
-        assert!(near(nav.floor_y, (16.0 - 24.0) / 64.0), "{:?}", nav.floor_y);
-        assert!(near(nav.eye_height, (22.0 + 24.0) / 64.0), "{:?}", nav.eye_height);
-        assert!(near(nav.step_height, 18.0 / 64.0), "{:?}", nav.step_height);
+        assert!(near(nav.floor_y, (16.0 - 24.0) * SCALE), "{:?}", nav.floor_y);
+        assert!(near(nav.eye_height, (22.0 + 24.0) * SCALE), "{:?}", nav.eye_height);
+        assert!(near(nav.step_height, 18.0 * SCALE), "{:?}", nav.step_height);
 
-        // Door centre (288, 160, 32) map units -> (4.5, 0.5, -2.5) metres.
+        // Door centre (288, 160, 32) map units, GLB axes.
         let door = &nav.doors[0];
         assert_eq!(door.name, "door_1");
-        assert!((door.pos[0] - 4.5).abs() < 1e-4, "{door:?}");
-        assert!((door.pos[2] + 2.5).abs() < 1e-4, "{door:?}");
-        assert!((door.closed_y - 0.5).abs() < 1e-4, "{door:?}");
-        assert!((door.open_y - 1.375).abs() < 1e-4, "{door:?}");
+        assert!((door.pos[0] - 288.0 * SCALE).abs() < 1e-4, "{door:?}");
+        assert!((door.pos[2] + 160.0 * SCALE).abs() < 1e-4, "{door:?}");
+        assert!((door.closed_y - 32.0 * SCALE).abs() < 1e-4, "{door:?}");
+        assert!((door.open_y - 88.0 * SCALE).abs() < 1e-4, "{door:?}");
         // A lift rests UP and travels DOWN, so its travel is negative.
         let lift = &nav.lifts[0];
-        assert!((lift.closed_y - 0.25).abs() < 1e-4, "{lift:?}");
-        assert!((lift.open_y + 0.125).abs() < 1e-4, "{lift:?}");
+        assert!((lift.closed_y - 16.0 * SCALE).abs() < 1e-4, "{lift:?}");
+        assert!((lift.open_y + 8.0 * SCALE).abs() < 1e-4, "{lift:?}");
         // Pad from the trigger brush, destination from `misc_teleporter_dest`.
         let tp = &nav.teleports[0];
-        assert!((tp.pad_min[0] - 8.0).abs() < 1e-4, "{tp:?}");
-        assert!((tp.pad_max[0] - 9.0).abs() < 1e-4, "{tp:?}");
-        assert!((tp.pad_min[1] + 1.0).abs() < 1e-4, "{tp:?}");
+        assert!((tp.pad_min[0] - 512.0 * SCALE).abs() < 1e-4, "{tp:?}");
+        assert!((tp.pad_max[0] - 576.0 * SCALE).abs() < 1e-4, "{tp:?}");
+        assert!((tp.pad_min[1] + 64.0 * SCALE).abs() < 1e-4, "{tp:?}");
         assert!((tp.pad_max[1] - 0.0).abs() < 1e-4, "{tp:?}");
-        assert!((tp.dst[0] - 10.0).abs() < 1e-4, "{tp:?}");
-        assert!((tp.dst[1] - (32.0 + 22.0) / 64.0).abs() < 1e-4, "{tp:?}");
-        assert!((tp.dst[2] + 2.0).abs() < 1e-4, "{tp:?}");
+        assert!((tp.dst[0] - 640.0 * SCALE).abs() < 1e-4, "{tp:?}");
+        assert!((tp.dst[1] - (32.0 + 22.0) * SCALE).abs() < 1e-4, "{tp:?}");
+        assert!((tp.dst[2] + 128.0 * SCALE).abs() < 1e-4, "{tp:?}");
 
         let names: Vec<String> = nav.anchors().into_iter().map(|a| a.name).collect();
         for want in [
@@ -3311,12 +3313,12 @@ mod tests {
         );
         let a = &q2_movers(&plain, &models)[0];
         let b = &q2_movers(&open, &models)[0];
-        assert!((a.travel[1] - 0.875).abs() < 1e-6, "{a:?}");
+        assert!((a.travel[1] - 56.0 * SCALE).abs() < 1e-6, "{a:?}");
         assert_eq!(a.shift, [0.0; 3]);
-        assert!((b.travel[1] + 0.875).abs() < 1e-6, "start-open runs back: {b:?}");
-        assert!((b.shift[1] - 0.875).abs() < 1e-6, "and is authored open: {b:?}");
+        assert!((b.travel[1] + 56.0 * SCALE).abs() < 1e-6, "start-open runs back: {b:?}");
+        assert!((b.shift[1] - 56.0 * SCALE).abs() < 1e-6, "and is authored open: {b:?}");
         // Both agree about where the door is when it is shut.
-        assert!((a.centre[1] + 0.875 - b.centre[1]).abs() < 1e-6);
+        assert!((a.centre[1] + 56.0 * SCALE - b.centre[1]).abs() < 1e-6);
     }
 
     /// A brush entity with an `origin` key is compiled around zero and moved
@@ -3337,12 +3339,11 @@ mod tests {
             "{\n\"classname\" \"func_door\"\n\"model\" \"*1\"\n\"angle\" \"-1\"\n\"origin\" \"640 128 64\"\n}\n",
         );
         let m = &q2_movers(&ents, &models)[0];
-        // (640, 128, 64) map units -> (10, 1, -2) metres, and the brush's own
-        // centre is zero.
-        assert!((m.centre[0] - 10.0).abs() < 1e-5, "{m:?}");
-        assert!((m.centre[1] - 1.0).abs() < 1e-5, "{m:?}");
-        assert!((m.centre[2] + 2.0).abs() < 1e-5, "{m:?}");
-        assert_eq!(m.shift, [10.0, 1.0, -2.0]);
+        // (640, 128, 64) map units, and the brush's own centre is zero.
+        assert!((m.centre[0] - 640.0 * SCALE).abs() < 1e-5, "{m:?}");
+        assert!((m.centre[1] - 64.0 * SCALE).abs() < 1e-5, "{m:?}");
+        assert!((m.centre[2] + 128.0 * SCALE).abs() < 1e-5, "{m:?}");
+        assert_eq!(m.shift, [640.0 * SCALE, 64.0 * SCALE, -128.0 * SCALE]);
     }
 
     /// Quake II's `key_*` classnames spell the item, so one rule names the
@@ -3584,7 +3585,7 @@ mod tests {
         let extras = lift.get("extras").expect("lift extras");
         let travel = num(extras.get("travel").unwrap());
         assert!(
-            (travel + 188.0 / 64.0).abs() < 1e-4,
+            (travel + (188.0 * SCALE) as f64).abs() < 1e-4,
             "plat travel {travel} (expected -2.9375, `lip 132` off a 320-unit brush)"
         );
         let nav = crate::world_nav::WorldNav::parse(

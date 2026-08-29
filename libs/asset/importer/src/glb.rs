@@ -11,6 +11,15 @@
 use makepad_render::skin::SkinnedModel;
 use makepad_render::StaticModel;
 
+pub use makepad_gltf::{GlbNamedPart, GlbPartAnimation, GlbPartAnimationKind};
+
+/// Asset-pipeline entry point for the rigid multi-part GLB writer. Keeping
+/// publication on this shared path means LocalGen emits the same GLB dialect
+/// the importers and render loaders already validate.
+pub fn write_named_parts_glb(parts: &[GlbNamedPart<'_>]) -> Vec<u8> {
+    makepad_gltf::write_glb_named_parts(parts)
+}
+
 pub struct GlbStats {
     /// Skinned + animated (joints and at least one clip).
     pub skinned: bool,
@@ -132,5 +141,64 @@ mod tests {
         assert!(!stats.skinned);
         assert!(stats.vertices >= 3, "vertices {}", stats.vertices);
         assert!(stats.triangles > 0, "triangles {}", stats.triangles);
+    }
+
+    #[test]
+    fn named_parts_keep_one_node_each_and_preserve_pivots() {
+        let positions = [
+            [1.0, 2.0, 3.0],
+            [2.0, 2.0, 3.0],
+            [1.0, 3.0, 3.0],
+        ];
+        let indices = [0, 1, 2];
+        let glb = write_named_parts_glb(&[
+            GlbNamedPart {
+                name: "body",
+                positions: &positions,
+                indices: &indices,
+                pivot: [1.0, 2.0, 3.0],
+                color: [0.2, 0.4, 0.8, 1.0],
+                parent: None,
+                animation: None,
+            },
+            GlbNamedPart {
+                name: "wheel-front",
+                positions: &positions,
+                indices: &indices,
+                pivot: [0.5, 0.0, -0.5],
+                color: [0.1, 0.1, 0.1, 1.0],
+                parent: Some(0),
+                animation: Some(GlbPartAnimation {
+                    kind: GlbPartAnimationKind::Spin,
+                    axis: 2,
+                    degrees: 25.0,
+                    hz: 1.0,
+                    amp: 0.1,
+                }),
+            },
+        ]);
+        let loaded = makepad_gltf::load_gltf_from_bytes(&glb, None).expect("load named GLB");
+        let nodes = loaded.document.nodes_slice();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name.as_deref(), Some("body"));
+        assert_eq!(nodes[0].translation, Some([1.0, 2.0, 3.0]));
+        assert_eq!(nodes[1].name.as_deref(), Some("wheel-front"));
+        assert_eq!(nodes[1].translation, Some([-0.5, -2.0, -3.5]));
+        assert_eq!(nodes[0].children.as_deref(), Some(&[1][..]));
+        assert_eq!(loaded.document.animations.as_ref().map_or(0, Vec::len), 1);
+        assert_eq!(loaded.document.meshes_slice().len(), 2);
+        assert_eq!(loaded.document.materials_slice().len(), 2);
+        let stats = inspect_glb(&glb).expect("inspect named GLB");
+        assert_eq!(stats.triangles, 2);
+        assert_eq!(stats.vertices, 6);
+
+        // The game renderer recognizes the manifest node as an animatable
+        // rigid part; this is the zero-level-wiring half of the contract.
+        let model = makepad_render::StaticModel::parse_glb(&glb)
+            .expect("renderer parses LocalGen part manifest");
+        assert_eq!(model.anim_parts.len(), 1);
+        assert_eq!(model.anim_parts[0].name, "wheel-front");
+        assert_eq!(model.anim_parts[0].kind.as_deref(), Some("localgen-spin"));
+        assert_eq!(model.anim_parts[0].strings.get("axis").map(String::as_str), Some("z"));
     }
 }

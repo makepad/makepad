@@ -652,23 +652,98 @@ pub fn h3_build_t2va_layout(
         latent_height,
         latent_width,
         num_audio_latents,
-        0,
+        &[],
     )
 }
 
+/// Which end of the clip one keyframe conditioning block anchors.
+///
+/// Reference: `before_encoder.py::MiniMaxH3FL2VASetupStep.__call__`
+/// (diffusers `modular_pipelines/minimax_h3`, lines 118-123) resolves the
+/// packed order as `("first", image)` then `("last", last_image)`, keeping
+/// only the ones that were supplied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum H3KeyframeAnchor {
+    /// Pinned at the first latent frame's rotary time (`float(n_text)`).
+    First,
+    /// Pinned at the last latent frame's anchor time (see
+    /// [`h3_last_anchor_time`]).
+    Last,
+}
+
+/// numpy's pairwise summation over f64, reproduced exactly
+/// (`numpy/_core/src/umath/loops_utils.h::@TYPE@_pairwise_sum`): under 8
+/// elements it sums sequentially, up to 128 it accumulates into 8 partials
+/// and folds them as `((r0+r1)+(r2+r3))+((r4+r5)+(r6+r7))`, and above that
+/// it splits at a multiple of 8 and recurses.
+///
+/// The "last" keyframe anchor is the one H3 call site that goes through
+/// `ndarray.sum()` rather than a sequential accumulation, and the two orders
+/// differ in the last ulp from 16 latent frames onwards — so this is not a
+/// cosmetic detail, it is the reference's arithmetic.
+fn numpy_pairwise_sum(values: &[f64]) -> f64 {
+    let n = values.len();
+    if n < 8 {
+        let mut acc = 0.0f64;
+        for value in values {
+            acc += *value;
+        }
+        return acc;
+    }
+    if n <= 128 {
+        let mut r = [
+            values[0], values[1], values[2], values[3], values[4], values[5], values[6],
+            values[7],
+        ];
+        let mut i = 8;
+        while i < n - (n % 8) {
+            for (k, slot) in r.iter_mut().enumerate() {
+                *slot += values[i + k];
+            }
+            i += 8;
+        }
+        let mut acc = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+        while i < n {
+            acc += values[i];
+            i += 1;
+        }
+        return acc;
+    }
+    let mut half = n / 2;
+    half -= half % 8;
+    numpy_pairwise_sum(&values[..half]) + numpy_pairwise_sum(&values[half..])
+}
+
+/// Rotary time of a "last"-anchored keyframe conditioning block.
+///
+/// Reference: `before_denoise.py::build_packed_sequence` lines 328-336 —
+/// `spans = ones(n) * 5/3` scaled per position by the `(1,4,4,4,4)` pattern,
+/// then `float(n_text) + float(spans.sum()) - 5/3`. Note this is NOT the
+/// last generated frame's own rotary time (which stops one span short of the
+/// total): it is the clip's full rotary span, less one base unit.
+pub fn h3_last_anchor_time(num_latent_frames: usize, num_text_tokens: usize) -> f64 {
+    let spans: Vec<f64> = (0..num_latent_frames)
+        .map(|index| {
+            ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[index % ROPE_FRAMES_PER_LATENT.len()]
+        })
+        .collect();
+    num_text_tokens as f64 + numpy_pairwise_sum(&spans) - ROPE_FRAME_RESCALE
+}
+
 /// Build the `[text | keyframe conditions | target audio | target video]`
-/// layout shared by t2va (`num_first_keyframes == 0`) and fl2va. Every
-/// keyframe conditioning block is "first"-anchored: its rotary time is the
-/// media clock's origin `float(num_text_tokens)` and its spatial grid is the
-/// video frame grid. (The reference also supports a "last" anchor for
-/// `last_image`; out of scope here.)
+/// layout shared by t2va (`keyframe_anchors.is_empty()`) and fl2va. Every
+/// keyframe conditioning block takes the video frame's spatial grid; its
+/// rotary time is the media clock's origin `float(num_text_tokens)` for a
+/// [`H3KeyframeAnchor::First`] block and [`h3_last_anchor_time`] for a
+/// [`H3KeyframeAnchor::Last`] one. Blocks are laid out in the packed order
+/// the slice gives (upstream: first, then last).
 pub fn h3_build_packed_layout(
     text_token_tags: &[u8],
     num_latent_frames: usize,
     latent_height: usize,
     latent_width: usize,
     num_audio_latents: usize,
-    num_first_keyframes: usize,
+    keyframe_anchors: &[H3KeyframeAnchor],
 ) -> Result<H3PackedLayout> {
     if latent_height % H3_PATCH_H != 0 || latent_width % H3_PATCH_W != 0 {
         return Err(DiffusionError::workflow(format!(
@@ -677,7 +752,7 @@ pub fn h3_build_packed_layout(
     }
     let rows_per_frame = (latent_height / H3_PATCH_H) * (latent_width / H3_PATCH_W);
     let num_text_tokens = text_token_tags.len();
-    let num_condition_rows = num_first_keyframes * rows_per_frame;
+    let num_condition_rows = keyframe_anchors.len() * rows_per_frame;
     let num_audio_rows = num_audio_latents * H3_AUDIO_CHANNELS;
     let num_video_rows = num_latent_frames * rows_per_frame;
     let sequence_length =
@@ -699,14 +774,19 @@ pub fn h3_build_packed_layout(
     let height_grid = spatial_position_grid(latent_height, H3_PATCH_H, sqrt_area);
     let width_grid = spatial_position_grid(latent_width, H3_PATCH_W, sqrt_area);
 
-    // Keyframe conditioning rows: "first" anchor -> rotary time is the media
-    // clock origin; spatial coordinates are the video frame grid; tagged as
+    // Keyframe conditioning rows: the anchor picks the rotary time ("first"
+    // = the media clock origin, "last" = the clip's rotary span less one
+    // base unit); spatial coordinates are the video frame grid; tagged as
     // video rows.
     let mut row = condition_start;
-    for _keyframe in 0..num_first_keyframes {
+    for anchor in keyframe_anchors {
+        let anchor_time = match anchor {
+            H3KeyframeAnchor::First => num_text_tokens as f64,
+            H3KeyframeAnchor::Last => h3_last_anchor_time(num_latent_frames, num_text_tokens),
+        };
         for h in &height_grid {
             for w in &width_grid {
-                position_ids[row * 3] = num_text_tokens as f64;
+                position_ids[row * 3] = anchor_time;
                 position_ids[row * 3 + 1] = *h;
                 position_ids[row * 3 + 2] = *w;
                 token_tags[row] = H3_VIDEO_TAG;
@@ -1093,7 +1173,7 @@ mod tests {
     fn fl2va_layout_condition_rows() {
         // 640x352 canvas, one first-anchored keyframe: [text | 220 cond | audio | video].
         let tags = vec![H3_TEXT_TAG; 90];
-        let layout = h3_build_packed_layout(&tags, 37, 22, 40, 207, 1).unwrap();
+        let layout = h3_build_packed_layout(&tags, 37, 22, 40, 207, &[H3KeyframeAnchor::First]).unwrap();
         assert_eq!(layout.num_condition_rows, 220);
         assert_eq!(layout.condition_start, 90);
         assert_eq!(layout.audio_start, 90 + 220);
@@ -1117,10 +1197,186 @@ mod tests {
         assert_eq!(t2va.condition_start, t2va.audio_start);
     }
 
+    /// `h3_last_anchor_time` against numpy: `float(n_text) + spans.sum() -
+    /// 5/3` with `spans = ones(n) * 5/3` scaled by `(1,4,4,4,4)`, evaluated
+    /// under numpy's pairwise summation. The cases cover all three branches
+    /// of that summation: under 8 elements, the 8-partial block, and the
+    /// recursive split above 128.
+    #[test]
+    fn last_anchor_time_matches_numpy_pairwise_sum() {
+        let cases = [
+            (2usize, 3usize, 9.666666666666668f64),
+            (7, 4, 39.00000000000001),
+            (16, 10, 95.0),
+            (37, 90, 294.99999999999994),
+            (129, 7, 735.3333333333334),
+            (200, 5, 1136.6666666666665),
+        ];
+        for (frames, text, expected) in cases {
+            let ours = h3_last_anchor_time(frames, text);
+            assert_eq!(
+                ours.to_bits(),
+                expected.to_bits(),
+                "frames={frames} text={text}: {ours:?} != {expected:?}"
+            );
+        }
+    }
+
+    /// The "last" anchor is NOT the last generated frame's own rotary time:
+    /// the frame grid stops one span short of the clip's total span, while
+    /// the anchor is the total less one BASE unit. They coincide only when
+    /// the last latent frame's span is the base unit — and even then the two
+    /// summation orders differ in the last ulp from 16 frames on, which is
+    /// why this port reproduces numpy's order rather than reusing the grid.
+    #[test]
+    fn last_anchor_is_not_the_last_frame_time() {
+        let tags = vec![H3_TEXT_TAG; 90];
+        let layout =
+            h3_build_packed_layout(&tags, 37, 22, 40, 207, &[H3KeyframeAnchor::Last]).unwrap();
+        let last_video_row = layout.sequence_length - 1;
+        let last_frame_time = layout.position_ids[last_video_row * 3];
+        let anchor_time = layout.position_ids[layout.condition_start * 3];
+        assert_eq!(anchor_time, 294.99999999999994);
+        assert!(
+            (anchor_time - last_frame_time).abs() > 1.0,
+            "anchor {anchor_time} vs last frame {last_frame_time}"
+        );
+    }
+
+    /// PARITY GATE. A single `First` anchor must reproduce the pre-endframe
+    /// builder bit-for-bit: every conditioning row is the first video
+    /// frame's row verbatim, and every other row is the t2va layout's row
+    /// verbatim. If this fails, first-only jobs have moved.
+    #[test]
+    fn first_only_layout_is_bit_identical_to_t2va_plus_frame_zero() {
+        for (frames, lh, lw, audio, text) in [
+            (37usize, 22usize, 40usize, 207usize, 90usize),
+            (7, 4, 4, 10, 4),
+            (12, 8, 12, 41, 137),
+        ] {
+            let tags = vec![H3_TEXT_TAG; text];
+            let fl2va =
+                h3_build_packed_layout(&tags, frames, lh, lw, audio, &[H3KeyframeAnchor::First])
+                    .unwrap();
+            let t2va = h3_build_t2va_layout(&tags, frames, lh, lw, audio).unwrap();
+            assert_eq!(fl2va.num_condition_rows, fl2va.rows_per_frame);
+            // Text rows.
+            for row in 0..text {
+                assert_eq!(
+                    fl2va.position_ids[row * 3..row * 3 + 3],
+                    t2va.position_ids[row * 3..row * 3 + 3]
+                );
+                assert_eq!(fl2va.token_tags[row], t2va.token_tags[row]);
+            }
+            // Condition rows == video frame 0's rows, bit for bit.
+            for i in 0..fl2va.rows_per_frame {
+                let c = (fl2va.condition_start + i) * 3;
+                let v = (fl2va.video_start + i) * 3;
+                assert_eq!(
+                    fl2va.position_ids[c].to_bits(),
+                    fl2va.position_ids[v].to_bits()
+                );
+                assert_eq!(fl2va.position_ids[c], text as f64);
+                assert_eq!(fl2va.position_ids[c + 1], fl2va.position_ids[v + 1]);
+                assert_eq!(fl2va.position_ids[c + 2], fl2va.position_ids[v + 2]);
+                assert_eq!(fl2va.token_tags[fl2va.condition_start + i], H3_VIDEO_TAG);
+            }
+            // Audio + video rows: the same values, shifted by the block.
+            let shift = fl2va.num_condition_rows;
+            for row in t2va.audio_start..t2va.sequence_length {
+                let moved = row + shift;
+                assert_eq!(
+                    fl2va.position_ids[moved * 3..moved * 3 + 3],
+                    t2va.position_ids[row * 3..row * 3 + 3],
+                    "row {row}"
+                );
+                assert_eq!(fl2va.token_tags[moved], t2va.token_tags[row]);
+            }
+        }
+    }
+
+    /// Last-only: one conditioning block, pinned at the last anchor, on the
+    /// video frame's spatial grid.
+    #[test]
+    fn last_only_layout_anchors_at_the_clip_end() {
+        let tags = vec![H3_TEXT_TAG; 90];
+        let layout =
+            h3_build_packed_layout(&tags, 37, 22, 40, 207, &[H3KeyframeAnchor::Last]).unwrap();
+        assert_eq!(layout.num_condition_rows, 220);
+        let anchor = h3_last_anchor_time(37, 90);
+        for i in 0..220 {
+            let c = (layout.condition_start + i) * 3;
+            let v = (layout.video_start + i) * 3;
+            assert_eq!(layout.position_ids[c], anchor);
+            assert_eq!(layout.position_ids[c + 1], layout.position_ids[v + 1]);
+            assert_eq!(layout.position_ids[c + 2], layout.position_ids[v + 2]);
+            assert_eq!(layout.token_tags[layout.condition_start + i], H3_VIDEO_TAG);
+        }
+    }
+
+    /// First+last: two blocks in packed order (first, then last), the
+    /// audio/video rows pushed out by both. The two blocks share the spatial
+    /// grid and differ only in rotary time — which is what makes them read
+    /// as the two ENDS of the same clip.
+    #[test]
+    fn first_last_layout_packs_two_blocks_in_order() {
+        let tags = vec![H3_TEXT_TAG; 90];
+        let anchors = [H3KeyframeAnchor::First, H3KeyframeAnchor::Last];
+        let layout = h3_build_packed_layout(&tags, 37, 22, 40, 207, &anchors).unwrap();
+        assert_eq!(layout.num_condition_rows, 2 * 220);
+        assert_eq!(layout.audio_start, 90 + 440);
+        assert_eq!(layout.video_start, 90 + 440 + 414);
+        assert_eq!(layout.sequence_length, 90 + 440 + 414 + 37 * 220);
+        let last_anchor = h3_last_anchor_time(37, 90);
+        for i in 0..220 {
+            let first = (layout.condition_start + i) * 3;
+            let last = (layout.condition_start + 220 + i) * 3;
+            let video = (layout.video_start + i) * 3;
+            assert_eq!(layout.position_ids[first], 90.0);
+            assert_eq!(layout.position_ids[last], last_anchor);
+            // Same spatial grid for both blocks and the video frame.
+            assert_eq!(layout.position_ids[first + 1], layout.position_ids[video + 1]);
+            assert_eq!(layout.position_ids[last + 1], layout.position_ids[video + 1]);
+            assert_eq!(layout.position_ids[first + 2], layout.position_ids[video + 2]);
+            assert_eq!(layout.position_ids[last + 2], layout.position_ids[video + 2]);
+            assert_eq!(layout.token_tags[layout.condition_start + i], H3_VIDEO_TAG);
+            assert_eq!(
+                layout.token_tags[layout.condition_start + 220 + i],
+                H3_VIDEO_TAG
+            );
+        }
+        // Both blocks are pinned at the same conditioning timestep: the
+        // denoise plan sees one extra timestep value, not two.
+        let plan = h3_build_row_timesteps_cond(&layout, 0.2, 0.5, 0.999);
+        assert_eq!(plan.values, vec![0.2, 0.5, 0.999]);
+        assert_eq!(plan.indices[layout.condition_start], 2);
+        assert_eq!(plan.indices[layout.condition_start + 220], 2);
+        assert_eq!(plan.indices[layout.video_start], 0);
+    }
+
+    /// An identical image at both ends is still TWO condition blocks — the
+    /// rows repeat, only the rotary time differs. (The clip is near-looping,
+    /// not pixel-closed: the conditioning rows never reach the VAE decode.)
+    #[test]
+    fn identical_start_and_end_still_packs_two_blocks() {
+        let tags = vec![H3_TEXT_TAG; 12];
+        let anchors = [H3KeyframeAnchor::First, H3KeyframeAnchor::Last];
+        let layout = h3_build_packed_layout(&tags, 7, 4, 4, 10, &anchors).unwrap();
+        let rows = layout.rows_per_frame;
+        assert_eq!(layout.num_condition_rows, 2 * rows);
+        for i in 0..rows {
+            let first = (layout.condition_start + i) * 3;
+            let last = (layout.condition_start + rows + i) * 3;
+            assert_ne!(layout.position_ids[first], layout.position_ids[last]);
+            assert_eq!(layout.position_ids[first + 1], layout.position_ids[last + 1]);
+            assert_eq!(layout.position_ids[first + 2], layout.position_ids[last + 2]);
+        }
+    }
+
     #[test]
     fn fl2va_row_timesteps_pin_condition() {
         let tags = vec![H3_TEXT_TAG; 4];
-        let layout = h3_build_packed_layout(&tags, 7, 4, 4, 10, 1).unwrap();
+        let layout = h3_build_packed_layout(&tags, 7, 4, 4, 10, &[H3KeyframeAnchor::First]).unwrap();
         // Step 0: video_t = audio_t = 0, cond pinned at 0.999 -> two values.
         let plan = h3_build_row_timesteps_cond(&layout, 0.0, 0.0, 0.999);
         assert_eq!(plan.values, vec![0.0, 0.999]);

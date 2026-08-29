@@ -6,7 +6,9 @@
 //! disables every native tool and `--strict-mcp-config` pins an empty MCP
 //! set, so the ONLY tools this lane can express are the content tools of
 //! [`crate::toolcall`], executed by the dispatcher against the Asset
-//! Server.
+//! Server. The prompt goes over stdin: since Claude Code 2.1 a trailing
+//! positional after `--tools ""` is swallowed as a tool name and the CLI
+//! exits with "Input must be provided" (observed live, 2.1.246).
 //!
 //! Credentials: none pass through this crate. The CLI authenticates itself
 //! on the broker host; the chat wire above carries text and typed events
@@ -14,48 +16,36 @@
 //! clients" — a client machine without the CLI simply reports
 //! `Unavailable`, it never receives key material to run one.
 //!
-//! This is a deliberate headless sibling of `makepad_ai`'s Cx-coupled
-//! `ClaudeCodeAgent` (same CLI contract, same stream-json shapes) for
-//! server processes that have no UI event loop.
+//! Process plumbing lives in [`crate::cli`], shared with the `grok` CLI
+//! (same Messages-format stream, [`parse_stream_line`]) and `codex`.
 
+use crate::cli::{categorize_cli_error, cli_command, turn_dir, CliTurn};
 use crate::provider::{ChatProvider, ProviderEvent, TurnInput};
 use crate::wire::{ChatRole, ProviderAvailability, ProviderKind};
 use makepad_asset_client::json::{self, Value};
-use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender};
-
-enum IoLine {
-    Out(String),
-    Err(String),
-    Exit,
-}
-
-struct ActiveTurn {
-    child: Child,
-    rx: Receiver<IoLine>,
-    parse: ParseState,
-    stderr_tail: String,
-    finished: bool,
-}
 
 /// Stream-parse state, separated from process plumbing so the line parser
 /// is a pure, testable function.
 #[derive(Default)]
 pub struct ParseState {
-    /// Text already delivered as deltas (dedupe base for full `assistant`
-    /// messages that repeat streamed content).
+    /// Visible text already delivered as deltas (dedupe base for full
+    /// `assistant` messages that repeat streamed content; the `Done` text).
     pub collected: String,
     /// The CLI's own conversation id, captured for `--resume`.
     pub session_id: Option<String>,
+    /// A `<think>` marker has been emitted and not closed yet: the CLI is
+    /// streaming reasoning (`thinking_delta`). It is forwarded inside the
+    /// same textual think block the fleet Qwen lane emits, so every client
+    /// renders reasoning one way and none of it lands in the history.
+    pub thinking_open: bool,
 }
 
 pub struct ClaudeCodeChatProvider {
     cli: Option<PathBuf>,
     model: Option<String>,
     resume: Option<String>,
-    turn: Option<ActiveTurn>,
+    turn: Option<(CliTurn, ParseState)>,
 }
 
 impl ClaudeCodeChatProvider {
@@ -69,31 +59,15 @@ impl ClaudeCodeChatProvider {
     }
 }
 
-/// CLI discovery: explicit env override first, then the documented install
-/// locations. No PATH probing subprocess here — availability must be cheap
-/// and deterministic.
+/// `CLAUDE_CODE_PATH`, else `claude` on `$PATH` or in the usual dirs.
 pub fn find_cli() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("CLAUDE_CODE_PATH") {
-        let p = PathBuf::from(p);
-        return if p.is_file() { Some(p) } else { None };
-    }
-    let mut candidates = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join(".local/bin/claude"));
-    }
-    candidates.push(PathBuf::from("/usr/local/bin/claude"));
-    candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
-    candidates.into_iter().find(|p| p.is_file())
+    crate::cli::find_cli("CLAUDE_CODE_PATH", "claude", &[])
 }
 
 /// Build the argv (after the executable), pure for testing. The prompt is
-/// the trailing positional; `--tools ""` keeps the CLI chat-only.
-pub fn build_args(
-    model: &Option<String>,
-    resume: &Option<String>,
-    system: &str,
-    prompt: &str,
-) -> Vec<String> {
+/// NOT here — it is written to stdin (see the module doc). `--tools ""`
+/// keeps the CLI chat-only.
+pub fn build_args(model: &Option<String>, resume: &Option<String>, system: &str) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--verbose".into(),
@@ -118,13 +92,16 @@ pub fn build_args(
         args.push("--system-prompt".into());
         args.push(system.to_string());
     }
-    args.push(prompt.to_string());
     args
 }
 
 /// Render the prompt for one turn. With a resumable CLI conversation only
-/// the NEW tail (messages after the last assistant reply) is sent; on a
-/// fresh conversation the whole bounded history is rendered.
+/// the NEW tail (messages after the last assistant reply) is sent — the
+/// CLI already holds everything before it; on a fresh conversation (first
+/// turn, or a broker restart resuming a persisted transcript) the WHOLE
+/// bounded history is rendered, assistant replies included as labelled
+/// `[assistant]` context — without them a resumed conversation would show
+/// the model only one side of itself.
 pub fn render_prompt(input: &TurnInput, resuming: bool) -> String {
     let messages: Vec<_> = if resuming {
         let last_assistant =
@@ -148,7 +125,9 @@ pub fn render_prompt(input: &TurnInput, resuming: bool) -> String {
             ChatRole::System => {
                 out.push_str("[context]\n");
             }
-            ChatRole::Assistant => continue,
+            ChatRole::Assistant => {
+                out.push_str("[assistant]\n");
+            }
         }
         out.push_str(&m.text);
         out.push('\n');
@@ -156,8 +135,25 @@ pub fn render_prompt(input: &TurnInput, resuming: bool) -> String {
     out
 }
 
-/// Parse one stdout line of the stream-json protocol into provider events.
-/// Returns `(events, done)`; `done` means the CLI reported its result.
+/// The rendered user-side prompt for one turn (codex reads it from stdin
+/// via the `-` positional, grok from a file in the 0700 turn dir; same
+/// text — never argv, where any user on the host could read it from the
+/// process listing).
+pub fn build_prompt_only(input: &TurnInput, resuming: bool) -> String {
+    render_prompt(input, resuming)
+}
+
+fn close_think(state: &mut ParseState, events: &mut Vec<ProviderEvent>) {
+    if state.thinking_open {
+        events.push(ProviderEvent::Delta("</think>\n".to_string()));
+        state.thinking_open = false;
+    }
+}
+
+/// Parse one stdout line of the Anthropic Messages stream protocol (Claude
+/// Code `stream-json`, grok `streaming-messages-json`) into provider
+/// events. Returns `(events, done)`; `done` means the CLI reported its
+/// result.
 pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEvent>, bool) {
     if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
         state.session_id = Some(sid.to_string());
@@ -165,20 +161,33 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
     let mut events = Vec::new();
     match v.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
-            let delta = v
-                .get("event")
-                .and_then(|e| e.get("delta"))
-                .filter(|d| d.get("type").and_then(Value::as_str) == Some("text_delta"))
-                .and_then(|d| d.get("text"))
-                .and_then(Value::as_str);
-            if let Some(text) = delta {
-                state.collected.push_str(text);
-                events.push(ProviderEvent::Delta(text.to_string()));
+            let delta = v.get("event").and_then(|e| e.get("delta"));
+            match delta.and_then(|d| d.get("type")).and_then(Value::as_str) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.and_then(|d| d.get("text")).and_then(Value::as_str) {
+                        close_think(state, &mut events);
+                        state.collected.push_str(text);
+                        events.push(ProviderEvent::Delta(text.to_string()));
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(text) =
+                        delta.and_then(|d| d.get("thinking")).and_then(Value::as_str)
+                    {
+                        if !state.thinking_open {
+                            events.push(ProviderEvent::Delta("<think>".to_string()));
+                            state.thinking_open = true;
+                        }
+                        events.push(ProviderEvent::Delta(text.to_string()));
+                    }
+                }
+                _ => {}
             }
         }
         Some("assistant") => {
             // A full assistant message may repeat already-streamed text;
             // deliver only the unseen suffix.
+            close_think(state, &mut events);
             let mut full = String::new();
             if let Some(content) =
                 v.get("message").and_then(|m| m.get("content")).and_then(Value::as_arr)
@@ -204,12 +213,13 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
             }
         }
         Some("result") => {
+            close_think(state, &mut events);
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             if is_error {
                 let msg = v
                     .get("result")
                     .and_then(Value::as_str)
-                    .unwrap_or("Claude Code reported an error")
+                    .unwrap_or("the CLI reported an error")
                     .to_string();
                 events.push(ProviderEvent::Error(msg));
             } else {
@@ -227,9 +237,58 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
     (events, false)
 }
 
+/// Poll a Messages-format CLI turn: parse what arrived, end the turn on the
+/// result line or on an early exit. Shared with the grok provider.
+///
+/// Vendor-reported error text (the `result` line's message) is mapped to a
+/// fixed public category here and logged server-side; raw CLI output never
+/// becomes a wire error.
+pub fn poll_messages_turn(
+    turn: &mut Option<(CliTurn, ParseState)>,
+    resume: &mut Option<String>,
+    what: &str,
+) -> Vec<ProviderEvent> {
+    let Some((cli, parse)) = turn.as_mut() else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let drained = cli.drain();
+    for line in drained.lines {
+        if cli.finished {
+            break;
+        }
+        if let Ok(v) = json::parse(line.as_bytes()) {
+            let (mut evs, done) = parse_stream_line(&v, parse);
+            for ev in &mut evs {
+                if let ProviderEvent::Error(raw) = ev {
+                    let public = categorize_cli_error(what, raw, false);
+                    *ev = ProviderEvent::Error(public);
+                }
+            }
+            events.append(&mut evs);
+            if done {
+                cli.finished = true;
+            }
+        }
+    }
+    if drained.exited && !cli.finished {
+        events.push(ProviderEvent::Error(cli.exit_error(what)));
+        cli.finished = true;
+    }
+    if cli.finished && (drained.exited || events.iter().any(|e| matches!(e, ProviderEvent::Done { .. } | ProviderEvent::Error(_)))) {
+        if let Some((cli, mut parse)) = turn.take() {
+            if let Some(sid) = parse.session_id.take() {
+                *resume = Some(sid);
+            }
+            cli.wait();
+        }
+    }
+    events
+}
+
 impl ChatProvider for ClaudeCodeChatProvider {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::ServerClaude
+        ProviderKind::ClaudeCli
     }
 
     fn availability(&mut self) -> ProviderAvailability {
@@ -253,100 +312,22 @@ impl ChatProvider for ClaudeCodeChatProvider {
             return Err("Claude Code CLI not found".to_string());
         };
         let prompt = render_prompt(input, self.resume.is_some());
-        let args = build_args(&self.model, &self.resume, &input.system, &prompt);
-        let mut command = Command::new(cli);
-        command.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            // Own process group so cancel can address CLI descendants.
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let mut child =
-            command.spawn().map_err(|e| format!("failed to start Claude Code: {e}"))?;
-        let (tx, rx) = channel();
-        // Only the stdout reader signals Exit: stderr can hit EOF before the
-        // final stdout `result` line is forwarded, and an early Exit would
-        // mark the turn errored and drop the real result.
-        spawn_reader(child.stdout.take(), tx.clone(), IoLine::Out, true);
-        spawn_reader(child.stderr.take(), tx, IoLine::Err, false);
-        self.turn = Some(ActiveTurn {
-            child,
-            rx,
-            parse: ParseState::default(),
-            stderr_tail: String::new(),
-            finished: false,
-        });
+        let args = build_args(&self.model, &self.resume, &input.system);
+        let dir = turn_dir("claude");
+        let mut command = cli_command(&cli, &dir);
+        command.args(&args);
+        let turn = CliTurn::spawn(command, Some(prompt), "Claude Code", Some(dir))?;
+        self.turn = Some((turn, ParseState::default()));
         Ok(())
     }
 
     fn poll(&mut self) -> Vec<ProviderEvent> {
-        let Some(turn) = &mut self.turn else {
-            return Vec::new();
-        };
-        let mut events = Vec::new();
-        let mut close = false;
-        while let Ok(line) = turn.rx.try_recv() {
-            match line {
-                IoLine::Out(line) => {
-                    if turn.finished || line.trim().is_empty() {
-                        continue;
-                    }
-                    if let Ok(v) = json::parse(line.as_bytes()) {
-                        let (mut evs, done) = parse_stream_line(&v, &mut turn.parse);
-                        events.append(&mut evs);
-                        if done {
-                            turn.finished = true;
-                            close = true;
-                        }
-                    }
-                }
-                IoLine::Err(line) => {
-                    if turn.stderr_tail.len() < 4096 {
-                        turn.stderr_tail.push_str(&line);
-                        turn.stderr_tail.push('\n');
-                    }
-                }
-                IoLine::Exit => {
-                    if !turn.finished {
-                        let tail = turn.stderr_tail.trim();
-                        events.push(ProviderEvent::Error(if tail.is_empty() {
-                            "Claude Code exited without a result".to_string()
-                        } else {
-                            format!("Claude Code exited without a result: {tail}")
-                        }));
-                        turn.finished = true;
-                    }
-                    close = true;
-                }
-            }
-        }
-        if close {
-            if let Some(mut turn) = self.turn.take() {
-                if let Some(sid) = turn.parse.session_id.take() {
-                    self.resume = Some(sid);
-                }
-                let _ = turn.child.wait();
-            }
-        }
-        events
+        poll_messages_turn(&mut self.turn, &mut self.resume, "Claude Code")
     }
 
     fn cancel(&mut self) {
-        if let Some(mut turn) = self.turn.take() {
-            let pid = turn.child.id();
-            let _ = turn.child.kill();
-            // Best-effort group kill for CLI descendants (we set a fresh
-            // process group at spawn). std has no group-kill; /bin/kill does.
-            #[cfg(unix)]
-            {
-                let _ = Command::new("/bin/kill")
-                    .args(["-KILL", "--", &format!("-{pid}")])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            let _ = turn.child.wait();
+        if let Some((cli, _)) = self.turn.take() {
+            cli.kill_group();
         }
     }
 }
@@ -357,29 +338,47 @@ impl Drop for ClaudeCodeChatProvider {
     }
 }
 
-fn spawn_reader<R: std::io::Read + Send + 'static>(
-    stream: Option<R>,
-    tx: Sender<IoLine>,
-    wrap: fn(String) -> IoLine,
-    signal_exit: bool,
-) {
-    let Some(stream) = stream else {
-        return;
-    };
-    std::thread::spawn(move || {
-        let reader = std::io::BufReader::new(stream);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send(wrap(line)).is_err() {
-                        return;
-                    }
-                }
-                Err(_) => break,
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_is_not_in_argv() {
+        let args = build_args(&None, &Some("sid".into()), "be brief");
+        assert_eq!(args[0], "-p");
+        assert!(args.windows(2).any(|w| w[0] == "--resume" && w[1] == "sid"));
+        assert!(args.windows(2).any(|w| w[0] == "--system-prompt" && w[1] == "be brief"));
+        // `--tools ""` must be the last positional-looking pair or it eats
+        // whatever follows; nothing follows.
+        assert_eq!(args.last().map(String::as_str), Some("be brief"));
+        let bare = build_args(&None, &None, "");
+        assert_eq!(bare.last().map(String::as_str), Some(""));
+        assert_eq!(bare[bare.len() - 2], "--tools");
+    }
+
+    #[test]
+    fn thinking_streams_as_one_think_block() {
+        let mut state = ParseState::default();
+        let mut all = Vec::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hm"}},"session_id":"s1"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"m."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi there"}]}}"#,
+            r#"{"type":"result","is_error":false,"result":"hi there"}"#,
+        ] {
+            let (events, _) = parse_stream_line(&json::parse(line.as_bytes()).unwrap(), &mut state);
+            all.extend(events);
         }
-        if signal_exit {
-            let _ = tx.send(IoLine::Exit);
-        }
-    });
+        let text: String = all
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::Delta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "<think>hmm.</think>\nhi there");
+        assert!(matches!(all.last(), Some(ProviderEvent::Done { text }) if text == "hi there"));
+        assert_eq!(state.session_id.as_deref(), Some("s1"));
+    }
 }

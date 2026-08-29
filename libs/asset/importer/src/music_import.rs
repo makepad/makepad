@@ -93,10 +93,18 @@ impl Container {
 const UNSUPPORTED_EXTS: &[&str] = &["flac", "m4a", "aac", "alac", "aiff", "aif", "wma", "opus"];
 
 /// One audio file found under the picked root.
+///
+/// Two producers fill this struct with different `rel` semantics.
+/// [`scan_music`] walks one root, so `rel` is relative to it. [`scan_music_paths`]
+/// walks a LIST of roots, so `rel` is the absolute path instead — `rel` is
+/// also what [`assign_aliases`] hashes to break a name collision, and two
+/// different roots each holding a top-level `track.mp3` must not collide on
+/// it the way two relative paths named `track.mp3` would.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MusicFile {
     pub path: PathBuf,
-    /// Path relative to the picked root, `/`-joined.
+    /// Relative to the picked root, `/`-joined — or the absolute path, for
+    /// a file found by [`scan_music_paths`]. See the struct doc above.
     pub rel: String,
     /// Relative DIRECTORY names under the root, outermost first. These are
     /// the user's tag vocabulary.
@@ -192,6 +200,103 @@ fn walk_dir(dir: &Path, stack: &mut Vec<String>, scan: &mut MusicScan) {
             });
         }
     }
+}
+
+/// Walk an explicit list of files and folders — what a DROP hands over.
+///
+/// Folders walk exactly as [`scan_music`] walks a picked root, so the
+/// directory names under each one stay the user's tag vocabulary. Bare
+/// files have no such vocabulary and get none invented for them.
+///
+/// Two differences from the single-root walk, both forced by there being
+/// more than one root:
+///
+/// - `rel` becomes the ABSOLUTE path. It is normally relative to the one
+///   root, but it is also the tiebreaker [`assign_aliases`] hashes when two
+///   tracks would claim one alias — and two dropped folders that each hold
+///   a top-level `track.mp3` would otherwise share a `rel`, hence an alias,
+///   and the second would publish as a revision of the first.
+/// - Duplicates are removed. Dropping a folder together with a file inside
+///   it is an ordinary selection, and it must import that file once.
+pub fn scan_music_paths(paths: &[PathBuf]) -> MusicScan {
+    let mut scan = MusicScan::default();
+    for path in paths {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            scan_dropped_dir(path, &mut scan);
+        } else if meta.is_file() {
+            scan_dropped_file(path, &mut scan);
+        }
+    }
+    // The same file can reach `scan.files` twice — once with real `dirs`
+    // from a folder walk, once bare (`dirs: Vec::new()`) if it was ALSO
+    // named directly. `dedup_by` below keeps whichever of a run of equal
+    // `path`s sorts first, so the tiebreaker here must not be "whichever
+    // the caller happened to list first": that would make the surviving
+    // `dirs` — and therefore the catalog tags and artist/album fallback —
+    // depend on argument order. Sorting non-empty `dirs` ahead of empty
+    // ones makes the richer entry win regardless of drop order.
+    scan.files
+        .sort_by(|a, b| a.rel.cmp(&b.rel).then_with(|| a.dirs.is_empty().cmp(&b.dirs.is_empty())));
+    scan.files.dedup_by(|a, b| a.path == b.path);
+    scan.skipped.sort_by(|a, b| a.rel.cmp(&b.rel));
+    scan.skipped.dedup_by(|a, b| a.rel == b.rel);
+    scan
+}
+
+fn scan_dropped_dir(root: &Path, scan: &mut MusicScan) {
+    let (files_before, skipped_before) = (scan.files.len(), scan.skipped.len());
+    walk_dir(root, &mut Vec::new(), scan);
+    for file in &mut scan.files[files_before..] {
+        file.rel = display_path(&file.path);
+    }
+    for skip in &mut scan.skipped[skipped_before..] {
+        skip.rel = format!("{}/{}", display_path(root), skip.rel);
+    }
+}
+
+fn scan_dropped_file(path: &Path, scan: &mut MusicScan) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.starts_with('.') {
+        return;
+    }
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = name
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| name.clone());
+    let rel = display_path(path);
+    if let Some(container) = Container::from_ext(&ext) {
+        scan.files.push(MusicFile {
+            path: path.to_path_buf(),
+            rel,
+            dirs: Vec::new(),
+            stem,
+            container,
+        });
+    } else if UNSUPPORTED_EXTS.contains(&ext.as_str()) {
+        scan.skipped.push(SkippedFile {
+            rel,
+            reason: format!("unsupported container .{ext} — no decoder yet"),
+        });
+    }
+}
+
+/// One spelling of a path for the parts of a report a human reads, with
+/// separators the same on every platform.
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn rel_join(dirs: &[String], name: &str) -> String {
@@ -1040,7 +1145,6 @@ fn read_metadata_window(path: &Path) -> Result<Vec<u8>, String> {
 /// `progress(done, total, rel)` is called per file — planning a big library is
 /// minutes of work and must not look like a hang.
 pub fn plan_tracks(
-    root: &Path,
     scan: &MusicScan,
     namespace: &str,
     progress: &mut dyn FnMut(usize, usize, &str),
@@ -1085,7 +1189,6 @@ pub fn plan_tracks(
             .unwrap_or_else(|| sanitize_text(file.stem.trim(), MAX_TITLE));
         let artist = tags.artist.clone().unwrap_or(dir_artist);
         let album = tags.album.clone().unwrap_or(dir_album);
-        let _ = root;
         planned.push(PlannedTrack {
             rel: file.rel.clone(),
             path: file.path.clone(),
@@ -1253,6 +1356,27 @@ pub fn import_music(
     if scan.files.is_empty() && scan.skipped.is_empty() {
         return Err(format!("no audio files under {}", root.display()));
     }
+    import_music_scan(client, &scan, namespace, rights, log, progress, cancel)
+}
+
+/// Publish an ALREADY-SCANNED set of tracks into `namespace`.
+///
+/// The half of [`import_music`] below the walk. A drop is a list of paths,
+/// not a root, so the scan and the publish have to be separable — and the
+/// two callers then share every line that matters: the planner, the pool of
+/// bakers, the one-writer publish loop, and the report.
+pub fn import_music_scan(
+    client: &mut AssetClient,
+    scan: &MusicScan,
+    namespace: &str,
+    rights: &PublishRights,
+    log: bool,
+    progress: &mut dyn FnMut(MusicProgress),
+    cancel: &dyn Fn() -> bool,
+) -> Result<MusicReport, String> {
+    if scan.files.is_empty() && scan.skipped.is_empty() {
+        return Err("no audio files".to_string());
+    }
     let (tracks, skipped) = {
         let mut on_file = |done: usize, total: usize, rel: &str| {
             progress(MusicProgress {
@@ -1262,7 +1386,7 @@ pub fn import_music(
                 current: rel,
             })
         };
-        plan_tracks(root, &scan, namespace, &mut on_file, cancel)
+        plan_tracks(scan, namespace, &mut on_file, cancel)
     };
     let mut report = MusicReport {
         skipped: skipped
@@ -1890,6 +2014,80 @@ mod tests {
     }
 
     #[test]
+    fn dropped_files_and_folders_scan_together_without_duplicates() {
+        let root = temp_root("dropped");
+        let library = root.join("Lib");
+        write(&library, "Adana Twins/Strange/track.mp3", &mp3_file(2, 180, None));
+        write(&library, "Lossless/keeper.flac", b"fLaC not decoded");
+        let loose = root.join("loose.wav");
+        std::fs::write(&loose, wav_file(64, 44100)).unwrap();
+        // The folder, a file that is ALREADY inside that folder, and a file
+        // outside it: exactly what a drop of a mixed Explorer selection
+        // hands over.
+        let inside = library.join("Adana Twins/Strange/track.mp3");
+        // `inside` reaches the scan twice: once with real `dirs` from the
+        // folder walk, once bare (`dirs` empty) from being named directly.
+        // Try both argument orders — the richer, folder-derived entry must
+        // win the dedup either way, not just when it happens to be scanned
+        // first.
+        for paths in [
+            vec![library.clone(), inside.clone(), loose.clone()],
+            vec![inside.clone(), library.clone(), loose.clone()],
+        ] {
+            let scan = scan_music_paths(&paths);
+            assert_eq!(scan.files.len(), 2, "the file inside the folder must not import twice");
+            let track = scan.files.iter().find(|f| f.path == inside).unwrap();
+            assert_eq!(
+                track.dirs,
+                ["Adana Twins", "Strange"],
+                "the folder-derived tag vocabulary must survive the dedup regardless of drop order: {paths:?}"
+            );
+            assert!(scan.files.iter().any(|f| f.path == loose));
+            assert_eq!(scan.skipped.len(), 1);
+            assert!(scan.skipped[0].reason.contains("flac"), "{}", scan.skipped[0].reason);
+        }
+    }
+
+    #[test]
+    fn a_bare_dropped_file_has_no_directory_tags() {
+        let root = temp_root("bare");
+        let loose = root.join("loose.mp3");
+        std::fs::write(&loose, mp3_file(2, 120, None)).unwrap();
+        let scan = scan_music_paths(&[loose]);
+        assert_eq!(scan.files.len(), 1);
+        assert!(scan.files[0].dirs.is_empty(), "a file dropped alone has no folder vocabulary");
+        assert_eq!(scan.files[0].stem, "loose");
+    }
+
+    #[test]
+    fn two_roots_sharing_a_relative_name_keep_distinct_identities() {
+        let root = temp_root("collide");
+        let a = root.join("A");
+        let b = root.join("B");
+        write(&a, "track.mp3", &mp3_file(2, 180, None));
+        write(&b, "track.mp3", &mp3_file(3, 180, None));
+        let scan = scan_music_paths(&[a, b]);
+        assert_eq!(scan.files.len(), 2);
+        assert_ne!(
+            scan.files[0].rel, scan.files[1].rel,
+            "rel is the alias tiebreaker; two roots must not collide on it"
+        );
+    }
+
+    #[test]
+    fn scanning_a_root_by_path_finds_what_the_walk_finds() {
+        let root = temp_root("parity");
+        write(&root, "Artist/Album/one.mp3", &mp3_file(2, 180, None));
+        write(&root, "two.wav", &wav_file(64, 44100));
+        let walked = scan_music(&root);
+        let by_path = scan_music_paths(&[root.clone()]);
+        let walked_paths: Vec<_> = walked.files.iter().map(|f| f.path.clone()).collect();
+        let by_path_paths: Vec<_> = by_path.files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(walked_paths, by_path_paths);
+        assert_eq!(walked.files[0].dirs, by_path.files[0].dirs, "tags come from the walk either way");
+    }
+
+    #[test]
     fn tags_come_from_the_directory_names() {
         let dirs = vec!["Echo, Red Axes".to_string(), "Nofar".to_string()];
         let tags = music_tags(&dirs, "Echo & Red Axes", "Nofar");
@@ -1954,7 +2152,7 @@ mod tests {
         write(&root, "Artist/Album B/Song.mp3", &mp3_file(3, 180, None));
         write(&root, "Artist/Album A/Other.mp3", &mp3_file(2, 180, None));
         let scan = scan_music(&root);
-        let (tracks, _) = plan_tracks(&root, &scan, "rik2", &mut |_, _, _| {}, &|| false);
+        let (tracks, _) = plan_tracks(&scan, "rik2", &mut |_, _, _| {}, &|| false);
         let by_rel = |rel: &str| {
             tracks
                 .iter()
@@ -1971,7 +2169,7 @@ mod tests {
         // The uncontested name stays clean.
         assert_eq!(by_rel("Artist/Album A/Other.mp3"), "rik2/music/artist/other");
         // Stable across runs over the same tree.
-        let (again, _) = plan_tracks(&root, &scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
+        let (again, _) = plan_tracks(&scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
         assert_eq!(
             again.iter().map(|t| t.alias.clone()).collect::<Vec<_>>(),
             tracks.iter().map(|t| t.alias.clone()).collect::<Vec<_>>()
@@ -1991,7 +2189,7 @@ mod tests {
             &mp3_file(2, 180, Some(id3v2(3, frames))),
         );
         write(&root, "Bare Artist/Bare Album/untagged.mp3", &mp3_file(2, 180, None));
-        let (tracks, _) = plan_tracks(&root, &scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
+        let (tracks, _) = plan_tracks(&scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
         let tagged = tracks.iter().find(|t| t.rel.contains("file name")).unwrap();
         assert_eq!(tagged.title, "Real Title");
         assert_eq!(tagged.artist, "Real Artist");

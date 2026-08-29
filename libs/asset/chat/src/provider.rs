@@ -82,6 +82,19 @@ pub trait ChatProvider {
         let _ = (call_id, output);
         Err("native tool continuation is not supported by this provider".to_string())
     }
+
+    /// Abandon the conversation state deliberately: any in-flight turn is
+    /// cancelled AND any pending native function call is dropped, so the
+    /// NEXT `begin_turn` starts a fresh provider conversation over whatever
+    /// history the session sends. This is how a turn that ends on an
+    /// unanswerable tool round (`world.new_level` hands the player to
+    /// another game) leaves a native provider usable — plain `cancel`
+    /// deliberately preserves the pending call so an accidental abort
+    /// fails closed instead. Textual providers have no such state; the
+    /// default is `cancel`.
+    fn reset_conversation(&mut self) {
+        self.cancel();
+    }
 }
 
 // ------------------------------------------------------------------ threaded
@@ -115,6 +128,7 @@ enum ThreadedCmd {
     Begin(TurnInput),
     ContinueFunction { call_id: String, output: String },
     Cancel,
+    Reset,
     Probe,
     Shutdown,
 }
@@ -152,6 +166,7 @@ impl ThreadedProvider {
                         }
                     }
                     Ok(ThreadedCmd::Cancel) => inner.cancel(),
+                    Ok(ThreadedCmd::Reset) => inner.reset_conversation(),
                     Ok(ThreadedCmd::Probe) => {
                         let _ = msg_tx.send(ThreadedMsg::Availability(inner.availability()));
                     }
@@ -250,6 +265,10 @@ impl ChatProvider for ThreadedProvider {
 
     fn cancel(&mut self) {
         let _ = self.cmd_tx.send(ThreadedCmd::Cancel);
+    }
+
+    fn reset_conversation(&mut self) {
+        let _ = self.cmd_tx.send(ThreadedCmd::Reset);
     }
 
     fn continue_function(&mut self, call_id: &str, output: &str) -> Result<(), String> {

@@ -8,10 +8,9 @@
 //! operation creation (the server resolves and pins the exact file,
 //! validates rights, and owns publication), and cancellation.
 //!
-//! Immutability and privilege are structural: the tool surface has no raw
-//! job enqueue, no publish, and no alias mutation — outputs appear only
-//! through the server's atomic operation finalizer, which records exact
-//! parent lineage and inherited rights inside the immutable manifest.
+//! Immutability and privilege are structural: the tool surface has one typed,
+//! allowlisted generation enqueue but no raw job kind/body, publish, or alias
+//! mutation. Outputs appear only through a worker's atomic publication path.
 
 use crate::session::{CancelFlag, ExecCtx, SessionId, ToolExecutor};
 use crate::tools::{
@@ -39,9 +38,32 @@ fn call_prompt(call: &ContentToolCall) -> Option<&str> {
         | ContentToolCall::MusicGenerate { prompt, .. }
         | ContentToolCall::MeshGenerate { prompt, .. }
         | ContentToolCall::WorldGenerate { prompt, .. }
-        | ContentToolCall::CharacterGenerate { prompt, .. } => Some(prompt.as_str()),
+        | ContentToolCall::CharacterGenerate { prompt, .. }
+        | ContentToolCall::ContentGenerate { prompt, .. } => Some(prompt.as_str()),
         _ => None,
     }
+}
+
+fn generation_job_body(
+    kind: crate::tools::ContentGenerateKind,
+    prompt: &str,
+    dim_height: Option<f64>,
+) -> Value {
+    let mut body = vec![
+        ("prompt", json::s(prompt.to_string())),
+        ("content_kind", json::s(kind.as_str())),
+    ];
+    if matches!(kind, crate::tools::ContentGenerateKind::Character) {
+        body.push(("dim_class", json::s("character")));
+    } else if matches!(kind, crate::tools::ContentGenerateKind::Prop) {
+        body.push(("dim_class", json::s("object")));
+    }
+    if let Some(height) = dim_height {
+        // The mesh publishing path's established dimension-hint wire is
+        // textual (see importer/mesh_from_image), so preserve that form.
+        body.push(("dim_height", json::s(height.to_string())));
+    }
+    json::obj(body)
 }
 
 /// Poll cadence of `operation.wait`.
@@ -200,6 +222,34 @@ impl AssetServerTools {
                     ),
                 )]),
             },
+        }
+    }
+
+    /// Queue a game-requested publishable pipeline. Unlike the Asset UI's
+    /// interactive generate tools this is broker-owned: it returns the store
+    /// job id immediately and never parks the model turn for GPU work.
+    fn content_generate(
+        &self,
+        kind: crate::tools::ContentGenerateKind,
+        prompt: &str,
+        dim_height: Option<f64>,
+    ) -> ToolOutcome {
+        let body = generation_job_body(kind, prompt, dim_height);
+        match self.api.enqueue_job(&self.namespace, kind.job_kind(), &body) {
+            Ok(job) => ToolOutcome::Ok {
+                value: json::obj(vec![
+                    ("job_id", json::s(job.to_string())),
+                    ("queued", Value::Bool(true)),
+                    (
+                        "note",
+                        json::s(
+                            "Generation is queued and may take several minutes. Tell the player \
+                             it is generating; the finished asset will appear in the library.",
+                        ),
+                    ),
+                ]),
+            },
+            Err(error) => err_outcome(error),
         }
     }
 
@@ -554,6 +604,9 @@ impl ToolExecutor for AssetServerTools {
                     ),
                 ]),
             },
+            ContentToolCall::ContentGenerate { kind, prompt, dim_height } => {
+                self.content_generate(*kind, prompt, *dim_height)
+            },
             ContentToolCall::DefaultsGet
             | ContentToolCall::DefaultsSet { .. }
             | ContentToolCall::FleetIntrospect { .. } => ToolOutcome::Unavailable {
@@ -616,17 +669,22 @@ impl ToolExecutor for AssetServerTools {
             // calls one anyway gets the honest answer, not an execution.
             ContentToolCall::AssetsQuery { .. }
             | ContentToolCall::AssetsSchema
+            | ContentToolCall::ModelBuild { .. }
+            | ContentToolCall::ModelFetch { .. }
             | ContentToolCall::WorldPlace { .. }
             | ContentToolCall::WorldRemove { .. }
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldList
             | ContentToolCall::WorldGetSource
             | ContentToolCall::WorldSetSource { .. }
+            | ContentToolCall::WorldNewLevel { .. }
             | ContentToolCall::WorldSetPlayerModel { .. }
             | ContentToolCall::WorldSpawn { .. }
             | ContentToolCall::WorldTune { .. }
-            | ContentToolCall::WorldAddAddon { .. } => ToolOutcome::Unavailable {
-                reason: "catalog SQL and world tools run in a game chat session".to_string(),
+            | ContentToolCall::WorldAddAddon { .. }
+            | ContentToolCall::WorldInSub { .. } => ToolOutcome::Unavailable {
+                reason: "catalog SQL, local model, and world tools run in a game chat session"
+                    .to_string(),
             },
         }
     }
@@ -725,6 +783,8 @@ pub(crate) fn kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
         AssetKind::VjEffect => "vjeffect",
+        AssetKind::Data => "data",
+        AssetKind::ModelProgram => "model-program",
     }
 }
 
@@ -785,6 +845,21 @@ mod session_idempotency_tests {
     use super::*;
     use makepad_asset_client::json::{self, Value};
     use makepad_asset_client::{JobId, OperationProgressDto, OperationStateDto};
+
+    #[test]
+    fn generation_job_specs_are_closed_and_keep_dimension_hints() {
+        use crate::tools::ContentGenerateKind as K;
+        for (kind, job_kind) in [
+            (K::Character, "character.generate"),
+            (K::Prop, "mesh_from_image"),
+            (K::Sound, "audio.generate"),
+        ] {
+            assert_eq!(kind.job_kind(), job_kind);
+            let body = generation_job_body(kind, "hopping bunny", Some(1.25));
+            assert_eq!(body.get("prompt").and_then(Value::as_str), Some("hopping bunny"));
+            assert_eq!(body.get("dim_height").and_then(Value::as_str), Some("1.25"));
+        }
+    }
 
     #[test]
     fn derived_keys_canonicalize_and_bind_session() {

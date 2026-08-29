@@ -1,7 +1,7 @@
-//! The claim→dispatch→publish coordinator: one loop that turns queued
-//! Asset Server generation jobs — of EVERY kind in
-//! [`crate::gen_kinds::GEN_KINDS`], not just video — into published,
-//! cueable catalog assets.
+//! The claim→dispatch→settle coordinator: one loop that turns queued
+//! Asset Server jobs — of EVERY kind in [`crate::gen_kinds::GEN_KINDS`] —
+//! into what that kind's product is: a published catalog asset, a text
+//! answer recorded on the job, or a rewritten annotation record.
 //!
 //! Per job: claim under a lease (kind-filtered to what this worker's box can
 //! actually run) → resolve any catalog input the body pins → pick a fleet box
@@ -19,12 +19,39 @@
 //! depth sidecar, a variants json) contributes at most typed files of that
 //! same revision; none of them ever becomes a catalog entry of its own.
 //!
+//! PROGRESS IS BANDED AND MONOTONE. One claim is one 0..=1000 run whose
+//! phases own fixed slices of the bar ([`JobBar`]): 0–50 the prompt
+//! expander, 50–900 dispatch plus the node's own fraction, 900–1000 the
+//! fetch/annotate/PUBLISH tail. Nothing may write a smaller number than
+//! this claim has already shown, so a node changing phase, a migration to
+//! another box, or the hand-off from expansion to generation holds the bar
+//! still and lets the NOTE explain. 1000 means published, not denoised.
+//!
+//! Three kinds do not publish at all, and the kind table says so
+//! ([`crate::gen_kinds::Product`]) rather than the loop guessing:
+//!
+//! * `vision.describe` — a question about an image. The answer is TEXT,
+//!   recorded on the job (`{text, model, box}`), which is where the client
+//!   that asked reads it back. A UI making content asks these at runtime.
+//! * `text.expand` — the prompt expander, as a job of its own. Its answer
+//!   is the PROMPT a later stage will be handed, so the result flattens
+//!   `prompt` (and, for a music answer, `lyrics`/`seconds`) as top-level
+//!   fields the store can splice into a dependent job's body at claim
+//!   time. The same expansion still runs as a pre-step inside another job
+//!   when its body says `expand: true`; both go through one code path.
+//! * `annotate.asset` — the catalog's own description pass, minted by the
+//!   store on every publish. The answer is parsed by `makepad-asset-annotate`
+//!   and folded into that asset's annotation record. Both live on the same
+//!   `vision` capability, so one box that advertises it drains both queues,
+//!   one job at a time, exactly like every GPU kind here.
+//!
 //! The fleet transport sits behind [`GenFleet`], so the coordinator loop is
 //! tested against a REAL Asset Server with a scripted fleet — the real
 //! implementation ([`AssetAiFleet`]) is a thin adapter over
 //! `makepad-asset-ai`'s blocking client.
 
 use crate::gen_kinds::{kind_of, GenKind, InputNeed};
+use crate::gen_profiles::slug;
 use crate::glb::inspect_glb;
 use crate::import::{placeholder_thumb, usable_image_thumb};
 use crate::thumbs::{
@@ -32,13 +59,18 @@ use crate::thumbs::{
     png_dims, THUMB_DIM,
 };
 use crate::videothumb::probe_video;
+use makepad_asset_annotate::pass::{self, SheetPrep};
+use makepad_asset_annotate::sheet;
+use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
+use makepad_asset_annotate::{needs_annotation, parse_record, plan_upload, ANNOTATOR_VERSION};
 use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
-    AssetClient, ClaimedJobDto, ClientError, JobStateDto, PublishFile, PublishProvenance,
-    PublishRequest, PublishRights, PublishStats, PublishThumbnail,
+    AnnotationUpload, AssetClient, ClaimedJobDto, ClientError, JobStageInput, JobStateDto,
+    PublishFile,
+    PublishProvenance, PublishRequest, PublishRights, PublishStats, PublishThumbnail,
 };
 use makepad_asset_data::{
-    AssetAlias, AssetRevisionId, FileRole, MediaType, ThumbnailMedia,
+    AssetAlias, AssetId, AssetRevisionId, FileRole, MediaType, ThumbnailMedia,
 };
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,14 +80,158 @@ use std::time::{Duration, Instant};
 const LEASE_MS: u64 = 60_000;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 /// Fleet poll cadence + Asset-Server cancel check cadence.
+#[cfg(not(test))]
 const FLEET_POLL_EVERY: Duration = Duration::from_millis(1_200);
+/// The tests drive this same loop against fakes that answer instantly; the
+/// real cadence would only make the suite sleep.
+#[cfg(test)]
+const FLEET_POLL_EVERY: Duration = Duration::from_millis(20);
 const CANCEL_CHECK_EVERY: Duration = Duration::from_secs(3);
 /// Idle sleep between claim attempts when the queue is empty.
 const IDLE_SLEEP: Duration = Duration::from_secs(2);
+/// How long a job may sit on the box its claim loop is pinned to — waiting
+/// for that box's VRAM, or queued behind its current run — before the
+/// coordinator looks at the rest of the fleet.
+///
+/// The trade is a cold load against a serialized run: an idle box that
+/// already holds the weights starts in ~30 s, while sitting behind a clip
+/// costs minutes. Anything past this is worth moving, and moving is safe:
+/// the Asset Server job and its lease never change, so nothing the person
+/// enqueued fails, restarts, or burns an attempt.
+#[cfg(not(test))]
+fn migrate_after() -> Duration {
+    Duration::from_secs(20)
+}
+/// The same decision on a test clock — the migration tests drive the real
+/// loop, and a 20 s threshold would only make them slow.
+#[cfg(test)]
+fn migrate_after() -> Duration {
+    Duration::from_millis(60)
+}
 /// Hard wall-clock ceiling for one generation (queue + render).
 const JOB_DEADLINE: Duration = Duration::from_secs(45 * 60);
+/// The prompt expander's own budget, covering the wait for a text model to
+/// be admitted AND the answer. Short on purpose: it is a courtesy step in
+/// front of a clip that itself takes ~40 s, and the raw prompt is already
+/// good enough to run. Spending minutes waiting for a nicer wording is a
+/// worse outcome than not having one.
+const EXPAND_DEADLINE: Duration = Duration::from_secs(90);
+/// Token budget for one expansion (the same 512 the interactive chains use).
+const EXPAND_MAX_TOKENS: u32 = 512;
+/// Music asks for more, because a music expansion is not a paragraph: it is
+/// a JSON body carrying a structured caption AND a full lyric script, and
+/// the contract says it may reach 3 300 bytes. At 512 tokens the composer
+/// was being cut off mid-song — which is not a worse prompt, it is an
+/// unparseable one.
+const EXPAND_MUSIC_MAX_TOKENS: u32 = 1_600;
+/// …and correspondingly longer to write it. Still bounded, and still in
+/// front of a generation that itself takes a minute.
+const EXPAND_MUSIC_DEADLINE: Duration = Duration::from_secs(180);
+/// Longest expanded prompt forwarded to a model; `GenRequest::from_body`
+/// refuses anything past 4 000, so an over-eager expander cannot make the
+/// generation itself unrunnable.
+const MAX_EXPANDED_PROMPT_BYTES: usize = 3_500;
+
+/// The expander's kind, read from the ONE table that defines it
+/// ([`crate::gen_kinds::GEN_KINDS`]).
+///
+/// It used to be a private static here, because nobody could enqueue
+/// `text.expand` and nothing claimed it. It is a real row now, so the
+/// worker-side pre-step and a pipeline's expand STAGE are the same kind by
+/// construction: same dispatch/poll/heartbeat path, same text model, same
+/// result contract. The only difference between them is whether the store
+/// ever saw a job of its own for it.
+fn expand_kind() -> &'static GenKind {
+    kind_of("text.expand").expect("text.expand is a wired kind")
+}
+
+/// The expander's result document has to fit the store's 16 KB result cap,
+/// and it carries three texts: the raw answer, plus the flattened `prompt`
+/// and `lyrics` a dependent stage splices from. Budget them here rather
+/// than discovering the cap at `worker_succeed`, where the answer has
+/// already been paid for.
+const MAX_EXPAND_ANSWER_BYTES: usize = 3_500;
 /// Largest catalog input this worker relays to a box, base64 included.
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+/// Reply budget for a vision answer. The annotation pass answers in nine
+/// short lines; a client asking its own question may raise it in the body.
+const VISION_MAX_TOKENS: u64 = 220;
+/// Ceiling on the answer text recorded on a job (the server caps the whole
+/// result document at 16 KB).
+const MAX_ANSWER_BYTES: usize = 8 * 1024;
+
+/// One BAND of the per-job progress bar: a phase of a claim owns a
+/// contiguous slice of 0..=1000 and can never write outside it.
+///
+/// The bar used to be the node's render fraction and nothing else, so
+/// everything the worker does after the node finishes — fetching,
+/// measuring, thumbnailing, publishing — happened behind a number that had
+/// stopped moving. A publish refusal then read as "73.2% → failed" on a
+/// clip that was fully rendered. Bands make the last tenth of the bar mean
+/// the last tenth of the work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Band {
+    lo: u16,
+    hi: u16,
+}
+
+impl Band {
+    const fn new(lo: u16, hi: u16) -> Band {
+        Band { lo, hi }
+    }
+
+    /// Where a 0..=1 fraction of this phase lands on the whole bar.
+    fn at(self, fraction: f64) -> u16 {
+        let span = (self.hi - self.lo) as f64;
+        self.lo + (span * fraction.clamp(0.0, 1.0)).round() as u16
+    }
+}
+
+/// The prompt expander, when the body asks for one. Small on purpose: it
+/// is a courtesy step in front of the work, not the work.
+const BAND_EXPAND: Band = Band::new(0, 50);
+/// Dispatch waits plus the node's own fraction. The note grammar
+/// (`@.166 queued behind 1 run`, `waiting-for-vram: …`) stays the
+/// explanation for a flat bar inside this band.
+const BAND_GENERATE: Band = Band::new(50, 900);
+/// Fetch, measure, annotate, PUBLISH. Reaching 1000 means published.
+const BAND_FINISH: Band = Band::new(900, 1000);
+
+/// Monotone progress for ONE claim.
+///
+/// Every write goes through here and none of them can go backwards: a node
+/// changing phase (download → denoise) drops its fraction, the expander
+/// hand-off restarts a node fraction at zero, and a migration re-queues on
+/// another box — all of which used to yank the bar backwards while the
+/// note was already saying what was happening. The bar holds still and the
+/// note explains. (A genuine RETRY is a new claim, and a new claim is
+/// honestly allowed to start over.)
+#[derive(Clone, Copy, Debug, Default)]
+struct JobBar {
+    floor: u16,
+}
+
+impl JobBar {
+    fn new() -> JobBar {
+        JobBar { floor: 0 }
+    }
+
+    /// Write `permille`, never below what this claim has already shown.
+    fn at(&mut self, permille: u16) -> u16 {
+        self.floor = self.floor.max(permille.min(1000));
+        self.floor
+    }
+
+    /// A 0..=1 fraction WITHIN a band, latched the same way.
+    fn in_band(&mut self, band: Band, fraction: f64) -> u16 {
+        self.at(band.at(fraction))
+    }
+
+    /// What the bar currently reads, for a write that is holding it still.
+    fn permille(&self) -> u16 {
+        self.floor
+    }
+}
 
 /// One artifact the fleet produced.
 #[derive(Clone, Debug)]
@@ -68,7 +244,20 @@ pub struct GenArtifact {
 #[derive(Clone, Debug)]
 pub enum FleetPoll {
     Running { stage: String, progress: f64 },
-    Done { artifacts: Vec<GenArtifact> },
+    /// Accepted by the box but not started: it sits in that node's queue.
+    /// Deliberately distinct from `Running` — a queued job has not spent a
+    /// second of GPU time, so it is still free to be moved to an idle box,
+    /// and the person watching it deserves to be told that it is waiting on
+    /// a queue rather than rendering. `ahead` is how many of the box's own
+    /// runs are in front of it, when the node's health says.
+    Queued { stage: String, ahead: Option<u64> },
+    /// Finished. `text` is the completed answer of a text-answering job
+    /// (the service's `text`, falling back to the streamed `partial_text`);
+    /// `None` on jobs that produce artifacts instead.
+    Done {
+        artifacts: Vec<GenArtifact>,
+        text: Option<String>,
+    },
     Failed { error: String },
 }
 
@@ -83,6 +272,11 @@ pub enum FleetDispatch {
         model: String,
         backend: String,
         version: String,
+        /// The parameters that went WITH the prompt, `key=value` per line,
+        /// read off the request the adapter actually sent. Recorded on the
+        /// job so a person can open a finished run and see what it was
+        /// given, not what a UI believes it asked for.
+        params: String,
     },
     Waiting { stage: String },
 }
@@ -96,11 +290,48 @@ pub trait GenFleet {
         None
     }
 
+    /// LAN host of the box serving `fleet_job` ("10.0.0.203"), when the
+    /// transport knows one. The vision progress line names the box in full:
+    /// an operator watching an annotation backlog drain wants to know WHICH
+    /// GPU is answering, not just that one is.
+    fn route_host(&self, _fleet_job: &str) -> Option<String> {
+        None
+    }
+
     /// Attempt one generation dispatch. A temporarily VRAM-blocked compatible
     /// node returns [`FleetDispatch::Waiting`], never a doomed submission.
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String>;
     fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String>;
     fn cancel(&mut self, fleet_job: &str);
+
+    /// Look past the box this adapter is pinned to, for the job in hand, and
+    /// name the idle box that could start it NOW (a short label, never a
+    /// URL). `None` means nothing elsewhere is both idle and able to admit
+    /// this request, so the caller keeps waiting exactly as it did before.
+    ///
+    /// Latching on purpose: once an answer is given, this adapter's
+    /// selection stays widened for the rest of the job — the job has already
+    /// proved that its own box cannot take it.
+    fn widen_to_idle(&mut self, _request: &GenRequest) -> Option<String> {
+        None
+    }
+
+    /// Every box that holds this job's model is BUSY and the job is
+    /// stacking behind them: acquire another copy. Returns the note the
+    /// waiting job shows while the pull runs, or `None` when there is
+    /// nothing to provision (an idle holder exists, nobody holds it yet, no
+    /// idle box can take it, or one is already in flight).
+    fn provision_for_demand(&mut self, _request: &GenRequest) -> Option<String> {
+        None
+    }
+
+    /// Consider the whole fleet for this job from the start, without
+    /// waiting for the pinned box to fail it — see [`FleetReach`].
+    fn widen_all(&mut self) {}
+
+    /// Undo any widening. Called once per job, before its first dispatch, so
+    /// one stuck job never changes where the next one goes.
+    fn narrow(&mut self) {}
 }
 
 /// A source payload relayed from the catalog into the fleet request.
@@ -117,7 +348,13 @@ pub struct GenInput {
 #[derive(Clone, Debug)]
 pub struct GenRequest {
     pub kind: &'static GenKind,
+    /// The prompt that goes to the model — the EXPANDED one once the
+    /// expander has run.
     pub prompt: String,
+    /// The human's own words, kept when an expansion replaced `prompt`.
+    /// The published row is titled from this and its provenance names it,
+    /// so a person can always find their run by what they typed.
+    pub original_prompt: Option<String>,
     /// Empty = let domain affinity pick.
     pub model: String,
     pub seed: Option<u64>,
@@ -138,7 +375,11 @@ impl GenRequest {
             .map(str::trim)
             .unwrap_or_default()
             .to_string();
-        if prompt.is_empty() && kind.input == InputNeed::None {
+        // A prompt is mandatory except for kinds that only TRANSFORM an
+        // input (an upscale has nothing to say about content). A question
+        // about an image is not a transform: without the question there is
+        // nothing to answer.
+        if prompt.is_empty() && (kind.input == InputNeed::None || kind.is_text()) {
             return Err("job body has no prompt".to_string());
         }
         if prompt.len() > 4_000 {
@@ -147,6 +388,7 @@ impl GenRequest {
         Ok(GenRequest {
             kind,
             prompt,
+            original_prompt: None,
             model: body
                 .get("model")
                 .and_then(Value::as_str)
@@ -161,11 +403,83 @@ impl GenRequest {
 }
 
 /// What one processed job ended as (for logging/tests).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum JobOutcome {
     Published { asset: String, revision: String },
+    /// A text answer, recorded on the job for whoever asked.
+    Answered {
+        text: String,
+        model: String,
+        /// LAN host that answered, empty when the transport knows none.
+        host: String,
+        /// Extra TOP-LEVEL fields recorded beside `text`, so a DEPENDENT
+        /// job can splice its own body from them at claim time
+        /// (`{"$from":"job_…","field":"prompt"}` — the store resolves only
+        /// top-level plain values, which is why they are flattened rather
+        /// than nested). Empty for a kind that just answers a question.
+        fields: Vec<(String, Value)>,
+    },
+    /// An annotation record rewritten in place.
+    Described {
+        asset: String,
+        description: String,
+        model: String,
+    },
     Failed { error: String },
     CancelledUpstream,
+}
+
+/// How the per-job heartbeat note reads, which is what an operator sees in
+/// the RUNS list while the job is alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageStyle {
+    /// The fleet's own stage words, tagged with the short node label:
+    /// "@.203 denoise".
+    Fleet,
+    /// "vision · qwen3.8-27b-vision @ 10.0.0.203 · 3.4 s" — a vision answer
+    /// has no stages worth showing, so the line says which model on which
+    /// box, and how long it has been thinking.
+    Vision,
+}
+
+/// Which boxes one job's dispatch may choose between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FleetReach {
+    /// This worker's own box, until the job proves that box cannot take it
+    /// (see [`GenFleet::widen_to_idle`]). One claim loop per box IS the
+    /// concurrency rule: it is what stops every loop piling onto the same
+    /// warm GPU.
+    OwnBox,
+    /// The whole fleet from the first attempt. For work that is not this
+    /// box's speciality but the fleet's: the prompt expander needs the box
+    /// where a text model is already resident, and a video box that loads a
+    /// 27B LLM to write one sentence is a video box with no room left for
+    /// video — which is exactly how an expansion failed on a 24 GB node
+    /// while the chat box sat idle.
+    WholeFleet,
+}
+
+/// One finished fleet dispatch.
+struct FleetAnswer {
+    artifacts: Vec<GenArtifact>,
+    text: Option<String>,
+    model: String,
+    backend: String,
+    version: String,
+    host: Option<String>,
+    /// What went to the box besides the prompt, `key=value` per line — the
+    /// same lines the stage record was opened with, so the record can be
+    /// CLOSED with the answer beside them rather than overwritten by a
+    /// poorer version of itself.
+    params: String,
+    elapsed: Duration,
+}
+
+/// A dispatch that either produced an answer or ended the job.
+enum FleetRun {
+    Done(FleetAnswer),
+    /// Terminal without an answer (failed, deadline, cancelled upstream).
+    Outcome(JobOutcome),
 }
 
 pub struct Coordinator<'f> {
@@ -173,7 +487,8 @@ pub struct Coordinator<'f> {
     pub fleet: &'f mut dyn GenFleet,
     pub suffix: String,
     /// Job kinds this worker claims. Built from the box's advertised
-    /// capabilities, so a chat-only node never swallows an image job.
+    /// capabilities, so a chat-only node never swallows an image job and a
+    /// vision box claims both `vision.describe` and `annotate.asset`.
     pub kinds: Vec<String>,
     /// The operator's explicit rights declaration for generated output —
     /// set from the CLI, never invented here.
@@ -219,6 +534,43 @@ impl<'f> Coordinator<'f> {
                 self.client
                     .worker_succeed(&claimed.job, Some(&self.suffix), Some(&result))?;
             }
+            // The answer IS the product: it is recorded on the job, and
+            // `GET /v1/jobs/<id>` is where the client that asked reads it.
+            Ok(JobOutcome::Answered { text, model, host, fields }) => {
+                // A document carrying flattened fields is carrying its
+                // answer TWICE — once raw, once split — and the store caps
+                // the whole result at 16 KB. The raw answer is the
+                // diagnostic half, so it is the half that gets the smaller
+                // budget; the fields a next stage splices are never cut to
+                // make room for it.
+                let budget = if fields.is_empty() {
+                    MAX_ANSWER_BYTES
+                } else {
+                    MAX_EXPAND_ANSWER_BYTES
+                };
+                let mut result = obj(vec![
+                    ("text", s(bounded_answer(text, budget))),
+                    ("model", s(model.clone())),
+                    ("box", s(host.clone())),
+                ]);
+                // What a next stage splices from. Written as top-level keys
+                // of the same document, because that is the only shape the
+                // store's `$from` resolver can read.
+                for (key, value) in fields {
+                    set_key(&mut result, key, value.clone());
+                }
+                self.client
+                    .worker_succeed(&claimed.job, Some(&self.suffix), Some(&result))?;
+            }
+            Ok(JobOutcome::Described { asset, description, model }) => {
+                let result = obj(vec![
+                    ("asset_id", s(asset.clone())),
+                    ("description", s(bounded(description, 1_000))),
+                    ("model", s(model.clone())),
+                ]);
+                self.client
+                    .worker_succeed(&claimed.job, Some(&self.suffix), Some(&result))?;
+            }
             Ok(JobOutcome::Failed { error }) => {
                 let doc = obj(vec![("error", s(bounded(error, 2_000)))]);
                 self.client
@@ -232,10 +584,30 @@ impl<'f> Coordinator<'f> {
         outcome.map(Some)
     }
 
+    /// Route one claimed job by what its kind PRODUCES. The table decides;
+    /// this is the only branch on it.
+    ///
+    /// ONE CLAIM, ONE BAR: the latch is minted here, so every phase of this
+    /// job — expansion, dispatch, the node, the publication — writes into
+    /// the same monotone 0..=1000 run.
     fn process_job(
         &mut self,
         kind: &'static GenKind,
         claimed: &ClaimedJobDto,
+        stop: &AtomicBool,
+    ) -> Result<JobOutcome, ClientError> {
+        let mut bar = JobBar::new();
+        if kind.is_annotation() {
+            return self.process_annotation(kind, claimed, &mut bar, stop);
+        }
+        self.process_generation(kind, claimed, &mut bar, stop)
+    }
+
+    fn process_generation(
+        &mut self,
+        kind: &'static GenKind,
+        claimed: &ClaimedJobDto,
+        bar: &mut JobBar,
         stop: &AtomicBool,
     ) -> Result<JobOutcome, ClientError> {
         let mut request = match GenRequest::from_body(kind, &claimed.body) {
@@ -258,183 +630,120 @@ impl<'f> Coordinator<'f> {
         if kind.input != InputNeed::None && request.input.is_none() {
             return Ok(JobOutcome::Failed {
                 error: format!(
-                    "{} requires a source asset (job body needs source_alias or source_revision)",
-                    kind.kind
+                    "{} requires a source asset (job body needs {})",
+                    kind.kind,
+                    if kind.is_text() {
+                        "input_alias, input_revision or input_b64"
+                    } else {
+                        "source_alias or source_revision"
+                    }
                 ),
             });
         }
 
-        let started = Instant::now();
-        let mut last_heartbeat = Instant::now();
-        let mut last_cancel_check = Instant::now();
-        let mut wait_stage: Option<String> = None;
-        let mut retry_not_before: Option<Instant> = None;
-        let (artifacts, generated_model, generated_backend, generator_version) =
-            'generation: loop {
-                // Selection is refreshed while a compatible GPU is temporarily
-                // below its advertised admission target. This is also the retry
-                // path when the service's authoritative, later admission check
-                // beats our health snapshot.
-                let (fleet_job, dispatched_model, dispatched_backend, dispatched_version) = loop {
-                    if stop.load(Ordering::SeqCst) {
-                        return Ok(JobOutcome::Failed { error: "worker shutdown".to_string() });
-                    }
-                    if started.elapsed() > JOB_DEADLINE {
-                        return Ok(JobOutcome::Failed {
-                            error: "generation deadline".to_string(),
-                        });
-                    }
-                    if last_cancel_check.elapsed() >= CANCEL_CHECK_EVERY {
-                        last_cancel_check = Instant::now();
-                        if let Ok(status) = self.client.job_status(&claimed.job) {
-                            if status.state == JobStateDto::Cancelled {
-                                self.log(&format!("job {}: cancelled upstream", claimed.job));
-                                return Ok(JobOutcome::CancelledUpstream);
-                            }
-                        }
-                    }
-                    if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
-                        last_heartbeat = Instant::now();
-                        let stage = wait_stage
-                            .as_deref()
-                            .unwrap_or("waiting-for-fleet-admission");
-                        if self
-                            .client
-                            .worker_heartbeat(
-                                &claimed.job,
-                                LEASE_MS,
-                                Some(&self.suffix),
-                                Some((0, &bounded(stage, 180))),
-                            )
-                            .is_err()
-                        {
-                            return Ok(JobOutcome::Failed { error: "lease lost".to_string() });
-                        }
-                    }
-                    if retry_not_before.is_some_and(|at| Instant::now() < at) {
-                        std::thread::sleep(FLEET_POLL_EVERY);
-                        continue;
-                    }
-                    retry_not_before = None;
-                    match self.fleet.dispatch(&request) {
-                        Ok(FleetDispatch::Started { job, model, backend, version }) => {
-                            break (job, model, backend, version)
-                        }
-                        Ok(FleetDispatch::Waiting { stage }) => {
-                            if wait_stage.as_deref() != Some(stage.as_str()) {
-                                self.log(&format!("job {}: {stage}", claimed.job));
-                            }
-                            wait_stage = Some(stage);
-                        }
-                        Err(error) => {
-                            return Ok(JobOutcome::Failed {
-                                error: format!("fleet dispatch: {error}"),
-                            })
-                        }
-                    }
-                    std::thread::sleep(FLEET_POLL_EVERY);
-                };
+        // The prompt expander, when the enqueuer asked for one. It runs
+        // BEFORE the generation and can only ever improve the prompt: a
+        // failed, empty or timed-out expansion leaves the human's words
+        // exactly as they were and the run continues.
+        if let Some(outcome) = self.expand_prompt(claimed, &mut request, bar, stop)? {
+            return Ok(outcome);
+        }
 
-                let node_tag = self.fleet.route_label(&fleet_job);
-                let tagged = |stage: &str| match &node_tag {
-                    Some(tag) => format!("@{tag} {stage}"),
-                    None => stage.to_string(),
-                };
-                let mut heartbeat_stage = tagged("queued-on-fleet");
-                let mut heartbeat_permille = 0;
-                loop {
-                    if stop.load(Ordering::SeqCst) {
-                        self.fleet.cancel(&fleet_job);
-                        return Ok(JobOutcome::Failed { error: "worker shutdown".to_string() });
-                    }
-                    if started.elapsed() > JOB_DEADLINE {
-                        self.fleet.cancel(&fleet_job);
-                        return Ok(JobOutcome::Failed {
-                            error: "generation deadline".to_string(),
-                        });
-                    }
-                    // Cancel propagation: the enqueuer (VJ) cancelled
-                    // server-side → stop the GPU box too.
-                    if last_cancel_check.elapsed() >= CANCEL_CHECK_EVERY {
-                        last_cancel_check = Instant::now();
-                        if let Ok(status) = self.client.job_status(&claimed.job) {
-                            if status.state == JobStateDto::Cancelled {
-                                self.fleet.cancel(&fleet_job);
-                                self.log(&format!("job {}: cancelled upstream", claimed.job));
-                                return Ok(JobOutcome::CancelledUpstream);
-                            }
-                        }
-                    }
-                    // Renew independently of a successful fleet poll. A box may
-                    // be restarting or its response may be temporarily lost; the
-                    // Asset Server lease must not expire merely because the last
-                    // known stage could not be refreshed.
-                    if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
-                        last_heartbeat = Instant::now();
-                        if self
-                            .client
-                            .worker_heartbeat(
-                                &claimed.job,
-                                LEASE_MS,
-                                Some(&self.suffix),
-                                Some((heartbeat_permille, &bounded(&heartbeat_stage, 180))),
-                            )
-                            .is_err()
-                        {
-                            self.fleet.cancel(&fleet_job);
-                            return Ok(JobOutcome::Failed { error: "lease lost".to_string() });
-                        }
-                    }
-                    match self.fleet.poll(&fleet_job) {
-                        Ok(FleetPoll::Done { artifacts }) => {
-                            break 'generation (
-                                artifacts,
-                                dispatched_model,
-                                dispatched_backend,
-                                dispatched_version,
-                            )
-                        }
-                        Ok(FleetPoll::Failed { error }) if is_vram_admission_error(&error) => {
-                            // A fresh service-side check is authoritative over the
-                            // snapshot used for routing. Requeue locally with a
-                            // bounded backoff; never burn the Asset Server job.
-                            let stage = format!(
-                                "waiting-for-vram: backend admission rejected ({})",
-                                bounded(&error, 120)
-                            );
-                            self.log(&format!("job {}: {stage}", claimed.job));
-                            wait_stage = Some(stage);
-                            retry_not_before = Some(Instant::now() + Duration::from_secs(5));
-                            continue 'generation;
-                        }
-                        Ok(FleetPoll::Failed { error }) => {
-                            return Ok(JobOutcome::Failed { error: format!("fleet: {error}") })
-                        }
-                        Ok(FleetPoll::Running { stage, progress }) => {
-                            heartbeat_stage = tagged(&stage);
-                            heartbeat_permille = (progress.clamp(0.0, 1.0) * 1000.0) as u16;
-                        }
-                        Err(error) => {
-                            // Transient fleet transport errors: keep polling
-                            // within the deadline (the box may be mid-restart).
-                            self.log(&format!("job {}: fleet poll error: {error}", claimed.job));
-                        }
-                    }
-                    std::thread::sleep(FLEET_POLL_EVERY);
-                }
+        // A claimed EXPAND job is the pre-step promoted to a stage of its
+        // own: same budgets, same token allowance, so an expansion enqueued
+        // by a pipeline and one run in front of a generation cannot answer
+        // differently.
+        let deadline = if kind.kind == expand_kind().kind {
+            expand_stage_budget(&mut request)
+        } else {
+            JOB_DEADLINE
+        };
+        let style = if kind.is_text() { StageStyle::Vision } else { StageStyle::Fleet };
+        let answer = match self.dispatch_and_wait(
+            claimed,
+            &request,
+            style,
+            FleetReach::OwnBox,
+            deadline,
+            BAND_GENERATE,
+            bar,
+            stop,
+        )? {
+            FleetRun::Done(answer) => answer,
+            FleetRun::Outcome(outcome) => return Ok(outcome),
+        };
+
+        // A text answer publishes nothing: it is written onto the job.
+        if kind.is_text() {
+            let Some(text) = answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty())
+            else {
+                return Ok(JobOutcome::Failed {
+                    error: "fleet finished the vision job without any text".to_string(),
+                });
             };
+            self.log(&format!(
+                "job {}: answered in {:.1}s on {}",
+                claimed.job,
+                answer.elapsed.as_secs_f64(),
+                answer.host.as_deref().unwrap_or("the fleet")
+            ));
+            // Recording the answer IS the product of a text job: the last
+            // band belongs to that write, not to a bar that stopped at the
+            // node's last poll. The same beat CLOSES this stage's record
+            // with what it answered — the pre-step expander has always done
+            // that, and an expansion enqueued as a stage of its own must
+            // read identically in the run a person opens.
+            let stage = JobStageInput {
+                name: kind.kind,
+                model: &answer.model,
+                at: answer.host.as_deref().unwrap_or_default(),
+                prompt: &request.prompt,
+                params: &answer.params,
+                output: text,
+            };
+            let _ = self.client.worker_heartbeat_stage(
+                &claimed.job,
+                LEASE_MS,
+                Some(&self.suffix),
+                Some((bar.at(1000), "answered")),
+                Some(&stage),
+            );
+            return Ok(JobOutcome::Answered {
+                fields: expansion_fields(kind, text),
+                text: text.to_string(),
+                model: answer.model,
+                host: answer.host.unwrap_or_default(),
+            });
+        }
 
         // The product is the artifact whose content type the kind declares.
         // A box that returned only sidecars is a failure, never a guess.
-        let Some(product) = artifacts
+        let Some(shape) = kind.catalog() else {
+            return Ok(JobOutcome::Failed {
+                error: format!("{} has no catalog product", kind.kind),
+            });
+        };
+        let Some(product) = answer
+            .artifacts
             .into_iter()
-            .find(|a| kind.content_types.iter().any(|ct| a.content_type == *ct))
+            .find(|a| shape.content_types.iter().any(|ct| a.content_type == *ct))
         else {
             return Ok(JobOutcome::Failed {
-                error: format!("fleet returned no {} artifact", kind.content_types[0]),
+                error: format!("fleet returned no {} artifact", shape.content_types[0]),
             });
         };
 
+        // THE LAST TENTH IS REAL WORK. Everything from here — decoding the
+        // payload, measuring it, building a thumbnail, publishing the row —
+        // used to happen behind a bar frozen at the node's final fraction,
+        // so a refusal at the very end read as "73.2% → failed" on a clip
+        // that had rendered completely.
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(BAND_FINISH.lo), "building the row")),
+        );
         let mut publish = match build_product(kind, &claimed.namespace, &request, product) {
             Ok(publish) => publish,
             Err(error) => return Ok(JobOutcome::Failed { error }),
@@ -447,10 +756,19 @@ impl<'f> Coordinator<'f> {
             job_hex.trim_start_matches("job_").chars().take(16).collect::<String>()
         );
         publish.alias = AssetAlias::from_str(&alias_text).ok();
-        publish.prompt = request.prompt.clone();
+        // An EXPANDED prompt is model output: newlines, tabs and the odd
+        // stray control byte are normal in it, and the store refuses any
+        // annotation field carrying one. Cleaning it here is not cosmetic —
+        // the alternative was losing a finished clip at the last step.
+        publish.prompt = annotation_text(&request.prompt, MAX_PROMPT_BYTES);
+        // Both prompts survive: the expanded one generated the pixels, the
+        // original is the only thing the person can search for.
+        if let Some(original) = &request.original_prompt {
+            publish.provenance = format!("expanded from: {}", annotation_text(original, 500));
+        }
         publish.generator = "asset-worker".to_string();
-        publish.backend = generated_backend;
-        publish.model = generated_model.clone();
+        publish.backend = answer.backend;
+        publish.model = answer.model.clone();
         // Rights come from the operator's explicit declaration, never from
         // a silent in-code default.
         publish.rights = self.rights.clone();
@@ -458,22 +776,61 @@ impl<'f> Coordinator<'f> {
         // only when the job body pinned one (the box invents nondeterministic
         // seeds it never reports back), and the required generator version
         // is the actual selected service's advertised version.
-        if let Some(seed) = request.seed.filter(|_| !generator_version.is_empty()) {
+        if let Some(seed) = request.seed.filter(|_| !answer.version.is_empty()) {
             publish.manifest_provenance = Some(PublishProvenance {
                 generator: "makepad-asset-ai".to_string(),
-                model: generated_model,
-                version: generator_version,
+                model: answer.model,
+                version: answer.version,
                 seed,
                 parents: vec![],
                 params_digest: None,
             });
         }
-        match self.client.publish_artifact(&publish) {
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(910), "publishing")),
+        );
+        let mut published = self.client.publish_artifact(&publish);
+        if let Err(error) = &published {
+            // The GPU spend already happened. A row the store refuses over
+            // TEXT must never cost the person their render: strip the
+            // annotation to what the store accepts, say so, and publish the
+            // same bytes once more. Only text refusals retry — a rejected
+            // artifact is a real failure.
+            if is_annotation_text_refusal(error) {
+                self.log(&format!(
+                    "job {}: publish refused ({error}) — retrying with plain annotation text",
+                    claimed.job
+                ));
+                let _ = self.client.worker_heartbeat(
+                    &claimed.job,
+                    LEASE_MS,
+                    Some(&self.suffix),
+                    Some((
+                        bar.at(930),
+                        "publish refused over annotation text — scrubbed, publishing again",
+                    )),
+                );
+                scrub_annotation(&mut publish);
+                published = self.client.publish_artifact(&publish);
+            }
+        }
+        match published {
             Ok(published) => {
                 self.log(&format!(
                     "job {}: published {} rev {}",
                     claimed.job, published.asset_id, published.revision
                 ));
+                // Full bar means PUBLISHED, and the note says so: the row
+                // exists, and the job is about to be marked succeeded.
+                let _ = self.client.worker_heartbeat(
+                    &claimed.job,
+                    LEASE_MS,
+                    Some(&self.suffix),
+                    Some((bar.at(1000), "published")),
+                );
                 Ok(JobOutcome::Published {
                     asset: published.asset_id.to_string(),
                     revision: published.revision.to_string(),
@@ -483,15 +840,726 @@ impl<'f> Coordinator<'f> {
         }
     }
 
-    /// Fetch the catalog payload a transform job pins, as `source_alias`
-    /// (`ns/name`) or `source_revision` (an exact revision id). Nothing is
-    /// inferred: a body without either resolves to `None`, and the caller
-    /// refuses kinds that need one.
+    /// `annotate.asset`: the catalog's own description pass, run as a fleet
+    /// job.
+    ///
+    /// The body is the store's (`{asset, alias, kind, version_tag}`), minted
+    /// on every publish. Everything else — which prompt, how the sheet is
+    /// framed, what a reply means, which fields may be overwritten — comes
+    /// from `makepad-asset-annotate`, so an answer written here is the same
+    /// answer the pass has always written.
+    fn process_annotation(
+        &mut self,
+        kind: &'static GenKind,
+        claimed: &ClaimedJobDto,
+        bar: &mut JobBar,
+        stop: &AtomicBool,
+    ) -> Result<JobOutcome, ClientError> {
+        let body = &claimed.body;
+        let Some(asset) = body
+            .get("asset")
+            .and_then(Value::as_str)
+            .and_then(|t| AssetId::from_str(t.trim()).ok())
+        else {
+            return Ok(JobOutcome::Failed { error: "job body has no asset id".to_string() });
+        };
+        let Some(alias) = body
+            .get("alias")
+            .and_then(Value::as_str)
+            .and_then(|a| AssetAlias::from_str(a.trim()).ok())
+        else {
+            return Ok(JobOutcome::Failed {
+                error: "job body has no usable alias".to_string(),
+            });
+        };
+        // Characters are asked about as PEOPLE, not as pieces that snap onto
+        // a grid — a different prompt and a different sheet framing.
+        let person = body.get("kind").and_then(Value::as_str) == Some("character");
+        let version_tag = body
+            .get("version_tag")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        // What the record says NOW, read before any GPU time: a job whose
+        // lease expired while its box was still answering comes back to the
+        // queue, and re-describing an asset that is already current would
+        // spend a GPU on work somebody already did.
+        let current = match self.client.get_annotation(&asset) {
+            Ok(current) => current,
+            Err(error) => {
+                return Ok(JobOutcome::Failed {
+                    error: format!("read annotation: {error}"),
+                })
+            }
+        };
+        let base = base_annotation(current);
+        if !version_tag.is_empty() && base.tags.iter().any(|t| *t == version_tag) {
+            self.log(&format!(
+                "job {}: {alias} is already described at {version_tag}",
+                claimed.job
+            ));
+            return Ok(JobOutcome::Described {
+                asset: asset.to_string(),
+                description: base.description,
+                model: String::new(),
+            });
+        }
+
+        // The published turntable sheet, framed the way the pass frames it.
+        let sheet = match self.client.thumbnail_alias_bytes(&alias) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Ok(JobOutcome::Failed {
+                    error: format!("thumbnail sheet for {alias}: {error}"),
+                })
+            }
+        };
+        let image = match sheet_image(&sheet, person) {
+            Ok(image) => image,
+            Err(error) => return Ok(JobOutcome::Failed { error }),
+        };
+        let prompt = format!(
+            "{}\n\n{}",
+            pass::prompt_for(person),
+            pass::context_line(alias.as_str(), person)
+        );
+        self.log(&format!(
+            "job {} [{}]: asking about {alias} ({} sheet, {} KB)",
+            claimed.job,
+            kind.kind,
+            if person { "person" } else { "kit" },
+            image.len() / 1024
+        ));
+        let request = GenRequest {
+            kind,
+            prompt,
+            original_prompt: None,
+            model: body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            seed: None,
+            body: obj(vec![("max_tokens", Value::Int(VISION_MAX_TOKENS as i64))]),
+            input: Some(GenInput {
+                bytes: image,
+                content_type: "image/jpeg".to_string(),
+            }),
+        };
+        let answer = match self.dispatch_and_wait(
+            claimed,
+            &request,
+            StageStyle::Vision,
+            FleetReach::OwnBox,
+            JOB_DEADLINE,
+            BAND_GENERATE,
+            bar,
+            stop,
+        )? {
+            FleetRun::Done(answer) => answer,
+            FleetRun::Outcome(outcome) => return Ok(outcome),
+        };
+        let Some(reply) = answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+            return Ok(JobOutcome::Failed {
+                error: "fleet finished the vision job without any text".to_string(),
+            });
+        };
+        let record = parse_record(reply);
+        if !record.is_useful() {
+            // The reason is what an operator reads in the RUNS list, so the
+            // unusable reply itself rides along, bounded.
+            return Ok(JobOutcome::Failed {
+                error: format!("unusable reply: {}", bounded(reply, 300)),
+            });
+        }
+        let annotator = Annotator {
+            version: ANNOTATOR_VERSION,
+            model: slug(&answer.model),
+        };
+        // Somebody else already wrote this version while this job ran: their
+        // answer is as good as ours, and a second write would only churn.
+        if !needs_annotation(&base.tags, &annotator) {
+            return Ok(JobOutcome::Described {
+                asset: asset.to_string(),
+                description: base.description,
+                model: annotator.model,
+            });
+        }
+        let upload = plan_upload(&base, &record, &annotator);
+        let wire = AnnotationUpload {
+            title: upload.title.clone(),
+            description: upload.description.clone(),
+            kind: upload
+                .kind
+                .as_deref()
+                .and_then(makepad_asset_client::dto::kind_parse),
+            categories: upload.categories.clone(),
+            tags: upload.tags.clone(),
+            creator: upload.creator.clone(),
+            generator: upload.generator.clone(),
+            backend: upload.backend.clone(),
+            model: upload.model.clone(),
+            prompt: upload.prompt.clone(),
+            provenance: upload.provenance.clone(),
+            private: upload.private,
+        };
+        // Same law as a publication: writing the record is the work this
+        // job exists for, and it can fail. It gets the last band.
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(BAND_FINISH.lo), "writing the annotation")),
+        );
+        if let Err(error) = self.client.put_annotation(&asset, &wire) {
+            return Ok(JobOutcome::Failed {
+                error: format!("put annotation: {error}"),
+            });
+        }
+        let _ = self.client.worker_heartbeat(
+            &claimed.job,
+            LEASE_MS,
+            Some(&self.suffix),
+            Some((bar.at(1000), "described")),
+        );
+        self.log(&format!(
+            "job {}: {alias} -> {} ({:.1}s)",
+            claimed.job,
+            upload.description,
+            answer.elapsed.as_secs_f64()
+        ));
+        Ok(JobOutcome::Described {
+            asset: asset.to_string(),
+            description: upload.description,
+            model: annotator.model,
+        })
+    }
+
+    /// Dispatch to the fleet and drive one job to an answer.
+    ///
+    /// Shared by every kind: the Asset Server lease is heartbeaten with real
+    /// progress, upstream cancellation is propagated to the box, a box that
+    /// is momentarily short of VRAM is waited for rather than failed, and
+    /// the whole thing is bounded by [`JOB_DEADLINE`].
+    /// Run the prompt expander for a job whose body asked for it
+    /// (`expand: true`), rewriting `request.prompt` in place.
+    ///
+    /// AN EXPANSION CAN NEVER LOSE A RUN. It is a text model's opinion
+    /// about wording, not a precondition of the work: when the box refuses,
+    /// times out, or answers with nothing, this logs why, notes it on the
+    /// job so the row says so, and returns with the ORIGINAL prompt intact.
+    /// The only thing that stops the job here is the enqueuer cancelling it
+    /// (returned as an outcome, exactly as the generation path would).
+    ///
+    /// This is what a picker's "expand → video" pipe means. The flag rode
+    /// the job body for a long time with nothing reading it, so those runs
+    /// quietly generated from the raw prompt while their label promised an
+    /// expansion.
+    fn expand_prompt(
+        &mut self,
+        claimed: &ClaimedJobDto,
+        request: &mut GenRequest,
+        bar: &mut JobBar,
+        stop: &AtomicBool,
+    ) -> Result<Option<JobOutcome>, ClientError> {
+        if request.body.get("expand").and_then(Value::as_bool) != Some(true) {
+            return Ok(None);
+        }
+        // ALREADY EXPANDED BY THE CLIENT. A client that ran its own
+        // expansion sends the expanded text as `prompt` and the person's
+        // words as `prompt_original`; expanding that again would rewrite a
+        // rewrite. Keep the original for the row's title and provenance and
+        // dispatch what arrived.
+        if let Some(original) = request
+            .body
+            .get("prompt_original")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            request.original_prompt = Some(bounded(original, MAX_EXPANDED_PROMPT_BYTES));
+            return Ok(None);
+        }
+        // Nothing to expand, or the kind IS the text path already.
+        if request.prompt.is_empty() || request.kind.is_text() {
+            return Ok(None);
+        }
+        let original = request.prompt.clone();
+        let music = request.kind.domain == "music";
+        // The expander is told what the expansion is FOR: a video brief and
+        // a mesh brief are not the same piece of writing — and a seamless
+        // VJ loop is not the same request as a song (no intro, no outro, no
+        // final cadence, always instrumental), so it has its own writer.
+        let target_domain = if music && wants_loop(&request.body) {
+            "music_loop"
+        } else {
+            request.kind.domain
+        };
+        let body = obj(vec![
+            ("target_domain", s(target_domain.to_string())),
+            (
+                "max_tokens",
+                Value::Int(if music { EXPAND_MUSIC_MAX_TOKENS } else { EXPAND_MAX_TOKENS } as i64),
+            ),
+        ]);
+        let expand_request = GenRequest {
+            kind: expand_kind(),
+            prompt: original.clone(),
+            original_prompt: None,
+            // Affinity picks the fleet's warmest text model; a video pin
+            // means nothing here.
+            model: String::new(),
+            seed: None,
+            body,
+            input: None,
+        };
+        self.log(&format!(
+            "job {}: expanding \"{}\"",
+            claimed.job,
+            bounded(&original, 120)
+        ));
+        let failed = |reason: String| -> String {
+            format!("expand failed, used raw prompt ({reason})")
+        };
+        let note = match self.dispatch_and_wait(
+            claimed,
+            &expand_request,
+            StageStyle::Vision,
+            // The expansion goes where a text model already lives, not
+            // wherever this claim loop happens to be pinned.
+            FleetReach::WholeFleet,
+            if music { EXPAND_MUSIC_DEADLINE } else { EXPAND_DEADLINE },
+            BAND_EXPAND,
+            bar,
+            stop,
+        )? {
+            FleetRun::Done(answer) => {
+                match answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                    Some(text) => {
+                        // A MUSIC expansion is not prose: the writer answers
+                        // with the request BODY, and the lyric script is a
+                        // field of its own. Parsed before anything is bounded
+                        // — the whole answer has to be seen to be read.
+                        let composed = music.then(|| compose_music_body(text)).flatten();
+                        if let Some(composed) = composed {
+                            self.log(&format!(
+                                "job {}: composed a music body ({} byte prompt, {} byte lyrics)",
+                                claimed.job,
+                                composed.prompt.len(),
+                                composed.lyrics.len()
+                            ));
+                            composed.apply(request);
+                        } else {
+                            request.prompt = annotation_text(text, MAX_EXPANDED_PROMPT_BYTES);
+                        }
+                        request.original_prompt = Some(original.clone());
+                        self.log(&format!(
+                            "job {}: expanded to \"{}\"",
+                            claimed.job,
+                            bounded(&request.prompt, 160)
+                        ));
+                        // Close the expander's own stage record with what it
+                        // ANSWERED. Two halves of one question — what the
+                        // person typed, and what the next model will be
+                        // handed because of it — in one place, in full.
+                        let stage = JobStageInput {
+                            name: expand_kind().kind,
+                            model: &answer.model,
+                            at: answer.host.as_deref().unwrap_or_default(),
+                            prompt: &original,
+                            params: &format!("target_domain={target_domain}"),
+                            // What it ANSWERED, whole — for music that is
+                            // the composed body, lyrics included, which is
+                            // exactly what the next stage will be handed.
+                            output: text,
+                        };
+                        // The expander's band is done, whatever the
+                        // generation does next: the hand-off is where the
+                        // bar used to fall back to zero.
+                        let permille = bar.at(BAND_EXPAND.hi);
+                        let _ = self.client.worker_heartbeat_stage(
+                            &claimed.job,
+                            LEASE_MS,
+                            Some(&self.suffix),
+                            Some((permille, "expanded")),
+                            Some(&stage),
+                        );
+                        None
+                    }
+                    None => Some(failed("the box answered with no text".to_string())),
+                }
+            }
+            // The enqueuer stopped the job: that IS the job's outcome.
+            FleetRun::Outcome(JobOutcome::CancelledUpstream) => {
+                return Ok(Some(JobOutcome::CancelledUpstream))
+            }
+            FleetRun::Outcome(JobOutcome::Failed { error }) => Some(failed(bounded(&error, 100))),
+            FleetRun::Outcome(_) => Some(failed("the expander produced no answer".to_string())),
+        };
+        if let Some(note) = note {
+            // Say it on the JOB, not only in a log nobody is reading: the
+            // row an operator is watching is where "used raw prompt" has to
+            // appear.
+            self.log(&format!("job {}: {note}", claimed.job));
+            let permille = bar.at(BAND_EXPAND.hi);
+            let _ = self.client.worker_heartbeat(
+                &claimed.job,
+                LEASE_MS,
+                Some(&self.suffix),
+                Some((permille, &bounded(&note, 180))),
+            );
+        }
+        Ok(None)
+    }
+
+    fn dispatch_and_wait(
+        &mut self,
+        claimed: &ClaimedJobDto,
+        request: &GenRequest,
+        style: StageStyle,
+        reach: FleetReach,
+        deadline: Duration,
+        band: Band,
+        bar: &mut JobBar,
+        stop: &AtomicBool,
+    ) -> Result<FleetRun, ClientError> {
+        let started = Instant::now();
+        let mut last_heartbeat = Instant::now();
+        let mut last_cancel_check = Instant::now();
+        let mut wait_stage: Option<String> = None;
+        let mut retry_not_before: Option<Instant> = None;
+        // This job's own box is the only candidate until it proves it cannot
+        // take the job; one stuck job never widens the next one's selection.
+        self.fleet.narrow();
+        if reach == FleetReach::WholeFleet {
+            self.fleet.widen_all();
+        }
+        // At most ONE migration per job, whatever the reason: a job that
+        // bounces between boxes finishes nowhere.
+        let mut migrated = false;
+        // When the current stuckness started — a VRAM wait before dispatch,
+        // or a node-side queue after it.
+        let mut stuck_since: Option<Instant> = None;
+        'generation: loop {
+            // Selection is refreshed while a compatible GPU is temporarily
+            // below its advertised admission target. This is also the retry
+            // path when the service's authoritative, later admission check
+            // beats our health snapshot.
+            let (
+                fleet_job,
+                dispatched_model,
+                dispatched_backend,
+                dispatched_version,
+                dispatched_params,
+            ) = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                        error: "worker shutdown".to_string(),
+                    }));
+                }
+                if started.elapsed() > deadline {
+                    return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                        error: "generation deadline".to_string(),
+                    }));
+                }
+                if last_cancel_check.elapsed() >= CANCEL_CHECK_EVERY {
+                    last_cancel_check = Instant::now();
+                    if let Ok(status) = self.client.job_status(&claimed.job) {
+                        if status.state == JobStateDto::Cancelled {
+                            self.log(&format!("job {}: cancelled upstream", claimed.job));
+                            return Ok(FleetRun::Outcome(JobOutcome::CancelledUpstream));
+                        }
+                    }
+                }
+                if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
+                    last_heartbeat = Instant::now();
+                    let stage = wait_stage
+                        .as_deref()
+                        .unwrap_or("waiting-for-fleet-admission");
+                    // Nothing has rendered yet: the FLOOR of this phase's
+                    // band, held (a migration must not walk the bar back).
+                    let permille = bar.in_band(band, 0.0);
+                    if self
+                        .client
+                        .worker_heartbeat(
+                            &claimed.job,
+                            LEASE_MS,
+                            Some(&self.suffix),
+                            Some((permille, &bounded(stage, 180))),
+                        )
+                        .is_err()
+                    {
+                        return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                            error: "lease lost".to_string(),
+                        }));
+                    }
+                }
+                if retry_not_before.is_some_and(|at| Instant::now() < at) {
+                    std::thread::sleep(FLEET_POLL_EVERY);
+                    continue;
+                }
+                retry_not_before = None;
+                match self.fleet.dispatch(request) {
+                    Ok(FleetDispatch::Started { job, model, backend, version, params }) => {
+                        break (job, model, backend, version, params)
+                    }
+                    Ok(FleetDispatch::Waiting { stage }) => {
+                        if wait_stage.as_deref() != Some(stage.as_str()) {
+                            self.log(&format!("job {}: {stage}", claimed.job));
+                        }
+                        wait_stage = Some(stage);
+                        // Spread before stacking: a box that cannot admit
+                        // this job keeps it only as long as no other box is
+                        // idle and ready to run it.
+                        let waited = stuck_since.get_or_insert_with(Instant::now).elapsed();
+                        if !migrated && waited >= migrate_after() {
+                            match self.fleet.widen_to_idle(request) {
+                                Some(idle) => {
+                                    migrated = true;
+                                    self.log(&format!(
+                                        "job {}: {:.0}s waiting for its own box — {idle} is \
+                                         idle and can run it now, moving it there",
+                                        claimed.job,
+                                        waited.as_secs_f64()
+                                    ));
+                                }
+                                // Nowhere idle to move it. If the reason is
+                                // that every box holding this model is busy,
+                                // the fleet's answer is another copy.
+                                None => {
+                                    if let Some(note) = self.fleet.provision_for_demand(request) {
+                                        self.log(&format!("job {}: {note}", claimed.job));
+                                        wait_stage =
+                                            Some(format!("waiting-for-fleet: {note}"));
+                                    }
+                                    stuck_since = Some(Instant::now());
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                            error: format!("fleet dispatch: {error}"),
+                        }))
+                    }
+                }
+                std::thread::sleep(FLEET_POLL_EVERY);
+            };
+
+            let node_tag = self.fleet.route_label(&fleet_job);
+            let node_host = self.fleet.route_host(&fleet_job);
+            let dispatched_at = Instant::now();
+            // A new box, a new clock: what counts now is how long THIS node
+            // leaves the job in its queue.
+            stuck_since = None;
+            let mut heartbeat_stage = match style {
+                StageStyle::Fleet => match &node_tag {
+                    Some(tag) => format!("@{tag} queued-on-fleet"),
+                    None => "queued-on-fleet".to_string(),
+                },
+                StageStyle::Vision => vision_note(&dispatched_model, node_host.as_deref(), 0.0),
+            };
+            let mut heartbeat_permille = bar.in_band(band, 0.0);
+            // Say WHERE it went the moment it went there. A vision answer
+            // takes seconds — less than one heartbeat period — so a job that
+            // waited for the normal cadence would finish before anything
+            // ever reported which box was on it, and an operator watching a
+            // backlog drain would see a queue with nothing visibly running.
+            last_heartbeat = Instant::now();
+            // The same beat records WHAT this stage was handed: the exact
+            // final prompt text and the parameters beside it. It rides the
+            // heartbeat because that is already the proof of the lease, and
+            // it is written the moment the box has it — a person watching a
+            // run can read the prompt while it renders, not only after.
+            let stage = JobStageInput {
+                name: request.kind.kind,
+                model: &dispatched_model,
+                // The short label when the transport knows one, else the
+                // box's own address: "which box" is the question, and the
+                // vision note has named hosts here for as long as it has
+                // existed.
+                at: node_tag.as_deref().or(node_host.as_deref()).unwrap_or_default(),
+                prompt: &request.prompt,
+                params: &dispatched_params,
+                output: "",
+            };
+            let _ = self.client.worker_heartbeat_stage(
+                &claimed.job,
+                LEASE_MS,
+                Some(&self.suffix),
+                Some((heartbeat_permille, &bounded(&heartbeat_stage, 180))),
+                Some(&stage),
+            );
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    self.fleet.cancel(&fleet_job);
+                    return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                        error: "worker shutdown".to_string(),
+                    }));
+                }
+                if started.elapsed() > deadline {
+                    self.fleet.cancel(&fleet_job);
+                    return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                        error: "generation deadline".to_string(),
+                    }));
+                }
+                // Cancel propagation: the enqueuer cancelled server-side
+                // (the Annotate Pause button, the VJ's stop) → stop the box.
+                if last_cancel_check.elapsed() >= CANCEL_CHECK_EVERY {
+                    last_cancel_check = Instant::now();
+                    if let Ok(status) = self.client.job_status(&claimed.job) {
+                        if status.state == JobStateDto::Cancelled {
+                            self.fleet.cancel(&fleet_job);
+                            self.log(&format!("job {}: cancelled upstream", claimed.job));
+                            return Ok(FleetRun::Outcome(JobOutcome::CancelledUpstream));
+                        }
+                    }
+                }
+                // Renew independently of a successful fleet poll. A box may
+                // be restarting or its response may be temporarily lost; the
+                // Asset Server lease must not expire merely because the last
+                // known stage could not be refreshed.
+                if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
+                    last_heartbeat = Instant::now();
+                    if style == StageStyle::Vision {
+                        heartbeat_stage = vision_note(
+                            &dispatched_model,
+                            node_host.as_deref(),
+                            dispatched_at.elapsed().as_secs_f64(),
+                        );
+                    }
+                    if self
+                        .client
+                        .worker_heartbeat(
+                            &claimed.job,
+                            LEASE_MS,
+                            Some(&self.suffix),
+                            Some((heartbeat_permille, &bounded(&heartbeat_stage, 180))),
+                        )
+                        .is_err()
+                    {
+                        self.fleet.cancel(&fleet_job);
+                        return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                            error: "lease lost".to_string(),
+                        }));
+                    }
+                }
+                match self.fleet.poll(&fleet_job) {
+                    Ok(FleetPoll::Done { artifacts, text }) => {
+                        return Ok(FleetRun::Done(FleetAnswer {
+                            artifacts,
+                            text,
+                            model: dispatched_model,
+                            backend: dispatched_backend,
+                            version: dispatched_version,
+                            host: node_host,
+                            params: dispatched_params,
+                            elapsed: dispatched_at.elapsed(),
+                        }))
+                    }
+                    Ok(FleetPoll::Failed { error }) if is_vram_admission_error(&error) => {
+                        // A fresh service-side check is authoritative over the
+                        // snapshot used for routing. Requeue locally with a
+                        // bounded backoff; never burn the Asset Server job.
+                        let stage = format!(
+                            "waiting-for-vram: backend admission rejected ({})",
+                            bounded(&error, 120)
+                        );
+                        self.log(&format!("job {}: {stage}", claimed.job));
+                        wait_stage = Some(stage);
+                        retry_not_before = Some(Instant::now() + Duration::from_secs(5));
+                        continue 'generation;
+                    }
+                    Ok(FleetPoll::Failed { error }) => {
+                        return Ok(FleetRun::Outcome(JobOutcome::Failed {
+                            error: format!("fleet: {error}"),
+                        }))
+                    }
+                    Ok(FleetPoll::Running { stage, progress }) => {
+                        // It is running: whatever it waited for is over.
+                        stuck_since = None;
+                        // The node's own fraction, scaled INTO this
+                        // phase's band and latched: a node that changes
+                        // phase and reports 0 again holds the bar instead
+                        // of resetting it.
+                        heartbeat_permille = bar.in_band(band, progress);
+                        if style == StageStyle::Fleet {
+                            heartbeat_stage = match &node_tag {
+                                Some(tag) => format!("@{tag} {stage}"),
+                                None => stage,
+                            };
+                        }
+                    }
+                    Ok(FleetPoll::Queued { stage, ahead }) => {
+                        // Say WHY it is not moving: a queue behind another
+                        // run is a different thing from a VRAM wait, and an
+                        // operator deciding whether to wait needs to know
+                        // which one this is and on which box. The bar holds
+                        // where it was; the note is what changed.
+                        heartbeat_permille = bar.permille();
+                        if style == StageStyle::Fleet {
+                            heartbeat_stage = queued_note(&stage, ahead, node_tag.as_deref());
+                        }
+                        let waited = stuck_since.get_or_insert_with(Instant::now).elapsed();
+                        if !migrated && waited >= migrate_after() {
+                            match self.fleet.widen_to_idle(request) {
+                                Some(idle) => {
+                                    migrated = true;
+                                    self.log(&format!(
+                                        "job {}: {:.0}s queued on {} — moving it to {idle}",
+                                        claimed.job,
+                                        waited.as_secs_f64(),
+                                        node_tag.as_deref().unwrap_or("that box")
+                                    ));
+                                    // Take it off the queue it is stuck in
+                                    // BEFORE re-dispatching: the same job
+                                    // must never be live on two boxes.
+                                    self.fleet.cancel(&fleet_job);
+                                    wait_stage =
+                                        Some(format!("waiting-for-fleet: moving to {idle}"));
+                                    stuck_since = None;
+                                    continue 'generation;
+                                }
+                                // Nothing better exists right now. Ask again
+                                // after another full interval, not on every
+                                // poll: the question costs a fleet probe.
+                                None => stuck_since = Some(Instant::now()),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Transient fleet transport errors: keep polling
+                        // within the deadline (the box may be mid-restart).
+                        self.log(&format!("job {}: fleet poll error: {error}", claimed.job));
+                    }
+                }
+                std::thread::sleep(FLEET_POLL_EVERY);
+            }
+        }
+    }
+
+    /// Fetch the payload a job pins.
+    ///
+    /// Two vocabularies, because they mean two different things. A TRANSFORM
+    /// names the catalog row its product derives from (`source_alias` /
+    /// `source_revision`) and gets that row's own file. A QUESTION names the
+    /// thing it is asking about (`input_alias` / `input_revision` /
+    /// `input_b64`) and gets a picture — for an alias that is the published
+    /// thumbnail sheet, because most of this catalog is meshes and a vision
+    /// model cannot look at a GLB.
+    ///
+    /// Nothing is inferred: a body naming neither resolves to `None`, and
+    /// the caller refuses kinds that need one.
     fn resolve_input(
         &mut self,
         kind: &GenKind,
         body: &Value,
     ) -> Result<Option<GenInput>, String> {
+        if kind.is_text() {
+            return self.resolve_question_input(body);
+        }
         let revision = match (
             body.get("source_revision").and_then(Value::as_str),
             body.get("source_alias").and_then(Value::as_str),
@@ -550,6 +1618,76 @@ impl<'f> Coordinator<'f> {
         Ok(Some(GenInput { bytes, content_type: content_type.to_string() }))
     }
 
+    /// The image a question is about: inline bytes, an exact revision's
+    /// image file, or an alias's published thumbnail sheet.
+    fn resolve_question_input(&mut self, body: &Value) -> Result<Option<GenInput>, String> {
+        // Inline bytes win: a client that already HAS the picture (a webcam
+        // frame, a canvas it just drew) should never be made to publish it
+        // first just to ask about it.
+        if let Some(b64) = body.get("input_b64").and_then(Value::as_str) {
+            let bytes = makepad_base64::base64_decode(b64.trim().as_bytes())
+                .map_err(|_| "input_b64 is not base64".to_string())?;
+            if bytes.is_empty() {
+                return Err("input_b64 is empty".to_string());
+            }
+            if bytes.len() as u64 > MAX_INPUT_BYTES {
+                return Err(format!("input_b64 too large ({} bytes)", bytes.len()));
+            }
+            let content_type = body
+                .get("input_content_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|ct| *ct == "image/png" || *ct == "image/jpeg")
+                .unwrap_or(if bytes.starts_with(&[0xFF, 0xD8]) {
+                    "image/jpeg"
+                } else {
+                    "image/png"
+                })
+                .to_string();
+            return Ok(Some(GenInput { bytes, content_type }));
+        }
+        if let Some(revision) = body.get("input_revision").and_then(Value::as_str) {
+            let revision = AssetRevisionId::from_str(revision.trim())
+                .map_err(|_| "malformed input_revision".to_string())?;
+            let manifest = self
+                .client
+                .fetch_asset_manifest(&revision)
+                .map_err(|e| format!("input manifest: {e}"))?;
+            let file = manifest
+                .files
+                .iter()
+                .find(|f| matches!(f.media, MediaType::Png | MediaType::Jpeg))
+                .ok_or("input revision has no image file")?;
+            if file.byte_len > MAX_INPUT_BYTES {
+                return Err(format!("input file too large ({} bytes)", file.byte_len));
+            }
+            let bytes = self
+                .client
+                .fetch_blob_bytes(&file.blob, Some(file.byte_len))
+                .map_err(|e| format!("input blob: {e}"))?;
+            let content_type = match file.media {
+                MediaType::Jpeg => "image/jpeg",
+                _ => "image/png",
+            };
+            return Ok(Some(GenInput { bytes, content_type: content_type.to_string() }));
+        }
+        if let Some(alias) = body.get("input_alias").and_then(Value::as_str) {
+            let alias = AssetAlias::from_str(alias.trim())
+                .map_err(|_| "malformed input_alias".to_string())?;
+            let bytes = self
+                .client
+                .thumbnail_alias_bytes(&alias)
+                .map_err(|e| format!("thumbnail sheet for {alias}: {e}"))?;
+            let content_type = if bytes.starts_with(&[0xFF, 0xD8]) {
+                "image/jpeg"
+            } else {
+                "image/png"
+            };
+            return Ok(Some(GenInput { bytes, content_type: content_type.to_string() }));
+        }
+        Ok(None)
+    }
+
     /// Claim/process until stopped. Transport errors back off and retry.
     pub fn run(&mut self, stop: &AtomicBool) {
         while !stop.load(Ordering::SeqCst) {
@@ -585,16 +1723,21 @@ fn build_product(
     request: &GenRequest,
     product: GenArtifact,
 ) -> Result<PublishRequest, String> {
-    let mut title = makepad_asset_client::util::sanitize_text(&request.prompt, 120);
+    // The row is titled by what the PERSON typed. An expanded prompt is a
+    // paragraph of camera language; a person looking for their run scans for
+    // their own words.
+    let titled_from = request.original_prompt.as_deref().unwrap_or(&request.prompt);
+    let mut title = annotation_text(titled_from, 120);
     if title.is_empty() {
         title = format!("Generated {}", kind.action);
     }
+    let shape = kind.catalog().ok_or("kind publishes no catalog row")?;
     let bytes = product.bytes;
     let mut stats = PublishStats::default();
     let mut extra_tags: Vec<String> = Vec::new();
-    let (media_millis, dims, thumbnail) = match kind.media {
+    let (media_millis, dims, thumbnail) = match shape.media {
         MediaType::Png | MediaType::Jpeg => {
-            let dims = match kind.media {
+            let dims = match shape.media {
                 MediaType::Jpeg => jpeg_dims(&bytes),
                 _ => png_dims(&bytes),
             }
@@ -608,7 +1751,7 @@ fn build_product(
             (0, Some(dims), thumbnail)
         }
         MediaType::Wav | MediaType::Mp3 | MediaType::Ogg => {
-            let pcm = decode_audio(&bytes, kind.media)?;
+            let pcm = decode_audio(&bytes, shape.media)?;
             let millis = pcm.millis();
             let picture = audio_thumbnail_jpeg(&pcm)?;
             let thumbnail = PublishThumbnail {
@@ -702,19 +1845,19 @@ fn build_product(
 
     let mut request_out = PublishRequest::new(
         ns,
-        kind.asset_kind,
+        shape.asset_kind,
         title,
         PublishFile {
             bytes,
-            media: kind.media,
-            role: kind.role,
+            media: shape.media,
+            role: shape.role,
             media_millis,
             dims,
         },
         thumbnail,
     );
-    request_out.categories = vec![kind.category.to_string()];
-    request_out.tags = kind.tags.iter().map(|t| t.to_string()).collect();
+    request_out.categories = vec![shape.category.to_string()];
+    request_out.tags = shape.tags.iter().map(|t| t.to_string()).collect();
     request_out.tags.extend(extra_tags);
     // Client-proposed tags ride the job body (the VJ's loop pipe tags its
     // clips `loop`). Bounded and charset-checked here so a buggy client
@@ -733,8 +1876,356 @@ fn build_product(
     Ok(request_out)
 }
 
+/// A music request body composed by the expander.
+///
+/// THE DEFECT THIS EXISTS TO FIX: the music expander was told to write a
+/// caption and then lyrics after a `Lyrics:` marker, and told that the
+/// pipeline split on it. Nothing did — the whole answer became the caption
+/// and the `lyrics` field stayed empty, so MiniMax substituted
+/// `[Instrumental]` and EVERY expanded vocal request came back as an
+/// instrumental. The writer now answers with the body itself and it is
+/// parsed here, which is the only way `lyrics` can ever be filled.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MusicBody {
+    prompt: String,
+    lyrics: String,
+    seconds: Option<f64>,
+    steps: Option<u64>,
+    seed: Option<u64>,
+}
+
+impl MusicBody {
+    /// Merge onto the job body so the wire request picks the fields up. The
+    /// person's own body WINS on duration and seed: they asked for those,
+    /// the writer only proposed them.
+    fn apply(self, request: &mut GenRequest) {
+        request.prompt = annotation_text(&self.prompt, MAX_EXPANDED_PROMPT_BYTES);
+        let mut body = request.body.clone();
+        // Words the PERSON wrote are never replaced by words a model wrote:
+        // the writer never even saw them (it is given the request, not the
+        // body), so anything it invents here would be a substitution, not an
+        // improvement.
+        let has_lyrics = request
+            .body
+            .get("lyrics")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        if !has_lyrics {
+            set_key(&mut body, "lyrics", s(self.lyrics.clone()));
+        }
+        if let Some(seconds) = self.seconds {
+            if request.body.get("seconds").is_none() {
+                set_key(&mut body, "seconds", Value::F64(seconds));
+            }
+        }
+        if let Some(steps) = self.steps {
+            if request.body.get("steps").is_none() {
+                set_key(&mut body, "steps", Value::Int(steps as i64));
+            }
+        }
+        if let Some(seed) = self.seed {
+            if request.seed.is_none() {
+                set_key(&mut body, "seed", Value::Int(seed as i64));
+                request.seed = Some(seed);
+            }
+        }
+        request.body = body;
+    }
+}
+
+/// Set (or replace) one key on a JSON object value.
+fn set_key(value: &mut Value, key: &str, new: Value) {
+    if let Value::Obj(pairs) = value {
+        if let Some(pair) = pairs.iter_mut().find(|(k, _)| k == key) {
+            pair.1 = new;
+            return;
+        }
+        pairs.push((key.to_string(), new));
+    }
+}
+
+/// Parse the writer's answer into a music body. `None` = it did not answer
+/// with one, and the caller falls back to using the whole answer as the
+/// prompt exactly as before — a bad expansion never costs the run.
+///
+/// Salvages a fenced or chatty answer by reading from the first `{` to the
+/// last `}`: a model that says "Here you go:" first is still usable. Only
+/// the keys the body actually has are taken; `model` is deliberately NOT
+/// among them, because which model runs is a scheduling decision and never
+/// a thing the writer gets to change.
+fn compose_music_body(answer: &str) -> Option<MusicBody> {
+    let start = answer.find('{')?;
+    let end = answer.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let value = makepad_asset_client::json::parse(answer[start..=end].as_bytes()).ok()?;
+    let prompt = value.get("prompt").and_then(Value::as_str)?.trim().to_string();
+    if prompt.is_empty() {
+        return None;
+    }
+    let number = |key: &str| -> Option<f64> {
+        match value.get(key)? {
+            Value::F64(f) => Some(*f),
+            Value::Int(i) => Some(*i as f64),
+            Value::Str(text) => text.trim().parse().ok(),
+            _ => None,
+        }
+    };
+    Some(MusicBody {
+        prompt,
+        // An absent or empty lyric field means instrumental, and the models
+        // want that said rather than left blank.
+        lyrics: value
+            .get("lyrics")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("[Instrumental]")
+            .to_string(),
+        seconds: number("seconds").filter(|v| (5.0..=300.0).contains(v)),
+        steps: number("steps").filter(|v| (1.0..=64.0).contains(v)).map(|v| v as u64),
+        seed: number("seed").filter(|v| *v >= 0.0).map(|v| v as u64),
+    })
+}
+
+/// The extra TOP-LEVEL result fields a claimed `text.expand` job records.
+///
+/// `prompt` is ALWAYS one of them. A pipeline must not have to know whether
+/// the writer answered prose or the music body contract in order to know
+/// which field to point its splice at — it points at `prompt` and gets the
+/// same words the worker-side pre-step would have handed the next model.
+///
+/// A music answer flattens the rest of the body it wrote: `lyrics` (the
+/// whole reason the contract exists — an empty lyric field is what made
+/// every expanded vocal request come back instrumental) and the numbers it
+/// proposed. `model` is deliberately NOT among them, here as in
+/// [`compose_music_body`]: which model runs is a scheduling decision, never
+/// the writer's to make.
+fn expansion_fields(kind: &GenKind, answer: &str) -> Vec<(String, Value)> {
+    if kind.kind != expand_kind().kind {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, Value)> = Vec::new();
+    match compose_music_body(answer) {
+        Some(body) => {
+            out.push((
+                "prompt".to_string(),
+                s(annotation_text(&body.prompt, MAX_EXPANDED_PROMPT_BYTES)),
+            ));
+            // Line breaks SURVIVE here: `[Verse]` and `[Chorus]` on their
+            // own lines are what the music models read.
+            out.push((
+                "lyrics".to_string(),
+                s(bounded_answer(&body.lyrics, MAX_EXPANDED_PROMPT_BYTES)),
+            ));
+            if let Some(seconds) = body.seconds {
+                out.push(("seconds".to_string(), Value::F64(seconds)));
+            }
+            if let Some(steps) = body.steps {
+                out.push(("steps".to_string(), Value::Int(steps as i64)));
+            }
+            if let Some(seed) = body.seed {
+                out.push(("seed".to_string(), Value::Int(seed as i64)));
+            }
+        }
+        // Prose: the answer itself is the prompt, cleaned exactly the way
+        // the pre-step cleans it before handing it to the next model.
+        None => out.push((
+            "prompt".to_string(),
+            s(annotation_text(answer, MAX_EXPANDED_PROMPT_BYTES)),
+        )),
+    }
+    out
+}
+
+/// The budgets a claimed `text.expand` stage runs on: the same deadline and
+/// the same token allowance the worker-side pre-step gives itself, so an
+/// expansion enqueued as a pipeline stage and one run in front of a
+/// generation cannot answer differently.
+///
+/// A music expansion is not a paragraph: it is a JSON body carrying a
+/// caption AND a full lyric script, and at the 512-token default the
+/// composer was cut off mid-song — which is not a worse prompt, it is an
+/// unparseable one. The body's own `max_tokens` still wins: an enqueuer
+/// that said what it wanted is not overruled.
+fn expand_stage_budget(request: &mut GenRequest) -> Duration {
+    let music = matches!(
+        request.body.get("target_domain").and_then(Value::as_str),
+        Some("music") | Some("music_loop")
+    );
+    if request.body.get("max_tokens").is_none() {
+        let budget = if music { EXPAND_MUSIC_MAX_TOKENS } else { EXPAND_MAX_TOKENS };
+        let mut body = request.body.clone();
+        set_key(&mut body, "max_tokens", Value::Int(budget as i64));
+        request.body = body;
+    }
+    if music {
+        EXPAND_MUSIC_DEADLINE
+    } else {
+        EXPAND_DEADLINE
+    }
+}
+
+/// Does this body ask for a seamless LOOP rather than a song? The VJ tags
+/// its loop clips, and a loop request wants the writer that knows a loop
+/// has no intro, no outro and no final cadence.
+fn wants_loop(body: &Value) -> bool {
+    if body.get("loop").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    body.get("tags")
+        .and_then(Value::as_arr)
+        .is_some_and(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .any(|tag| tag.eq_ignore_ascii_case("loop"))
+        })
+}
+
 fn bounded(text: &str, max: usize) -> String {
     makepad_asset_client::util::sanitize_text(text, max)
+}
+
+/// Longest prompt recorded on a published row (the job body itself refuses
+/// anything past 4 000, so this only ever bounds an expansion).
+const MAX_PROMPT_BYTES: usize = 4_000;
+
+/// Text on its way into a searchable annotation.
+///
+/// Every annotation field is refused by the store if it carries a control
+/// character, and the expander's answer is a paragraph with newlines in it.
+/// A control character becomes ONE SPACE rather than nothing: dropping the
+/// newline between two lines would run their words together and make the
+/// prompt unsearchable. Whitespace runs collapse, the ends trim, and the
+/// cut happens on a word boundary so the last word is a word.
+fn annotation_text(text: &str, max: usize) -> String {
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out = String::with_capacity(spaced.len().min(max));
+    for word in spaced.split_whitespace() {
+        let sep = usize::from(!out.is_empty());
+        if out.len() + sep + word.len() > max {
+            break;
+        }
+        if sep == 1 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        // One word longer than the whole budget: cut it mid-word rather
+        // than publish an empty field.
+        out = bounded(spaced.trim(), max);
+    }
+    out
+}
+
+/// Did the store refuse this publication over annotation TEXT (as opposed
+/// to the artifact, the rights, or the network)? Only that class is worth
+/// republishing with plainer words.
+fn is_annotation_text_refusal(error: &ClientError) -> bool {
+    match error {
+        ClientError::InvalidInput { what } => what.starts_with("annotation"),
+        // The server's own validator, reported through its error document.
+        ClientError::Server { detail: Some(detail), .. } => {
+            detail.contains("annotation") && !detail.contains("artifact")
+        }
+        _ => false,
+    }
+}
+
+/// Last-resort annotation: exactly what the store's validator accepts —
+/// no control characters anywhere, a title that exists, and labels within
+/// the charset. Used only after a refusal, on work that is already paid for.
+fn scrub_annotation(publish: &mut PublishRequest) {
+    publish.title = annotation_text(&publish.title, 120);
+    if publish.title.is_empty() {
+        publish.title = "Generated asset".to_string();
+    }
+    publish.description = annotation_text(&publish.description, 1_000);
+    publish.prompt = annotation_text(&publish.prompt, MAX_PROMPT_BYTES);
+    publish.provenance = annotation_text(&publish.provenance, 500);
+    let label_ok = |label: &String| {
+        !label.is_empty() && label.len() <= 128 && !label.chars().any(char::is_control)
+    };
+    publish.categories.retain(label_ok);
+    publish.tags.retain(label_ok);
+}
+
+/// Bound an ANSWER for the job result document. Line breaks survive — a
+/// nine-line record and a paragraph are different answers, and the client
+/// that asked gets what the model actually wrote — while every other
+/// control character is dropped.
+fn bounded_answer(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The vision progress line: which model, on which box, how long so far.
+fn vision_note(model: &str, host: Option<&str>, seconds: f64) -> String {
+    match host {
+        Some(host) => format!("vision · {model} @ {host} · {seconds:.1} s"),
+        None => format!("vision · {model} · {seconds:.1} s"),
+    }
+}
+
+/// Frame a published turntable sheet for the vision tower and encode it for
+/// the wire. The framing is the annotation pass's
+/// ([`pass::sheet_to_rgb`]); only the container is decided here.
+fn sheet_image(sheet_bytes: &[u8], person: bool) -> Result<Vec<u8>, String> {
+    // An imported asset publishes the PNG turntable sheet; a generated one
+    // publishes a JPEG. Both are pictures OF the asset, so both are framed
+    // the same way rather than one of them failing the job.
+    let decoded = if sheet_bytes.starts_with(&[0xFF, 0xD8]) {
+        let (rgba, w, h) = crate::quake3_import::decode_jpeg(sheet_bytes)?;
+        let mut pixels = Vec::with_capacity(w as usize * h as usize * 3);
+        for px in rgba.chunks_exact(4) {
+            pixels.extend_from_slice(&px[..3]);
+        }
+        sheet::Rgb { w: w as usize, h: h as usize, pixels }
+    } else {
+        sheet::decode_png(sheet_bytes)?
+    };
+    let rgb = pass::frame_sheet(decoded, person, &SheetPrep::default());
+    let mut bgra = Vec::with_capacity(rgb.w * rgb.h);
+    for px in rgb.pixels.chunks_exact(3) {
+        bgra.push(
+            0xff00_0000 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32,
+        );
+    }
+    encode_jpeg_bgra(&bgra, rgb.w, rgb.h)
+}
+
+/// The annotation record as the pass reads it.
+fn base_annotation(current: makepad_asset_client::dto::AnnotationDto) -> BaseAnnotation {
+    BaseAnnotation {
+        title: current.title,
+        description: current.description,
+        kind: current
+            .kind
+            .map(|k| makepad_asset_client::dto::kind_name(k).to_string()),
+        categories: current.categories,
+        tags: current.tags,
+        creator: current.creator,
+        generator: current.generator,
+        backend: current.backend,
+        model: current.model,
+        prompt: current.prompt,
+        provenance: current.provenance,
+        private: current.private,
+    }
 }
 
 /// The service's final VRAM gate runs on its GPU worker after submission and
@@ -772,6 +2263,72 @@ pub struct AssetAiFleet {
     log: bool,
     /// The box a dispatched job lives on: `fleet_job -> base_url`.
     routes: std::collections::HashMap<String, String>,
+    /// The rest of the fleet, kept live by whoever owns the claim loops.
+    /// A pinned adapter dispatches ONLY to its own box — that pinning is
+    /// what stops every loop from piling onto the same warm GPU — until a
+    /// job proves its box cannot take it. Then, and only for that job, these
+    /// boxes join the selection.
+    overflow: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Latched by [`GenFleet::widen_to_idle`], cleared by
+    /// [`GenFleet::narrow`] at the start of every job.
+    widened: bool,
+    /// Throttled `jobs_pending` reading per box, for the "queued behind N
+    /// runs" note: `base_url -> (read at, depth)`. Only a job actually
+    /// sitting in a node queue ever asks, and then at most this often.
+    queue_depth: std::collections::HashMap<String, (Instant, u64)>,
+}
+
+/// How often a queued job may ask its box how deep its queue is.
+const QUEUE_DEPTH_EVERY: Duration = Duration::from_secs(5);
+
+/// How long one provisioning may hold its slot before another may be
+/// started for the same model. A 17 GB pull over the LAN is minutes and
+/// over the internet can be an hour; the record is also cleared the moment
+/// the target reports the model ready, so this is only the backstop for a
+/// box that vanished mid-pull.
+const PROVISION_TTL: Duration = Duration::from_secs(90 * 60);
+
+/// Transfer-ticket lifetime. The whole pull rides one set of tickets and a
+/// big model takes a while, so this is hours rather than the peer lane's
+/// 5-minute interactive default (its own 24 h cap still applies).
+const PROVISION_TICKET_TTL: u64 = 6 * 60 * 60;
+
+/// One in-flight demand-flip provisioning.
+#[derive(Clone, Debug)]
+struct ProvisionRecord {
+    /// Short label of the box being filled (".100").
+    at: String,
+    base_url: String,
+    fleet_job: String,
+    started: Instant,
+}
+
+/// AT MOST ONE PROVISIONING PER MODEL, process-wide.
+///
+/// Every box has its own claim loop and its own fleet adapter, and they all
+/// watch the same fleet: without a shared record, six loops noticing the
+/// same starving queue would start the same 17 GB download on six different
+/// boxes at once. Keyed by model id, because that is what is scarce.
+fn provisioning() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, ProvisionRecord>,
+> {
+    static IN_FLIGHT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ProvisionRecord>>,
+    > = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+/// The fleet's shared transfer secret, coordinator side.
+///
+/// Env only: the coordinator is not a service and has no cache directory of
+/// its own. Run the app with
+/// `MAKEPAD_AI_PEER_SECRET=$(cat <box cache>/peer-secret)` and every pull it
+/// provisions is minted for the LAN; without it the pull still happens, it
+/// just cannot be ticketed and the node falls back to its own sources
+/// (`MAKEPAD_AI_PEER_SOURCES`) or Hugging Face.
+fn coordinator_peer_secret() -> Option<makepad_asset_ai::peer::TransferSecret> {
+    let text = std::env::var("MAKEPAD_AI_PEER_SECRET").ok()?;
+    makepad_asset_ai::peer::TransferSecret::new(text.as_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -782,7 +2339,10 @@ enum GenRoute {
         backend: String,
         version: String,
     },
-    Waiting { stage: String },
+    /// Nothing can run this yet. `on` is the box being held for, when there
+    /// is one — the scheduler needs to know whether that box is merely
+    /// short of memory for a moment, or busy for the next several minutes.
+    Waiting { stage: String, on: Option<usize> },
 }
 
 impl AssetAiFleet {
@@ -797,6 +2357,9 @@ impl AssetAiFleet {
             discovered: None,
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         })
     }
 
@@ -806,6 +2369,9 @@ impl AssetAiFleet {
             discovered: Some(makepad_asset_ai::discovery::start_listener()),
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         }
     }
 
@@ -815,7 +2381,24 @@ impl AssetAiFleet {
             discovered: None,
             log,
             routes: Default::default(),
+            overflow: None,
+            widened: false,
+            queue_depth: Default::default(),
         }
+    }
+
+    /// Name the rest of the fleet for a PINNED adapter (one box, one claim
+    /// loop). The list is read live, so a box that joins later is a valid
+    /// destination without respawning anything. Nothing here changes where
+    /// jobs normally go: these boxes enter selection only after
+    /// [`GenFleet::widen_to_idle`] finds one of them idle for a job its own
+    /// box is holding up.
+    pub fn with_overflow(
+        mut self,
+        boxes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> AssetAiFleet {
+        self.overflow = Some(boxes);
+        self
     }
 
     pub fn boxes(&self) -> Vec<String> {
@@ -830,14 +2413,40 @@ impl AssetAiFleet {
         boxes
     }
 
+    /// The boxes one dispatch may choose between: this adapter's own, plus
+    /// the rest of the fleet once a job has been widened onto it.
+    fn dispatch_boxes(&self) -> Vec<String> {
+        let mut boxes = self.boxes();
+        if self.widened {
+            for url in self.overflow_boxes() {
+                if !boxes.contains(&url) {
+                    boxes.push(url);
+                }
+            }
+        }
+        boxes
+    }
+
+    /// The wider fleet as it stands right now (empty when this adapter was
+    /// never given one).
+    fn overflow_boxes(&self) -> Vec<String> {
+        self.overflow
+            .as_ref()
+            .and_then(|boxes| boxes.lock().ok().map(|boxes| boxes.clone()))
+            .unwrap_or_default()
+    }
+
     /// Health + model snapshot of every box this adapter can reach.
     pub fn snapshots(&self) -> (Vec<makepad_asset_ai::fleet::BoxSnapshot>, bool) {
+        self.snapshots_of(&self.boxes())
+    }
+
+    fn snapshots_of(&self, boxes: &[String]) -> (Vec<makepad_asset_ai::fleet::BoxSnapshot>, bool) {
         use makepad_asset_ai::client::{ContentProvider, LocalService};
         use makepad_asset_ai::fleet::BoxSnapshot;
-        let boxes = self.boxes();
         let mut snapshots = Vec::with_capacity(boxes.len());
         let mut probe_incomplete = false;
-        for url in &boxes {
+        for url in boxes {
             let provider = LocalService::new(url);
             let mut snapshot = BoxSnapshot::new(url);
             match provider.health() {
@@ -867,13 +2476,19 @@ impl AssetAiFleet {
         (snapshots, probe_incomplete)
     }
 
-    /// Domains every reachable box advertises, deduplicated.
+    /// Domains every reachable box advertises, deduplicated — minus what
+    /// each box's ROLE forbids. This is what the claim filter is built
+    /// from, so a dedicated chat box never claims a video job in the first
+    /// place: it advertises `video` honestly, and its role says no.
     pub fn capabilities(&self) -> Vec<String> {
         let (snapshots, _) = self.snapshots();
         let mut out: Vec<String> = Vec::new();
         for snapshot in &snapshots {
             let Some(health) = snapshot.health.as_ref() else { continue };
             for domain in health.capabilities.iter().flatten() {
+                if !makepad_asset_ai::fleet::role_allows(&snapshot.base_url, domain) {
+                    continue;
+                }
                 if !out.contains(domain) {
                     out.push(domain.clone());
                 }
@@ -886,20 +2501,435 @@ impl AssetAiFleet {
     /// facts pass admission. A hardware-compatible target under transient
     /// pressure remains a wait candidate instead of becoming an error or a
     /// fallback submission.
-    fn pick_box(&self, domain: &str, want_model: &str) -> Result<GenRoute, String> {
-        let (snapshots, probe_incomplete) = self.snapshots();
+    fn pick_box(
+        &self,
+        boxes: &[String],
+        domain: &str,
+        want_model: &str,
+    ) -> Result<GenRoute, String> {
+        let (snapshots, probe_incomplete) = self.snapshots_of(boxes);
         match select_route(&snapshots, domain, want_model) {
             Err(_) if probe_incomplete => Ok(GenRoute::Waiting {
                 stage: "waiting-for-fleet: capability probe incomplete".to_string(),
+                on: None,
             }),
             result => result,
         }
     }
+
+    /// DEMAND FLIP: start a peer-first model pull on an idle box because
+    /// every box holding the model is busy and this job is stacking behind
+    /// them. Returns the note a waiting job shows while it happens.
+    ///
+    /// The pull is an ordinary node job (`pull_only`), so it queues, reports
+    /// download progress and cancels like anything else — and the queued
+    /// work is NOT moved onto it: it keeps waiting for a box that can run it
+    /// now, and ordinary dispatch picks the new copy up the moment it lands.
+    fn provision_for_demand(&mut self, request: &GenRequest) -> Option<String> {
+        use makepad_asset_ai::client::{ContentProvider, LocalService};
+        use makepad_asset_ai::registry::Domain;
+        let mut boxes = self.boxes();
+        for url in self.overflow_boxes() {
+            if !boxes.contains(&url) {
+                boxes.push(url);
+            }
+        }
+        let (snapshots, _) = self.snapshots_of(&boxes);
+        // Retire finished/stale records first, so a model whose pull landed
+        // can be provisioned again later if the fleet starves again.
+        self.forget_finished_provisioning(&snapshots);
+        let plan = {
+            let in_flight = |model: &str| provisioning().lock().is_ok_and(|map| map.contains_key(model));
+            provision_plan(&snapshots, request.kind.domain, &request.model, &in_flight)?
+        };
+        let target = &snapshots[plan.target];
+        let base_url = boxes[plan.target].clone();
+        let Some(domain) = Domain::parse(request.kind.domain) else {
+            return None;
+        };
+        // Peer sources: the boxes that HOLD it. Bytes come off the LAN, not
+        // out of the internet — that is the whole point of provisioning from
+        // inside the fleet.
+        let sources: Vec<String> = plan
+            .sources
+            .iter()
+            .map(|index| snapshots[*index].base_url.clone())
+            .collect();
+        let tickets = self.peer_tickets_for(&snapshots, &plan, target);
+        let wire = makepad_asset_ai::protocol::GenerateRequestJson {
+            model: plan.model.clone(),
+            pull_only: Some(true),
+            peer_sources: (!sources.is_empty()).then(|| sources.clone()),
+            peer_tickets: (!tickets.is_empty()).then_some(tickets),
+            ..Default::default()
+        };
+        let fleet_job = match LocalService::new(&base_url).request(domain, &wire) {
+            Ok(job) => job,
+            Err(error) => {
+                if self.log {
+                    eprintln!("[asset-worker] provisioning {} on {base_url} refused: {error}", plan.model);
+                }
+                return None;
+            }
+        };
+        let at = short_label(&base_url);
+        let from: Vec<String> = sources.iter().map(|url| short_label(url)).collect();
+        if let Ok(mut map) = provisioning().lock() {
+            map.insert(
+                plan.model.clone(),
+                ProvisionRecord {
+                    at: at.clone(),
+                    base_url: base_url.clone(),
+                    fleet_job,
+                    started: Instant::now(),
+                },
+            );
+        }
+        if self.log {
+            eprintln!(
+                "[asset-worker] every box holding {} is busy — provisioning it on {at} from {}",
+                plan.model,
+                from.join(", ")
+            );
+        }
+        Some(format!(
+            "provisioning {} on {at} from {}",
+            plan.model,
+            if from.is_empty() { "the internet".to_string() } else { from.join(", ") }
+        ))
+    }
+
+    /// One ticket per (source box, pinned file digest) — what the receiver
+    /// needs to ask a peer for those exact bytes. Empty when this process
+    /// holds no fleet secret; the pull then falls back to the node's own
+    /// configured sources or Hugging Face.
+    fn peer_tickets_for(
+        &self,
+        snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+        plan: &ProvisionPlan,
+        target: &makepad_asset_ai::fleet::BoxSnapshot,
+    ) -> Vec<String> {
+        use makepad_asset_ai::peer::PeerTicket;
+        use makepad_asset_ai::registry::Registry;
+        let Some(secret) = coordinator_peer_secret() else {
+            return Vec::new();
+        };
+        let Some(receiver_key) = target.health.as_ref().and_then(|h| h.node_key.clone()) else {
+            return Vec::new();
+        };
+        let Ok(registry) = Registry::embedded() else {
+            return Vec::new();
+        };
+        let Some(spec) = registry.find(&plan.model) else {
+            return Vec::new();
+        };
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + PROVISION_TICKET_TTL;
+        let mut tickets = Vec::new();
+        for index in &plan.sources {
+            let Some(source_key) = snapshots[*index].health.as_ref().and_then(|h| h.node_key.clone())
+            else {
+                continue;
+            };
+            for file in &spec.files {
+                let Some(digest) = file.sha256.as_deref() else {
+                    continue;
+                };
+                tickets.push(PeerTicket::mint(&secret, &source_key, &receiver_key, digest, expires));
+            }
+        }
+        tickets
+    }
+
+    /// Drop provisioning records whose model has landed (or whose pull is
+    /// long gone), so the fleet can provision that model again later.
+    fn forget_finished_provisioning(
+        &self,
+        snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    ) {
+        use makepad_asset_ai::fleet::affinity;
+        let Ok(mut map) = provisioning().lock() else {
+            return;
+        };
+        map.retain(|model, record| {
+            if record.started.elapsed() > PROVISION_TTL {
+                return false;
+            }
+            // Landed: the box it was pulled onto now holds it.
+            let landed = snapshots.iter().any(|snapshot| {
+                snapshot.base_url == record.base_url
+                    && affinity(snapshot, model).is_some_and(|score| score >= WARM_AFFINITY)
+            });
+            !landed
+        });
+    }
+
+    /// How many of a box's own runs are in front of a job queued there.
+    /// Throttled: a queued job polls every second or so and the answer only
+    /// changes when a run ends. `None` = the box did not say.
+    fn runs_ahead(&mut self, base_url: &str) -> Option<u64> {
+        use makepad_asset_ai::client::{ContentProvider, LocalService};
+        if let Some((at, depth)) = self.queue_depth.get(base_url) {
+            if at.elapsed() < QUEUE_DEPTH_EVERY {
+                return Some(*depth);
+            }
+        }
+        let pending = LocalService::new(base_url).health().ok()?.jobs_pending?;
+        // `jobs_pending` counts this job too.
+        let ahead = pending.saturating_sub(1);
+        self.queue_depth
+            .insert(base_url.to_string(), (Instant::now(), ahead));
+        Some(ahead)
+    }
 }
 
-/// Route one request: an explicit model pin is honoured whenever any
-/// compatible GPU advertises it, otherwise the domain's best model wins.
+/// Affinity score of a model whose weights are already ON the box
+/// (`ready`), the threshold between "run it now" and "pull gigabytes
+/// first". `loaded` scores above it; `downloading`/`absent` below.
+/// See `makepad_asset_ai::fleet::affinity_reason`.
+const WARM_AFFINITY: u32 = 3;
+
+/// Route one request: an explicit model pin is honoured whenever a
+/// compatible GPU already HOLDS it, otherwise the box's own best model for
+/// the domain wins — and an IDLE box beats a busy one either way.
+///
+/// A pin is a preference, not an instruction to fetch. A picker's profile
+/// carries one model id fleet-wide, so a pin that is merely *capable* on
+/// this box (`absent`/`downloading`) used to make every box start the same
+/// multi-GB download — including a node whose own native tier of the same
+/// domain sat `ready` beside it, and a 24 GB node that then could not fit
+/// the result. Warm weights win: the pin is honoured when it is loaded or
+/// cached here, and otherwise the domain's warm model on this box runs
+/// instead. Nothing waits for a download that a resident model makes
+/// unnecessary.
+///
+/// SPREAD BEFORE STACKING. Warmth alone picked the busiest GPU in the
+/// fleet: a box running a clip is maximally warm, so every following job
+/// queued behind it while boxes with the same weights on disk sat empty.
+/// Warmth is a ~30 s question (loading cached weights); a queue is a
+/// minutes question (the run in front has to finish). So an idle box that
+/// can start now beats a warm busy one — but only when it can genuinely
+/// start: weights it already holds (`ready` or better), never a download,
+/// and never a synthetic test backend.
 fn select_route(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+) -> Result<GenRoute, String> {
+    use makepad_asset_ai::fleet::{affinity, is_synthetic_backend};
+    // A DOWNLOAD NEVER STEALS FROM A BOX THAT HAS THE WEIGHTS — not even
+    // from a busy one. Checked first, because it outranks idleness.
+    let route = hold_for_weights(
+        snapshots,
+        domain,
+        want_model,
+        warm_route(snapshots, domain, want_model)?,
+    );
+    // Which box is this route standing on, and is that box busy? An idle
+    // box holding the job is not a stacking problem: its memory frees on
+    // its own, and moving would only cost a load somewhere else.
+    let held_by = match &route {
+        GenRoute::Admitted { index, .. } => Some(*index),
+        GenRoute::Waiting { on, .. } => *on,
+    };
+    let busy = held_by.is_some_and(|index| !is_idle(&snapshots[index]));
+    if !busy {
+        return Ok(route);
+    }
+    let idle: Vec<makepad_asset_ai::fleet::BoxSnapshot> = snapshots
+        .iter()
+        .map(|snapshot| {
+            if is_idle(snapshot) {
+                snapshot.clone()
+            } else {
+                // Same index, nothing to offer: every picker skips a box
+                // that advertises no model, so the indices a route carries
+                // still point at the real snapshot list.
+                let mut hidden = snapshot.clone();
+                hidden.models.clear();
+                hidden
+            }
+        })
+        .collect();
+    if let Ok(GenRoute::Admitted { index, model, backend, version }) =
+        warm_route(&idle, domain, want_model)
+    {
+        let warm = affinity(&snapshots[index], &model).is_some_and(|score| score >= WARM_AFFINITY);
+        if warm && !is_synthetic_backend(&backend) {
+            return Ok(GenRoute::Admitted { index, model, backend, version });
+        }
+    }
+    Ok(route)
+}
+
+/// Refuse a route that would DOWNLOAD a model the fleet already holds.
+///
+/// The admitted pickers only see boxes with free memory right now, so a box
+/// mid-clip drops out of them — and the fleet's fresh, empty box wins the
+/// job and starts pulling 17 GB of weights that are already cached two
+/// racks over. That trade is always wrong: a download is tens of minutes
+/// and a queue is one run. So when any hardware-compatible box HOLDS the
+/// weights (`loaded`/`ready`) — busy or not, admitted or not — a cold box
+/// does not get the job; the job waits for the box that has it, and the
+/// migration clock is the safety valve if that box never frees.
+///
+/// A cold route survives only when nothing in the fleet holds anything for
+/// this work: the weights have to be acquired sometime.
+fn hold_for_weights(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+    route: GenRoute,
+) -> GenRoute {
+    use makepad_asset_ai::fleet::affinity;
+    let GenRoute::Admitted { index, ref model, .. } = route else {
+        return route;
+    };
+    if affinity(&snapshots[index], model).is_some_and(|score| score >= WARM_AFFINITY) {
+        return route;
+    }
+    match warm_holder(snapshots, domain, want_model) {
+        Some((holder, held)) if holder != index => GenRoute::Waiting {
+            stage: holding_stage(&held, &short_label(&snapshots[holder].base_url)),
+            on: Some(holder),
+        },
+        _ => route,
+    }
+}
+
+/// The best box that already HAS weights for this work, whether or not its
+/// memory is free this second. Deliberately the `*_scored` pickers, not the
+/// `*_admitted_scored` ones: a box busy with a run is exactly the box this
+/// rule protects.
+fn warm_holder(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+) -> Option<(usize, String)> {
+    use makepad_asset_ai::fleet::{pick_box_scored, pick_for_domain_scored};
+    if !want_model.is_empty() {
+        if let Some((index, score)) = pick_box_scored(snapshots, want_model) {
+            if score >= WARM_AFFINITY {
+                return Some((index, want_model.to_string()));
+            }
+        }
+    }
+    // Nobody holds the pin, but the domain's own warm model somewhere is
+    // still better than fetching gigabytes here — the same trade V4 made
+    // within one box, made across the fleet.
+    let (index, model, score) = pick_for_domain_scored(snapshots, domain)?;
+    (score >= WARM_AFFINITY).then_some((index, model))
+}
+
+/// Why a job is not moving when the fleet has the weights but no room yet.
+/// A third stall, and it reads as its own sentence: this is not a memory
+/// shortage on the box we chose, it is a deliberate wait for the box that
+/// already has the model.
+fn holding_stage(model: &str, on: &str) -> String {
+    format!("waiting-for-fleet: {model} is already on {on} — better than downloading it here")
+}
+
+/// What a demand-flip provisioning would do: pull `model` onto the box at
+/// `target`, sourcing it from the boxes at `sources` (which hold it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProvisionPlan {
+    model: String,
+    target: usize,
+    sources: Vec<usize>,
+}
+
+/// DEMAND FLIP. The anti-download rule ("a cold box never steals a job from
+/// one that has the weights") is right for ONE job and wrong for a QUEUE:
+/// when every box holding the model is busy and work is stacking behind
+/// them, the fleet's answer is not to wait harder, it is to acquire another
+/// copy. So the moment a job is queuing with no idle holder anywhere, the
+/// coordinator provisions the model onto the best idle box — as a job of its
+/// own, visible and cancellable — while the queued work keeps waiting on the
+/// boxes that can actually run it now. When the new copy lands, ordinary
+/// dispatch picks it up; nothing is re-routed by force.
+///
+/// Refuses to plan when:
+/// - nothing holds the model yet (that is a plain cold start, and
+///   [`warm_route`] already downloads it on the box that will run it);
+/// - some holder is IDLE (the job has somewhere to go right now);
+/// - no idle box can take it (hardware-incompatible, already holding it,
+///   or DEDICATED — a box with a role serves what it was given and its disk
+///   is not ours to fill);
+/// - a provisioning of this model is already in flight (`in_flight`).
+fn provision_plan(
+    snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
+    domain: &str,
+    want_model: &str,
+    in_flight: &dyn Fn(&str) -> bool,
+) -> Option<ProvisionPlan> {
+    use makepad_asset_ai::fleet::{
+        affinity, gpu_rank, is_synthetic_backend, role_allows, role_names,
+    };
+    // What would run this work: the pin when the fleet holds it, else the
+    // domain's warm model. Same answer `hold_for_weights` waits for.
+    let (_, model) = warm_holder(snapshots, domain, want_model)?;
+    if in_flight(&model) {
+        return None;
+    }
+    let mut holders = Vec::new();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if affinity(snapshot, &model).is_some_and(|score| score >= WARM_AFFINITY) {
+            // An IDLE holder means nothing is starving: the job can start
+            // there this second.
+            if is_idle(snapshot) {
+                return None;
+            }
+            holders.push(index);
+        }
+    }
+    if holders.is_empty() {
+        return None;
+    }
+    // The best idle box that could hold it but does not.
+    let mut target: Option<(usize, u32)> = None;
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if !is_idle(snapshot) || holders.contains(&index) {
+            continue;
+        }
+        if role_names(&snapshot.base_url) || !role_allows(&snapshot.base_url, domain) {
+            continue;
+        }
+        // It must be able to RUN what it is being given, by the same
+        // hardware rule dispatch uses — and a test pattern is not a model.
+        let Some(spec) = snapshot.models.iter().find(|info| info.id == model) else {
+            continue;
+        };
+        if is_synthetic_backend(&spec.backend)
+            || !makepad_asset_ai::fleet::model_admission(snapshot, &model)
+                .is_some_and(|admission| admission.is_hardware_compatible())
+        {
+            continue;
+        }
+        let rank = gpu_rank(snapshot);
+        if target.is_none_or(|(_, best)| rank > best) {
+            target = Some((index, rank));
+        }
+    }
+    let (target, _) = target?;
+    Some(ProvisionPlan { model, target, sources: holders })
+}
+
+/// A box with nothing queued or running on it.
+///
+/// Free VRAM is NOT this signal and must not be confused with it: a box
+/// holding a resident model reports little free memory and is still the
+/// fastest place to start (the service evicts to admit), while a box
+/// mid-clip has plenty of free memory between steps and none of it for
+/// anyone else.
+fn is_idle(snapshot: &makepad_asset_ai::fleet::BoxSnapshot) -> bool {
+    snapshot.is_up() && snapshot.jobs_pending() == 0
+}
+
+/// The warm/cold pin rules, over whatever set of boxes it is given.
+fn warm_route(
     snapshots: &[makepad_asset_ai::fleet::BoxSnapshot],
     domain: &str,
     want_model: &str,
@@ -909,19 +2939,37 @@ fn select_route(
         pick_for_domain_admitted_scored, pick_for_domain_scored,
     };
 
-    // An explicit/requested model remains a pin whenever any compatible GPU
-    // advertises it. Prefer any admitted copy; otherwise hold for the best
-    // compatible copy instead of silently changing models.
+    // An explicit/requested model remains a pin whenever a compatible GPU
+    // already holds it. Prefer an admitted WARM copy; otherwise hold for the
+    // best compatible copy instead of silently changing models.
     if !want_model.is_empty() {
-        if let Some((index, _)) = pick_box_admitted_scored(snapshots, want_model) {
+        if let Some((index, score)) = pick_box_admitted_scored(snapshots, want_model) {
+            if score >= WARM_AFFINITY {
+                return Ok(admitted_route(snapshots, index, want_model.to_string()));
+            }
+            // The pin is cold here. A warm model of the same domain on an
+            // admitted box beats waiting out a download.
+            if let Some((warm_index, warm_model, warm_score)) =
+                pick_for_domain_admitted_scored(snapshots, domain)
+            {
+                if warm_score >= WARM_AFFINITY && warm_model != want_model {
+                    return Ok(admitted_route(snapshots, warm_index, warm_model));
+                }
+            }
             return Ok(admitted_route(snapshots, index, want_model.to_string()));
         }
+        // Not admittable anywhere: HOLD for it. A pinned tier that is merely
+        // under transient VRAM pressure must not be silently downgraded —
+        // that is a different failure from "not on this box yet", and the
+        // caller asked for this model.
         if let Some((index, _)) = pick_box_scored(snapshots, want_model) {
             return Ok(GenRoute::Waiting {
                 stage: waiting_stage(
                     want_model,
                     model_admission(&snapshots[index], want_model),
+                    &short_label(&snapshots[index].base_url),
                 ),
+                on: Some(index),
             });
         }
     }
@@ -933,23 +2981,69 @@ fn select_route(
     }
     if let Some((index, model, _)) = pick_for_domain_scored(snapshots, domain) {
         let admission = model_admission(&snapshots[index], &model);
-        return Ok(GenRoute::Waiting { stage: waiting_stage(&model, admission) });
+        return Ok(GenRoute::Waiting {
+            stage: waiting_stage(&model, admission, &short_label(&snapshots[index].base_url)),
+            on: Some(index),
+        });
     }
     Err(format!(
         "no fleet box advertises a hardware-compatible {domain} model"
     ))
 }
 
+/// Short, URL-free name for a box: the last octet of a LAN address
+/// (".166"), else the host itself. Worker status documents are visible to
+/// Asset Server clients, so the address never appears in one — but WHICH
+/// box a job is stuck on is exactly what the person watching needs.
+fn short_label(base_url: &str) -> String {
+    let host = base_url
+        .rsplit('/')
+        .next()
+        .unwrap_or(base_url)
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    match host.rsplit_once('.') {
+        Some((_, last)) if !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) => {
+            format!(".{last}")
+        }
+        _ => host.to_string(),
+    }
+}
+
+/// How a job that a box has accepted but not started reads in the RUNS
+/// list. Honest about which of the two very different stalls this is: a
+/// queue behind that box's own runs, not a memory wait — and about WHICH
+/// box, because the person watching has a fleet, not a machine.
+fn queued_note(stage: &str, ahead: Option<u64>, tag: Option<&str>) -> String {
+    use makepad_asset_ai::protocol::JOB_STATE_QUEUED;
+    let note = match ahead {
+        Some(ahead) if ahead > 0 => {
+            format!("queued behind {ahead} run{}", if ahead == 1 { "" } else { "s" })
+        }
+        // The node named its own waiting stage: say that instead of
+        // inventing a queue depth it did not report.
+        _ if !stage.is_empty() && stage != JOB_STATE_QUEUED => stage.to_string(),
+        _ => "queued-on-fleet".to_string(),
+    };
+    match tag {
+        Some(tag) => format!("@{tag} {note}"),
+        None => note,
+    }
+}
+
 fn waiting_stage(
     model: &str,
     admission: Option<makepad_asset_ai::fleet::VramAdmission>,
+    on: &str,
 ) -> String {
     use makepad_asset_ai::fleet::VramAdmission;
     match admission {
         Some(VramAdmission::Waiting { required_free_mb, free_mb }) => format!(
-            "waiting-for-vram: model {model} has {free_mb} MiB free, {required_free_mb} MiB required"
+            "waiting-for-vram: model {model} on {on} has {free_mb} MiB free, \
+             {required_free_mb} MiB required"
         ),
-        _ => format!("waiting-for-vram: model {model} awaits a fresh admission snapshot"),
+        _ => format!("waiting-for-vram: model {model} on {on} awaits a fresh admission snapshot"),
     }
 }
 
@@ -1012,9 +3106,15 @@ fn wire_request(
         // Video
         frames: u32_of("frames"),
         codec: str_of("codec").or_else(|| {
-            (request.kind.media == makepad_asset_data::MediaType::Mp4)
+            (request.kind.catalog().map(|c| c.media) == Some(MediaType::Mp4))
                 .then(|| "h264".to_string())
         }),
+        // Vision: how much answer to allow. The nine-line record needs
+        // ~200; a client asking its own question sets its own budget.
+        max_tokens: u32_of("max_tokens"),
+        // Text: what the expansion is FOR (a video brief is not a mesh
+        // brief). Only the expander sets it.
+        target_domain: str_of("target_domain"),
         audio: body.get("audio").and_then(Value::as_bool),
         interpolate: u32_of("interpolate"),
         // Enhance (video post-process)
@@ -1050,26 +3150,124 @@ fn wire_request(
     wire
 }
 
+/// What went to the box BESIDES the prompt, `key=value` per line, read off
+/// the request that was actually sent rather than the body it was built
+/// from — so an inspected run shows what the model got, not what a client
+/// meant. The prompt itself is recorded separately and in full; the input
+/// payload is named by size and type, never by its base64.
+fn stage_params(
+    wire: &makepad_asset_ai::protocol::GenerateRequestJson,
+    request: &GenRequest,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut put = |key: &str, value: String| lines.push(format!("{key}={value}"));
+    put("model", wire.model.clone());
+    if let Some(text) = &wire.negative_prompt {
+        put("negative_prompt", text.clone());
+    }
+    if let Some(text) = &wire.lyrics {
+        put("lyrics", text.clone());
+    }
+    if let Some(text) = &wire.text {
+        put("text", text.clone());
+    }
+    if let Some(voice) = &wire.voice {
+        put("voice", voice.clone());
+    }
+    if let Some(codec) = &wire.codec {
+        put("codec", codec.clone());
+    }
+    if let Some(domain) = &wire.target_domain {
+        put("target_domain", domain.clone());
+    }
+    if let Some(mode) = &wire.motion_mode {
+        put("motion_mode", mode.clone());
+    }
+    for (key, value) in [
+        ("width", wire.width),
+        ("height", wire.height),
+        ("steps", wire.steps),
+        ("frames", wire.frames),
+        ("interpolate", wire.interpolate),
+        ("upscale", wire.upscale),
+        ("max_tokens", wire.max_tokens),
+        ("remesh_resolution", wire.remesh_resolution),
+        ("decimation_target", wire.decimation_target),
+        ("texture_size", wire.texture_size),
+        ("gaussians", wire.gaussians),
+    ] {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(seed) = wire.seed {
+        put("seed", seed.to_string());
+    }
+    for (key, value) in [
+        ("guidance", wire.guidance),
+        ("seconds", wire.seconds),
+        ("speed", wire.speed),
+        ("canny_low", wire.canny_low),
+        ("canny_high", wire.canny_high),
+    ] {
+        if let Some(value) = value {
+            put(key, format!("{value}"));
+        }
+    }
+    if let Some(strength) = wire.strength {
+        put("strength", format!("{strength}"));
+    }
+    for (key, value) in [("audio", wire.audio), ("texture", wire.texture), ("flow_map", wire.flow_map)]
+    {
+        if let Some(value) = value {
+            put(key, value.to_string());
+        }
+    }
+    if let Some(input) = &request.input {
+        put(
+            "input",
+            format!("{} bytes {}", input.bytes.len(), input.content_type),
+        );
+    }
+    lines.join("\n")
+}
+
 impl GenFleet for AssetAiFleet {
     fn route_label(&self, fleet_job: &str) -> Option<String> {
+        Some(short_label(self.routes.get(fleet_job)?))
+    }
+
+    fn route_host(&self, fleet_job: &str) -> Option<String> {
         let url = self.routes.get(fleet_job)?;
-        // "http://10.0.0.203:8123" -> ".203"
-        let host = url.rsplit('/').next()?.split(':').next()?;
-        Some(format!(".{}", host.rsplit('.').next()?))
+        // "http://10.0.0.203:8123" -> "10.0.0.203"
+        Some(url.rsplit('/').next()?.split(':').next()?.to_string())
     }
 
     fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String> {
         use makepad_asset_ai::client::{ContentProvider, LocalService};
         use makepad_asset_ai::registry::Domain;
+        // ONE list, chosen once: the index a route carries points into it,
+        // and a box joining mid-decision must not shift what it means.
+        let boxes = self.dispatch_boxes();
         let (index, model, backend, version) =
-            match self.pick_box(request.kind.domain, &request.model)? {
+            match self.pick_box(&boxes, request.kind.domain, &request.model)? {
                 GenRoute::Admitted { index, model, backend, version } => {
                     (index, model, backend, version)
                 }
-                GenRoute::Waiting { stage } => return Ok(FleetDispatch::Waiting { stage }),
+                GenRoute::Waiting { stage, .. } => return Ok(FleetDispatch::Waiting { stage }),
             };
-        let base_url = self.boxes()[index].clone();
+        let base_url = boxes[index].clone();
         if self.log {
+            // Say out loud when a pin was NOT what ran: a picker's profile
+            // pins one model id for the whole fleet, and a box swapping in
+            // its own resident tier must be visible, never a mystery.
+            if !request.model.is_empty() && request.model != model {
+                eprintln!(
+                    "[asset-worker] {base_url}: {} not resident here — running {model} instead \
+                     (a warm model beats downloading a pinned one)",
+                    request.model
+                );
+            }
             eprintln!(
                 "[asset-worker] dispatch {} to {base_url} model {model}",
                 request.kind.kind
@@ -1100,11 +3298,13 @@ impl GenFleet for AssetAiFleet {
             }
         };
         self.routes.insert(fleet_job.clone(), base_url);
+        let params = stage_params(&wire, request);
         Ok(FleetDispatch::Started {
             job: fleet_job,
             model: wire.model,
             backend,
             version,
+            params,
         })
     }
 
@@ -1115,8 +3315,18 @@ impl GenFleet for AssetAiFleet {
         let provider = LocalService::new(&base_url);
         let status = provider.poll(fleet_job).map_err(|e| format!("{e:?}"))?;
         if status.state == JOB_STATE_DONE {
-            if status.artifacts.is_empty() {
-                return Err("done without artifacts".to_string());
+            // A text-answering job (vision, llm) reports its completed answer
+            // in `text`; `partial_text` is the streamed snapshot, which is
+            // the whole answer by the time the job is done. Such a job has
+            // no artifacts, and that is not a failure.
+            let text = status
+                .text
+                .clone()
+                .or_else(|| status.partial_text.clone())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            if status.artifacts.is_empty() && text.is_none() {
+                return Err("done without artifacts or text".to_string());
             }
             let mut out = Vec::with_capacity(status.artifacts.len());
             for artifact in &status.artifacts {
@@ -1130,7 +3340,7 @@ impl GenFleet for AssetAiFleet {
                 });
             }
             self.routes.remove(fleet_job);
-            return Ok(FleetPoll::Done { artifacts: out });
+            return Ok(FleetPoll::Done { artifacts: out, text });
         }
         if status.state == JOB_STATE_ERROR || status.state == "cancelled" {
             self.routes.remove(fleet_job);
@@ -1138,10 +3348,72 @@ impl GenFleet for AssetAiFleet {
                 error: status.error.unwrap_or_else(|| status.state.clone()),
             });
         }
+        if status.state == makepad_asset_ai::protocol::JOB_STATE_QUEUED {
+            // Accepted, not started. Ask the box how much of its own work is
+            // in front of this job, so the note can say so.
+            let ahead = self.runs_ahead(&base_url);
+            return Ok(FleetPoll::Queued {
+                stage: status.stage.unwrap_or_else(|| status.state.clone()),
+                ahead,
+            });
+        }
         Ok(FleetPoll::Running {
             stage: status.stage.unwrap_or_else(|| status.state.clone()),
             progress: status.progress.unwrap_or(0.0),
         })
+    }
+
+    fn widen_to_idle(&mut self, request: &GenRequest) -> Option<String> {
+        use makepad_asset_ai::fleet::{affinity, is_synthetic_backend};
+        let own = self.boxes();
+        let mut wider = own.clone();
+        for url in self.overflow_boxes() {
+            if !wider.contains(&url) {
+                wider.push(url);
+            }
+        }
+        if wider.len() == own.len() {
+            // Nothing else to offer: this adapter already sees the fleet
+            // (the single-shot worker), or it was never given one.
+            return None;
+        }
+        let (snapshots, _) = self.snapshots_of(&wider);
+        // Only boxes that are somewhere ELSE and idle: the box this job is
+        // already stuck on has had its turn.
+        let elsewhere: Vec<makepad_asset_ai::fleet::BoxSnapshot> = snapshots
+            .iter()
+            .map(|snapshot| {
+                if !own.contains(&snapshot.base_url) && is_idle(snapshot) {
+                    snapshot.clone()
+                } else {
+                    let mut hidden = snapshot.clone();
+                    hidden.models.clear();
+                    hidden
+                }
+            })
+            .collect();
+        let Ok(GenRoute::Admitted { index, model, backend, .. }) =
+            select_route(&elsewhere, request.kind.domain, &request.model)
+        else {
+            return None;
+        };
+        // Moving costs a load; it must not also cost a download or hand the
+        // job to a test pattern.
+        if is_synthetic_backend(&backend)
+            || !affinity(&snapshots[index], &model).is_some_and(|score| score >= WARM_AFFINITY)
+        {
+            return None;
+        }
+        self.widened = true;
+        Some(short_label(&snapshots[index].base_url))
+    }
+
+    fn widen_all(&mut self) {
+        self.widened = true;
+    }
+
+    fn narrow(&mut self) {
+        self.widened = false;
     }
 
     fn cancel(&mut self, fleet_job: &str) {
@@ -1166,7 +3438,10 @@ mod tests {
     use super::*;
     use crate::gen_kinds::kind_of;
     use makepad_asset_ai::fleet::BoxSnapshot;
-    use makepad_asset_ai::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_READY};
+    use makepad_asset_ai::protocol::{
+        HealthJson, ModelInfoJson, MODEL_STATE_ABSENT, MODEL_STATE_DOWNLOADING,
+        MODEL_STATE_LOADED, MODEL_STATE_READY,
+    };
     use makepad_asset_client::{ApiEndpoints, ClientConfig};
     use makepad_asset_data::{AssetId, AssetKind};
     use makepad_asset_store::{AssetServer, ServerConfig};
@@ -1254,26 +3529,75 @@ mod tests {
         requests: Vec<GenRequest>,
         /// Set to fail every dispatch with this error.
         fail: Option<String>,
+        /// Set to answer with TEXT instead of artifacts (the vision kinds).
+        text: Option<String>,
+        /// What the prompt expander answers. `None` = it answers nothing,
+        /// which the coordinator must survive.
+        expand_text: Option<String>,
+        /// Set to make the expander's DISPATCH fail outright.
+        expand_dispatch_fail: Option<String>,
+        /// Set to make the expander's job fail after it started.
+        expand_job_fail: Option<String>,
+        /// Fleet job ids that belong to an expansion.
+        expand_jobs: Vec<String>,
     }
 
     impl GenFleet for ScriptedFleet {
+        fn route_host(&self, _fleet_job: &str) -> Option<String> {
+            Some("10.0.0.203".to_string())
+        }
+
         fn dispatch(&mut self, request: &GenRequest) -> Result<FleetDispatch, String> {
-            if let Some(error) = &self.fail {
+            let expanding = request.kind.domain == "text";
+            if expanding {
+                if let Some(error) = &self.expand_dispatch_fail {
+                    return Err(error.clone());
+                }
+            } else if let Some(error) = &self.fail {
                 return Err(error.clone());
             }
             self.requests.push(request.clone());
+            let job = format!("fleet-job-{}", self.requests.len());
+            if expanding {
+                self.expand_jobs.push(job.clone());
+                return Ok(FleetDispatch::Started {
+                    job,
+                    model: "qwen3.8-27b".to_string(),
+                    backend: "scripted".to_string(),
+                    version: "0.2.0-test".to_string(),
+                    params: "model=qwen3.8-27b\nmax_tokens=512".to_string(),
+                });
+            }
             Ok(FleetDispatch::Started {
-                job: format!("fleet-job-{}", self.requests.len()),
+                job,
                 // Deliberately differ from the requested full model: the
                 // published annotation/provenance must name what really ran.
                 model: format!("{}-q4", request.model),
                 backend: "scripted".to_string(),
                 version: "0.2.0-test".to_string(),
+                params: format!("model={}-q4\nseed=77", request.model),
             })
         }
 
-        fn poll(&mut self, _fleet_job: &str) -> Result<FleetPoll, String> {
+        fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String> {
+            if self.expand_jobs.iter().any(|job| job == fleet_job) {
+                if let Some(error) = &self.expand_job_fail {
+                    return Ok(FleetPoll::Failed { error: error.clone() });
+                }
+                return Ok(FleetPoll::Done {
+                    artifacts: Vec::new(),
+                    text: self.expand_text.clone(),
+                });
+            }
+            if let Some(text) = &self.text {
+                // A vision box answers with text and no artifacts at all.
+                return Ok(FleetPoll::Done {
+                    artifacts: Vec::new(),
+                    text: Some(text.clone()),
+                });
+            }
             Ok(FleetPoll::Done {
+                text: None,
                 artifacts: vec![
                     // A sidecar the kind does not declare: it must be
                     // ignored, never published as a row of its own.
@@ -1353,7 +3677,7 @@ mod tests {
             snapshot("http://small", 24 * 1024, 24 * 1024, vec![h3]),
         ];
         match select_route(&snapshots, "video", "minimax-h3").unwrap() {
-            GenRoute::Waiting { stage } => {
+            GenRoute::Waiting { stage, .. } => {
                 assert!(!stage.contains("http://"), "worker status must not leak fleet URLs");
                 assert!(stage.contains("94208 MiB required"));
             }
@@ -1396,6 +3720,78 @@ mod tests {
             GenRoute::Admitted {
                 index: 1,
                 model: "minimax-h3-q4".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            }
+        );
+    }
+
+    /// The .165 case, exactly: a picker's profile pinned the fleet's most
+    /// common quant, and the RTX 6000 — whose own native tier sat READY —
+    /// started pulling 17 GB of a model it did not need. A pin says which
+    /// model is preferred; it does not say "fetch it first".
+    #[test]
+    fn a_cold_pin_never_downloads_past_a_warm_model_on_the_same_box() {
+        let mut native = model("minimax-h3", "video", 74.0);
+        native.state = MODEL_STATE_READY.to_string();
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_ABSENT.to_string();
+        let snapshots = vec![snapshot(
+            "http://big",
+            95 * 1024,
+            96 * 1024,
+            vec![native, quant],
+        )];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            },
+            "a ready native tier beats downloading the pinned quant"
+        );
+    }
+
+    /// The same pin on a box that HOLDS it is still the pin — the rule is
+    /// about downloads, not about second-guessing the caller.
+    #[test]
+    fn a_warm_pin_is_still_exactly_what_runs() {
+        let mut native = model("minimax-h3", "video", 20.0);
+        native.state = MODEL_STATE_LOADED.to_string();
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_READY.to_string();
+        let snapshots = vec![snapshot(
+            "http://quant-box",
+            23 * 1024,
+            24 * 1024,
+            vec![native, quant],
+        )];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3-q4-24g".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            }
+        );
+    }
+
+    /// A cold pin with NOTHING warm behind it still downloads — the fleet
+    /// has to acquire the weights sometime, and refusing would just make
+    /// the job impossible.
+    #[test]
+    fn a_cold_pin_with_no_warm_alternative_still_runs_the_pin() {
+        let mut quant = model("minimax-h3-q4-24g", "video", 20.0);
+        quant.state = MODEL_STATE_ABSENT.to_string();
+        let snapshots = vec![snapshot("http://fresh-box", 23 * 1024, 24 * 1024, vec![quant])];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 0,
+                model: "minimax-h3-q4-24g".to_string(),
                 backend: "h3".to_string(),
                 version: "test".to_string(),
             }
@@ -1514,6 +3910,560 @@ mod tests {
             &obj(vec![("prompt", s(" ".repeat(4_001)))])
         )
         .is_err());
+    }
+
+
+    /// The nine-line record a vision box answers an annotation job with.
+    fn kit_reply() -> &'static str {
+        "what: wooden cart\ncat: vehicle\nrole: standalone\nconn: none\n\
+         size: 1x2\ncolors: brown, grey\nstyle: low-poly\n\
+         desc: open cart with one large spoked wheel"
+    }
+
+    /// One triangle: the smallest thing the catalog accepts as a mesh, so
+    /// the publish that MINTS an annotation job is a real publish.
+    fn one_triangle_glb() -> Vec<u8> {
+        let mut bin: Vec<u8> = Vec::new();
+        for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            bin.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// Publish one annotatable asset and return (asset, alias). Publishing
+    /// is what MAKES the annotation job: the store mints one per newly live
+    /// annotatable row, which is the whole point of the queue.
+    fn publish_mesh(client: &mut AssetClient, ns: &str, name: &str) -> (AssetId, String) {
+        let glb = one_triangle_glb();
+        let inspected = crate::glb::inspect_glb(&glb).expect("inspect the fixture");
+        let mut publish = PublishRequest::new(
+            ns,
+            AssetKind::Mesh,
+            name.to_string(),
+            PublishFile {
+                bytes: glb,
+                media: MediaType::Glb,
+                role: FileRole::RenderGlb,
+                media_millis: 0,
+                dims: None,
+            },
+            crate::import::placeholder_thumb().expect("placeholder thumbnail"),
+        );
+        publish.stats = PublishStats {
+            triangles: inspected.triangles,
+            vertices: inspected.vertices,
+            joints: inspected.joints,
+            clips: inspected.clips,
+        };
+        let alias = format!("{ns}/{name}");
+        publish.alias = AssetAlias::from_str(&alias).ok();
+        publish.rights = PublishRights::generated_cc0();
+        let published = client.publish_artifact(&publish).expect("publish");
+        (published.asset_id, alias)
+    }
+
+    fn test_server(name: &str) -> (AssetServer, PathBuf, String) {
+        let root = test_root(name);
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        (server, root, token)
+    }
+
+    /// A question about an image is answered ONTO THE JOB: no catalog row,
+    /// and `GET /v1/jobs/<id>` carries the text back to whoever asked. This
+    /// is the runtime path for a UI making content.
+    #[test]
+    fn a_vision_question_records_its_answer_on_the_job() {
+        let (server, root, token) = test_server("vision_describe");
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let png_b64 = String::from_utf8(makepad_base64::base64_encode(
+            &tiny_png(),
+            &makepad_base64::BASE64_STANDARD,
+        ))
+        .unwrap();
+        let body = obj(vec![
+            ("prompt", s("is this door left- or right-hinged?")),
+            ("input_b64", s(png_b64)),
+            ("max_tokens", Value::Int(64)),
+        ]);
+        let job = submitter
+            .enqueue_job("gen", "vision.describe", &body)
+            .expect("enqueue");
+
+        let mut fleet = ScriptedFleet {
+            text: Some("  right-hinged: the handle is on the left edge.  ".to_string()),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "vision-box".to_string(),
+                kinds: vec!["vision.describe".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the vision job")
+        };
+        // The image reached the box as bytes, not as a promise.
+        assert_eq!(fleet.requests.len(), 1);
+        assert_eq!(
+            fleet.requests[0].input.as_ref().map(|i| i.bytes.clone()),
+            Some(tiny_png())
+        );
+        assert_eq!(
+            fleet.requests[0].input.as_ref().map(|i| i.content_type.clone()),
+            Some("image/png".to_string())
+        );
+        match &outcome {
+            JobOutcome::Answered { text, host, .. } => {
+                assert_eq!(text, "right-hinged: the handle is on the left edge.");
+                assert_eq!(host, "10.0.0.203");
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+
+        // What the asking client sees.
+        let detail = submitter.job_detail(&job).expect("job detail");
+        assert_eq!(detail.status.state, JobStateDto::Succeeded);
+        // No catalog row: an answer is not an asset.
+        assert_eq!(detail.status.result_asset, None);
+        let result = detail.result.expect("recorded result");
+        assert_eq!(
+            result.body.get("text").and_then(Value::as_str),
+            Some("right-hinged: the handle is on the left edge.")
+        );
+        assert_eq!(
+            result.body.get("box").and_then(Value::as_str),
+            Some("10.0.0.203")
+        );
+        assert!(result
+            .body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|m| !m.is_empty()));
+        // Only the EXPANDER flattens fields for a next stage: an answer
+        // about a door is not a prompt for anything.
+        assert!(result.body.get("prompt").is_none());
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `expand: true` in a job body means an expansion actually happens.
+    ///
+    /// The flag rode the wire for months with nothing reading it: a picker
+    /// offering "expand → video" sent the raw prompt to the video model and
+    /// called it expanded. The expansion now runs first, on the box's own
+    /// text model, and the generation gets its words.
+    #[test]
+    fn an_expand_job_expands_before_it_generates() {
+        let (server, root, token) = test_server("expand_ok");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("scanning electron microscope art")),
+            ("expand", Value::Bool(true)),
+        ]);
+        submitter
+            .enqueue_job("gen", "image.generate", &body)
+            .expect("enqueue");
+
+        let mut fleet = ScriptedFleet {
+            expand_text: Some(
+                "  a scanning electron micrograph of a pollen grain, false-colour, \
+                 extreme macro, studio lighting  "
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the job")
+        };
+        assert!(
+            matches!(outcome, JobOutcome::Published { .. }),
+            "expected a published row, got {outcome:?}"
+        );
+        assert_eq!(fleet.requests.len(), 2, "expansion, then generation");
+        // The expander is asked with the PERSON'S words, and told what the
+        // expansion is for.
+        let expand = &fleet.requests[0];
+        assert_eq!(expand.kind.domain, "text");
+        assert_eq!(expand.prompt, "scanning electron microscope art");
+        assert_eq!(
+            expand.body.get("target_domain").and_then(Value::as_str),
+            Some("image")
+        );
+        // Affinity picks the text model: a video/image pin means nothing here.
+        assert!(expand.model.is_empty());
+        // The generation gets the expansion, and still knows what was typed.
+        let generate = &fleet.requests[1];
+        assert_eq!(generate.kind.kind, "image.generate");
+        assert!(
+            generate.prompt.starts_with("a scanning electron micrograph"),
+            "{}",
+            generate.prompt
+        );
+        assert_eq!(
+            generate.original_prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// AN EXPANSION CAN NEVER LOSE A RUN. Whether the expander refuses to
+    /// start, dies mid-answer, or answers with nothing at all, the run goes
+    /// ahead on the words the person typed.
+    #[test]
+    fn a_failed_expansion_still_generates_from_the_raw_prompt() {
+        for (name, fleet_setup) in [
+            (
+                "dispatch_refused",
+                ScriptedFleet {
+                    expand_dispatch_fail: Some("no text box in this fleet".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "job_failed",
+                ScriptedFleet {
+                    expand_job_fail: Some("chat box evicted the model".to_string()),
+                    ..Default::default()
+                },
+            ),
+            // Answered, but with nothing usable.
+            ("empty_answer", ScriptedFleet::default()),
+        ] {
+            let (server, root, token) = test_server(&format!("expand_{name}"));
+            let submitter = connect(&server, &token, &root.join("submit-cache"));
+            let body = obj(vec![
+                ("prompt", s("scanning electron microscope art")),
+                ("expand", Value::Bool(true)),
+            ]);
+            submitter
+                .enqueue_job("gen", "image.generate", &body)
+                .expect("enqueue");
+
+            let mut fleet = fleet_setup;
+            let outcome = {
+                let mut coordinator = Coordinator {
+                    client: connect(&server, &token, &root.join("worker-cache")),
+                    fleet: &mut fleet,
+                    suffix: "image-box".to_string(),
+                    kinds: vec!["image.generate".to_string()],
+                    rights: PublishRights::generated_cc0(),
+                    log: false,
+                };
+                coordinator
+                    .run_one(&AtomicBool::new(false))
+                    .expect("coordinator call")
+                    .expect("claimed the job")
+            };
+            assert!(
+                matches!(outcome, JobOutcome::Published { .. }),
+                "{name}: a failed expansion must not lose the run, got {outcome:?}"
+            );
+            // The generation ran with the human's own prompt, unchanged.
+            let generate = fleet
+                .requests
+                .iter()
+                .find(|request| request.kind.kind == "image.generate")
+                .unwrap_or_else(|| panic!("{name}: nothing generated"));
+            assert_eq!(generate.prompt, "scanning electron microscope art");
+            assert_eq!(generate.original_prompt, None);
+
+            drop(submitter);
+            drop(server);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// A client that expanded on its own is not expanded a second time —
+    /// and its record of what the person typed still reaches the row.
+    #[test]
+    fn a_client_side_expansion_is_kept_not_repeated() {
+        let (server, root, token) = test_server("expand_client_side");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        submitter
+            .enqueue_job(
+                "gen",
+                "image.generate",
+                &obj(vec![
+                    ("prompt", s("a false-colour scanning electron micrograph")),
+                    ("prompt_original", s("scanning electron microscope art")),
+                    ("expand", Value::Bool(true)),
+                ]),
+            )
+            .expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a THIRD rewrite nobody asked for".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator.run_one(&AtomicBool::new(false)).expect("run").expect("claimed");
+        }
+        assert_eq!(fleet.requests.len(), 1, "no second expansion");
+        assert_eq!(
+            fleet.requests[0].prompt,
+            "a false-colour scanning electron micrograph"
+        );
+        assert_eq!(
+            fleet.requests[0].original_prompt.as_deref(),
+            Some("scanning electron microscope art")
+        );
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A body without the flag is untouched: no expander, no extra dispatch.
+    #[test]
+    fn a_job_that_did_not_ask_for_an_expansion_never_gets_one() {
+        let (server, root, token) = test_server("expand_off");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        submitter
+            .enqueue_job(
+                "gen",
+                "image.generate",
+                &obj(vec![("prompt", s("a red door"))]),
+            )
+            .expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a magnificent crimson portal".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "image-box".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator.run_one(&AtomicBool::new(false)).expect("run").expect("claimed");
+        }
+        assert_eq!(fleet.requests.len(), 1);
+        assert_eq!(fleet.requests[0].prompt, "a red door");
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The whole annotation chain, without a GPU: publishing mints the job,
+    /// a vision-capable worker claims it, the reply is parsed by the pass,
+    /// and the asset's own annotation record carries the description and the
+    /// facets a level builder searches on.
+    #[test]
+    fn an_annotate_job_writes_the_parsed_record_into_the_annotation() {
+        let (server, root, token) = test_server("annotate_job");
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let (asset, alias) = publish_mesh(&mut submitter, "kenney", "cart");
+
+        let mut fleet = ScriptedFleet {
+            text: Some(kit_reply().to_string()),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "vision-box".to_string(),
+                kinds: vec!["annotate.asset".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("the publish queued an annotate job to claim")
+        };
+        // One vision request, carrying the framed sheet as a real image and
+        // both halves of the question.
+        assert_eq!(fleet.requests.len(), 1);
+        let asked = &fleet.requests[0];
+        assert!(asked.prompt.contains("metadata writer"), "{}", asked.prompt);
+        assert!(asked.prompt.contains("\"cart\""), "{}", asked.prompt);
+        let image = asked.input.as_ref().expect("a sheet was sent");
+        assert_eq!(image.content_type, "image/jpeg");
+        assert!(image.bytes.starts_with(&[0xFF, 0xD8]), "framed sheet is a jpeg");
+
+        match &outcome {
+            JobOutcome::Described { description, model, .. } => {
+                assert!(description.starts_with("wooden cart"), "{description}");
+                assert!(!model.is_empty());
+            }
+            other => panic!("expected a description, got {other:?}"),
+        }
+
+        // The catalog now answers for it.
+        let annotation = submitter.get_annotation(&asset).expect("annotation");
+        assert_eq!(
+            annotation.description,
+            "wooden cart; standalone; 1x2; brown/grey; \
+             open cart with one large spoked wheel"
+        );
+        for tag in ["vlm-v7", "vlm-cat-vehicle", "vlm-col-brown", "vlm-sty-low-poly"] {
+            assert!(
+                annotation.tags.iter().any(|t| t == tag),
+                "missing {tag}: {:?}",
+                annotation.tags
+            );
+        }
+        // Nothing was published: an annotation is a rewrite, not a row.
+        assert!(annotation.title.contains("cart"));
+
+        // And the same asset is not described twice: the second claim finds
+        // an empty queue, because the store's derived job id is the dedupe.
+        let mut idle = ScriptedFleet {
+            text: Some(kit_reply().to_string()),
+            ..Default::default()
+        };
+        let mut coordinator = Coordinator {
+            client: connect(&server, &token, &root.join("worker-2")),
+            fleet: &mut idle,
+            suffix: "vision-box-2".to_string(),
+            kinds: vec!["annotate.asset".to_string()],
+            rights: PublishRights::generated_cc0(),
+            log: false,
+        };
+        assert!(coordinator.run_one(&AtomicBool::new(false)).unwrap().is_none());
+        drop(coordinator);
+        assert!(idle.requests.is_empty());
+        let _ = alias;
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A model that answered with prose instead of the record must not
+    /// overwrite a description with junk: the job fails, carrying the reply
+    /// an operator has to read to fix the prompt.
+    #[test]
+    fn an_unusable_reply_fails_the_annotate_job_with_its_reason() {
+        let (server, root, token) = test_server("annotate_unusable");
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let (asset, _) = publish_mesh(&mut submitter, "kenney", "barrel");
+        let before = submitter.get_annotation(&asset).expect("annotation");
+
+        let mut fleet = ScriptedFleet {
+            text: Some("I'm sorry, I can't see the image well enough.".to_string()),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "vision-box".to_string(),
+                kinds: vec!["annotate.asset".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the annotate job")
+        };
+        let JobOutcome::Failed { error } = outcome else {
+            panic!("expected a failure, got {outcome:?}")
+        };
+        assert!(error.starts_with("unusable reply:"), "{error}");
+        assert!(error.contains("I'm sorry"), "{error}");
+        // The record is untouched — a bad answer costs a retry, never a
+        // description.
+        let after = submitter.get_annotation(&asset).expect("annotation");
+        assert_eq!(after.description, before.description);
+        assert!(!after.tags.iter().any(|t| t.starts_with("vlm-v")));
+
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_vision_progress_line_names_the_model_the_box_and_the_time() {
+        assert_eq!(
+            vision_note("qwen3.8-27b-vision", Some("10.0.0.203"), 3.42),
+            "vision · qwen3.8-27b-vision @ 10.0.0.203 · 3.4 s"
+        );
+        // A transport that cannot name the box still says what is thinking.
+        assert_eq!(
+            vision_note("qwen3.8-27b-vision", None, 0.0),
+            "vision · qwen3.8-27b-vision · 0.0 s"
+        );
+        // An answer's line breaks are part of the answer and survive the
+        // bound; other control characters do not.
+        assert_eq!(bounded_answer("a\nb\u{7}c", 100), "a\nb c".replace(' ', ""));
+        assert_eq!(bounded_answer("aéébb", 4), "aé");
+        // A question needs a question, even though it also needs an image.
+        let describe = kind_of("vision.describe").unwrap();
+        assert!(GenRequest::from_body(describe, &obj(vec![("input_alias", s("a/b"))])).is_err());
+        assert!(GenRequest::from_body(
+            describe,
+            &obj(vec![("prompt", s("what is this?")), ("input_alias", s("a/b"))])
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1730,6 +4680,1248 @@ mod tests {
             JobStateDto::Failed
         );
 
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------- spread before stacking
+
+    /// A box's queue depth: the ONLY honest "is this box busy" signal.
+    fn busy(mut snapshot: BoxSnapshot, jobs: u64) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().jobs_pending = Some(jobs);
+        snapshot
+    }
+
+    fn in_state(id: &str, domain: &str, vram_gb: f64, state: &str) -> ModelInfoJson {
+        let mut info = model(id, domain, vram_gb);
+        info.state = state.to_string();
+        info
+    }
+
+    /// Tonight's incident, in one assertion: .166 was running a clip with
+    /// the pinned quant LOADED (maximally warm), .165 was idle with its own
+    /// tier cached on disk, and every queued job stacked behind .166. Warmth
+    /// is a ~30 s question; a queue is a minutes question.
+    #[test]
+    fn an_idle_box_that_holds_the_weights_beats_a_warm_busy_one() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                2,
+            ),
+            snapshot(
+                "http://10.0.0.165:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+            ),
+        ];
+        assert_eq!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted {
+                index: 1,
+                model: "minimax-h3".to_string(),
+                backend: "h3".to_string(),
+                version: "test".to_string(),
+            },
+            "the idle box runs it, even though the busy one is warmer"
+        );
+        // With no pin at all the answer is the same: idle wins.
+        assert!(matches!(
+            select_route(&snapshots, "video", "").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+    }
+
+    /// Spreading buys a LOAD, never a download and never a placeholder. An
+    /// idle box that would have to fetch 20 GB is slower than the queue it
+    /// was supposed to relieve, and a test pattern is not the thing anyone
+    /// asked for.
+    #[test]
+    fn spreading_never_starts_a_download_or_a_test_pattern() {
+        let cold = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&cold, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 0, .. }
+            ),
+            "a download is not a rescue"
+        );
+
+        let mut fake = in_state("testpattern-video", "video", 0.5, MODEL_STATE_LOADED);
+        fake.backend = "testpattern".to_string();
+        let synthetic = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                3,
+            ),
+            snapshot("http://10.0.0.99:8123", 23 * 1024, 24 * 1024, vec![fake]),
+        ];
+        assert!(
+            matches!(
+                select_route(&synthetic, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 0, model, .. } if model == "minimax-h3-q4-24g"
+            ),
+            "a test pattern is never worth spreading to"
+        );
+    }
+
+    /// When the whole fleet is busy there is nothing to spread to, and the
+    /// warm/cold pin rules decide exactly as they did before.
+    #[test]
+    fn when_every_box_is_busy_the_pin_still_decides() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            busy(
+                snapshot(
+                    "http://10.0.0.165:8123",
+                    95 * 1024,
+                    96 * 1024,
+                    vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+                ),
+                1,
+            ),
+        ];
+        assert!(matches!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 0, .. }
+        ));
+    }
+
+    /// A BUSY box holding a job for memory it does not have loses it. An
+    /// IDLE box short of memory keeps it: its VRAM frees on its own, and
+    /// V4's rule stands — a pinned tier under transient pressure is never
+    /// silently downgraded.
+    #[test]
+    fn a_busy_box_loses_a_vram_wait_that_an_idle_box_could_run() {
+        // Cached, not resident: it still has to be loaded, and there is no
+        // room to load it (a model already RESIDENT is admitted on its own
+        // allocation — a different case, and not a stall).
+        let stuck = snapshot(
+            "http://10.0.0.166:8123",
+            9_821,
+            24 * 1024,
+            vec![in_state("minimax-h3-q4-24g", "video", 21.0, MODEL_STATE_READY)],
+        );
+        let idle_elsewhere = snapshot(
+            "http://10.0.0.165:8123",
+            95 * 1024,
+            96 * 1024,
+            vec![in_state("minimax-h3-q4-24g", "video", 21.0, MODEL_STATE_READY)],
+        );
+        // Busy and short of memory: the job moves.
+        let snapshots = vec![busy(stuck.clone(), 2), idle_elsewhere.clone()];
+        assert!(matches!(
+            select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+        // Idle and short of memory, alone: it waits, exactly as before.
+        let alone = vec![stuck];
+        match select_route(&alone, "video", "minimax-h3-q4-24g").unwrap() {
+            GenRoute::Waiting { stage, on } => {
+                assert_eq!(on, Some(0));
+                assert!(stage.starts_with("waiting-for-vram:"), "{stage}");
+                assert!(stage.contains("on .166"), "the note must name the box: {stage}");
+                assert!(!stage.contains("http"), "worker status must not leak fleet URLs");
+            }
+            other => panic!("expected a VRAM wait, got {other:?}"),
+        }
+    }
+
+    /// A DOWNLOAD NEVER STEALS FROM A BOX THAT HAS THE WEIGHTS. The busy
+    /// box holds the model and has no memory free this second, so the
+    /// admitted pickers cannot see it; the fresh empty box can take the job
+    /// today and would spend 20 GB of pull doing it. The job queues on the
+    /// box that has it — one run is shorter than any download — and the
+    /// migration clock is the safety valve if that box never frees.
+    #[test]
+    fn a_box_that_would_download_never_steals_from_one_that_has_the_model() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    2 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+            ),
+        ];
+        // The pin, and the same question with no pin at all.
+        for want in ["minimax-h3-q4-24g", ""] {
+            match select_route(&snapshots, "video", want).unwrap() {
+                GenRoute::Waiting { stage, on } => {
+                    assert_eq!(on, Some(0), "it waits for the box that HAS the weights");
+                    assert!(stage.contains("already on .166"), "{stage}");
+                    assert!(!stage.contains("http"), "no fleet URLs in worker status");
+                }
+                other => panic!("a download must not win: {other:?}"),
+            }
+        }
+        // A box in mid-DOWNLOAD is just as cold: still no stealing.
+        let mut downloading = snapshots.clone();
+        downloading[1].models[0].state = MODEL_STATE_DOWNLOADING.to_string();
+        assert!(matches!(
+            select_route(&downloading, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Waiting { on: Some(0), .. }
+        ));
+        // And when NOTHING in the fleet holds it, the download is the only
+        // way the fleet ever gets the weights: it runs.
+        let mut nobody_has_it = snapshots.clone();
+        nobody_has_it[0].models[0].state = MODEL_STATE_ABSENT.to_string();
+        assert!(matches!(
+            select_route(&nobody_has_it, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 1, .. }
+        ));
+    }
+
+    /// The other half of the same rule, unchanged by it: within the boxes
+    /// that HAVE the weights, idle still beats busy.
+    #[test]
+    fn idle_still_wins_among_the_boxes_that_have_the_model() {
+        let snapshots = vec![
+            busy(
+                snapshot(
+                    "http://10.0.0.166:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_LOADED)],
+                ),
+                1,
+            ),
+            snapshot(
+                "http://10.0.0.100:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)],
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&snapshots, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "cached-and-idle beats resident-and-busy"
+        );
+    }
+
+    fn on_gpu(mut snapshot: BoxSnapshot, gpu: &str) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().gpu = Some(gpu.to_string());
+        snapshot
+    }
+
+    /// Everything else equal, the faster card takes it. Last tiebreak, and
+    /// only a tiebreak: the tier is decided by weights and idleness first.
+    #[test]
+    fn the_faster_gpu_wins_a_tie_inside_a_tier() {
+        let ready = || vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_READY)];
+        let both_idle = vec![
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            on_gpu(
+                snapshot("http://10.0.0.165:8123", 95 * 1024, 96 * 1024, ready()),
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&both_idle, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "6000 beats 4090 when nothing else separates them"
+        );
+
+        // The idle tier still wins: a 4090 that can start now beats the
+        // fastest card in the fleet with a run already on it.
+        let fast_but_busy = vec![
+            busy(
+                on_gpu(
+                    snapshot("http://10.0.0.165:8123", 95 * 1024, 96 * 1024, ready()),
+                    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                ),
+                1,
+            ),
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+        ];
+        assert!(
+            matches!(
+                select_route(&fast_but_busy, "video", "minimax-h3-q4-24g").unwrap(),
+                GenRoute::Admitted { index: 1, .. }
+            ),
+            "idle beats faster-but-busy"
+        );
+
+        // And the weights still outrank the card: the 6000 would download.
+        let fast_but_cold = vec![
+            on_gpu(
+                snapshot("http://10.0.0.100:8123", 23 * 1024, 24 * 1024, ready()),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.165:8123",
+                    95 * 1024,
+                    96 * 1024,
+                    vec![in_state("minimax-h3-q4-24g", "video", 20.0, MODEL_STATE_ABSENT)],
+                ),
+                "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            ),
+        ];
+        assert!(matches!(
+            select_route(&fast_but_cold, "video", "minimax-h3-q4-24g").unwrap(),
+            GenRoute::Admitted { index: 0, .. }
+        ));
+    }
+
+    /// The two stalls read differently, and both say which box.
+    #[test]
+    fn the_progress_note_says_which_stall_this_is_and_where() {
+        assert_eq!(short_label("http://10.0.0.166:8123"), ".166");
+        assert_eq!(short_label("http://box-a"), "box-a");
+        assert_eq!(
+            queued_note("queued", Some(2), Some(".166")),
+            "@.166 queued behind 2 runs"
+        );
+        assert_eq!(
+            queued_note("queued", Some(1), Some(".166")),
+            "@.166 queued behind 1 run"
+        );
+        // Nothing in front of it, or a box that does not count: the old
+        // words, unchanged, so a client parsing them keeps working.
+        assert_eq!(queued_note("queued", Some(0), Some(".166")), "@.166 queued-on-fleet");
+        assert_eq!(queued_note("queued", None, None), "queued-on-fleet");
+        // A node that named its own waiting stage is quoted, not overruled.
+        assert_eq!(queued_note("download", None, Some(".100")), "@.100 download");
+        // A third stall, its own sentence: the fleet HAS the weights, just
+        // not the room yet — nothing here is downloading or short of memory.
+        assert_eq!(
+            holding_stage("minimax-h3-q4-24g", ".166"),
+            "waiting-for-fleet: minimax-h3-q4-24g is already on .166 — better than \
+             downloading it here"
+        );
+        // And a VRAM wait is a VRAM wait — a different sentence entirely.
+        let stage = waiting_stage(
+            "minimax-h3-q4-24g",
+            Some(makepad_asset_ai::fleet::VramAdmission::Waiting {
+                required_free_mb: 21_504,
+                free_mb: 9_821,
+            }),
+            ".166",
+        );
+        assert_eq!(
+            stage,
+            "waiting-for-vram: model minimax-h3-q4-24g on .166 has 9821 MiB free, \
+             21504 MiB required"
+        );
+    }
+
+    // ------------------------------------------------ a job that migrates
+
+    /// A fleet whose own box will not take the job, and one idle box
+    /// elsewhere that will. Records what the coordinator did about it.
+    #[derive(Default)]
+    struct StuckFleet {
+        /// Node-side job ids handed out, in order.
+        dispatched: Vec<String>,
+        /// Node-side cancels: a migration must take the job OFF the box it
+        /// was stuck on.
+        cancelled: Vec<String>,
+        /// How many times the coordinator asked for somewhere else.
+        widen_calls: usize,
+        widened: bool,
+        /// Refuse to admit anything until the coordinator widens.
+        admit_only_when_widened: bool,
+        /// Answer "queued" this many polls per node job, then finish.
+        queued_polls: usize,
+        /// No idle box anywhere: every ask answers None.
+        nowhere_to_go: bool,
+        polls: std::collections::HashMap<String, usize>,
+    }
+
+    impl GenFleet for StuckFleet {
+        fn route_label(&self, _fleet_job: &str) -> Option<String> {
+            Some(if self.widened { ".165".to_string() } else { ".166".to_string() })
+        }
+
+        fn dispatch(&mut self, _request: &GenRequest) -> Result<FleetDispatch, String> {
+            if self.admit_only_when_widened && !self.widened {
+                return Ok(FleetDispatch::Waiting {
+                    stage: "waiting-for-vram: model minimax-h3-q4-24g on .166 has 9821 MiB \
+                            free, 21504 MiB required"
+                        .to_string(),
+                });
+            }
+            let job = format!("node-job-{}", self.dispatched.len() + 1);
+            self.dispatched.push(job.clone());
+            Ok(FleetDispatch::Started {
+                job,
+                model: "minimax-h3-q4-24g".to_string(),
+                backend: "h3".to_string(),
+                version: "0.2.0-test".to_string(),
+                params: "model=minimax-h3-q4-24g".to_string(),
+            })
+        }
+
+        fn poll(&mut self, fleet_job: &str) -> Result<FleetPoll, String> {
+            let seen = self.polls.entry(fleet_job.to_string()).or_insert(0);
+            *seen += 1;
+            if *seen <= self.queued_polls {
+                return Ok(FleetPoll::Queued {
+                    stage: "queued".to_string(),
+                    ahead: Some(1),
+                });
+            }
+            Ok(FleetPoll::Done {
+                text: None,
+                artifacts: vec![GenArtifact {
+                    content_type: "image/png".to_string(),
+                    bytes: tiny_png(),
+                }],
+            })
+        }
+
+        fn cancel(&mut self, fleet_job: &str) {
+            self.cancelled.push(fleet_job.to_string());
+        }
+
+        fn widen_to_idle(&mut self, _request: &GenRequest) -> Option<String> {
+            self.widen_calls += 1;
+            if self.nowhere_to_go {
+                return None;
+            }
+            self.widened = true;
+            Some(".165".to_string())
+        }
+
+        fn narrow(&mut self) {
+            self.widened = false;
+        }
+    }
+
+    /// Enqueue one image job on a real Asset Server and run it to the end
+    /// against `fleet`. Returns the outcome and the server-side job state.
+    fn run_one_job(
+        name: &str,
+        prompt: &str,
+        fleet: &mut dyn GenFleet,
+    ) -> (JobOutcome, PathBuf, AssetServer, String, String) {
+        let root = test_root(name);
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s(prompt.to_string())),
+            ("model", s("minimax-h3-q4-24g")),
+        ]);
+        let job = submitter.enqueue_job("gen", "image.generate", &body).expect("enqueue");
+        drop(submitter);
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet,
+                suffix: "box-166".to_string(),
+                kinds: vec!["image.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the job")
+        };
+        (outcome, root, server, token, job.to_string())
+    }
+
+    /// The job the fleet could not admit on its own box: it moves, and the
+    /// person never sees a failure — same Asset Server job, same lease, no
+    /// attempt burned.
+    #[test]
+    fn a_job_its_own_box_cannot_admit_moves_to_an_idle_one() {
+        let mut fleet = StuckFleet {
+            admit_only_when_widened: true,
+            ..Default::default()
+        };
+        let (outcome, root, server, token, job) =
+            run_one_job("migrate_vram", "a wireframe panther", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert_eq!(fleet.widen_calls, 1, "asked exactly once, then moved");
+        assert_eq!(fleet.dispatched.len(), 1, "nothing ran before the move");
+        assert!(fleet.cancelled.is_empty(), "nothing was on a box to cancel");
+
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let status = submitter
+            .job_status(&makepad_asset_client::dto::JobId::parse(&job).unwrap())
+            .expect("status");
+        assert_eq!(status.state, JobStateDto::Succeeded);
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A job sitting in a box's queue behind another run is taken OFF that
+    /// box before it is re-dispatched — and moved at most once, whatever
+    /// the new box does, because a job that bounces finishes nowhere.
+    #[test]
+    fn a_queued_job_is_taken_off_that_box_and_moved_exactly_once() {
+        let mut fleet = StuckFleet { queued_polls: 8, ..Default::default() };
+        let (outcome, root, server, _token, _job) =
+            run_one_job("migrate_queued", "a slow neon tunnel", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert_eq!(fleet.cancelled, vec!["node-job-1".to_string()]);
+        assert_eq!(fleet.dispatched.len(), 2, "it ran on the second box");
+        assert_eq!(fleet.widen_calls, 1, "one move per job, never two");
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Nothing idle anywhere: the job stays exactly where it is (and keeps
+    /// asking, on its own clock, rather than on every poll).
+    #[test]
+    fn a_job_with_nowhere_better_to_go_stays_where_it_is() {
+        let mut fleet = StuckFleet {
+            queued_polls: 8,
+            nowhere_to_go: true,
+            ..Default::default()
+        };
+        let (outcome, root, server, _token, _job) =
+            run_one_job("migrate_nowhere", "a patient render", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        assert!(fleet.cancelled.is_empty(), "never cancel what cannot be moved");
+        assert_eq!(fleet.dispatched.len(), 1);
+        assert!(fleet.widen_calls >= 1, "it did ask");
+        assert!(
+            fleet.widen_calls < 4,
+            "asking costs a fleet probe: {} asks in 8 polls",
+            fleet.widen_calls
+        );
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------------ the demand flip
+
+    /// The rule that protects a fleet from pointless downloads has to
+    /// invert when work is STACKING: one job waits for the box that has the
+    /// weights, but a queue means the fleet is short of copies.
+    #[test]
+    fn a_queue_behind_every_holder_provisions_another_copy() {
+        let never = |_: &str| false;
+        let holder_busy = busy(
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.235:8123",
+                    22 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_READY)],
+                ),
+                "NVIDIA GeForce RTX 4090",
+            ),
+            2,
+        );
+        let cold_idle_4090 = on_gpu(
+            snapshot(
+                "http://10.0.0.166:8123",
+                23 * 1024,
+                24 * 1024,
+                vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_ABSENT)],
+            ),
+            "NVIDIA GeForce RTX 4090",
+        );
+        let cold_idle_6000 = on_gpu(
+            snapshot(
+                "http://10.0.0.165:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_ABSENT)],
+            ),
+            "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        );
+        let fleet = vec![holder_busy.clone(), cold_idle_4090.clone(), cold_idle_6000.clone()];
+        let plan = provision_plan(&fleet, "music", "minimax-music3-q4", &never)
+            .expect("a starving queue provisions");
+        assert_eq!(plan.model, "minimax-music3-q4");
+        assert_eq!(plan.target, 2, "the fastest idle card takes the copy");
+        assert_eq!(plan.sources, vec![0], "sourced from the box that HAS it");
+
+        // An IDLE holder means nothing is starving: the job has somewhere to
+        // go this second, and a download would be pure waste.
+        let with_idle_holder = vec![
+            holder_busy.clone(),
+            cold_idle_6000.clone(),
+            on_gpu(
+                snapshot(
+                    "http://10.0.0.203:8123",
+                    23 * 1024,
+                    24 * 1024,
+                    vec![in_state("minimax-music3-q4", "music", 20.0, MODEL_STATE_READY)],
+                ),
+                "NVIDIA GeForce RTX 4090",
+            ),
+        ];
+        assert_eq!(provision_plan(&with_idle_holder, "music", "minimax-music3-q4", &never), None);
+
+        // Nobody holds it at all: that is a cold start, and ordinary
+        // dispatch already downloads it on the box that will run it.
+        let nobody = vec![cold_idle_4090.clone(), cold_idle_6000.clone()];
+        assert_eq!(provision_plan(&nobody, "music", "minimax-music3-q4", &never), None);
+
+        // One per model, whoever notices first.
+        let already = |model: &str| model == "minimax-music3-q4";
+        assert_eq!(provision_plan(&fleet, "music", "minimax-music3-q4", &already), None);
+    }
+
+    /// Where a copy may NOT go: a box too small to run it, a box that is
+    /// dedicated to something else, and a box already running work.
+    #[test]
+    fn provisioning_respects_hardware_roles_and_idleness() {
+        let never = |_: &str| false;
+        let holder_busy = busy(
+            snapshot(
+                "http://10.0.0.235:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_READY)],
+            ),
+            1,
+        );
+        // 24 GB idle box, 74 GB model: hardware says no, forever.
+        let too_small = snapshot(
+            "http://10.0.0.166:8123",
+            23 * 1024,
+            24 * 1024,
+            vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy.clone(), too_small], "video", "minimax-h3", &never),
+            None
+        );
+
+        // The dedicated chat box is never filled with someone else's
+        // weights, even when it is idle and big enough.
+        let chat_box = snapshot(
+            "http://10.0.0.217:8123",
+            95 * 1024,
+            96 * 1024,
+            vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy.clone(), chat_box], "video", "minimax-h3", &never),
+            None
+        );
+
+        // A busy box is not a place to put a download either.
+        let busy_cold = busy(
+            snapshot(
+                "http://10.0.0.100:8123",
+                95 * 1024,
+                96 * 1024,
+                vec![in_state("minimax-h3", "video", 74.0, MODEL_STATE_ABSENT)],
+            ),
+            1,
+        );
+        assert_eq!(
+            provision_plan(&[holder_busy, busy_cold], "video", "minimax-h3", &never),
+            None
+        );
+    }
+
+    // ------------------------------------------ the music body composer
+
+    /// The defect, in one test: the expander wrote lyrics, nothing parsed
+    /// them, and every expanded vocal request came back instrumental
+    /// because MiniMax substitutes `[Instrumental]` for an empty field.
+    #[test]
+    fn a_music_expansion_fills_the_lyrics_field_it_writes() {
+        let answer = r#"{"model":"minimax-music3","prompt":"Global Metadata\nDreamy shoegaze at a slow tempo.\nVocal Details\nWhispery female lead.\nArrangement\nGuitar motif opens alone.","lyrics":"[Verse]\nPlatform lights dissolve in rain\n\n[Chorus]\nI missed the last train home","seconds":90}"#;
+        let body = compose_music_body(answer).expect("a composed body");
+        assert!(body.prompt.starts_with("Global Metadata"));
+        assert_eq!(
+            body.lyrics,
+            "[Verse]\nPlatform lights dissolve in rain\n\n[Chorus]\nI missed the last train home",
+            "the lyric script is its own field, tags and line breaks intact"
+        );
+        assert_eq!(body.seconds, Some(90.0));
+
+        // Applied to the job, the lyrics reach the wire — which is the
+        // whole point: this is what was silently empty before.
+        let kind = kind_of("music.generate").unwrap();
+        let mut request = GenRequest::from_body(
+            kind,
+            &obj(vec![("prompt", s("a shoegaze song")), ("model", s("minimax-music3"))]),
+        )
+        .unwrap();
+        body.clone().apply(&mut request);
+        let wire = wire_request(&request, "minimax-music3".to_string());
+        assert_eq!(wire.lyrics.as_deref(), Some(body.lyrics.as_str()));
+        assert_eq!(wire.seconds, Some(90.0));
+        assert!(wire.prompt.as_deref().unwrap().contains("Whispery female lead"));
+        assert!(
+            !wire.prompt.as_deref().unwrap().contains("Platform lights"),
+            "lyrics never leak back into the caption"
+        );
+        // …and BOTH halves are inspectable on the job: the caption is the
+        // stage's prompt, the lyric script rides its parameters, so opening
+        // the run shows exactly what the music model was handed.
+        let params = stage_params(&wire, &request);
+        assert!(params.contains("lyrics=[Verse]"), "{params}");
+        assert!(params.contains("seconds=90"), "{params}");
+    }
+
+    /// The writer is a writer, not a scheduler: it never gets to change the
+    /// model, and the person's own duration and seed outrank its proposal.
+    #[test]
+    fn the_composer_never_overrules_what_the_person_asked_for() {
+        let answer = r#"{"model":"ace-step-1.5-xl","prompt":"Neo-soul, warm Rhodes.","lyrics":"[Verse]\nMorning settles on the floor","seconds":30,"steps":8,"seed":5}"#;
+        let kind = kind_of("music.generate").unwrap();
+        let mut request = GenRequest::from_body(
+            kind,
+            &obj(vec![
+                ("prompt", s("neo soul")),
+                ("model", s("minimax-music3")),
+                ("seconds", Value::Int(120)),
+                ("seed", Value::Int(77)),
+            ]),
+        )
+        .unwrap();
+        compose_music_body(answer).expect("composed").apply(&mut request);
+        assert_eq!(request.model, "minimax-music3", "the pin still decides");
+        assert_eq!(request.seed, Some(77));
+        // Words the person wrote are never overwritten either.
+        let mut with_lyrics = GenRequest::from_body(
+            kind,
+            &obj(vec![
+                ("prompt", s("neo soul")),
+                ("lyrics", s("[Verse]\nmy own words")),
+            ]),
+        )
+        .unwrap();
+        compose_music_body(answer).expect("composed").apply(&mut with_lyrics);
+        assert_eq!(
+            wire_request(&with_lyrics, "minimax-music3".to_string()).lyrics.as_deref(),
+            Some("[Verse]\nmy own words")
+        );
+        let wire = wire_request(&request, request.model.clone());
+        assert_eq!(wire.seconds, Some(120.0), "the person asked for two minutes");
+        assert_eq!(wire.seed, Some(77));
+        // What the writer DID get to say still lands.
+        assert_eq!(wire.steps, Some(8));
+        assert!(wire.lyrics.is_some());
+    }
+
+    /// An answer that is not a body never costs the run: it falls back to
+    /// being the prompt, exactly as it did before there was a composer.
+    #[test]
+    fn an_answer_that_is_not_a_body_is_salvaged_or_refused_cleanly() {
+        // Chatty preamble and a code fence: still a body.
+        let fenced = "Sure! Here you go:\n```json\n{\"prompt\":\"warm house\",\"lyrics\":\"[Instrumental]\",\"seconds\":60}\n```";
+        let body = compose_music_body(fenced).expect("salvaged");
+        assert_eq!(body.prompt, "warm house");
+        // Prose, malformed JSON, and an empty prompt are all "not a body".
+        assert_eq!(compose_music_body("Global Metadata\nDreamy shoegaze"), None);
+        assert_eq!(compose_music_body("{\"prompt\": }"), None);
+        assert_eq!(compose_music_body("{\"prompt\":\"   \"}"), None);
+        // A body with no lyrics is an INSTRUMENTAL, said out loud — an
+        // empty field is the thing that used to make everything a hum.
+        let instrumental = compose_music_body("{\"prompt\":\"taiko score\",\"seconds\":45}")
+            .expect("composed");
+        assert_eq!(instrumental.lyrics, "[Instrumental]");
+        // Out-of-range numbers are dropped, not clamped into a lie.
+        let silly = compose_music_body(
+            "{\"prompt\":\"x\",\"seconds\":99999,\"steps\":900,\"seed\":-1}",
+        )
+        .expect("composed");
+        assert_eq!((silly.seconds, silly.steps, silly.seed), (None, None, None));
+    }
+
+    /// A loop request gets the writer that knows a loop has no intro, no
+    /// outro and no final cadence — the VJ's own tag is the signal.
+    #[test]
+    fn a_loop_request_asks_the_loop_writer() {
+        assert!(wants_loop(&obj(vec![("loop", Value::Bool(true))])));
+        assert!(wants_loop(&obj(vec![(
+            "tags",
+            Value::Arr(vec![s("neon"), s("Loop")])
+        )])));
+        assert!(!wants_loop(&obj(vec![("prompt", s("a song"))])));
+        assert!(!wants_loop(&obj(vec![("loop", Value::Bool(false))])));
+        // And the writer exists for that name.
+        assert!(
+            makepad_asset_ai::llm_backend::default_system_prompt("music_loop")
+                .contains("[Instrumental]")
+        );
+    }
+
+    // -------------------------------------------- stages are inspectable
+
+    /// The user's case: open the run, read the exact text that went into the
+    /// model. Recorded while the job runs, not reconstructed afterwards.
+    #[test]
+    fn every_stage_records_the_full_text_it_handed_the_model() {
+        let prompt = "warm analog house, 120 bpm\n\n[verse]\nthe city hums at dusk\n\
+                      [chorus]\nall night, all night";
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, job) =
+            run_one_job("stage_records", prompt, &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let status = submitter
+            .job_status(&makepad_asset_client::dto::JobId::parse(&job).unwrap())
+            .expect("status");
+        assert_eq!(status.stages.len(), 1);
+        let stage = &status.stages[0];
+        assert_eq!(stage.name, "image.generate");
+        assert_eq!(stage.prompt, prompt, "the whole prompt, line breaks and all");
+        assert_eq!(stage.model, "minimax-h3-q4-24g-q4", "what RAN, not what was asked for");
+        assert_eq!(stage.at, "10.0.0.203");
+        assert!(stage.params.contains("seed=77"), "{}", stage.params);
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An expansion is two things worth reading: what the person typed, and
+    /// the paragraph the next model was handed because of it. Both, on the
+    /// same job, as separate stages.
+    #[test]
+    fn an_expansion_records_both_what_it_was_asked_and_what_it_answered() {
+        let root = test_root("stage_expand");
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        let mut submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a warm house track")),
+            ("model", s("minimax-music3")),
+            ("expand", Value::Bool(true)),
+            ("seconds", Value::Int(60)),
+        ]);
+        let job = submitter.enqueue_job("gen", "music.generate", &body).expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("warm analog house, 120 bpm, tape saturation".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "box-165".to_string(),
+                kinds: vec!["music.generate".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            let _ = coordinator.run_one(&AtomicBool::new(false)).expect("coordinator call");
+        }
+        let status = submitter.job_status(&job).expect("status");
+        let names: Vec<&str> = status.stages.iter().map(|st| st.name.as_str()).collect();
+        assert_eq!(names, vec!["text.expand", "music.generate"], "in the order they ran");
+        let expand = &status.stages[0];
+        assert_eq!(expand.prompt, "a warm house track", "what the person typed");
+        assert_eq!(
+            expand.output, "warm analog house, 120 bpm, tape saturation",
+            "what the next model will be handed"
+        );
+        assert!(expand.params.contains("target_domain=music"), "{}", expand.params);
+        // And the music stage was given the EXPANSION, which is the whole
+        // reason a person opens the run to look.
+        assert_eq!(status.stages[1].prompt, "warm analog house, 120 bpm, tape saturation");
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ------------------------------------------- annotation text survives
+
+    /// An expanded prompt is model output. The store refuses a control
+    /// character in ANY annotation field, and refusing it after the GPU
+    /// spend cost a finished clip.
+    #[test]
+    fn an_expanded_prompt_keeps_its_words_when_its_newlines_go() {
+        assert_eq!(
+            annotation_text("a neon city\nseen from above\r\n\tat dusk", 200),
+            "a neon city seen from above at dusk"
+        );
+        assert!(!annotation_text("a\u{7}b\u{0}c", 200).chars().any(char::is_control));
+        // The cut lands on a word boundary...
+        assert_eq!(annotation_text("alpha beta gamma", 12), "alpha beta");
+        // ...unless the first word is longer than the whole budget.
+        assert_eq!(annotation_text("aaaaaaaaaaaaaaa", 4), "aaaa");
+        assert_eq!(annotation_text("   \n\t  ", 40), "");
+    }
+
+    #[test]
+    fn a_text_refusal_republishes_the_same_bytes_with_plainer_words() {
+        assert!(is_annotation_text_refusal(&ClientError::InvalidInput {
+            what: "annotation control chars"
+        }));
+        assert!(is_annotation_text_refusal(&ClientError::Server {
+            status: 400,
+            detail: Some("invalid annotation label".to_string()),
+        }));
+        // A refusal about the BYTES is a real failure and must not retry.
+        assert!(!is_annotation_text_refusal(&ClientError::InvalidInput {
+            what: "publish rights control chars"
+        }));
+        assert!(!is_annotation_text_refusal(&ClientError::Timeout { op: "publish" }));
+
+        let mut publish = PublishRequest::new(
+            "gen",
+            AssetKind::Texture,
+            "\u{7}\u{7}",
+            PublishFile {
+                bytes: tiny_png(),
+                media: MediaType::Png,
+                role: FileRole::Texture,
+                media_millis: 0,
+                dims: None,
+            },
+            PublishThumbnail {
+                bytes: tiny_png(),
+                media: ThumbnailMedia::Png,
+                width: 1,
+                height: 1,
+                views: Vec::new(),
+            },
+        );
+        publish.prompt = "one\ntwo".to_string();
+        publish.provenance = "expanded from: a\u{0}b".to_string();
+        publish.tags = vec!["loop".to_string(), "bad\u{7}tag".to_string()];
+        scrub_annotation(&mut publish);
+        assert_eq!(publish.title, "Generated asset");
+        assert_eq!(publish.prompt, "one two");
+        assert_eq!(publish.provenance, "expanded from: a b");
+        assert_eq!(publish.tags, vec!["loop".to_string()]);
+    }
+
+    // ------------------------------------------------ the banded job bar
+
+    /// The bar is a LATCH. Every phase of one claim writes through it, and
+    /// none of those writes may be smaller than what the person has already
+    /// seen — which is what a node changing phase, a migration, and the
+    /// expansion→generation hand-off all used to do.
+    #[test]
+    fn the_bar_never_goes_backwards_inside_one_claim() {
+        let mut bar = JobBar::new();
+        // The expander owns the first twentieth.
+        assert_eq!(bar.in_band(BAND_EXPAND, 0.0), 0);
+        assert_eq!(bar.in_band(BAND_EXPAND, 0.5), 25);
+        assert_eq!(bar.at(BAND_EXPAND.hi), 50);
+        // The generation starts where the expansion left off, not at zero.
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.0), 50);
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.5), 475);
+        // A node that changes phase and reports 0 again HOLDS the bar.
+        assert_eq!(bar.in_band(BAND_GENERATE, 0.0), 475);
+        // …and so does a queue behind another run on a new box.
+        assert_eq!(bar.permille(), 475);
+        assert_eq!(bar.in_band(BAND_GENERATE, 1.0), 900);
+        // The last tenth is the publication, and 1000 means published.
+        assert_eq!(bar.at(910), 910);
+        assert_eq!(bar.at(BAND_FINISH.lo), 910, "a retry note never rewinds");
+        assert_eq!(bar.at(930), 930);
+        assert_eq!(bar.at(1000), 1000);
+        // Nothing can write past the end, and nothing can write under the
+        // floor once the job is done.
+        assert_eq!(bar.at(u16::MAX), 1000);
+        assert_eq!(bar.in_band(BAND_EXPAND, 1.0), 1000);
+    }
+
+    /// Each phase owns exactly its slice, and a fraction lands inside it.
+    /// These three numbers are the contract the UI reads: under 50 the
+    /// expander is writing, 900 means the GPU is done and the publish has
+    /// begun, 1000 means a row exists.
+    #[test]
+    fn the_bands_partition_the_bar_without_gaps_or_overlap() {
+        assert_eq!((BAND_EXPAND.lo, BAND_EXPAND.hi), (0, 50));
+        assert_eq!((BAND_GENERATE.lo, BAND_GENERATE.hi), (50, 900));
+        assert_eq!((BAND_FINISH.lo, BAND_FINISH.hi), (900, 1000));
+        assert_eq!(BAND_EXPAND.hi, BAND_GENERATE.lo);
+        assert_eq!(BAND_GENERATE.hi, BAND_FINISH.lo);
+        // A node fraction is scaled INTO its band, never used raw: 25% of a
+        // render is 262‰ of the job, not 250‰ and not 25‰.
+        assert_eq!(BAND_GENERATE.at(0.0), 50);
+        assert_eq!(BAND_GENERATE.at(0.25), 263);
+        assert_eq!(BAND_GENERATE.at(1.0), 900);
+        // Out-of-range fractions are clamped, never wrapped.
+        assert_eq!(BAND_GENERATE.at(-1.0), 50);
+        assert_eq!(BAND_GENERATE.at(9.0), 900);
+        assert_eq!(BAND_FINISH.at(1.0), 1000);
+    }
+
+    /// THE TERMINAL LIE IS DEAD. A published run leaves the bar in the
+    /// publish band with a publish note — not frozen at whatever fraction
+    /// the node last reported before the fetch/thumbnail/publish work that
+    /// nobody could see.
+    #[test]
+    fn a_published_run_ends_in_the_publish_band_and_says_so() {
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, job) =
+            run_one_job("publish_band", "a neon panther", &mut fleet);
+        assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+        let submitter = connect(&server, &token, &root.join("check-cache"));
+        let job = makepad_asset_client::dto::JobId::parse(&job).unwrap();
+        let detail = submitter.job_detail(&job).expect("job detail");
+        assert_eq!(detail.status.state, JobStateDto::Succeeded);
+        let progress = detail.progress.expect("a job that ran has progress");
+        assert!(
+            progress.permille >= 900,
+            "the publish band starts at 900, read {}",
+            progress.permille
+        );
+        assert!(
+            progress.note.contains("publish"),
+            "the note names the phase that finished: {:?}",
+            progress.note
+        );
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // --------------------------------------- text.expand as a real job
+
+    /// The expander, ENQUEUED. It used to be the coordinator's private
+    /// pre-step, so an expansion existed only inside a job that was already
+    /// running. As a kind it is claimable by the box that runs text models,
+    /// and its result is written in the shape the store's `$from` splice
+    /// reads: top-level plain values, so a dependent stage's body can be
+    /// filled from it at claim time without anybody watching.
+    #[test]
+    fn an_enqueued_expansion_is_claimed_and_answers_in_spliceable_fields() {
+        let (server, root, token) = test_server("expand_kind_music");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a warm house track")),
+            ("target_domain", s("music")),
+        ]);
+        let job = submitter
+            .enqueue_job("gen", "text.expand", &body)
+            .expect("a client can enqueue the expander");
+        let answer = r#"{"prompt":"Global Metadata\nDreamy shoegaze, slow.","lyrics":"[Verse]\nPlatform lights dissolve in rain","seconds":90,"steps":40}"#;
+        let mut fleet = ScriptedFleet {
+            expand_text: Some(answer.to_string()),
+            ..Default::default()
+        };
+        let outcome = {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "text-box".to_string(),
+                // What a text box actually claims — from the kind table, so
+                // the claim filter and the row cannot disagree.
+                kinds: crate::gen_kinds::kinds_for_domains(&["text".to_string()]),
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            assert_eq!(coordinator.kinds, vec!["text.expand".to_string()]);
+            coordinator
+                .run_one(&AtomicBool::new(false))
+                .expect("coordinator call")
+                .expect("claimed the expand job")
+        };
+        assert!(matches!(outcome, JobOutcome::Answered { .. }), "{outcome:?}");
+        // A stage gets the same token budget the pre-step gives itself: a
+        // lyric script cut off at 512 tokens is unparseable, not shorter.
+        assert_eq!(fleet.requests.len(), 1);
+        assert_eq!(
+            fleet.requests[0].body.get("max_tokens").and_then(Value::as_u64),
+            Some(EXPAND_MUSIC_MAX_TOKENS as u64)
+        );
+
+        let detail = submitter.job_detail(&job).expect("job detail");
+        assert_eq!(detail.status.state, JobStateDto::Succeeded);
+        // Nothing is published: an expansion is a sentence, not an asset.
+        assert_eq!(detail.status.result_asset, None);
+        // And it reads like the pre-step expansion does when a person opens
+        // the run: what it was asked, and what it wrote.
+        assert_eq!(detail.status.stages.len(), 1);
+        let stage = &detail.status.stages[0];
+        assert_eq!(stage.name, "text.expand");
+        assert_eq!(stage.prompt, "a warm house track");
+        assert!(stage.output.contains("Dreamy shoegaze"), "{}", stage.output);
+        // The bar ends full: recording the answer IS the product here.
+        let progress = detail.progress.as_ref().expect("progress");
+        assert_eq!(progress.permille, 1000);
+        let result = detail.result.expect("recorded result");
+        // What a next stage splices: `prompt` always, `lyrics` because the
+        // writer answered with the music body contract.
+        assert_eq!(
+            result.body.get("prompt").and_then(Value::as_str),
+            Some("Global Metadata Dreamy shoegaze, slow.")
+        );
+        assert_eq!(
+            result.body.get("lyrics").and_then(Value::as_str),
+            Some("[Verse]\nPlatform lights dissolve in rain"),
+            "the lyric script keeps its line breaks"
+        );
+        // A whole number rides the wire as an int and comes back as one;
+        // both variants are plain values, and `wire_request` reads either.
+        let seconds = match result.body.get("seconds") {
+            Some(Value::Int(i)) => *i as f64,
+            Some(Value::F64(f)) => *f,
+            other => panic!("seconds must be a number, got {other:?}"),
+        };
+        assert_eq!(seconds, 90.0);
+        assert_eq!(result.body.get("steps").and_then(Value::as_u64), Some(40));
+        // The raw answer and who answered it are still there, for a person
+        // reading the run rather than a machine splicing it.
+        assert!(result
+            .body
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.contains("Dreamy shoegaze")));
+        assert_eq!(
+            result.body.get("box").and_then(Value::as_str),
+            Some("10.0.0.203")
+        );
+        // THE SPLICE CONTRACT: the store resolves `{"$from":…,"field":…}`
+        // against TOP-LEVEL PLAIN VALUES of this document and refuses
+        // anything else. Every field it could be pointed at must be one.
+        let Value::Obj(pairs) = &result.body else {
+            panic!("a result is an object")
+        };
+        for (key, value) in pairs {
+            assert!(
+                matches!(
+                    value,
+                    Value::Str(_) | Value::Int(_) | Value::F64(_) | Value::Bool(_)
+                ),
+                "{key} is not spliceable: {value:?}"
+            );
+        }
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A prose expansion answers the same question with the same field: the
+    /// pipeline points at `prompt` and never has to know whether the writer
+    /// wrote a paragraph or a body. The words are cleaned exactly the way
+    /// the pre-step cleans them before handing them to the next model.
+    #[test]
+    fn a_prose_expansion_flattens_the_prompt_the_next_stage_gets() {
+        let (server, root, token) = test_server("expand_kind_prose");
+        let submitter = connect(&server, &token, &root.join("submit-cache"));
+        let body = obj(vec![
+            ("prompt", s("a city at night")),
+            ("target_domain", s("video")),
+        ]);
+        let job = submitter.enqueue_job("gen", "text.expand", &body).expect("enqueue");
+        let mut fleet = ScriptedFleet {
+            expand_text: Some("a rain-slick city\nseen from a rooftop\r\n\tat 3am".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut coordinator = Coordinator {
+                client: connect(&server, &token, &root.join("worker-cache")),
+                fleet: &mut fleet,
+                suffix: "text-box".to_string(),
+                kinds: vec!["text.expand".to_string()],
+                rights: PublishRights::generated_cc0(),
+                log: false,
+            };
+            let _ = coordinator.run_one(&AtomicBool::new(false)).expect("coordinator call");
+        }
+        // A prose brief gets the prose budget, not the music one.
+        assert_eq!(
+            fleet.requests[0].body.get("max_tokens").and_then(Value::as_u64),
+            Some(EXPAND_MAX_TOKENS as u64)
+        );
+        let result = submitter
+            .job_detail(&job)
+            .expect("job detail")
+            .result
+            .expect("recorded result");
+        assert_eq!(
+            result.body.get("prompt").and_then(Value::as_str),
+            Some("a rain-slick city seen from a rooftop at 3am"),
+            "no control characters reach the next stage's body"
+        );
+        // Nothing musical is invented for a video brief.
+        assert!(result.body.get("lyrics").is_none());
+        assert!(result.body.get("seconds").is_none());
+        drop(submitter);
+        drop(server);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// End to end: a prompt full of newlines publishes, instead of losing
+    /// the render at the last step.
+    #[test]
+    fn a_control_char_prompt_still_publishes_its_row() {
+        let mut fleet = ScriptedFleet::default();
+        let (outcome, root, server, token, _job) = run_one_job(
+            "publish_control_chars",
+            "a wireframe panther\nprowling a neon grid\r\n\tat dusk",
+            &mut fleet,
+        );
+        let JobOutcome::Published { revision, .. } = outcome else {
+            panic!("expected publication, got {outcome:?}")
+        };
+        let mut submitter = connect(&server, &token, &root.join("check-cache"));
+        let revision = AssetRevisionId::from_str(&revision).expect("revision");
+        let manifest = submitter.fetch_asset_manifest(&revision).expect("manifest");
+        assert_eq!(manifest.kind, AssetKind::Texture);
         drop(submitter);
         drop(server);
         let _ = std::fs::remove_dir_all(root);

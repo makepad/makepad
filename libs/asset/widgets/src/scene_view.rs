@@ -350,6 +350,8 @@ impl SceneView {
                     dynamic: false,
                     depth_order: 0.0,
                     part_poses: Vec::new(),
+                    tint: vec4(1.0, 1.0, 1.0, 1.0),
+                    color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                 });
                 self.status = format!("{tris} triangles");
             }
@@ -367,6 +369,8 @@ impl SceneView {
             dynamic: false,
             depth_order: 0.0,
             part_poses: Vec::new(),
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
         });
         // A level's door parts are animated nodes, NOT part of the static
         // collision mesh, so their cells are walkable in the graph and the

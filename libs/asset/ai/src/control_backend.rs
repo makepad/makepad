@@ -144,11 +144,28 @@ impl ContentBackend for ControlBackend {
     }
 
     fn unload(&mut self) -> Result<(), AssetAiError> {
-        if let Some((generation, worker)) = self.worker.take() {
-            control_worker::ControlWorker::retire_shared(generation);
-            drop(worker);
+        let Some((generation, worker)) = self.worker.take() else {
+            return Ok(());
+        };
+        // Ask the pipeline thread to free its own residency and WAIT for the
+        // acknowledgement: dropping the handle is not a release (the device
+        // weight cache and the CUDA idle pool are that thread's thread-locals),
+        // and the admission gate is about to promise the VRAM to another model.
+        let released = worker.release();
+        control_worker::ControlWorker::retire_shared(generation);
+        drop(worker);
+        match released {
+            Ok(line) => {
+                eprintln!("[asset-ai] {line}");
+                Ok(())
+            }
+            Err(control_worker::ControlWorkerError::WorkerGone(message)) => {
+                eprintln!("[asset-ai] control release skipped: {message}");
+                Ok(())
+            }
+            Err(control_worker::ControlWorkerError::Cancelled) => Ok(()),
+            Err(control_worker::ControlWorkerError::Other(message)) => Err(AssetAiError::Backend(message)),
         }
-        Ok(())
     }
 
     fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
@@ -348,12 +365,51 @@ mod control_worker {
         events: mpsc::Sender<WorkerEvent>,
     }
 
+    /// What the backend may ask the pipeline thread to do. `Release` frees the
+    /// thread-LOCAL device weight cache and CUDA idle pool that nothing on the
+    /// server's worker thread can reach — see `control_worker`'s note; dropping the
+    /// handle alone returned no VRAM the admission gate could see.
+    enum WorkerCmd {
+        Run(WorkerMsg),
+        Release(mpsc::Sender<String>),
+    }
+
     #[derive(Clone)]
     pub struct ControlWorker {
-        tx: mpsc::Sender<WorkerMsg>,
+        tx: mpsc::Sender<WorkerCmd>,
     }
 
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<ControlWorker>)> = std::sync::Mutex::new((0, None));
+
+    /// Upper bound on a release acknowledgement (it queues behind whatever the
+    /// thread is doing; the free itself is well under a second).
+    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Frees every device allocation this pipeline thread owns — the resident
+    /// pipeline's checkpoint weight-cache namespaces, any residual dense-linear
+    /// weight buffer, and the idle CUDA block pool — ON this thread, the only
+    /// place they can be freed from. Dropping the pipeline alone releases only
+    /// its HOST arenas by design.
+    fn release_device_residency(warm: &mut Option<FluxPipeline>) -> String {
+        let checkpoint = match warm.take() {
+            Some(pipeline) => {
+                let freed = pipeline.evict_device_caches();
+                drop(pipeline);
+                freed
+            }
+            None => 0,
+        };
+        let (residual, trouble) =
+            match makepad_ai_common::backend::release_gpu_runtime_namespaces(&[""]) {
+                Ok(count) => (count, String::new()),
+                Err(error) => (0, format!(", release error: {error}")),
+            };
+        makepad_ai_common::backend::gpu_pool_clear();
+        format!(
+            "control vram-release on the pipeline thread: {checkpoint} checkpoint weight buffers, \
+             {residual} residual weight buffers, idle pool cleared{trouble}"
+        )
+    }
 
     impl ControlWorker {
         pub fn shared() -> Result<(u64, Self), AssetAiError> {
@@ -372,16 +428,47 @@ mod control_worker {
             }
         }
 
+        /// Frees the thread's device residency and BLOCKS for the
+        /// acknowledgement, so the caller can honestly report the VRAM back.
+        pub fn release(&self) -> Result<String, ControlWorkerError> {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            self.tx
+                .send(WorkerCmd::Release(ack_tx))
+                .map_err(|_| ControlWorkerError::WorkerGone("control worker thread is gone".to_string()))?;
+            ack_rx
+                .recv_timeout(RELEASE_TIMEOUT)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        ControlWorkerError::WorkerGone("control dropped the release reply".to_string())
+                    }
+                    mpsc::RecvTimeoutError::Timeout => ControlWorkerError::Other(format!(
+                        "control worker did not acknowledge the device release within {}s",
+                        RELEASE_TIMEOUT.as_secs()
+                    )),
+                })
+        }
+
         fn spawn() -> Result<Self, AssetAiError> {
-            let (tx, rx) = mpsc::channel::<WorkerMsg>();
+            let (tx, rx) = mpsc::channel::<WorkerCmd>();
             std::thread::Builder::new()
                 .name("control-pipeline".to_string())
                 .spawn(move || {
                     let mut warm: Option<FluxPipeline> = None;
-                    while let Ok(WorkerMsg { job, cancel, events }) = rx.recv() {
-                        let result = run_generate(&mut warm, job, &cancel, &events);
-                        let _ = events.send(WorkerEvent::Done(result));
+                    while let Ok(cmd) = rx.recv() {
+                        match cmd {
+                            WorkerCmd::Run(WorkerMsg { job, cancel, events }) => {
+                                let result = run_generate(&mut warm, job, &cancel, &events);
+                                let _ = events.send(WorkerEvent::Done(result));
+                            }
+                            WorkerCmd::Release(ack) => {
+                                let _ = ack.send(release_device_residency(&mut warm));
+                            }
+                        }
                     }
+                    eprintln!(
+                        "[asset-ai] control worker thread exiting: {}",
+                        release_device_residency(&mut warm)
+                    );
                 })
                 .map_err(|e| AssetAiError::Backend(format!("spawn control worker: {e}")))?;
             Ok(Self { tx })
@@ -395,11 +482,11 @@ mod control_worker {
         ) -> Result<FluxPipelineGenerateRun, ControlWorkerError> {
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
-                .send(WorkerMsg {
+                .send(WorkerCmd::Run(WorkerMsg {
                     job,
                     cancel,
                     events: event_tx,
-                })
+                }))
                 .map_err(|_| ControlWorkerError::WorkerGone("control worker thread is gone".to_string()))?;
             loop {
                 match event_rx.recv() {

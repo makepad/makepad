@@ -131,6 +131,9 @@ pub struct JobRecord {
     pub finished_ms: Option<u64>,
     /// Assistant text for chat/LLM jobs; surfaced as `JobStatusJson.partial_text`.
     pub partial_text: Option<String>,
+    /// The completed text answer, set once when the job's text artifact is
+    /// persisted; surfaced as `JobStatusJson.text`.
+    pub text: Option<String>,
     /// Chat serving facts (warmth, think/visible split), surfaced as
     /// `JobStatusJson.serving`. Set by the backend as the turn runs.
     pub serving: Option<crate::protocol::ServingStatusJson>,
@@ -311,6 +314,7 @@ impl JobStore {
                 started_ms: None,
                 finished_ms: None,
                 partial_text: None,
+                text: None,
                 serving: None,
                 log: Vec::new(),
                 log_phase: String::new(),
@@ -484,6 +488,15 @@ impl JobStore {
         }
     }
 
+    /// The finished answer (see `JobStatusJson::text`). Called once, when the
+    /// worker persists a text artifact — never from the streaming path, so a
+    /// reader that only trusts `text` never sees a half-written reply.
+    pub fn set_text(&mut self, id: &str, text: String) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.text = Some(text);
+        }
+    }
+
     /// Merge chat serving facts. Fields arrive at different moments — warmth
     /// at prefill, the think split as the reply grows — so each update fills
     /// only what it knows and leaves the rest alone. Overwriting wholesale
@@ -653,6 +666,7 @@ impl JobStore {
             partial_text: job.partial_text.clone(),
             live: None,
             serving: job.serving.clone(),
+            text: job.text.clone(),
         };
         match &job.state {
             JobState::Queued => {

@@ -95,6 +95,8 @@ makepad-network = { path = "../../../platform/network" }
 makepad-asset-client = { path = "../client" }
 makepad-zune-core = { path = "../../zune/zune-core" }
 makepad-zune-png = { path = "../../zune/zune-png" }
+# Vision-domain request images arrive as PNG or JPEG.
+makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
 makepad-zip-file = { path = "../../zip_file" }
 makepad-ai-common = { path = "../../ai/models/common", optional = true }
 makepad-ai-flux = { path = "../../ai/models/flux", optional = true }

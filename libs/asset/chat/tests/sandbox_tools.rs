@@ -1,4 +1,4 @@
-//! The sandbox (game-client) tool extension: `assets.query`/`assets.schema`
+//! The sandbox tool extension: queued generation, `assets.query`/`assets.schema`
 //! and the `world.*` placement verbs. Parsing is the security boundary —
 //! every wrong shape refuses — and the extension is only ADVERTISED when an
 //! executor opts in via `ToolExecutor::tool_definitions`.
@@ -6,11 +6,12 @@
 use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_asset_chat::session::{CancelFlag, ExecCtx, Session, ToolExecutor};
 use makepad_asset_chat::tools::{
-    canonical_from_api_name, definitions, encode_args, sandbox_definitions, ContentToolCall,
-    ToolDef,
+    canonical_from_api_name, definitions, encode_args, sandbox_definitions, ContentGenerateKind,
+    ContentToolCall, SpawnForm, SpawnScale, ToolDef, CSG_MODEL_TOOL_DOC,
 };
 use makepad_asset_chat::wire::{ProviderAvailability, ProviderKind, ToolOutcome};
 use makepad_asset_client::json::{self, Value};
+use makepad_asset_data::ScalePreset;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -23,6 +24,33 @@ fn obj(json_text: &str) -> Value {
 }
 
 // ---------------------------------------------------------------- parsing
+
+#[test]
+fn content_generate_roundtrips_and_refuses_unbounded_jobs() {
+    let call = parse(
+        "content.generate",
+        obj(r#"{"kind":"character","prompt":"a hopping clockwork bunny","dim_height":1.25}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        call,
+        ContentToolCall::ContentGenerate {
+            kind: ContentGenerateKind::Character,
+            prompt: "a hopping clockwork bunny".into(),
+            dim_height: Some(1.25),
+        }
+    );
+    assert_eq!(ContentToolCall::parse(call.name(), &encode_args(&call)).unwrap(), call);
+    for bad in [
+        r#"{"kind":"video","prompt":"x"}"#,
+        r#"{"kind":"prop","prompt":""}"#,
+        r#"{"kind":"prop","prompt":"x","dim_height":0}"#,
+        r#"{"kind":"sound","prompt":"x","dim_height":101}"#,
+        r#"{"kind":"sound","prompt":"x","model":"expensive"}"#,
+    ] {
+        assert!(parse("content.generate", obj(bad)).is_err(), "{bad}");
+    }
+}
 
 #[test]
 fn assets_query_roundtrips_and_bounds_sql() {
@@ -143,6 +171,36 @@ fn world_list_takes_no_arguments() {
     assert!(parse("world.list", obj(r#"{"tag": "x"}"#)).is_err());
 }
 
+#[test]
+fn reviewed_model_tools_roundtrip_and_teaching_stays_small() {
+    let source = "let s=csg.sphere({r:0.1})\ncsg.part(\"ball\",s,{color:#4477aa})";
+    let call = parse(
+        "model.build",
+        json::obj(vec![("title", json::s("Blue Ball")), ("source", json::s(source))]),
+    )
+    .unwrap();
+    assert!(matches!(&call, ContentToolCall::ModelBuild { title, source: got }
+        if title == "Blue Ball" && got == source));
+    assert_eq!(ContentToolCall::parse(call.name(), &encode_args(&call)).unwrap(), call);
+
+    let fetch = parse("model.fetch", obj(r#"{"alias":"gen/csg/blue-ball"}"#)).unwrap();
+    assert!(matches!(&fetch, ContentToolCall::ModelFetch { alias }
+        if alias.as_str() == "gen/csg/blue-ball"));
+    assert_eq!(ContentToolCall::parse(fetch.name(), &encode_args(&fetch)).unwrap(), fetch);
+    assert!(parse("model.build", obj(r#"{"title":"x"}"#)).is_err());
+    assert!(parse("model.fetch", obj(r#"{"alias":"public/not-csg"}"#)).is_err());
+
+    assert!(CSG_MODEL_TOOL_DOC.len() < 4_608, "{} bytes", CSG_MODEL_TOOL_DOC.len());
+    for verb in ["box", "sphere", "cylinder", "torus", "extrude", "lathe",
+        "union", "difference", "intersect", "move", "rotate", "scale", "mirror",
+        "implicit", "part", "anim"] {
+        assert!(CSG_MODEL_TOOL_DOC.contains(&format!("csg.{verb}")), "missing {verb}");
+    }
+    for forbidden in ["csg.shape", "csg.op", "csg.transform", "csg.gear", "csg.xor"] {
+        assert!(!CSG_MODEL_TOOL_DOC.contains(forbidden), "obsolete surface: {forbidden}");
+    }
+}
+
 // ------------------------------------------------------------ definitions
 
 #[test]
@@ -183,11 +241,69 @@ fn world_source_tools_roundtrip_and_bound() {
             model: "kenney/car-kit/ambulance".into(),
             pos: None,
             form: None,
+            scale: None,
+            color: None,
+            hue: None,
             tag: None,
         }
     );
     let re = ContentToolCall::parse("world.spawn", &encode_args(&call)).unwrap();
     assert_eq!(re, call);
+    let exact = parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/car-kit/ambulance", "scale": 0.5}"#),
+    )
+    .unwrap();
+    assert!(matches!(
+        &exact,
+        ContentToolCall::WorldSpawn { scale: Some(SpawnScale::Exact(0.5)), .. }
+    ));
+    assert_eq!(ContentToolCall::parse("world.spawn", &encode_args(&exact)).unwrap(), exact);
+    let preset = parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/car-kit/ambulance", "scale": "small"}"#),
+    )
+    .unwrap();
+    assert!(matches!(
+        &preset,
+        ContentToolCall::WorldSpawn {
+            scale: Some(SpawnScale::Preset(ScalePreset::Small)),
+            ..
+        }
+    ));
+    assert_eq!(ContentToolCall::parse("world.spawn", &encode_args(&preset)).unwrap(), preset);
+    let recolored = parse(
+        "world.spawn",
+        obj(r##"{"model": "gen/csg/corgi-dog", "color": "#44aaff", "hue": -75}"##),
+    )
+    .unwrap();
+    assert!(matches!(
+        &recolored,
+        ContentToolCall::WorldSpawn {
+            color: Some(color),
+            hue: Some(-75.0),
+            ..
+        } if color == "#44aaff"
+    ));
+    assert_eq!(
+        ContentToolCall::parse("world.spawn", &encode_args(&recolored)).unwrap(),
+        recolored
+    );
+    assert!(parse(
+        "world.spawn",
+        obj(r##"{"model": "gen/csg/corgi-dog", "color": "blue"}"##),
+    )
+    .is_err());
+    assert!(parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/car-kit/ambulance", "scale": 0.1}"#),
+    )
+    .is_err());
+    assert!(parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/car-kit/ambulance", "scale": "tiny"}"#),
+    )
+    .is_err());
     let call = parse(
         "world.spawn",
         obj(r#"{"model": "kenney/nature-kit/tree_oak", "pos": [4, 0, 2], "form": "prop", "tag": "forest"}"#),
@@ -195,6 +311,22 @@ fn world_source_tools_roundtrip_and_bound() {
     .unwrap();
     let re = ContentToolCall::parse("world.spawn", &encode_args(&call)).unwrap();
     assert_eq!(re, call);
+    let follower = parse(
+        "world.spawn",
+        obj(r#"{"model": "gen/csg/corgi-dog", "form": "follower", "tag": "corgi"}"#),
+    )
+    .unwrap();
+    assert!(matches!(
+        &follower,
+        ContentToolCall::WorldSpawn {
+            form: Some(SpawnForm::Follower),
+            ..
+        }
+    ));
+    assert_eq!(
+        ContentToolCall::parse("world.spawn", &encode_args(&follower)).unwrap(),
+        follower
+    );
     // world.tune: the world-knob verb (§4.5 tune slice). Both knobs are
     // optional, at least one is required, and each has its own band.
     let call = parse("world.tune", obj(r#"{"car_speed": 0.6}"#)).unwrap();
@@ -240,7 +372,7 @@ fn world_source_tools_roundtrip_and_bound() {
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 12);
+    assert_eq!(extra.len(), 16);
     for def in &extra {
         assert_eq!(
             canonical_from_api_name(def.api_name),
@@ -270,6 +402,7 @@ fn base_args_docs_still_name_only_base_tools() {
     let names: Vec<&str> = definitions().iter().map(|d| d.name).collect();
     assert!(!names.contains(&"assets.query"));
     assert!(!names.contains(&"world.place"));
+    assert!(!names.contains(&"content.generate"));
 }
 
 // ------------------------------------------------- session advertisement
@@ -502,6 +635,157 @@ fn a_world_call_parks_the_turn_until_the_client_answers() {
     assert!(!system.contains("- image.generate:"), "phase 1 hides generation tools");
 }
 
+/// `world.new_level` parses like `world.set_source` plus a title, is
+/// advertised next to it on the game surface, and is client-executed.
+#[test]
+fn world_new_level_roundtrips_bounds_and_is_a_game_client_tool() {
+    let call = parse(
+        "world.new_level",
+        obj(r#"{"title": "Quarry Arena", "source": "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})", "note": "first cut"}"#),
+    )
+    .unwrap();
+    let ContentToolCall::WorldNewLevel { title, source, note } = &call else {
+        panic!("wrong variant");
+    };
+    assert_eq!(title, "Quarry Arena");
+    assert!(source.starts_with("game.sky"));
+    assert_eq!(note.as_deref(), Some("first cut"));
+    assert_eq!(call.name(), "world.new_level");
+    let re = ContentToolCall::parse("world.new_level", &encode_args(&call)).unwrap();
+    assert_eq!(re, call);
+    assert_eq!(canonical_from_api_name("world_new_level"), Some("world.new_level"));
+
+    // Same caps as set_source on the source; a title is display text.
+    let big = format!(r#"{{"title": "t", "source": "{}"}}"#, "g".repeat(13_000));
+    assert!(parse("world.new_level", obj(&big)).is_err(), "oversized source refuses");
+    assert!(parse("world.new_level", obj(r#"{"source": "x"}"#)).is_err(), "title required");
+    assert!(parse("world.new_level", obj(r#"{"title": "t"}"#)).is_err(), "source required");
+    assert!(parse("world.new_level", obj(r#"{"title": "   ", "source": "x"}"#)).is_err());
+    assert!(parse("world.new_level", obj(r#"{"title": "ab", "source": "x"}"#)).is_ok());
+    assert!(parse("world.new_level", obj(r#"{"title": "a\u0007b", "source": "x"}"#)).is_err(), "control chars refuse");
+    let long_title = format!(r#"{{"title": "{}", "source": "x"}}"#, "t".repeat(81));
+    assert!(parse("world.new_level", obj(&long_title)).is_err());
+    assert!(parse("world.new_level", obj(r#"{"title": "t", "source": "x", "switch": true}"#)).is_err());
+
+    // Advertised on the game surface, right after set_source; never on the
+    // base list.
+    let names: Vec<&str> = game_definitions().iter().map(|d| d.name).collect();
+    let set = names.iter().position(|n| *n == "world.set_source").unwrap();
+    assert_eq!(names[set + 1], "world.new_level", "{names:?}");
+    assert!(!definitions().iter().any(|d| d.name == "world.new_level"));
+    assert!(makepad_asset_chat::context::ClientProfile::Game.client_executes(&call));
+    assert!(!makepad_asset_chat::context::ClientProfile::General.client_executes(&call));
+}
+
+#[test]
+fn splash_source_tools_teach_if_else_and_range_loop_syntax() {
+    let defs = sandbox_definitions();
+    for name in ["world.add_addon", "world.set_source"] {
+        let description = defs
+            .iter()
+            .find(|def| def.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .description;
+        assert!(description.contains("NO ternary `?:` — use if/else"), "{name}: {description}");
+        assert!(description.contains("`for i in 0..n {}`"), "{name}: {description}");
+    }
+}
+
+/// The client's answer to `world.new_level` ENDS the turn: the round is in
+/// the history, `done` is emitted, and NO follow-up model round runs — the
+/// player is in another game, with its own chat, by then.
+#[test]
+fn a_new_level_answer_ends_the_turn_without_another_model_round() {
+    let inputs = Rc::new(RefCell::new(Vec::new()));
+    let provider = Replay {
+        turns: vec![
+            "New level coming.\n<<tool>>{\"name\":\"world.new_level\",\"args\":{\"title\":\"Quarry\",\"source\":\"game.sky({})\"}}".into(),
+            "THIS ROUND MUST NEVER RUN".into(),
+        ],
+        pending: Vec::new(),
+        inputs: inputs.clone(),
+    };
+    let executed = Rc::new(RefCell::new(Vec::new()));
+    let mut exec = GameExec { executed: executed.clone() };
+    let mut session = Session::new("game", Box::new(provider));
+    session.send("make me a new level", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+    assert_eq!(session.awaiting_client_tool(), Some("tc_1_1"));
+    assert!(executed.borrow().is_empty());
+
+    let ok = ToolOutcome::Ok {
+        value: json::obj(vec![
+            ("asset_id", json::s("ast_0123456789abcdef0123456789abcdef")),
+            ("alias", json::s("games/quarry")),
+            ("title", json::s("Quarry")),
+        ]),
+    };
+    session.provide_client_outcome("tc_1_1", ok, &mut exec).unwrap();
+    assert!(session.is_idle(), "the turn ends on the answer");
+    let events = session.drain_events();
+    assert!(events.iter().any(|e| matches!(&e.body, ChatEventBody::ToolResult { .. })));
+    assert!(events.iter().any(|e| matches!(&e.body, ChatEventBody::Done)));
+    assert!(!events.iter().any(|e| matches!(&e.body, ChatEventBody::Error { .. })), "{events:?}");
+    assert_eq!(inputs.borrow().len(), 1, "no follow-up provider turn");
+    // The round is recorded for the transcript: user, assistant(+call), tool.
+    let roles: Vec<_> = session.history().iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            makepad_asset_chat::wire::ChatRole::User,
+            makepad_asset_chat::wire::ChatRole::Assistant,
+            makepad_asset_chat::wire::ChatRole::Tool
+        ]
+    );
+    let rows = makepad_asset_chat::transcript::render(session.history());
+    assert_eq!(rows.last().unwrap().text, "world.new_level · ok");
+    // The session is reusable afterwards (it is still this game's chat).
+    assert!(session.send("still here?", &[], &mut exec).is_ok());
+}
+
+/// A session rebuilt from its persisted history keeps its id, turn and the
+/// conversation, and the next send replays that history to a fresh
+/// provider. Over-long histories keep the newest half.
+#[test]
+fn a_resumed_session_replays_its_history_on_the_next_send() {
+    use makepad_asset_chat::session::SessionId;
+    use makepad_asset_chat::wire::{ChatMessage, ChatRole};
+    let inputs = Rc::new(RefCell::new(Vec::new()));
+    let provider = Replay {
+        turns: vec!["Welcome back.".into()],
+        pending: Vec::new(),
+        inputs: inputs.clone(),
+    };
+    let id = SessionId::parse("chat_00000000deadbeef").unwrap();
+    let history = vec![
+        ChatMessage::new(ChatRole::User, "make a level"),
+        ChatMessage::new(ChatRole::Assistant, "Built it."),
+        // An invalid (empty) row from a torn file is dropped, not fatal.
+        ChatMessage::new(ChatRole::Tool, ""),
+    ];
+    let mut exec = GameExec { executed: Rc::new(RefCell::new(Vec::new())) };
+    let mut session = Session::resume(id.clone(), "game", Box::new(provider), history, 7, None);
+    assert_eq!(session.id(), &id);
+    assert_eq!(session.turn(), 7);
+    assert_eq!(session.history().len(), 2);
+    assert_eq!(session.send("and now?", &[], &mut exec).unwrap(), 8);
+    while !session.is_idle() {
+        session.pump(&mut exec);
+    }
+    let input = inputs.borrow()[0].clone();
+    assert_eq!(input.messages.len(), 3);
+    assert_eq!(input.messages[0].text, "make a level");
+    assert!(input.messages[2].text.starts_with("and now?"));
+
+    let many: Vec<ChatMessage> = (0..200)
+        .map(|i| ChatMessage::new(ChatRole::User, format!("m{i}")))
+        .collect();
+    let provider = Replay { turns: Vec::new(), pending: Vec::new(), inputs: inputs.clone() };
+    let session = Session::resume(id, "game", Box::new(provider), many, 1, None);
+    assert_eq!(session.history().len(), makepad_asset_chat::wire::MAX_MESSAGES / 2);
+    assert_eq!(session.history().last().unwrap().text, "m199");
+}
+
 #[test]
 fn cancelling_a_parked_turn_frees_the_session() {
     let provider = Replay {
@@ -552,4 +836,31 @@ fn the_system_prompt_lists_exactly_what_the_executor_advertises() {
     let system2 = turns2.borrow()[0].system.clone();
     assert!(!system2.contains("world.place"), "broker prompt must not grow world tools");
     assert!(!system2.contains("assets.query"));
+}
+
+#[test]
+fn world_tools_accept_and_roundtrip_an_explicit_sub_world() {
+    let call = parse("world.get_source", obj(r#"{"sub":"dogshop"}"#)).unwrap();
+    assert!(matches!(
+        call,
+        ContentToolCall::WorldInSub { ref sub, ref call }
+            if sub == "dogshop" && matches!(**call, ContentToolCall::WorldGetSource)
+    ));
+    assert_eq!(encode_args(&call).get("sub").and_then(Value::as_str), Some("dogshop"));
+    assert!(parse("world.list", obj(r#"{"sub":"../escape"}"#)).is_err());
+    let def = sandbox_definitions().into_iter().find(|def| def.name == "world.list").unwrap();
+    assert!(def.parameters.to_json().contains("\"sub\""));
+}
+
+#[test]
+fn per_turn_world_manifest_is_system_context_not_transcript_text() {
+    let turns = Rc::new(RefCell::new(Vec::new()));
+    let mut session = Session::new("test", Box::new(OneTurn { turns: turns.clone() }));
+    let context = "WORLD MANIFEST: asset ast_x; worlds: `main`, `dogshop`\nthe player is currently in: `dogshop`";
+    session
+        .send_with_context("add a chair", &[], context, &mut SandboxExec)
+        .unwrap();
+    assert!(turns.borrow()[0].system.contains(context));
+    assert_eq!(session.history()[0].text, "add a chair");
+    assert!(!session.history()[0].text.contains("WORLD MANIFEST"));
 }

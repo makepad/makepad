@@ -299,6 +299,41 @@ fn malformed_tool_line_is_refused_back_to_model() {
 }
 
 #[test]
+fn leaked_level_source_is_refused_back_not_final() {
+    // 2026-08-27 dog-shop regression: the model hit the token cap while
+    // printing a whole interior as PLAIN TEXT (no tool call). That must
+    // spend a corrective round, not end the turn as a final answer.
+    let leak = "Here is the shop:
+game.sky({top: #111})
+game.box({pos: vec3(0,0,0), size: vec3(1,1,1)})
+game.box({pos: vec3(1,0,0), size: vec3(1,1,1)})
+game.box({pos: vec3(2,0,0), size: vec3(1,1,1)})
+game.box({pos: vec3(3,0.9,-2.0), size: vec3(0.25,0.3,0.2), body:";
+    let provider = Scripted::new(vec![
+        vec![ProviderEvent::Done { text: leak.into() }],
+        vec![ProviderEvent::Done { text: "Calling the tool properly now.".into() }],
+    ]);
+    let turns = provider.turns.clone();
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
+    let mut session = Session::new("prin_test", Box::new(provider));
+
+    session.send("furnish the shop", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+    session.pump(&mut exec);
+
+    // Nothing executed; the model got a corrective tool message naming the fix.
+    assert!(exec.calls.borrow().is_empty());
+    let followup = &turns.borrow()[1];
+    let tool_msg = followup
+        .messages
+        .iter()
+        .find(|m| m.role == makepad_asset_chat::wire::ChatRole::Tool)
+        .unwrap();
+    assert!(tool_msg.text.contains("plain text"), "{}", tool_msg.text);
+    assert!(tool_msg.text.contains("add_addon"), "{}", tool_msg.text);
+}
+
+#[test]
 fn attachments_bind_known_revisions_and_tool_results_extend_them() {
     let input = rev(0x33);
     let derived = rev(0x44);
@@ -816,6 +851,9 @@ fn provider_slugs_are_stable() {
         (ProviderKind::FleetQwen, "fleet-qwen"),
         (ProviderKind::OpenAi, "openai"),
         (ProviderKind::Grok, "grok"),
+        (ProviderKind::ClaudeCli, "claude-cli"),
+        (ProviderKind::CodexCli, "codex-cli"),
+        (ProviderKind::GrokCli, "grok-cli"),
     ] {
         let mut provider = Scripted::new(vec![]);
         provider.kind = kind;

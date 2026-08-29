@@ -1,5 +1,7 @@
 //! The generation service: everything a host needs to turn an Asset
-//! Server's job queue into published catalog rows on the GPU fleet.
+//! Server's job queue into answered work on the GPU fleet — published
+//! catalog rows for the generating kinds, and text answers or rewritten
+//! annotation records for the `vision` ones.
 //!
 //! Two hosts run exactly this loop — the standalone worker binary and the
 //! Asset UI, which coordinates jobs in-process against its own embedded
@@ -9,7 +11,8 @@
 //!   advertised capabilities. That is both the fan-out (N queued jobs of a
 //!   kind drain across the N boxes that serve it) and the concurrency rule
 //!   (a box's own queue is its limit — this side never puts two jobs on one
-//!   GPU), and it is why a chat-only node never swallows an image job.
+//!   GPU), and it is why a chat-only node never swallows an image job and a
+//!   vision box drains both the questions and the annotation backlog.
 //! - **one profile announcer**, so `GET /v1/job-profiles` advertises what
 //!   the fleet can execute right now instead of what a config file hoped
 //!   for at boot.
@@ -21,6 +24,7 @@ use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRight
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long an announcement lives before the server drops it, and how often
@@ -123,6 +127,12 @@ pub fn run(config: &GenServiceConfig, stop: &'static AtomicBool) {
     let mut spawned: HashSet<(usize, String)> = HashSet::new();
     let mut threads = Vec::new();
     let mut last_announce: Option<Instant> = None;
+    // The fleet as it stands, shared with every claim loop. A loop stays
+    // pinned to its own box — that is the concurrency rule — and consults
+    // this list only for a job its box is holding up (see
+    // `GenFleet::widen_to_idle`). Refreshed every pass, so a box that joins
+    // becomes a rescue destination without respawning anything.
+    let fleet_boxes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     while !stop.load(Ordering::SeqCst) {
         // A fresh probe each pass: boxes join and leave, and their
         // capabilities change as weights land.
@@ -138,13 +148,18 @@ pub fn run(config: &GenServiceConfig, stop: &'static AtomicBool) {
         };
         let (snapshots, _) = probe.snapshots();
         let boxes = probe.boxes();
+        if let Ok(mut shared) = fleet_boxes.lock() {
+            shared.clone_from(&boxes);
+        }
 
         for (index, endpoints) in config.servers.iter().enumerate() {
             for url in &boxes {
                 if !spawned.insert((index, url.clone())) {
                     continue;
                 }
-                if let Some(handle) = spawn_box_loop(config, index, *endpoints, url, stop) {
+                if let Some(handle) =
+                    spawn_box_loop(config, index, *endpoints, url, &fleet_boxes, stop)
+                {
                     threads.push(handle);
                 }
             }
@@ -227,9 +242,11 @@ fn spawn_box_loop(
     index: usize,
     endpoints: ApiEndpoints,
     url: &str,
+    fleet_boxes: &Arc<Mutex<Vec<String>>>,
     stop: &'static AtomicBool,
 ) -> Option<std::thread::JoinHandle<()>> {
     let tag = box_tag(url);
+    let fleet_boxes = Arc::clone(fleet_boxes);
     let suffix = format!("{}-{tag}", config.suffix);
     let cache = config.cache_root.join(format!("box-{index}-{tag}"));
     let token = config.token.clone();
@@ -264,7 +281,8 @@ fn spawn_box_loop(
             }
             // Pinned to ONE box: its own queue is the concurrency limit, so
             // this loop never puts two jobs on one GPU.
-            let mut fleet = AssetAiFleet::from_urls(vec![url.clone()], log);
+            let mut fleet =
+                AssetAiFleet::from_urls(vec![url.clone()], log).with_overflow(fleet_boxes);
             let mut last_caps = Instant::now();
             let mut coordinator = Coordinator {
                 client,
@@ -333,6 +351,21 @@ mod tests {
         assert!(suffix
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+    }
+
+    /// Widening is a DISPATCH affordance and nothing else. A pinned loop's
+    /// claim filter is built from `boxes()`, so if the wider fleet leaked
+    /// into it, one box's loop would start claiming kinds its own GPU
+    /// cannot run — the opposite of the concurrency rule.
+    #[test]
+    fn the_wider_fleet_never_changes_what_a_pinned_loop_claims() {
+        let shared = Arc::new(Mutex::new(vec![
+            "http://box-a".to_string(),
+            "http://box-b".to_string(),
+        ]));
+        let fleet =
+            AssetAiFleet::from_urls(vec!["http://box-a".to_string()], false).with_overflow(shared);
+        assert_eq!(fleet.boxes(), vec!["http://box-a".to_string()]);
     }
 
     #[test]
