@@ -17,6 +17,8 @@ workspace.members = [
     "apps/vj",
     "apps/mixer",
     "libs/asset/importer",
+    # The tiled-RTS map generator, shared by the importer and the sandbox.
+    "libs/rtsmap",
     "libs/texcomp",
     "libs/asset/data",
     "libs/asset/client",

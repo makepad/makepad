@@ -22,6 +22,10 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-asset-data = { path = "../data" }
+# The tiled-RTS map generator. The two procedural converters (TS, D2K)
+# generate their worlds through it, and so does the sandbox at runtime, so a
+# generated map is the same map wherever it is made.
+makepad-rtsmap = { path = "../../rtsmap" }
 makepad-asset-client = { path = "../client" }
 # GLB inspection (measured metrics) for the importer.
 makepad-render = { path = "../../render" }
