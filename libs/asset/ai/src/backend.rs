@@ -726,7 +726,7 @@ pub struct DriftParams {
 impl Default for DriftParams {
     fn default() -> Self {
         Self {
-            hue_deg: 0.6,
+            hue_deg: 0.0,
             gain: 0.98,
             anchor: 0.05,
             grain: 0.02,
@@ -827,7 +827,7 @@ impl CameraMotion {
     /// reads the camera, so feed sessions are unaffected. Send
     /// `camera: {dolly: 0, roll: 0}` for a static loop.
     pub fn feedback_default() -> Self {
-        Self { dolly: 0.2, pan_x: 0.0, pan_y: 0.0, roll: 0.010 }
+        Self { dolly: 0.0, pan_x: 0.0, pan_y: 0.0, roll: 0.0 }
     }
 }
 

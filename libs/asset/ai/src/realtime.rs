@@ -914,6 +914,91 @@ pub fn mean_abs_diff(a: &RgbImage, b: &RgbImage) -> Option<f64> {
 }
 
 /// The source image a feedback loop anchors to, sized and measured once
+/// The accumulated motion of the WORLD: where the camera has carried the
+/// source itself since this picture arrived. A per-frame warp of the
+/// feedback echo alone cannot make a settled loop move — the anchor is the
+/// (followed) source, and the model re-pins the geometry to it every frame,
+/// which is why a constantly-zooming camera measurably never zoomed the
+/// output. Accumulate the camera into ONE absolute transform and apply it
+/// to the ORIGINAL source each frame instead: the anchor itself travels,
+/// stays crisp at any age (one resample, not hundreds), and the loop can
+/// not settle while any camera term is non-zero — with no runaway, because
+/// the anchor is still a clean engraving, just a moving one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceDrift {
+    pub zoom: f32,
+    pub roll: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub hue: f32,
+}
+
+impl Default for SourceDrift {
+    fn default() -> Self {
+        SourceDrift { zoom: 1.0, roll: 0.0, pan_x: 0.0, pan_y: 0.0, hue: 0.0 }
+    }
+}
+
+impl SourceDrift {
+    pub fn advance(&mut self, camera: &CameraMotion, hue_deg: f32) {
+        self.zoom = (self.zoom * (1.0 + camera.dolly * 0.05)).clamp(1.0e-3, 1.0e4);
+        self.roll += camera.roll;
+        self.pan_x += camera.pan_x;
+        self.pan_y += camera.pan_y;
+        self.hue = (self.hue + hue_deg).rem_euclid(360.0);
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.zoom == 1.0 && self.roll == 0.0 && self.pan_x == 0.0 && self.pan_y == 0.0 && self.hue == 0.0
+    }
+}
+
+/// The source under its accumulated drift: one absolute affine (the same
+/// mapping `warp_feedback_bordered` applies per frame, at the total zoom /
+/// roll / pan) and one absolute hue rotation. Border reflect, so the world
+/// folds instead of tearing.
+pub fn warp_source_drift(image: &RgbImage, drift: &SourceDrift) -> RgbImage {
+    let width = image.width;
+    let height = image.height;
+    if width == 0 || height == 0 || image.data.len() != width as usize * height as usize * 3 {
+        return image.clone();
+    }
+    let mut out = image.clone();
+    if !(drift.zoom == 1.0 && drift.roll == 0.0 && drift.pan_x == 0.0 && drift.pan_y == 0.0) {
+        let zoom = drift.zoom.max(1.0e-3);
+        let (sin_r, cos_r) = drift.roll.sin_cos();
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 / 2.0;
+        let max_x = (width - 1) as f32;
+        let max_y = (height - 1) as f32;
+        let mut data = vec![0u8; image.data.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let rx = dx * cos_r + dy * sin_r;
+                let ry = -dx * sin_r + dy * cos_r;
+                let sx = cx + rx / zoom - drift.pan_x * width as f32;
+                let sy = cy + ry / zoom - drift.pan_y * height as f32;
+                let rgb = sample_bilinear_clamped(image, reflect_coord(sx, max_x), reflect_coord(sy, max_y));
+                let idx = (y as usize * width as usize + x as usize) * 3;
+                data[idx..idx + 3].copy_from_slice(&rgb);
+            }
+        }
+        out = RgbImage { width, height, data };
+    }
+    if drift.hue != 0.0 {
+        let matrix = hue_rotation_matrix(drift.hue);
+        for pixel in out.data.chunks_exact_mut(3) {
+            let (r, g, b) = (pixel[0] as f32, pixel[1] as f32, pixel[2] as f32);
+            for (c, row) in matrix.iter().enumerate() {
+                pixel[c] = (row[0] * r + row[1] * g + row[2] * b).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// per (source, frame size).
 struct PreparedSource {
     image: RgbImage,
@@ -930,6 +1015,9 @@ struct FeedbackState {
     source: Option<RgbImage>,
     prepared: Option<PreparedSource>,
     reference0_seen: u64,
+    /// Where the camera has carried this picture so far; a new picture
+    /// starts the world still again.
+    drift: SourceDrift,
 }
 
 impl FeedbackState {
@@ -939,6 +1027,7 @@ impl FeedbackState {
         }
         self.source = Some(image);
         self.prepared = None;
+        self.drift = SourceDrift::default();
     }
 
     fn prepared(&mut self, width: u32, height: u32) -> Option<&PreparedSource> {
@@ -1141,37 +1230,44 @@ pub fn run_live(
                         last_output = Some(resize_bilinear(previous, width, height));
                     }
                 }
-                let Some(prepared) = feedback.prepared(width, height) else {
-                    // No source yet: wait for reference slot 0 or the first
-                    // pushed frame rather than failing the session.
-                    session.wait_for_mailbox(Duration::from_millis(250));
-                    continue;
-                };
                 // Slot 0 IS the source in feedback mode — the anchor carries
                 // it, so it must not ride along a second time as an extra
                 // reference.
                 if !config.references.is_empty() {
                     config.references.remove(0);
                 }
-                let init = feedback_frame(&prepared.image, &prepared.stats, last_output.as_ref(), &config, frame_index);
+                // The camera moves the WORLD: the source itself drifts under
+                // the accumulated transform, so the anchor travels with it
+                // and the loop cannot settle while any camera term is on —
+                // see SourceDrift for why warping the echo alone cannot.
+                let drift_now = feedback.drift;
+                feedback.drift.advance(&config.camera, config.drift.hue_deg);
+                let Some(prepared) = feedback.prepared(width, height) else {
+                    session.wait_for_mailbox(Duration::from_millis(250));
+                    continue;
+                };
+                let (moved_source, moved_stats) = if drift_now.is_identity() {
+                    (prepared.image.clone(), prepared.stats)
+                } else {
+                    let moved = warp_source_drift(&prepared.image, &drift_now);
+                    let stats = channel_stats(&moved);
+                    (moved, stats)
+                };
+                let init = feedback_frame(&moved_source, &moved_stats, last_output.as_ref(), &config, frame_index);
                 if init.is_none() {
                     // Cold start: one full edit of the source, from noise.
                     config.strength = 1.0;
                 }
-                // The anchor the edit conditions on. Pinned to the source it
-                // pins the trip with it: the model repaints the source's
-                // geometry every frame and the loop CONVERGES — measured on
-                // a wall of feeds, per-frame movement decays geometrically
-                // to ~1/255 whatever the prompt or the carry; those only
-                // set how far from the source the fixed point sits. With
-                // `anchor_follow` the anchor chases the trip, the restoring
-                // force weakens as the loop departs, and the melt keeps
-                // travelling instead of settling into a still.
+                // The anchor the edit conditions on. Pinned to the still
+                // source it pins the trip with it — the loop converges to a
+                // still whatever the prompt or the carry. It rides the
+                // moving source, and `anchor_follow` lets it also lean into
+                // the previous output.
                 let anchor = match last_output.as_ref().filter(|_| config.anchor_follow > 0.0) {
-                    Some(last) if last.width == prepared.image.width && last.height == prepared.image.height => {
-                        lerp_images(&prepared.image, last, config.anchor_follow)
+                    Some(last) if last.width == moved_source.width && last.height == moved_source.height => {
+                        lerp_images(&moved_source, last, config.anchor_follow)
                     }
-                    _ => prepared.image.clone(),
+                    _ => moved_source.clone(),
                 };
                 (init, Some(anchor))
             }
@@ -1512,10 +1608,12 @@ mod tests {
         assert_eq!(params.config.camera.dolly, 0.2);
         assert_eq!(params.config.camera.roll, 0.01);
         assert_eq!(params.config.drift.gain, 0.9);
-        assert_eq!(params.config.drift.hue_deg, 0.6);
+        // The defaults are STILL now — the camera moves the source itself
+        // since SourceDrift, so any default motion would run away with every
+        // plain session. Motion is asked for, never assumed.
+        assert_eq!(params.config.drift.hue_deg, 0.0);
 
-        // The session camera default is the slow tunnel + spiral; an explicit
-        // zero switches it off.
+        // An explicit zero stays zero, and an explicit value lands.
         let still = RealtimeRequestJson {
             model: "testpattern".to_string(),
             camera: Some(CameraUpdateJson { dolly: Some(0.0), roll: Some(0.0), ..Default::default() }),
@@ -1594,6 +1692,42 @@ mod tests {
 
     fn identity_drift() -> DriftParams {
         DriftParams { hue_deg: 0.0, gain: 1.0, anchor: 0.0, grain: 0.0, sharpen: 0.0, border: BorderMode::Reflect }
+    }
+
+    /// The world moves: the accumulated drift compounds, resets with a new
+    /// picture, and its absolute warp really displaces the pixels — the
+    /// mechanism that makes a camera perturbation land as MOTION instead of
+    /// being repainted away by the anchor.
+    #[test]
+    fn source_drift_compounds_resets_and_moves_the_picture() {
+        let camera = CameraMotion { dolly: 0.4, pan_x: 0.01, pan_y: 0.0, roll: 0.02 };
+        let mut drift = SourceDrift::default();
+        assert!(drift.is_identity());
+        drift.advance(&camera, 1.5);
+        drift.advance(&camera, 1.5);
+        assert!((drift.zoom - 1.02f32 * 1.02).abs() < 1e-5);
+        assert!((drift.roll - 0.04).abs() < 1e-6);
+        assert!((drift.pan_x - 0.02).abs() < 1e-6);
+        assert_eq!(drift.hue, 3.0);
+        // A 32x32 field with one bright pixel off-centre: a big zoom must
+        // move it, and identity must not touch a byte.
+        let mut image = RgbImage { width: 32, height: 32, data: vec![10u8; 32 * 32 * 3] };
+        let at = (10usize * 32 + 20) * 3;
+        image.data[at] = 250;
+        let same = warp_source_drift(&image, &SourceDrift::default());
+        assert_eq!(same.data, image.data);
+        let zoomed = warp_source_drift(&image, &SourceDrift { zoom: 2.0, ..Default::default() });
+        assert_ne!(zoomed.data, image.data);
+        assert!(zoomed.data[at] < 200, "the marker should have moved away from its old spot");
+        // Hue-only: the same red patch turns, geometry untouched.
+        let red = RgbImage { width: 4, height: 4, data: [200u8, 20, 20].repeat(16) };
+        let turned = warp_source_drift(&red, &SourceDrift { hue: 120.0, ..Default::default() });
+        assert!(turned.data[1] > turned.data[0], "red should have rotated toward green: {:?}", &turned.data[..3]);
+        // A fresh picture starts the world still again.
+        let mut feedback = FeedbackState::default();
+        feedback.drift = drift;
+        feedback.set_source(red);
+        assert!(feedback.drift.is_identity());
     }
 
     #[test]
