@@ -2881,6 +2881,15 @@ script_mod! {
                                 text: "IMPORT"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/import.svg") }
                             }
+                            // What the app is allowed to work out about a track
+                            // before anyone asks to play it. Icon-only, so it
+                            // takes the house icon button rather than a bare
+                            // Button, which would leave the glyph off-centre.
+                            music_prep_cfg := MusicIconButton{
+                                width: 24
+                                height: 20
+                                draw_icon +: { svg: crate_resource("self:resources/icons/gear.svg") }
+                            }
                             // Fit, not a fixed 90: the count is four characters and a
                             // slash, and the dead width it used to carry pushed the
                             // load target away from it for nothing.
@@ -2907,6 +2916,43 @@ script_mod! {
                             width: Fill
                             text: ""
                             draw_text.color: #xff5c39
+                        }
+                        // Narrow the listing to what has already been worked
+                        // out. Several at once AND together: "a key and a
+                        // tempo" is the harmonic-mixing question, and it is
+                        // not answerable one column at a time. Lit chips are
+                        // in force; the row reads as off when none are.
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 6
+                            padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
+                            align: Align{x: 0.0, y: 0.5}
+                            MusicLabel{width: Fit text: "HAS"}
+                            music_has_stem := MusicChipButton{
+                                height: 18
+                                text: "STEMS"
+                                draw_icon +: { svg: crate_resource("self:resources/icons/levels.svg") }
+                            }
+                            music_has_krk := MusicChipButton{
+                                height: 18
+                                text: "KARAOKE"
+                                draw_icon +: { svg: crate_resource("self:resources/icons/karaoke.svg") }
+                            }
+                            music_has_key := MusicChipButton{
+                                height: 18
+                                text: "KEY"
+                                draw_icon +: { svg: crate_resource("self:resources/icons/note.svg") }
+                            }
+                            music_has_bpm := MusicChipButton{
+                                height: 18
+                                text: "BPM"
+                                draw_icon +: { svg: crate_resource("self:resources/icons/beat_lock.svg") }
+                            }
+                            // What the filters left, and what the background
+                            // passes are doing about the rest.
+                            music_prep_status := MusicLabel{width: Fill text: ""}
                         }
                         // The column heads. Every one of them sorts: a click takes
                         // the order, a second click reverses it, and the arrow in the
@@ -3180,6 +3226,230 @@ script_mod! {
                         flow: Right
                         align: Align{x: 1.0, y: 0.5}
                         auto_cfg_close := MusicButton{width: 60 height: 22 text: "Close"}
+                    }
+                }
+            }
+        }
+
+        // The preprocessing dialog: what the app may work out about a track
+        // before anyone asks to play it, and where it keeps the answers.
+        //
+        // Four passes down the left, two source columns across — the listing
+        // and the set list — because those are genuinely different appetites.
+        // Separating six hundred records is hours of device time nobody
+        // asked for; separating the next three in the set list is exactly
+        // what should be running while the current one plays.
+        prep_modal := Modal{
+            can_dismiss: true
+            content +: {
+                width: 460
+                height: Fit
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    padding: 20
+                    spacing: 10
+                    flow: Down
+                    draw_bg +: {
+                        color: #x16161b
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    Label{
+                        text: "PREPROCESSING"
+                        draw_text.color: #xff5c39
+                        draw_text.text_style: theme.font_bold{font_size: 11}
+                    }
+                    Label{
+                        width: Fill
+                        text: "Work done ahead of the set, so the columns are filled before you need them."
+                        draw_text.color: #x8e9aa7
+                        draw_text.text_style.font_size: 9
+                    }
+                    // The header for the two tick columns. Fixed widths that
+                    // match the rows below, so the ticks line up under their
+                    // own words instead of drifting with the label lengths.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fill text: ""}
+                        MusicLabel{width: 90 text: "EXPLORER"}
+                        MusicLabel{width: 70 text: "SET LIST"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fill text: "STEMS"}
+                        prep_stems_explorer := CheckBox{width: 90 text: ""}
+                        prep_stems_queue := CheckBox{width: 70 text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fill text: "KARAOKE"}
+                        prep_karaoke_explorer := CheckBox{width: 90 text: ""}
+                        prep_karaoke_queue := CheckBox{width: 70 text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fill text: "KEY"}
+                        prep_key_explorer := CheckBox{width: 90 text: ""}
+                        prep_key_queue := CheckBox{width: 70 text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fill text: "BPM"}
+                        prep_bpm_explorer := CheckBox{width: 90 text: ""}
+                        prep_bpm_queue := CheckBox{width: 70 text: ""}
+                    }
+                    // Tempo and key fall out of ONE pass over the samples, so
+                    // asking for either buys both. Said here rather than
+                    // discovered by an operator wondering why unticking BPM
+                    // changed nothing.
+                    Label{
+                        width: Fill
+                        text: "Key and BPM come from one pass — either one fills both columns."
+                        draw_text.color: #x6f7b87
+                        draw_text.text_style.font_size: 9
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "TRACKS AHEAD"}
+                        prep_ahead := ValueInput{
+                            width: 70
+                            min: 1.0
+                            max: 500.0
+                            step: 1.0
+                            precision: 0
+                        }
+                        MusicLabel{width: Fill text: "per source"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "AT ONCE"}
+                        prep_concurrency := ValueInput{
+                            width: 70
+                            min: 1.0
+                            max: 8.0
+                            step: 1.0
+                            precision: 0
+                        }
+                        // Separation and transcription hold the one device the
+                        // show is drawing on; they stay serial whatever this
+                        // says, and saying so here is cheaper than an operator
+                        // discovering it from a stuttering output.
+                        MusicLabel{width: Fill text: "key/bpm only — stems stay serial"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "CACHE FOLDER"}
+                        prep_cache_path := MusicLabel{width: Fill text: ""}
+                        prep_cache_browse := MusicButton{width: 70 height: 22 text: "Browse"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_progress := MusicLabel{width: Fill text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 1.0, y: 0.5}
+                        prep_clear := MusicButton{
+                            width: 130
+                            height: 22
+                            text: "CLEAR ALL DATA"
+                            draw_icon +: { svg: crate_resource("self:resources/icons/trash.svg") }
+                            draw_bg +: {
+                                color: #x3a1f1f
+                                color_focus: #x3a1f1f
+                                color_hover: #x4a2626
+                                color_down: #x2c1717
+                                border_color: #xff5c3966
+                            }
+                            draw_text +: { color: #xff8a6a }
+                        }
+                        prep_close := MusicButton{width: 60 height: 22 text: "Close"}
+                    }
+                }
+            }
+        }
+
+        // One Yes/No for both destructive answers this page can need: moving
+        // the cache and emptying it. The host writes the words and remembers
+        // which question it asked, so there is one dialog rather than two
+        // that drift apart.
+        prep_confirm_modal := Modal{
+            can_dismiss: true
+            content +: {
+                width: 420
+                height: Fit
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    padding: 20
+                    spacing: 10
+                    flow: Down
+                    draw_bg +: {
+                        color: #x16161b
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 5.0
+                    }
+                    prep_confirm_title := Label{
+                        text: ""
+                        draw_text.color: #xe8eef4
+                        draw_text.text_style: theme.font_bold{font_size: 11}
+                    }
+                    prep_confirm_body := Label{
+                        width: Fill
+                        text: ""
+                        draw_text.color: #x8e9aa7
+                        draw_text.text_style.font_size: 9
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 1.0 y: 0.5}
+                        prep_confirm_no := MusicButton{width: 60 height: 22 text: "No"}
+                        prep_confirm_yes := MusicButton{width: 90 height: 22 text: "Yes"}
                     }
                 }
             }

@@ -446,6 +446,7 @@ mod tests {
                 confidence,
             },
             tempo_map: TempoMap::default(),
+            key: None,
             tiles: WaveTiles {
                 zoom: vec![[0, 0, 0, 128]; (duration_secs * ZOOM_COLS_PER_SEC) as usize],
                 overview: Vec::new(),

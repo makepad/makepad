@@ -107,9 +107,14 @@ pub fn sung_fraction(line: &LyricLine, secs: f64) -> f32 {
 // where the cache lives
 // ---------------------------------------------------------------------------
 
+/// `VJ_LYRICS_CACHE` overrides; then the preprocessing dialog's chosen root;
+/// otherwise beside the VJ's other local state.
 pub fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VJ_LYRICS_CACHE") {
         return PathBuf::from(dir);
+    }
+    if let Some(dir) = crate::preprocess::cache_subdir(crate::preprocess::LYRICS_SUBDIR) {
+        return dir;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/lyrics-cache")
 }

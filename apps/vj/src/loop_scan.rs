@@ -833,6 +833,7 @@ mod tests {
             tempo_map: TempoMap::default(),
             tiles: WaveTiles::default(),
             changes_secs: Vec::new(),
+            key: None,
         }
     }
 

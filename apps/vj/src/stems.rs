@@ -73,10 +73,14 @@ pub fn checkpoint_path() -> PathBuf {
 }
 
 /// Where separated spans are kept between sessions. `VJ_STEMS_CACHE`
-/// overrides; otherwise beside the VJ's other local state.
+/// overrides; then the preprocessing dialog's chosen root; otherwise beside
+/// the VJ's other local state.
 pub fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VJ_STEMS_CACHE") {
         return PathBuf::from(dir);
+    }
+    if let Some(dir) = crate::preprocess::cache_subdir(crate::preprocess::STEMS_SUBDIR) {
+        return dir;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/stem-cache")
 }

@@ -97,7 +97,14 @@ mod music_dsp;
 mod music_import_ui;
 mod music_view;
 mod score_preview;
+// What may be worked out about a track before anyone asks to play it, and
+// where the results of that work are kept.
+mod preprocess;
 mod stems;
+// The chroma pass behind the explorer's KEY column. Separate from
+// `wave_analysis` because pitch class is the one thing that file's energy
+// envelopes have already discarded.
+mod track_key;
 mod wave_analysis;
 mod pads;
 mod local_store;
@@ -151,7 +158,10 @@ use crate::lyrics::{
     KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
-use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
+use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
+use crate::wave_analysis::{
+    AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid, TrackSummary,
+};
 use crate::loop_scan::LoopScanPool;
 use crate::loop_scan::ScanSettings;
 use crate::effects::audio_tex::AudioTexBus;
@@ -4038,6 +4048,29 @@ struct PrefetchState {
 
 /// How long a yielded or unfinished warm-up waits before trying again.
 const PREFETCH_RETRY_SECS: u64 = 20;
+/// How often the preprocessing lane may re-decide what to work on. Deciding
+/// costs a stat per candidate; a third of a second is far below noticing and
+/// far above doing it on every frame.
+const PREPROCESS_SCAN_MS: u64 = 300;
+
+/// Where one track's samples come from for a background analysis.
+enum PrepSource {
+    /// A file already on this machine: decode it straight off disk.
+    File(PathBuf),
+    /// A store track: its blob has to come down first.
+    Blob(crate::catalog::TileMedia),
+}
+
+/// What the shared Yes/No dialog is asking. Both answers are destructive and
+/// both are irreversible, which is why neither happens on a single click.
+#[derive(Clone, Debug, PartialEq)]
+enum PrepConfirm {
+    /// Move every cached result to a newly chosen root. `None` means the
+    /// operator picked the built-in location again.
+    MoveCache(Option<PathBuf>),
+    /// Empty all three caches.
+    ClearCache,
+}
 
 /// One deck reduced to what the gate actually asks of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4305,6 +4338,10 @@ enum MediaPurpose {
     DeckLyrics { deck: DeckId, gen: u64 },
     Pad { pad: AssetId, gen: u64, revision: AssetRevisionId, media: MediaType },
     Mesh { gen: u64 },
+    /// A store track being fetched only so the preprocessing lane can
+    /// analyse it. No deck is waiting; `gen` is the cache generation, so a
+    /// blob that lands after the cache was emptied is dropped.
+    Analyze { key: String, gen: u64, media: MediaType },
 }
 
 /// The side-channel blobs a deck load is waiting on. Complete means the
@@ -6703,8 +6740,68 @@ pub struct App {
     /// Rows on screen, so a row click maps back to a track.
     #[rust]
     music_rows: Vec<TrackRowEntry>,
+    /// Tempo and key per TRACK, which is what the explorer's columns are
+    /// asking about — a deck holds one record at a time and the library is
+    /// showing hundreds.
+    ///
+    /// A `None` value is a probe that came back empty, cached deliberately:
+    /// without it every unanalysed row would re-open its missing sidecar on
+    /// every rebuild. Entries are replaced, never merely added to, when an
+    /// analysis lands, so a re-analysis is what clears a stale miss.
+    #[rust]
+    track_summaries: HashMap<AnalysisKey, Option<TrackSummary>>,
+    /// The preprocessing dialog, as it survives restarts.
+    #[rust]
+    prep: PreprocessSettings,
+    /// Which destructive question the shared Yes/No dialog is currently
+    /// asking, so its Yes knows what it is agreeing to.
+    #[rust]
+    prep_confirm: Option<PrepConfirm>,
+    /// Tracks the analysis lane has finished or given up on this session.
+    /// Without it a library whose work is done re-decides on every tick.
+    #[rust]
+    prep_analysed: HashSet<AnalysisKey>,
+    /// Analysis jobs submitted and not yet answered, against the dialog's
+    /// concurrency. The pool itself is fire-and-forget, so the count is kept
+    /// here rather than asked of it.
+    #[rust]
+    prep_in_flight: usize,
+    /// Bumped whenever the cache is emptied. A background decode that was
+    /// already running is stamped with the generation it started under, and
+    /// a result carrying a stale one is dropped rather than written back
+    /// into the directory the operator just cleared.
+    #[rust]
+    prep_generation: u64,
+    /// The folder picker is open for the CACHE root rather than for an
+    /// import. Both use the one platform dialog, and its answer arrives with
+    /// nothing on it to say who asked.
+    #[rust]
+    prep_picking_cache: bool,
+    /// Earliest the work-list may be walked again. Deciding what to
+    /// preprocess costs a `is_file` per candidate, which is nothing once and
+    /// far too much sixty times a second.
+    #[rust]
+    prep_next_scan: Option<Instant>,
+    /// Narrow the listing to rows that already carry these. All of them at
+    /// once, which is the harmonic-mixing question rather than four separate
+    /// ones. Indexed by [`preprocess::PASSES`].
+    #[rust]
+    music_has: [bool; 4],
+    /// Force the next refresh to push, whatever the rows compare as.
+    ///
+    /// The listing used to be invalidated by CLEARING this cache, which
+    /// works for every change except the one that matters most: a list that
+    /// has just become EMPTY computes equal to the wiped cache, the push is
+    /// skipped, and the rows stay on screen as ghosts that no longer answer
+    /// a click (the hit reader drops every row once the model is empty).
+    /// That is what made Clear look broken and the last remove look flaky.
+    #[rust]
+    music_rows_dirty: bool,
     #[rust]
     queue_rows: Vec<TrackRowEntry>,
+    /// Same for the set list; see [`App::music_rows_dirty`].
+    #[rust]
+    queue_rows_dirty: bool,
     /// Browsing local audio files instead of the store catalog.
     #[rust]
     music_local: bool,
@@ -13554,7 +13651,7 @@ p2 {}
         // path here and hand only the path to the analysis worker.
         let beats_model = self.hub_model_path("beat-this", "weights");
         self.analysis.submit(AnalysisJob {
-            deck,
+            deck: Some(deck),
             gen,
             key,
             pcm,
@@ -13682,6 +13779,7 @@ p2 {}
         self.pump_loop_scan(cx);
         // Last, and only when everything above found nothing to do.
         self.pump_prefetch();
+        self.pump_preprocess();
         self.pump_lyrics(cx);
         self.pump_model_install(cx);
         self.pump_fx_slot_reloads();
@@ -14681,6 +14779,15 @@ p2 {}
                                     self.decode.submit(DecodeJob::MeshPrep { gen, path });
                                 }
                             }
+                            MediaPurpose::Analyze { key, gen, media } => {
+                                if gen == self.prep_generation {
+                                    self.decode
+                                        .submit(DecodeJob::Analyze { key, gen, path, media });
+                                } else {
+                                    self.prep_in_flight =
+                                        self.prep_in_flight.saturating_sub(1);
+                                }
+                            }
                         }
                     }
                     ClientEvent::Failed { error, .. } => {
@@ -14728,6 +14835,12 @@ p2 {}
             MediaPurpose::Deck { deck, gen, .. } => {
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
+            }
+            MediaPurpose::Analyze { key, .. } => {
+                // The track stays marked done, so an unreachable blob is not
+                // re-fetched every scan for the rest of the session.
+                log!("preprocess: {key} could not be fetched ({error})");
+                self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
             }
             MediaPurpose::Preview { gen, .. } => {
                 if gen == self.phones_preview_gen {
@@ -14911,7 +15024,7 @@ p2 {}
             // fresh page beats waiting for the store's own event to come
             // back around, and it costs one listing.
             self.music_model.event_touch(None);
-            self.music_rows.clear();
+            self.music_rows_dirty = true;
             self.grids_dirty = true;
         }
     }
@@ -15318,7 +15431,7 @@ p2 {}
         }
         self.queue_drag = Some(to);
         // The 20 Hz pump is too slow to feel like the row is in the hand.
-        self.queue_rows.clear();
+        self.queue_rows_dirty = true;
         self.refresh_music_rows(cx);
         self.paint_queue_carry(cx);
     }
@@ -15347,7 +15460,7 @@ p2 {}
                     let cmds = self.decks.enqueue(item);
                     self.run_deck_cmds(cx, cmds);
                 }
-                self.queue_rows.clear();
+                self.queue_rows_dirty = true;
             }
             DjDropZone::DeckA | DjDropZone::DeckB => {
                 let target =
@@ -15362,8 +15475,8 @@ p2 {}
                     let cmds = self.decks.enqueue(rest);
                     self.run_deck_cmds(cx, cmds);
                 }
-                self.music_rows.clear();
-                self.queue_rows.clear();
+                self.music_rows_dirty = true;
+                self.queue_rows_dirty = true;
             }
         }
     }
@@ -15401,8 +15514,8 @@ p2 {}
                         self.run_deck_cmds(cx, cmds);
                     }
                 }
-                self.music_rows.clear();
-                self.queue_rows.clear();
+                self.music_rows_dirty = true;
+                self.queue_rows_dirty = true;
             }
             DjDropZone::Queue => {
                 let playable: Vec<PathBuf> = paths
@@ -15421,7 +15534,7 @@ p2 {}
                         self.run_deck_cmds(cx, cmds);
                     }
                 }
-                self.queue_rows.clear();
+                self.queue_rows_dirty = true;
             }
         }
     }
@@ -15618,6 +15731,11 @@ p2 {}
             + std::time::Duration::from_micros((media::UI_STEP_BUDGET_MS * 1000.0) as u64);
         while let Some(done) = self.next_decode_result(deadline) {
             match done {
+                // The preprocessing lane's own decode: straight to the
+                // analysis worker, and nothing on screen is waiting for it.
+                DecodeDone::Analyze { key, gen, result } => {
+                    self.preprocess_decoded(key, gen, result);
+                }
                 // A background warm-up borrows the deck decode lane and is
                 // told apart by its generation, which no load can mint. It
                 // must never reach `deck_incoming`.
@@ -17564,6 +17682,270 @@ p2 {}
         service::session_config_from_env().cache_parent.join("headphones.txt")
     }
 
+    fn preprocess_settings_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("preprocess.txt")
+    }
+
+    /// The listing's HAS chips, in [`PASSES`] order so a chip and the thing
+    /// it filters on can never drift apart.
+    const MUSIC_HAS_CHIPS: [&'static [LiveId]; 4] = [
+        ids!(music_has_stem),
+        ids!(music_has_krk),
+        ids!(music_has_key),
+        ids!(music_has_bpm),
+    ];
+
+    /// The dialog's widget ids, in [`PASSES`] order so the two never drift.
+    const PREP_BOXES: [(&'static [LiveId], &'static [LiveId]); 4] = [
+        (ids!(prep_stems_explorer), ids!(prep_stems_queue)),
+        (ids!(prep_karaoke_explorer), ids!(prep_karaoke_queue)),
+        (ids!(prep_key_explorer), ids!(prep_key_queue)),
+        (ids!(prep_bpm_explorer), ids!(prep_bpm_queue)),
+    ];
+
+    /// Every setting onto its control. Called at boot and after anything
+    /// that changes the settings from outside the dialog.
+    fn sync_preprocess_panel(&mut self, cx: &mut Cx) {
+        for (index, pass) in PASSES.iter().enumerate() {
+            let scope = self.prep.scope(*pass);
+            let (explorer, queue) = Self::PREP_BOXES[index];
+            self.ui.check_box(cx, explorer).set_active(cx, scope.explorer, Animate::No);
+            self.ui.check_box(cx, queue).set_active(cx, scope.queue, Animate::No);
+        }
+        if let Some(mut field) =
+            self.ui.widget(cx, ids!(prep_ahead)).borrow_mut::<ValueInput>()
+        {
+            field.set_value(cx, self.prep.ahead as f64);
+        }
+        if let Some(mut field) =
+            self.ui.widget(cx, ids!(prep_concurrency)).borrow_mut::<ValueInput>()
+        {
+            field.set_value(cx, self.prep.concurrency as f64);
+        }
+        let root = match &self.prep.cache_root {
+            Some(root) => root.display().to_string(),
+            None => "default (beside the app's local state)".to_string(),
+        };
+        self.ui.label(cx, ids!(prep_cache_path)).set_text(cx, &root);
+    }
+
+    /// Ask before anything irreversible. The words are written here rather
+    /// than in the dialog so one Yes/No can serve both questions and neither
+    /// can end up describing the other one.
+    fn ask_preprocess_confirm(&mut self, cx: &mut Cx, ask: PrepConfirm) {
+        let (title, body) = match &ask {
+            PrepConfirm::MoveCache(root) => {
+                let where_to = match root {
+                    Some(root) => root.display().to_string(),
+                    None => "the default location".to_string(),
+                };
+                (
+                    "Move cached data?".to_string(),
+                    format!(
+                        "Move everything already analysed to {where_to}? Choosing No \
+                         leaves it where it is and only new results go to the new folder."
+                    ),
+                )
+            }
+            PrepConfirm::ClearCache => (
+                "Delete all cached data?".to_string(),
+                "This permanently deletes every cached BPM, key, waveform, separated \
+                 stem and karaoke transcript, for every track. It cannot be undone."
+                    .to_string(),
+            ),
+        };
+        self.ui.label(cx, ids!(prep_confirm_title)).set_text(cx, &title);
+        self.ui.label(cx, ids!(prep_confirm_body)).set_text(cx, &body);
+        self.prep_confirm = Some(ask);
+        self.ui.modal(cx, ids!(prep_confirm_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// The three cache directories as they stand right now. Read through the
+    /// same functions the workers use, so a root change or an environment
+    /// override is reflected here and not guessed at.
+    fn preprocess_cache_dirs() -> [PathBuf; 3] {
+        [wave_analysis::cache_dir(), stems::cache_dir(), lyrics::cache_dir()]
+    }
+
+    /// Put a chosen cache root in force: settings, the workers' view of it,
+    /// and the dialog.
+    fn apply_cache_root(&mut self, cx: &mut Cx, root: Option<PathBuf>) {
+        self.prep.cache_root = root.clone();
+        preprocess::set_cache_root(root);
+        self.save_preprocess_settings();
+        // Sidecars were read from the OLD root, so what is in hand no longer
+        // describes what is on disk. Drop the memoized probes and let the
+        // rows ask again.
+        self.track_summaries.clear();
+        self.music_rows_dirty = true;
+        self.sync_preprocess_panel(cx);
+    }
+
+    fn handle_preprocess_modal(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(music_prep_cfg)).clicked(actions) {
+            self.sync_preprocess_panel(cx);
+            self.ui.modal(cx, ids!(prep_modal)).open(cx);
+        }
+        if self.ui.button(cx, ids!(prep_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(prep_modal)).close(cx);
+        }
+        let mut changed = false;
+        for (index, pass) in PASSES.iter().enumerate() {
+            let (explorer, queue) = Self::PREP_BOXES[index];
+            let mut scope = self.prep.scope(*pass);
+            if let Some(on) = self.ui.check_box(cx, explorer).changed(actions) {
+                scope.explorer = on;
+                changed = true;
+            }
+            if let Some(on) = self.ui.check_box(cx, queue).changed(actions) {
+                scope.queue = on;
+                changed = true;
+            }
+            self.prep.set_scope(*pass, scope);
+        }
+        for (path, field) in
+            [(ids!(prep_ahead), true), (ids!(prep_concurrency), false)]
+        {
+            let widget = self.ui.widget(cx, path);
+            let mut value = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == widget.widget_uid() {
+                        if let ValueInputAction::Changed(v) = wa.cast() {
+                            value = Some(v);
+                        }
+                    }
+                }
+            }
+            let Some(value) = value else { continue };
+            let value = value.max(0.0) as usize;
+            match field {
+                true => self.prep.ahead = value.clamp(1, preprocess::MAX_AHEAD),
+                false => {
+                    self.prep.concurrency = value.clamp(1, preprocess::MAX_CONCURRENCY)
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            self.save_preprocess_settings();
+            // A pass that just came on has work to find, and a track that was
+            // skipped for being out of scope has to be reconsidered. Clearing
+            // the finished set is safe: anything genuinely done is answered by
+            // its sidecar without a second decode.
+            self.prep_analysed.clear();
+            self.prep_next_scan = None;
+            self.refresh_prep_status(cx);
+        }
+        if self.ui.button(cx, ids!(prep_cache_browse)).clicked(actions) {
+            self.import_picker = ImportPicker::None;
+            self.prep_picking_cache = true;
+            cx.open_select_folder_dialog(
+                FileDialog::new().set_title("Choose where cached analysis is kept".into()),
+            );
+        }
+        if self.ui.button(cx, ids!(prep_clear)).clicked(actions) {
+            self.ask_preprocess_confirm(cx, PrepConfirm::ClearCache);
+        }
+        if self.ui.button(cx, ids!(prep_confirm_no)).clicked(actions) {
+            // No is a real answer to the move question: keep the new root,
+            // leave the old data where it is.
+            if let Some(PrepConfirm::MoveCache(root)) = self.prep_confirm.take() {
+                self.apply_cache_root(cx, root);
+                self.set_prep_status(cx, "cache folder changed; existing data left in place");
+            }
+            self.prep_confirm = None;
+            self.ui.modal(cx, ids!(prep_confirm_modal)).close(cx);
+        }
+        if self.ui.button(cx, ids!(prep_confirm_yes)).clicked(actions) {
+            self.ui.modal(cx, ids!(prep_confirm_modal)).close(cx);
+            match self.prep_confirm.take() {
+                Some(PrepConfirm::MoveCache(root)) => self.move_cache_root(cx, root),
+                Some(PrepConfirm::ClearCache) => self.clear_all_cached_data(cx),
+                None => {}
+            }
+        }
+    }
+
+    /// Carry every cached result to a newly chosen root, then adopt it.
+    ///
+    /// The move happens BEFORE the root changes, so both sides are read from
+    /// the directories that actually hold the files; anything that could not
+    /// be carried is left where it is and said out loud.
+    fn move_cache_root(&mut self, cx: &mut Cx, root: Option<PathBuf>) {
+        let from = Self::preprocess_cache_dirs();
+        preprocess::set_cache_root(root.clone());
+        let to = Self::preprocess_cache_dirs();
+        let mut moved = 0usize;
+        let mut failed = 0usize;
+        for (from, to) in from.iter().zip(to.iter()) {
+            if from == to {
+                continue;
+            }
+            let report = preprocess::move_dir(from, to);
+            moved += report.removed;
+            failed += report.failed.len();
+        }
+        self.apply_cache_root(cx, root);
+        let text = match failed {
+            0 => format!("moved {moved} cached item(s) to the new folder"),
+            failed => format!(
+                "moved {moved} cached item(s); {failed} could not be moved and were left \
+                 in the old folder"
+            ),
+        };
+        log!("preprocess: {text}");
+        self.set_prep_status(cx, &text);
+    }
+
+    /// Empty all three caches.
+    ///
+    /// In-flight work is disowned first. A job that finishes after the delete
+    /// would otherwise write its result straight back into the directory the
+    /// operator just asked to empty, and the columns would refill by
+    /// themselves seconds later.
+    fn clear_all_cached_data(&mut self, cx: &mut Cx) {
+        self.prep_analysed.clear();
+        self.prep_in_flight = 0;
+        self.prep_generation = self.prep_generation.wrapping_add(1);
+        let mut report = preprocess::CacheReport::default();
+        for dir in Self::preprocess_cache_dirs() {
+            let one = preprocess::clear_dir(&dir);
+            report.removed += one.removed;
+            report.bytes += one.bytes;
+            report.failed.extend(one.failed);
+        }
+        // What was on screen came out of those files; it is not true any more.
+        self.track_summaries.clear();
+        self.music_rows_dirty = true;
+        let text = report.summary();
+        log!("preprocess: {text}");
+        self.set_prep_status(cx, &text);
+        self.ui.redraw(cx);
+    }
+
+    fn set_prep_status(&mut self, cx: &mut Cx, text: &str) {
+        self.ui.label(cx, ids!(prep_progress)).set_text(cx, text);
+    }
+
+    fn save_preprocess_settings(&self) {
+        let path = Self::preprocess_settings_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.prep.to_text());
+    }
+
+    /// Read the dialog back, and put its cache root in force before anything
+    /// has had a chance to open a sidecar in the old place.
+    fn load_preprocess_settings(&mut self) {
+        if let Ok(body) = std::fs::read_to_string(Self::preprocess_settings_path()) {
+            self.prep = PreprocessSettings::from_text(&body);
+        }
+        preprocess::set_cache_root(self.prep.cache_root.clone());
+    }
+
     /// The phones rig survives restarts: device (by NAME), volume, player
     /// placement, cue signal. The deck cue latches and the active preview
     /// are live monitoring state and deliberately absent.
@@ -17949,7 +18331,7 @@ p2 {}
         let cmds = self.decks.click(item, target);
         self.run_deck_cmds(cx, cmds);
         self.arm_autoplay();
-        self.music_rows.clear();
+        self.music_rows_dirty = true;
         self.sync_phones_player_ui(cx);
     }
 
@@ -17960,7 +18342,7 @@ p2 {}
         }
         let cmds = self.decks.enqueue(item);
         self.run_deck_cmds(cx, cmds);
-        self.queue_rows.clear();
+        self.queue_rows_dirty = true;
         self.sync_phones_player_ui(cx);
     }
 
@@ -19456,16 +19838,38 @@ p2 {}
     /// and upload the waveform tiles as textures for the deck surface.
     fn pump_analysis(&mut self, cx: &mut Cx) {
         for done in self.analysis.poll() {
-            let index = done.deck.index();
+            // File it against the track FIRST, before any deck gate below can
+            // drop it. A result the deck no longer wants — the operator moved
+            // on while it ran — is still the truth about that record, and the
+            // explorer's columns are asking about the record.
+            self.track_summaries.insert(
+                done.key.clone(),
+                Some(TrackSummary {
+                    duration_secs: done.analysis.duration_secs,
+                    grid: done.analysis.grid,
+                    key: done.analysis.key,
+                }),
+            );
+            self.prep_analysed.insert(done.key.clone());
+            self.music_rows_dirty = true;
+            // The preprocessing lane's own work: nothing on screen is waiting
+            // for it, so it stops here rather than touching a deck it was
+            // never about.
+            let Some(deck) = done.deck else {
+                self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
+                self.refresh_prep_status(cx);
+                continue;
+            };
+            let index = deck.index();
             // The grid goes to the engine first: it decides whether this
             // arrival should engage a sync.
-            let cmds = self.decks.grid_ready(done.deck, done.gen, done.analysis.grid);
-            if self.decks.deck(done.deck).load_gen != done.gen {
+            let cmds = self.decks.grid_ready(deck, done.gen, done.analysis.grid);
+            if self.decks.deck(deck).load_gen != done.gen {
                 continue;
             }
             self.run_deck_cmds(cx, cmds);
             if let Some(grid) = build_splat(&done.analysis, None) {
-                let cmds = self.decks.splat_set(done.deck, Arc::new(grid));
+                let cmds = self.decks.splat_set(deck, Arc::new(grid));
                 self.run_deck_cmds(cx, cmds);
             }
             self.deck_zoom_tex[index] =
@@ -19482,7 +19886,7 @@ p2 {}
             self.autopilot.changes_ready(done.gen, done.analysis.changes_secs.clone());
             self.deck_analysis[index] = Some(done.analysis);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                self.submit_splat_refinement(done.deck, done.gen);
+                self.submit_splat_refinement(deck, done.gen);
             }
             // A parked scan fires only if it is still parked against THIS
             // load: a track swap between the ask and the grid landing must
@@ -19490,23 +19894,23 @@ p2 {}
             // scan. A mismatched (or absent) parked entry just clears busy.
             match self.scan_pending[index].take() {
                 Some((gen, config)) if gen == done.gen => {
-                    self.start_loop_scan(done.deck, config);
+                    self.start_loop_scan(deck, config);
                 }
                 Some(_) => self.scan_busy[index] = false,
                 None => {}
             }
             // Separation may have finished before the analysis that defines
             // the column grid: colour whatever is already separated.
-            if self.rebuild_stem_colour(done.deck) {
+            if self.rebuild_stem_colour(deck) {
                 let tiles = std::mem::take(&mut self.deck_stem_tiles[index]);
                 self.deck_stem_tex[index] = crate::music_view::stem_texture(cx, &tiles);
                 self.deck_stem_tiles[index] = tiles;
             }
-            self.push_deck_wave(cx, done.deck);
+            self.push_deck_wave(cx, deck);
             // The grid is what quantizes the karaoke display to the music;
             // a transcript that landed before it must be re-scheduled now.
-            self.rebuild_karaoke(cx, done.deck);
-            self.music_rows.clear();
+            self.rebuild_karaoke(cx, deck);
+            self.music_rows_dirty = true;
         }
     }
 
@@ -20084,6 +20488,190 @@ p2 {}
                 self.deck_splat_refining[index] = Some(gen);
             }
         }
+    }
+
+    /// Where the preprocessing lane would get one track's samples from.
+    ///
+    /// A local file is opened directly; a store track has its blob fetched on
+    /// the same lane a deck load uses, which is a no-op when the verified
+    /// cache already holds it. Either way the cache key is derived exactly as
+    /// [`App::submit_analysis`] derives it, so a deck load and a background
+    /// pass file their results in the same place instead of analysing the
+    /// same record twice under two names.
+    fn preprocess_source(&self, key: &TrackKey) -> Option<(AnalysisKey, PrepSource)> {
+        if let TrackKey::Local(path) = key {
+            return path
+                .is_file()
+                .then(|| (AnalysisKey::from_path(path), PrepSource::File(path.clone())));
+        }
+        let TrackKey::Asset(asset) = key else { return None };
+        if let Some(path) = self.local_by_asset.get(asset) {
+            return path
+                .is_file()
+                .then(|| (AnalysisKey::from_path(path), PrepSource::File(path.clone())));
+        }
+        let media = self.music_model_tile(*asset).and_then(|tile| tile.media.clone())?;
+        Some((AnalysisKey::from_blob(media.blob), PrepSource::Blob(media)))
+    }
+
+    /// The listing and the set list, as the work-list builder wants them.
+    fn preprocess_sources(&self) -> (Vec<TrackKey>, Vec<TrackKey>) {
+        let explorer = self.music_rows.iter().map(|row| row.key.clone()).collect();
+        let queue = self
+            .decks
+            .queue()
+            .iter()
+            .map(|item| TrackKey::Asset(item.asset))
+            .collect();
+        (explorer, queue)
+    }
+
+    /// Start whatever analysis the dialog is asking for, up to its
+    /// concurrency.
+    ///
+    /// Cheap enough to run every pump: with nothing enabled it is one bool,
+    /// and with everything done it is a set lookup per candidate.
+    fn pump_preprocess(&mut self) {
+        if self.prep.group_off(PrepGroup::Analysis) {
+            return;
+        }
+        if self.prep_in_flight >= self.prep.concurrency {
+            return;
+        }
+        let now = Instant::now();
+        if self.prep_next_scan.is_some_and(|at| now < at) {
+            return;
+        }
+        self.prep_next_scan = Some(now + Duration::from_millis(PREPROCESS_SCAN_MS));
+        let (explorer, queue) = self.preprocess_sources();
+        let wanted = preprocess::work_list(
+            &self.prep,
+            PrepGroup::Analysis,
+            &explorer,
+            &queue,
+            &HashSet::new(),
+        );
+        for key in wanted {
+            if self.prep_in_flight >= self.prep.concurrency {
+                return;
+            }
+            let Some((cache_key, source)) = self.preprocess_source(&key) else { continue };
+            if self.prep_analysed.contains(&cache_key) {
+                continue;
+            }
+            // Already on disk from an earlier session: file it and move on
+            // rather than decoding a six-minute record to learn what a
+            // sixty-three byte read already knows.
+            if let Some(summary) =
+                wave_analysis::load_cached_summary(&wave_analysis::cache_dir(), &cache_key)
+            {
+                self.track_summaries.insert(cache_key.clone(), Some(summary));
+                self.prep_analysed.insert(cache_key);
+                self.music_rows_dirty = true;
+                continue;
+            }
+            // Claimed before the work starts, so the next pump does not hand
+            // the same track out again while this one is in flight.
+            self.prep_analysed.insert(cache_key.clone());
+            let raw = cache_key.as_str().to_string();
+            let gen = self.prep_generation;
+            match source {
+                PrepSource::File(path) => {
+                    let media = Self::media_type_for_path(&path);
+                    self.prep_in_flight += 1;
+                    self.decode.submit(DecodeJob::Analyze { key: raw, gen, path, media });
+                }
+                PrepSource::Blob(media) => {
+                    // Same lane and the same request a deck load makes, so a
+                    // blob already in the verified cache costs a lookup. Not
+                    // pinned: this is background work and must not hold the
+                    // cache against something the operator actually played.
+                    let Some(up) = self.up.as_mut() else { continue };
+                    let Some(runtime) = up.media.get_mut(AUDIO_LANE) else { continue };
+                    let asked = runtime.submit(ClientRequest::FetchBlob {
+                        blob: media.blob,
+                        expected_len: Some(media.len),
+                        pin: false,
+                    });
+                    if let Ok(id) = asked {
+                        self.prep_in_flight += 1;
+                        self.media_reqs.insert(
+                            (AUDIO_LANE, id),
+                            MediaPurpose::Analyze { key: raw, gen, media: media.media },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A finished preprocessing decode: hand the samples to the analysis
+    /// worker, or give the slot back if the decode failed.
+    fn preprocess_decoded(
+        &mut self,
+        key: String,
+        gen: u64,
+        result: Result<Arc<TrackPcm>, String>,
+    ) {
+        // The cache was emptied while this ran. Writing the result now would
+        // put a sidecar straight back into the directory the operator just
+        // asked to clear.
+        if gen != self.prep_generation {
+            self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
+            return;
+        }
+        // The preprocessing lane refines its grids the same way a deck load
+        // does, when the model is installed and acknowledged.
+        let beats_model = self.hub_model_path("beat-this", "weights");
+        match result {
+            Ok(pcm) => self.analysis.submit(AnalysisJob {
+                deck: None,
+                gen,
+                key: AnalysisKey::from_raw(key),
+                pcm,
+                beats_model,
+            }),
+            Err(error) => {
+                // Stays in `prep_analysed`, so an unreadable file is not
+                // retried every pump for the rest of the session.
+                log!("preprocess: {key} could not be decoded ({error})");
+                self.prep_in_flight = self.prep_in_flight.saturating_sub(1);
+            }
+        }
+    }
+
+    /// How much of the library has been worked out, for the dialog and the
+    /// listing's status line.
+    fn refresh_prep_status(&mut self, cx: &mut Cx) {
+        if self.prep.group_off(PrepGroup::Analysis) {
+            self.set_prep_status(cx, "");
+            self.ui.label(cx, ids!(music_prep_status)).set_text(cx, "");
+            return;
+        }
+        let (explorer, queue) = self.preprocess_sources();
+        let wanted = preprocess::work_list(
+            &self.prep,
+            PrepGroup::Analysis,
+            &explorer,
+            &queue,
+            &HashSet::new(),
+        );
+        let mut total = 0usize;
+        let mut done = 0usize;
+        for key in &wanted {
+            let Some((cache_key, _)) = self.preprocess_source(key) else { continue };
+            total += 1;
+            if self.track_summaries.get(&cache_key).is_some_and(|hit| hit.is_some()) {
+                done += 1;
+            }
+        }
+        let text = match (total, self.prep_in_flight) {
+            (0, _) => String::new(),
+            (total, 0) if done >= total => format!("analysed {done}/{total}"),
+            (total, working) => format!("analysed {done}/{total} · {working} running"),
+        };
+        self.set_prep_status(cx, &text);
+        self.ui.label(cx, ids!(music_prep_status)).set_text(cx, &text);
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
@@ -21382,11 +21970,17 @@ p2 {}
     /// Explorer + queue rows. Both are plain views over engine state.
     fn refresh_music_rows(&mut self, cx: &mut Cx) {
         let rows = self.music_row_entries();
-        if rows != self.music_rows {
+        if self.music_rows_dirty || rows != self.music_rows {
+            self.music_rows_dirty = false;
             self.music_rows = rows.clone();
             if let Some(mut list) = self.music_refs.tracks.borrow_mut::<VjTrackList>() {
                 list.set_entries(cx, rows);
             };
+            // The listing IS the preprocessing lane's work-list, so a
+            // changed listing is a changed appetite: re-count, and let the
+            // next pump look again rather than serve out its throttle.
+            self.prep_next_scan = None;
+            self.refresh_prep_status(cx);
         }
         let queue: Vec<TrackRowEntry> = self
             .decks
@@ -21407,7 +22001,8 @@ p2 {}
                 live: false,
             })
             .collect();
-        if queue != self.queue_rows {
+        if self.queue_rows_dirty || queue != self.queue_rows {
+            self.queue_rows_dirty = false;
             self.queue_rows = queue.clone();
             let count = queue.len();
             if let Some(mut list) = self.music_refs.queue.borrow_mut::<VjTrackList>() {
@@ -21448,16 +22043,74 @@ p2 {}
         (String::new(), false)
     }
 
+    /// The music catalog's tile for one asset, when the model is holding it.
+    fn music_model_tile(&self, asset: AssetId) -> Option<&crate::catalog::Tile> {
+        self.music_model.tiles().iter().find(|tile| tile.asset == asset)
+    }
+
+    /// The analysis cache key for an explorer row, matching what
+    /// [`App::submit_analysis`] files a deck's result under. `None` for a
+    /// catalog tile whose media blob has not resolved yet — there is nothing
+    /// content-stable to ask about until it does.
+    fn row_analysis_key(&self, key: &TrackKey) -> Option<AnalysisKey> {
+        match key {
+            TrackKey::Local(path) => Some(AnalysisKey::from_path(path)),
+            TrackKey::Asset(asset) => match self.local_by_asset.get(asset) {
+                Some(path) => Some(AnalysisKey::from_path(path)),
+                None => self
+                    .music_model_tile(*asset)
+                    .and_then(|tile| tile.media.as_ref())
+                    .map(|media| AnalysisKey::from_blob(media.blob)),
+            },
+        }
+    }
+
+    /// Tempo and key for one row, from this session's results when the track
+    /// has been analysed and from its sidecar header otherwise.
+    ///
+    /// The probe is memoized either way. A library of six hundred tracks
+    /// rebuilds its rows on every catalog page, every deck load and every
+    /// sort, and none of those are a reason to re-open six hundred files.
+    fn row_summary(&mut self, key: &TrackKey) -> Option<TrackSummary> {
+        let cache_key = self.row_analysis_key(key)?;
+        if let Some(hit) = self.track_summaries.get(&cache_key) {
+            return *hit;
+        }
+        let dir = wave_analysis::cache_dir();
+        let summary = wave_analysis::load_cached_summary(&dir, &cache_key);
+        self.track_summaries.insert(cache_key, summary);
+        summary
+    }
+
+    /// The two analysed columns as the cells want them: blank when nothing
+    /// has judged this track, rather than a zero that reads as a fact.
+    fn row_analysis_cells(&mut self, key: &TrackKey) -> (String, String, String) {
+        let Some(summary) = self.row_summary(key) else {
+            return (String::new(), String::new(), String::new());
+        };
+        let bpm = match summary.grid.has_grid() {
+            true => format!("{:.1}", summary.grid.bpm),
+            false => String::new(),
+        };
+        let musical_key = summary.key.map(|key| key.camelot()).unwrap_or_default();
+        let duration = match summary.duration_secs > 0.0 {
+            true => format_duration(summary.duration_secs),
+            false => String::new(),
+        };
+        (bpm, musical_key, duration)
+    }
+
     /// The explorer's rows: the store's music catalog, or local files —
     /// both through the STEM/KRK header switches at the end.
-    fn music_row_entries(&self) -> Vec<TrackRowEntry> {
+    fn music_row_entries(&mut self) -> Vec<TrackRowEntry> {
         if self.music_local {
-            let rows = self
-                .local_tracks
+            let paths = self.local_tracks.clone();
+            let rows = paths
                 .iter()
                 .map(|path| {
                     let key = TrackKey::Local(path.clone());
                     let (badge, live) = self.deck_badge(&key);
+                    let (bpm, musical_key, duration) = self.row_analysis_cells(&key);
                     let title = path
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -21466,9 +22119,9 @@ p2 {}
                         key,
                         title,
                         artist: "local file".to_string(),
-                        bpm: String::new(),
-                        musical_key: String::new(),
-                        duration: String::new(),
+                        bpm,
+                        musical_key,
+                        duration,
                         tags: path
                             .parent()
                             .map(|dir| dir.to_string_lossy().to_string())
@@ -21485,42 +22138,51 @@ p2 {}
                 .collect::<Vec<_>>();
             return self.filter_sort_rows(rows);
         }
-        let rows = self
+        let tiles: Vec<(AssetId, String, Option<String>, Option<AssetRevisionId>)> = self
             .music_model
             .tiles()
             .iter()
-            .map(|tile| {
-                let key = TrackKey::Asset(tile.asset);
+            .map(|tile| (tile.asset, tile.title.clone(), tile.alias.clone(), tile.revision))
+            .collect();
+        let rows = tiles
+            .into_iter()
+            .map(|(asset, title, alias, revision)| {
+                let key = TrackKey::Asset(asset);
                 let (badge, live) = self.deck_badge(&key);
                 // The processed marks come from the manifests this session
                 // has seen: present the moment a tile's manifest resolves.
-                let side = tile
-                    .revision
-                    .and_then(|revision| self.track_side_channels.get(&revision));
+                let side = revision.and_then(|revision| self.track_side_channels.get(&revision));
                 let stem = side.is_some_and(|side| side.stems.is_some());
                 let krk = side.is_some_and(|side| side.lyrics.is_some());
-                // BPM and duration come from whichever deck holds it; a
-                // track that has never been on a deck has not been analysed.
-                let mut bpm = String::new();
-                let mut duration = String::new();
+                // Tempo, key and length come from the analysis filed against
+                // this TRACK. They used to come from whichever deck happened
+                // to be holding it, which meant a record that had been
+                // analysed a hundred times still showed blank columns the
+                // moment it was unloaded.
+                let (mut bpm, musical_key, mut duration) = self.row_analysis_cells(&key);
+                // A deck that is holding this track knows its length before
+                // the analysis lands, and has the live grid if the operator
+                // has nudged it off the analysed one.
                 for deck in [DeckId::A, DeckId::B] {
                     let state = self.decks.deck(deck);
-                    if state.item().map(|item| item.asset) != Some(tile.asset) {
+                    if state.item().map(|item| item.asset) != Some(asset) {
                         continue;
                     }
                     if let Some(grid) = state.grid.filter(|grid| grid.has_grid()) {
                         bpm = format!("{:.1}", grid.bpm);
                     }
-                    duration = format_duration(state.duration_secs);
+                    if state.duration_secs > 0.0 {
+                        duration = format_duration(state.duration_secs);
+                    }
                 }
                 TrackRowEntry {
                     key,
-                    title: tile.title.clone(),
+                    title,
                     artist: String::new(),
                     bpm,
-                    musical_key: String::new(),
+                    musical_key,
                     duration,
-                    tags: tile.alias.clone().unwrap_or_default(),
+                    tags: alias.unwrap_or_default(),
                     stem,
                     krk,
                     badge,
@@ -21548,7 +22210,29 @@ p2 {}
         }
     }
 
+    /// Does one row carry everything the lit HAS chips ask for?
+    ///
+    /// AND, not OR: "has a key AND a tempo" is the harmonic-mixing question,
+    /// and an OR would answer a question nobody asked. No chips lit is not a
+    /// filter at all.
+    fn row_passes_has_filter(&self, row: &TrackRowEntry) -> bool {
+        PASSES.iter().enumerate().all(|(index, pass)| {
+            if !self.music_has[index] {
+                return true;
+            }
+            match pass {
+                PrepPass::Stems => row.stem,
+                PrepPass::Karaoke => row.krk,
+                PrepPass::Key => !row.musical_key.trim().is_empty(),
+                PrepPass::Bpm => !row.bpm.trim().is_empty(),
+            }
+        })
+    }
+
     fn filter_sort_rows(&self, mut rows: Vec<TrackRowEntry>) -> Vec<TrackRowEntry> {
+        if self.music_has.iter().any(|on| *on) {
+            rows.retain(|row| self.row_passes_has_filter(row));
+        }
         // A column holds the order until another one takes it. The sort is
         // stable, so the catalog's own order survives underneath as the
         // tie-break — two tracks at 123 BPM stay in the order the store
@@ -23179,6 +23863,7 @@ p2 {}
         if self.ui.button(cx, ids!(auto_cfg_close)).clicked(actions) {
             self.ui.modal(cx, ids!(auto_dj_modal)).close(cx);
         }
+        self.handle_preprocess_modal(cx, actions);
         self.handle_phones_modal(cx, actions);
         self.handle_phones_player(cx, actions);
         self.handle_loop_scan_modal(cx, actions);
@@ -23666,7 +24351,7 @@ p2 {}
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
                 self.decks.end_auto_fade();
-                self.queue_rows.clear();
+                self.queue_rows_dirty = true;
             }
             AutoCmd::StartSet { deck } => {
                 // Snapping the fader replaces any manual ramp on the mixer;
@@ -23686,7 +24371,7 @@ p2 {}
             AutoCmd::PumpQueue => {
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
-                self.queue_rows.clear();
+                self.queue_rows_dirty = true;
             }
             // The blend overlay is mixer-level on purpose: the engine's
             // stored intent is the operator's, and these must never touch it.
@@ -23898,7 +24583,7 @@ p2 {}
             if self.music_local && self.local_tracks.is_empty() {
                 self.local_tracks = wave_analysis::list_local_audio(&Self::local_music_dir());
             }
-            self.music_rows.clear();
+            self.music_rows_dirty = true;
             // Search/More/category are catalog controls; the local listing
             // has no use for them.
             self.ui
@@ -23913,6 +24598,16 @@ p2 {}
             let on = self.music_autoplay || self.deck_target == DeckTarget::Mix;
             self.paint_lit(cx, ids!(music_autoplay), on);
         }
+        // The HAS chips: each one narrows the listing to rows that already
+        // carry that work, and several together narrow to rows carrying all
+        // of it.
+        for (index, chip) in Self::MUSIC_HAS_CHIPS.iter().enumerate() {
+            if self.ui.button(cx, chip).clicked(actions) {
+                self.music_has[index] = !self.music_has[index];
+                self.paint_lit(cx, chip, self.music_has[index]);
+                self.music_rows_dirty = true;
+            }
+        }
         // Every column head takes the order; the one that has it reverses.
         for (column, head, _) in MUSIC_HEADS {
             if self.ui.button(cx, head).clicked(actions) {
@@ -23922,13 +24617,13 @@ p2 {}
                     self.music_sort = column;
                     self.music_sort_desc = false;
                 }
-                self.music_rows.clear();
+                self.music_rows_dirty = true;
                 self.sync_sort_heads(cx);
             }
         }
         if self.music_refs.queue_clear.clicked(actions) {
             self.decks.clear_queue();
-            self.queue_rows.clear();
+            self.queue_rows_dirty = true;
         }
         // A beats dropdown floats OVER the library, and the two widgets do
         // not agree on who saw the press first: the list is walked before
@@ -23973,7 +24668,7 @@ p2 {}
                     if let Some(item) = self.track_item_at(index) {
                         let cmds = self.decks.enqueue(item);
                         self.run_deck_cmds(cx, cmds);
-                        self.queue_rows.clear();
+                        self.queue_rows_dirty = true;
                     }
                     continue;
                 }
@@ -24010,7 +24705,7 @@ p2 {}
                 let cmds = self.decks.click(item, self.deck_target);
                 self.run_deck_cmds(cx, cmds);
                 self.arm_autoplay();
-                self.music_rows.clear();
+                self.music_rows_dirty = true;
             }
         }
         // The queue's own carry: rows rearrange the set list rather than
@@ -24024,11 +24719,11 @@ p2 {}
                     self.deck_hands_on();
                     let cmds = self.decks.load_queued(index, self.deck_target);
                     self.run_deck_cmds(cx, cmds);
-                    self.queue_rows.clear();
+                    self.queue_rows_dirty = true;
                 }
                 TrackListHit::Unqueue(index) => {
                     self.decks.dequeue(index);
-                    self.queue_rows.clear();
+                    self.queue_rows_dirty = true;
                     // A track pulled out of the set list while it is in the
                     // phones gets its `+` back on the player.
                     self.sync_phones_player_ui(cx);
@@ -24250,6 +24945,11 @@ impl MatchEvent for App {
         // boot.
         self.load_fx_slots_panel(cx);
         self.load_midi_map();
+        // The preprocessing dialog loads FIRST of the settings: it carries
+        // the cache root, and everything below it that touches a cache has
+        // to be looking in the right place already.
+        self.load_preprocess_settings();
+        self.sync_preprocess_panel(cx);
         // The phones rig loads before the first devices event, which then
         // resolves the saved name against what the OS actually has.
         self.load_phones_settings();
@@ -25543,6 +26243,18 @@ impl MatchEvent for App {
             let Some(picked) = action.downcast_ref::<FileDialogAction>() else { continue };
             match picked {
                 FileDialogAction::FolderSelected(path) => {
+                    // The cache picker and the import pickers share the one
+                    // platform dialog, and its answer says nothing about who
+                    // asked — so whoever armed it takes it back first.
+                    if std::mem::take(&mut self.prep_picking_cache) {
+                        let root = PathBuf::from(path.to_string_lossy().into_owned());
+                        let root = (Some(&root) != self.prep.cache_root.as_ref())
+                            .then_some(Some(root));
+                        if let Some(root) = root {
+                            self.ask_preprocess_confirm(cx, PrepConfirm::MoveCache(root));
+                        }
+                        continue;
+                    }
                     let picker = std::mem::take(&mut self.import_picker);
                     let path = path.to_string_lossy().into_owned();
                     match picker {
@@ -25556,6 +26268,7 @@ impl MatchEvent for App {
                 }
                 FileDialogAction::FolderCancelled => {
                     self.import_picker = ImportPicker::None;
+                    self.prep_picking_cache = false;
                 }
                 // Import drives folder selection only; the platform's file
                 // and save panels answer elsewhere.

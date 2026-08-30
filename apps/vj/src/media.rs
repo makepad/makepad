@@ -2175,6 +2175,13 @@ impl UiStep {
 
 pub enum DecodeJob {
     Deck { deck: DeckId, gen: u64, path: PathBuf, media: MediaType },
+    /// Decode purely so the track can be ANALYSED — no deck, no mixer, no
+    /// waveform upload. The preprocessing lane runs these ahead of the set so
+    /// the library's tempo and key columns are filled before anyone asks.
+    /// `gen` is the cache generation, not a deck load: a result stamped with
+    /// a stale one is dropped rather than written back into a cache the
+    /// operator has since emptied.
+    Analyze { key: String, gen: u64, path: PathBuf, media: MediaType },
     /// The headphone pre-listen: the same full decode as a deck, plus the
     /// overview strip for the mini player's seek bar.
     Preview { gen: u64, path: PathBuf, media: MediaType },
@@ -2291,6 +2298,11 @@ pub enum DecodeDone {
     Preview {
         gen: u64,
         result: Result<(Arc<TrackPcm>, Vec<f32>), String>,
+    },
+    Analyze {
+        key: String,
+        gen: u64,
+        result: Result<Arc<TrackPcm>, String>,
     },
     Pad {
         pad: PadKey,
@@ -3381,6 +3393,12 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
             let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES).map(Arc::new);
             DecodeDone::Pad { pad, gen, revision, result }
         }
+        DecodeJob::Analyze { key, gen, path, media } => {
+            // No peaks and no bins: nothing is going to draw this decode.
+            // The analysis worker builds its own tiles from the samples.
+            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(Arc::new);
+            DecodeDone::Analyze { key, gen, result }
+        }
         DecodeJob::Preview { gen, path, media } => {
             let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = preview_wave_bins(&pcm, PREVIEW_WAVE_COLS);
@@ -4219,6 +4237,7 @@ mod tests {
                     assert!(result.is_err(), "bad wav must fail");
                 }
                 DecodeDone::Preview { .. }
+                | DecodeDone::Analyze { .. }
                 | DecodeDone::MeshPrep { .. }
                 | DecodeDone::SlotMesh { .. }
                 | DecodeDone::Still { .. }

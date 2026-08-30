@@ -29,6 +29,7 @@ use crate::beat_sync::BeatSyncAnalyzer;
 use crate::decks::DeckId;
 use crate::mixer::TrackPcm;
 use makepad_ai_beats::BeatsModel;
+use crate::track_key::KeyEstimate;
 use makepad_asset_data::{BlobId, MediaType};
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
@@ -72,9 +73,14 @@ const REFERENCE_PERCENTILE: f64 = 0.995;
 const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// Version 4 carries the tempo map; a version 3 sidecar has no record of
 /// whether the track's tempo moves, so it is re-analysed rather than reused.
-/// Version 6 records whether Beat This! has refined the comb grid. Version 5
-/// remains readable, but is deliberately treated as unrefined.
-const CACHE_VERSION: u32 = 6;
+/// Version 6 was claimed twice: once for the musical key, once for whether a
+/// neural beat pass refined the comb grid. Version 7 carries both. A version
+/// 5 sidecar was written before the chroma pass existed, so it has no key in
+/// it at all — and an absent key is indistinguishable from "this track has no
+/// tonal centre" once it is on disk; a version 6 sidecar carries only one of
+/// the two fields, under either layout. All of them are re-analysed rather
+/// than reused, as every earlier bump did.
+const CACHE_VERSION: u32 = 7;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -517,6 +523,10 @@ pub struct TrackAnalysis {
     /// at least four seconds apart. Empty when nothing clears the floor.
     /// This is the autopilot's phrase map.
     pub changes_secs: Vec<f64>,
+    /// The track's musical key, when the chroma had enough shape to name
+    /// one. `None` is a real answer — too short, too quiet, or no tonal
+    /// centre — and reads as an empty cell rather than as a guess.
+    pub key: Option<KeyEstimate>,
 }
 
 impl TrackAnalysis {
@@ -1877,6 +1887,9 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
         .into_iter()
         .map(|hop| hop * hop_secs)
         .collect();
+    // The key runs off the SAMPLES, not off the envelopes above: pitch class
+    // is the one thing a three-band energy envelope has already thrown away.
+    let key = crate::track_key::estimate_key(&pcm.frames, pcm.sample_rate);
     TrackAnalysis {
         duration_secs: pcm.seconds(),
         sample_rate: pcm.sample_rate,
@@ -1886,6 +1899,7 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
         tempo_map,
         tiles,
         changes_secs,
+        key,
     }
 }
 
@@ -1955,12 +1969,26 @@ impl AnalysisKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Rebuild a key from what [`AnalysisKey::as_str`] handed out. The
+    /// preprocessing lane's decode jobs carry the key as a plain string
+    /// through the media worker, which knows nothing about analysis.
+    pub fn from_raw(raw: String) -> AnalysisKey {
+        AnalysisKey(raw)
+    }
 }
 
-/// Where the sidecars live: beside the VJ's other local state.
+/// Where the sidecars live: the operator's chosen cache root when the
+/// preprocessing dialog has been given one, otherwise beside the VJ's other
+/// local state. `VJ_WAVE_CACHE` still wins over both — it is how a test or a
+/// packaging script pins a directory, and that must not be overruled by a
+/// preference the machine knows nothing about.
 pub fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VJ_WAVE_CACHE") {
         return PathBuf::from(dir);
+    }
+    if let Some(dir) = crate::preprocess::cache_subdir(crate::preprocess::WAVE_SUBDIR) {
+        return dir;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../local/vj/wave-cache")
@@ -1984,6 +2012,19 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
     out.extend_from_slice(&analysis.grid.first_beat_secs.to_le_bytes());
     out.extend_from_slice(&analysis.grid.downbeat_phase.to_le_bytes());
     out.extend_from_slice(&analysis.grid.confidence.to_le_bytes());
+    // The key rides in the FIXED-SIZE header, not after the tiles, so the
+    // explorer can read a track's tempo and key out of a sidecar with a
+    // 64-byte read instead of paging in megabytes of waveform it will not
+    // draw. See `decode_summary`.
+    match analysis.key {
+        Some(key) => {
+            out.push(1);
+            out.push(key.tonic);
+            out.push(key.minor as u8);
+            out.extend_from_slice(&key.confidence.to_le_bytes());
+        }
+        None => out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]),
+    }
     out.extend_from_slice(&(analysis.tiles.zoom.len() as u32).to_le_bytes());
     for column in &analysis.tiles.zoom {
         out.extend_from_slice(column);
@@ -2019,25 +2060,22 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         return Err("not a wave cache file".into());
     }
     let version = u32::from_le_bytes(take(4)?.try_into().unwrap());
-    if version != 5 && version != CACHE_VERSION {
+    if version != CACHE_VERSION {
         return Err(format!("wave cache version {version}"));
     }
     let duration_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let sample_rate = u32::from_le_bytes(take(4)?.try_into().unwrap());
-    let refined_by_beats = if version >= 6 {
-        match take(1)?[0] {
-            0 => false,
-            1 => true,
-            _ => return Err("wave cache refinement flag out of range".into()),
-        }
-    } else {
-        false
+    let refined_by_beats = match take(1)?[0] {
+        0 => false,
+        1 => true,
+        _ => return Err("wave cache refinement flag out of range".into()),
     };
     let bpm = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let beat_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let first_beat_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let downbeat_phase = u32::from_le_bytes(take(4)?.try_into().unwrap());
     let confidence = f32::from_le_bytes(take(4)?.try_into().unwrap());
+    let key = decode_key_field(take(KEY_FIELD_LEN)?);
     let zoom_len = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
     if zoom_len > 64_000_000 {
         return Err("wave cache zoom length out of range".into());
@@ -2083,6 +2121,7 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         sample_rate,
         #[cfg(not(test))]
         refined_by_beats,
+        key,
         grid: TrackGrid {
             bpm,
             beat_secs,
@@ -2094,6 +2133,70 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         tempo_map: TempoMap { segments },
         tiles: WaveTiles { zoom, overview },
     })
+}
+
+/// The presence byte, the tonic, the mode and the confidence.
+const KEY_FIELD_LEN: usize = 7;
+/// Everything before the first variable-length run: magic, version, duration,
+/// sample rate, the refinement flag, the five grid fields and the key field. A read of this many
+/// bytes answers "what tempo and key is this track" without touching the
+/// waveform tiles behind it.
+const SUMMARY_LEN: usize = 8 + 4 + 8 + 4 + 1 + 8 + 8 + 8 + 4 + 4 + KEY_FIELD_LEN;
+
+/// A tonic outside the octave is a corrupt sidecar, not a key: drop it rather
+/// than hand the wheel an index it cannot spell.
+fn decode_key_field(field: &[u8]) -> Option<KeyEstimate> {
+    match (field.first()?, field.get(1)?) {
+        (1, tonic) if *tonic < 12 => Some(KeyEstimate {
+            tonic: *tonic,
+            minor: *field.get(2)? != 0,
+            confidence: f32::from_le_bytes(field.get(3..7)?.try_into().ok()?),
+        }),
+        _ => None,
+    }
+}
+
+/// What the explorer's columns need from a sidecar, and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackSummary {
+    pub duration_secs: f64,
+    pub grid: TrackGrid,
+    pub key: Option<KeyEstimate>,
+}
+
+/// Read just the header of a sidecar. This runs on the UI thread once per
+/// track the explorer shows, so it must never pull the tiles in: a long
+/// record's zoom channel is megabytes, and the columns want sixty-four
+/// bytes of it.
+pub fn decode_summary(bytes: &[u8]) -> Option<TrackSummary> {
+    if bytes.len() < SUMMARY_LEN || &bytes[0..8] != CACHE_MAGIC {
+        return None;
+    }
+    if u32::from_le_bytes(bytes[8..12].try_into().ok()?) != CACHE_VERSION {
+        return None;
+    }
+    Some(TrackSummary {
+        duration_secs: f64::from_le_bytes(bytes[12..20].try_into().ok()?),
+        grid: TrackGrid {
+            bpm: f64::from_le_bytes(bytes[25..33].try_into().ok()?),
+            beat_secs: f64::from_le_bytes(bytes[33..41].try_into().ok()?),
+            first_beat_secs: f64::from_le_bytes(bytes[41..49].try_into().ok()?),
+            downbeat_phase: u32::from_le_bytes(bytes[49..53].try_into().ok()?),
+            confidence: f32::from_le_bytes(bytes[53..57].try_into().ok()?),
+        },
+        key: decode_key_field(&bytes[57..SUMMARY_LEN]),
+    })
+}
+
+/// The header of the sidecar for `key`, when one is on disk for this cache
+/// version. `None` covers "never analysed", "analysed by an older build" and
+/// "unreadable" alike — all of which mean the same thing to a column: blank.
+pub fn load_cached_summary(dir: &Path, key: &AnalysisKey) -> Option<TrackSummary> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(cache_path(dir, key)).ok()?;
+    let mut head = [0u8; SUMMARY_LEN];
+    file.read_exact(&mut head).ok()?;
+    decode_summary(&head)
 }
 
 fn load_cached(dir: &Path, key: &AnalysisKey) -> Option<TrackAnalysis> {
@@ -2203,7 +2306,10 @@ fn gcd_u32(mut left: u32, mut right: u32) -> u32 {
 // ---------------------------------------------------------------------------
 
 pub struct AnalysisJob {
-    pub deck: DeckId,
+    /// The deck waiting on this, when one is. `None` is the preprocessing
+    /// lane: the result is filed against the track and nothing on screen is
+    /// waiting for it.
+    pub deck: Option<DeckId>,
     pub gen: u64,
     pub key: AnalysisKey,
     pub pcm: Arc<TrackPcm>,
@@ -2211,8 +2317,13 @@ pub struct AnalysisJob {
 }
 
 pub struct AnalysisDone {
-    pub deck: DeckId,
+    /// The deck that asked, when one did; `None` for the preprocessing lane.
+    pub deck: Option<DeckId>,
     pub gen: u64,
+    /// The key the job was submitted under, handed back so a result can be
+    /// filed against the TRACK rather than only against the deck that
+    /// happened to ask for it. The explorer's columns read that filing.
+    pub key: AnalysisKey,
     pub analysis: Arc<TrackAnalysis>,
     /// True when the result came straight out of the sidecar cache.
     pub cached: bool,
@@ -2238,11 +2349,14 @@ impl AnalysisPool {
         let _ = std::thread::Builder::new()
             .name("vj-wave-analysis".into())
             .spawn(move || {
-                let dir = cache_dir();
                 let mut beats_checkpoint: Option<PathBuf> = None;
                 let mut beats_model: Option<BeatsModel> = None;
                 let mut beats_model_error: Option<String> = None;
                 while let Ok(job) = jobs.recv() {
+                    // Per job, not once per thread: the operator can move the
+                    // cache root mid-session, and a worker holding the old one
+                    // would keep writing sidecars where nothing reads them.
+                    let dir = cache_dir();
                     let (mut analysis, cached) = match load_cached(&dir, &job.key) {
                         Some(hit) => (hit, true),
                         None => (analyze(&job.pcm), false),
@@ -2315,6 +2429,7 @@ impl AnalysisPool {
                         .send(AnalysisDone {
                             deck: job.deck,
                             gen: job.gen,
+                            key: job.key,
                             analysis: Arc::new(analysis),
                             cached: straight_from_cache,
                         })
@@ -2946,17 +3061,77 @@ mod tests {
         // Truncation and junk are refused, not misread.
         assert!(decode_analysis(&bytes[..bytes.len() / 2]).is_err());
         assert!(decode_analysis(b"nope").is_err());
-        // Version 5 had every field except the refinement marker. It remains
-        // reusable, but must run Beat This! once when weights are available.
-        let mut version_five = encode_analysis(&analysis);
-        version_five[8..12].copy_from_slice(&5u32.to_le_bytes());
-        version_five.remove(24);
-        let old = decode_analysis(&version_five).expect("version 5 decode");
-        assert!(!old.refined_by_beats());
-        // Still older layouts are re-analysed, never misread.
-        let mut old = encode_analysis(&analysis);
-        old[8..12].copy_from_slice(&4u32.to_le_bytes());
-        assert!(decode_analysis(&old).is_err());
+        // The fixed header answers the explorer's columns without the tiles,
+        // and it must agree with the full decode byte for byte.
+        let summary = decode_summary(&bytes).expect("summary");
+        assert_eq!(summary.grid, analysis.grid);
+        assert_eq!(summary.key, analysis.key);
+        assert!((summary.duration_secs - analysis.duration_secs).abs() < 1e-9);
+        // Versions 5 and 6 each lack a field this layout carries (the key, or
+        // the refinement marker), so they are re-analysed, never misread.
+        for version in [4u32, 5, 6] {
+            let mut old = encode_analysis(&analysis);
+            old[8..12].copy_from_slice(&version.to_le_bytes());
+            assert!(decode_analysis(&old).is_err(), "version {version}");
+            assert!(decode_summary(&old).is_none(), "version {version}");
+        }
+    }
+
+    #[test]
+    fn the_key_survives_the_cache_as_itself() {
+        let pcm = click_track(48_000, 124.0, 12.0, 0.2);
+        let mut analysis = analyze(&pcm);
+        // Both answers have to round trip, and they have to stay DIFFERENT
+        // answers: "no tonal centre" must not come back as C major, which is
+        // exactly what a zeroed field would read as.
+        analysis.key = None;
+        assert_eq!(decode_analysis(&encode_analysis(&analysis)).expect("decode").key, None);
+        for (tonic, minor) in [(0u8, false), (9, true), (11, true), (6, false)] {
+            analysis.key = Some(KeyEstimate { tonic, minor, confidence: 0.42 });
+            let back = decode_analysis(&encode_analysis(&analysis)).expect("decode");
+            assert_eq!(back.key, analysis.key, "tonic {tonic} minor {minor}");
+        }
+        // A tonic outside the octave is corruption, not a twelve-and-a-half.
+        let mut corrupt = encode_analysis(&analysis);
+        corrupt[57] = 12;
+        assert_eq!(decode_analysis(&corrupt).expect("decode").key, None);
+    }
+
+    #[test]
+    fn a_summary_reads_the_header_without_the_tiles() {
+        let pcm = click_track(48_000, 124.0, 12.0, 0.2);
+        let mut analysis = analyze(&pcm);
+        analysis.key = Some(KeyEstimate { tonic: 9, minor: true, confidence: 0.5 });
+        let bytes = encode_analysis(&analysis);
+        // The whole point of the header layout: the first SUMMARY_LEN bytes
+        // are enough. If the key ever moves back behind the tiles this fails.
+        let summary = decode_summary(&bytes[..SUMMARY_LEN]).expect("summary");
+        assert_eq!(summary.grid, analysis.grid);
+        assert_eq!(summary.key, analysis.key);
+        assert!((summary.duration_secs - analysis.duration_secs).abs() < 1e-9);
+        assert!(bytes.len() > SUMMARY_LEN * 4, "the fixture must have real tiles behind it");
+        // Short, junk and stale-version reads are refused rather than guessed.
+        assert!(decode_summary(&bytes[..SUMMARY_LEN - 1]).is_none());
+        assert!(decode_summary(b"nope").is_none());
+        let mut old = bytes.clone();
+        old[8..12].copy_from_slice(&5u32.to_le_bytes());
+        assert!(decode_summary(&old).is_none());
+    }
+
+    #[test]
+    fn a_summary_comes_off_disk_for_a_stored_track() {
+        let pcm = click_track(48_000, 120.0, 8.0, 0.2);
+        let mut analysis = analyze(&pcm);
+        analysis.key = Some(KeyEstimate { tonic: 4, minor: false, confidence: 0.3 });
+        let dir = std::env::temp_dir()
+            .join(format!("makepad-vj-summary-{}", std::process::id()));
+        let key = AnalysisKey::from_blob(BlobId::hash_of(b"a summarised track"));
+        assert!(load_cached_summary(&dir, &key).is_none());
+        store_cached(&dir, &key, &analysis);
+        let summary = load_cached_summary(&dir, &key).expect("summary off disk");
+        assert_eq!(summary.key, analysis.key);
+        assert_eq!(summary.grid, analysis.grid);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
