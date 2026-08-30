@@ -270,8 +270,6 @@ const STRUCT_PENALTY: f32 = 0.05;
 const LOUD_GATE_DB: f32 = 0.5;
 const LOUD_GATE_CAP_DB: f32 = 8.0;
 const CHROMA_GATE: f32 = 0.25;
-/// Kept INs stay at least a bar apart.
-const MIN_IN_SPACING_BEATS: i64 = 4;
 /// Power-of-two candidate lengths, in beats.
 const LENGTHS: [usize; 11] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 
@@ -285,11 +283,28 @@ pub enum LengthBounds {
 pub struct LoopScanConfig {
     pub bounds: LengthBounds,
     pub count: usize,
+    /// Whether kept loops may sit inside one another. A track's best loops
+    /// tend to cluster on the same strong phrase, so overlap is how you get
+    /// several readings of one good passage; refusing it is how you get a
+    /// set that spreads across the record.
+    pub overlap: bool,
+    /// The least distance between two kept loops, in whatever unit
+    /// `bounds` is expressed in. With overlap allowed it is measured IN to
+    /// IN; without, it is the clear air between one loop's OUT and the
+    /// next one's IN.
+    pub min_gap: f64,
 }
 
 impl Default for LoopScanConfig {
     fn default() -> Self {
-        Self { bounds: LengthBounds::Secs { min: 4.0, max: 10.0 }, count: 10 }
+        Self {
+            bounds: LengthBounds::Secs { min: 4.0, max: 10.0 },
+            count: 10,
+            overlap: true,
+            // Two seconds: about a bar at the tempi this app plays, which
+            // is where the fixed one-bar rule sat before it was a setting.
+            min_gap: 2.0,
+        }
     }
 }
 
@@ -312,6 +327,13 @@ pub struct ScanSettings {
     pub min_beats_ix: usize,
     pub max_beats_ix: usize,
     pub count: usize,
+    /// Kept loops may lie over one another.
+    pub overlap: bool,
+    /// The least distance between kept loops, one per unit so switching the
+    /// unit does not reinterpret a number the operator set for the other —
+    /// the same courtesy min/max already get.
+    pub min_gap_secs: f64,
+    pub min_gap_beats: usize,
     pub automatic: bool,
 }
 
@@ -325,6 +347,10 @@ impl Default for ScanSettings {
             // The 64-beat rung: a phrase at any tempo this app plays.
             max_beats_ix: 3,
             count: 10,
+            overlap: true,
+            min_gap_secs: 2.0,
+            // One bar: where the rule sat when it was hard-coded.
+            min_gap_beats: 4,
             automatic: false,
         }
     }
@@ -334,13 +360,16 @@ impl ScanSettings {
     /// `key value` lines, one per setting — the shape that goes to disk.
     pub fn to_text(&self) -> String {
         format!(
-            "unit {}\nmin_secs {}\nmax_secs {}\nmin_beats {}\nmax_beats {}\ncount {}\nautomatic {}\n",
+            "unit {}\nmin_secs {}\nmax_secs {}\nmin_beats {}\nmax_beats {}\ncount {}\noverlap {}\ngap_secs {}\ngap_beats {}\nautomatic {}\n",
             if self.unit_beats { "beats" } else { "secs" },
             self.min_secs,
             self.max_secs,
             self.min_beats_ix,
             self.max_beats_ix,
             self.count,
+            u8::from(self.overlap),
+            self.min_gap_secs,
+            self.min_gap_beats,
             u8::from(self.automatic),
         )
     }
@@ -386,6 +415,19 @@ impl ScanSettings {
                         }
                     }
                 }
+                "overlap" => out.overlap = value == "1",
+                "gap_secs" => {
+                    if let Ok(secs) = value.parse::<f64>() {
+                        if secs.is_finite() && secs >= 0.0 {
+                            out.min_gap_secs = secs;
+                        }
+                    }
+                }
+                "gap_beats" => {
+                    if let Ok(beats) = value.parse::<usize>() {
+                        out.min_gap_beats = beats;
+                    }
+                }
                 "automatic" => out.automatic = value == "1",
                 _ => {}
             }
@@ -396,6 +438,11 @@ impl ScanSettings {
     /// What the scanner is actually asked for. Bounds given the wrong way
     /// round swap themselves; the count is clamped to the marker row.
     pub fn to_config(&self) -> LoopScanConfig {
+        let min_gap = if self.unit_beats {
+            self.min_gap_beats as f64
+        } else {
+            self.min_gap_secs
+        };
         let bounds = if self.unit_beats {
             let min = LENGTHS[self.min_beats_ix.min(LENGTHS.len() - 1)] as u32;
             let max = LENGTHS[self.max_beats_ix.min(LENGTHS.len() - 1)] as u32;
@@ -409,6 +456,8 @@ impl ScanSettings {
         LoopScanConfig {
             bounds,
             count: self.count.clamp(1, crate::decks::FOUND_LOOP_CAP),
+            overlap: self.overlap,
+            min_gap,
         }
     }
 }
@@ -599,15 +648,44 @@ pub fn scan(
         .collect();
     scored.sort_by(|a, b| a.2.total_cmp(&b.2));
 
-    // Greedy pick, INs at least a bar apart, best first.
+    // Greedy pick, best first, spaced the way the operator asked. The
+    // distance is read in the unit the bounds are in: beats compare as beat
+    // indices (exact on the grid, and honest under a tempo map), seconds as
+    // seconds.
+    let gap = config.min_gap.max(0.0);
+    let in_beats = matches!(config.bounds, LengthBounds::Beats { .. });
     let mut out: Vec<ScoredLoop> = Vec::new();
-    let mut kept: Vec<i64> = Vec::new();
+    let mut kept: Vec<(usize, usize)> = Vec::new();
     for (i, l, score) in scored {
-        let beat = first_beat + i as i64;
-        if kept.iter().any(|k| (k - beat).abs() < MIN_IN_SPACING_BEATS) {
+        let j = i + l;
+        let clash = kept.iter().any(|&(ki, kj)| {
+            if config.overlap {
+                // IN to IN: two loops may lie over each other, they just
+                // may not start on top of each other.
+                let apart = if in_beats {
+                    (i as f64 - ki as f64).abs()
+                } else {
+                    (beats[i] - beats[ki]).abs()
+                };
+                return apart < gap;
+            }
+            // No overlap at all — and then the air between them counts.
+            let ((_, first_end), (second_start, _)) =
+                if i <= ki { ((i, j), (ki, kj)) } else { ((ki, kj), (i, j)) };
+            if second_start < first_end {
+                return true;
+            }
+            let apart = if in_beats {
+                second_start as f64 - first_end as f64
+            } else {
+                beats[second_start] - beats[first_end]
+            };
+            apart < gap
+        });
+        if clash {
             continue;
         }
-        kept.push(beat);
+        kept.push((i, j));
         out.push(ScoredLoop {
             span: LoopSpan { start_secs: beats[i], end_secs: beats[i + l] },
             beats: l as u32,
@@ -863,6 +941,8 @@ mod tests {
         let config = LoopScanConfig {
             bounds: LengthBounds::Beats { min: 8, max: 64 },
             count: 3,
+            overlap: true,
+            min_gap: 0.0,
         };
         let loops = scan(&pcm, None, &analysis, &config);
         assert!(!loops.is_empty());
@@ -880,6 +960,8 @@ mod tests {
         let config = LoopScanConfig {
             bounds: LengthBounds::Secs { min: 7.0, max: 9.0 }, // only 16 beats = 8 s fits
             count: 4,
+            overlap: true,
+            min_gap: 0.0,
         };
         let loops = scan(&pcm, None, &analysis, &config);
         assert!(!loops.is_empty());
@@ -893,6 +975,8 @@ mod tests {
         let config = LoopScanConfig {
             bounds: LengthBounds::Secs { min: 4.4, max: 5.6 }, // no power of two lands here
             count: 2,
+            overlap: true,
+            min_gap: 0.0,
         };
         let loops = scan(&pcm, None, &analysis, &config);
         assert!(!loops.is_empty(), "widening must rescue an empty length set");
@@ -911,6 +995,8 @@ mod tests {
         let config = LoopScanConfig {
             bounds: LengthBounds::Beats { min: 8, max: 16 },
             count: 5,
+            overlap: true,
+            min_gap: 0.0,
         };
         let loops = scan(&pcm, None, &analysis, &config);
         assert!(!loops.is_empty(), "relaxation must always yield candidates");
@@ -920,6 +1006,80 @@ mod tests {
             assert!((a - b).abs() >= 4, "INs at least a bar apart: {loops:?}");
         }
         assert!(loops.iter().all(|l| l.score.is_finite()));
+    }
+
+    #[test]
+    fn refusing_overlap_leaves_clear_air_between_the_finds() {
+        let pcm = body_track(22050);
+        let analysis = analysis_120bpm(96);
+        let config = LoopScanConfig {
+            // 16 beats is 8 s at this tempo, so every find is the same size
+            // and the spacing rule is the only thing separating them.
+            bounds: LengthBounds::Secs { min: 7.0, max: 9.0 },
+            count: 4,
+            overlap: false,
+            min_gap: 2.0,
+        };
+        let loops = scan(&pcm, None, &analysis, &config);
+        assert!(loops.len() >= 2, "{loops:?}");
+        let mut spans: Vec<(f64, f64)> = loops
+            .iter()
+            .map(|found| (found.span.start_secs, found.span.end_secs))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in spans.windows(2) {
+            assert!(
+                pair[1].0 >= pair[0].1 + 2.0 - 1e-6,
+                "no overlap, and two seconds of air between them: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowing_overlap_measures_the_gap_in_to_in() {
+        let pcm = body_track(22050);
+        let analysis = analysis_120bpm(96);
+        let config = LoopScanConfig {
+            bounds: LengthBounds::Beats { min: 16, max: 16 },
+            count: 6,
+            overlap: true,
+            // Eight beats — half a find's length, so the finds are free to
+            // lie over each other and only their INs are held apart.
+            min_gap: 8.0,
+        };
+        let loops = scan(&pcm, None, &analysis, &config);
+        assert!(loops.len() >= 2, "{loops:?}");
+        let mut starts: Vec<f64> = loops.iter().map(|found| found.span.start_secs).collect();
+        starts.sort_by(|a, b| a.total_cmp(b));
+        for pair in starts.windows(2) {
+            // Eight beats at 120 BPM is four seconds.
+            assert!(pair[1] - pair[0] >= 4.0 - 1e-6, "INs held apart: {starts:?}");
+        }
+    }
+
+    #[test]
+    fn a_gap_of_zero_lets_the_finds_butt_together() {
+        let pcm = body_track(22050);
+        let analysis = analysis_120bpm(96);
+        let config = LoopScanConfig {
+            bounds: LengthBounds::Beats { min: 16, max: 16 },
+            count: 6,
+            overlap: false,
+            min_gap: 0.0,
+        };
+        let loops = scan(&pcm, None, &analysis, &config);
+        assert!(loops.len() >= 2, "{loops:?}");
+        let mut spans: Vec<(f64, f64)> = loops
+            .iter()
+            .map(|found| (found.span.start_secs, found.span.end_secs))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in spans.windows(2) {
+            assert!(
+                pair[1].0 >= pair[0].1 - 1e-6,
+                "still no overlap, but touching is allowed: {spans:?}"
+            );
+        }
     }
 
     #[test]
@@ -956,7 +1116,9 @@ mod tests {
             config: LoopScanConfig {
                 bounds: LengthBounds::Beats { min: 8, max: 32 },
                 count: 4,
-            },
+                overlap: true,
+                min_gap: 0.0,
+                },
             stems_root: None,
             digest: None,
         });
@@ -1040,6 +1202,11 @@ mod tests {
             max_beats_ix: 5,
             count: 7,
             automatic: true,
+            // Off the defaults on purpose: a round trip that only ever sees
+            // default values cannot tell a written field from a missing one.
+            overlap: false,
+            min_gap_secs: 3.5,
+            min_gap_beats: 6,
         };
         assert_eq!(ScanSettings::from_text(&settings.to_text()), settings);
     }
