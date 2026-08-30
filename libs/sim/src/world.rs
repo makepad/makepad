@@ -75,6 +75,12 @@ pub struct GameWorld {
     pub cam_distance: f32,
     pub cam_follow: u64,
     pub cam_side: bool,
+    /// Top-down strategy camera: the view looks straight down at
+    /// `cam_target` from `cam_distance` metres, panned and zoomed by the
+    /// player rather than following a body. A tiled strategy level turns it
+    /// on the way an `fps` map turns on first person — the presentation is
+    /// part of what the level IS, not a thing every script must remember.
+    pub cam_top_down: bool,
     /// Third-person rig: pivot entity (0 = off), pivot height, boom length.
     pub cam_third: u64,
     pub cam_height: f32,
@@ -388,6 +394,7 @@ impl GameWorld {
         self.cam_distance = 18.0;
         self.cam_follow = 0;
         self.cam_side = false;
+        self.cam_top_down = false;
         self.cam_third = 0;
         self.cam_height = 1.6;
         self.cam_boom = 10.0;

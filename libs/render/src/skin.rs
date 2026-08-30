@@ -2306,6 +2306,37 @@ impl SkinnedModel {
         ))
     }
 
+    /// This rig's clip for one gameplay [`ClipRole`], resolved through the
+    /// shared vocabulary and the role's fallback chain. `None` means the
+    /// rig has nothing for it — a rigid GLB with no clips answers `None`
+    /// for every role and is still a perfectly good piece.
+    pub fn role_clip(&self, role: ClipRole) -> Option<usize> {
+        let mut next = Some(role);
+        while let Some(r) = next {
+            if let Some(i) = self.clip_index_any(r.names()) {
+                return Some(i);
+            }
+            next = r.fallback();
+        }
+        None
+    }
+
+    /// [`Self::role_clip`], with the clip name the CONTENT authored for this
+    /// role tried first — exactly, then as a substring. Empty `authored`
+    /// means "the content named none", which is the ordinary case.
+    pub fn role_clip_authored(&self, role: ClipRole, authored: &str) -> Option<usize> {
+        let authored = authored.trim();
+        if !authored.is_empty() {
+            if let Some(i) = self
+                .clip_index_exact(authored)
+                .or_else(|| self.clip_index(authored))
+            {
+                return Some(i);
+            }
+        }
+        self.role_clip(role)
+    }
+
     /// CPU-skin the SDF-shadow-bake pose set: the idle stance at t = 0 plus
     /// the walk cycle at [`crate::shadow_sdf::SDF_GAIT_PHASES`] evenly
     /// spaced stations, each as a packed [`SKIN_VERTEX_FLOATS`] stream
@@ -2914,6 +2945,103 @@ pub const GAIT_IDLE_CLIPS: &[&str] = &["idle", "unarmed_idle", "static"];
 /// first: a rig with both `walk` and `run` gaits its shadow from the walk.
 pub const GAIT_WALK_CLIPS: &[&str] = &["walk", "walking_a", "walking_b", "run", "running_a"];
 
+/// Clip names that mean "travelling under its own power" — a strategy
+/// piece's `move`. A superset of [`GAIT_WALK_CLIPS`] with the words a
+/// VEHICLE rig uses in front, because a tank drives and a rifleman walks
+/// and the state that drives both is one. (A test below pins the tail to
+/// `GAIT_WALK_CLIPS` so the two can never drift.)
+pub const GAIT_MOVE_CLIPS: &[&str] = &[
+    "move", "drive", "roll", "walk", "walking_a", "walking_b", "run", "running_a",
+];
+
+/// Clip names that mean "shooting".
+pub const GAIT_FIRE_CLIPS: &[&str] = &["fire", "shoot", "attack", "1h_melee", "melee"];
+
+/// Clip names that mean "dying". No fallback: a rig without one must not
+/// play its idle over a corpse — the host's own death handling takes over.
+pub const GAIT_DIE_CLIPS: &[&str] = &["die", "death", "dead", "destroy"];
+
+/// Clip names that mean "unfolding into something else" — an MCV becoming a
+/// construction yard, a siege unit setting up.
+pub const GAIT_DEPLOY_CLIPS: &[&str] = &["deploy", "unfold", "unpack", "open", "build"];
+
+/// The STATE a host drives a rig through, and the only vocabulary that
+/// resolves it. One contract, shared by everything that animates a body
+/// from gameplay state — so a rig published by anyone animates in a
+/// strategy round, a shooter or a sandbox with no per-game matcher.
+///
+/// Resolution, in order:
+/// 1. the clip the CONTENT named for this role, if any
+///    ([`SkinnedModel::role_clip_authored`]) — exact name first, then as a
+///    substring, so `fire:Shoot` finds `Shoot` and `Shoot_Rifle` alike;
+/// 2. this role's own vocabulary, case-insensitively by substring, best
+///    fit first — the same rule [`SkinnedModel::clip_index`] has always
+///    used;
+/// 3. the role's [`ClipRole::fallback`], repeatedly.
+///
+/// A rig that resolves NOTHING is not an error: a rigid GLB with no clips
+/// at all is a legitimate piece, it simply does not animate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipRole {
+    Idle,
+    Move,
+    Fire,
+    Die,
+    Deploy,
+}
+
+impl ClipRole {
+    pub const ALL: [ClipRole; 5] = [Self::Idle, Self::Move, Self::Fire, Self::Die, Self::Deploy];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Move => "move",
+            Self::Fire => "fire",
+            Self::Die => "die",
+            Self::Deploy => "deploy",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "idle" => Self::Idle,
+            "move" | "walk" => Self::Move,
+            "fire" | "attack" => Self::Fire,
+            "die" | "death" => Self::Die,
+            "deploy" => Self::Deploy,
+            _ => return None,
+        })
+    }
+
+    /// Names to try for this role, best fit first.
+    pub fn names(self) -> &'static [&'static str] {
+        match self {
+            Self::Idle => GAIT_IDLE_CLIPS,
+            Self::Move => GAIT_MOVE_CLIPS,
+            Self::Fire => GAIT_FIRE_CLIPS,
+            Self::Die => GAIT_DIE_CLIPS,
+            Self::Deploy => GAIT_DEPLOY_CLIPS,
+        }
+    }
+
+    /// What to try when this role's own vocabulary misses. Standing still
+    /// is a truthful answer for a rig that cannot move, shoot or unfold;
+    /// standing still is NOT a truthful answer for a rig that cannot die,
+    /// so `Die` falls back to nothing and lets the host decide.
+    pub fn fallback(self) -> Option<ClipRole> {
+        match self {
+            Self::Idle | Self::Die => None,
+            Self::Move | Self::Fire | Self::Deploy => Some(Self::Idle),
+        }
+    }
+
+    /// Does this role repeat, or does it play once and hold?
+    pub fn loops(self) -> bool {
+        matches!(self, Self::Idle | Self::Move)
+    }
+}
+
 /// Texels one joint matrix occupies in the palette texture.
 pub const PALETTE_TEXELS_PER_JOINT: usize = 3;
 
@@ -3135,6 +3263,103 @@ fn nlerp(a: Quat, mut b: Quat, f: f32) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rig that owns nothing but a list of clip NAMES — which is all the
+    /// role vocabulary looks at.
+    fn clip_named_model(names: &[&str]) -> SkinnedModel {
+        SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
+            nodes: vec![Node { name: "mesh".into(), parent: None, rest: NodeTrs::default() }],
+            joint_nodes: Vec::new(),
+            inverse_bind: Vec::new(),
+            mesh_node: 0,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            clips: names
+                .iter()
+                .map(|name| AnimClip {
+                    name: (*name).to_string(),
+                    duration: 1.0,
+                    channels: Vec::new(),
+                })
+                .collect(),
+            skipped_unskinned: 0,
+            joint_bounds: Vec::new(),
+            ragdoll: None,
+        }
+    }
+
+    #[test]
+    fn the_move_vocabulary_is_the_walk_vocabulary_plus_the_vehicle_words() {
+        assert!(
+            GAIT_MOVE_CLIPS.ends_with(GAIT_WALK_CLIPS),
+            "move must never drift from walk: {GAIT_MOVE_CLIPS:?}"
+        );
+    }
+
+    #[test]
+    fn every_role_resolves_against_the_shared_vocabulary() {
+        // A vehicle rig, in a pack's own spelling and case.
+        let tank = clip_named_model(&["Idle", "Drive", "Shoot", "Destroy", "Unfold"]);
+        for (role, want) in [
+            (ClipRole::Idle, 0),
+            (ClipRole::Move, 1),
+            (ClipRole::Fire, 2),
+            (ClipRole::Die, 3),
+            (ClipRole::Deploy, 4),
+        ] {
+            assert_eq!(tank.role_clip(role), Some(want), "{}", role.as_str());
+        }
+        // A character rig from another pack, resolved by the SAME lists.
+        let hero = clip_named_model(&["Unarmed_Idle", "Walking_A", "1H_Melee_Attack_Chop"]);
+        assert_eq!(hero.role_clip(ClipRole::Idle), Some(0));
+        assert_eq!(hero.role_clip(ClipRole::Move), Some(1));
+        assert_eq!(hero.role_clip(ClipRole::Fire), Some(2));
+    }
+
+    #[test]
+    fn a_missing_role_falls_back_to_idle_but_death_never_does() {
+        let stiff = clip_named_model(&["idle"]);
+        assert_eq!(stiff.role_clip(ClipRole::Move), Some(0));
+        assert_eq!(stiff.role_clip(ClipRole::Fire), Some(0));
+        assert_eq!(stiff.role_clip(ClipRole::Deploy), Some(0));
+        // A corpse must not stand there playing its idle.
+        assert_eq!(stiff.role_clip(ClipRole::Die), None);
+    }
+
+    #[test]
+    fn a_rig_with_no_clips_answers_nothing_for_every_role() {
+        let rigid = clip_named_model(&[]);
+        for role in ClipRole::ALL {
+            assert_eq!(rigid.role_clip(role), None, "{}", role.as_str());
+        }
+    }
+
+    #[test]
+    fn an_authored_clip_name_outranks_the_vocabulary() {
+        let rig = clip_named_model(&["Idle", "Walk", "Attack_Special", "Attack"]);
+        // The vocabulary would take `Attack` (substring, best fit first).
+        assert_eq!(rig.role_clip(ClipRole::Fire), Some(2));
+        // The content's own name wins, exactly.
+        assert_eq!(rig.role_clip_authored(ClipRole::Fire, "Attack"), Some(3));
+        // And as a substring when no exact name matches.
+        assert_eq!(rig.role_clip_authored(ClipRole::Fire, "Special"), Some(2));
+        // A name this rig does not have falls back to the vocabulary.
+        assert_eq!(rig.role_clip_authored(ClipRole::Fire, "Nope"), Some(2));
+        // An empty authored name is the ordinary case.
+        assert_eq!(rig.role_clip_authored(ClipRole::Move, ""), Some(1));
+    }
+
+    #[test]
+    fn roles_name_themselves_and_say_whether_they_loop() {
+        for role in ClipRole::ALL {
+            assert_eq!(ClipRole::parse(role.as_str()), Some(role));
+        }
+        assert!(ClipRole::Idle.loops() && ClipRole::Move.loops());
+        assert!(!ClipRole::Fire.loops() && !ClipRole::Die.loops() && !ClipRole::Deploy.loops());
+        assert_eq!(ClipRole::parse("Walk"), Some(ClipRole::Move));
+        assert_eq!(ClipRole::parse("nonsense"), None);
+    }
 
     /// A two-bone rig whose bind pose IS its rest pose, drawn through a mesh
     /// node that carries its own unit scale (Kenney rigs do). `mesh_scale`
