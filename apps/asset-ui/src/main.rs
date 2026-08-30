@@ -13437,7 +13437,9 @@ impl MatchEvent for App {
                 FileDialogAction::FolderCancelled => {
                     self.music_import_page.picking = false;
                 }
-                FileDialogAction::None => {}
+                // This screen drives folder selection only; the platform's
+                // file and save panels answer elsewhere.
+                _ => {}
             }
             if self.surface == Surface::Import {
                 self.refresh_import_ui(cx);

@@ -1,6 +1,7 @@
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod opengl_cx;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
+pub mod file_dialog;
 pub mod wayland;
 #[cfg(not(any(linux_direct, target_env = "ohos", target_os = "android")))]
 pub mod windowing_backend;

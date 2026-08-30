@@ -23766,7 +23766,9 @@ impl MatchEvent for App {
                 FileDialogAction::FolderCancelled => {
                     self.import_picker = ImportPicker::None;
                 }
-                FileDialogAction::None => {}
+                // Import drives folder selection only; the platform's file
+                // and save panels answer elsewhere.
+                _ => {}
             }
         }
 
