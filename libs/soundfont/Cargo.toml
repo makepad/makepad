@@ -1,0 +1,11 @@
+[package]
+name = "makepad-soundfont"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Dependency-free SoundFont/SFZ loading and real-time-safe sample synthesis"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

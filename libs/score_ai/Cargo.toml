@@ -1,0 +1,11 @@
+[package]
+name = "makepad-score-ai"
+version = "0.1.0"
+edition = "2021"
+description = "Brokered AI score generation with musical validation and repair"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-asset-client = { path = "../asset/client" }
+makepad-score = { path = "../score" }
+makepad-musicxml = { path = "../musicxml" }
