@@ -72,6 +72,7 @@ impl VjModel {
             size: Some(self.bytes),
             sha256: Some(self.sha256.to_string()),
             local: false,
+            optional: false,
             converts_to: None,
             conversion: None,
         }

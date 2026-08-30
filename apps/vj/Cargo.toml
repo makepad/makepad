@@ -66,3 +66,8 @@ makepad-frametween = { path = "../../libs/frametween" }
 # re-encode. Shared with the enhance backend, which fills the same box from
 # RIFE — one format, one parser, two producers.
 makepad-video-flow = { path = "../../libs/video_flow" }
+# ARCHIVE.ORG panel: search + swatch download of internet-archive video
+# and stills; the panel imports a chosen file into the asset store.
+makepad-archive-org = { path = "../../libs/archive_org" }
+# The streaming swatch's MP4 index: per-sample byte ranges for range play.
+makepad-mp4-index = { path = "../../libs/mp4_index" }
