@@ -85,6 +85,20 @@ workspace.members = [
     "studio/desktop",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
+    # === headless music score engine ===
+    "libs/score",
+    "libs/score_layout",
+    "libs/score_play",
+    "libs/score_render",
+    "libs/score_ai",
+    "libs/score_import",
+    "libs/score_pdf",
+    "libs/score_ui",
+    "apps/score",
+    "libs/midi_file",
+    "libs/soundfont",
+    "libs/piano_model",
+    "libs/musicxml",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
@@ -103,6 +117,10 @@ workspace.members = [
     # chain, the RIFE producer behind the same warp, and the mode set
     # (extracted from the VJ, which is still its reference user) ===
     "libs/frametween",
+    # === archive.org search + download content input (VJ / asset-ui) ===
+    "libs/archive_org",
+    # === mp4 sample index for range-streaming playback ===
+    "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
@@ -119,6 +137,9 @@ workspace.exclude = [
     # still loads.
     "apps/sandbox",
     "apps/sandbox/tools/sandbox-eval",
+    # Private Source Library picture wall. Same shape as sandbox: clone into
+    # apps/source-library; path deps stay ../../.
+    "apps/source-library",
     "libs/terminal_core",
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/asset/ai",
