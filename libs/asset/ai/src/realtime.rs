@@ -528,6 +528,7 @@ pub fn apply_control_to_config(config: &mut LiveConfig, update: &realtime_wire::
     merge_feedback_fields(
         config,
         update.feedback,
+        update.anchor_follow,
         update.noise_mode.as_deref(),
         update.camera.as_ref(),
         update.drift.as_ref(),
@@ -1157,7 +1158,22 @@ pub fn run_live(
                     // Cold start: one full edit of the source, from noise.
                     config.strength = 1.0;
                 }
-                (init, Some(prepared.image.clone()))
+                // The anchor the edit conditions on. Pinned to the source it
+                // pins the trip with it: the model repaints the source's
+                // geometry every frame and the loop CONVERGES — measured on
+                // a wall of feeds, per-frame movement decays geometrically
+                // to ~1/255 whatever the prompt or the carry; those only
+                // set how far from the source the fixed point sits. With
+                // `anchor_follow` the anchor chases the trip, the restoring
+                // force weakens as the loop departs, and the melt keeps
+                // travelling instead of settling into a still.
+                let anchor = match last_output.as_ref().filter(|_| config.anchor_follow > 0.0) {
+                    Some(last) if last.width == prepared.image.width && last.height == prepared.image.height => {
+                        lerp_images(&prepared.image, last, config.anchor_follow)
+                    }
+                    _ => prepared.image.clone(),
+                };
+                (init, Some(anchor))
             }
         };
         match config.noise_mode.resolve(loop_mode) {
@@ -1449,6 +1465,32 @@ mod tests {
         apply_control_to_config(&mut config, &bad);
         assert_eq!(config.noise_mode, NoiseMode::Reroll);
         assert_eq!(config.drift.border, BorderMode::Source);
+    }
+
+    /// A pinned anchor pins the whole feed (the loop converges to a still),
+    /// so the follow knob must ride the control wire and clamp like the
+    /// other unit fields — and stay put when a message does not carry it.
+    #[test]
+    fn anchor_follow_rides_the_control_wire_and_clamps() {
+        let mut config = blank_config();
+        assert_eq!(config.anchor_follow, 0.0);
+        let update = ControlUpdateJson {
+            kind: "control".to_string(),
+            anchor_follow: Some(0.6),
+            ..Default::default()
+        };
+        apply_control_to_config(&mut config, &update);
+        assert_eq!(config.anchor_follow, 0.6);
+        let over = ControlUpdateJson {
+            kind: "control".to_string(),
+            anchor_follow: Some(1.7), // clamps to 1.0
+            ..Default::default()
+        };
+        apply_control_to_config(&mut config, &over);
+        assert_eq!(config.anchor_follow, 1.0);
+        let silent = ControlUpdateJson { kind: "control".to_string(), ..Default::default() };
+        apply_control_to_config(&mut config, &silent);
+        assert_eq!(config.anchor_follow, 1.0);
     }
 
     #[test]

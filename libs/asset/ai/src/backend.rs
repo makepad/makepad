@@ -786,6 +786,12 @@ pub struct LiveConfig {
     /// is a fresh edit of the source, 1 = pure self-feedback (the source
     /// only conditions as the reference/anchor, never re-enters the init).
     pub feedback: f32,
+    /// `loop_mode = "feedback"` only: how far the anchor (the edit's
+    /// conditioning image) follows the trip — `anchor = lerp(source,
+    /// previous_output, anchor_follow)`. 0 pins it to the source, which
+    /// pins the whole feed: the loop converges to a still whatever the
+    /// prompt or the carry.
+    pub anchor_follow: f32,
     pub noise_mode: NoiseMode,
     pub drift: DriftParams,
 }
@@ -805,6 +811,7 @@ impl Default for LiveConfig {
             references: Vec::new(),
             camera: CameraMotion::feedback_default(),
             feedback: 0.7,
+            anchor_follow: 0.0,
             noise_mode: NoiseMode::default(),
             drift: DriftParams::default(),
         }
@@ -837,12 +844,16 @@ fn clamp_unit(value: f64) -> Option<f32> {
 pub fn merge_feedback_fields(
     config: &mut LiveConfig,
     feedback: Option<f64>,
+    anchor_follow: Option<f64>,
     noise_mode: Option<&str>,
     camera: Option<&crate::realtime_wire::CameraUpdateJson>,
     drift: Option<&crate::realtime_wire::DriftUpdateJson>,
 ) {
     if let Some(value) = feedback.and_then(clamp_unit) {
         config.feedback = value;
+    }
+    if let Some(value) = anchor_follow.and_then(clamp_unit) {
+        config.anchor_follow = value;
     }
     if let Some(mode) = noise_mode.and_then(|text| NoiseMode::parse(text).ok()) {
         config.noise_mode = mode;
@@ -983,6 +994,7 @@ impl LiveParams {
             references: Vec::new(),
             camera: CameraMotion::feedback_default(),
             feedback: 0.7,
+            anchor_follow: 0.0,
             noise_mode: NoiseMode::Auto,
             drift: DriftParams::default(),
         };
@@ -996,6 +1008,7 @@ impl LiveParams {
         merge_feedback_fields(
             &mut config,
             request.feedback,
+            request.anchor_follow,
             request.noise_mode.as_deref(),
             request.camera.as_ref(),
             request.drift.as_ref(),

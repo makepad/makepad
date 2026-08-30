@@ -99,7 +99,7 @@ pub struct FleetRoles {
 /// The ratified fleet end state: `.217` (RTX 5090) is the dedicated chat
 /// box — chat and the prompt expander live there, every other generative
 /// domain lives on the other nodes.
-const DEFAULT_FLEET_ROLES: &str = "10.0.0.217=chat,text";
+const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text";
 
 /// Env var naming the roles; `off` disables the built-in list too.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
@@ -847,19 +847,21 @@ mod tests {
 
     #[test]
     fn the_default_role_list_keeps_the_chat_box_on_chat() {
-        // The ratified fleet end state, as data.
+        // The ratified fleet end state, as data: chat and text live on the
+        // Blackwell (82 GB free beside the live model) since the 5090 was
+        // turned over to the live-feed pool on the user's order.
         let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
-        assert!(roles.allows("http://10.0.0.217:8123", "chat"));
-        assert!(roles.allows("http://10.0.0.217:8123", "text"));
+        assert!(roles.allows("http://10.0.0.165:8123", "chat"));
+        assert!(roles.allows("http://10.0.0.165:8123", "text"));
         for domain in ["video", "image", "music", "mesh", "vision"] {
             assert!(
-                !roles.allows("http://10.0.0.217:8123", domain),
+                !roles.allows("http://10.0.0.165:8123", domain),
                 "the dedicated chat box must not serve {domain}"
             );
         }
         assert_eq!(
             roles.filter_domains(
-                "http://10.0.0.217:8123",
+                "http://10.0.0.165:8123",
                 &["chat".to_string(), "video".to_string(), "text".to_string()]
             ),
             vec!["chat".to_string(), "text".to_string()]
@@ -877,7 +879,7 @@ mod tests {
             return;
         }
         let chat_box = {
-            let mut snapshot = snap("http://10.0.0.217:8123", 32 * 1024, 32 * 1024);
+            let mut snapshot = snap("http://10.0.0.165:8123", 32 * 1024, 32 * 1024);
             snapshot.models = vec![
                 m("qwen3.8-27b", "chat", MODEL_STATE_LOADED, 24.0),
                 m("minimax-h3-q4-24g", "video", MODEL_STATE_READY, 20.0),

@@ -878,6 +878,7 @@ pub struct RealtimeRequestJson {
     /// (default in feedback) | "reroll". `camera` / `drift`: partial
     /// objects, every field optional.
     pub feedback: Option<f64>,
+    pub anchor_follow: Option<f64>,
     pub noise_mode: Option<String>,
     pub camera: Option<crate::realtime_wire::CameraUpdateJson>,
     pub drift: Option<crate::realtime_wire::DriftUpdateJson>,

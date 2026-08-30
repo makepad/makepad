@@ -175,6 +175,11 @@ pub struct ControlUpdateJson {
     pub idle_timeout_s: Option<u64>,
     /// Feedback loop: share of the warped previous output in the next init.
     pub feedback: Option<f64>,
+    /// Feedback loop: how far the anchor (the edit's conditioning image)
+    /// follows the trip — 0 pins it to the source, 1 lets it ride the
+    /// previous output entirely. See `realtime`'s loop for why a pinned
+    /// anchor makes the whole feed converge to a still.
+    pub anchor_follow: Option<f64>,
     /// "hold" | "reroll" | "auto".
     pub noise_mode: Option<String>,
     pub drift: Option<DriftUpdateJson>,
