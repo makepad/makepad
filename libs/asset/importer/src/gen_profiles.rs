@@ -34,6 +34,27 @@ struct Preset {
 
 const ONE: &[Preset] = &[Preset { suffix: "", label: "", defaults: &[] }];
 
+/// The `fast` video backend (FastH3, the DMD2-distilled MiniMax H3): the
+/// same three canvases, but `steps` counts DiT forwards and 4 is the
+/// trained schedule — an H3 tier's 30/50 would be the wrong unit here.
+const VIDEO_FAST: &[Preset] = &[
+    Preset {
+        suffix: "standard",
+        label: "640×352 · ~2.7s · 4-step",
+        defaults: &[("width", 640), ("height", 352), ("frames", 65), ("steps", 4)],
+    },
+    Preset {
+        suffix: "long",
+        label: "640×352 · ~5.4s · 4-step",
+        defaults: &[("width", 640), ("height", 352), ("frames", 129), ("steps", 4)],
+    },
+    Preset {
+        suffix: "wide",
+        label: "960×544 · ~2.7s · 4-step",
+        defaults: &[("width", 960), ("height", 544), ("frames", 65), ("steps", 4)],
+    },
+];
+
 /// Video is the one domain whose cost varies enough that a picker needs
 /// tiers. These mirror the server's stock advertisement so the VJ's queue
 /// estimates keep meaning the same thing.
@@ -55,9 +76,10 @@ const VIDEO: &[Preset] = &[
     },
 ];
 
-fn presets_for(domain: &str) -> &'static [Preset] {
-    match domain {
-        "video" => VIDEO,
+fn presets_for(domain: &str, backend: &str) -> &'static [Preset] {
+    match (domain, backend) {
+        ("video", "fast") => VIDEO_FAST,
+        ("video", _) => VIDEO,
         _ => ONE,
     }
 }
@@ -133,8 +155,8 @@ pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto>
         if !row.advertised {
             continue;
         }
-        for model in executable_models(snapshots, row) {
-            for preset in presets_for(row.domain) {
+        for (model, backend) in executable_models(snapshots, row) {
+            for preset in presets_for(row.domain, &backend) {
                 if let Some(profile) = profile_of(row, &model, preset, ns) {
                     if !out.iter().any(|p| p.id == profile.id) {
                         out.push(profile);
@@ -149,8 +171,11 @@ pub fn build_profiles(snapshots: &[BoxSnapshot], ns: &str) -> Vec<JobProfileDto>
 /// Model ids of `row`'s domain that some live box can execute now, in
 /// stable (box order, service order) order so the advertisement does not
 /// churn between polls.
-fn executable_models(snapshots: &[BoxSnapshot], row: &GenKind) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// `(model id, backend)` of every model the fleet can run for `row`, the
+/// domain's PREFERRED backend first (the fleet scheduler routes unpinned
+/// jobs there, so its profiles lead the picker too), then fleet order.
+fn executable_models(snapshots: &[BoxSnapshot], row: &GenKind) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     for snapshot in snapshots {
         // A box outside its role does not serve this domain, so its copy of
         // the weights is not a capability the fleet can offer.
@@ -163,15 +188,20 @@ fn executable_models(snapshots: &[BoxSnapshot], row: &GenKind) -> Vec<String> {
             if model.domain != row.domain
                 || !is_advertisable(model)
                 || !is_executable_now(model)
-                || out.iter().any(|id| id == &model.id)
+                || out.iter().any(|(id, _)| id == &model.id)
                 || !hardware_fits(snapshots, &model.id)
             {
                 continue;
             }
-            out.push(model.id.clone());
+            out.push((model.id.clone(), model.backend.clone()));
         }
     }
-    out
+    // Stable: preferred backends float to the front, everything else keeps
+    // its discovery order.
+    let (preferred, rest): (Vec<_>, Vec<_>) = out
+        .into_iter()
+        .partition(|(_, backend)| makepad_asset_ai::fleet::is_preferred_domain_backend(row.domain, backend));
+    preferred.into_iter().chain(rest).collect()
 }
 
 fn profile_of(
@@ -262,6 +292,7 @@ mod tests {
                 queue_limit: Some(8),
                 fleet: None,
                 lanes: None,
+                realtime: None,
             }),
             models,
         }
@@ -315,6 +346,42 @@ mod tests {
             Some(129)
         );
         assert!(profiles.iter().all(|p| p.kind == "video.generate"));
+    }
+
+    /// The fast lane leads the video picker with its own step unit: the
+    /// distilled model's presets carry `steps: 4` (DiT forwards), the H3
+    /// tier keeps 30/50, and the fast profiles come first even when the
+    /// fleet lists the H3 tier before it.
+    #[test]
+    fn the_fast_video_lane_leads_the_picker_with_four_step_presets() {
+        let mut fast = model("fasth3-4step", "video", MODEL_STATE_READY, 74.0);
+        fast.backend = "fast".to_string();
+        let mut h3 = model("minimax-h3-bf16-96g", "video", MODEL_STATE_LOADED, 74.0);
+        h3.backend = "h3".to_string();
+        let snapshots = vec![snapshot("http://big", 96 * 1024, vec![h3, fast])];
+        let profiles = build_profiles(&snapshots, "gen");
+        let ids: Vec<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "video-fasth3-4step-standard",
+                "video-fasth3-4step-long",
+                "video-fasth3-4step-wide",
+                "video-minimax-h3-bf16-96g-standard",
+                "video-minimax-h3-bf16-96g-long",
+                "video-minimax-h3-bf16-96g-wide",
+            ]
+        );
+        for profile in &profiles[..3] {
+            assert_eq!(profile.defaults.get("steps").and_then(Value::as_u64), Some(4));
+            assert_eq!(
+                profile.defaults.get("model").and_then(Value::as_str),
+                Some("fasth3-4step")
+            );
+        }
+        assert_eq!(profiles[3].defaults.get("steps").and_then(Value::as_u64), Some(30));
+        assert_eq!(profiles[4].defaults.get("steps").and_then(Value::as_u64), Some(50));
+        assert!(profiles[0].label.ends_with("4-step"));
     }
 
     #[test]

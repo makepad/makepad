@@ -270,15 +270,19 @@ pub enum ScriptedTurn {
     Consult { task: String, prompt: String, provider: String, visible: String },
 }
 
-/// The stock advertisement for the current fleet: MiniMax H3 text-to-video
-/// under job kind `video.generate` in the `gen` namespace. Deployments with
-/// a different fleet replace this list at embed time.
+/// The stock advertisement for the current fleet: text-to-video under job
+/// kind `video.generate` in the `gen` namespace. The `fast-*` profiles come
+/// FIRST — FastH3 (`fasth3-4step`, the DMD2-distilled MiniMax H3, four DiT
+/// forwards) is the fleet's default video path; the `h3-*` profiles keep
+/// the 30/50-step base model reachable by explicit choice. Deployments
+/// with a different fleet replace this list at embed time.
 fn default_job_profiles() -> Vec<JobProfile> {
     use super::json::{obj, s};
     // `model` is the fleet registry's model id (the worker resolves it on
     // the box that actually advertises it); frames/steps pairs mirror the
-    // ai-content UI presets so queue times stay honest.
-    let h3 = |id: &str, label: &str, width: i64, height: i64, frames: i64, steps: i64| {
+    // ai-content UI presets so queue times stay honest. For `fasth3-4step`
+    // `steps` counts DiT forwards and 4 is the trained schedule.
+    let video = |id: &str, model: &str, label: &str, width: i64, height: i64, frames: i64, steps: i64| {
         JobProfile {
             id: id.to_string(),
             domain: "video".to_string(),
@@ -286,7 +290,7 @@ fn default_job_profiles() -> Vec<JobProfile> {
             kind: "video.generate".to_string(),
             namespace: "gen".to_string(),
             defaults: obj(vec![
-                ("model", s("minimax-h3")),
+                ("model", s(model)),
                 ("width", Value::Int(width)),
                 ("height", Value::Int(height)),
                 ("frames", Value::Int(frames)),
@@ -294,7 +298,16 @@ fn default_job_profiles() -> Vec<JobProfile> {
             ]),
         }
     };
+    let fast = |id: &str, label: &str, width: i64, height: i64, frames: i64| {
+        video(id, "fasth3-4step", label, width, height, frames, 4)
+    };
+    let h3 = |id: &str, label: &str, width: i64, height: i64, frames: i64, steps: i64| {
+        video(id, "minimax-h3", label, width, height, frames, steps)
+    };
     vec![
+        fast("fast-standard", "FastH3 · 640×352 · ~2.7s · 4-step", 640, 352, 65),
+        fast("fast-long", "FastH3 · 640×352 · ~5.4s · 4-step", 640, 352, 129),
+        fast("fast-wide", "FastH3 · 960×544 · ~2.7s · 4-step", 960, 544, 65),
         h3("h3-standard", "MiniMax H3 · 640×352 · ~2.7s", 640, 352, 65, 30),
         h3("h3-long", "MiniMax H3 · 640×352 · ~5.4s", 640, 352, 129, 50),
         h3("h3-wide", "MiniMax H3 · 960×544 · ~2.7s", 960, 544, 65, 30),
