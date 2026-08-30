@@ -14,6 +14,8 @@
 //! them from a shell or an app runs them on a worker thread; [`progress`]
 //! is how the latter gets the lines the former prints to stdout.
 
+#[cfg(feature = "faces")]
+pub mod faces;
 pub mod nav_build;
 pub mod native;
 pub mod progress;

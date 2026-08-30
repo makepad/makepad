@@ -16,11 +16,11 @@
 //! 3. **base** — [`crate::native::convert_base`] writes the one archive the
 //!    app draws from: styled z0..=14 plus all-tag detail at z14.
 //! 4. **nav** — [`crate::nav_build`] writes `.graph` and `.search`.
-//!
-//! The faces bake that follows in production is a rendering optimisation on
-//! top of a finished archive, needs the renderer itself, and so lives with
-//! the renderer (`makepad_widgets::map::face_bake`); a host that wants it
-//! runs it after [`bake`] returns.
+//! 5. **faces** — `crate::faces` replays the painter cascade and bakes the
+//!    road-union faces into the archive, which is what makes a tilted city
+//!    view cheap to draw. Needs the renderer, so it is behind the `faces`
+//!    feature; without it the recipe stops after nav and the renderer falls
+//!    back to unioning at runtime.
 
 use crate::native;
 use crate::progress::Report;
@@ -101,15 +101,20 @@ impl TestMapPaths {
 }
 
 /// The stages, in order, for a host that wants to draw them all up front.
-pub const STAGES: [&str; 4] = ["fetch", "detail", "base", "nav"];
+pub const STAGES: [&str; 5] = ["fetch", "detail", "base", "nav", "faces"];
 
 /// How far through the whole bake each stage's completion is, by the clock
 /// rather than by step count — the fetch dominates on a slow line and the
-/// base pass dominates on a fast one, and a bar that jumps 25% per stage
-/// reads as broken. Measured on an M-series laptop: fetch ~60s, detail ~6s,
-/// base ~51s, nav ~6s.
-const STAGE_SPAN: [(f32, f32); 4] =
-    [(0.00, 0.48), (0.48, 0.53), (0.53, 0.94), (0.94, 1.00)];
+/// bake passes dominate on a fast one, and a bar that jumps a fifth per
+/// stage reads as broken. Measured on an M-series laptop, Amsterdam:
+/// fetch ~60s, detail ~6s, base ~51s, nav ~6s, faces ~67s.
+const STAGE_SPAN: [(f32, f32); 5] = [
+    (0.00, 0.31),
+    (0.31, 0.34),
+    (0.34, 0.61),
+    (0.61, 0.64),
+    (0.64, 1.00),
+];
 
 /// Maps a within-stage fraction onto the whole-bake bar.
 pub fn overall_fraction(stage: &str, stage_fraction: f32) -> f32 {
@@ -134,6 +139,11 @@ pub struct BakeOptions {
     /// Keep the scratch store after a successful bake (it is ~1 GiB, and
     /// only useful for re-running the base pass without re-reading the PBF).
     pub keep_store: bool,
+    /// Bake the painter-cascade faces into the finished archive. Costs
+    /// about as long again as the rest of the bake and grows the archive by
+    /// roughly two thirds, and is what makes the tilted view draw cheaply.
+    /// Ignored without the `faces` feature.
+    pub faces: bool,
 }
 
 impl BakeOptions {
@@ -144,6 +154,7 @@ impl BakeOptions {
             zoom: 14,
             brotli_quality: 11,
             keep_store: false,
+            faces: true,
         }
     }
 }
@@ -196,6 +207,7 @@ pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> 
     detail_stage(options)?;
     base_stage(options)?;
     nav_stage(options)?;
+    faces_stage(options)?;
 
     if !options.keep_store && paths.store.exists() {
         // Only now, with every artifact written and verified present: the
@@ -314,6 +326,48 @@ fn nav_stage(options: &BakeOptions) -> Result<(), String> {
         searchdb: false,
         major_roads_only: false,
     })
+}
+
+/// Bake the face stream into the finished archive, in place: the app opens
+/// one archive path, so the baked copy replaces the plain one rather than
+/// sitting beside it as a second 200 MB file. Written under a partial name
+/// and renamed, so a machine that loses power mid-bake still has the
+/// working archive it had before.
+#[cfg(feature = "faces")]
+fn faces_stage(options: &BakeOptions) -> Result<(), String> {
+    let archive = &options.paths.archive;
+    if !options.faces {
+        return Ok(());
+    }
+    if crate::faces::archive_has_faces(archive) {
+        crate::step!("faces", "archive already carries baked faces");
+        return Ok(());
+    }
+    crate::step!(
+        "faces",
+        "Baking road faces into the tiles (what makes the tilted view cheap)"
+    );
+    let partial = archive.with_extension("faces.partial.mbtiles");
+    let _ = fs::remove_file(&partial);
+    let face_options =
+        crate::faces::default_face_bake_options(archive.clone(), partial.clone());
+    let stats = crate::faces::bake_faces(&face_options)?;
+    if stats.total == 0 {
+        let _ = fs::remove_file(&partial);
+        return Err("face bake produced an empty archive".to_string());
+    }
+    fs::rename(&partial, archive).map_err(|e| format!("rename {}: {e}", partial.display()))
+}
+
+#[cfg(not(feature = "faces"))]
+fn faces_stage(options: &BakeOptions) -> Result<(), String> {
+    if options.faces {
+        crate::note!(
+            "faces",
+            "  faces not baked: this build has no renderer (feature `faces` off)"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

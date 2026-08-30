@@ -128,9 +128,9 @@ impl TestMapBuild {
         self.stage = Stage::Offered;
         self.headline = "No map data on this machine".to_string();
         self.log = vec![
-            "Building an Amsterdam test map: ~143 MB download, then about a".to_string(),
-            "minute of baking. Tiles, a routing graph and a search index".to_string(),
-            "land under local/maps.".to_string(),
+            "Building an Amsterdam test map: ~143 MB download, then a couple".to_string(),
+            "of minutes of baking. Tiles with baked road faces, a routing".to_string(),
+            "graph and a search index land under local/maps.".to_string(),
         ];
     }
 
@@ -296,7 +296,15 @@ impl TestMapBuild {
         std::thread::spawn(move || {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
-            let result = testmap::bake(&options, &mut NoFetch);
+            //
+            // Caught, not propagated: the face pass reports a corrupt tile
+            // by panicking inside its worker pool, and an uncaught panic
+            // here would take this thread out with the channel still open —
+            // a popup frozen at 63% forever. A failed bake must SAY so.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                testmap::bake(&options, &mut NoFetch)
+            }))
+            .unwrap_or_else(|_| Err("bake panicked — see the log".to_string()));
             let _ = done.send(match result {
                 Ok(()) => BakeMsg::Done,
                 Err(error) => BakeMsg::Failed(error),
