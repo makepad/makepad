@@ -14819,6 +14819,16 @@ p2 {}
                                     if !self.track_tags.contains_key(&cache_key) {
                                         let tags = track_tags::read_for_path(&path)
                                             .unwrap_or_default();
+                                        // Written beside the analysis: this
+                                        // is the only moment the bytes are
+                                        // here, and the next session will
+                                        // find the analysis cached and never
+                                        // fetch the record again.
+                                        track_tags::save_sidecar(
+                                            &wave_analysis::cache_dir(),
+                                            cache_key.as_str(),
+                                            &tags,
+                                        );
                                         self.track_tags.insert(cache_key, tags);
                                         self.music_rows_dirty = true;
                                     }
@@ -22027,6 +22037,9 @@ p2 {}
             }
             self.ui.button(cx, *chip).set_text(cx, if narrow { "" } else { label });
             let mut button = self.ui.button(cx, *chip);
+            // Width only. The centring lives on `MusicChipButton` itself —
+            // an alignment set from here never applied, because the type is
+            // not in scope inside an applied fragment.
             if narrow {
                 script_apply_eval!(cx, button, {
                     width: 22
@@ -22411,6 +22424,13 @@ p2 {}
         if let Some(hit) = self.track_tags.get(&cache_key) {
             return hit.clone();
         }
+        // Written down the one time this track's bytes were here.
+        if let Some(tags) =
+            track_tags::load_sidecar(&wave_analysis::cache_dir(), cache_key.as_str())
+        {
+            self.track_tags.insert(cache_key, tags.clone());
+            return tags;
+        }
         // A file on this machine is read here and now — it is one bounded
         // read of the head, and the answer is remembered.
         let path = match key {
@@ -22425,6 +22445,7 @@ p2 {}
             return TrackTags::default();
         };
         let tags = track_tags::read_for_path(&path).unwrap_or_default();
+        track_tags::save_sidecar(&wave_analysis::cache_dir(), cache_key.as_str(), &tags);
         self.track_tags.insert(cache_key, tags.clone());
         tags
     }

@@ -124,6 +124,79 @@ impl TrackTags {
             && self.year.is_empty()
             && self.bitrate_kbps.is_none()
     }
+
+    /// `key value` per line, one line per field, values on one line each.
+    ///
+    /// Tags are read from the file itself, which for a store track means the
+    /// one moment its bytes are on this machine. That moment does not come
+    /// again — the second session finds the analysis cached and never
+    /// fetches the record — so what was read has to be written down or the
+    /// column goes blank on the next launch.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for (key, value) in [
+            ("title", &self.title),
+            ("artist", &self.artist),
+            ("album", &self.album),
+            ("genre", &self.genre),
+            ("year", &self.year),
+        ] {
+            // A newline inside a tag would forge a second field; the reader
+            // is line-based and the writer has to keep it that way.
+            let value = value.replace(['\n', '\r'], " ");
+            if !value.trim().is_empty() {
+                out.push_str(&format!("{key} {}\n", value.trim()));
+            }
+        }
+        if let Some(kbps) = self.bitrate_kbps {
+            out.push_str(&format!("bitrate {kbps}\n"));
+        }
+        out
+    }
+
+    pub fn from_text(text: &str) -> TrackTags {
+        let mut out = TrackTags::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let value = value.trim().to_string();
+            match key {
+                "title" => out.title = value,
+                "artist" => out.artist = value,
+                "album" => out.album = value,
+                "genre" => out.genre = value,
+                "year" => out.year = value,
+                "bitrate" => out.bitrate_kbps = value.parse().ok(),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Where one track's tags are kept, beside its analysis sidecar and keyed the
+/// same way, so clearing the cache clears both.
+pub fn sidecar_path(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    dir.join(format!("{key}.tags"))
+}
+
+pub fn save_sidecar(dir: &std::path::Path, key: &str, tags: &TrackTags) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = sidecar_path(dir, key);
+    let temporary = path.with_extension("tags.tmp");
+    if std::fs::write(&temporary, tags.to_text()).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
+    }
+}
+
+/// An empty file is a real answer — "this record carries no tags" — and is
+/// worth keeping, so a missing FILE is the only `None`.
+pub fn load_sidecar(dir: &std::path::Path, key: &str) -> Option<TrackTags> {
+    let body = std::fs::read_to_string(sidecar_path(dir, key)).ok()?;
+    Some(TrackTags::from_text(&body))
 }
 
 /// Read one file's metadata.
@@ -913,6 +986,51 @@ mod tests {
             let _ = declared_head_len(&damaged);
             assert!(tags.bitrate_kbps.is_none_or(|kbps| (8..=320).contains(&kbps)));
         }
+    }
+
+    #[test]
+    fn a_sidecar_carries_the_tags_to_the_next_session() {
+        let dir = std::env::temp_dir()
+            .join(format!("makepad-vj-tags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tags = TrackTags {
+            title: "Bike".into(),
+            artist: "A Band".into(),
+            album: "An Album".into(),
+            genre: "Southern Rock".into(),
+            year: "1998".into(),
+            bitrate_kbps: Some(320),
+        };
+        assert!(load_sidecar(&dir, "abc").is_none(), "nothing written yet");
+        save_sidecar(&dir, "abc", &tags);
+        assert_eq!(load_sidecar(&dir, "abc"), Some(tags));
+        // A record that genuinely carries no tags is an ANSWER, and writing
+        // it down is what stops the next session opening the file again.
+        save_sidecar(&dir, "bare", &TrackTags::default());
+        assert_eq!(load_sidecar(&dir, "bare"), Some(TrackTags::default()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_with_a_newline_in_it_cannot_forge_a_second_field() {
+        // The format is line-based, so an artist containing a newline would
+        // otherwise write a line the reader takes as another field.
+        let tags = TrackTags {
+            artist: "A Band\nalbum Forged".into(),
+            ..TrackTags::default()
+        };
+        let back = TrackTags::from_text(&tags.to_text());
+        assert_eq!(back.album, "", "a newline must not become another field");
+        assert_eq!(back.artist, "A Band album Forged");
+    }
+
+    #[test]
+    fn a_mangled_sidecar_line_costs_one_field_and_not_the_rest() {
+        let back = TrackTags::from_text("artist A Band\nnonsense\nbitrate huh\nyear 1998\n");
+        assert_eq!(back.artist, "A Band");
+        assert_eq!(back.year, "1998");
+        assert_eq!(back.bitrate_kbps, None);
+        assert_eq!(TrackTags::from_text(""), TrackTags::default());
     }
 
     #[test]

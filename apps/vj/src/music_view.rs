@@ -1378,6 +1378,16 @@ script_mod! {
         height: 22
         padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
         spacing: 5.0
+        // Centred HERE rather than at the moment a chip loses its word.
+        //
+        // A narrow console collapses these to a fixed round key with only
+        // the icon in it, and a left-aligned icon in a fixed box sits off to
+        // one side with dead width beside it. Setting the alignment from
+        // Rust does not work — the alignment type is not in scope inside an
+        // applied fragment, so it silently failed and the glyph stayed put.
+        // With the word in place the button is Fit-width, so centring the
+        // content changes nothing there.
+        align: Align{x: 0.5, y: 0.5}
         icon_walk: Walk{width: 10 height: Fit}
         draw_bg +: {
             color: #x272e38
