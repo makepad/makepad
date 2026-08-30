@@ -882,6 +882,22 @@ script_mod! {
         //
         // The bold face is the widest a cell ever needs (BPM wears it); a
         // lighter column overrides the text style along with its colour.
+        //
+        // They live inside a FILL box of their own, so the two chips after
+        // it are fixed-size siblings of that box rather than of the cells.
+        // A Fill column with a minimum — the title has one — takes more than
+        // its share when the row is narrow, and what it took came out of
+        // whatever was laid out last: on a narrow set list the headphone and
+        // remove chips were pushed off the end of their own row. The box
+        // clips instead, so the columns lose their tail and the chips keep
+        // their place.
+        row_cells := View{
+        width: Fill
+        height: Fill
+        flow: Right
+        spacing: 6
+        clip_x: true
+        align: Align{x: 0.0, y: 0.5}
         row_col0 := TrackText{width: 0}
         row_col1 := TrackText{width: 0}
         row_col2 := TrackText{width: 0}
@@ -894,6 +910,7 @@ script_mod! {
         row_col9 := TrackText{width: 0}
         row_col10 := TrackText{width: 0}
         row_col11 := TrackText{width: 0}
+        }
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
         // ButtonIcon, not Button: an icon-only button carries no label and
@@ -2939,9 +2956,16 @@ script_mod! {
                             deck_target := DropDown{labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]}
                             // Latched, the deck a picked track lands on starts as
                             // soon as its decode finishes — "select and it plays".
+                            // An EJECT turned a quarter turn: the bar leads,
+                            // the triangle follows. A plain play triangle
+                            // here reads as "play", which is a different
+                            // button on every deck in the room — and it has
+                            // to survive losing its word, because this chip
+                            // collapses to its icon on a narrow console like
+                            // the rest of the row.
                             music_autoplay := MusicChipButton{
                                 text: "AUTOPLAY"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/autoplay.svg") }
                             }
                         }
                         // The music import's whole face, on a line of its own.
@@ -3015,6 +3039,16 @@ script_mod! {
                             padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 26 text: ""}
+                            // The same FILL box the rows put their cells in,
+                            // so the heads narrow exactly as the cells under
+                            // them do. See `row_cells`.
+                            th_cells := View{
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 6
+                            clip_x: true
+                            align: Align{x: 0.0, y: 0.5}
                             th_cell0 := View{width: 0 height: Fit th_head0 := MusicColHead{width: Fill text: ""}}
                             th_cell1 := View{width: 0 height: Fit th_head1 := MusicColHead{width: Fill text: ""}}
                             th_cell2 := View{width: 0 height: Fit th_head2 := MusicColHead{width: Fill text: ""}}
@@ -3027,7 +3061,11 @@ script_mod! {
                             th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
                             th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
                             th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
-                            MusicLabel{width: 26 text: ""}
+                            }
+                            // Stands in for the row's headphone + queue
+                            // chips, so a head sits over its own column
+                            // rather than 24 points to the right of it.
+                            MusicLabel{width: 50 text: ""}
                         }
                         music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                     }
@@ -6215,9 +6253,17 @@ pub fn column_size(column: Column, narrow: bool) -> Size {
         ColumnWidth::Fixed(width) => Size::Fixed(width),
         // The title carries the weight so it takes the slack a row has left
         // after every fixed column has been paid.
+        //
+        // Its MINIMUM is dropped on a narrow list, and that is the whole
+        // reason the set list can carry a tempo and a key at all. A floor of
+        // 180 points is right for a listing, where the title is what the eye
+        // reads; in a 330-point set list it is more than the whole row has
+        // to give, and every column after it was clipped away to pay for it.
+        // A truncated title beside a tempo is worth more there than a whole
+        // title beside nothing.
         ColumnWidth::Fill { min, max } => Size::Fill {
             weight: if matches!(column, Column::Title) { 400.0 } else { 100.0 },
-            min,
+            min: min.filter(|_| !narrow),
             max,
         },
     }
@@ -6700,6 +6746,30 @@ mod tests {
             panic!("title and tags are both Fill columns");
         };
         assert!(title > tags, "the title must outweigh the columns beside it");
+    }
+
+    #[test]
+    fn a_narrow_list_lets_the_title_shrink_so_the_columns_after_it_survive() {
+        // The set list is ~330 points wide. A 180-point floor under the
+        // title is more than that row has to give once the badge and the two
+        // chips are paid, and everything after the title was clipped away —
+        // which is exactly the tempo and key the set list exists to show.
+        let Size::Fill { min: wide, .. } = column_size(Column::Title, false) else {
+            panic!("the title is a Fill column");
+        };
+        let Size::Fill { min: narrow, .. } = column_size(Column::Title, true) else {
+            panic!("the title is a Fill column");
+        };
+        assert_eq!(wide, Some(180.0), "a listing keeps its floor");
+        assert_eq!(narrow, None, "a narrow list gives it up");
+        // The fixed columns are unmoved: they are what the floor was
+        // crowding out, so shrinking them too would defeat the exercise.
+        let fixed = |size: Size| match size {
+            Size::Fixed(points) => points,
+            other => panic!("expected a fixed width, got {other:?}"),
+        };
+        assert_eq!(fixed(column_size(Column::Bpm, true)), 54.0);
+        assert_eq!(fixed(column_size(Column::Key, true)), 40.0);
     }
 
     #[test]
