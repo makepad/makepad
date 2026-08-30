@@ -375,6 +375,11 @@ pub struct GenerateRequestJson {
     //    image->world; also STT/captioning later) --
     /// Base64 input payload, typically a PNG from an earlier pipeline stage
     /// (fetched from another box's /artifact and relayed by the client).
+    /// Music (`minimax-music3*`): an optional REFERENCE CLIP — any audio
+    /// file the service decodes (WAV, MP3, FLAC, Ogg Vorbis; sniffed from
+    /// the bytes), <= 50 MB, 2..60 s after decode (longer keeps its loudest
+    /// 60 s). The song follows the clip's semantic content on every Nth
+    /// frame (see `strength`); empty = text-only generation.
     pub input_b64: Option<String>,
     /// Content type of `input_b64`, e.g. "image/png". Default "image/png".
     pub input_content_type: Option<String>,
@@ -397,6 +402,10 @@ pub struct GenerateRequestJson {
     /// tokens and generate fully; plain image models ignore the input).
     /// Extra edit references ride in `inputs` as `reference_1..N`
     /// (`image/png`) next to the primary `input_b64` reference.
+    /// Music (`minimax-music3*`): how tightly a reference clip steers the
+    /// song — 1.0 constrains every frame's semantic draw to the clip, 0.0
+    /// every tenth frame; `None` = every fifth (the encoder's tested
+    /// default). Ignored without `input_b64`.
     pub strength: Option<f32>,
 
     // -- video domain (h3 backend) --

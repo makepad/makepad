@@ -2049,7 +2049,7 @@
     "restriction": "community"
    },
    "vram_gb": 29.0,
-   "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served reference-tier through the official diffusers ModularPipeline (music3_worker.py subprocess; diffusers pinned to PR #14456 commit dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d per the model card). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth, dav.pth) are deliberately excluded. vram_gb is full bf16 residency; MAKEPAD_MUSIC3_OFFLOAD=1 fits ~22 GB via auto CPU offload. License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
+   "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served reference-tier through the official diffusers ModularPipeline (music3_worker.py subprocess; diffusers pinned to PR #14456 commit dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d per the model card). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth) are deliberately excluded. OPTIONAL reference-audio roles (music3.md): dav.pth (the official DAV encoder half) + the SimpleTuner open-rvq-encoder v4 (169M, distilled from Music3 output; MiniMax-Music3 license terms) let a 2-60 s clip on input_b64 steer the song's semantic codes every Nth frame (`strength`); text-only jobs never touch them and a box without them refuses reference jobs by name. vram_gb is full bf16 residency; MAKEPAD_MUSIC3_OFFLOAD=1 fits ~22 GB via auto CPU offload. License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-Music3",
@@ -2242,6 +2242,36 @@
      "cache_as": "music/MiniMax-Music3/vocoder/diffusion_pytorch_model.safetensors",
      "size": 216695272,
      "sha256": "daf0bf0560ea978ce7b5ec3e82f420a44429efef18bdfbe3c714d55ceffbe934"
+    },
+    {
+     "role": "dav-pth",
+     "optional": true,
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "dav.pth",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/dav.pth",
+     "size": 491817450,
+     "sha256": "52adde6c6c52cca872f549449cd7b608677d1e69f4a98eee22da3403e63b56e8"
+    },
+    {
+     "role": "rvq-encoder",
+     "optional": true,
+     "repo": "SimpleTuner/open-rvq-encoder-minimax-music3",
+     "path": "encoders/minimax_music3_rvq_encoder_v4_169m_autoregressive_depth_recommended.safetensors",
+     "revision": "326964c2f4edcc642c1ea116274dd2dd94081713",
+     "cache_as": "music/MiniMax-Music3/encoders/minimax_music3_rvq_encoder_v4_169m_autoregressive_depth_recommended.safetensors",
+     "size": 676055232,
+     "sha256": "e8fa93a7db2e5a090442d9492ea3f9f07664ce5bdb2ea7890559a4408f049744"
+    },
+    {
+     "role": "rvq-encoder-config",
+     "optional": true,
+     "repo": "SimpleTuner/open-rvq-encoder-minimax-music3",
+     "path": "encoders/minimax_music3_rvq_encoder_v4_169m_autoregressive_depth_recommended.json",
+     "revision": "326964c2f4edcc642c1ea116274dd2dd94081713",
+     "cache_as": "music/MiniMax-Music3/encoders/minimax_music3_rvq_encoder_v4_169m_autoregressive_depth_recommended.json",
+     "size": 595,
+     "sha256": "7b5debc72cf3d7a00c95a15429351c6be5e8e700e262becd84b606f8bd75df94"
     }
    ]
   },

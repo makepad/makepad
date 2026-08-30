@@ -72,10 +72,40 @@ pub fn encode_wav_pcm16_stereo(left: &[f32], right: &[f32], sample_rate: u32) ->
 }
 
 /// Decodes a PCM RIFF/WAV file to mono f32 samples + sample rate. Accepts
-/// 16-bit / 24-bit / 32-bit integer PCM and 32-bit float, mono or stereo
-/// (stereo is averaged to mono). Compressed formats error. Used for
-/// reference-voice input (indextts voice cloning).
+/// 16-bit / 24-bit / 32-bit integer PCM and 32-bit float, any channel
+/// count (channels are averaged to mono). Compressed formats error. Used
+/// for reference-voice input (indextts voice cloning).
 pub fn decode_wav_to_mono_f32(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
+    let (channels, rate) = decode_wav_channels(bytes)?;
+    let frames = channels[0].len();
+    let scale = 1.0 / channels.len() as f32;
+    let mut out = vec![0f32; frames];
+    for channel in &channels {
+        for (acc, value) in out.iter_mut().zip(channel) {
+            *acc += value * scale;
+        }
+    }
+    Ok((out, rate))
+}
+
+/// Decodes a PCM RIFF/WAV file to planar stereo `(left, right)` + sample
+/// rate: mono is duplicated, extra channels beyond the first two are
+/// dropped. Used for Music3 reference clips.
+pub fn decode_wav_to_stereo_f32(bytes: &[u8]) -> Result<(Vec<f32>, Vec<f32>, u32), String> {
+    let (mut channels, rate) = decode_wav_channels(bytes)?;
+    let left = channels.swap_remove(0);
+    let right = if channels.is_empty() {
+        left.clone()
+    } else {
+        channels.swap_remove(0)
+    };
+    Ok((left, right, rate))
+}
+
+/// Decodes a PCM RIFF/WAV file to one f32 vector per channel + sample rate.
+/// Same format support as [`decode_wav_to_mono_f32`]; at least one channel
+/// with at least one frame, else an error.
+pub fn decode_wav_channels(bytes: &[u8]) -> Result<(Vec<Vec<f32>>, u32), String> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".to_string());
     }
@@ -107,7 +137,7 @@ pub fn decode_wav_to_mono_f32(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
     }
     let (tag, channels, rate, bits) = format.ok_or("missing fmt chunk")?;
     let data = data.ok_or("missing data chunk")?;
-    if channels == 0 || channels > 2 {
+    if channels == 0 || channels > 64 {
         return Err(format!("unsupported channel count {channels}"));
     }
     // WAVE_FORMAT_EXTENSIBLE (0xFFFE) carries the real format in the
@@ -118,9 +148,10 @@ pub fn decode_wav_to_mono_f32(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
         return Err("zero-size frames".to_string());
     }
     let frames = data.len() / frame_bytes;
-    let mut out = Vec::with_capacity(frames);
+    let mut out: Vec<Vec<f32>> = (0..channels as usize)
+        .map(|_| Vec::with_capacity(frames))
+        .collect();
     for frame in 0..frames {
-        let mut acc = 0f32;
         for ch in 0..channels as usize {
             let at = frame * frame_bytes + ch * (bits as usize / 8);
             let value = match (tag, bits) {
@@ -144,11 +175,10 @@ pub fn decode_wav_to_mono_f32(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
                 }
                 _ => return Err(format!("unsupported wav format tag {tag} bits {bits}")),
             };
-            acc += value;
+            out[ch].push(value);
         }
-        out.push(acc / channels as f32);
     }
-    if out.is_empty() {
+    if frames == 0 {
         return Err("empty wav data".to_string());
     }
     Ok((out, rate))
@@ -183,6 +213,42 @@ mod tests {
     #[test]
     fn decode_rejects_junk() {
         assert!(decode_wav_to_mono_f32(b"not a wav").is_err());
+        assert!(decode_wav_to_stereo_f32(b"not a wav").is_err());
+    }
+
+    #[test]
+    fn decode_stereo_keeps_channels_and_duplicates_mono() {
+        let wav = encode_wav_pcm16_stereo(&[0.5, -0.25], &[-0.5, 0.75], 48_000);
+        let (left, right, rate) = decode_wav_to_stereo_f32(&wav).unwrap();
+        assert_eq!(rate, 48_000);
+        assert!((left[0] - 0.5).abs() < 1e-3 && (left[1] + 0.25).abs() < 1e-3);
+        assert!((right[0] + 0.5).abs() < 1e-3 && (right[1] - 0.75).abs() < 1e-3);
+        let mono = encode_wav_pcm16_mono(&[0.1, 0.2, 0.3], 22_050);
+        let (left, right, rate) = decode_wav_to_stereo_f32(&mono).unwrap();
+        assert_eq!(rate, 22_050);
+        assert_eq!(left, right);
+        assert_eq!(left.len(), 3);
+        // Float WAV (tag 3) round-trips exactly.
+        let mut f32wav = Vec::new();
+        f32wav.extend_from_slice(b"RIFF");
+        f32wav.extend_from_slice(&(36u32 + 16).to_le_bytes());
+        f32wav.extend_from_slice(b"WAVEfmt ");
+        f32wav.extend_from_slice(&16u32.to_le_bytes());
+        f32wav.extend_from_slice(&3u16.to_le_bytes());
+        f32wav.extend_from_slice(&2u16.to_le_bytes());
+        f32wav.extend_from_slice(&44_100u32.to_le_bytes());
+        f32wav.extend_from_slice(&(44_100u32 * 8).to_le_bytes());
+        f32wav.extend_from_slice(&8u16.to_le_bytes());
+        f32wav.extend_from_slice(&32u16.to_le_bytes());
+        f32wav.extend_from_slice(b"data");
+        f32wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [0.123f32, -0.456, 0.789, -0.5] {
+            f32wav.extend_from_slice(&v.to_le_bytes());
+        }
+        let (left, right, rate) = decode_wav_to_stereo_f32(&f32wav).unwrap();
+        assert_eq!(rate, 44_100);
+        assert_eq!(left, vec![0.123, 0.789]);
+        assert_eq!(right, vec![-0.456, -0.5]);
     }
 
     #[test]

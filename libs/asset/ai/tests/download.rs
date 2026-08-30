@@ -136,6 +136,7 @@ fn file_spec(sha256: Option<String>) -> FileSpec {
         size: None,
         sha256,
         local: false,
+        optional: false,
         converts_to: None,
         conversion: None,
     }

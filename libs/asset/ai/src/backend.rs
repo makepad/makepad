@@ -1290,12 +1290,23 @@ impl<'a> BackendCtx<'a> {
                 paths.push(file.converted_path(self.cache_dir).unwrap());
                 continue;
             }
-            paths.push(self.downloader.ensure_file(
+            match self.downloader.ensure_file(
                 file,
                 self.cache_dir,
                 self.download_progress,
                 self.cancel,
-            )?);
+            ) {
+                Ok(path) => paths.push(path),
+                Err(AssetAiError::Cancelled) => return Err(AssetAiError::Cancelled),
+                // An optional role (Music3's reference-audio encoder) must
+                // never take the model down with it: the job that needs the
+                // file names the missing role itself.
+                Err(err) if file.optional => {
+                    let role = file.role.as_deref().unwrap_or(&file.path);
+                    (self.progress)(&format!("optional {role} unavailable: {err}"), 0.0);
+                }
+                Err(err) => return Err(err),
+            }
         }
         Ok(paths)
     }

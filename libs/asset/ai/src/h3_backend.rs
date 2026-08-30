@@ -1875,6 +1875,7 @@ mod tests {
                 size: None,
                 sha256: None,
                 local: false,
+                optional: false,
                 converts_to: None,
                 conversion: None,
             })

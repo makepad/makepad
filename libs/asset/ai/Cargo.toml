@@ -98,6 +98,9 @@ makepad-zune-png = { path = "../../zune/zune-png" }
 # Vision-domain request images arrive as PNG or JPEG.
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
 makepad-zip-file = { path = "../../zip_file" }
+# Music reference clips arrive as any audio file the in-repo decoders read
+# (MP3 / FLAC / Ogg Vorbis here, WAV in crate::wav). No deps, no unsafe.
+makepad-audio-decode = { path = "../../audio_decode" }
 makepad-ai-common = { path = "../../ai/models/common", optional = true }
 makepad-ai-flux = { path = "../../ai/models/flux", optional = true }
 makepad-ai-h3 = { path = "../../ai/models/h3", optional = true }

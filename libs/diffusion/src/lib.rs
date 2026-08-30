@@ -35,8 +35,8 @@ pub use makepad_ai_sfx::{
 };
 pub use makepad_ai_music::{
     ace, ace_dit, ace_pipeline, ace_text, ace_vae, music3, music3_ar, music3_dit, music3_gguf,
-    music3_gguf_gen, music3_lm, music3_pipeline, music3_quant, music3_rvq, music3_vocoder,
-    music3_weights,
+    music3_gguf_gen, music3_lm, music3_pipeline, music3_quant, music3_reference, music3_rvq,
+    music3_vocoder, music3_weights,
 };
 pub use makepad_ai_speech::{
     indextts, indextts_bigvgan, indextts_campplus, indextts_codec, indextts_gpt, indextts_mel,

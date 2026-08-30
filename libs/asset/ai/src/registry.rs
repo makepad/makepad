@@ -92,6 +92,11 @@ pub struct RegistryEntryFileJson {
     /// `repo`/`path` may then be empty or point at the upstream source for
     /// reference.
     pub local: Option<bool>,
+    /// True for artifacts a model can run WITHOUT (Music3's reference-audio
+    /// encoder): a pull still fetches them, but a download failure does not
+    /// fail the model, readiness ignores them, and the backend names the
+    /// role when a job actually needs the file. Requires `role`.
+    pub optional: Option<bool>,
     /// Cache-relative path ('/'-separated) of the converted form this
     /// download is turned into by the backend (e.g. Kokoro's upstream `.pth`
     /// -> `tts/kokoro-v1_0.mktts`). A file whose converted form exists counts
@@ -267,6 +272,8 @@ pub struct FileSpec {
     pub sha256: Option<String>,
     /// Local-only converted weights: never downloaded, expected in the cache.
     pub local: bool,
+    /// Optional role: see [`RegistryEntryFileJson::optional`].
+    pub optional: bool,
     /// Cache-relative path of the converted form the backend derives from
     /// this download (see [`RegistryEntryFileJson::converts_to`]).
     pub converts_to: Option<String>,
@@ -406,9 +413,13 @@ impl LicenseRestriction {
 
 impl ModelSpec {
     /// True when every registry file is present in the cache (in downloaded
-    /// or converted form — see [`FileSpec::is_present`]).
+    /// or converted form — see [`FileSpec::is_present`]). Optional roles do
+    /// not gate readiness.
     pub fn files_present(&self, cache_dir: &Path) -> bool {
-        self.files.iter().all(|file| file.is_present(cache_dir))
+        self.files
+            .iter()
+            .filter(|file| !file.optional)
+            .all(|file| file.is_present(cache_dir))
     }
 
     pub fn file_by_role(&self, role: &str) -> Option<&FileSpec> {
@@ -553,6 +564,13 @@ impl Registry {
                     .conversion
                     .map(|conversion| validate_conversion(&model.id, conversion))
                     .transpose()?;
+                let optional = file.optional.unwrap_or(false);
+                if optional && file.role.is_none() {
+                    return Err(AssetAiError::Registry(format!(
+                        "model {}: optional file {} must declare a role",
+                        model.id, file.cache_as
+                    )));
+                }
                 let spec = FileSpec {
                     role: file.role,
                     repo: file.repo,
@@ -562,6 +580,7 @@ impl Registry {
                     size: file.size,
                     sha256: file.sha256.map(|s| s.to_ascii_lowercase()),
                     local,
+                    optional,
                     converts_to: file.converts_to,
                     conversion,
                 };
@@ -884,28 +903,62 @@ mod tests {
         assert_eq!(music3.domain, Domain::Music);
         assert_eq!(music3.backend, "music3");
         assert!(music3.available && !music3.gated);
-        assert_eq!(music3.files.len(), 24);
+        assert_eq!(music3.files.len(), 27);
         for file in &music3.files {
-            assert_eq!(file.repo, "MiniMaxAI/MiniMax-Music3");
-            assert_eq!(
-                file.revision.as_deref(),
-                Some("bd348f9c49ea3c1b39f33ace3436f8fad435f24e"),
-                "{} must pin the audited revision",
-                file.cache_as
-            );
             assert!(file.size.is_some() && file.sha256.is_some(), "{}", file.cache_as);
             assert!(
                 file.cache_as.starts_with("music/MiniMax-Music3/"),
                 "{}",
                 file.cache_as
             );
+            if !file.optional {
+                assert_eq!(file.repo, "MiniMaxAI/MiniMax-Music3");
+                assert_eq!(
+                    file.revision.as_deref(),
+                    Some("bd348f9c49ea3c1b39f33ace3436f8fad435f24e"),
+                    "{} must pin the audited revision",
+                    file.cache_as
+                );
+            }
         }
         // The diffusers component subset only — the ~29 GB of sglang-omni
-        // serving artifacts must not sneak into the pull set.
+        // serving artifacts must not sneak into the REQUIRED pull set. The
+        // one .pth that does ride along is the DAV encoder for reference
+        // audio, and only as an optional role.
         assert!(!music3.files.iter().any(|f| f.path.starts_with("qwen_7B/")
-            || f.path.ends_with(".pth")));
-        let total: u64 = music3.files.iter().map(|f| f.size.unwrap()).sum();
-        assert_eq!(total, 28_517_609_106);
+            || (f.path.ends_with(".pth") && !f.optional)));
+        let required: u64 = music3
+            .files
+            .iter()
+            .filter(|f| !f.optional)
+            .map(|f| f.size.unwrap())
+            .sum();
+        assert_eq!(required, 28_517_609_106);
+        // Reference-audio roles (music3.md): the official dav.pth encoder
+        // half at the same audited revision, plus the SimpleTuner RVQ v4
+        // encoder + its config pinned to one immutable commit. Optional:
+        // text-only generation never needs them.
+        let dav = music3.file_by_role("dav-pth").unwrap();
+        assert!(dav.optional);
+        assert_eq!(dav.repo, "MiniMaxAI/MiniMax-Music3");
+        assert_eq!(dav.path, "dav.pth");
+        assert_eq!(dav.revision.as_deref(), Some("bd348f9c49ea3c1b39f33ace3436f8fad435f24e"));
+        assert_eq!(dav.size, Some(491_817_450));
+        let rvq = music3.file_by_role("rvq-encoder").unwrap();
+        assert!(rvq.optional);
+        assert_eq!(rvq.repo, "SimpleTuner/open-rvq-encoder-minimax-music3");
+        assert_eq!(rvq.revision.as_deref(), Some("326964c2f4edcc642c1ea116274dd2dd94081713"));
+        assert_eq!(rvq.size, Some(676_055_232));
+        assert!(rvq.cache_as.ends_with("_v4_169m_autoregressive_depth_recommended.safetensors"));
+        let rvq_cfg = music3.file_by_role("rvq-encoder-config").unwrap();
+        assert!(rvq_cfg.optional);
+        assert_eq!(rvq_cfg.revision, rvq.revision);
+        assert_eq!(rvq_cfg.size, Some(595));
+        assert_eq!(
+            music3.files.iter().filter(|f| f.optional).count(),
+            3,
+            "only the three reference roles are optional"
+        );
 
         // Music Q4 tier: the official audio.cpp GGUF pack (default mix
         // Q4_0 LM + Q4_0 DiT + BF16 RVQ + F32 cond/vocoder + sidecar
@@ -1519,6 +1572,7 @@ mod tests {
             size: None,
             sha256: None,
             local: false,
+            optional: false,
             converts_to: None,
             conversion: None,
         };
@@ -1546,6 +1600,7 @@ mod tests {
             size: None,
             sha256: None,
             local: false,
+            optional: false,
             converts_to: Some("tts/af_heart.mkvoice".into()),
             conversion: None,
         };

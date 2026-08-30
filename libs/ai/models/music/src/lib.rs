@@ -20,6 +20,7 @@ pub mod music3_gguf_gen;
 pub mod music3_lm;
 pub mod music3_pipeline;
 pub mod music3_quant;
+pub mod music3_reference;
 pub mod music3_rvq;
 pub mod music3_vocoder;
 pub mod music3_weights;

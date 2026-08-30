@@ -1038,6 +1038,7 @@ mod receipt_tests {
             size: Some(6),
             sha256: Some(source_sha),
             local: false,
+            optional: false,
             converts_to: None,
             conversion: Some(ConversionSpec {
                 cache_as: "native/model.safetensors".into(),
@@ -1192,6 +1193,7 @@ mod tests {
             size: None,
             sha256: None,
             local: false,
+            optional: false,
             converts_to: None,
             conversion: None,
         };
