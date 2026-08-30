@@ -11,8 +11,11 @@
 // of the bridge force; nothing extra is needed.
 
 use crate::modal::{pad8, run_modes_stereo, KernelPath, MAX_CHUNK};
+use crate::params::DesignParams;
 
 pub const BOARD_MODES: usize = 84;
+/// Hard cap on the parameterised mode count (preallocation bound).
+pub const BOARD_MODES_MAX: usize = 256;
 
 /// Radiativity of the instrument body: how strongly a bridge-force partial
 /// at `f` Hz reaches the listener, relative to the mid plateau.
@@ -32,10 +35,11 @@ pub const BOARD_MODES: usize = 84;
 /// below the tilt corner (C4's partial 1 sat 14 dB under its partial 7 at
 /// equal modal amplitude) and held the top of the spectrum up — a bright,
 /// thin balance that reads as a plucked wire, not a struck piano string.
-pub fn radiativity(f: f64) -> f64 {
-    let hp1 = f / (f + 95.0);
-    let hp2 = f / (f + 48.0);
-    let lp = 1.0 / (1.0 + (f / 2400.0) * (f / 2400.0)).sqrt();
+pub fn radiativity(f: f64, p: &DesignParams) -> f64 {
+    let hp1 = f / (f + p.rad_hp1);
+    let hp2 = f / (f + p.rad_hp2);
+    let x = (f / p.rad_lp) * (f / p.rad_lp);
+    let lp = (1.0 / (1.0 + x)).powf(0.5 * p.rad_lp_pow);
     hp1 * hp2 * lp
 }
 
@@ -72,8 +76,9 @@ fn hash01(mut x: u32) -> f32 {
 }
 
 impl Soundboard {
-    pub fn new(sample_rate: f64) -> Self {
-        let n = pad8(BOARD_MODES);
+    pub fn new(sample_rate: f64, p: &DesignParams) -> Self {
+        let modes = (p.board_modes as usize).clamp(16, BOARD_MODES_MAX);
+        let n = pad8(modes);
         let zr = vec![0.0f32; n];
         let zi = vec![0.0f32; n];
         let mut cr = vec![0.0f32; n];
@@ -82,10 +87,10 @@ impl Soundboard {
         let mut gout_l = vec![0.0f32; n];
         let mut gout_r = vec![0.0f32; n];
         let dt = 1.0 / sample_rate;
-        let norm = 1.0 / (BOARD_MODES as f64).sqrt();
-        for m in 0..BOARD_MODES {
+        let norm = 1.0 / (modes as f64).sqrt();
+        for m in 0..modes {
             let jitter = 0.94 + 0.12 * hash01(m as u32 * 3 + 1) as f64;
-            let f = 60.0 * 1.074f64.powi(m as i32) * jitter;
+            let f = 60.0 * p.board_ratio.powi(m as i32) * jitter;
             if f >= 0.45 * sample_rate {
                 continue;
             }
@@ -94,14 +99,14 @@ impl Soundboard {
             // makes the attack fast: a mode's rise time is 1/sigma, so a
             // lightly damped board *swells* instead of speaking (measured:
             // 17-47 ms to peak with sigma = 16 + f/38; < 10 ms with this).
-            let sigma = (28.0 + f / 11.0).min(400.0);
+            let sigma = (p.board_sig_base + f / p.board_sig_div).min(400.0);
             let r = (-sigma * dt).exp();
             let th = core::f64::consts::TAU * f * dt;
             cr[m] = (r * th.cos()) as f32;
             ci[m] = (r * th.sin()) as f32;
             gin[m] = 1.0;
             // Radiativity curve (see above): flat mid plateau, dark top.
-            let tilt = 2.2 * radiativity(f);
+            let tilt = p.board_tilt * radiativity(f, p);
             let al = (0.6 + 0.8 * hash01(m as u32 * 5 + 2) as f64) * tilt * norm;
             let ar = (0.6 + 0.8 * hash01(m as u32 * 7 + 3) as f64) * tilt * norm;
             let sl = if hash01(m as u32 * 11 + 4) < 0.5 { -1.0 } else { 1.0 };
@@ -124,13 +129,13 @@ impl Soundboard {
             // the per-sample difference is scaled by fs/(2 pi f_lo), so the
             // level is sample-rate independent and `direct` is the plateau
             // gain of the path.
-            direct: 9.0 * (sample_rate / (core::f64::consts::TAU * 150.0)) as f32,
+            direct: (p.board_direct * sample_rate / (core::f64::consts::TAU * 150.0)) as f32,
             dbg_direct: 1.0,
             dx1: 0.0,
             dlp: 0.0,
             dlp2: 0.0,
             dc_lp: (1.0 - (-core::f64::consts::TAU * 150.0 / sample_rate).exp()) as f32,
-            dc_lp2: (1.0 - (-core::f64::consts::TAU * 2400.0 / sample_rate).exp()) as f32,
+            dc_lp2: (1.0 - (-core::f64::consts::TAU * p.rad_lp / sample_rate).exp()) as f32,
         }
     }
 

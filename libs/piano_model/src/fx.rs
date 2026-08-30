@@ -511,3 +511,174 @@ pub fn soft_clip(x: f32) -> f32 {
         x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Output EQ: a treble shelf with a settable corner plus one parametric
+// presence bell. Sits between the dry instrument and the room sends (the
+// room hears the EQ'd source, as on a mixing desk). Flat by default and
+// bypassed when flat, so the physical voicing stays the primary character.
+// RBJ biquads, f64 design, f32 state; coefficients are safe to change
+// between process() calls (control path, no allocation).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    fn identity() -> Self {
+        Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
+    fn set_coeffs(&mut self, b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) {
+        let inv = 1.0 / a0;
+        self.b0 = (b0 * inv) as f32;
+        self.b1 = (b1 * inv) as f32;
+        self.b2 = (b2 * inv) as f32;
+        self.a1 = (a1 * inv) as f32;
+        self.a2 = (a2 * inv) as f32;
+    }
+}
+
+pub struct Eq {
+    fs: f64,
+    shelf_l: Biquad,
+    shelf_r: Biquad,
+    bell_l: Biquad,
+    bell_r: Biquad,
+    shelf_on: bool,
+    bell_on: bool,
+    shelf_db: f32,
+    shelf_hz: f32,
+    bell_hz: f32,
+    bell_db: f32,
+    bell_q: f32,
+}
+
+impl Eq {
+    pub fn new(fs: f64) -> Self {
+        Self {
+            fs,
+            shelf_l: Biquad::identity(),
+            shelf_r: Biquad::identity(),
+            bell_l: Biquad::identity(),
+            bell_r: Biquad::identity(),
+            shelf_on: false,
+            bell_on: false,
+            shelf_db: 0.0,
+            shelf_hz: 6000.0,
+            bell_hz: 3000.0,
+            bell_db: 0.0,
+            bell_q: 1.4,
+        }
+    }
+
+    /// High shelf: gain_db in -24..=12, corner 1 kHz..16 kHz.
+    pub fn set_shelf(&mut self, gain_db: f32, corner_hz: f32) {
+        let g = if gain_db.is_finite() { gain_db.clamp(-24.0, 12.0) } else { 0.0 };
+        let fc = if corner_hz.is_finite() { corner_hz.clamp(1000.0, 16000.0) } else { 6000.0 };
+        self.shelf_db = g;
+        self.shelf_hz = fc;
+        if g.abs() < 0.01 {
+            self.shelf_on = false;
+            return;
+        }
+        self.shelf_on = true;
+        let a = 10f64.powf(g as f64 / 40.0);
+        let w0 = core::f64::consts::TAU * (fc as f64).min(0.45 * self.fs) / self.fs;
+        let (sw, cw) = (w0.sin(), w0.cos());
+        let s = 1.0f64; // shelf slope
+        let alpha = sw / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt();
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cw + two_sqrt_a_alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cw);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cw - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cw + two_sqrt_a_alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cw);
+        let a2 = (a + 1.0) - (a - 1.0) * cw - two_sqrt_a_alpha;
+        self.shelf_l.set_coeffs(b0, b1, b2, a0, a1, a2);
+        self.shelf_r.set_coeffs(b0, b1, b2, a0, a1, a2);
+    }
+
+    /// Parametric bell: freq 200 Hz..12 kHz, gain -24..=12 dB, Q 0.3..=8.
+    pub fn set_bell(&mut self, freq_hz: f32, gain_db: f32, q: f32) {
+        let g = if gain_db.is_finite() { gain_db.clamp(-24.0, 12.0) } else { 0.0 };
+        let fc = if freq_hz.is_finite() { freq_hz.clamp(200.0, 12000.0) } else { 3000.0 };
+        let q = if q.is_finite() { q.clamp(0.3, 8.0) } else { 1.4 };
+        self.bell_hz = fc;
+        self.bell_db = g;
+        self.bell_q = q;
+        if g.abs() < 0.01 {
+            self.bell_on = false;
+            return;
+        }
+        self.bell_on = true;
+        let a = 10f64.powf(g as f64 / 40.0);
+        let w0 = core::f64::consts::TAU * (fc as f64).min(0.45 * self.fs) / self.fs;
+        let alpha = w0.sin() / (2.0 * q as f64);
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * w0.cos();
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = b1;
+        let a2 = 1.0 - alpha / a;
+        self.bell_l.set_coeffs(b0, b1, b2, a0, a1, a2);
+        self.bell_r.set_coeffs(b0, b1, b2, a0, a1, a2);
+    }
+
+    pub fn shelf(&self) -> (f32, f32) {
+        (self.shelf_db, self.shelf_hz)
+    }
+
+    pub fn bell(&self) -> (f32, f32, f32) {
+        (self.bell_hz, self.bell_db, self.bell_q)
+    }
+
+    #[inline(always)]
+    pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
+        let (mut l, mut r) = (l, r);
+        if self.shelf_on {
+            l = self.shelf_l.process(l);
+            r = self.shelf_r.process(r);
+        }
+        if self.bell_on {
+            l = self.bell_l.process(l);
+            r = self.bell_r.process(r);
+        }
+        (l, r)
+    }
+
+    pub fn reset(&mut self) {
+        self.shelf_l.reset();
+        self.shelf_r.reset();
+        self.bell_l.reset();
+        self.bell_r.reset();
+    }
+}

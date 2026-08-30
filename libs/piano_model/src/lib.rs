@@ -41,6 +41,7 @@
 
 pub mod simd;
 pub mod modal;
+pub mod params;
 mod hammer;
 mod keys;
 mod voice;
@@ -49,9 +50,10 @@ mod soundboard;
 pub mod fx;
 mod mt;
 
-use fx::{soft_clip, DcBlock, EarlyReflections, Perspective, Reverb, ReverbParams, ReverbPreset, Tone};
+use fx::{soft_clip, DcBlock, EarlyReflections, Eq, Perspective, Reverb, ReverbParams, ReverbPreset, Tone};
 use keys::{build_key, KeyDesign, FIRST_KEY, LAST_KEY, NUM_KEYS};
-use modal::{detect_path, KernelPath, MAX_CHUNK};
+pub use params::{DesignParams, PianoPreset, Voicing, VoicingPreset, PIANO_PRESETS};
+use modal::{detect_path, run_modes, KernelPath, MAX_CHUNK};
 use soundboard::Soundboard;
 use sympathetic::SymBank;
 use voice::Voice;
@@ -110,17 +112,13 @@ pub trait Instrument {
 // Mix constants (bridge-force domain unless noted)
 // ---------------------------------------------------------------------------
 
-/// Bus drive into each sympathetic bank.
-const SYM_IN: f32 = 0.002;
-/// Sympathetic bank return into the soundboard.
-const SYM_OUT: f32 = 0.35;
 /// Per-voice panned direct radiation relative to the board's modal part
 /// (both direct paths run through the same plateau-normalised radiation
 /// filter, so this is a plateau gain comparable to the board's `direct`).
 /// The instant paths must sit within a few dB of the modal board: when the
 /// resonators dominated by ~30 dB the whole instrument spoke with their
-/// 15-45 ms rise — a swell, not a strike.
-const DIRECT_STRING: f32 = 7.0;
+/// 15-45 ms rise — a swell, not a strike. (Value: DesignParams.direct_string;
+/// the sympathetic sends are DesignParams.sym_in / sym_out.)
 /// Bridge-force domain -> output domain.
 /// Sized so a median-velocity classical performance (velocities ~30-60)
 /// lands near -20 dBFS RMS with the default room, fortissimo material peaks
@@ -153,13 +151,13 @@ struct RadTilt {
 }
 
 impl RadTilt {
-    fn new(sample_rate: f64) -> Self {
+    fn new(sample_rate: f64, lp_hz: f64) -> Self {
         Self {
             dx1: 0.0,
             dlp: 0.0,
             dlp2: 0.0,
             c: (1.0 - (-core::f64::consts::TAU * 150.0 / sample_rate).exp()) as f32,
-            c2: (1.0 - (-core::f64::consts::TAU * 2400.0 / sample_rate).exp()) as f32,
+            c2: (1.0 - (-core::f64::consts::TAU * lp_hz / sample_rate).exp()) as f32,
             scale: (sample_rate / (core::f64::consts::TAU * 150.0)) as f32,
         }
     }
@@ -194,10 +192,36 @@ pub(crate) struct EngineCore {
     er: EarlyReflections,
     reverb: Reverb,
     tone: Tone,
+    eq: Eq,
+    voicing: Voicing,
+    /// sym-bank openness derived from voicing.sympathetic > 1 (dampers
+    /// conceptually lifting on the resonance bed)
+    openness: f32,
     dc_l: DcBlock,
     dc_r: DcBlock,
     sustain: f32,
     soft: bool,
+    direct_string: f32,
+    sym_in: f32,
+    sym_out_gain: f32,
+    sym_damped_gain: f32,
+    sym_gate: f32,
+    /// bus power accumulated since the last control tick (64-grid)
+    bus_pow_acc: f32,
+    /// damped-bank gate decided ON the control grid (never mid-chunk, so
+    /// the decision cannot depend on host-buffer chunk splits)
+    damped_on: bool,
+    couple_loss: f32,
+    // quantised bath-loading extra radius currently applied to voices
+    bath_r: f32,
+    // duplex / aliquot bank (shared, driven by the bridge bus)
+    dup_zr: Vec<f32>,
+    dup_zi: Vec<f32>,
+    dup_cr: Vec<f32>,
+    dup_ci: Vec<f32>,
+    dup_gin: Vec<f32>,
+    dup_gout: Vec<f32>,
+    dup_gain: f32,
     perspective: Perspective,
     pan_sign: f32,
     dry: f32,
@@ -236,22 +260,100 @@ impl Piano {
     /// Builds the full instrument (all 88 key designs, voices, sympathetic
     /// banks, soundboard, effects). Allocation happens only here.
     pub fn new(sample_rate: f32) -> Self {
+        Self::new_with_params(sample_rate, &DesignParams::default())
+    }
+
+    /// Builds one of the shipped instrument presets (see
+    /// params::PIANO_PRESETS): design + voicing + room in one call.
+    /// Selecting a preset whose `needs_rebuild()` is true means calling
+    /// this again (construction, not the audio path); a voicing-only
+    /// preset can instead be applied live with `apply_preset_live`.
+    pub fn new_with_preset(sample_rate: f32, preset: &PianoPreset) -> Self {
+        let mut p = Self::new_with_params(sample_rate, &preset.design_params());
+        p.apply_preset_live(preset);
+        p
+    }
+
+    /// Applies the runtime part of a preset (voicing + room) to this
+    /// instrument. If `preset.needs_rebuild()` the construction-time design
+    /// is NOT applied — build with `new_with_preset` for the full change.
+    pub fn apply_preset_live(&mut self, preset: &PianoPreset) {
+        self.set_voicing(preset.voicing);
+        self.set_reverb_preset(preset.room);
+        self.set_reverb_mix(preset.reverb_mix);
+    }
+
+    /// Same instrument, explicit design parameters (see params.rs). Used by
+    /// verification tooling that walks the design space against reference
+    /// recordings; `DesignParams::default()` IS `Piano::new`.
+    pub fn new_with_params(sample_rate: f32, dp: &DesignParams) -> Self {
         assert!((8000.0..=192_000.0).contains(&sample_rate), "unsupported sample rate {sample_rate}");
         let fs = sample_rate as f64;
-        let keys: Vec<KeyDesign> = (FIRST_KEY..=LAST_KEY).map(|k| build_key(k, fs)).collect();
+        let keys: Vec<KeyDesign> = (FIRST_KEY..=LAST_KEY).map(|k| build_key(k, fs, dp)).collect();
         let voices: Vec<Voice> = keys.iter().enumerate().map(|(i, k)| Voice::new(i, k)).collect();
         let sym: Vec<SymBank> = keys.iter().map(SymBank::new).collect();
+        // Duplex / aliquot scale: the non-speaking string segments behind
+        // the bridge, a shared bank of lightly damped resonators across the
+        // duplex band, rung by the summed bridge force.
+        let dup = {
+            const N: usize = 32;
+            let mut zr = vec![0.0f32; N];
+            let zi = vec![0.0f32; N];
+            let mut cr = vec![0.0f32; N];
+            let mut ci = vec![0.0f32; N];
+            let mut gin = vec![0.0f32; N];
+            let mut gout = vec![0.0f32; N];
+            let dt = 1.0 / fs;
+            let lo = dp.duplex_lo.max(200.0);
+            let hi = dp.duplex_hi.max(lo * 1.2);
+            for m in 0..28usize {
+                let jit = 0.96 + 0.08 * (((m as u32).wrapping_mul(0x9e37_79b9) >> 8) & 0xffff) as f64 / 65536.0;
+                let f = lo * (hi / lo).powf(m as f64 / 27.0) * jit;
+                if f >= 0.45 * fs {
+                    continue;
+                }
+                let sigma = dp.duplex_sigma.max(1.0);
+                let r = (-sigma * dt).exp();
+                let th = core::f64::consts::TAU * f * dt;
+                cr[m] = (r * th.cos()) as f32;
+                ci[m] = (r * th.sin()) as f32;
+                gin[m] = 1.0;
+                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                gout[m] = (sign * sigma * 0.006 * (48000.0 / fs)) as f32;
+            }
+            zr.fill(0.0);
+            (zr, zi, cr, ci, gin, gout)
+        };
         let core = EngineCore {
             sample_rate,
             sym,
-            board: Soundboard::new(fs),
+            board: Soundboard::new(fs, dp),
             er: EarlyReflections::new(sample_rate),
             reverb: Reverb::new(sample_rate),
             tone: Tone::new(sample_rate),
+            eq: Eq::new(fs),
+            voicing: Voicing::default(),
+            openness: 0.0,
             dc_l: DcBlock::new(sample_rate),
             dc_r: DcBlock::new(sample_rate),
             sustain: 0.0,
             soft: false,
+            direct_string: dp.direct_string as f32,
+            sym_in: dp.sym_in as f32,
+            sym_out_gain: dp.sym_out as f32,
+            sym_damped_gain: dp.sym_damped as f32,
+            sym_gate: dp.sym_gate as f32,
+            bus_pow_acc: 0.0,
+            damped_on: false,
+            couple_loss: dp.couple_loss as f32,
+            bath_r: 1.0,
+            dup_zr: dup.0,
+            dup_zi: dup.1,
+            dup_cr: dup.2,
+            dup_ci: dup.3,
+            dup_gin: dup.4,
+            dup_gout: dup.5,
+            dup_gain: dp.duplex_gain as f32,
             perspective: Perspective::Player,
             pan_sign: 1.0,
             dry: 1.0,
@@ -274,8 +376,8 @@ impl Piano {
             board_r: [0.0; MAX_CHUNK],
             dir_l: [0.0; MAX_CHUNK],
             dir_r: [0.0; MAX_CHUNK],
-            dir_tilt_l: RadTilt::new(sample_rate as f64),
-            dir_tilt_r: RadTilt::new(sample_rate as f64),
+            dir_tilt_l: RadTilt::new(sample_rate as f64, dp.rad_lp),
+            dir_tilt_r: RadTilt::new(sample_rate as f64, dp.rad_lp),
         };
         Self { keys, core, voices }
     }
@@ -368,6 +470,56 @@ impl Piano {
 
     pub fn perspective(&self) -> Perspective {
         self.core.perspective
+    }
+
+    // ------------------------------------------------------------------
+    // Voicing: the runtime mechanism mix (see params::Voicing). Six
+    // continuous amounts, 0.0 = mechanism off, 1.0 = the reference-matched
+    // level, up to 2.5 for deliberate exaggeration; presets are named
+    // points in the same space. Safe between process() calls: plain
+    // scalars, consumed at note-on / per chunk, no allocation. New strikes
+    // pick up slider moves; ringing notes keep the voicing they were
+    // struck with (except the sympathetic field, which is live).
+    // What is NOT voicing: the strike-vs-pluck modal quadrature (fixed
+    // physics, see modal.rs) and the construction-time string/radiation
+    // design (Piano::new_with_params).
+    // ------------------------------------------------------------------
+
+    pub fn set_voicing(&mut self, v: Voicing) {
+        self.core.voicing = v.clamped();
+    }
+
+    pub fn voicing(&self) -> Voicing {
+        self.core.voicing
+    }
+
+    pub fn set_voicing_preset(&mut self, p: VoicingPreset) {
+        self.set_voicing(p.voicing());
+    }
+
+    // ------------------------------------------------------------------
+    // Output EQ (after the instrument, before the room sends): a treble
+    // shelf with settable corner and one parametric presence bell. Flat
+    // (and bypassed) by default; the physical voicing stays the primary
+    // character and this is the engineer's trim on top.
+    //   set_eq_shelf(gain_db -24..=12, corner_hz 1k..=16k)
+    //   set_eq_bell(freq_hz 200..=12k, gain_db -24..=12, q 0.3..=8)
+    // ------------------------------------------------------------------
+
+    pub fn set_eq_shelf(&mut self, gain_db: f32, corner_hz: f32) {
+        self.core.eq.set_shelf(gain_db, corner_hz);
+    }
+
+    pub fn eq_shelf(&self) -> (f32, f32) {
+        self.core.eq.shelf()
+    }
+
+    pub fn set_eq_bell(&mut self, freq_hz: f32, gain_db: f32, q: f32) {
+        self.core.eq.set_bell(freq_hz, gain_db, q);
+    }
+
+    pub fn eq_bell(&self) -> (f32, f32, f32) {
+        self.core.eq.bell()
     }
 
     /// Gentle output shelves, +/-12 dB at 120 Hz / 6 kHz (clamped).
@@ -488,8 +640,11 @@ impl Piano {
             k.t1_seconds,
             self.core.sample_rate as f64,
             1.0,
-            (0.35 * (speed / 6.0)).min(0.5) as f32,
+            (k.rough_depth as f64 * (speed / 6.0)).min(0.5) as f32,
             (key as u32).wrapping_mul(0x51ed_270b) ^ 0x5bd1,
+            k.img_fc_mul,
+            k.img_g_base,
+            k.img_g_slope,
         );
         let mut pos = 0;
         while pos + MAX_CHUNK <= out.len() {
@@ -501,6 +656,40 @@ impl Piano {
         out
     }
 
+    /// Renders one voice in isolation and reports (peak, rms) of its bridge
+    /// force signal (diagnostics: calibrates the phantom-partial drive
+    /// normalisation; the audio path is untouched).
+    #[doc(hidden)]
+    pub fn debug_bridge_stats(&mut self, key: u8, velocity: u8, secs: f64) -> (f32, f64) {
+        if !(FIRST_KEY..=LAST_KEY).contains(&key) {
+            return (0.0, 0.0);
+        }
+        self.reset();
+        let n = (secs * self.core.sample_rate as f64) as usize;
+        self.core.apply_event(&self.keys, &mut self.voices, &PianoEvent::NoteOn { key, velocity });
+        let i = (key - FIRST_KEY) as usize;
+        let mut peak = 0.0f32;
+        let mut e = 0.0f64;
+        let mut pos = 0usize;
+        while pos < n {
+            let m = MAX_CHUNK.min(n - pos);
+            let v = &mut self.voices[i];
+            if v.active {
+                v.render(&self.keys[i], self.core.path, m);
+            }
+            for k in 0..m {
+                let a = self.voices[i].acc[k].abs();
+                if a > peak {
+                    peak = a;
+                }
+                e += (a as f64) * (a as f64);
+            }
+            pos += m;
+        }
+        self.reset();
+        (peak, (e / n.max(1) as f64).sqrt())
+    }
+
     /// Full state reset (voices, pedals, resonance, effects, clock).
     pub fn reset(&mut self) {
         for v in &mut self.voices {
@@ -509,6 +698,7 @@ impl Piano {
             v.sost_held = false;
             v.strike_count = 0;
             v.eng = 1.0;
+            v.extra_r = 1.0;
         }
         for (s, k) in self.core.sym.iter_mut().zip(self.keys.iter()) {
             s.clear();
@@ -519,9 +709,15 @@ impl Piano {
             v.rebuild(k, 1.0);
         }
         self.core.board.reset();
+        self.core.dup_zr.fill(0.0);
+        self.core.dup_zi.fill(0.0);
+        self.core.bath_r = 1.0;
+        self.core.bus_pow_acc = 0.0;
+        self.core.damped_on = false;
         self.core.er.reset();
         self.core.reverb.reset();
         self.core.tone.reset();
+        self.core.eq.reset();
         self.core.dc_l.reset();
         self.core.dc_r.reset();
         self.core.dir_tilt_l.reset();
@@ -557,7 +753,8 @@ impl EngineCore {
                     return;
                 }
                 let i = (key - FIRST_KEY) as usize;
-                voices[i].note_on(&keys[i], velocity, self.soft, self.sample_rate as f64);
+                let vc = self.voicing;
+                voices[i].note_on(&keys[i], velocity, self.soft, self.sample_rate as f64, &vc);
                 // The damper leaves the string early in the key travel,
                 // before the hammer arrives.
                 voices[i].rebuild(&keys[i], 0.0);
@@ -588,6 +785,8 @@ impl EngineCore {
                 for s in &mut self.sym {
                     s.clear();
                 }
+                self.dup_zr.fill(0.0);
+                self.dup_zi.fill(0.0);
                 self.board.reset();
                 self.er.reset();
                 self.reverb.reset();
@@ -601,7 +800,25 @@ impl EngineCore {
         // Dampers lift over the top of the pedal travel and the felt only
         // grips near full engagement: a strongly nonlinear curve is what
         // makes half-pedalling usable.
+        self.damped_on = self.sym_damped_gain > 0.0 && self.bus_pow_acc > self.sym_gate;
+        self.bus_pow_acc = 0.0;
         let lift_target = ((PEDAL_FULL_LIFT - self.sustain).max(0.0) / PEDAL_FULL_LIFT).min(1.0).powf(2.5);
+        // Bath-loading: how much open string is there for a sounding string
+        // to bleed into through the bridge (quantised so voices only
+        // rebuild on material change; the factor can only add damping).
+        let mut bath_r = 1.0f32;
+        let sym_amt = self.voicing.sympathetic;
+        self.openness = ((sym_amt - 1.0).max(0.0) / 1.5).min(1.0);
+        if self.couple_loss > 0.0 && sym_amt > 0.0 {
+            let mut open_w = 0.0f32;
+            for v in voices.iter() {
+                open_w += 1.0 - v.eng;
+            }
+            let w = (open_w / NUM_KEYS as f32).clamp(0.0, 1.0);
+            let sx_q = (self.couple_loss * sym_amt.min(1.5) * w / 0.05).round() * 0.05;
+            bath_r = (-sx_q / self.sample_rate).exp();
+        }
+        self.bath_r = bath_r;
         for i in 0..NUM_KEYS {
             let key = &keys[i];
             let v = &mut voices[i];
@@ -611,6 +828,9 @@ impl EngineCore {
             let mut eng = old + 0.35 * (target - old);
             if (eng - target).abs() < 1e-3 {
                 eng = target;
+            }
+            if v.active && v.extra_r != bath_r {
+                v.rebuild_with(key, eng, bath_r);
             }
             if eng != old {
                 if v.active {
@@ -628,16 +848,20 @@ impl EngineCore {
             }
             // Sympathetic bank runs whenever this key's damper is off the
             // string; when the damper lands it rings out briefly, then is
-            // cleared (deterministically, on this grid).
-            if eng < 0.98 {
+            // cleared (deterministically, on this grid). The voicing's
+            // sympathetic amount above 1.0 lifts the resonance bed's
+            // dampers ("all dampers off" at the top of the slider) —
+            // rebuilds are in-place radius updates, no allocation.
+            let s_eng = eng * (1.0 - self.openness);
+            if s_eng < 0.98 {
                 s.active = true;
                 s.off_ticks = 0;
-                if s.eng != eng {
-                    s.rebuild(key, eng);
+                if s.eng != s_eng {
+                    s.rebuild(key, s_eng);
                 }
             } else if s.active {
-                if s.eng != eng {
-                    s.rebuild(key, eng);
+                if s.eng != s_eng {
+                    s.rebuild(key, s_eng);
                 }
                 s.off_ticks += 1;
                 if s.off_ticks > 240 {
@@ -696,21 +920,49 @@ impl EngineCore {
             }
             v.power = p;
         }
+        let mut bus_pow = 0.0f32;
+        for k in 0..n {
+            bus_pow += self.bus[k] * self.bus[k];
+        }
+        self.bus_pow_acc += bus_pow;
+        let damped_on = self.damped_on && self.voicing.sympathetic > 0.0;
+        let sym_send = self.sym_out_gain * self.voicing.sympathetic;
         for i in 0..NUM_KEYS {
             let s = &mut self.sym[i];
             if s.active {
-                s.render(&keys[i], self.path, &self.bus[..n], SYM_IN, &mut self.sym_out[..n]);
+                s.render(&keys[i], self.path, &self.bus[..n], self.sym_in, &mut self.sym_out[..n]);
+            } else if damped_on {
+                // felt-damped strings still couple: heavily damped rotations,
+                // small drive, rendered only while the bridge is energetic
+                s.render(&keys[i], self.path, &self.bus[..n], self.sym_in * self.sym_damped_gain, &mut self.sym_out[..n]);
             }
         }
+        if self.dup_gain > 0.0 && self.voicing.sympathetic > 0.0 {
+            run_modes(
+                self.path,
+                &mut self.dup_zr,
+                &mut self.dup_zi,
+                &self.dup_cr,
+                &self.dup_ci,
+                &self.dup_gin,
+                &self.dup_gout,
+                &self.bus[..n],
+                self.dup_gain * self.voicing.sympathetic.min(1.6),
+                &mut self.sym_out[..n],
+            );
+        }
         for k in 0..n {
-            self.board_in[k] = self.bus[k] + SYM_OUT * self.sym_out[k] + self.noise[k];
+            self.board_in[k] = self.bus[k] + sym_send * self.sym_out[k] + self.noise[k];
         }
         self.board.render(self.path, &self.board_in[..n], &mut self.board_l[..n], &mut self.board_r[..n]);
         for k in 0..n {
             let dsl = self.dir_tilt_l.process(self.dir_l[k]);
             let dsr = self.dir_tilt_r.process(self.dir_r[k]);
-            let pl = self.master * (self.dbg_board_modal * self.board_l[k] + self.dbg_direct * DIRECT_STRING * dsl);
-            let pr = self.master * (self.dbg_board_modal * self.board_r[k] + self.dbg_direct * DIRECT_STRING * dsr);
+            let pl = self.master * (self.dbg_board_modal * self.board_l[k] + self.dbg_direct * self.direct_string * dsl);
+            let pr = self.master * (self.dbg_board_modal * self.board_r[k] + self.dbg_direct * self.direct_string * dsr);
+            // channel EQ ahead of the room: the reflections and tail hear
+            // the EQ'd source, the way a desk insert feeds the sends
+            let (pl, pr) = self.eq.process(pl, pr);
             let (el, er) = self.er.process(pl, pr);
             let (wl, wr) = self.reverb.process(pl, pr);
             let l = self.dry * pl + self.er_level * el + self.wet * wl;

@@ -3,9 +3,24 @@
 // Every string partial (and every soundboard / sympathetic mode) is one
 // exponentially damped complex rotator ("phasor filter"):
 //
-//     z[k+1] = C * z[k] + i * g_in * x[k],  C = r * e^{i theta}
+//     z[k+1] = C * z[k] + g_in * x[k],  C = r * e^{i theta}
 //     r = exp(-sigma / fs), theta = 2*pi*f / fs
 //     y[k] = sum_modes g_out * Im(z[k+1])
+//
+// Injection is on the REAL axis and the output reads Im(z): the force
+// impulse response of one mode is g r^k sin(k theta) — it starts at ZERO
+// and builds as a damped sine, which is what a force-driven displacement
+// mode does (q'' + 2 sigma q' + w^2 q = F g/m has q(t) ~ e^{-sigma t}
+// sin(w t): the strike transfers momentum first, displacement follows).
+// Injecting on the imaginary axis and reading Im — the obvious phasor
+// form — gives g r^k cos(k theta) instead: an initial-DISPLACEMENT
+// release, i.e. the response of a plucked string, not a struck one. The
+// two have identical pole radius, identical envelopes and near-identical
+// magnitude spectra, but every partial's onset phase differs by 90
+// degrees, and the ear reads the coherent cosine start of all partials at
+// once as a pick/zip. (The soundboard's stereo kernel below keeps the
+// mixed quadratures deliberately: its output stands for plate VELOCITY,
+// whose force impulse response does jump at t=0.)
 //
 // This is the modal-synthesis discretisation of the stiff-string PDE modes:
 // unconditionally stable for any input because |C| < 1 makes each mode a
@@ -109,8 +124,8 @@ fn run_modes_scalar(
         let (crm, cim, ginm, goutm) = (cr[m], ci[m], gin[m], gout[m]);
         let (mut r, mut i) = (zr[m], zi[m]);
         for k in 0..n {
-            let t = crm * r - cim * i;
-            i = cim * r + crm * i + ginm * (in_gain * input[k]);
+            let t = crm * r - cim * i + ginm * (in_gain * input[k]);
+            i = cim * r + crm * i;
             r = t;
             acc[k] += goutm * i;
         }
@@ -142,8 +157,8 @@ fn run_modes_simd4(
         let goutv = load_v4(&gout[m..]);
         for k in 0..n {
             let f = splat_v4(in_gain * input[k]);
-            let t = sub_v4(mul_v4(crv, zrv), mul_v4(civ, ziv));
-            ziv = fma_v4(ginv, f, fma_v4(civ, zrv, mul_v4(crv, ziv)));
+            let t = fma_v4(ginv, f, sub_v4(mul_v4(crv, zrv), mul_v4(civ, ziv)));
+            ziv = fma_v4(civ, zrv, mul_v4(crv, ziv));
             zrv = t;
             vacc[k] = fma_v4(goutv, ziv, vacc[k]);
         }
@@ -184,8 +199,8 @@ unsafe fn run_modes_avx2(
         let goutv = _mm256_loadu_ps(gout.as_ptr().add(m));
         for k in 0..n {
             let f = _mm256_set1_ps(in_gain * input[k]);
-            let t = _mm256_sub_ps(_mm256_mul_ps(crv, zrv), _mm256_mul_ps(civ, ziv));
-            ziv = _mm256_fmadd_ps(ginv, f, _mm256_fmadd_ps(civ, zrv, _mm256_mul_ps(crv, ziv)));
+            let t = _mm256_fmadd_ps(ginv, f, _mm256_sub_ps(_mm256_mul_ps(crv, zrv), _mm256_mul_ps(civ, ziv)));
+            ziv = _mm256_fmadd_ps(civ, zrv, _mm256_mul_ps(crv, ziv));
             zrv = t;
             vacc[k] = _mm256_fmadd_ps(goutv, ziv, vacc[k]);
         }

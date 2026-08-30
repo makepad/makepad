@@ -16,8 +16,26 @@ use makepad_piano_model::{Piano, PianoEvent::*};
 // ---------------------------------------------------------------------------
 #[test]
 fn partials_follow_dispersion_law() {
+    // The dispersion law is a property of the transverse string bank, so
+    // the deliberately non-dispersive resonators are silenced for the
+    // measurement: phantom/longitudinal modes (their whole point is to sit
+    // off the series), the duplex/aliquot scale, and the sympathetic banks
+    // — any of them can land inside a partial's search window. Scatter off:
+    // the law itself is under test, not the per-key jitter.
+    let mut dp = makepad_piano_model::DesignParams::default();
+    dp.ph_gain = 0.0;
+    dp.duplex_gain = 0.0;
+    dp.sym_damped = 0.0;
+    dp.sym_out = 0.0;
+    dp.scatter = 0.0;
     for &key in &[36u8, 48, 60, 84] {
-        let mut p = dry_piano();
+        let mut p = {
+            let mut q = Piano::new_with_params(FS, &dp);
+            q.set_reverb_mix(0.0);
+            q.set_early_reflection_level(0.0);
+            q.set_soft_clip(false);
+            q
+        };
         let info = p.key_info(key).unwrap();
         let f0 = info.f0 as f64;
         let b = info.b_coeff as f64;
@@ -43,8 +61,12 @@ fn partials_follow_dispersion_law() {
                 break;
             }
             let (fm, mag) = peak_near(x, pred, (0.3 * f0).min(60.0).max(4.0));
-            if mag < ref_mag * 5e-4 {
-                continue; // strike-point comb null / buried partial
+            if mag < ref_mag * 3e-3 {
+                // Strike-comb-dip partials (the dips have a physical floor
+                // now, ~-22 dB of gin) sit far enough down that spectral
+                // leakage from their strong neighbours dominates the search
+                // window — unmeasurable, not undispersed.
+                continue;
             }
             let cents = 1200.0 * (fm / pred).log2();
             max_cents_err = max_cents_err.max(cents.abs());
@@ -513,7 +535,15 @@ fn output_levels_are_sane() {
     let (l, r) = render(&mut p, &[ev(0.0, NoteOn { key: 60, velocity: 127 })], FS as usize, 512);
     let pk = peak(&l).max(peak(&r));
     println!("C4 ff peak: {pk:.3}");
-    assert!((0.05..0.95).contains(&pk), "single ff note peak {pk:.3} outside sane range");
+    // The reference-matched voicing drives a lone ff note well into the
+    // soft saturator (which the level calibration treats as the mastering
+    // stage); the clipper ceiling is 1.0 and must hold.
+    assert!((0.05..=1.0).contains(&pk), "single ff note peak {pk:.3} outside sane range");
+    let rms_ff = {
+        let e: f64 = l.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        (e / l.len() as f64).sqrt()
+    };
+    assert!(rms_ff > 0.02 && rms_ff < 0.5, "ff rms {rms_ff:.3} outside sane range");
     let mut p2 = Piano::new(FS);
     let (l2, r2) = render(&mut p2, &[ev(0.0, NoteOn { key: 60, velocity: 20 })], FS as usize, 512);
     let pk2 = peak(&l2).max(peak(&r2));
@@ -581,5 +611,64 @@ fn diagnostics() {
             spectral_centroid(bin, &ps, 30.0, 10000.0),
             spectral_centroid(bin_a, &ps_a, 30.0, 10000.0)
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strike-vs-pluck quadrature. The force impulse response of a string mode
+// must START AT ZERO and build as a damped SINE (a strike transfers
+// momentum; displacement follows). Reading the other quadrature — a damped
+// COSINE that starts at its maximum — is the response of an initial
+// displacement release, i.e. a plucked string, and is audible as a "pick"
+// at the front of every note even when the whole partial ladder is right.
+// Three earlier tuning passes matched published spectra while this was
+// wrong; this test pins the physics so it cannot regress.
+// ---------------------------------------------------------------------------
+#[test]
+fn string_mode_impulse_starts_at_zero_and_builds_as_sine() {
+    use makepad_piano_model::modal::{run_modes, KernelPath};
+    for path in [KernelPath::Scalar, KernelPath::Simd4] {
+        let n = 8usize;
+        let mut zr = vec![0.0f32; n];
+        let mut zi = vec![0.0f32; n];
+        let mut cr = vec![0.0f32; n];
+        let mut ci = vec![0.0f32; n];
+        let mut gin = vec![0.0f32; n];
+        let mut gout = vec![0.0f32; n];
+        // one 1 kHz mode at fs=48k, light damping
+        let fs = 48000.0f64;
+        let sigma = 5.0f64;
+        let th = core::f64::consts::TAU * 1000.0 / fs;
+        let r = (-sigma / fs).exp();
+        cr[0] = (r * th.cos()) as f32;
+        ci[0] = (r * th.sin()) as f32;
+        gin[0] = 1.0;
+        gout[0] = 1.0;
+        // unit force impulse at k=0, then silence
+        let mut input = vec![0.0f32; 64];
+        input[0] = 1.0;
+        let mut acc = vec![0.0f32; 64];
+        run_modes(path, &mut zr, &mut zi, &cr, &ci, &gin, &gout, &input, 1.0, &mut acc);
+        let zeros = vec![0.0f32; 64];
+        let mut acc2 = vec![0.0f32; 64];
+        run_modes(path, &mut zr, &mut zi, &cr, &ci, &gin, &gout, &zeros, 1.0, &mut acc2);
+        // sample 0 is Im(C^0 * g) = 0: the strike does not move the bridge
+        // in the very sample the force lands
+        assert!(
+            acc[0].abs() < 1e-6,
+            "{path:?}: mode output at the impulse sample is {} — cosine (pluck) quadrature",
+            acc[0]
+        );
+        // and the response is r^k sin(k theta): check a quarter period in
+        let k_quarter = (0.25 * fs / 1000.0).round() as usize; // 12
+        let expect = (r.powi(k_quarter as i32) * (k_quarter as f64 * th).sin()) as f32;
+        let got = acc[k_quarter];
+        assert!(
+            (got - expect).abs() < 1e-4,
+            "{path:?}: expected damped-sine value {expect} at k={k_quarter}, got {got}"
+        );
+        // envelope keeps building over the first quarter period (no jump)
+        assert!(acc[1] > 0.0 && acc[2] > acc[1] && acc[6] > acc[3], "{path:?}: onset must build, got {:?}", &acc[..8]);
+        let _ = acc2;
     }
 }

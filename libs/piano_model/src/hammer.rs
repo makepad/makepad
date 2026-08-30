@@ -144,6 +144,9 @@ impl Hammer {
         k_scale: f64,
         rough: f32,
         rough_seed: u32,
+        img_fc_mul: f64,
+        img_g_base: f64,
+        img_g_slope: f64,
     ) {
         self.active = true;
         self.started = false;
@@ -176,13 +179,13 @@ impl Hammer {
         // null at 1/(2 T1) (~1.15 kHz at C4, right on partial 4) and held
         // the pulse in a flat pedestal. One pole at ~0.8/T1 plus a 0.85
         // per-trip survival reproduces the measured decaying-ripple shape.
-        let fc_img = (0.62 / t1_seconds.max(1e-5)).min(0.45 * sample_rate * NSUB as f64);
+        let fc_img = (img_fc_mul / t1_seconds.max(1e-5)).min(0.45 * sample_rate * NSUB as f64);
         self.img_c = 1.0 - (-core::f64::consts::TAU * fc_img * self.dt).exp();
         // Long bass round trips come back nearly intact (the lowest octaves
         // are the two-wave regime: incoming + one strong reflection); short
         // mid/treble trips repeat many times inside one contact and disperse
         // a little more each pass.
-        self.img_g = (0.72 + 50.0 * t1_seconds).min(0.97);
+        self.img_g = (img_g_base + img_g_slope * t1_seconds).min(0.985);
         self.img_lp = 0.0;
         // 60 ms hard timeout: no physical contact lasts anywhere near this.
         self.timeout = (0.060 * sample_rate * NSUB as f64) as u32;
