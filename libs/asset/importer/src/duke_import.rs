@@ -2459,6 +2459,7 @@ fn map_to_place(
             height,
             align: "face".into(),
             flags: 0,
+            ..Default::default()
         });
     }
     crate::world_place::WorldPlace {
@@ -4313,6 +4314,7 @@ fn build_actor_billboard(
             actor: None,
             weapon: None,
             metres_per_pixel: DUKE_SPRITE_METRES_PER_PIXEL,
+            ..Default::default()
         },
         tiles,
     ))
@@ -4964,6 +4966,7 @@ enda
                 height: 1.2,
                 align: "face".into(),
                 flags: 0,
+                ..Default::default()
             }],
             family: Default::default(),
         };

@@ -372,6 +372,7 @@ mod tests {
             actor: None,
             weapon: None,
             metres_per_pixel: 0.0,
+            ..Default::default()
         }
     }
 

@@ -1148,6 +1148,7 @@ pub(crate) fn doom_map_place(
                 // multiplayer-only) so a future difficulty option can
                 // re-derive another cast without re-importing the WAD.
                 flags: flags as u32,
+                ..Default::default()
             });
         }
     }
@@ -1393,6 +1394,7 @@ pub(crate) fn quake_bsp_place(bytes: &[u8], source: &str, world_key: &str) -> cr
                         // Quake's .map entities carry no Doom-style skill
                         // bits; nothing to preserve here.
                         flags: 0,
+                        ..Default::default()
                     });
                     i += 1;
                 }

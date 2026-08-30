@@ -119,9 +119,48 @@ pub fn convert_classic_ex(
     let mut files = collect_classic_files(pack_dir)?;
     if files.is_empty() {
         return Err(ClassicImportError::new(format!(
-            "folder has no classic sources (wad/pak/bsp/mdl/spr/wav/grp/map/pk3/pk4/md5mesh/proc): {}",
+            "folder has no classic sources (wad/pak/mix/bsp/mdl/spr/wav/grp/map/pk3/pk4/md5mesh/proc): {}",
             pack_dir.display()
         )));
+    }
+
+    if matches!(
+        source,
+        ClassicSource::Cnc
+            | ClassicSource::RedAlert
+            | ClassicSource::TiberianSun
+            | ClassicSource::Dune2000
+    ) {
+        let mut cancelled = false;
+        let mut forward = |progress| {
+            if !on_progress(progress) {
+                cancelled = true;
+            }
+        };
+        let assets = crate::cnc_import::convert::convert_pack(
+            source,
+            pack_dir,
+            staged_dir,
+            &mut forward,
+        )
+        .map_err(ClassicImportError::new)?;
+        if cancelled {
+            return Err(ClassicImportError::new("cancelled"));
+        }
+        if assets.is_empty() {
+            return Err(ClassicImportError::new(format!(
+                "no convertible assets in {}",
+                pack_dir.display()
+            )));
+        }
+        return Ok(ClassicConvertReport {
+            source,
+            assets,
+            staged_dir: staged_dir.to_path_buf(),
+            bake: BakeStats::default(),
+            skipped,
+            warnings,
+        });
     }
 
     // Expand PAKs outside the staged tree. `_pak/` inside staged is not a
@@ -388,7 +427,8 @@ pub fn convert_classic_ex(
             ClassicFileKind::Pak
             | ClassicFileKind::Grp
             | ClassicFileKind::Pk3
-            | ClassicFileKind::Pk4 => {}
+            | ClassicFileKind::Pk4
+            | ClassicFileKind::Mix => {}
             ClassicFileKind::Zip => {}
             ClassicFileKind::Art => {}
             ClassicFileKind::Map if idtech4 => {
@@ -668,6 +708,7 @@ enum ClassicFileKind {
     Png,
     Wal,
     Zip,
+    Mix,
 }
 
 struct ClassicFile {
@@ -779,6 +820,7 @@ fn collect_classic_files(root: &Path) -> Result<Vec<ClassicFile>, ClassicImportE
                 "png" => ClassicFileKind::Png,
                 "wal" => ClassicFileKind::Wal,
                 "zip" => ClassicFileKind::Zip,
+                "mix" => ClassicFileKind::Mix,
                 _ => continue,
             };
             out.push(ClassicFile { path, rel, kind });
@@ -902,6 +944,7 @@ fn classic_file_from_extracted(path: PathBuf, rel: String) -> Option<ClassicFile
         "art" => ClassicFileKind::Art,
         "map" => ClassicFileKind::Map,
         "wal" => ClassicFileKind::Wal,
+        "mix" => ClassicFileKind::Mix,
         _ => return None,
     };
     if crate::doom3_import::is_fan_mission_rel(&rel) {
@@ -2754,6 +2797,28 @@ mod tests {
         assert_eq!(quake.pack_spec("quake").redistribution.as_deref(), Some("user-owned-local"));
         assert!(doom.terms_url().starts_with("http"));
         assert!(quake.terms_url().starts_with("http"));
+    }
+
+    #[test]
+    fn classic_source_ids_round_trip_every_variant() {
+        for source in [
+            ClassicSource::Doom,
+            ClassicSource::Freedoom,
+            ClassicSource::Quake,
+            ClassicSource::LibreQuake,
+            ClassicSource::Quake2,
+            ClassicSource::Quake3,
+            ClassicSource::Duke3d,
+            ClassicSource::DarkMod,
+            ClassicSource::Cnc,
+            ClassicSource::RedAlert,
+            ClassicSource::TiberianSun,
+            ClassicSource::Dune2000,
+        ] {
+            assert_eq!(ClassicSource::from_id(source.id()), Some(source));
+        }
+        assert_eq!(ClassicSource::from_id("CNC"), Some(ClassicSource::Cnc));
+        assert_eq!(ClassicSource::from_id("unknown"), None);
     }
 
     #[test]

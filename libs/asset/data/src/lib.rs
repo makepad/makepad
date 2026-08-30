@@ -42,8 +42,10 @@ pub mod scene;
 pub mod sha256;
 pub mod stateful_billboard;
 pub mod snapshot;
+pub mod unit_def;
 pub mod value;
 pub mod view_weapon;
+pub mod world_grid;
 pub mod world_place;
 
 pub use activation::{

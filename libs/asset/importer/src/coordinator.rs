@@ -3664,6 +3664,7 @@ mod tests {
                 queue_limit: Some(8),
                 fleet: None,
                 lanes: None,
+                realtime: None,
             }),
             models,
         }

@@ -12,6 +12,7 @@ pub mod billboard_sheet;
 pub mod vertex_skin;
 pub mod classic_fetch;
 pub mod classic_import;
+pub mod cnc_import;
 pub mod iso9660;
 pub mod tdm_zipsync;
 pub mod doom3_import;

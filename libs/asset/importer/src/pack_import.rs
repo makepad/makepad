@@ -1334,6 +1334,15 @@ enum MediaKind {
     /// for the next schema bump (a new canon_enum tag hard-errors every
     /// deployed client).
     Place,
+    /// `<stem>.grid`: the world's walkability/resource grid (`world-grid 1`
+    /// text) for tiled levels — same Source-role sidecar lane as `.place`.
+    Grid,
+    /// Plain `ui-sheets 1` source document. Its referenced sheets remain
+    /// independent Texture assets.
+    UiSource,
+    /// Plain `ui-font 1` source document. Its same-stem PNG is attached as
+    /// the font Data asset's Texture file.
+    FontSource,
 }
 
 impl MediaKind {
@@ -1349,6 +1358,9 @@ impl MediaKind {
             "billboard" => Some(Self::Billboard),
             "spawn" => Some(Self::Spawn),
             "place" => Some(Self::Place),
+            "grid" => Some(Self::Grid),
+            "ui" => Some(Self::UiSource),
+            "font" => Some(Self::FontSource),
             _ => None,
         }
     }
@@ -1358,7 +1370,7 @@ impl MediaKind {
     fn is_sidecar(self) -> bool {
         matches!(
             self,
-            Self::AoMesh | Self::AoPng | Self::ShadowSdf | Self::Spawn | Self::Place
+            Self::AoMesh | Self::AoPng | Self::ShadowSdf | Self::Spawn | Self::Place | Self::Grid
         )
     }
 
@@ -1371,7 +1383,12 @@ impl MediaKind {
             Self::Glb => MediaType::Glb,
             Self::AoMesh | Self::ShadowSdf => MediaType::Bin,
             Self::AoPng => MediaType::Png,
-            Self::Billboard | Self::Spawn | Self::Place => MediaType::Text,
+            Self::Billboard
+            | Self::Spawn
+            | Self::Place
+            | Self::Grid
+            | Self::UiSource
+            | Self::FontSource => MediaType::Text,
         }
     }
 
@@ -1388,6 +1405,9 @@ impl MediaKind {
             Self::Billboard => "billboard",
             Self::Spawn => "spawn",
             Self::Place => "place",
+            Self::Grid => "grid",
+            Self::UiSource => "ui",
+            Self::FontSource => "font",
         }
     }
 }
@@ -3077,6 +3097,9 @@ fn build_manifest(
         if let Some(place) = find(MediaKind::Place) {
             attached.push(place);
         }
+        if let Some(grid) = find(MediaKind::Grid) {
+            attached.push(grid);
+        }
         // The spawn sidecar becomes anchors, never a file: it is metadata
         // the manifest already has room for.
         if let Some(idx) = hashed.iter().position(|f| {
@@ -3188,6 +3211,23 @@ fn build_manifest(
         }
     }
 
+    // Bitmap-font source and its atlas are one store asset. Marking the
+    // same-stem PNG attached here keeps it from also becoming a duplicate
+    // Texture card when the main asset loop reaches it.
+    let mut sheet_for_font: BTreeMap<String, usize> = BTreeMap::new();
+    for manifest in hashed
+        .iter()
+        .filter(|f| f.discovered.kind == MediaKind::FontSource)
+    {
+        if let Some(index) = hashed.iter().position(|candidate| {
+            candidate.discovered.kind == MediaKind::Png
+                && candidate.discovered.key == manifest.discovered.key
+        }) {
+            sheet_for_font.insert(manifest.discovered.key.clone(), index);
+            attached_images.insert(index);
+        }
+    }
+
     let collection = SourceCollection {
         id: source.source_id.clone(),
         title: source.source_title.clone(),
@@ -3244,6 +3284,23 @@ fn build_manifest(
                     push_blob(&mut blobs, &mut seen_blob_paths, t, FileRole::PreviewFront)?;
                 }
                 billboard_asset(file, &hashed[sheet], thumb)?
+            }
+            MediaKind::UiSource => source_data_asset(file, None)?,
+            MediaKind::FontSource => {
+                let sheet = sheet_for_font
+                    .get(&file.discovered.key)
+                    .map(|&index| &hashed[index])
+                    .ok_or_else(|| {
+                        PackImportError::new(
+                            PackImportErrorKind::Malformed,
+                            format!(
+                                "{}: bitmap font needs same-stem PNG sheet",
+                                file.discovered.pack_path
+                            ),
+                        )
+                    })?;
+                push_blob(&mut blobs, &mut seen_blob_paths, sheet, FileRole::Texture)?;
+                source_data_asset(file, Some(sheet))?
             }
             MediaKind::Wav => {
                 let thumb = thumb_for_entry.get(&file.discovered.key).map(|&i| &hashed[i]);
@@ -3316,7 +3373,8 @@ fn build_manifest(
             | MediaKind::AoPng
             | MediaKind::ShadowSdf
             | MediaKind::Spawn
-            | MediaKind::Place => continue,
+            | MediaKind::Place
+            | MediaKind::Grid => continue,
         };
         if !seen_keys.insert(asset.key.as_str().to_string()) {
             return Err(PackImportError::new(
@@ -3462,7 +3520,12 @@ fn role_of(file: &HashedFile) -> FileRole {
         MediaKind::AoMesh => FileRole::AoMesh,
         MediaKind::AoPng => FileRole::AoTexture,
         MediaKind::ShadowSdf => FileRole::ShadowSdf,
-        MediaKind::Billboard | MediaKind::Spawn | MediaKind::Place => FileRole::Source,
+        MediaKind::Billboard
+        | MediaKind::Spawn
+        | MediaKind::Place
+        | MediaKind::Grid
+        | MediaKind::UiSource
+        | MediaKind::FontSource => FileRole::Source,
     }
 }
 
@@ -3592,6 +3655,73 @@ fn texture_asset(
             joints: 0,
             clips: 0,
             max_texture_dim: dims.width.max(dims.height),
+            media_millis: 0,
+        },
+        coordinate_system: PACK_COORD,
+        bounds: Bounds {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        },
+        anchors: Vec::new(),
+        capabilities: Capabilities::default(),
+        spawn_recipe: None,
+    })
+}
+
+fn source_data_asset(
+    source: &HashedFile,
+    sheet: Option<&HashedFile>,
+) -> Result<ImportAsset, PackImportError> {
+    let mut files = vec![ImportFile {
+        path: source.discovered.pack_path.clone(),
+        file: AssetFile {
+            role: FileRole::Source,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media: MediaType::Text,
+            blob: source.blob,
+            byte_len: source.byte_len,
+            dims: None,
+        },
+    }];
+    let mut total_bytes = source.byte_len;
+    let mut max_texture_dim = 0;
+    if let Some(sheet) = sheet {
+        let dims = sheet.dims.ok_or_else(|| {
+            PackImportError::new(
+                PackImportErrorKind::Malformed,
+                format!("{}: bitmap-font sheet has no dimensions", sheet.discovered.pack_path),
+            )
+        })?;
+        total_bytes = total_bytes.checked_add(sheet.byte_len).ok_or_else(|| {
+            PackImportError::new(PackImportErrorKind::Malformed, "file byte_len sum")
+        })?;
+        max_texture_dim = dims.width.max(dims.height);
+        files.push(ImportFile {
+            path: sheet.discovered.pack_path.clone(),
+            file: AssetFile {
+                role: FileRole::Texture,
+                tier: DeviceTier::Any,
+                lod: 0,
+                media: sheet.discovered.kind.media_type(),
+                blob: sheet.blob,
+                byte_len: sheet.byte_len,
+                dims: Some(dims),
+            },
+        });
+    }
+    Ok(ImportAsset {
+        key: parse_key(&source.discovered.key)?,
+        kind: AssetKind::Data,
+        files,
+        thumbnail: None,
+        metrics: Metrics {
+            total_bytes,
+            triangles: 0,
+            vertices: 0,
+            joints: 0,
+            clips: 0,
+            max_texture_dim,
             media_millis: 0,
         },
         coordinate_system: PACK_COORD,
@@ -4088,7 +4218,10 @@ fn mesh_asset(
             file: AssetFile {
                 role: role_of(sidecar),
                 tier: DeviceTier::Any,
-                lod: 0,
+                // `.place` and `.grid` are both Source-role text blobs on one
+                // world; the manifest keys files by (role, tier, lod), so the
+                // grid takes lod 1. Readers tell them apart by their magic line.
+                lod: if kind == MediaKind::Grid { 1 } else { 0 },
                 media: kind.media_type(),
                 blob: sidecar.blob,
                 byte_len: sidecar.byte_len,
@@ -4520,6 +4653,35 @@ fn measure_handle(
                 .and_then(|text| crate::world_place::WorldPlace::parse(text).ok())
                 .is_some();
             Ok(Measured { sidecar_ok: ok, ..Measured::default() })
+        }
+        MediaKind::Grid => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let ok = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| makepad_asset_data::world_grid::WorldGrid::parse(text).ok())
+                .is_some();
+            Ok(Measured { sidecar_ok: ok, ..Measured::default() })
+        }
+        MediaKind::UiSource | MediaKind::FontSource => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                PackImportError::new(
+                    PackImportErrorKind::Malformed,
+                    format!("{}: source manifest is not utf-8", file.pack_path),
+                )
+            })?;
+            let magic = if file.kind == MediaKind::UiSource {
+                "ui-sheets 1"
+            } else {
+                "ui-font 1"
+            };
+            if text.lines().next() != Some(magic) {
+                return Err(PackImportError::new(
+                    PackImportErrorKind::Malformed,
+                    format!("{}: expected {magic} header", file.pack_path),
+                ));
+            }
+            Ok(Measured::ok())
         }
         // A manifest that cannot be read is refused, never published as a
         // mystery blob: its frame list is what keeps the per-frame PNGs out
@@ -7223,6 +7385,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn ui_manifest_extensions_are_text_source_assets() {
+        for (extension, kind) in [
+            ("ui", MediaKind::UiSource),
+            ("font", MediaKind::FontSource),
+        ] {
+            assert_eq!(MediaKind::from_ext(extension), Some(kind));
+            assert_eq!(kind.media_type(), MediaType::Text);
+            assert!(!kind.is_sidecar());
+        }
+    }
 
     /// The `.place` placements sidecar (world-place 1 text) rides the same
     /// sidecar lane as `.spawn`: recognized by extension, attached to the
