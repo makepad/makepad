@@ -5004,6 +5004,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("upscale", "realesrgan-x4plus"),
             ("vision", "qwen3.8-27b-vision"),
             ("video", "fasth3-4step"),
+            ("video", "fasth3-4step-q4-24g"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),

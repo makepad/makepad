@@ -23,7 +23,7 @@
 //!   introspection, plus catalog ops when the Asset Server is up),
 //!   LIBRARY (searchable Local/Server asset browser with kind/category/tag
 //!   filters, thumbnail grid and a revision/provenance/publish detail rail),
-//!   IMPORT (hardcoded OSS pack modules — Kenney first, local-folder only),
+//!   IMPORT (hardcoded licensed pack modules — Kenney first),
 //!   RUNS + WORKERS (local pipeline + LAN fleet, cancellable),
 //!   and ADMIN + AUDIT. The left generator column
 //!   stays on all of them. Server
@@ -76,6 +76,7 @@ use crate::annotate_queue::AnnotateQueue;
 use crate::runs_chip::RunsChip;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
+use makepad_asset_importer::classic_import::ClassicSource;
 use crate::music_page::MusicImportPage;
 use crate::library::{Library, ThumbnailBackfillJob};
 use crate::billboard_view::BillboardView;
@@ -3241,6 +3242,32 @@ script_mod! {
                                         HintLabel{ text: "Official Duke Nukem 3D shareware. Local preview in this app only. Not a redistributable grant. Not retail Atomic Edition. Optional HRP stays under the Duke4 HRP license." }
                                     }
 
+                                    ea_card := ImportRow{
+                                        flow: Down spacing: 4
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            ea_import_btn := PrimaryButton{ text: "Load" }
+                                            BrightLabel{ text: "Command & Conquer classics (EA freeware)" width: 280 }
+                                            ea_license_label := HintLabel{ text: "EA freeware · local preview only" }
+                                            LinkLabel{ text: "Terms" url: "https://www.ea.com/games/command-and-conquer" }
+                                        }
+                                        DropField{
+                                            FieldCaption{ text: "Pack" }
+                                            ea_pack_drop := FieldDrop{}
+                                        }
+                                        ea_blurb_label := HintLabel{
+                                            text: "EA's 1995 RTS, freeware since 2007 — terrain, units, structures, sounds and every campaign and multiplayer map convert into RTS maps for the sandbox."
+                                        }
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            ea_status_label := HintLabel{ width: Fill text: "" }
+                                            ea_cancel_btn := DangerButton{ text: "Cancel" visible: false }
+                                        }
+                                        ea_progress := ProgressBar{ width: Fill height: 5 }
+                                    }
+
                                     quake2_card := ImportRow{
                                         flow: Down spacing: 2
                                         View{
@@ -3920,7 +3947,7 @@ const VOICES: &[&str] = &[
 ];
 
 /// Right-pane surface behind the nav tabs. Create keeps the viewer +
-/// History strip; Import is the OSS pack catalog; the others are Asset
+/// History strip; Import is the licensed pack catalog; the others are Asset
 /// Store views.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Surface {
@@ -3947,7 +3974,7 @@ struct AutoRun {
     /// AI_CONTENT_SURFACE="library"|"import"|"runs"|"admin": start on that
     /// surface (headless captures of the Asset Store / Import views).
     surface: Option<String>,
-    /// ASSET_UI_IMPORT="duke3d": queue that classic Import card once the UI is up.
+    /// ASSET_UI_IMPORT: queue named Import cards once the UI is up.
     import: Option<String>,
     capture: Option<PathBuf>,
     /// AI_CONTENT_CAPTURE_AT_S: capture at a fixed time after startup
@@ -4371,6 +4398,16 @@ impl App {
         self.ui
             .combo_box(cx, ids!(preset_drop))
             .set_labels(cx, labels);
+        self.ui.combo_box(cx, ids!(ea_pack_drop)).set_labels(
+            cx,
+            crate::import_classic::EA_PACK_LABELS
+                .iter()
+                .map(|label| (*label).to_string())
+                .collect(),
+        );
+        self.ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .set_selected_item(cx, 0);
         self.ui
             .combo_box(cx, ids!(box_drop))
             .set_labels(cx, vec!["auto (affinity)".to_string()]);
@@ -11439,6 +11476,12 @@ impl App {
         }
     }
 
+    fn selected_ea_source(&self, cx: &mut Cx) -> ClassicSource {
+        crate::import_classic::ea_source_for_index(
+            self.ui.combo_box(cx, ids!(ea_pack_drop)).selected_item(),
+        )
+    }
+
     fn refresh_import_ui(&mut self, cx: &mut Cx) {
         let _modules = crate::import_classic::PACK_MODULES_WITH_CLASSIC;
         let labels = crate::import::kenney_pack_labels();
@@ -11558,6 +11601,43 @@ impl App {
                 "Load"
             },
         );
+        let ea_index = self
+            .ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .selected_item()
+            .min(crate::import_classic::EA_MODULES.len() - 1);
+        let ea_source = crate::import_classic::ea_source_for_index(ea_index);
+        let ea_module = &crate::import_classic::EA_MODULES[ea_index];
+        let ea_card = self.classic_import_page.card(ea_source);
+        let ea_job = ImportJob::EaClassic {
+            source: ea_source,
+            path: String::new(),
+        };
+        self.ui.button(cx, ids!(ea_import_btn)).set_text(
+            cx,
+            if self.import_queue.is_active(&ea_job) && ea_card.compiling() {
+                "Loading…"
+            } else if self.import_queue.has_job(&ea_job) {
+                "Waiting"
+            } else {
+                "Load"
+            },
+        );
+        self.ui
+            .label(cx, ids!(ea_blurb_label))
+            .set_text(cx, ea_module.blurb);
+        self.ui
+            .label(cx, ids!(ea_license_label))
+            .set_text(cx, ea_module.license);
+        self.ui
+            .label(cx, ids!(ea_status_label))
+            .set_text(cx, &ea_card.status_line(self.store.connected()));
+        self.ui
+            .view(cx, ids!(ea_progress))
+            .set_uniform(cx, live_id!(progress), &[ea_card.progress_fraction()]);
+        self.ui
+            .button(cx, ids!(ea_cancel_btn))
+            .set_visible(cx, self.import_queue.has_job(&ea_job));
         let q2_job = ImportJob::Quake2 { path: String::new() };
         self.ui.button(cx, ids!(quake2_import_btn)).set_text(
             cx,
@@ -11733,6 +11813,15 @@ impl App {
                         crate::import::ImportPhase::Failed { .. }
                     ),
                 ),
+                ImportJob::EaClassic { source, .. } => {
+                    let card = self.classic_import_page.card(*source);
+                    (
+                        active.job.title(),
+                        card.status_line(self.store.connected()),
+                        card.progress_fraction(),
+                        matches!(card.phase, crate::import::ImportPhase::Failed { .. }),
+                    )
+                }
                 ImportJob::Quake2 { .. } => (
                     active.job.title(),
                     self.classic_import_page
@@ -11964,6 +12053,10 @@ impl App {
                 .classic_import_page
                 .duke3d
                 .start_import(cx, path.clone(), server),
+            ImportJob::EaClassic { source, path } => self
+                .classic_import_page
+                .card_mut(*source)
+                .start_import(cx, path.clone(), server),
             ImportJob::Quake2 { path } => self
                 .classic_import_page
                 .quake2
@@ -12019,6 +12112,9 @@ impl App {
             }
             Some(ImportJob::Duke3d { .. }) => {
                 self.classic_import_page.duke3d.request_stop(cx);
+            }
+            Some(ImportJob::EaClassic { source, .. }) => {
+                self.classic_import_page.card_mut(*source).request_stop(cx);
             }
             Some(ImportJob::Quake2 { .. }) => {
                 self.classic_import_page.quake2.request_stop(cx);
@@ -13096,6 +13192,15 @@ impl MatchEvent for App {
                 self.refresh_import_ui(cx);
             }
         }
+        if self
+            .ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .changed(actions)
+            .is_some()
+            && self.surface == Surface::Import
+        {
+            self.refresh_import_ui(cx);
+        }
         if self.ui.button(cx, ids!(kenney_import_btn)).clicked(actions) {
             let (pack, _) = self.import_page.selected_pack_id();
             self.open_kenney_donate_modal(
@@ -13209,6 +13314,36 @@ impl MatchEvent for App {
                     path: String::new(),
                 },
             );
+        }
+        if self.ui.button(cx, ids!(ea_import_btn)).clicked(actions) {
+            let source = self.selected_ea_source(cx);
+            log!("import: queue {}", source.title());
+            self.enqueue_import(
+                cx,
+                ImportJob::EaClassic {
+                    source,
+                    path: String::new(),
+                },
+            );
+        }
+        if self.ui.button(cx, ids!(ea_cancel_btn)).clicked(actions) {
+            let source = self.selected_ea_source(cx);
+            let job = ImportJob::EaClassic {
+                source,
+                path: String::new(),
+            };
+            if self.import_queue.is_active(&job) {
+                self.stop_active_import(cx);
+            } else if let Some(id) = self
+                .import_queue
+                .pending
+                .iter()
+                .find(|item| item.job.conflicts(&job))
+                .map(|item| item.id)
+            {
+                self.import_queue.remove(id);
+                self.refresh_import_ui(cx);
+            }
         }
         if self.ui.button(cx, ids!(quake2_import_btn)).clicked(actions) {
             log!("import: queue Quake II shareware");
@@ -14636,7 +14771,7 @@ impl AppMain for App {
                 }
                 if classic_poll {
                     log!(
-                        "import classic: freedoom={} librequake={} duke3d={} quake2={} quake3={}",
+                        "import classic: freedoom={} librequake={} duke3d={} cnc={} ra={} ts={} d2k={} quake2={} quake3={}",
                         self.classic_import_page
                             .freedoom
                             .status_line(self.store.connected()),
@@ -14646,6 +14781,10 @@ impl AppMain for App {
                         self.classic_import_page
                             .duke3d
                             .status_line(self.store.connected()),
+                        self.classic_import_page.cnc.status_line(self.store.connected()),
+                        self.classic_import_page.ra.status_line(self.store.connected()),
+                        self.classic_import_page.ts.status_line(self.store.connected()),
+                        self.classic_import_page.d2k.status_line(self.store.connected()),
                         self.classic_import_page
                             .quake2
                             .status_line(self.store.connected()),
@@ -14829,12 +14968,29 @@ impl AppMain for App {
                     }
                     let job = match lower.as_str() {
                         "duke3d" | "duke" => Some(ImportJob::Duke3d { path: empty() }),
+                        "cnc" | "tiberian" | "td" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::Cnc,
+                            path: empty(),
+                        }),
+                        "ra" | "redalert" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::RedAlert,
+                            path: empty(),
+                        }),
+                        "ts" | "tiberiansun" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::TiberianSun,
+                            path: empty(),
+                        }),
+                        "d2k" | "dune" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::Dune2000,
+                            path: empty(),
+                        }),
                         "quake3" | "quakeiii" | "q3" => Some(ImportJob::Quake3 { path: empty() }),
                         "quake2" | "q2" => Some(ImportJob::Quake2 { path: empty() }),
                         "quake" | "q1" => Some(ImportJob::Quake { path: empty() }),
                         "doom" => Some(ImportJob::Doom { path: empty() }),
                         "freedoom" => Some(ImportJob::Freedoom { path: empty() }),
                         "librequake" => Some(ImportJob::LibreQuake { path: empty() }),
+                        "darkmod" => Some(ImportJob::DarkMod { path: empty() }),
                         "kenney" | "kenney-all" => Some(ImportJob::KenneyAll),
                         _ => None,
                     };
@@ -15660,7 +15816,6 @@ mod search_box_tests {
 #[cfg(test)]
 mod library_view_tests {
     use super::*;
-    use makepad_asset_client::FacetKind;
 
     /// A changed filter is a changed RESULT SET, and both Library bodies go
     /// back to the top when it changes — a narrowed filter must not leave

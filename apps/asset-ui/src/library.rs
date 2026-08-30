@@ -1219,7 +1219,15 @@ pub fn infer_import_tags(
 
 fn push_prompt_source_tag(tags: &mut Vec<String>, prompt: &str) {
     let p = prompt.to_ascii_lowercase();
-    let source = if p.starts_with("the dark mod") {
+    let source = if p == "cnc" || p.starts_with("cnc ") || p.starts_with("cnc:") {
+        "cnc"
+    } else if p == "ra" || p.starts_with("ra ") || p.starts_with("ra:") {
+        "ra"
+    } else if p == "ts" || p.starts_with("ts ") || p.starts_with("ts:") {
+        "ts"
+    } else if p == "d2k" || p.starts_with("d2k ") || p.starts_with("d2k:") {
+        "d2k"
+    } else if p.starts_with("the dark mod") {
         "darkmod"
     } else if p.starts_with("freedoom") {
         "freedoom"
