@@ -97,6 +97,9 @@ mod music_dsp;
 mod music_import_ui;
 mod music_view;
 mod score_preview;
+// Which columns a track list shows and in what order — the operator's, not
+// the template's.
+mod columns;
 // What may be worked out about a track before anyone asks to play it, and
 // where the results of that work are kept.
 mod preprocess;
@@ -105,6 +108,10 @@ mod stems;
 // `wave_analysis` because pitch class is the one thing that file's energy
 // envelopes have already discarded.
 mod track_key;
+// Artist, album, genre, year, bitrate: what the file already says about
+// itself. Nothing analyses these, which is why they fill in for a track no
+// pass has ever looked at.
+mod track_tags;
 mod wave_analysis;
 mod pads;
 mod local_store;
@@ -151,14 +158,16 @@ use crate::side_channels::{
 use crate::music_view::{
     format_bpm, format_duration, format_pitch, track_list_hits, OverviewEvent,
     PhonesLine, PhonesWaveAction, TrackKey, VjPhonesWave,
-    LIBRARY_NARROW_WIDTH, MARK_COLUMN_NARROW,
+    LIBRARY_NARROW_WIDTH,
     TrackListHit, TrackRowEntry, VjTrackList, VjWaveOverview, VjWaveScroll, WaveEvent, WaveLane,
 };
 use crate::lyrics::{
     KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
+use crate::columns::{Column, ColumnLayout};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
+use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
     AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid, TrackSummary,
 };
@@ -5842,46 +5851,39 @@ fn env_millis(name: &str, fallback: Duration, min: u64, max: u64) -> Duration {
 
 
 
-/// Which column is holding the library's order. Every head can take it; a
+/// Which column is holding the library's order — `None` for however the
+/// catalog (or the folder) handed the rows over. Every head can take it; a
 /// second click on the one that has it reverses the order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum MusicSort {
-    /// However the catalog (or the folder) handed the rows over.
-    #[default]
-    Listed,
-    Title,
-    Artist,
-    Bpm,
-    Key,
-    Time,
-    Stem,
-    Krk,
-    Tags,
-}
-
-/// The heads, their ids and the words under the arrow.
-const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 8] = [
-    (MusicSort::Title, ids!(th_title), "TITLE"),
-    (MusicSort::Artist, ids!(th_artist), "ARTIST"),
-    (MusicSort::Bpm, ids!(th_bpm), "BPM"),
-    (MusicSort::Key, ids!(th_key), "KEY"),
-    (MusicSort::Time, ids!(th_time), "TIME"),
-    (MusicSort::Stem, ids!(music_th_stem), "STEM"),
-    (MusicSort::Krk, ids!(music_th_krk), "KRK"),
-    (MusicSort::Tags, ids!(th_tags), "TAGS"),
-];
+///
+/// This is the COLUMN rather than a parallel enum of sortable things: the
+/// operator can now add and reorder columns, and a second list of what is
+/// sortable would only be somewhere for the two to disagree.
+type MusicSort = Option<Column>;
 /// The library row's chips and the words they wear when there is room. Below
 /// `LIBRARY_NARROW_WIDTH` they keep only their icons.
-const LIBRARY_CHIPS: [(&[LiveId], &str); 8] = [
+///
+/// Split from the set list's chips below because the two lists now have a
+/// GRIP between them: dragging it makes one narrow and the other wide at the
+/// same moment, and a single measurement would have the set list's buttons
+/// answering to the listing's width — collapsing the wrong row, or refusing
+/// to collapse the row that actually ran out of room.
+const LIBRARY_CHIPS: [(&[LiveId], &str); 5] = [
     (ids!(music_go), "Search"),
     (ids!(music_more), "More"),
     (ids!(music_local), "LOCAL FILES"),
     (ids!(music_import), "IMPORT"),
     (ids!(music_autoplay), "AUTOPLAY"),
+];
+/// The set list's own chips, measured against the set list's own width.
+const QUEUE_CHIPS: [(&[LiveId], &str); 3] = [
     (ids!(queue_repeat), "REPEAT"),
     (ids!(queue_shuffle), "SHUFFLE"),
     (ids!(queue_clear), "Clear"),
 ];
+/// Where the set list's chips give up their words. Lower than the listing's
+/// threshold because the set list is the narrower column by design: its
+/// three chips plus the word QUEUE and a count is about this much.
+const QUEUE_NARROW_WIDTH: f64 = 360.0;
 
 /// The category field: twelve characters of room, eight when the console is
 /// narrow. Both are the cell's width — the field itself fills it.
@@ -6592,6 +6594,12 @@ pub struct App {
     scan_max_beats_ix: usize,
     #[rust(10usize)]
     scan_count: usize,
+    #[rust(true)]
+    scan_overlap: bool,
+    #[rust(2.0)]
+    scan_gap_secs: f64,
+    #[rust(4usize)]
+    scan_gap_beats: usize,
     #[rust]
     scan_automatic: bool,
     /// A scan asked for before the track's analysis landed. Tagged with
@@ -6753,6 +6761,22 @@ pub struct App {
     /// The preprocessing dialog, as it survives restarts.
     #[rust]
     prep: PreprocessSettings,
+    /// Which columns each list shows, and in what order. Two layouts, not
+    /// one: the set list is a 320-point column and cannot wear what the
+    /// explorer wears, but it does want tempo and key.
+    #[rust(ColumnLayout::explorer_default())]
+    explorer_columns: ColumnLayout,
+    #[rust(ColumnLayout::queue_default())]
+    queue_columns: ColumnLayout,
+    /// The columns dialog is editing the SET LIST's layout rather than the
+    /// explorer's. One dialog, two answers.
+    #[rust]
+    prep_columns_queue: bool,
+    /// Container metadata per track — artist, album, genre, year, bitrate.
+    /// Memoized like [`App::track_summaries`] and for the same reason: a
+    /// listing rebuilds constantly and a tag read is a file open.
+    #[rust]
+    track_tags: HashMap<AnalysisKey, TrackTags>,
     /// Which destructive question the shared Yes/No dialog is currently
     /// asking, so its Yes knows what it is agreeing to.
     #[rust]
@@ -6810,6 +6834,10 @@ pub struct App {
     /// them. `None` until the first measurement lands.
     #[rust]
     library_narrow: Option<bool>,
+    /// The same question for the set list, which has its own width now that
+    /// a grip decides where the two lists meet.
+    #[rust]
+    queue_narrow: Option<bool>,
     /// What each library chip measured while it still wore its word — the
     /// width to put back when the console widens again.
     #[rust]
@@ -14781,6 +14809,19 @@ p2 {}
                             }
                             MediaPurpose::Analyze { key, gen, media } => {
                                 if gen == self.prep_generation {
+                                    // The one moment a store track's bytes
+                                    // are on this machine: read what the file
+                                    // says about itself while it is here.
+                                    // Nothing analyses these fields, but they
+                                    // are unreachable until something has
+                                    // fetched the record.
+                                    let cache_key = AnalysisKey::from_raw(key.clone());
+                                    if !self.track_tags.contains_key(&cache_key) {
+                                        let tags = track_tags::read_for_path(&path)
+                                            .unwrap_or_default();
+                                        self.track_tags.insert(cache_key, tags);
+                                        self.music_rows_dirty = true;
+                                    }
                                     self.decode
                                         .submit(DecodeJob::Analyze { key, gen, path, media });
                                 } else {
@@ -17686,6 +17727,141 @@ p2 {}
         service::session_config_from_env().cache_parent.join("preprocess.txt")
     }
 
+    /// The columns dialog's twelve rows: show tick, name, and the pair that
+    /// moves it. One row per column, in the edited list's current order.
+    const PREP_COL_ROWS: [(&'static [LiveId], &'static [LiveId], &'static [LiveId],
+        &'static [LiveId]); 12] = [
+        (ids!(prep_col_show0), ids!(prep_col_label0), ids!(prep_col_up0), ids!(prep_col_down0)),
+        (ids!(prep_col_show1), ids!(prep_col_label1), ids!(prep_col_up1), ids!(prep_col_down1)),
+        (ids!(prep_col_show2), ids!(prep_col_label2), ids!(prep_col_up2), ids!(prep_col_down2)),
+        (ids!(prep_col_show3), ids!(prep_col_label3), ids!(prep_col_up3), ids!(prep_col_down3)),
+        (ids!(prep_col_show4), ids!(prep_col_label4), ids!(prep_col_up4), ids!(prep_col_down4)),
+        (ids!(prep_col_show5), ids!(prep_col_label5), ids!(prep_col_up5), ids!(prep_col_down5)),
+        (ids!(prep_col_show6), ids!(prep_col_label6), ids!(prep_col_up6), ids!(prep_col_down6)),
+        (ids!(prep_col_show7), ids!(prep_col_label7), ids!(prep_col_up7), ids!(prep_col_down7)),
+        (ids!(prep_col_show8), ids!(prep_col_label8), ids!(prep_col_up8), ids!(prep_col_down8)),
+        (ids!(prep_col_show9), ids!(prep_col_label9), ids!(prep_col_up9), ids!(prep_col_down9)),
+        (
+            ids!(prep_col_show10),
+            ids!(prep_col_label10),
+            ids!(prep_col_up10),
+            ids!(prep_col_down10),
+        ),
+        (
+            ids!(prep_col_show11),
+            ids!(prep_col_label11),
+            ids!(prep_col_up11),
+            ids!(prep_col_down11),
+        ),
+    ];
+
+    /// The layout the columns dialog is currently editing.
+    fn edited_columns(&mut self) -> &mut ColumnLayout {
+        match self.prep_columns_queue {
+            true => &mut self.queue_columns,
+            false => &mut self.explorer_columns,
+        }
+    }
+
+    /// Paint the columns dialog from the layout it is editing.
+    fn sync_columns_panel(&mut self, cx: &mut Cx) {
+        let queue = self.prep_columns_queue;
+        let layout = match queue {
+            true => self.queue_columns.clone(),
+            false => self.explorer_columns.clone(),
+        };
+        self.paint_lit(cx, ids!(prep_cols_explorer), !queue);
+        self.paint_lit(cx, ids!(prep_cols_queue), queue);
+        let note = match queue {
+            true => "the set list is narrow — pick few",
+            false => "",
+        };
+        self.ui.label(cx, ids!(prep_cols_note)).set_text(cx, note);
+        for (slot, (show, label, _, _)) in Self::PREP_COL_ROWS.iter().enumerate() {
+            let Some(column) = layout.order().get(slot).copied() else { continue };
+            self.ui
+                .check_box(cx, show)
+                .set_active(cx, layout.is_visible(column), Animate::No);
+            // The name says what the column is; the suffix says why it might
+            // be blank, so nobody hunts for a tag the file never carried.
+            let word = match column.needs_analysis() {
+                true => format!("{}  (from analysis)", column.label()),
+                false => column.label().to_string(),
+            };
+            self.ui.label(cx, label).set_text(cx, &word);
+        }
+    }
+
+    fn handle_columns_modal(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(prep_columns_open)).clicked(actions) {
+            self.sync_columns_panel(cx);
+            self.ui.modal(cx, ids!(prep_columns_modal)).open(cx);
+        }
+        if self.ui.button(cx, ids!(prep_cols_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(prep_columns_modal)).close(cx);
+        }
+        for (queue, chip) in
+            [(false, ids!(prep_cols_explorer)), (true, ids!(prep_cols_queue))]
+        {
+            if self.ui.button(cx, chip).clicked(actions) {
+                self.prep_columns_queue = queue;
+                self.sync_columns_panel(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(prep_cols_reset)).clicked(actions) {
+            let fresh = match self.prep_columns_queue {
+                true => ColumnLayout::queue_default(),
+                false => ColumnLayout::explorer_default(),
+            };
+            *self.edited_columns() = fresh;
+            self.commit_columns(cx);
+        }
+        // One pass, at most one change: a move rewrites the order under the
+        // rows, so acting on two clicks from the same frame would apply the
+        // second to a list it was never aimed at.
+        let mut changed = false;
+        for (slot, (show, _, up, down)) in Self::PREP_COL_ROWS.iter().enumerate() {
+            let Some(column) = self.edited_columns().order().get(slot).copied() else {
+                continue;
+            };
+            if let Some(on) = self.ui.check_box(cx, show).changed(actions) {
+                self.edited_columns().set_visible(column, on);
+                changed = true;
+            }
+            if !changed && self.ui.button(cx, up).clicked(actions) {
+                self.edited_columns().move_up(column);
+                changed = true;
+            }
+            if !changed && self.ui.button(cx, down).clicked(actions) {
+                self.edited_columns().move_down(column);
+                changed = true;
+            }
+            if changed {
+                break;
+            }
+        }
+        if changed {
+            self.commit_columns(cx);
+        }
+    }
+
+    /// A changed layout: saved, pushed to the lists, repainted in the dialog.
+    fn commit_columns(&mut self, cx: &mut Cx) {
+        self.save_preprocess_settings();
+        self.sync_columns(cx);
+        self.sync_columns_panel(cx);
+        // The sort may be holding a column that is no longer shown; the rows
+        // are rebuilt either way, and a hidden column that still orders the
+        // list is a listing nobody can explain.
+        if self.music_sort.is_some_and(|column| !self.explorer_columns.is_visible(column)) {
+            self.music_sort = None;
+            self.music_sort_desc = false;
+        }
+        self.music_rows_dirty = true;
+        self.queue_rows_dirty = true;
+        self.ui.redraw(cx);
+    }
+
     /// The listing's HAS chips, in [`PASSES`] order so a chip and the thing
     /// it filters on can never drift apart.
     const MUSIC_HAS_CHIPS: [&'static [LiveId]; 4] = [
@@ -17934,7 +18110,16 @@ p2 {}
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, self.prep.to_text());
+        // The column layouts ride in the same file, on the same `key value`
+        // lines: they are the same dialog, and two files would be two things
+        // to keep in step for no gain.
+        let body = format!(
+            "{}explorer_columns {}\nqueue_columns {}\n",
+            self.prep.to_text(),
+            self.explorer_columns.to_text(),
+            self.queue_columns.to_text(),
+        );
+        let _ = std::fs::write(path, body);
     }
 
     /// Read the dialog back, and put its cache root in force before anything
@@ -17942,6 +18127,18 @@ p2 {}
     fn load_preprocess_settings(&mut self) {
         if let Ok(body) = std::fs::read_to_string(Self::preprocess_settings_path()) {
             self.prep = PreprocessSettings::from_text(&body);
+            for line in body.lines() {
+                let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                    continue;
+                };
+                match key {
+                    "explorer_columns" => {
+                        self.explorer_columns = ColumnLayout::from_text(value)
+                    }
+                    "queue_columns" => self.queue_columns = ColumnLayout::from_text(value),
+                    _ => {}
+                }
+            }
         }
         preprocess::set_cache_root(self.prep.cache_root.clone());
     }
@@ -18641,6 +18838,9 @@ p2 {}
             min_beats_ix: self.scan_min_beats_ix,
             max_beats_ix: self.scan_max_beats_ix,
             count: self.scan_count,
+            overlap: self.scan_overlap,
+            min_gap_secs: self.scan_gap_secs,
+            min_gap_beats: self.scan_gap_beats,
             automatic: self.scan_automatic,
         }
     }
@@ -18652,6 +18852,9 @@ p2 {}
         self.scan_min_beats_ix = settings.min_beats_ix;
         self.scan_max_beats_ix = settings.max_beats_ix;
         self.scan_count = settings.count;
+        self.scan_overlap = settings.overlap;
+        self.scan_gap_secs = settings.min_gap_secs;
+        self.scan_gap_beats = settings.min_gap_beats;
         self.scan_automatic = settings.automatic;
     }
 
@@ -21729,22 +21932,39 @@ p2 {}
     /// STEM for S keeps it — S ▲ still reads.
     fn sync_sort_heads(&mut self, cx: &mut Cx) {
         let narrow = self.library_narrow.unwrap_or(false);
-        for (column, head, word) in MUSIC_HEADS {
-            // The two mark columns wear one letter on a narrow console.
-            let word = match (narrow, column) {
-                (true, MusicSort::Stem) => "S",
-                (true, MusicSort::Krk) => "K",
-                _ => word,
+        let shown = self.explorer_columns.visible();
+        for (slot, cell) in music_view::HEAD_CELLS.iter().enumerate() {
+            let head = music_view::HEAD_BUTTONS[slot];
+            let Some(column) = shown.get(slot).copied() else {
+                // Past the end of the layout: no box, no head, no width.
+                self.ui.widget(cx, cell).set_visible(cx, false);
+                continue;
             };
-            let text = if self.music_sort == column {
-                let arrow = if self.music_sort_desc { " ▼" } else { " ▲" };
-                format!("{word}{arrow}")
-            } else {
-                word.to_string()
+            self.ui.widget(cx, cell).set_visible(cx, true);
+            // The CELL carries the width — a Button's walk is private — and
+            // takes it from the same place the rows take theirs, so a
+            // reordered or resized column moves both at once.
+            let size = music_view::column_size(column, narrow);
+            if let Some(mut view) = self.ui.widget(cx, cell).borrow_mut::<View>() {
+                view.walk.width = size;
+            }
+            // A narrow console wears the short word: STEM becomes S, and the
+            // column shrinks with it so the title keeps the pixels.
+            let word = match narrow {
+                true => column.short(),
+                false => column.label(),
+            };
+            let holding = self.music_sort == Some(column);
+            let text = match holding {
+                true => {
+                    let arrow = if self.music_sort_desc { " ▼" } else { " ▲" };
+                    format!("{word}{arrow}")
+                }
+                false => word.to_string(),
             };
             self.ui.button(cx, head).set_text(cx, &text);
-            let lit = self.music_sort == column;
-            let color: Vec4f = Vec4f::from_u32(if lit { 0xfffaf4ff } else { 0xa6b1bdff });
+            let color: Vec4f =
+                Vec4f::from_u32(if holding { 0xfffaf4ff } else { 0xa6b1bdff });
             let mut button = self.ui.button(cx, head);
             script_apply_eval!(cx, button, {
                 draw_text +: {
@@ -21756,6 +21976,19 @@ p2 {}
         self.ui.redraw(cx);
     }
 
+    /// Push both lists' column layouts onto the lists that draw them.
+    fn sync_columns(&mut self, cx: &mut Cx) {
+        let explorer = self.explorer_columns.visible();
+        let queue = self.queue_columns.visible();
+        if let Some(mut list) = self.music_refs.tracks.borrow_mut::<VjTrackList>() {
+            list.set_columns(cx, explorer);
+        }
+        if let Some(mut list) = self.music_refs.queue.borrow_mut::<VjTrackList>() {
+            list.set_columns(cx, queue);
+        }
+        self.sync_sort_heads(cx);
+    }
+
     /// The library's column set follows the width it actually got.
     ///
     /// Below `LIBRARY_NARROW_WIDTH` the two word headers cost more than the
@@ -21764,38 +21997,28 @@ p2 {}
     /// information — keeps the pixels. One measurement drives BOTH the
     /// header cells here and the tick columns in the rows (through
     /// `VjTrackList::set_narrow`), so the two can never disagree.
-    fn sync_library_density(&mut self, cx: &mut Cx) {
-        let area = self.ui.widget(cx, ids!(music_tracks)).area();
-        if !area.is_valid(cx) {
-            return;
-        }
-        let width = area.rect(cx).size.x;
-        if width <= 0.0 {
-            return;
-        }
-        let narrow = width < LIBRARY_NARROW_WIDTH;
-        if self.library_narrow == Some(narrow) {
-            return;
-        }
-        self.library_narrow = Some(narrow);
-        for (cell, wide) in [(ids!(music_th_stem_cell), 36.0), (ids!(music_th_krk_cell), 30.0)] {
-            let widget = self.ui.widget(cx, cell);
-            let mut view_ref = widget.borrow_mut::<View>();
-            if let Some(view) = view_ref.as_mut() {
-                view.walk.width = Size::Fixed(if narrow { MARK_COLUMN_NARROW } else { wide });
-            }
-        }
-        // A chip with its word is as wide as its content; bare, it is a
-        // fixed round key with the icon in the middle of it. Fit alone
-        // cannot centre an icon: the button lays out icon-then-label, and
-        // the gap before an empty label is dead width on the icon's right.
-        //
-        // The wide width is MEASURED, never a constant and never `Fit`: the
-        // script apply takes a number, and handing it `Fit` silently leaves
-        // the chip at whatever number it last had — which is how a widened
-        // console kept a row of round keys. Each chip is measured on the
-        // frame before it first shrinks, when it is still wearing its word.
-        for (index, (chip, label)) in LIBRARY_CHIPS.iter().enumerate() {
+    /// Take one row of chips down to bare icons, or put their words back.
+    ///
+    /// A chip with its word is as wide as its content; bare, it is a fixed
+    /// round key with the icon in the middle of it. Fit alone cannot centre
+    /// an icon: the button lays out icon-then-label, and the gap before an
+    /// empty label is dead width on the icon's right.
+    ///
+    /// The wide width is MEASURED, never a constant and never `Fit`: the
+    /// script apply takes a number, and handing it `Fit` silently leaves the
+    /// chip at whatever number it last had — which is how a widened console
+    /// kept a row of round keys. Each chip is measured on the frame before
+    /// it first shrinks, while it is still wearing its word. `base` is where
+    /// this row starts in the shared measurement cache.
+    fn collapse_chips(
+        &mut self,
+        cx: &mut Cx,
+        chips: &[(&'static [LiveId], &'static str)],
+        base: usize,
+        narrow: bool,
+    ) {
+        for (offset, (chip, label)) in chips.iter().enumerate() {
+            let index = base + offset;
             if narrow && self.chip_wide[index] < 1.0 {
                 let rect = self.ui.button(cx, *chip).area().rect(cx);
                 if rect.size.x > 1.0 {
@@ -21822,6 +22045,63 @@ p2 {}
                 }
             }
         }
+    }
+
+    /// The set list's chips follow the SET LIST's width.
+    ///
+    /// Dragging the grip between the two lists narrows one and widens the
+    /// other in the same gesture, so a set list squeezed to a sliver has to
+    /// give up its words even while the listing beside it has room to
+    /// spare — and get them back when the grip goes the other way.
+    fn sync_queue_density(&mut self, cx: &mut Cx) {
+        let area = self.ui.widget(cx, ids!(music_queue)).area();
+        if !area.is_valid(cx) {
+            return;
+        }
+        let width = area.rect(cx).size.x;
+        if width <= 0.0 {
+            return;
+        }
+        let narrow = width < QUEUE_NARROW_WIDTH;
+        if self.queue_narrow == Some(narrow) {
+            return;
+        }
+        self.queue_narrow = Some(narrow);
+        self.collapse_chips(cx, &QUEUE_CHIPS, LIBRARY_CHIPS.len(), narrow);
+        if let Some(mut list) = self.music_refs.queue.borrow_mut::<VjTrackList>() {
+            list.set_narrow(narrow);
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn sync_library_density(&mut self, cx: &mut Cx) {
+        let area = self.ui.widget(cx, ids!(music_tracks)).area();
+        if !area.is_valid(cx) {
+            return;
+        }
+        let width = area.rect(cx).size.x;
+        if width <= 0.0 {
+            return;
+        }
+        let narrow = width < LIBRARY_NARROW_WIDTH;
+        if self.library_narrow == Some(narrow) {
+            return;
+        }
+        self.library_narrow = Some(narrow);
+        // The header cells take their widths and their words from the same
+        // layout the rows do, so one measurement still moves both.
+        self.sync_sort_heads(cx);
+        // A chip with its word is as wide as its content; bare, it is a
+        // fixed round key with the icon in the middle of it. Fit alone
+        // cannot centre an icon: the button lays out icon-then-label, and
+        // the gap before an empty label is dead width on the icon's right.
+        //
+        // The wide width is MEASURED, never a constant and never `Fit`: the
+        // script apply takes a number, and handing it `Fit` silently leaves
+        // the chip at whatever number it last had — which is how a widened
+        // console kept a row of round keys. Each chip is measured on the
+        // frame before it first shrinks, when it is still wearing its word.
+        self.collapse_chips(cx, &LIBRARY_CHIPS, 0, narrow);
         // Eight characters of category instead of twelve — the floor below
         // which the field stops being a field.
         let widget = self.ui.widget(cx, ids!(music_category_cell));
@@ -21969,6 +22249,19 @@ p2 {}
 
     /// Explorer + queue rows. Both are plain views over engine state.
     fn refresh_music_rows(&mut self, cx: &mut Cx) {
+        // The column layout rides with the rows rather than being pushed
+        // once at boot: the lists are built from the document and a push
+        // that happens first reaches nothing. `set_columns` diffs, so this
+        // costs a vector compare on every pump and a redraw only on a
+        // change the operator actually made.
+        let explorer = self.explorer_columns.visible();
+        let queue = self.queue_columns.visible();
+        if let Some(mut list) = self.music_refs.tracks.borrow_mut::<VjTrackList>() {
+            list.set_columns(cx, explorer);
+        }
+        if let Some(mut list) = self.music_refs.queue.borrow_mut::<VjTrackList>() {
+            list.set_columns(cx, queue);
+        }
         let rows = self.music_row_entries();
         if self.music_rows_dirty || rows != self.music_rows {
             self.music_rows_dirty = false;
@@ -21982,23 +22275,44 @@ p2 {}
             self.prep_next_scan = None;
             self.refresh_prep_status(cx);
         }
-        let queue: Vec<TrackRowEntry> = self
+        // The set list gets the same columns the listing does, from the same
+        // places. It used to be built blank — title and a number and nothing
+        // else — which meant the tempo and key of the record about to play
+        // were the two things the operator could not see.
+        let items: Vec<(usize, AssetId, String)> = self
             .decks
             .queue()
             .iter()
             .enumerate()
-            .map(|(index, item)| TrackRowEntry {
-                key: TrackKey::Asset(item.asset),
-                title: item.title.clone(),
-                artist: String::new(),
-                bpm: String::new(),
-                musical_key: String::new(),
-                duration: String::new(),
-                tags: String::new(),
-                stem: false,
-                krk: false,
-                badge: format!("{}", index + 1),
-                live: false,
+            .map(|(index, item)| (index, item.asset, item.title.clone()))
+            .collect();
+        let queue: Vec<TrackRowEntry> = items
+            .into_iter()
+            .map(|(index, asset, title)| {
+                let key = TrackKey::Asset(asset);
+                let (bpm, musical_key, duration) = self.row_analysis_cells(&key);
+                let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                let side = self
+                    .music_model_tile(asset)
+                    .and_then(|tile| tile.revision)
+                    .and_then(|revision| self.track_side_channels.get(&revision));
+                TrackRowEntry {
+                    key,
+                    title,
+                    artist,
+                    album,
+                    genre,
+                    year,
+                    bitrate,
+                    bpm,
+                    musical_key,
+                    duration,
+                    tags: String::new(),
+                    stem: side.is_some_and(|side| side.stems.is_some()),
+                    krk: side.is_some_and(|side| side.lyrics.is_some()),
+                    badge: format!("{}", index + 1),
+                    live: false,
+                }
             })
             .collect();
         if self.queue_rows_dirty || queue != self.queue_rows {
@@ -22082,6 +22396,64 @@ p2 {}
         summary
     }
 
+    /// One track's container metadata, read once and remembered.
+    ///
+    /// Nothing analyses this — it is what the file already says about itself
+    /// — so it fills in whether or not the preprocessing lane has ever
+    /// looked at the track. Only a local file can be asked: a store track's
+    /// bytes are not on this machine until something fetches them, and
+    /// fetching a whole record to read six fields is not a trade worth
+    /// making on a listing.
+    fn row_tags(&mut self, key: &TrackKey) -> TrackTags {
+        let Some(cache_key) = self.row_analysis_key(key) else {
+            return TrackTags::default();
+        };
+        if let Some(hit) = self.track_tags.get(&cache_key) {
+            return hit.clone();
+        }
+        // A file on this machine is read here and now — it is one bounded
+        // read of the head, and the answer is remembered.
+        let path = match key {
+            TrackKey::Local(path) => Some(path.clone()),
+            TrackKey::Asset(asset) => self.local_by_asset.get(asset).cloned(),
+        };
+        let Some(path) = path else {
+            // A store track's bytes are not here yet. Its tags are read when
+            // the preprocessing lane fetches it, which is the one time they
+            // are on disk anyway — rather than pulling a whole record down
+            // to read six fields.
+            return TrackTags::default();
+        };
+        let tags = track_tags::read_for_path(&path).unwrap_or_default();
+        self.track_tags.insert(cache_key, tags.clone());
+        tags
+    }
+
+    /// The metadata columns for one row, already formatted.
+    ///
+    /// Bitrate prefers what the container states and falls back to the file's
+    /// size over its known length, which is the only honest figure for a
+    /// format whose header does not carry one.
+    fn row_metadata(&mut self, key: &TrackKey) -> (String, String, String, String, String) {
+        let tags = self.row_tags(key);
+        let bitrate = tags.bitrate_kbps.or_else(|| {
+            let path = match key {
+                TrackKey::Local(path) => Some(path.clone()),
+                TrackKey::Asset(asset) => self.local_by_asset.get(asset).cloned(),
+            }?;
+            let bytes = std::fs::metadata(&path).ok()?.len();
+            let secs = self.row_summary(key)?.duration_secs;
+            track_tags::bitrate_from_size(bytes, secs)
+        });
+        (
+            tags.artist,
+            tags.album,
+            tags.genre,
+            tags.year,
+            bitrate.map(|rate| format!("{rate}k")).unwrap_or_default(),
+        )
+    }
+
     /// The two analysed columns as the cells want them: blank when nothing
     /// has judged this track, rather than a zero that reads as a fact.
     fn row_analysis_cells(&mut self, key: &TrackKey) -> (String, String, String) {
@@ -22111,6 +22483,10 @@ p2 {}
                     let key = TrackKey::Local(path.clone());
                     let (badge, live) = self.deck_badge(&key);
                     let (bpm, musical_key, duration) = self.row_analysis_cells(&key);
+                    let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
+                    // The file's own title tag beats its filename — the
+                    // filename is a naming convention, the tag is what the
+                    // record says it is.
                     let title = path
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -22118,7 +22494,11 @@ p2 {}
                     TrackRowEntry {
                         key,
                         title,
-                        artist: "local file".to_string(),
+                        artist,
+                        album,
+                        genre,
+                        year,
+                        bitrate,
                         bpm,
                         musical_key,
                         duration,
@@ -22175,10 +22555,15 @@ p2 {}
                         duration = format_duration(state.duration_secs);
                     }
                 }
+                let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                 TrackRowEntry {
                     key,
                     title,
-                    artist: String::new(),
+                    artist,
+                    album,
+                    genre,
+                    year,
+                    bitrate,
                     bpm,
                     musical_key,
                     duration,
@@ -22239,21 +22624,32 @@ p2 {}
         // listed them.
         let text = |a: &str, b: &str| a.to_lowercase().cmp(&b.to_lowercase());
         let number = |a: f64, b: f64| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+        // A number that will not parse sorts below every real one, which
+        // puts the tracks nothing has judged yet together at one end
+        // whichever way the column runs.
+        let number_cell = |cell: &str| cell.trim().parse::<f64>().unwrap_or(-1.0);
         match self.music_sort {
-            MusicSort::Listed => {}
-            MusicSort::Title => rows.sort_by(|a, b| text(&a.title, &b.title)),
-            MusicSort::Artist => rows.sort_by(|a, b| text(&a.artist, &b.artist)),
-            MusicSort::Bpm => rows.sort_by(|a, b| {
-                let value = |row: &TrackRowEntry| row.bpm.trim().parse::<f64>().unwrap_or(-1.0);
-                number(value(a), value(b))
-            }),
-            MusicSort::Key => rows.sort_by(|a, b| text(&a.musical_key, &b.musical_key)),
-            MusicSort::Time => rows.sort_by(|a, b| {
+            None => {}
+            Some(Column::Title) => rows.sort_by(|a, b| text(&a.title, &b.title)),
+            Some(Column::Artist) => rows.sort_by(|a, b| text(&a.artist, &b.artist)),
+            Some(Column::Album) => rows.sort_by(|a, b| text(&a.album, &b.album)),
+            Some(Column::Genre) => rows.sort_by(|a, b| text(&a.genre, &b.genre)),
+            Some(Column::Year) => {
+                rows.sort_by(|a, b| number(number_cell(&a.year), number_cell(&b.year)))
+            }
+            Some(Column::Bitrate) => {
+                rows.sort_by(|a, b| number(number_cell(&a.bitrate), number_cell(&b.bitrate)))
+            }
+            Some(Column::Bpm) => {
+                rows.sort_by(|a, b| number(number_cell(&a.bpm), number_cell(&b.bpm)))
+            }
+            Some(Column::Key) => rows.sort_by(|a, b| text(&a.musical_key, &b.musical_key)),
+            Some(Column::Time) => rows.sort_by(|a, b| {
                 number(Self::row_seconds(&a.duration), Self::row_seconds(&b.duration))
             }),
-            MusicSort::Stem => rows.sort_by_key(|row| row.stem),
-            MusicSort::Krk => rows.sort_by_key(|row| row.krk),
-            MusicSort::Tags => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
+            Some(Column::Stem) => rows.sort_by_key(|row| row.stem),
+            Some(Column::Krk) => rows.sort_by_key(|row| row.krk),
+            Some(Column::Tags) => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
         }
         if self.music_sort_desc {
             rows.reverse();
@@ -23864,6 +24260,7 @@ p2 {}
             self.ui.modal(cx, ids!(auto_dj_modal)).close(cx);
         }
         self.handle_preprocess_modal(cx, actions);
+        self.handle_columns_modal(cx, actions);
         self.handle_phones_modal(cx, actions);
         self.handle_phones_player(cx, actions);
         self.handle_loop_scan_modal(cx, actions);
@@ -23928,6 +24325,11 @@ p2 {}
         self.ui.text_input(cx, ids!(scan_min_secs)).set_text(cx, &min_secs);
         self.ui.text_input(cx, ids!(scan_max_secs)).set_text(cx, &max_secs);
         self.ui.text_input(cx, ids!(scan_count)).set_text(cx, &count);
+        let gap_secs = format!("{}", self.scan_gap_secs);
+        let gap_beats = format!("{}", self.scan_gap_beats);
+        self.ui.text_input(cx, ids!(scan_gap_secs)).set_text(cx, &gap_secs);
+        self.ui.text_input(cx, ids!(scan_gap_beats)).set_text(cx, &gap_beats);
+        self.paint_lit(cx, ids!(scan_overlap), self.scan_overlap);
         self.paint_lit(cx, ids!(scan_auto), self.scan_automatic);
     }
 
@@ -23944,8 +24346,11 @@ p2 {}
         integer: bool,
     ) {
         let input = self.ui.text_input(cx, id);
+        // Zero counts as a value here, not as garbage: the gap fields sit
+        // at zero legitimately, and the floor is what keeps a length or a
+        // count off it.
         let current = match input.text().trim().parse::<f64>() {
-            Ok(value) if value.is_finite() && value > 0.0 => value,
+            Ok(value) if value.is_finite() && value >= 0.0 => value,
             _ => fallback,
         };
         let next = (current + delta).max(floor);
@@ -23978,6 +24383,19 @@ p2 {}
         if let Some(value) = parse(self.ui.text_input(cx, ids!(scan_count)).text()) {
             self.scan_count = (value.round() as usize).clamp(1, crate::decks::FOUND_LOOP_CAP);
         }
+        // The gaps take zero, so they parse on their own terms.
+        let parse_gap = |text: String| -> Option<f64> {
+            match text.trim().parse::<f64>() {
+                Ok(value) if value.is_finite() && value >= 0.0 => Some(value),
+                _ => None,
+            }
+        };
+        if let Some(value) = parse_gap(self.ui.text_input(cx, ids!(scan_gap_secs)).text()) {
+            self.scan_gap_secs = value;
+        }
+        if let Some(value) = parse_gap(self.ui.text_input(cx, ids!(scan_gap_beats)).text()) {
+            self.scan_gap_beats = value.round() as usize;
+        }
     }
 
     /// What SCAN NOW submits: the settings, as the scanner's own config.
@@ -24001,18 +24419,26 @@ p2 {}
         if let Some(index) = self.ui.drop_down(cx, ids!(scan_max_beats)).selected(actions) {
             self.scan_max_beats_ix = index;
         }
-        let steppers: [(&[LiveId], &[LiveId], &[LiveId], f64, bool); 3] = [
-            (ids!(scan_min_secs_dec), ids!(scan_min_secs), ids!(scan_min_secs_inc), 4.0, false),
-            (ids!(scan_max_secs_dec), ids!(scan_max_secs), ids!(scan_max_secs_inc), 10.0, false),
-            (ids!(scan_count_dec), ids!(scan_count), ids!(scan_count_inc), 10.0, true),
+        // Floor per field: a gap of zero is a real answer — loops butted
+        // end to end — where a length or a count of zero never is.
+        let steppers: [(&[LiveId], &[LiveId], &[LiveId], f64, f64, bool); 5] = [
+            (ids!(scan_min_secs_dec), ids!(scan_min_secs), ids!(scan_min_secs_inc), 1.0, 4.0, false),
+            (ids!(scan_max_secs_dec), ids!(scan_max_secs), ids!(scan_max_secs_inc), 1.0, 10.0, false),
+            (ids!(scan_gap_secs_dec), ids!(scan_gap_secs), ids!(scan_gap_secs_inc), 0.0, 2.0, false),
+            (ids!(scan_gap_beats_dec), ids!(scan_gap_beats), ids!(scan_gap_beats_inc), 0.0, 4.0, true),
+            (ids!(scan_count_dec), ids!(scan_count), ids!(scan_count_inc), 1.0, 10.0, true),
         ];
-        for (dec, field, inc, fallback, integer) in steppers {
+        for (dec, field, inc, floor, fallback, integer) in steppers {
             if self.ui.button(cx, dec).clicked(actions) {
-                self.step_scan_field(cx, field, -1.0, 1.0, fallback, integer);
+                self.step_scan_field(cx, field, -1.0, floor, fallback, integer);
             }
             if self.ui.button(cx, inc).clicked(actions) {
-                self.step_scan_field(cx, field, 1.0, 1.0, fallback, integer);
+                self.step_scan_field(cx, field, 1.0, floor, fallback, integer);
             }
+        }
+        if self.ui.button(cx, ids!(scan_overlap)).clicked(actions) {
+            self.scan_overlap = !self.scan_overlap;
+            self.paint_lit(cx, ids!(scan_overlap), self.scan_overlap);
         }
         if self.ui.button(cx, ids!(scan_auto)).clicked(actions) {
             self.scan_automatic = !self.scan_automatic;
@@ -24572,6 +24998,7 @@ p2 {}
         }
         // The column set follows the width the library actually got.
         self.sync_library_density(cx);
+        self.sync_queue_density(cx);
         if self.music_refs.models_install.clicked(actions) {
             self.models_install_clicked(cx);
         }
@@ -24609,12 +25036,17 @@ p2 {}
             }
         }
         // Every column head takes the order; the one that has it reverses.
-        for (column, head, _) in MUSIC_HEADS {
+        // Which head means which column comes from the layout, so a
+        // reordered header sorts by what the operator sees under their
+        // finger rather than by where the column used to be.
+        let shown = self.explorer_columns.visible();
+        for (slot, head) in music_view::HEAD_BUTTONS.iter().enumerate() {
+            let Some(column) = shown.get(slot).copied() else { continue };
             if self.ui.button(cx, head).clicked(actions) {
-                if self.music_sort == column {
+                if self.music_sort == Some(column) {
                     self.music_sort_desc = !self.music_sort_desc;
                 } else {
-                    self.music_sort = column;
+                    self.music_sort = Some(column);
                     self.music_sort_desc = false;
                 }
                 self.music_rows_dirty = true;
@@ -24950,6 +25382,7 @@ impl MatchEvent for App {
         // to be looking in the right place already.
         self.load_preprocess_settings();
         self.sync_preprocess_panel(cx);
+        self.sync_columns(cx);
         // The phones rig loads before the first devices event, which then
         // resolves the saved name against what the OS actually has.
         self.load_phones_settings();

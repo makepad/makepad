@@ -9,11 +9,53 @@
 //! spelling says ought to belong. That is what makes the chords a record
 //! spends its bars on count for more than the passing notes over them.
 //!
+//! Between the transform and the twelve classes there is a SEMITONE array,
+//! not a direct bin-to-class fold. Three things need that middle step and
+//! none of them is optional:
+//!
+//! - **Neutrality.** Transform bins are linearly spaced and pitch is
+//!   logarithmic, so a semitone up at the top of the band owns twenty times
+//!   the bins a semitone down at the bottom does. Folding bins straight onto
+//!   classes made a FLAT spectrum come out with a deterministic shape —
+//!   measured per-class mass ran from Bb at -14.8% to G# at +14.3%, sd/mean
+//!   0.0883 — and white noise read as F minor with more confidence than any
+//!   correct answer scored. Each semitone is now the MEAN weighted magnitude
+//!   over its own band, and each class is divided by the mass a flat
+//!   spectrum puts in it, which drops that figure to 0.0000.
+//! - **Harmonics.** A pitch is not just its fundamental. Harmonic 3 is the
+//!   fifth, harmonic 5 is the MAJOR THIRD, and a bass-forward mix used to
+//!   read every minor chord as major because of the second of those: a
+//!   sawtooth bass under a minor triad put more weight on the major third
+//!   than the chord's own minor third carried. The semitone array is walked
+//!   upward and each note subtracts its expected share from its own
+//!   harmonics before anything votes.
+//! - **Tilt.** The class weighting is a Gaussian in octaves over a band five
+//!   octaves wide, so it is cut off well up its own sides, and a truncated
+//!   window is not offset-invariant: a spectrum with a smooth slope and no
+//!   notes in it at all still folded to a shape, and pink noise came back as
+//!   Bb minor. Each semitone is divided by the running mean of the octave
+//!   either side of it, so a broadband source of any slope reads flat and
+//!   only the PEAKS — the notes — survive into the chroma.
+//!
+//! And the thing it still cannot do: a chord voiced entirely below
+//! [`CHROMA_LOW_HZ`] is heard through its partials, and the first of those
+//! to clear the floor is often a fifth. Such a record reads a perfect fifth
+//! sharp, before and after everything above; see [`CHROMA_LOW_HZ`] for what
+//! was tried and what it cost.
+//!
 //! Deliberately self-contained. The transform, the window, the decimator and
 //! the profiles all live in this file, so a worker that has PCM and nothing
-//! else can run it; it holds one frame of scratch plus twelve floats per
-//! analysis window, and it is pure — same samples in, same key out, on every
-//! machine and in every order.
+//! else can run it. It is not cheap in memory: the decimated mono signal is
+//! held whole, which is four bytes per sample at about 11 kHz — roughly
+//! 16 MB for a six-minute record — plus twelve doubles per analysis window,
+//! about 93 KB over the same six minutes.
+//!
+//! Deterministic for a given build: no threading, no clock, no allocation
+//! order dependence, same samples in and same key out. NOT bit-identical
+//! across platforms — `cos`, `sin`, `exp`, `log2` and `powf` come from the
+//! system math library and the last bits of a correlation move with it. Two
+//! machines can disagree on a record whose top two candidates are inside
+//! 1e-15 of each other, which is a record with no answer anyway.
 //!
 //! What it does not pretend to do: a record that modulates gets ONE key here,
 //! the one it spends most of its bars in. Every estimate carries a
@@ -36,16 +78,23 @@ pub struct KeyEstimate {
     pub minor: bool,
     /// How far ahead of the runner-up the winner scored, 0.0..=1.0.
     ///
-    /// The margin over second place measured against the whole spread of the
-    /// twenty-four candidates, so it says how much better the answer is than
-    /// the next one rather than how well it fits in the abstract. A record
-    /// whose relative minor scores nearly as well reads LOW here, which is
-    /// the truth about that record and not a fault in the estimate.
+    /// The margin over second place, in correlation points, against a fixed
+    /// yardstick — [`CONFIDENCE_MARGIN`], the margin a clean cadence with no
+    /// competing key opens up. It is deliberately NOT divided by the spread
+    /// of the twenty-four candidates: that divisor is dominated by the WORST
+    /// candidate, which is a number about the record's brightness and not
+    /// about how sure the answer is, and it squeezed every honest estimate
+    /// into 0.076..=0.191 while noise scored 0.200.
+    ///
+    /// A record whose relative minor scores nearly as well reads LOW here,
+    /// which is the truth about that record and not a fault in the estimate.
     pub confidence: f32,
 }
 
-/// How a key's tonic is spelled when it is the root of a MAJOR key: the
-/// flat side of the wheel, because nobody writes A# major.
+/// How a key's tonic is spelled when it is the root of a MAJOR key: flats
+/// everywhere the choice is free, because nobody writes A# major. The one
+/// exception is the tritone at index 6, which is written F# and not Gb —
+/// that is what the wheel prints and what a DJ reads off the screen.
 const MAJOR_NAMES: [&str; 12] =
     ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
 /// The same twelve as MINOR roots, where the sharp side is the convention
@@ -86,15 +135,28 @@ impl KeyEstimate {
 // the analysis pass
 // ---------------------------------------------------------------------------
 
-/// The rate the chroma pass runs at. Everything key lives in is under 4 kHz,
+/// The rate the chroma pass aims at. Everything key lives in is under 4 kHz,
 /// so the top of the band is thrown away ONCE by the decimator instead of
 /// being paid for in every transform.
 const TARGET_RATE: f64 = 11_025.0;
+/// The rate the chroma pass may not exceed, whatever the source rate.
+///
+/// [`FRAME`] is fixed, so the resolution guarantee below is really a
+/// statement about the OUTPUT rate: a Hann main lobe is `4 * rate / FRAME`
+/// wide and a semitone at [`CHROMA_LOW_HZ`] is 6.541 Hz, which caps the
+/// output at 13_395 Hz. Aiming at [`TARGET_RATE`] alone did not enforce
+/// that — a rounded `rate / 11025` stays at 1 all the way to 16_537 Hz, so a
+/// 16 kHz decoder (a real rate, not a hypothetical one) ran the transform at
+/// 16 kHz with a 7.81 Hz lobe and smeared the bottom octave across three
+/// classes. The factor is now whichever of the two demands is stricter, so
+/// 44.1 and 48 kHz decimate exactly as they always did and only the 12.5 to
+/// 16.5 kHz gap moves.
+const MAX_RATE: f64 = 13_394.0;
 /// Transform size and hop, in samples at the decimated rate.
 ///
 /// 8192 is 0.74 seconds and 1.35 Hz per bin. That resolution is what sets
-/// the bottom of the chroma band: a semitone at A2 is 6.2 Hz wide and this
-/// window's main lobe is 5.4 Hz, so a note there still falls inside its own
+/// the bottom of the chroma band: a semitone at A2 is 6.54 Hz wide and this
+/// window's main lobe is 5.38 Hz, so a note there still falls inside its own
 /// class. At 4096 the lobe is 10.8 Hz and A2 smears across three classes,
 /// which is why the cheaper size is not used.
 const FRAME: usize = 8192;
@@ -104,9 +166,22 @@ const HOP: usize = 4096;
 /// The band folded onto the twelve classes, A2 to A7.
 ///
 /// The floor is not the lowest note a record plays — it is the lowest note
-/// this transform can tell from its neighbours. Below it the bass is heard
-/// through its own harmonics, which land on the same pitch class an octave
-/// up (and on the fifth, which the profiles already expect to be strong).
+/// this transform can tell from its neighbours. Below it a bass note is
+/// heard only through its partials, and those partials are not the note: in
+/// a rich voicing the first one to clear 110 Hz is often harmonic 3, which
+/// is a FIFTH.
+///
+/// That is a KNOWN LIMIT and not a solved problem. Six-partial triads
+/// voiced at octave 3 — fundamentals from 131 Hz up, all inside the band —
+/// read 12/24 wrong before [`HARMONIC_SUBTRACT`] and 0/24 after. At octave
+/// 2, half the fundamentals fall under the floor: 21/24 wrong before,
+/// 18/24 after. At octave 1 nothing is in band at all and the subtraction
+/// has no fundamental to charge from, so every one of the 24 comes back
+/// exactly a perfect fifth sharp, before and after. Fixing that needs a
+/// fundamental estimated from its partials alone, which is a pitch tracker
+/// and not a fold, and the versions of it tried here — a harmonic sum over
+/// sub-band pitches — bought the sub-bass case by making a flat spectrum
+/// look like a bass note and wrecking everything else.
 const CHROMA_LOW_HZ: f64 = 110.0;
 const CHROMA_HIGH_HZ: f64 = 3_520.0;
 /// Where the weight over the band is centred, and how wide it is in
@@ -115,6 +190,57 @@ const CHROMA_HIGH_HZ: f64 = 3_520.0;
 /// as its piano, and cymbals have no pitch class.
 const OCTAVE_CENTRE_HZ: f64 = 440.0;
 const OCTAVE_WIDTH: f64 = 2.0;
+/// How many harmonics of a semitone are accounted for, and how much of a
+/// note's own weight is charged to each of them.
+///
+/// The subtraction is `HARMONIC_SUBTRACT / h` of the note's remaining
+/// weight, taken off harmonic `h` — a sawtooth's own 1/h roll-off, scaled
+/// down. It is deliberately UNDER a full subtraction: the sum of the charge
+/// a note collects from its seven possible parents is 1.72, so at 1.0 a
+/// flat spectrum drives the top of the band to zero and a chord voiced in
+/// octaves loses its upper voice.
+///
+/// Swept, with everything else fixed. At 0.0 a sawtooth bass five times
+/// the level of the minor triad over it reads 12/12 chords as MAJOR —
+/// harmonic 5 of the bass IS the major third, and that is the whole defect.
+/// At 0.5, 0/12. At 0.8 it is still 0/12 but pink noise folds to a class
+/// profile with sd/mean 0.071, over [`FLAT_CHROMA`], so noise starts coming
+/// back as a key again. 0.5 also takes six-partial triads at octave 3 from
+/// 6/24 wrong to 0/24.
+const HARMONICS: usize = 8;
+const HARMONIC_SUBTRACT: f64 = 0.5;
+/// Half-width, in semitones, of the running mean each semitone is measured
+/// against before it votes.
+///
+/// The class weights are a Gaussian in octaves over a band that is only
+/// five octaves wide, so the Gaussian is CUT at 0.61 of its peak at the
+/// bottom and 0.33 at the top. A truncated window is not offset-invariant,
+/// and the consequence is measurable: a spectrum with a smooth 1/f tilt and
+/// no notes in it at all folded to a class profile with sd/mean 0.182 —
+/// pink noise came back as Bb minor. Dividing each semitone by the mean of
+/// the octave either side of it removes any smooth tilt before the fold
+/// sees it, and a broadband source of any slope reads flat.
+///
+/// One octave each way, swept: at half an octave the window sits between
+/// the notes of a chord and flattens the chord itself — pink noise rises to
+/// 0.049 and the mean confidence over the forty-eight cadences falls from
+/// 0.730 to 0.490. At an octave and a half the window reaches past the
+/// bass and a sawtooth bass starts winning again, 1/12 wrong. At one
+/// octave: pink 0.032, cadences 48/48, bass 0/12.
+const ENVELOPE_HALF: usize = 12;
+/// How far under the window's own mean semitone level the running mean is
+/// allowed to go before it stops dividing.
+///
+/// Flattening against a purely local mean is flattening against nothing
+/// where there IS nothing: a mix with no content over 2 kHz has a
+/// quantization floor up there, and dividing that floor by itself promoted
+/// it to a full-strength vote. Measured on a chromatic cluster of pure
+/// tones between 131 and 1975 Hz — a source with no key in it and no energy
+/// in the top octave of the band — the empty octave's dither decided the
+/// answer. -26 dB is forty decibels over a sixteen-bit floor and well under
+/// any real spectral tilt: a 1/f slope across the five-octave band only
+/// reaches -21 dB of its own mean at the top.
+const ENVELOPE_FLOOR: f64 = 0.05;
 /// The percentile of window loudness a track is judged against, rather than
 /// its maximum, so one clipped bar cannot set the gate for the whole record.
 const LOUDNESS_PERCENTILE: f64 = 0.90;
@@ -122,12 +248,62 @@ const LOUDNESS_PERCENTILE: f64 = 0.90;
 /// not the record: its chroma is noise, and normalizing it would give that
 /// noise a full-scale vote.
 const WINDOW_FLOOR: f64 = 0.04;
+/// The ABSOLUTE floor, as an RMS over the loudest half second, in full-scale
+/// units: four sixteen-bit steps, -78.3 dBFS.
+///
+/// [`WINDOW_FLOOR`] is relative to the track's own loudness, so it can never
+/// fire on a track that is quiet all the way through — and a six-second file
+/// whose loudest sample was ONE step used to come back as a key with a
+/// confidence in the normal range, as did undithered hiss. Four steps is
+/// eighteen decibels under the quietest passage of real music anyone would
+/// hand a deck (-60 dBFS is 32.8 steps of RMS) and twelve decibels over
+/// one-step dither, which is the loudest thing this gate has to refuse.
+/// Half a second rather than a sample, so a single click cannot open it.
+const TRACK_FLOOR: f64 = 4.0 / 32_768.0;
 /// Shortest track worth an opinion. Under a second there is no harmony to
 /// average over, only whatever chord happened to be sounding.
 const MIN_TRACK_SECS: f64 = 1.0;
-/// Below this, the chroma has no shape at all — silence that cleared the
-/// gate, or broadband noise — and every candidate scores the same.
-const FLAT_CHROMA: f64 = 1e-3;
+/// Below this relative spread the chroma has no shape at all and every
+/// candidate is scoring the same accident.
+///
+/// The number is empirical and it only means anything because the fold is
+/// class-neutral. With the old bin-to-class fold the geometry alone put a
+/// hard floor of 0.088 under sd/mean — thirty times the 1e-3 gate that was
+/// supposed to catch a flat profile — so that gate could not fire on any
+/// input at all, and white noise came back as F minor.
+///
+/// Both populations, measured at 44.1 kHz. NOISE, over 33 probes (white at
+/// six seeds and four lengths, pink at six seeds, white at three other
+/// sample rates, one-step dither): worst 0.056, and 0.032 for the
+/// ten-second cases. MUSIC, over 14 probes: worst 0.120, which is a C major
+/// cadence buried under four times its own level of white noise and still
+/// read as C major. A cadence in the clear is 0.95, a held triad 1.75.
+///
+/// 0.08 sits between the two, 1.4x over the worst noise and 1.5x under the
+/// worst music. The populations are NOT decades apart and the value is a
+/// real trade: raise it and a percussive record loses its key, lower it and
+/// a noise floor gets one.
+///
+/// Recorded negative result: this gate cannot catch SHORT noise. It works
+/// because a flat profile averages flatter over many windows, and a track
+/// at [`MIN_TRACK_SECS`] has one or two. Measured over eight seeds, white
+/// noise reads 0.063 at 1.5 s (caught), 0.070 at 1.2 s (3 of 8 get through)
+/// and 0.120 at 1.0 s (all 8 get through). A one-second full-scale noise
+/// burst gets a key, and no threshold here can stop it.
+const FLAT_CHROMA: f64 = 0.08;
+/// The correlation margin over second place that reads as certainty.
+///
+/// Measured over forty-eight cadences — twelve roots, both modes, at 44.1
+/// and 48 kHz: raw margin min 0.209, mean 0.256, max 0.293. Against 0.35
+/// those come out at 0.597 to 0.837, mean 0.730, which is the shape the
+/// documented range asks for: a cadence that names its key reads high, and
+/// the remaining headroom is for a record that leaves NO room for its
+/// relative.
+///
+/// What it replaced: dividing by `best - worst` put every one of those
+/// forty-eight between 0.076 and 0.191 while white noise scored 0.199 —
+/// noise ranked above every correct answer the detector had ever given.
+const CONFIDENCE_MARGIN: f64 = 0.35;
 
 /// The Krumhansl-Kessler probe-tone profiles, tonic first: how strongly
 /// each of the twelve degrees is felt to belong to the key. A candidate is
@@ -150,8 +326,11 @@ pub fn estimate_key(frames: &[[i16; 2]], sample_rate: u32) -> Option<KeyEstimate
     // A profile with no shape cannot pick a winner, and the arbitrary one it
     // would pick would wear whatever confidence the ties happened to leave.
     let mean = chroma.iter().sum::<f64>() / 12.0;
+    if mean <= 0.0 || !mean.is_finite() {
+        return None;
+    }
     let spread = chroma.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>();
-    if mean <= 1e-12 || (spread / 12.0).sqrt() <= mean * FLAT_CHROMA {
+    if (spread / 12.0).sqrt() <= mean * FLAT_CHROMA {
         return None;
     }
     // Twenty-four candidates in one pass: even index major, odd index minor.
@@ -171,21 +350,12 @@ pub fn estimate_key(frames: &[[i16; 2]], sample_rate: u32) -> Option<KeyEstimate
         }
     }
     let mut second = f64::NEG_INFINITY;
-    let mut worst = f64::INFINITY;
     for (index, score) in scores.iter().enumerate() {
         if index != best && *score > second {
             second = *score;
         }
-        if *score < worst {
-            worst = *score;
-        }
     }
-    let span = scores[best] - worst;
-    let confidence = if span > 1e-9 {
-        ((scores[best] - second) / span).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let confidence = ((scores[best] - second) / CONFIDENCE_MARGIN).clamp(0.0, 1.0);
     Some(KeyEstimate {
         tonic: (best / 2) as u8,
         minor: best % 2 == 1,
@@ -196,11 +366,18 @@ pub fn estimate_key(frames: &[[i16; 2]], sample_rate: u32) -> Option<KeyEstimate
 /// The track's pitch-class profile: twelve numbers, one per semitone of the
 /// octave, summed over every analysis window that carried music.
 ///
-/// Each window is normalized against its own loudest class BEFORE it is
-/// added, so a drop contributes exactly as much evidence as the breakdown
-/// before it. A key is what a record spends its bars in, not what it spends
-/// its decibels on, and without this the loudest thirty seconds would decide
-/// the whole thing.
+/// Every window that carried music gets one vote of the same size: its
+/// chroma is divided by its own loudest class before it is added. A key is
+/// what a record spends its bars in, not what it spends its decibels on,
+/// and without this a drone whose chroma is a single spike counts for more
+/// than a chord whose chroma is spread over seven classes — measured, an
+/// eight-second F# drone in front of sixteen seconds of a C major cadence
+/// takes the record.
+///
+/// Which windows carry music is two separate questions and both are asked
+/// here: [`TRACK_FLOOR`] for whether the FILE has anything in it, and
+/// [`WINDOW_FLOOR`] against the record's own 90th percentile for whether
+/// this bar does.
 fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
     if sample_rate == 0 {
         return None;
@@ -209,38 +386,14 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
     if frames.len() as f64 / rate < MIN_TRACK_SECS {
         return None;
     }
+    if loudest_block_rms(frames, rate) < TRACK_FLOOR {
+        return None;
+    }
     let (mono, rate_out) = decimate_mono(frames, rate);
     if mono.len() < FRAME || rate_out < 1.0 {
         return None;
     }
-
-    // Bin geometry, and the fold from bins onto pitch classes. Computed once
-    // for the whole track: it is the same for every window, and it is the
-    // expensive part of the inner loop if it is not.
-    let bin_hz = rate_out / FRAME as f64;
-    let low = CHROMA_LOW_HZ.max(bin_hz * 2.0);
-    let high = CHROMA_HIGH_HZ.min(rate_out * 0.45);
-    if high <= low * 2.0 {
-        return None;
-    }
-    let bins = FRAME / 2 + 1;
-    let mut fold: Vec<Option<(usize, f64)>> = Vec::with_capacity(bins);
-    for bin in 0..bins {
-        let frequency = bin as f64 * bin_hz;
-        if frequency < low || frequency > high {
-            fold.push(None);
-            continue;
-        }
-        let midi = 69.0 + 12.0 * (frequency / 440.0).log2();
-        let nearest = midi.round();
-        let class = (nearest as i64).rem_euclid(12) as usize;
-        // A raised cosine across the semitone, one at the note and zero at
-        // the boundary with its neighbour: window leakage lands in the bins
-        // between two notes, and this is what stops it voting for either.
-        let centred = (PI * (midi - nearest)).cos().powi(2);
-        let octaves = (frequency / OCTAVE_CENTRE_HZ).log2() / OCTAVE_WIDTH;
-        fold.push(Some((class, centred * (-0.5 * octaves * octaves).exp())));
-    }
+    let geometry = Geometry::new(rate_out)?;
 
     let transform = Fft::new(FRAME);
     let window: Vec<f64> = (0..FRAME)
@@ -248,6 +401,8 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
         .collect();
     let mut real = vec![0.0f64; FRAME];
     let mut imaginary = vec![0.0f64; FRAME];
+    let mut notes = vec![0.0f64; geometry.notes()];
+    let mut envelope = vec![0.0f64; geometry.notes()];
     let mut windows: Vec<[f64; 12]> = Vec::with_capacity(mono.len() / HOP + 1);
     let mut loudness: Vec<f64> = Vec::with_capacity(mono.len() / HOP + 1);
     let mut at = 0usize;
@@ -257,20 +412,9 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
             imaginary[index] = 0.0;
         }
         transform.forward(&mut real, &mut imaginary);
-        let mut chroma = [0.0f64; 12];
-        let mut total = 0.0f64;
-        for (bin, folded) in fold.iter().enumerate() {
-            let Some((class, weight)) = folded else { continue };
-            // Magnitude, not power: a chord's loudest partial is already the
-            // one the ear names, and squaring it would let it name the bar.
-            let magnitude =
-                (real[bin] * real[bin] + imaginary[bin] * imaginary[bin]).sqrt();
-            let value = magnitude * weight;
-            chroma[*class] += value;
-            total += value;
-        }
-        windows.push(chroma);
-        loudness.push(total);
+        geometry.gather(&real, &imaginary, &mut notes);
+        loudness.push(geometry.level(&notes));
+        windows.push(geometry.fold(&mut notes, &mut envelope));
         at += HOP;
     }
     if windows.is_empty() {
@@ -279,10 +423,13 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
 
     let mut ranked = loudness.clone();
     ranked.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let index = ((ranked.len() as f64 * LOUDNESS_PERCENTILE) as usize)
-        .min(ranked.len().saturating_sub(1));
+    // Nearest rank over the zero-based positions. `len * 0.90` handed back
+    // the LAST position for every count up to ten, which gated any track
+    // under 4.1 seconds against its own maximum — the one thing the
+    // percentile exists to avoid.
+    let index = ((ranked.len() - 1) as f64 * LOUDNESS_PERCENTILE) as usize;
     let reference = ranked.get(index).copied().unwrap_or(0.0);
-    if reference <= 1e-9 {
+    if reference <= 1e-12 {
         return None;
     }
     let floor = reference * WINDOW_FLOOR;
@@ -310,20 +457,323 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
     Some(chroma)
 }
 
+/// RMS of the loudest half second of the down-mix, in full-scale units.
+///
+/// Half a second is long enough that one sample cannot set it and short
+/// enough that a single real bar inside a silent file still shows up, which
+/// is the pair of things [`TRACK_FLOOR`] has to be able to tell apart.
+fn loudest_block_rms(frames: &[[i16; 2]], rate: f64) -> f64 {
+    let block = ((rate * 0.5) as usize).max(1);
+    let mut loudest = 0.0f64;
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    let mut full = false;
+    for frame in frames {
+        let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32_768.0;
+        sum += mono * mono;
+        count += 1;
+        if count == block {
+            loudest = loudest.max(sum / count as f64);
+            full = true;
+            sum = 0.0;
+            count = 0;
+        }
+    }
+    if !full && count > 0 {
+        loudest = loudest.max(sum / count as f64);
+    }
+    loudest.sqrt()
+}
+
+// ---------------------------------------------------------------------------
+// bins -> semitones -> classes
+// ---------------------------------------------------------------------------
+
+/// Everything about the fold that depends only on the rate: which bins feed
+/// which semitone, what each semitone is worth, where its harmonics land,
+/// and what it takes to make the twelve classes weigh the same.
+///
+/// Built once per track. It is the expensive part of the inner loop if it
+/// is not.
+struct Geometry {
+    /// Per transform bin: the semitone it feeds and the weight it feeds at.
+    bin: Vec<Option<(usize, f64)>>,
+    /// Reciprocal of the total bin weight each semitone collects, so a
+    /// semitone is the MEAN of its band and not the sum. Without this a
+    /// semitone at the top of the band is worth twenty of one at the
+    /// bottom purely because linear bins are denser up there.
+    scale: Vec<f64>,
+    /// Per semitone: pitch class, and the octave weight at its frequency.
+    /// The weight is zero outside the voting band, whose semitones are only
+    /// measured to give the running mean and the harmonic pass some
+    /// context.
+    class: Vec<usize>,
+    weight: Vec<f64>,
+    /// First semitone in the voting band. Nothing under it is allowed to
+    /// charge its harmonics: below the resolution limit a note smears over
+    /// three or four semitones, each of which would charge the full series,
+    /// and a bass note that pays four times over gouges the chord above it.
+    /// Measured, with sub-band notes charging: a sawtooth bass under a
+    /// minor triad went from 0/12 wrong to 9/12 wrong.
+    first_voting: usize,
+    /// Per semitone and harmonic 2..=[`HARMONICS`]: the semitone the
+    /// harmonic lands on and how far past it, so the charge can be split
+    /// between that semitone and the next. Harmonics 5 and 7 are 0.14 and
+    /// 0.31 of a semitone off the grid and rounding them would put a
+    /// bass note's major third on the wrong class.
+    harmonic: Vec<Option<(usize, f64)>>,
+    /// Per class: what it takes to make a flat spectrum fold flat.
+    normal: [f64; 12],
+}
+
+impl Geometry {
+    fn new(rate_out: f64) -> Option<Geometry> {
+        let bin_hz = rate_out / FRAME as f64;
+        if !bin_hz.is_finite() || bin_hz <= 0.0 {
+            return None;
+        }
+        // The two bins nearest DC are the window's own skirt, never a note.
+        let usable_low = bin_hz * 2.0;
+        let usable_high = rate_out * 0.45;
+        let low = CHROMA_LOW_HZ.max(usable_low);
+        let high = CHROMA_HIGH_HZ.min(usable_high);
+        if high <= low {
+            return None;
+        }
+        // The semitones that VOTE.
+        let voting_low = midi_of(low).ceil() as i32;
+        let voting_high = midi_of(high).floor() as i32;
+        if voting_high - voting_low < 12 {
+            return None;
+        }
+        // The semitones that are MEASURED. An octave of context past each
+        // end of the voting band, as far as the transform can reach: the
+        // running mean below wants real neighbours rather than a truncated
+        // window, and the harmonic pass wants the bass that sits under the
+        // band to be able to charge the partials it puts inside it.
+        let margin = ENVELOPE_HALF as i32;
+        let lowest = midi_of(usable_low.max(hz_of((voting_low - margin) as f64))).ceil() as i32;
+        let highest =
+            midi_of(usable_high.min(hz_of((voting_high + margin) as f64))).floor() as i32;
+        if highest < voting_high || lowest > voting_low {
+            return None;
+        }
+        let count = (highest - lowest + 1) as usize;
+
+        let bins = FRAME / 2 + 1;
+        let mut bin: Vec<Option<(usize, f64)>> = Vec::with_capacity(bins);
+        let mut collected = vec![0.0f64; count];
+        for index in 0..bins {
+            let frequency = index as f64 * bin_hz;
+            if frequency < bin_hz * 2.0 || frequency > rate_out * 0.45 {
+                bin.push(None);
+                continue;
+            }
+            let midi = midi_of(frequency);
+            let nearest = midi.round();
+            if nearest < lowest as f64 || nearest > highest as f64 {
+                bin.push(None);
+                continue;
+            }
+            // A raised cosine across the semitone, one at the note and zero
+            // at the boundary with its neighbour: window leakage lands in
+            // the bins between two notes, and this is what stops it voting
+            // for either.
+            let centred = (PI * (midi - nearest)).cos().powi(2);
+            let note = (nearest as i32 - lowest) as usize;
+            collected[note] += centred;
+            bin.push(Some((note, centred)));
+        }
+
+        let mut scale = Vec::with_capacity(count);
+        let mut class = Vec::with_capacity(count);
+        let mut weight = Vec::with_capacity(count);
+        for (note, total) in collected.iter().enumerate() {
+            let semitone = lowest + note as i32;
+            // A semitone narrower than the bins that are supposed to
+            // resolve it has no reading of its own; it is left out rather
+            // than amplified up from whatever fell in it.
+            scale.push(if *total > 1e-9 { 1.0 / *total } else { 0.0 });
+            class.push(semitone.rem_euclid(12) as usize);
+            let voting = semitone >= voting_low && semitone <= voting_high;
+            weight.push(if voting { octave_weight(hz_of(semitone as f64)) } else { 0.0 });
+        }
+
+        let mut harmonic = Vec::with_capacity(count * (HARMONICS - 1));
+        for note in 0..count {
+            for step in 2..=HARMONICS {
+                let target = note as f64 + 12.0 * (step as f64).log2();
+                let floor = target.floor();
+                if floor < 0.0 || floor >= count as f64 {
+                    harmonic.push(None);
+                } else {
+                    harmonic.push(Some((floor as usize, target - floor)));
+                }
+            }
+        }
+
+        let mut geometry = Geometry {
+            bin,
+            scale,
+            class,
+            weight,
+            first_voting: (voting_low - lowest) as usize,
+            harmonic,
+            normal: [1.0; 12],
+        };
+        // A flat spectrum reads one at every usable semitone, so pushing
+        // ones through the whole chain — subtraction included — measures
+        // exactly what each class collects when the music says nothing.
+        // Dividing that out is what makes noise come back shapeless
+        // instead of coming back in F minor.
+        let mut flat: Vec<f64> = (0..count)
+            .map(|note| if geometry.scale[note] > 0.0 { 1.0 } else { 0.0 })
+            .collect();
+        let mut envelope = vec![0.0f64; count];
+        let mass = geometry.fold(&mut flat, &mut envelope);
+        for value in mass.iter() {
+            if !value.is_finite() || *value <= 1e-12 {
+                return None;
+            }
+        }
+        for (normal, collected) in geometry.normal.iter_mut().zip(&mass) {
+            *normal = 1.0 / collected;
+        }
+        Some(geometry)
+    }
+
+    fn notes(&self) -> usize {
+        self.class.len()
+    }
+
+    /// How loud this window is, in the units the semitone array is in and
+    /// over the band that votes. It has to be read BEFORE `fold`: flattening
+    /// against the running mean throws level away by design, and a chroma
+    /// summed after it carries no information about how loud the window was
+    /// at all — [`WINDOW_FLOOR`] read off the folded chroma let a bar at 2%
+    /// of full scale outvote a bar at full scale.
+    fn level(&self, notes: &[f64]) -> f64 {
+        notes.iter().zip(&self.weight).map(|(value, weight)| value * weight).sum()
+    }
+
+    /// Mean weighted magnitude per semitone, from one transformed window.
+    ///
+    /// Magnitude and not power: a chord's loudest partial is already the one
+    /// the ear names, and squaring it would let it name the bar. Two tones a
+    /// minor third apart at 1.0 and 0.5 come out of here at 2.2 to 1, which
+    /// is the amplitude ratio; squared they would be 4 to 1.
+    fn gather(&self, real: &[f64], imaginary: &[f64], notes: &mut [f64]) {
+        for value in notes.iter_mut() {
+            *value = 0.0;
+        }
+        for (index, entry) in self.bin.iter().enumerate() {
+            let Some((note, weight)) = entry else { continue };
+            let magnitude =
+                (real[index] * real[index] + imaginary[index] * imaginary[index]).sqrt();
+            notes[*note] += magnitude * weight;
+        }
+        for (value, scale) in notes.iter_mut().zip(&self.scale) {
+            *value *= scale;
+        }
+    }
+
+    /// Charge every semitone's harmonics against it, flatten what is left
+    /// against its own neighbourhood, and fold that onto the twelve
+    /// classes. `notes` and `envelope` are both consumed in place.
+    ///
+    /// The harmonic pass runs upward, so a note is only ever charged by
+    /// notes BELOW it and is itself already clean when its own harmonics
+    /// are taken off. That order is the whole trick: the bass is settled
+    /// before the chord sitting over it is read.
+    fn fold(&self, notes: &mut [f64], envelope: &mut [f64]) -> [f64; 12] {
+        let count = self.class.len();
+        for note in self.first_voting..count {
+            let value = notes[note];
+            if value <= 0.0 {
+                continue;
+            }
+            for step in 2..=HARMONICS {
+                let Some((target, split)) = self.harmonic[note * (HARMONICS - 1) + step - 2]
+                else {
+                    continue;
+                };
+                let charge = HARMONIC_SUBTRACT / step as f64 * value;
+                notes[target] = (notes[target] - charge * (1.0 - split)).max(0.0);
+                if target + 1 < count {
+                    notes[target + 1] = (notes[target + 1] - charge * split).max(0.0);
+                }
+            }
+        }
+        let floor =
+            ENVELOPE_FLOOR * notes.iter().sum::<f64>() / count as f64;
+        let mut high = ENVELOPE_HALF.min(count - 1);
+        let mut low = 0usize;
+        let mut sum: f64 = notes[0..=high].iter().sum();
+        for (note, slot) in envelope.iter_mut().enumerate().take(count) {
+            let want_high = (note + ENVELOPE_HALF).min(count - 1);
+            let want_low = note.saturating_sub(ENVELOPE_HALF);
+            while high < want_high {
+                high += 1;
+                sum += notes[high];
+            }
+            while low < want_low {
+                sum -= notes[low];
+                low += 1;
+            }
+            *slot = (sum / (want_high - want_low + 1) as f64).max(floor);
+        }
+        let mut chroma = [0.0f64; 12];
+        for note in 0..count {
+            if envelope[note] <= 0.0 {
+                continue;
+            }
+            chroma[self.class[note]] += notes[note] / envelope[note] * self.weight[note];
+        }
+        for (value, normal) in chroma.iter_mut().zip(&self.normal) {
+            *value *= normal;
+        }
+        chroma
+    }
+}
+
+/// MIDI number of a frequency, fractional. 69 is A440.
+fn midi_of(hz: f64) -> f64 {
+    69.0 + 12.0 * (hz / 440.0).log2()
+}
+
+fn hz_of(midi: f64) -> f64 {
+    440.0 * ((midi - 69.0) / 12.0).exp2()
+}
+
+/// How much a semitone at `hz` counts, as a Gaussian in octaves around
+/// [`OCTAVE_CENTRE_HZ`].
+fn octave_weight(hz: f64) -> f64 {
+    let octaves = (hz / OCTAVE_CENTRE_HZ).log2() / OCTAVE_WIDTH;
+    (-0.5 * octaves * octaves).exp()
+}
+
 /// Down-mix to mono and decimate to about [`TARGET_RATE`], returning the
 /// signal and the rate it actually came out at.
 ///
 /// The anti-alias filter is two moving averages of `factor` samples run back
 /// to back, sampled every `factor`th sample — a triangular decimator whose
 /// response is `sinc(pi f / rate_out)^2`. It is chosen over a pole cascade
-/// because it is FLAT where it matters: under 3 dB of tilt across the whole
-/// chroma band, against 12 dB for four one-poles steep enough to be worth
-/// having, and a tilt is not harmless here — it would weigh the classes that
-/// happen to sit high in the band against the ones that sit low. What folds
-/// back into the band arrives about 16 dB down, and it lands on a null at
-/// the output rate itself.
+/// because it is FLAT where it matters. Measured through this function at
+/// 44.1 kHz: 0.9996 at 110 Hz against 0.7215 at 3520 Hz, a tilt of 2.83 dB
+/// across the whole chroma band, where four one-poles steep enough to be
+/// worth having cost 12 dB. The tilt no longer moves a pitch class —
+/// `Geometry` makes the classes weigh the same by construction — but it
+/// still shapes which OCTAVE of a class is heard, and a filter that quietly
+/// rewrites the octave weighting is a filter nobody can reason about.
+///
+/// Also measured, by sweeping everything above the new Nyquist and looking
+/// for where it lands: the worst thing that folds back into the chroma band
+/// arrives 15.4 dB down, at 7513 Hz. The response has an exact null at the
+/// output rate itself and at every multiple of it.
 fn decimate_mono(frames: &[[i16; 2]], rate: f64) -> (Vec<f32>, f64) {
-    let factor = ((rate / TARGET_RATE).round() as usize).max(1);
+    let aim = (rate / TARGET_RATE).round();
+    let cap = (rate / MAX_RATE).ceil();
+    let factor = (aim.max(cap).max(1.0) as usize).max(1);
     if factor == 1 {
         let mono = frames
             .iter()
@@ -376,8 +826,17 @@ struct Fft {
 }
 
 impl Fft {
+    /// `size` must be a power of two, and at least two.
+    ///
+    /// It used to be rounded up quietly, which meant `Fft::new(100)` built a
+    /// 128-point transform and then [`Fft::forward`] handed a 100-element
+    /// slice straight back untouched — a caller with an off-by-a-bit size
+    /// got zeros for a spectrum and no complaint. Both ends now say so.
     fn new(size: usize) -> Fft {
-        let size = size.next_power_of_two().max(2);
+        assert!(
+            size >= 2 && size.is_power_of_two(),
+            "transform size {size} is not a power of two"
+        );
         let mut twiddle = Vec::with_capacity(size / 2);
         for step in 0..size / 2 {
             let angle = -2.0 * PI * step as f64 / size as f64;
@@ -392,12 +851,16 @@ impl Fft {
     }
 
     /// Forward transform in place. `imaginary` starts at zero for a real
-    /// signal; a slice of the wrong length is left untouched rather than
-    /// indexed past its end.
+    /// signal.
     fn forward(&self, real: &mut [f64], imaginary: &mut [f64]) {
-        if real.len() != self.size || imaginary.len() != self.size {
-            return;
-        }
+        assert!(
+            real.len() == self.size && imaginary.len() == self.size,
+            "transform of {} wants {} samples, not {} and {}",
+            self.size,
+            self.size,
+            real.len(),
+            imaginary.len()
+        );
         for index in 0..self.size {
             let target = self.reversal[index] as usize;
             if target > index {
@@ -464,17 +927,38 @@ fn pearson(left: &[f64; 12], right: &[f64; 12]) -> f64 {
 mod tests {
     use super::*;
 
-    /// Semitones above C4 for the twelve pitch classes, as frequencies.
+    // ---------------------------------------------------------------------------
+    // signals
+    // ---------------------------------------------------------------------------
+
+    /// Frequency of a pitch class in an octave. MIDI 60 is C4; class 0 is C.
     fn pitch(class: usize, octave: i32) -> f64 {
-        // MIDI 60 is C4; class 0 is C.
         let midi = 12 * (octave + 1) + class as i32;
         440.0 * 2.0f64.powf((midi as f64 - 69.0) / 12.0)
     }
 
-    /// A chord progression as PCM: every chord is a set of pure tones, held
-    /// for an equal share of `seconds`. Pure tones and not a synthesized
-    /// instrument on purpose — a partial that is not there cannot be the
-    /// reason the estimate is right.
+    /// Additive tones at fixed amplitudes, held for `seconds`. Pure tones and
+    /// not a synthesized instrument on purpose — a partial that is not there
+    /// cannot be the reason an estimate is right.
+    fn tones(rate: u32, seconds: f64, voices: &[(f64, f64)]) -> Vec<[i16; 2]> {
+        let count = (rate as f64 * seconds) as usize;
+        let mut out = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = index as f64 / rate as f64;
+            let mut value = 0.0f64;
+            for (voice, (frequency, amplitude)) in voices.iter().enumerate() {
+                // A per-voice phase offset so the tones do not all start at zero
+                // together and make one broadband click at t = 0.
+                value += amplitude * (2.0 * PI * frequency * at + voice as f64 * 0.7).sin();
+            }
+            let sample = (value * 12_000.0).clamp(-32_000.0, 32_000.0) as i16;
+            out.push([sample, sample]);
+        }
+        out
+    }
+
+    /// A chord progression as PCM: every chord is a set of pure tones, held for
+    /// an equal share of `seconds`.
     fn progression(rate: u32, seconds: f64, chords: &[&[f64]]) -> Vec<[i16; 2]> {
         let count = (rate as f64 * seconds) as usize;
         let mut out = Vec::with_capacity(count);
@@ -485,8 +969,6 @@ mod tests {
             let amplitude = 0.8 / chord.len().max(1) as f64;
             let mut value = 0.0f64;
             for (voice, frequency) in chord.iter().enumerate() {
-                // A per-voice phase offset so the tones do not all start at
-                // zero together and make one broadband click at t = 0.
                 let phase = 2.0 * PI * frequency * at + voice as f64 * 0.7;
                 value += amplitude * phase.sin();
             }
@@ -512,20 +994,102 @@ mod tests {
         triad(root, octave, 3)
     }
 
-    /// I - IV - V - I in C: the cadence that names a key, and the only
-    /// chord that both frames is the tonic.
+    /// I - IV - V - I in C: the cadence that names a key, and the only chord
+    /// that both frames is the tonic.
     fn c_major_cadence(rate: u32) -> Vec<[i16; 2]> {
         let (one, four, five) = (major(0, 4), major(5, 3), major(7, 3));
         progression(rate, 8.0, &[&one, &four, &five, &one])
     }
 
-    /// i - iv - V - i in A minor. The dominant is MAJOR, as it is played,
-    /// which puts a G# in the profile and is exactly what separates A minor
-    /// from its relative C major.
+    /// i - iv - V - i in A minor. The dominant is MAJOR, as it is played, which
+    /// puts a G# in the profile and is exactly what separates A minor from its
+    /// relative C major.
     fn a_minor_cadence(rate: u32) -> Vec<[i16; 2]> {
         let (one, four, five) = (minor(9, 3), minor(2, 4), major(4, 4));
         progression(rate, 8.0, &[&one, &four, &five, &one])
     }
+
+    /// The same cadence in any key and either mode, one octave lower, so the
+    /// transposition tests and the loudness tests share a generator.
+    fn cadence(rate: u32, root: usize, is_minor: bool) -> Vec<[i16; 2]> {
+        let third = if is_minor { 3 } else { 4 };
+        let (one, four, five) = (
+            triad(root, 3, third),
+            triad((root + 5) % 12, 3, third),
+            major((root + 7) % 12, 3),
+        );
+        progression(rate, 8.0, &[&one, &four, &five, &one])
+    }
+
+    /// Deterministic broadband noise. A fixed xorshift and not a crate, so this
+    /// suite says the same thing on every machine and in every release.
+    fn noise(rate: u32, seconds: f64, amplitude: f64, seed: u64) -> Vec<[i16; 2]> {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let count = (rate as f64 * seconds) as usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let left = (next() * amplitude * 32_000.0).clamp(-32_000.0, 32_000.0) as i16;
+            let right = (next() * amplitude * 32_000.0).clamp(-32_000.0, 32_000.0) as i16;
+            out.push([left, right]);
+        }
+        out
+    }
+
+    fn quieter(frames: &[[i16; 2]], gain: f64) -> Vec<[i16; 2]> {
+        frames
+            .iter()
+            .map(|frame| {
+                [(frame[0] as f64 * gain) as i16, (frame[1] as f64 * gain) as i16]
+            })
+            .collect()
+    }
+
+    fn then(first: &[[i16; 2]], second: &[[i16; 2]]) -> Vec<[i16; 2]> {
+        let mut out = first.to_vec();
+        out.extend_from_slice(second);
+        out
+    }
+
+    fn over(first: &[[i16; 2]], second: &[[i16; 2]]) -> Vec<[i16; 2]> {
+        let count = first.len().min(second.len());
+        (0..count)
+            .map(|index| {
+                let left = (first[index][0] as f64 + second[index][0] as f64)
+                    .clamp(-32_000.0, 32_000.0) as i16;
+                let right = (first[index][1] as f64 + second[index][1] as f64)
+                    .clamp(-32_000.0, 32_000.0) as i16;
+                [left, right]
+            })
+            .collect()
+    }
+
+    /// Relative spread of a chroma: the quantity [`FLAT_CHROMA`] gates on.
+    fn shape(chroma: &[f64; 12]) -> f64 {
+        let mean = chroma.iter().sum::<f64>() / 12.0;
+        let spread =
+            chroma.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>() / 12.0;
+        spread.sqrt() / mean
+    }
+
+    fn strongest(chroma: &[f64; 12]) -> usize {
+        (1..12).fold(0usize, |best, class| {
+            if chroma[class] > chroma[best] {
+                class
+            } else {
+                best
+            }
+        })
+    }
+
+    // ---------------------------------------------------------------------------
+    // the answers
+    // ---------------------------------------------------------------------------
 
     #[test]
     fn the_c_major_cadence_reads_as_c_major() {
@@ -546,53 +1110,121 @@ mod tests {
         assert_eq!(key.camelot(), "8A");
     }
 
-    /// The same cadence in all twelve keys, both modes. A detector can get
-    /// C right by accident — every constant in it was chosen while looking
-    /// at C — and only the transpositions say whether it heard the music or
-    /// the arithmetic.
+    /// The same cadence in all twelve keys, both modes. A detector can get C
+    /// right by accident — every constant in it was chosen while looking at C —
+    /// and only the transpositions say whether it heard the music or the
+    /// arithmetic.
     #[test]
     fn every_key_is_found_where_it_was_put() {
         for root in 0..12usize {
-            let (one, four, five) =
-                (major(root, 3), major((root + 5) % 12, 3), major((root + 7) % 12, 3));
-            let track = progression(44_100, 8.0, &[&one, &four, &five, &one]);
-            let key = estimate_key(&track, 44_100).expect("a key");
-            assert_eq!((key.tonic as usize, key.minor), (root, false), "major on {root}");
-
-            let (one, four, five) =
-                (minor(root, 3), minor((root + 5) % 12, 3), major((root + 7) % 12, 3));
-            let track = progression(44_100, 8.0, &[&one, &four, &five, &one]);
-            let key = estimate_key(&track, 44_100).expect("a key");
-            assert_eq!((key.tonic as usize, key.minor), (root, true), "minor on {root}");
+            for is_minor in [false, true] {
+                let track = cadence(44_100, root, is_minor);
+                let key = estimate_key(&track, 44_100).expect("a key");
+                assert_eq!(
+                    (key.tonic as usize, key.minor),
+                    (root, is_minor),
+                    "root {root} minor {is_minor} read as {key:?}"
+                );
+            }
         }
     }
 
-    /// The same music at three rates has to give the same answer: the
-    /// decimator picks a different factor for each, and a key that moves
-    /// with the sample rate is a bug in that filter, not in the profiles.
+    /// A cadence that names its key has to read as CERTAIN, not as a coin toss.
+    ///
+    /// The old confidence divided the margin by the whole spread of the
+    /// twenty-four candidates, and that divisor is set by the WORST candidate;
+    /// every one of these forty-eight came out between 0.076 and 0.191 while
+    /// white noise scored 0.199. Measured now: 0.597 to 0.837, mean 0.730.
+    #[test]
+    fn a_cadence_that_names_its_key_says_so() {
+        let mut lowest = 1.0f32;
+        let mut total = 0.0f64;
+        for root in 0..12usize {
+            for is_minor in [false, true] {
+                let key = estimate_key(&cadence(44_100, root, is_minor), 44_100).expect("a key");
+                assert!(
+                    key.confidence >= 0.0 && key.confidence <= 1.0,
+                    "confidence out of range: {key:?}"
+                );
+                lowest = lowest.min(key.confidence);
+                total += key.confidence as f64;
+            }
+        }
+        assert!(lowest > 0.45, "weakest cadence read {lowest}");
+        assert!(total / 24.0 > 0.6, "mean confidence {}", total / 24.0);
+    }
+
+    /// The same music at four rates has to give the same answer: the decimator
+    /// picks a different factor for each. 16 kHz is in the band a rounded
+    /// `rate / TARGET_RATE` used to leave undecimated, where the transform ran
+    /// too coarse to resolve the bottom octave.
     #[test]
     fn the_rate_the_file_was_made_at_does_not_change_the_key() {
-        for rate in [22_050u32, 44_100, 48_000] {
+        for rate in [16_000u32, 22_050, 44_100, 48_000] {
             let key = estimate_key(&c_major_cadence(rate), rate).expect("a key");
             assert_eq!(key.camelot(), "8B", "{rate} Hz gave {key:?}");
         }
     }
 
-    /// One channel silent is a real file, not a broken one: the down-mix
-    /// halves the level and nothing else about the answer may move.
+    /// The transform has to be able to tell a semitone from its neighbour at
+    /// the bottom of the band, at every rate a decoder produces. A Hann main
+    /// lobe is `4 * rate / FRAME` wide; the semitone at [`CHROMA_LOW_HZ`] is
+    /// 6.541 Hz. The 12.5 to 16.5 kHz gap is the one that used to fail.
     #[test]
-    fn one_dead_channel_is_still_a_key() {
-        let mut frames = c_major_cadence(44_100);
-        for frame in frames.iter_mut() {
-            frame[1] = 0;
+    fn the_decimator_never_outruns_the_transform() {
+        let semitone = CHROMA_LOW_HZ * (2.0f64.powf(1.0 / 12.0) - 1.0);
+        for rate in [
+            8_000u32, 11_025, 12_000, 12_500, 14_000, 16_000, 16_537, 22_050, 32_000, 44_100,
+            48_000, 88_200, 96_000, 192_000, 384_000,
+        ] {
+            let (_, out) = decimate_mono(&[[0i16, 0]; 8], rate as f64);
+            let lobe = 4.0 * out / FRAME as f64;
+            assert!(
+                lobe <= semitone,
+                "{rate} Hz decimates to {out} Hz: a {lobe:.3} Hz lobe over a {semitone:.3} Hz semitone"
+            );
+            assert!(out >= 1.0, "{rate} Hz decimated to {out}");
         }
-        let key = estimate_key(&frames, 44_100).expect("a key");
-        assert_eq!(key.camelot(), "8B", "{key:?}");
     }
 
-    /// The whole wheel, by hand, against the chart a DJ reads off the
-    /// screen. Every neighbour on it shares its notes with the last, which
-    /// is the only property of this mapping anyone actually uses.
+    /// One channel silent is a real file, not a broken one. BOTH directions,
+    /// because a down-mix that reads only one channel passes the other.
+    #[test]
+    fn either_dead_channel_is_still_a_key() {
+        for dead in [0usize, 1] {
+            let mut frames = c_major_cadence(44_100);
+            for frame in frames.iter_mut() {
+                frame[dead] = 0;
+            }
+            let key = estimate_key(&frames, 44_100).expect("a key");
+            assert_eq!(key.camelot(), "8B", "channel {dead} silenced gave {key:?}");
+        }
+        // And the down-mix is a SUM, not a pick: a file whose two channels carry
+        // different music is judged on both of them.
+        let left = c_major_cadence(44_100);
+        let right = cadence(44_100, 6, false);
+        let split: Vec<[i16; 2]> = left
+            .iter()
+            .zip(right.iter())
+            .map(|(a, b)| [a[0], b[1]])
+            .collect();
+        let both = estimate_key(&split, 44_100).expect("a key");
+        let only_left = estimate_key(&left, 44_100).expect("a key");
+        let only_right = estimate_key(&right, 44_100).expect("a key");
+        assert_ne!(only_left.camelot(), only_right.camelot());
+        assert!(
+            both.confidence < only_left.confidence && both.confidence < only_right.confidence,
+            "two keys at once read as confidently as one: {both:?} vs {only_left:?} / {only_right:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // the wheel and the names
+    // ---------------------------------------------------------------------------
+
+    /// The whole wheel, by hand, against the chart a DJ reads off the screen.
+    /// Every neighbour on it shares its notes with the last, which is the only
+    /// property of this mapping anyone actually uses.
     #[test]
     fn the_camelot_wheel_is_the_camelot_wheel() {
         // (tonic, minor) -> the number and letter it is known by.
@@ -636,97 +1268,495 @@ mod tests {
 
     #[test]
     fn keys_are_spelled_the_way_they_are_written() {
-        let name = |tonic: u8, minor: bool| {
-            KeyEstimate { tonic, minor, confidence: 0.0 }.name()
-        };
+        let name = |tonic: u8, minor: bool| KeyEstimate { tonic, minor, confidence: 0.0 }.name();
         assert_eq!(name(0, false), "C");
         assert_eq!(name(9, true), "Am");
         assert_eq!(name(7, false), "G");
         assert_eq!(name(4, true), "Em");
+        // The tritone is written sharp on both sides of the wheel; everything
+        // else that has a choice is written flat.
         assert_eq!(name(6, false), "F#");
+        assert_eq!(name(6, true), "F#m");
         assert_eq!(name(3, false), "Eb");
         assert_eq!(name(10, true), "Bbm");
         assert_eq!(name(8, true), "G#m");
+        assert_eq!(name(8, false), "Ab");
     }
 
-    /// The estimate has to survive the things a library is full of: files
-    /// that are ten samples long, files that are silent, and headers that
-    /// claim a rate no decoder would produce.
+    // ---------------------------------------------------------------------------
+    // the refusals
+    // ---------------------------------------------------------------------------
+
+    /// The estimate has to survive the things a library is full of, and each of
+    /// these dies at a DIFFERENT gate.
     #[test]
     fn nothing_to_judge_is_answered_with_none_and_not_a_panic() {
+        // No samples at all.
         assert_eq!(estimate_key(&[], 44_100), None);
-        assert_eq!(estimate_key(&[[0, 0]; 10], 44_100), None);
+        // Shorter than MIN_TRACK_SECS.
         assert_eq!(estimate_key(&[[1_234, -4_321]; 10], 44_100), None);
-        // Ten minutes of digital black.
+        // Four seconds of digital black: long enough, loud enough to reach the
+        // absolute floor and stopped by it.
         assert_eq!(estimate_key(&vec![[0, 0]; 44_100 * 4], 44_100), None);
-        // A rate of zero, and a rate so low the band has no octave in it.
+        // A header that claims a rate no decoder produces.
         assert_eq!(estimate_key(&c_major_cadence(44_100), 0), None);
-        assert_eq!(estimate_key(&vec![[100, 100]; 8_000], 100), None);
+        // A rate whose usable band is under an octave wide: 400 Hz gives a
+        // Nyquist-limited ceiling of 180 Hz over a 110 Hz floor, which is eight
+        // semitones. Long enough and loud enough to reach that check.
+        let low_rate = tones(400, 40.0, &[(150.0, 0.9)]);
+        assert!(low_rate.len() > FRAME, "the band check has to be reachable");
+        assert_eq!(estimate_key(&low_rate, 400), None);
     }
 
-    /// A track that is only nearly silent must not be normalized up into an
-    /// opinion — but one real bar in an otherwise quiet file must still be
-    /// heard, which is the same gate seen from the other side.
+    /// A track that is quiet in ABSOLUTE terms is not a track.
+    ///
+    /// [`WINDOW_FLOOR`] is relative to the record's own loudness and can never
+    /// fire on a record that is quiet throughout, so each of these used to come
+    /// back as a key with a confidence in the normal range: one-step dither read
+    /// F minor at 0.201, a one-step tone read A major at 0.096, three-step hiss
+    /// read F minor.
     #[test]
-    fn a_quiet_bar_in_a_silent_file_is_what_gets_judged() {
-        let mut frames = vec![[0i16, 0]; 44_100 * 12];
-        let chord = c_major_cadence(44_100);
-        for (index, frame) in chord.iter().enumerate().take(44_100 * 8) {
-            frames[44_100 * 2 + index] = *frame;
+    fn a_file_with_nothing_but_a_noise_floor_in_it_has_no_key() {
+        // One-step dither.
+        let mut dither = Vec::new();
+        let mut state = 0x9E3779B97F4A7C15u64;
+        for _ in 0..44_100 * 6 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let value = if state & 1 == 0 { 1i16 } else { -1 };
+            dither.push([value, value]);
         }
-        let key = estimate_key(&frames, 44_100).expect("a key");
+        assert_eq!(estimate_key(&dither, 44_100), None, "one-step dither got a key");
+        // A tone whose peak is one step.
+        let tone: Vec<[i16; 2]> = (0..44_100 * 6)
+            .map(|index| {
+                let value = ((2.0 * PI * 220.0 * index as f64 / 44_100.0).sin() * 1.4) as i16;
+                [value, value]
+            })
+            .collect();
+        assert_eq!(estimate_key(&tone, 44_100), None, "a one-step tone got a key");
+        // Three-step hiss.
+        assert_eq!(estimate_key(&noise(44_100, 6.0, 3.0 / 32_000.0, 5_150), 44_100), None);
+        // And the other side of the same gate: real music at -60 dBFS, which is
+        // eighteen decibels over the floor, still gets judged.
+        let quiet_music = quieter(&c_major_cadence(44_100), 0.001);
+        let key = estimate_key(&quiet_music, 44_100).expect("quiet music is still music");
         assert_eq!(key.camelot(), "8B", "{key:?}");
     }
 
+    /// Broadband noise has no key and must not be given one.
+    ///
+    /// This is the gate that could not fire at all before: the old bin-to-class
+    /// fold put a hard floor of 0.088 under the relative spread of ANY chroma,
+    /// eighty-eight times the 1e-3 threshold that was supposed to catch a flat
+    /// profile, and white noise came back as F minor at a higher confidence
+    /// than any correct answer ever scored.
+    #[test]
+    fn noise_has_no_key() {
+        for seed in [1u64, 2, 3, 12_345, 24_680] {
+            let white = noise(44_100, 10.0, 0.5, seed);
+            assert_eq!(estimate_key(&white, 44_100), None, "white noise seed {seed} got a key");
+            let chroma = track_chroma(&white, 44_100).expect("a chroma");
+            assert!(shape(&chroma) < FLAT_CHROMA, "seed {seed} spread {}", shape(&chroma));
+        }
+        // Noise at a quarter of full scale, so the absolute floor is not what is
+        // doing the refusing.
+        assert_eq!(estimate_key(&noise(44_100, 10.0, 0.25, 7), 44_100), None);
+        // And the other side: music does not trip it, even under four times its
+        // own level in noise. Measured spread there is 0.120 against 0.95 for
+        // the cadence in the clear.
+        let buried = over(&c_major_cadence(44_100), &noise(44_100, 8.0, 0.5, 4_242));
+        let key = estimate_key(&buried, 44_100).expect("music under noise is still music");
+        assert_eq!(key.camelot(), "8B", "{key:?}");
+        let chroma = track_chroma(&buried, 44_100).expect("a chroma");
+        assert!(shape(&chroma) > FLAT_CHROMA, "buried cadence spread {}", shape(&chroma));
+    }
+
+    /// Under a second there is no harmony to average over. The length guard is
+    /// the ONLY thing that refuses this one: at 11025 Hz a 0.9 second file is
+    /// 9922 samples, more than one transform's worth.
+    #[test]
+    fn a_track_too_short_to_have_a_key_does_not_get_one() {
+        let short = progression(11_025, 0.9, &[&major(0, 4)]);
+        assert!(short.len() > FRAME, "the length guard has to be the gate that fires");
+        assert_eq!(estimate_key(&short, 11_025), None);
+        // Just over the line, the same music does get an answer.
+        let long_enough = progression(11_025, 1.4, &[&major(0, 4)]);
+        assert!(estimate_key(&long_enough, 11_025).is_some());
+    }
+
+    // ---------------------------------------------------------------------------
+    // what the chroma is made of
+    // ---------------------------------------------------------------------------
+
     #[test]
     fn a_sine_at_a440_lands_in_the_a_bin() {
-        let tone = progression(44_100, 4.0, &[&[440.0]]);
-        let chroma = track_chroma(&tone, 44_100).expect("a chroma");
-        let mut best = 0usize;
-        for class in 1..12 {
-            if chroma[class] > chroma[best] {
-                best = class;
-            }
-        }
-        assert_eq!(best, 9, "{chroma:?}");
+        let chroma = track_chroma(&tones(44_100, 4.0, &[(440.0, 1.0)]), 44_100).expect("a chroma");
+        assert_eq!(strongest(&chroma), 9, "{chroma:?}");
         // And it is not a near thing: a pure tone belongs to ONE class.
-        let rest = chroma.iter().enumerate().filter(|(class, _)| *class != 9);
-        let runner_up = rest.fold(0.0f64, |most, (_, value)| most.max(*value));
-        assert!(chroma[9] > runner_up * 4.0, "{chroma:?}");
+        let runner_up = (0..12)
+            .filter(|class| *class != 9)
+            .fold(0.0f64, |most, class| most.max(chroma[class]));
+        assert!(chroma[9] > runner_up * 20.0, "{chroma:?}");
     }
 
     /// The octave a chord is voiced in is not part of its name.
+    ///
+    /// Three voicings and a whole cadence rather than one held triad: a single
+    /// triad leaves its relative minor within a fraction of a percent, and a
+    /// test that turns on the last bit of a correlation is a test that reports
+    /// the weather.
     #[test]
     fn the_same_chord_an_octave_up_is_the_same_key() {
-        let low = progression(44_100, 6.0, &[&major(0, 3)]);
-        let high = progression(44_100, 6.0, &[&major(0, 5)]);
-        let low = estimate_key(&low, 44_100).expect("a key");
-        let high = estimate_key(&high, 44_100).expect("a key");
-        assert_eq!(low.camelot(), high.camelot(), "{low:?} vs {high:?}");
+        let mut confidences = Vec::new();
+        for octave in [3i32, 4, 5] {
+            let (one, four, five) = (
+                major(0, octave),
+                major(5, octave - 1),
+                major(7, octave - 1),
+            );
+            let track = progression(44_100, 8.0, &[&one, &four, &five, &one]);
+            let key = estimate_key(&track, 44_100).expect("a key");
+            assert_eq!(key.camelot(), "8B", "octave {octave} gave {key:?}");
+            assert!(key.confidence > 0.2, "octave {octave} gave {key:?}");
+            confidences.push(key.confidence);
+        }
+        // The three readings agree on the key AND roughly on how sure they are.
+        let spread = confidences.iter().cloned().fold(0.0f32, f32::max)
+            - confidences.iter().cloned().fold(1.0f32, f32::min);
+        assert!(spread < 0.5, "the octave moved the confidence by {spread}: {confidences:?}");
     }
+
+    /// Magnitude, not power. Two tones a minor third apart, one at half the
+    /// other's amplitude: the chroma has to read the AMPLITUDE ratio. Squaring
+    /// would read 4:1 and let the loudest partial in a chord name the bar.
+    #[test]
+    fn the_chroma_reads_amplitude_and_not_energy() {
+        let chroma =
+            track_chroma(&tones(44_100, 6.0, &[(440.0, 1.0), (523.251, 0.5)]), 44_100)
+                .expect("a chroma");
+        let ratio = chroma[9] / chroma[0];
+        assert!((1.7..2.9).contains(&ratio), "A/C came out {ratio}: {chroma:?}");
+        let chroma =
+            track_chroma(&tones(44_100, 6.0, &[(440.0, 1.0), (523.251, 0.25)]), 44_100)
+                .expect("a chroma");
+        let ratio = chroma[9] / chroma[0];
+        assert!((3.2..5.6).contains(&ratio), "A/C at a quarter came out {ratio}: {chroma:?}");
+    }
+
+    /// The raised cosine across each semitone: a partial that sits BETWEEN two
+    /// notes is not evidence for either of them.
+    ///
+    /// The same interferer at three times the level of an A440, once on a note
+    /// and once a quarter-tone off it. On the note it takes the chroma over; off
+    /// it, it is thrown away and the quiet A still wins. Weighting every bin in
+    /// the band equally instead loses that, and a detuned synth or a bent string
+    /// votes at full strength for whichever neighbour it happens to round to.
+    #[test]
+    fn a_partial_between_two_notes_votes_for_neither() {
+        let on_note = track_chroma(
+            &tones(44_100, 6.0, &[(440.0, 1.0), (pitch(2, 5), 3.0)]),
+            44_100,
+        )
+        .expect("a chroma");
+        assert_eq!(strongest(&on_note), 2, "a loud D did not win: {on_note:?}");
+
+        let quarter_sharp = pitch(2, 5) * 2.0f64.powf(0.5 / 12.0);
+        let between = track_chroma(&tones(44_100, 6.0, &[(440.0, 1.0), (quarter_sharp, 3.0)]), 44_100)
+            .expect("a chroma");
+        assert_eq!(strongest(&between), 9, "a quarter-tone outvoted the note: {between:?}");
+        assert!(
+            between[9] > between[2] * 4.0 && between[9] > between[3] * 4.0,
+            "the quarter-tone still voted: {between:?}"
+        );
+    }
+
+    /// The band has a bottom and it is a resolution limit, not a taste.
+    ///
+    /// A 55 Hz tone is a real A, and the transform cannot say so: at that
+    /// frequency a semitone is 3.3 Hz and this window's main lobe is 5.4 Hz. It
+    /// must therefore NOT be read as an A. The same tone an octave up, at the
+    /// floor, must be.
+    #[test]
+    fn a_pitch_under_the_floor_is_not_read_as_a_pitch() {
+        let under = track_chroma(&tones(44_100, 6.0, &[(55.0, 1.0)]), 44_100).expect("a chroma");
+        assert_ne!(strongest(&under), 9, "55 Hz was read as an A: {under:?}");
+        let at_floor =
+            track_chroma(&tones(44_100, 6.0, &[(110.0, 1.0)]), 44_100).expect("a chroma");
+        assert_eq!(strongest(&at_floor), 9, "110 Hz was not read as an A: {at_floor:?}");
+    }
+
+    /// The band has a top too, and chords get voiced up there.
+    ///
+    /// A whole cadence with every voice between 1046 and 2349 Hz. Nothing in it
+    /// is under a kilohertz, so a ceiling put anywhere near the fundamentals a
+    /// piano spends its time on throws the entire record away.
+    #[test]
+    fn a_chord_voiced_high_still_has_a_key() {
+        let (one, four, five) = (major(0, 6), major(5, 6), major(7, 6));
+        let track = progression(44_100, 8.0, &[&one, &four, &five, &one]);
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.tonic, 0, "{key:?}");
+        assert!(!key.minor, "{key:?}");
+    }
+
+    /// The octave weighting is a weighting: the middle of the keyboard counts
+    /// for more than either end of the band.
+    #[test]
+    fn the_middle_of_the_keyboard_counts_for_most() {
+        // The shape of the window itself.
+        assert!(octave_weight(440.0) > octave_weight(110.0) * 1.3);
+        assert!(octave_weight(440.0) > octave_weight(3_520.0) * 1.3);
+        assert!(octave_weight(220.0) > octave_weight(3_520.0));
+
+        // And what it does. Two tones of equal amplitude, one in the middle of
+        // the keyboard and one near an edge of the band: the middle one has to
+        // come out ahead.
+        let high = track_chroma(&tones(44_100, 6.0, &[(440.0, 1.0), (pitch(6, 7), 1.0)]), 44_100)
+            .expect("a chroma");
+        assert!(high[9] > high[6] * 1.8, "a cymbal-register tone weighed as much: {high:?}");
+        let low = track_chroma(&tones(44_100, 6.0, &[(440.0, 1.0), (pitch(0, 3), 1.0)]), 44_100)
+            .expect("a chroma");
+        assert!(low[9] > low[0], "the bottom of the band outweighed the middle: {low:?}");
+    }
+
+    /// A flat spectrum has to fold to a flat chroma, exactly, at every rate.
+    ///
+    /// This is the property the whole semitone array exists for. Folding bins
+    /// straight onto classes gave a flat spectrum a permanent shape — Bb at
+    /// -14.8%, G# at +14.3%, sd/mean 0.0883 — which is why noise had a key.
+    #[test]
+    fn a_flat_spectrum_folds_flat() {
+        for rate in [8_000.0f64, 11_025.0, 12_000.0, 13_000.0] {
+            let geometry = Geometry::new(rate).expect("geometry at {rate}");
+            let count = geometry.notes();
+            let mut flat = vec![1.0f64; count];
+            let mut envelope = vec![0.0f64; count];
+            let mass = geometry.fold(&mut flat, &mut envelope);
+            let deviation = shape(&mass);
+            assert!(deviation < 1e-9, "{rate} Hz folds flat to sd/mean {deviation}: {mass:?}");
+        }
+    }
+
+    /// A bass note pays for its own harmonics before the chord over it is read.
+    ///
+    /// Harmonic 5 of a fundamental is a MAJOR THIRD, and a bass-forward mix used
+    /// to read every minor chord as major because of it: a sawtooth bass five
+    /// times the level of the triad over it read 12/12 minor chords as major.
+    /// The control is the same signal with harmonic 5 taken out, which was right
+    /// all along and stays right.
+    #[test]
+    fn a_loud_bass_does_not_turn_a_minor_chord_major() {
+        for skip_the_third in [false, true] {
+            for root in [0usize, 4, 7, 10] {
+                let mut voices: Vec<(f64, f64)> = triad(root, 4, 3)
+                    .into_iter()
+                    .map(|frequency| (frequency, 1.0))
+                    .collect();
+                let bass = pitch(root, 2);
+                for harmonic in 1..=12usize {
+                    if skip_the_third && harmonic == 5 {
+                        continue;
+                    }
+                    let frequency = bass * harmonic as f64;
+                    if frequency > 44_100.0 * 0.45 {
+                        break;
+                    }
+                    voices.push((frequency, 5.0 / harmonic as f64));
+                }
+                let key = estimate_key(&tones(44_100, 6.0, &voices), 44_100).expect("a key");
+                assert_eq!(
+                    (key.tonic as usize, key.minor),
+                    (root, true),
+                    "minor triad on {root} over a sawtooth bass (harmonic 5 {}) read {key:?}",
+                    if skip_the_third { "removed" } else { "present" }
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // which windows get a vote, and how much of one
+    // ---------------------------------------------------------------------------
+
+    /// Every window that carried music gets ONE vote, whatever it weighed.
+    ///
+    /// Eight seconds of a C major cadence at full scale against twenty-four
+    /// seconds of an F# major cadence at fifteen percent. Three times as many
+    /// bars in F#, a fifth of the level: normalizing each window against its own
+    /// loudest class is what makes the bars decide instead of the decibels.
+    #[test]
+    fn a_long_quiet_passage_outvotes_a_short_loud_one() {
+        let loud = c_major_cadence(44_100);
+        let mut quiet = Vec::new();
+        for _ in 0..3 {
+            quiet.extend_from_slice(&cadence(44_100, 6, false));
+        }
+        let track = then(&loud, &quieter(&quiet, 0.15));
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.tonic, 6, "{key:?}");
+        assert!(!key.minor, "{key:?}");
+    }
+
+    /// A window far enough under the record's own level is the room between the
+    /// tracks, and it does not get a vote at all.
+    ///
+    /// The same shape as the test above, with the long passage at two percent
+    /// instead of fifteen. Without the floor its noise is normalized up to full
+    /// strength and thirty-two bars of nearly nothing decide the record.
+    #[test]
+    fn a_passage_under_the_floor_gets_no_vote() {
+        let loud = c_major_cadence(44_100);
+        let mut quiet = Vec::new();
+        for _ in 0..3 {
+            quiet.extend_from_slice(&cadence(44_100, 6, false));
+        }
+        let track = then(&loud, &quieter(&quiet, 0.02));
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.camelot(), "8B", "{key:?}");
+    }
+
+    /// The loudness reference is a percentile, and a percentile has to be able
+    /// to name something other than the maximum.
+    ///
+    /// A three-second track is nine windows, and `len * 0.90` rounds to nine —
+    /// the last index — so every track under about four seconds used to be
+    /// gated against its own peak. Here that peak is a single very loud bar in
+    /// another key; gate on it and the whole cadence falls under the floor and
+    /// the loud bar is the only thing left to judge.
+    #[test]
+    fn a_short_track_is_not_gated_against_its_own_peak() {
+        let (one, four) = (major(0, 4), major(5, 3));
+        let quiet = quieter(&progression(44_100, 3.0, &[&one, &four, &one]), 0.02);
+        let burst = progression(44_100, 0.45, &[&major(6, 4)]);
+        let mut track = quiet.clone();
+        let at = track.len() - burst.len();
+        track[at..].copy_from_slice(&burst);
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.tonic, 0, "the loud bar decided a short track: {key:?}");
+    }
+
+    /// Half-window overlap. A chord that lands on the boundary between two
+    /// windows falls in BOTH of their tapers; at half the hop there is always a
+    /// window centred on it instead.
+    ///
+    /// The signal is a held C-and-G — a fifth, which names no mode — with short
+    /// Eb bursts that do: the record is C minor and nothing but those bursts
+    /// says so. Every burst straddles a boundary between non-overlapping
+    /// windows. At a full hop they land where the taper is near zero, the Eb
+    /// never arrives, and the fifth reads as C major instead. Measured: C minor
+    /// at 0.823 with the half hop, C major at 0.239 with the full one.
+    #[test]
+    fn a_chord_on_the_boundary_is_still_heard() {
+        let rate = 44_100u32;
+        let (_, decimated) = decimate_mono(&[[0i16, 0]; 8], rate as f64);
+        let factor = (rate as f64 / decimated).round() as usize;
+        // One non-overlapped window, in source samples.
+        let boundary = FRAME * factor;
+        let burst = boundary / 12;
+        let held = [pitch(0, 3), pitch(7, 3), pitch(0, 4), pitch(7, 4)];
+        let says_minor = [pitch(3, 4), pitch(3, 5)];
+        let count = (rate as f64 * 16.0) as usize;
+        let mut out = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = index as f64 / rate as f64;
+            let mut value = 0.0f64;
+            for (voice, frequency) in held.iter().enumerate() {
+                value += 0.25 * (2.0 * PI * frequency * at + voice as f64 * 0.7).sin();
+            }
+            let offset = index % boundary;
+            if offset < burst / 2 || offset > boundary - burst / 2 {
+                for (voice, frequency) in says_minor.iter().enumerate() {
+                    value += 2.0 * (2.0 * PI * frequency * at + voice as f64 * 0.31).sin();
+                }
+            }
+            let sample = (value * 20_000.0).clamp(-32_000.0, 32_000.0) as i16;
+            out.push([sample, sample]);
+        }
+        // The bursts are the only thing in the file that names a mode.
+        let without = estimate_key(&tones(rate, 8.0, &held.map(|f| (f, 1.0))), rate).expect("a key");
+        assert!(!without.minor, "the held fifth already picked a mode: {without:?}");
+        let key = estimate_key(&out, rate).expect("a key");
+        assert_eq!(key.camelot(), "5A", "the boundary bursts were not heard: {key:?}");
+    }
+
+    /// A window that is all one note does not get to outvote a window that is a
+    /// chord, and neither gets to outvote the other by being longer than it is.
+    ///
+    /// Eight seconds of an F# drone — three octaves of one pitch class, so its
+    /// chroma is a single spike — against sixteen seconds of a C major cadence,
+    /// whose chroma is spread over seven. Normalizing each window against its
+    /// own loudest class is what makes those thirty-two bars of C outweigh the
+    /// sixteen bars of F#; summing the chroma raw instead lets the spike win,
+    /// measured, and the record comes back as F# minor.
+    #[test]
+    fn a_drone_does_not_outvote_a_chord() {
+        let drone: Vec<(f64, f64)> = [3i32, 4, 5]
+            .iter()
+            .map(|octave| (pitch(6, *octave), 1.0))
+            .collect();
+        let mut track = tones(44_100, 8.0, &drone);
+        for _ in 0..2 {
+            track.extend_from_slice(&c_major_cadence(44_100));
+        }
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.tonic, 0, "the drone decided the record: {key:?}");
+        assert!(!key.minor, "{key:?}");
+    }
+
+    /// The decimator's filter, from the other side: content above the decimated
+    /// Nyquist must not fold back into the band and vote.
+    ///
+    /// A C major cadence with a loud 10_285 Hz tone over it. Sub-sample by four
+    /// without filtering and that tone lands on 740 Hz — an F#, a tritone from
+    /// the key and the one note that ruins it. The filter puts it 22 dB down and
+    /// the cadence is unmoved.
+    #[test]
+    fn what_is_above_the_new_nyquist_does_not_come_back_inside_the_band() {
+        let alias = 44_100.0 / 4.0 - pitch(6, 5);
+        assert!((alias - 10_285.0).abs() < 1.0, "the probe tone moved: {alias}");
+        let track = over(&c_major_cadence(44_100), &tones(44_100, 8.0, &[(alias, 2.0)]));
+        let key = estimate_key(&track, 44_100).expect("a key");
+        assert_eq!(key.camelot(), "8B", "the aliased tone was heard: {key:?}");
+        let chroma = track_chroma(&track, 44_100).expect("a chroma");
+        assert!(chroma[6] < chroma[0], "an F# arrived from above Nyquist: {chroma:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // the pieces, on their own
+    // ---------------------------------------------------------------------------
 
     /// The profiles themselves, guarded by what they mean. A table typed one
     /// degree out still looks like a plausible list of numbers, and what it
-    /// silently does is move the fifth's weight onto the tritone — which
-    /// reads every record as the key a third away and never once looks like
-    /// a crash.
+    /// silently does is move the fifth's weight onto the tritone — which reads
+    /// every record as the key a third away and never once looks like a crash.
     #[test]
     fn the_profiles_rank_their_own_degrees() {
-        for profile in [MAJOR_PROFILE, MINOR_PROFILE] {
-            let strongest = (0..12).fold(0, |best: usize, degree| {
-                if profile[degree] > profile[best] { degree } else { best }
+        // Through a function, so these are comparisons the test runs and not
+        // constants the compiler folds before it ever gets there.
+        fn stronger(profile: &[f64; 12], degree: usize, than: usize) -> bool {
+            profile[degree] > profile[than]
+        }
+        for profile in [&MAJOR_PROFILE, &MINOR_PROFILE] {
+            let strongest = (0..12).fold(0usize, |best, degree| {
+                if profile[degree] > profile[best] {
+                    degree
+                } else {
+                    best
+                }
             });
             assert_eq!(strongest, 0, "the tonic is not the strongest degree");
-            assert!(profile[7] > profile[6], "the fifth is under the tritone");
-            assert!(profile[7] > profile[8], "the fifth is under the sixth");
+            assert!(stronger(profile, 7, 6), "the fifth is under the tritone");
+            assert!(stronger(profile, 7, 8), "the fifth is under the sixth");
         }
         // The third is what the two modes disagree about, and nothing else.
-        assert!(MAJOR_PROFILE[4] > MAJOR_PROFILE[3]);
-        assert!(MINOR_PROFILE[3] > MINOR_PROFILE[4]);
-        // The fifth is second only to the tonic in major; in minor the
-        // third takes that place, which is the whole character of the mode.
-        assert!(MAJOR_PROFILE[7] > MAJOR_PROFILE[3] && MAJOR_PROFILE[7] > MAJOR_PROFILE[4]);
-        assert!(MINOR_PROFILE[3] > MINOR_PROFILE[7]);
+        assert!(stronger(&MAJOR_PROFILE, 4, 3));
+        assert!(stronger(&MINOR_PROFILE, 3, 4));
+        // The fifth is second only to the tonic in major; in minor the third
+        // takes that place, which is the whole character of the mode.
+        assert!(stronger(&MAJOR_PROFILE, 7, 3) && stronger(&MAJOR_PROFILE, 7, 4));
+        assert!(stronger(&MINOR_PROFILE, 3, 7));
     }
 
     /// The correlation, on its own: a profile that IS the major template
@@ -741,15 +1771,26 @@ mod tests {
             rotated[degree] = MAJOR_PROFILE[(degree + 5) % 12];
         }
         assert!(pearson(&rotated, &MAJOR_PROFILE) < 0.9);
+        // Affine invariance: the shape is what is scored, not the level.
+        let mut scaled = [0.0f64; 12];
+        for degree in 0..12 {
+            scaled[degree] = MAJOR_PROFILE[degree] * 17.0 + 4.0;
+        }
+        assert!((pearson(&scaled, &MAJOR_PROFILE) - 1.0).abs() < 1e-12);
     }
 
-    /// The transform against the definition, on a signal with a known
-    /// answer: a single bin's worth of cosine has to come back as a single
-    /// bin.
+    /// The transform against the definition, magnitude AND phase.
+    ///
+    /// A cosine alone cannot catch a sign error in the twiddle table: it is
+    /// real and even, so its transform is real and a conjugated transform is
+    /// the same transform. A sine can, and a signal with no symmetry at all
+    /// checked against the naive sum can catch anything.
     #[test]
     fn the_transform_transforms() {
         let size = 64usize;
         let transform = Fft::new(size);
+
+        // A single bin's worth of cosine comes back as a single bin.
         let mut real = vec![0.0f64; size];
         let mut imaginary = vec![0.0f64; size];
         for (index, value) in real.iter_mut().enumerate() {
@@ -764,10 +1805,112 @@ mod tests {
                 assert!(magnitude < 1e-9, "bin {bin} {magnitude}");
             }
         }
-        // A slice of the wrong length is refused rather than indexed.
-        let mut short = vec![0.0f64; 3];
-        let mut also = vec![0.0f64; 3];
-        transform.forward(&mut short, &mut also);
-        assert_eq!(short, vec![0.0; 3]);
+
+        // A sine, where the ANSWER IS IMAGINARY and its sign is the sign of the
+        // twiddles: X[k] = -i N/2 at k, +i N/2 at N - k.
+        let mut real = vec![0.0f64; size];
+        let mut imaginary = vec![0.0f64; size];
+        for (index, value) in real.iter_mut().enumerate() {
+            *value = (2.0 * PI * 5.0 * index as f64 / size as f64).sin();
+        }
+        transform.forward(&mut real, &mut imaginary);
+        assert!(real[5].abs() < 1e-9, "a sine has no real part at its own bin: {}", real[5]);
+        assert!(
+            (imaginary[5] + size as f64 / 2.0).abs() < 1e-9,
+            "bin 5 imaginary {} (a sign flip in the twiddles reads +32 here)",
+            imaginary[5]
+        );
+        assert!((imaginary[size - 5] - size as f64 / 2.0).abs() < 1e-9);
+
+        // And against the definition, on a signal with no symmetry to hide in.
+        let signal: Vec<f64> = (0..size)
+            .map(|index| ((index * index * 37 + index * 11) % 101) as f64 / 50.0 - 1.0)
+            .collect();
+        let mut real = signal.clone();
+        let mut imaginary = vec![0.0f64; size];
+        transform.forward(&mut real, &mut imaginary);
+        for bin in 0..size {
+            let (mut want_real, mut want_imaginary) = (0.0f64, 0.0f64);
+            for (index, value) in signal.iter().enumerate() {
+                let angle = -2.0 * PI * bin as f64 * index as f64 / size as f64;
+                want_real += value * angle.cos();
+                want_imaginary += value * angle.sin();
+            }
+            assert!((real[bin] - want_real).abs() < 1e-9, "bin {bin} real");
+            assert!((imaginary[bin] - want_imaginary).abs() < 1e-9, "bin {bin} imaginary");
+        }
+    }
+
+    /// A size that is not a power of two used to be rounded up in silence, and
+    /// then every transform of a buffer the caller had sized to what they ASKED
+    /// for came back untouched — a spectrum of zeros, with no complaint.
+    #[test]
+    #[should_panic(expected = "not a power of two")]
+    fn a_transform_size_that_is_not_a_power_of_two_is_refused() {
+        Fft::new(100);
+    }
+
+    #[test]
+    #[should_panic(expected = "wants")]
+    fn a_buffer_of_the_wrong_length_is_refused() {
+        let transform = Fft::new(64);
+        let mut real = vec![0.0f64; 63];
+        let mut imaginary = vec![0.0f64; 63];
+        transform.forward(&mut real, &mut imaginary);
+    }
+
+    /// Rates and lengths a decoder can hand over, including the ones that make
+    /// no sense, against seven waveforms: silence, hard-panned full scale, both
+    /// channels pinned, a sawtooth, an out-of-phase sine, one-step dither and a
+    /// hashed pseudo-random fill. 840 cases. Nothing here may panic and no
+    /// confidence may leave 0.0..=1.0.
+    #[test]
+    fn no_input_makes_it_panic() {
+        let rates = [0u32, 1, 2, 7, 100, 489, 500, 8_000, 11_025, 44_100, 192_000, 384_000];
+        let lengths = [0usize, 1, 2, 10, 4_095, 8_191, 8_192, 8_193, 16_384, 100_000];
+        let mut cases = 0usize;
+        for rate in rates {
+            for length in lengths {
+                let shapes: [Vec<[i16; 2]>; 7] = [
+                    vec![[0, 0]; length],
+                    vec![[i16::MIN, i16::MAX]; length],
+                    vec![[i16::MAX, i16::MAX]; length],
+                    (0..length).map(|i| [(i % 4_001) as i16 - 2_000, -((i % 331) as i16)]).collect(),
+                    (0..length)
+                        .map(|i| {
+                            let value = ((i as f64 * 0.031).sin() * 30_000.0) as i16;
+                            [value, -value]
+                        })
+                        .collect(),
+                    (0..length)
+                        .map(|i| {
+                            let value = if i % 2 == 0 { 1i16 } else { -1 };
+                            [value, value]
+                        })
+                        .collect(),
+                    (0..length)
+                        .map(|i| {
+                            let mut state =
+                                (i as u64).wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                            state ^= state >> 33;
+                            let value = ((state % 60_001) as i32 - 30_000) as i16;
+                            [value, value.wrapping_neg()]
+                        })
+                        .collect(),
+                ];
+                for frames in shapes {
+                    cases += 1;
+                    if let Some(key) = estimate_key(&frames, rate) {
+                        assert!(key.tonic < 12, "{rate} {length} {key:?}");
+                        assert!(
+                            key.confidence.is_finite() && (0.0..=1.0).contains(&key.confidence),
+                            "{rate} {length} {key:?}"
+                        );
+                        assert!(!key.camelot().is_empty() && !key.name().is_empty());
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 840);
     }
 }

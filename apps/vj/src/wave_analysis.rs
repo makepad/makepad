@@ -80,7 +80,13 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// tonal centre" once it is on disk; a version 6 sidecar carries only one of
 /// the two fields, under either layout. All of them are re-analysed rather
 /// than reused, as every earlier bump did.
-const CACHE_VERSION: u32 = 7;
+///
+/// Version 8 is the same FIELDS with a different chroma behind them: the fold
+/// was made pitch-class neutral, the bass harmonics that were reading a minor
+/// triad as its relative major are subtracted, and noise now returns no key
+/// instead of a confident wrong one. A version 7 key is not wrong-format, it
+/// is wrong — which is worse, because nothing about it looks stale.
+const CACHE_VERSION: u32 = 8;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -3068,8 +3074,9 @@ mod tests {
         assert_eq!(summary.key, analysis.key);
         assert!((summary.duration_secs - analysis.duration_secs).abs() < 1e-9);
         // Versions 5 and 6 each lack a field this layout carries (the key, or
-        // the refinement marker), so they are re-analysed, never misread.
-        for version in [4u32, 5, 6] {
+        // the refinement marker) and version 7 carries a key the old chroma
+        // got wrong, so they are re-analysed, never misread.
+        for version in [4u32, 5, 6, 7] {
             let mut old = encode_analysis(&analysis);
             old[8..12].copy_from_slice(&version.to_le_bytes());
             assert!(decode_analysis(&old).is_err(), "version {version}");

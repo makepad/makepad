@@ -13,6 +13,7 @@
 //! velocity into a playback rate and hands it to the host as events, which
 //! the deck engine routes to the mixer's vinyl ramps.
 
+use crate::columns::{Column, ColumnWidth};
 use crate::decks::DeckId;
 use crate::loop_splat_view::{DrawSplatBlock, DrawSplatCell, VjLoopSplat};
 use crate::wave_analysis::{TrackGrid, WaveTiles, ZOOM_COLS_PER_SEC};
@@ -869,21 +870,30 @@ script_mod! {
             draw_text.color: #xff5c39
             draw_text.text_style: theme.font_bold{font_size: 8}
         }
-        row_title := TrackText{width: Fill{weight: 400. min: 180.}}
-        row_artist := TrackText{width: Fill{max: 150.} draw_text.color: #x9fabb7}
-        row_bpm := TrackText{
-            width: 54
-            draw_text.color: #xff5c39
-            draw_text.text_style: theme.font_bold{font_size: 9}
-        }
-        row_key := TrackText{width: 40 draw_text.color: #xc6a0f0}
-        row_time := TrackText{width: 52 draw_text.color: #x9fabb7}
-        // The processed marks: a green tick under STEM when the
-        // store holds this track's four stems, under KRK when it
-        // holds the word-aligned transcript.
-        row_stem := TrackText{width: 36 draw_text.color: #x35c05f}
-        row_krk := TrackText{width: 30 draw_text.color: #x35c05f}
-        row_tags := TrackText{width: Fill{max: 190.} draw_text.color: #x6f7b87}
+        // TWELVE GENERIC CELLS, not one per column.
+        //
+        // Which column a cell carries — its words, its width, its ink and
+        // whether it shows at all — is decided per draw from the list's
+        // column layout, because the operator picks both the set of columns
+        // and their ORDER. A cell per named column cannot be reordered: a
+        // view draws its children in the order they are declared here, and
+        // that order is fixed at build time. The header opposite is built
+        // the same way and from the same layout, so the two cannot drift.
+        //
+        // The bold face is the widest a cell ever needs (BPM wears it); a
+        // lighter column overrides the text style along with its colour.
+        row_col0 := TrackText{width: 0}
+        row_col1 := TrackText{width: 0}
+        row_col2 := TrackText{width: 0}
+        row_col3 := TrackText{width: 0}
+        row_col4 := TrackText{width: 0}
+        row_col5 := TrackText{width: 0}
+        row_col6 := TrackText{width: 0}
+        row_col7 := TrackText{width: 0}
+        row_col8 := TrackText{width: 0}
+        row_col9 := TrackText{width: 0}
+        row_col10 := TrackText{width: 0}
+        row_col11 := TrackText{width: 0}
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
         // ButtonIcon, not Button: an icon-only button carries no label and
@@ -2799,13 +2809,34 @@ script_mod! {
                     lists_tab_1 := MusicButton{width: 62 height: 22 text: "queue"}
                     lists_tab_2 := MusicButton{width: 62 height: 22 text: "loops"}
                 }
-                View{
+                // A GRIP between the listing and the set list.
+                //
+                // The queue used to be a fixed 320 points, which is the right
+                // width for a title and nothing else — and the set list now
+                // carries tempo and key, and whatever else the operator has
+                // asked it to carry. FromB keeps that 320 as the starting
+                // place rather than as the law, so widening the set list
+                // costs the listing exactly what it gains.
+                lists_split := Splitter{
                     width: Fill
                     height: Fill
-                    flow: Right
-                    spacing: 8
-                    new_batch: true
-                    library_drop := RoundedView{
+                    axis: SplitterAxis.Horizontal
+                    align: SplitterAlign.FromB(320.0)
+                    // The seam the rest of the console uses: near-invisible
+                    // at rest, accent under the pointer.
+                    size: 6.0
+                    draw_bg +: {
+                        color_bg: #x14171c
+                        color: #x222830
+                        color_hover: #x46312b
+                        color_drag: #xff5c39
+                        splitter_pad: 2.0
+                        bar_size: 72.0
+                    }
+                    a: View{
+                        width: Fill
+                        height: Fill
+                        library_drop := RoundedView{
                         width: Fill
                         height: Fill
                         flow: Down
@@ -2956,9 +2987,16 @@ script_mod! {
                         }
                         // The column heads. Every one of them sorts: a click takes
                         // the order, a second click reverses it, and the arrow in the
-                        // label says which column is holding it. STEM and KRK are
-                        // heads like the rest — same widget, same box — so they sit
-                        // on the line their neighbours sit on.
+                        // label says which column is holding it.
+                        //
+                        // Twelve generic cells, matching the row's twelve — see the
+                        // note on `row_col0`. Which column each carries comes from
+                        // the operator's layout at sync time, so the heads and the
+                        // cells under them are reordered by one decision rather than
+                        // by two that could disagree.
+                        //
+                        // The CELL carries the width, not the head: a Button's walk
+                        // is private, so the head fills a box the host can size.
                         View{
                             width: Fill
                             height: Fit
@@ -2967,34 +3005,28 @@ script_mod! {
                             padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 26 text: ""}
-                            th_title := MusicColHead{width: Fill{weight: 400. min: 180.} text: "TITLE"}
-                            th_artist := MusicColHead{width: Fill{max: 150.} text: "ARTIST"}
-                            th_bpm := MusicColHead{width: 54 text: "BPM"}
-                            th_key := MusicColHead{width: 40 text: "KEY"}
-                            th_time := MusicColHead{width: 52 text: "TIME"}
-                            // The cell carries the column width, not the head: a
-                            // Button's walk is private, and on a narrow console
-                            // `App::sync_library_density` shrinks these two cells and
-                            // swaps the words for S and K. The rows' tick columns
-                            // follow the same rule in `VjTrackList::draw_walk`, so
-                            // header and rows never fall out of step.
-                            music_th_stem_cell := View{
-                                width: 36
-                                height: Fit
-                                music_th_stem := MusicColHead{width: Fill text: "STEM"}
-                            }
-                            music_th_krk_cell := View{
-                                width: 30
-                                height: Fit
-                                music_th_krk := MusicColHead{width: Fill text: "KRK"}
-                            }
-                            th_tags := MusicColHead{width: Fill{max: 190.} text: "TAGS"}
+                            th_cell0 := View{width: 0 height: Fit th_head0 := MusicColHead{width: Fill text: ""}}
+                            th_cell1 := View{width: 0 height: Fit th_head1 := MusicColHead{width: Fill text: ""}}
+                            th_cell2 := View{width: 0 height: Fit th_head2 := MusicColHead{width: Fill text: ""}}
+                            th_cell3 := View{width: 0 height: Fit th_head3 := MusicColHead{width: Fill text: ""}}
+                            th_cell4 := View{width: 0 height: Fit th_head4 := MusicColHead{width: Fill text: ""}}
+                            th_cell5 := View{width: 0 height: Fit th_head5 := MusicColHead{width: Fill text: ""}}
+                            th_cell6 := View{width: 0 height: Fit th_head6 := MusicColHead{width: Fill text: ""}}
+                            th_cell7 := View{width: 0 height: Fit th_head7 := MusicColHead{width: Fill text: ""}}
+                            th_cell8 := View{width: 0 height: Fit th_head8 := MusicColHead{width: Fill text: ""}}
+                            th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
+                            th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
+                            th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
                             MusicLabel{width: 26 text: ""}
                         }
                         music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                     }
-                    queue_drop := RoundedView{
-                        width: 320
+                    }
+                    b: View{
+                        width: Fill
+                        height: Fill
+                        queue_drop := RoundedView{
+                        width: Fill
                         height: Fill
                         flow: Down
                         spacing: 4
@@ -3043,7 +3075,6 @@ script_mod! {
                         music_queue := mod.widgets.VjTrackList{
                             show_queue_button: false
                             show_unqueue_button: true
-                            compact: true
                         }
                         // The DOCKED home of the pre-listen player: under the
                         // queue, exactly where the mockup parks it.
@@ -3054,37 +3085,38 @@ script_mod! {
                             phones_dock_player := mod.widgets.VjPhonesPlayer{}
                         }
                     }
-                    loops_drop := RoundedView{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 4
-                        draw_bg +: {
-                            color: #x00000000
-                            border_color: #x00000000
-                            border_size: 1.0
-                            border_radius: 8.0
-                        }
-                        // The loop page's own row, where the explorer keeps its
-                        // search: which deck the grid shows, the engine switch,
-                        // and the score popup.
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            align: Align{x: 0.0, y: 0.5}
-                            splat_deck_a := MusicButton{width: 26 height: 22 text: "A"}
-                            splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
-                            splat_on := MusicButton{width: 36 height: 22 text: "ON"}
-                            View{width: Fill height: Fit}
-                            splat_score := MusicButton{width: 52 height: 22 text: "score"}
-                        }
-                        loop_splat := mod.widgets.VjLoopSplat{}
                     }
                 }
+                loops_drop := RoundedView{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 4
+                    draw_bg +: {
+                        color: #x00000000
+                        border_color: #x00000000
+                        border_size: 1.0
+                        border_radius: 8.0
+                    }
+                    // The loop page's own row, where the explorer keeps its
+                    // search: which deck the grid shows, the engine switch,
+                    // and the score popup.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0, y: 0.5}
+                        splat_deck_a := MusicButton{width: 26 height: 22 text: "A"}
+                        splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
+                        splat_on := MusicButton{width: 36 height: 22 text: "ON"}
+                        View{width: Fill height: Fit}
+                        splat_score := MusicButton{width: 52 height: 22 text: "score"}
+                    }
+                    loop_splat := mod.widgets.VjLoopSplat{}
+                }
             }
-            }
+        }
 
             loop_score_panel := RoundedView{
                 visible: false
@@ -3389,6 +3421,23 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "COLUMNS"}
+                        prep_columns_open := MusicButton{
+                            width: 150
+                            height: 22
+                            text: "CHOOSE COLUMNS"
+                        }
+                        // Artist, album, genre, year and bitrate come out of
+                        // the file's own tags: no pass here fills them, and
+                        // none needs to.
+                        MusicLabel{width: Fill text: "tags need no pass"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
                         align: Align{x: 1.0, y: 0.5}
                         prep_clear := MusicButton{
                             width: 130
@@ -3450,6 +3499,197 @@ script_mod! {
                         align: Align{x: 1.0 y: 0.5}
                         prep_confirm_no := MusicButton{width: 60 height: 22 text: "No"}
                         prep_confirm_yes := MusicButton{width: 90 height: 22 text: "Yes"}
+                    }
+                }
+            }
+        }
+
+
+        // The columns dialog: which columns a list shows, and in what order.
+        //
+        // One dialog serves both lists, with a switch at the top saying which
+        // one is being edited, because the two want genuinely different sets
+        // — the set list is a 320-point column — and two dialogs would be two
+        // places for the same twelve rows to drift apart.
+        //
+        // Twelve rows, one per column, in the list's CURRENT order: the row
+        // order IS the answer, so moving a row is the whole gesture. A hidden
+        // column keeps its place in the order rather than falling to the
+        // bottom, so unticking something and ticking it back puts it where it
+        // was.
+        prep_columns_modal := Modal{
+            can_dismiss: true
+            content +: {
+                width: 420
+                height: Fit
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    padding: 20
+                    spacing: 6
+                    flow: Down
+                    draw_bg +: {
+                        color: #x16161b
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    Label{
+                        text: "COLUMNS"
+                        draw_text.color: #xff5c39
+                        draw_text.text_style: theme.font_bold{font_size: 11}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fit text: "EDITING"}
+                        prep_cols_explorer := MusicChipButton{height: 20 text: "EXPLORER"}
+                        prep_cols_queue := MusicChipButton{height: 20 text: "SET LIST"}
+                        prep_cols_note := MusicLabel{width: Fill text: ""}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show0 := CheckBox{width: 26 text: ""}
+                        prep_col_label0 := MusicLabel{width: Fill text: ""}
+                        prep_col_up0 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down0 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show1 := CheckBox{width: 26 text: ""}
+                        prep_col_label1 := MusicLabel{width: Fill text: ""}
+                        prep_col_up1 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down1 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show2 := CheckBox{width: 26 text: ""}
+                        prep_col_label2 := MusicLabel{width: Fill text: ""}
+                        prep_col_up2 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down2 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show3 := CheckBox{width: 26 text: ""}
+                        prep_col_label3 := MusicLabel{width: Fill text: ""}
+                        prep_col_up3 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down3 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show4 := CheckBox{width: 26 text: ""}
+                        prep_col_label4 := MusicLabel{width: Fill text: ""}
+                        prep_col_up4 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down4 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show5 := CheckBox{width: 26 text: ""}
+                        prep_col_label5 := MusicLabel{width: Fill text: ""}
+                        prep_col_up5 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down5 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show6 := CheckBox{width: 26 text: ""}
+                        prep_col_label6 := MusicLabel{width: Fill text: ""}
+                        prep_col_up6 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down6 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show7 := CheckBox{width: 26 text: ""}
+                        prep_col_label7 := MusicLabel{width: Fill text: ""}
+                        prep_col_up7 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down7 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show8 := CheckBox{width: 26 text: ""}
+                        prep_col_label8 := MusicLabel{width: Fill text: ""}
+                        prep_col_up8 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down8 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show9 := CheckBox{width: 26 text: ""}
+                        prep_col_label9 := MusicLabel{width: Fill text: ""}
+                        prep_col_up9 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down9 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show10 := CheckBox{width: 26 text: ""}
+                        prep_col_label10 := MusicLabel{width: Fill text: ""}
+                        prep_col_up10 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down10 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        prep_col_show11 := CheckBox{width: 26 text: ""}
+                        prep_col_label11 := MusicLabel{width: Fill text: ""}
+                        prep_col_up11 := MusicButton{width: 26 height: 20 text: "UP"}
+                        prep_col_down11 := MusicButton{width: 26 height: 20 text: "DN"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 1.0, y: 0.5}
+                        prep_cols_reset := MusicButton{width: 80 height: 22 text: "Reset"}
+                        prep_cols_close := MusicButton{width: 60 height: 22 text: "Close"}
                     }
                 }
             }
@@ -3521,6 +3761,17 @@ script_mod! {
                             scan_max_secs := TextInput{width: 60 text: "10"}
                             scan_max_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
                         }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{x: 0.0, y: 0.5}
+                            MusicLabel{width: 90 text: "MIN GAP"}
+                            scan_gap_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            scan_gap_secs := TextInput{width: 60 text: "2"}
+                            scan_gap_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                        }
                     }
                     scan_beats_rows := View{
                         visible: false
@@ -3546,6 +3797,17 @@ script_mod! {
                             MusicLabel{width: 90 text: "MAX BEATS"}
                             scan_max_beats := DropDown{labels: ["8" "16" "32" "64" "128" "256" "512" "1024" "2048" "4096" "8192"]}
                         }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{x: 0.0, y: 0.5}
+                            MusicLabel{width: 90 text: "MIN GAP"}
+                            scan_gap_beats_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            scan_gap_beats := TextInput{width: 60 text: "4"}
+                            scan_gap_beats_inc := MusicButton{width: 22 height: 22 text: "+"}
+                        }
                     }
                     View{
                         width: Fill
@@ -3559,7 +3821,19 @@ script_mod! {
                         scan_count_inc := MusicButton{width: 22 height: 22 text: "+"}
                     }
                     // Lit = on, the switch idiom the AUTO DJ dialog next
-                    // door already uses for its two brains.
+                    // door already uses for its two brains. Lit OVERLAP
+                    // lets the finds lie over each other, and MIN GAP then
+                    // reads IN to IN; unlit, no two finds may touch and the
+                    // gap is the clear air between them.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 90 text: "OVERLAP"}
+                        scan_overlap := MusicButton{width: 110 height: 22 text: "OVERLAP"}
+                    }
                     View{
                         width: Fill
                         height: Fit
@@ -5215,7 +5489,15 @@ pub enum TrackKey {
 pub struct TrackRowEntry {
     pub key: TrackKey,
     pub title: String,
+    /// Straight out of the file's own tags — no analysis stands behind
+    /// these four, which is why they fill in whether or not the
+    /// preprocessing lane has ever looked at the track.
     pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub year: String,
+    /// Nominal container bitrate, already carrying its unit.
+    pub bitrate: String,
     /// Pre-formatted so the list stays a pure view.
     pub bpm: String,
     pub musical_key: String,
@@ -5237,6 +5519,10 @@ impl TrackRowEntry {
             key,
             title,
             artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            year: String::new(),
+            bitrate: String::new(),
             bpm: String::new(),
             musical_key: String::new(),
             duration: String::new(),
@@ -5777,10 +6063,6 @@ pub struct VjTrackList {
     /// flag that says what it means survives the next one.
     #[live]
     show_unqueue_button: bool,
-    /// A narrow list keeps badge + title and drops every fixed column;
-    /// without this the fixed widths squeeze the Fill title to nothing.
-    #[live]
-    compact: bool,
     /// Pushed by `App::sync_library_density` from the width the list got:
     /// the tick columns shrink in step with the header's S/K.
     #[rust]
@@ -5806,6 +6088,11 @@ pub struct VjTrackList {
     /// What the unfolded player shows, pushed whole by the host's pump.
     #[rust]
     preview_line: PhonesLine,
+    /// Which columns this list shows and in what order, pushed by the host
+    /// from the operator's layout. Empty until the first push, which draws
+    /// as a title-only list rather than as nothing.
+    #[rust]
+    columns: Vec<Column>,
 }
 
 /// The inline player's face, pushed by the host each pump — the list stays
@@ -5821,7 +6108,120 @@ pub struct PhonesLine {
     pub queued: bool,
 }
 
+/// The most columns a row or a header can carry. The templates declare this
+/// many generic cells; a layout is never longer, because it is a permutation
+/// of the twelve that exist.
+pub const MAX_COLUMNS: usize = 12;
+
+/// The cell ids in the row template, in declaration order. A column's place
+/// in the operator's layout picks the cell it draws into, which is what makes
+/// the order theirs rather than the template's.
+pub const ROW_CELLS: [&[LiveId]; MAX_COLUMNS] = [
+    ids!(row_col0),
+    ids!(row_col1),
+    ids!(row_col2),
+    ids!(row_col3),
+    ids!(row_col4),
+    ids!(row_col5),
+    ids!(row_col6),
+    ids!(row_col7),
+    ids!(row_col8),
+    ids!(row_col9),
+    ids!(row_col10),
+    ids!(row_col11),
+];
+
+/// The header's boxes and the heads inside them, same order as [`ROW_CELLS`].
+pub const HEAD_CELLS: [&[LiveId]; MAX_COLUMNS] = [
+    ids!(th_cell0),
+    ids!(th_cell1),
+    ids!(th_cell2),
+    ids!(th_cell3),
+    ids!(th_cell4),
+    ids!(th_cell5),
+    ids!(th_cell6),
+    ids!(th_cell7),
+    ids!(th_cell8),
+    ids!(th_cell9),
+    ids!(th_cell10),
+    ids!(th_cell11),
+];
+
+pub const HEAD_BUTTONS: [&[LiveId]; MAX_COLUMNS] = [
+    ids!(th_head0),
+    ids!(th_head1),
+    ids!(th_head2),
+    ids!(th_head3),
+    ids!(th_head4),
+    ids!(th_head5),
+    ids!(th_head6),
+    ids!(th_head7),
+    ids!(th_head8),
+    ids!(th_head9),
+    ids!(th_head10),
+    ids!(th_head11),
+];
+
+/// What one column reads for one row. The tick columns are a mark rather
+/// than a word — a row either carries that work or it does not.
+pub fn column_text(column: Column, entry: &TrackRowEntry) -> String {
+    match column {
+        Column::Title => entry.title.clone(),
+        Column::Artist => entry.artist.clone(),
+        Column::Album => entry.album.clone(),
+        Column::Genre => entry.genre.clone(),
+        Column::Year => entry.year.clone(),
+        Column::Bitrate => entry.bitrate.clone(),
+        Column::Bpm => entry.bpm.clone(),
+        Column::Key => entry.musical_key.clone(),
+        Column::Time => entry.duration.clone(),
+        Column::Stem => if entry.stem { "✓" } else { "" }.to_string(),
+        Column::Krk => if entry.krk { "✓" } else { "" }.to_string(),
+        Column::Tags => entry.tags.clone(),
+    }
+}
+
+/// A column's ink. Tempo and key wear their own colours because they are
+/// what the eye hunts for while beatmatching; the rest are quieter than the
+/// title so a full row still reads title-first.
+pub fn column_color(column: Column) -> u32 {
+    match column {
+        Column::Title => 0xd6dee6ff,
+        Column::Bpm => 0xff5c39ff,
+        Column::Key => 0xc6a0f0ff,
+        Column::Stem | Column::Krk => 0x35c05fff,
+        Column::Tags => 0x6f7b87ff,
+        _ => 0x9fabb7ff,
+    }
+}
+
+/// The layout size for a column, honouring the narrow console's shrunken
+/// tick columns exactly as the header does.
+pub fn column_size(column: Column, narrow: bool) -> Size {
+    if narrow && matches!(column, Column::Stem | Column::Krk) {
+        return Size::Fixed(MARK_COLUMN_NARROW);
+    }
+    match column.width() {
+        ColumnWidth::Fixed(width) => Size::Fixed(width),
+        // The title carries the weight so it takes the slack a row has left
+        // after every fixed column has been paid.
+        ColumnWidth::Fill { min, max } => Size::Fill {
+            weight: if matches!(column, Column::Title) { 400.0 } else { 100.0 },
+            min,
+            max,
+        },
+    }
+}
+
 impl VjTrackList {
+    /// Which columns this list shows, in the operator's order.
+    pub fn set_columns(&mut self, cx: &mut Cx, columns: Vec<Column>) {
+        if self.columns != columns {
+            self.columns = columns;
+            self.view.redraw(cx);
+        }
+    }
+
     /// Which track is in the phones — `None` unlights every row.
     pub fn set_active_preview(&mut self, cx: &mut Cx, key: Option<TrackKey>) {
         if self.active_preview != key {
@@ -6002,42 +6402,30 @@ impl Widget for VjTrackList {
                 let mut item = list.item(cx, row_id, template);
                 if let Some(entry) = self.entries.get(row_id) {
                     item.label(cx, ids!(row_badge)).set_text(cx, &entry.badge);
-                    item.label(cx, ids!(row_title)).set_text(cx, &entry.title);
-                    item.label(cx, ids!(row_artist)).set_text(cx, &entry.artist);
-                    item.label(cx, ids!(row_bpm)).set_text(cx, &entry.bpm);
-                    item.label(cx, ids!(row_key)).set_text(cx, &entry.musical_key);
-                    item.label(cx, ids!(row_time)).set_text(cx, &entry.duration);
-                    item.label(cx, ids!(row_stem))
-                        .set_text(cx, if entry.stem { "✓" } else { "" });
-                    item.label(cx, ids!(row_krk))
-                        .set_text(cx, if entry.krk { "✓" } else { "" });
-                    item.label(cx, ids!(row_tags)).set_text(cx, &entry.tags);
-                    // The tick columns follow the header's S/K: one
-                    // measurement (App::sync_library_density) decides both,
-                    // so a narrow console never leaves the marks under a
-                    // header that has already shrunk.
-                    for (column, wide_width) in
-                        [(ids!(row_stem), 36.0), (ids!(row_krk), 30.0)]
-                    {
-                        let cell = item.widget(cx, column);
-                        let mut cell_ref = cell.borrow_mut::<Label>();
-                        if let Some(label) = cell_ref.as_mut() {
-                            let width =
-                                if self.narrow { MARK_COLUMN_NARROW } else { wide_width };
-                            label.walk.width = Size::Fixed(width);
-                        }
-                    }
-                    let wide = !self.compact;
-                    for column in [
-                        ids!(row_artist),
-                        ids!(row_bpm),
-                        ids!(row_key),
-                        ids!(row_time),
-                        ids!(row_stem),
-                        ids!(row_krk),
-                        ids!(row_tags),
-                    ] {
-                        item.widget(cx, column).set_visible(cx, wide);
+                    // Every cell is filled from the layout, never from a
+                    // fixed idea of which cell is which column. A cell past
+                    // the end of the layout is hidden rather than left
+                    // wearing whatever the last row that used it put there.
+                    //
+                    // The layout is the whole answer. This used to drop every
+                    // fixed column on a narrow list to protect the title, so
+                    // the set list could show nothing but a name — which made
+                    // the tempo and key of the record about to play the two
+                    // things the operator could not see. A list too narrow
+                    // for what it was given is now the operator's own call,
+                    // and one they can take back in the columns dialog.
+                    for (slot, cell) in ROW_CELLS.iter().enumerate() {
+                        let column = self.columns.get(slot).copied();
+                        let shown = column.is_some();
+                        let widget = item.widget(cx, cell);
+                        widget.set_visible(cx, shown);
+                        let Some(column) = column.filter(|_| shown) else { continue };
+                        let mut cell_ref = widget.borrow_mut::<Label>();
+                        let Some(label) = cell_ref.as_mut() else { continue };
+                        label.walk.width = column_size(column, self.narrow);
+                        label.draw_text.color = Vec4f::from_u32(column_color(column));
+                        drop(cell_ref);
+                        item.label(cx, cell).set_text(cx, &column_text(column, entry));
                     }
                     item.button(cx, ids!(row_queue))
                         .set_visible(cx, self.show_queue_button);
@@ -6221,6 +6609,98 @@ pub fn format_key_shift(semitones: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filled_row() -> TrackRowEntry {
+        TrackRowEntry {
+            key: TrackKey::Local(PathBuf::from("a.mp3")),
+            title: "Title".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            genre: "Genre".into(),
+            year: "1998".into(),
+            bitrate: "320k".into(),
+            bpm: "123.0".into(),
+            musical_key: "8A".into(),
+            duration: "3:16".into(),
+            tags: "Tags".into(),
+            stem: true,
+            krk: false,
+            badge: String::new(),
+            live: false,
+        }
+    }
+
+    #[test]
+    fn every_column_reads_its_own_field_and_no_other() {
+        let row = filled_row();
+        // Each column must pull a DIFFERENT field. A copy-paste slip in the
+        // match would show one field under two headings, which reads as data
+        // rather than as a bug.
+        for (column, expect) in [
+            (Column::Title, "Title"),
+            (Column::Artist, "Artist"),
+            (Column::Album, "Album"),
+            (Column::Genre, "Genre"),
+            (Column::Year, "1998"),
+            (Column::Bitrate, "320k"),
+            (Column::Bpm, "123.0"),
+            (Column::Key, "8A"),
+            (Column::Time, "3:16"),
+            (Column::Tags, "Tags"),
+        ] {
+            assert_eq!(column_text(column, &row), expect, "{column:?}");
+        }
+        // The two mark columns are a tick or nothing, never a word.
+        assert_eq!(column_text(Column::Stem, &row), "✓");
+        assert_eq!(column_text(Column::Krk, &row), "");
+    }
+
+    #[test]
+    fn a_blank_field_reads_as_an_empty_cell_rather_than_a_zero() {
+        let row = TrackRowEntry::blank(TrackKey::Local(PathBuf::from("a.mp3")), "T".into());
+        for column in crate::columns::ALL {
+            if matches!(column, Column::Title) {
+                continue;
+            }
+            assert_eq!(column_text(column, &row), "", "{column:?} invented a value");
+        }
+    }
+
+    #[test]
+    fn the_mark_columns_shrink_with_a_narrow_console_and_nothing_else_does() {
+        // The narrow rule is the tick columns' alone: a title that shrank
+        // with them would be squeezed twice.
+        let fixed = |size: Size| match size {
+            Size::Fixed(points) => points,
+            other => panic!("expected a fixed width, got {other:?}"),
+        };
+        assert_eq!(fixed(column_size(Column::Stem, true)), MARK_COLUMN_NARROW);
+        assert_eq!(fixed(column_size(Column::Krk, true)), MARK_COLUMN_NARROW);
+        assert_eq!(fixed(column_size(Column::Stem, false)), 36.0);
+        assert_eq!(
+            fixed(column_size(Column::Bpm, true)),
+            fixed(column_size(Column::Bpm, false)),
+            "only the tick columns answer to a narrow console"
+        );
+        // The title takes the slack, so it must carry more weight than any
+        // other Fill column or a long tag list would starve it.
+        let (Size::Fill { weight: title, .. }, Size::Fill { weight: tags, .. }) =
+            (column_size(Column::Title, false), column_size(Column::Tags, false))
+        else {
+            panic!("title and tags are both Fill columns");
+        };
+        assert!(title > tags, "the title must outweigh the columns beside it");
+    }
+
+    #[test]
+    fn the_templates_have_a_cell_for_every_column_there_is() {
+        // The row and the header are reordered by index into these arrays,
+        // so a column with no cell would silently never draw.
+        assert_eq!(ROW_CELLS.len(), MAX_COLUMNS);
+        assert_eq!(HEAD_CELLS.len(), MAX_COLUMNS);
+        assert_eq!(HEAD_BUTTONS.len(), MAX_COLUMNS);
+        assert!(crate::columns::ALL.len() <= MAX_COLUMNS);
+    }
 
     /// The group widths the strip measures, near enough: shaping,
     /// automation and one cue key, with the themed spacing between them.
