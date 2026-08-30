@@ -1,4 +1,4 @@
-use crate::playback::RoomSettings;
+use crate::{playback::RoomSettings, sound::SoundParam};
 use makepad_piano_model::fx::{Perspective, ReverbPreset};
 use makepad_score::model::AnnotationKind;
 use makepad_widgets::*;
@@ -13,22 +13,23 @@ pub enum ProductMode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PageLayout {
+    /// The document as one strip, page beside page, left to right.
     #[default]
     Single,
+    /// The same strip in openings: two pages to a spread.
     TwoUp,
+    /// The strip turned on its side: a column, page above page.
     Continuous,
-    Overview,
 }
 
 impl PageLayout {
-    pub const ALL: [Self; 4] = [Self::Single, Self::TwoUp, Self::Continuous, Self::Overview];
+    pub const ALL: [Self; 3] = [Self::Single, Self::TwoUp, Self::Continuous];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Single => "Single page",
+            Self::Single => "Pages",
             Self::TwoUp => "Two-up",
             Self::Continuous => "Continuous",
-            Self::Overview => "Overview",
         }
     }
 }
@@ -69,6 +70,8 @@ pub enum DialogKind {
     Keymap,
     About,
     AnnotationText,
+    /// The music library browser.
+    Library,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -76,7 +79,20 @@ pub enum InspectorTab {
     #[default]
     Properties,
     Mixer,
+    /// Everything that shapes the piano sound, in one panel.
+    Sound,
     History,
+}
+
+impl InspectorTab {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Properties => "Properties",
+            Self::Mixer => "Mixer",
+            Self::Sound => "Sound",
+            Self::History => "History",
+        }
+    }
 }
 
 /// Labels for the room controls, so the shell never re-derives them.
@@ -121,6 +137,8 @@ pub enum PrefToggle {
 pub enum BrowseTarget {
     Open,
     SaveDirectory,
+    /// The folder the music library lists.
+    LibraryDirectory,
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +151,9 @@ pub enum ScoreAction {
     FirstPage,
     LastPage,
     ZoomBy(f64),
+    /// Zoom out until the whole document is in view. There is no separate
+    /// overview mode: the overview is where the zoom control ends up.
+    FitAllPages,
     FitPage,
     RevealControls(bool),
     PlayPause,
@@ -144,9 +165,18 @@ pub enum ScoreAction {
     SetTempo(f64),
     SeekQuarter(f64),
     SetReverbPreset(ReverbPreset),
-    /// Relative nudge of the dry/wet amount, in the same style as part gain.
-    SetReverbMix { delta: f32 },
     SetPerspective(Perspective),
+    /// Adopt one of the shipped instrument presets whole: voicing, suggested
+    /// room and a clean trim on top of it.
+    SetPianoPreset(usize),
+    /// Move one continuous sound control. The value is in the parameter's own
+    /// unit; the panel converts from slider travel before sending it.
+    SetSoundParam { param: SoundParam, value: f32 },
+    /// Put every control back where the current preset had it.
+    ResetSoundToPreset,
+    /// Lift the resonance bed's dampers all the way — the "whole instrument
+    /// open" sound, reachable in one press from the panel.
+    LiftDampers,
     SetAnnotationTool(AnnotationTool),
     ApplyAnnotationText(String),
     SetInspectorTab(InspectorTab),
@@ -179,6 +209,13 @@ pub enum ScoreAction {
     SetDialogTempo(f64),
     Browse(BrowseTarget),
     OpenRecent(usize),
+    /// Open the piece at this index of the current library page.
+    OpenLibraryEntry(usize),
+    /// Point the library at another folder and list it.
+    SetLibraryDir(PathBuf),
+    RescanLibrary,
+    /// Page the library list when the folder holds more than it can show.
+    LibraryPage(i32),
     OpenPath(PathBuf),
     SavePath(PathBuf),
     Save,

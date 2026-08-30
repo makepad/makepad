@@ -30,6 +30,13 @@ script_mod! {
         }
     }
 
+    // A muted line that wraps inside the panel it sits in, for the sentences
+    // the sound panel and the library browser explain themselves with.
+    mod.widgets.ScoreLabelWrap = mod.widgets.ScoreLabelMuted{
+        width: Fill
+        height: Fit
+    }
+
     mod.widgets.ScoreHeader = mod.widgets.ScoreLabel{
         draw_text +: {
             color: score.color_text
@@ -86,12 +93,21 @@ script_mod! {
         draw_text +: {color: score.color_text_on_accent}
     }
 
+    // A flat button paints nothing until the pointer is on it — and that has
+    // to include the KEY FOCUS state. The solid button's focus colour is the
+    // same grey as its resting fill, which is invisible there and a permanent
+    // grey slab here: a clicked menu row or menu-bar button kept key focus and
+    // so kept the highlight long after the pointer had left. That is the
+    // "sticky menu selection" a reader sees; the focused row is not the
+    // hovered row and must not look like it.
     mod.widgets.ScoreButtonFlat = mod.widgets.ScoreButton{
         draw_bg +: {
             color: #x00000000
             color_hover: score.color_row_hover
             color_down: score.color_button_down
+            color_focus: #x00000000
             border_size: 0.0
+            border_color_focus: #x00000000
         }
     }
 
@@ -215,6 +231,41 @@ script_mod! {
             border_radius: score.radius
             border_size: 1.0
             border_color: score.color_border_light
+        }
+    }
+
+    // The sound panel's control. Every instance runs 0..1: the parameter's own
+    // range and its linear-or-logarithmic mapping live in `sound.rs`, so a
+    // slider here is just travel and the panel cannot drift from the engine.
+    mod.widgets.ScoreSlider = SliderMinimalFlat{
+        width: Fill
+        height: 15
+        min: 0.0
+        max: 1.0
+        step: 0.0
+        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+        label_walk: Walk{width: 0 height: 0}
+        text_input +: {width: 0 height: 0}
+        draw_bg +: {
+            offset_y: 5.0
+            handle_size: 9.0
+            border_size: 0.0
+            color: score.color_input
+            color_hover: score.color_input
+            color_focus: score.color_input
+            color_drag: score.color_input
+            color_2: score.color_input
+            color_2_hover: score.color_input
+            color_2_focus: score.color_input
+            color_2_drag: score.color_input
+            val_color: score.color_accent
+            val_color_hover: score.color_accent_hover
+            val_color_focus: score.color_accent_hover
+            val_color_drag: score.color_accent_hover
+            handle_color: score.color_text
+            handle_color_hover: #xffffff
+            handle_color_focus: #xffffff
+            handle_color_drag: #xffffff
         }
     }
 

@@ -9,10 +9,11 @@ use crate::{
     },
     keymap::KEYMAP_ROWS,
     playback::REVERB_PRESETS,
+    sound::{self, SoundParam, DAMPERS_LIFTING},
     state::{transport_label, ScoreAppState},
     ProductMode,
 };
-use makepad_piano_model::fx::Perspective;
+use makepad_piano_model::{fx::Perspective, PIANO_PRESETS};
 use makepad_widgets::*;
 use std::path::PathBuf;
 
@@ -107,10 +108,10 @@ script_mod! {
                     palette_accent := ScoreToolButton{text: ">"}
                     palette_tenuto := ScoreToolButton{text: "—"}
                     Filler{}
-                    layout_single := ScoreButtonFlat{text: "Single"}
+                    layout_single := ScoreButtonFlat{text: "Pages"}
                     layout_two := ScoreButtonFlat{text: "Two-up"}
                     layout_continuous := ScoreButtonFlat{text: "Continuous"}
-                    layout_overview := ScoreButtonFlat{text: "Overview"}
+                    layout_overview := ScoreButtonFlat{text: "All pages"}
                     zoom_out := ScoreToolButton{text: "−"}
                     fit_page := ScoreButton{text: "Fit"}
                     zoom_in := ScoreToolButton{text: "+"}
@@ -179,10 +180,11 @@ script_mod! {
                     visible: false
                     width: score.inspector_width
                     ScorePanelHeader{
-                        ScoreHeader{text: "INSPECTOR"}
-                        Filler{}
+                        // No title: four tabs already fill the strip, and the
+                        // panel they open says what it is.
                         inspector_properties := ScoreButtonFlat{text: "Properties"}
                         inspector_mixer := ScoreButtonFlat{text: "Mixer"}
+                        inspector_sound := ScoreButtonFlat{text: "Sound"}
                         inspector_history := ScoreButtonFlat{text: "History"}
                     }
                     properties_page := View{
@@ -240,11 +242,242 @@ script_mod! {
                             View{width: Fill height: Fit flow: Right spacing: 5 mix_3_mute := ScoreButton{text: "Mute"} mix_3_solo := ScoreButton{text: "Solo"}}
                         }
                         ScoreDivider{}
-                        ScoreSection{ScoreLabelDim{text: "Room"}}
-                        room := View{
+                        // The room moved into the Sound panel: one place for
+                        // everything that shapes what the piano sounds like.
+                        ScoreRow{ScoreLabelMuted{text: "Instrument, voicing and room · Sound tab"}}
+                        Filler{}
+                    }
+                    sound_page := ScrollYView{
+                        visible: false width: Fill height: Fill flow: Down
+
+                        ScoreSection{ScoreLabelDim{text: "Instrument"} Filler{} sound_state := ScoreLabelMuted{text: ""}}
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 3
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            sound_preset_name := ScoreHeader{text: ""}
+                            sound_preset_desc := ScoreLabelWrap{text: ""}
+                            View{
+                                width: Fill height: Fit flow: Right spacing: 5
+                                sound_reset := ScoreButton{text: "Back to preset"}
+                                Filler{}
+                            }
+                        }
+                        preset_0 := ScoreMenuRow{text: ""}
+                        preset_0_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_1 := ScoreMenuRow{text: ""}
+                        preset_1_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_2 := ScoreMenuRow{text: ""}
+                        preset_2_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_3 := ScoreMenuRow{text: ""}
+                        preset_3_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_4 := ScoreMenuRow{text: ""}
+                        preset_4_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_5 := ScoreMenuRow{text: ""}
+                        preset_5_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_6 := ScoreMenuRow{text: ""}
+                        preset_6_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_7 := ScoreMenuRow{text: ""}
+                        preset_7_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_8 := ScoreMenuRow{text: ""}
+                        preset_8_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_9 := ScoreMenuRow{text: ""}
+                        preset_9_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_10 := ScoreMenuRow{text: ""}
+                        preset_10_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_11 := ScoreMenuRow{text: ""}
+                        preset_11_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_12 := ScoreMenuRow{text: ""}
+                        preset_12_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_13 := ScoreMenuRow{text: ""}
+                        preset_13_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_14 := ScoreMenuRow{text: ""}
+                        preset_14_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_15 := ScoreMenuRow{text: ""}
+                        preset_15_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_16 := ScoreMenuRow{text: ""}
+                        preset_16_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_17 := ScoreMenuRow{text: ""}
+                        preset_17_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_18 := ScoreMenuRow{text: ""}
+                        preset_18_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        preset_19 := ScoreMenuRow{text: ""}
+                        preset_19_desc := ScoreLabelWrap{text: "" margin: Inset{left: 18 right: 10 top: 0 bottom: 5}}
+                        ScoreDivider{}
+
+                        ScoreSection{ScoreLabelDim{text: "Character"} Filler{} ScoreLabelMuted{text: "1.00 = as voiced"}}
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_body_tap_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_body_tap_value := ScoreLabel{text: ""}
+                            }
+                            sl_body_tap := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_knock_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_knock_value := ScoreLabel{text: ""}
+                            }
+                            sl_knock := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_roughness_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_roughness_value := ScoreLabel{text: ""}
+                            }
+                            sl_roughness := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_phantoms_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_phantoms_value := ScoreLabel{text: ""}
+                            }
+                            sl_phantoms := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_attack_noise_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_attack_noise_value := ScoreLabel{text: ""}
+                            }
+                            sl_attack_noise := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_sympathetic_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_sympathetic_value := ScoreLabel{text: ""}
+                            }
+                            sl_sympathetic := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 3
+                            padding: Inset{left: 10 right: 10 top: 6 bottom: 9}
+                            View{
+                                width: Fill height: Fit flow: Right spacing: 5 align: Align{y: 0.5}
+                                sound_dampers := ScoreButton{text: "Dampers off"}
+                                Filler{}
+                            }
+                            sound_dampers_note := ScoreLabelWrap{text: ""}
+                        }
+                        ScoreDivider{}
+
+                        ScoreSection{ScoreLabelDim{text: "Tone"} Filler{} ScoreLabelMuted{text: "output trim"}}
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_shelf_db_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_shelf_db_value := ScoreLabel{text: ""}
+                            }
+                            sl_shelf_db := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_shelf_hz_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_shelf_hz_value := ScoreLabel{text: ""}
+                            }
+                            sl_shelf_hz := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_bell_hz_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_bell_hz_value := ScoreLabel{text: ""}
+                            }
+                            sl_bell_hz := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_bell_db_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_bell_db_value := ScoreLabel{text: ""}
+                            }
+                            sl_bell_db := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_bell_q_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_bell_q_value := ScoreLabel{text: ""}
+                            }
+                            sl_bell_q := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_tone_bass_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_tone_bass_value := ScoreLabel{text: ""}
+                            }
+                            sl_tone_bass := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_tone_treble_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_tone_treble_value := ScoreLabel{text: ""}
+                            }
+                            sl_tone_treble := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_master_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_master_value := ScoreLabel{text: ""}
+                            }
+                            sl_master := ScoreSlider{}
+                        }
+                        ScoreDivider{}
+
+                        ScoreSection{ScoreLabelDim{text: "Room"} Filler{} room_name := ScoreLabelMuted{text: ""}}
+                        View{
                             width: Fill height: Fit flow: Down spacing: 4
-                            padding: Inset{left: 10 right: 10 top: 9 bottom: 9}
-                            room_name := ScoreHeader{text: "Studio · 25%"}
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 3}
                             View{
                                 width: Fill height: Fit flow: Right spacing: 4
                                 room_practice := ScoreButtonFlat{text: "Practice"}
@@ -258,11 +491,43 @@ script_mod! {
                             View{
                                 width: Fill height: Fit flow: Right spacing: 4
                                 room_cathedral := ScoreButtonFlat{text: "Cathedral"}
+                                Filler{}
+                                room_player := ScoreButtonFlat{text: "Player"}
+                                room_audience := ScoreButtonFlat{text: "Audience"}
                             }
-                            ScoreRow{padding: Inset{left: 0 right: 0} ScoreLabelDim{text: "Reverb"} Filler{} room_mix := ScoreLabel{text: "25%"} room_mix_down := ScoreButtonFlat{text: "−"} room_mix_up := ScoreButtonFlat{text: "+"}}
-                            ScoreRow{padding: Inset{left: 0 right: 0} ScoreLabelDim{text: "Listen from"} Filler{} room_player := ScoreButtonFlat{text: "Player"} room_audience := ScoreButtonFlat{text: "Audience"}}
                         }
-                        Filler{}
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_reverb_mix_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_reverb_mix_value := ScoreLabel{text: ""}
+                            }
+                            sl_reverb_mix := ScoreSlider{}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down spacing: 1
+                            padding: Inset{left: 10 right: 10 top: 5 bottom: 2}
+                            View{
+                                width: Fill height: Fit flow: Right align: Align{x: 0.0 y: 0.5} spacing: 5
+                                sl_early_name := ScoreLabelDim{text: ""}
+                                Filler{}
+                                sl_early_value := ScoreLabel{text: ""}
+                            }
+                            sl_early := ScoreSlider{}
+                        }
+                        ScoreRow{
+                            ScoreLabelDim{text: "Output level"}
+                            Filler{}
+                            sound_meter := ScoreLabel{text: "—"}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Down
+                            padding: Inset{left: 10 right: 10 top: 4 bottom: 14}
+                            sound_hint := ScoreLabelWrap{text: ""}
+                        }
                     }
                     history_page := View{
                         visible: false width: Fill height: Fill flow: Down
@@ -350,7 +615,9 @@ script_mod! {
                     pianist_loop := ScoreButton{text: "Loop"}
                     pianist_follow := ScoreButton{text: "Follow"}
                     pianist_fit := ScoreButtonFlat{text: "Fit"}
-                    pianist_overview := ScoreButtonFlat{text: "Pages"}
+                    pianist_overview := ScoreButtonFlat{text: "All pages"}
+                    pianist_music := ScoreButtonFlat{text: "Music"}
+                    pianist_sound := ScoreButtonFlat{text: "Sound"}
                 }
             }
         }
@@ -367,6 +634,8 @@ script_mod! {
                     file_open := ScoreMenuRow{text: "Open…                               ⌘O"}
                     file_save := ScoreMenuRow{text: "Save                                  ⌘S"}
                     file_save_as := ScoreMenuRow{text: "Save As…                         ⇧⌘S"}
+                    ScoreDivider{}
+                    file_library := ScoreMenuRow{text: "Music library…                 ⌘L"}
                     ScoreDivider{}
                     file_setup := ScoreMenuRow{text: "Score setup…"}
                     file_page_setup := ScoreMenuRow{text: "Page and staff size…"}
@@ -388,10 +657,10 @@ script_mod! {
                 view_menu := ScorePopup{
                     visible: false abs_pos: vec2(95.0, 27.0)
                     view_pianist := ScoreMenuRow{text: "Pianist mode                     ⌘E"}
-                    view_single := ScoreMenuRow{text: "Single page"}
+                    view_single := ScoreMenuRow{text: "Pages, left to right"}
                     view_two := ScoreMenuRow{text: "Two-up"}
                     view_continuous := ScoreMenuRow{text: "Continuous scroll"}
-                    view_overview := ScoreMenuRow{text: "Multi-page overview"}
+                    view_overview := ScoreMenuRow{text: "Zoom out to all pages"}
                     ScoreDivider{}
                     view_fit := ScoreMenuRow{text: "Fit page                             ⌘0"}
                     view_zoom_in := ScoreMenuRow{text: "Zoom in                              ⌘+"}
@@ -401,6 +670,8 @@ script_mod! {
                     visible: false abs_pos: vec2(145.0, 27.0)
                     play_toggle := ScoreMenuRow{text: "Play / pause                    Space"}
                     play_stop := ScoreMenuRow{text: "Stop"}
+                    ScoreDivider{}
+                    play_sound := ScoreMenuRow{text: "Piano sound…"}
                     ScoreDivider{}
                     play_metro := ScoreMenuRow{text: "Metronome                         M"}
                     play_count := ScoreMenuRow{text: "Count-in"}
@@ -462,6 +733,68 @@ script_mod! {
                         dialog_formats := ScoreLabelMuted{text: ""}
                     }
 
+                    dialog_library := View{
+                        visible: false width: Fill height: Fit flow: Down spacing: 7
+                        View{
+                            width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                            library_dir_input := ScoreTextInput{empty_text: "Folder of .mid, .musicxml or .mpscore scores"}
+                            library_browse := ScoreButton{text: "Browse…"}
+                            library_rescan := ScoreButton{text: "Rescan"}
+                        }
+                        View{
+                            width: Fill height: Fit flow: Right spacing: 6 align: Align{y: 0.5}
+                            library_summary := ScoreLabelMuted{text: ""}
+                            Filler{}
+                            library_prev := ScoreButtonFlat{text: "‹"}
+                            library_page_label := ScoreLabelMuted{text: ""}
+                            library_next := ScoreButtonFlat{text: "›"}
+                        }
+                        library_empty := ScoreLabelWrap{visible: false text: ""}
+                        library_list := ScrollYView{
+                            width: Fill height: 392 flow: Down
+                            lib_0 := ScoreMenuRow{text: ""}
+                            lib_1 := ScoreMenuRow{text: ""}
+                            lib_2 := ScoreMenuRow{text: ""}
+                            lib_3 := ScoreMenuRow{text: ""}
+                            lib_4 := ScoreMenuRow{text: ""}
+                            lib_5 := ScoreMenuRow{text: ""}
+                            lib_6 := ScoreMenuRow{text: ""}
+                            lib_7 := ScoreMenuRow{text: ""}
+                            lib_8 := ScoreMenuRow{text: ""}
+                            lib_9 := ScoreMenuRow{text: ""}
+                            lib_10 := ScoreMenuRow{text: ""}
+                            lib_11 := ScoreMenuRow{text: ""}
+                            lib_12 := ScoreMenuRow{text: ""}
+                            lib_13 := ScoreMenuRow{text: ""}
+                            lib_14 := ScoreMenuRow{text: ""}
+                            lib_15 := ScoreMenuRow{text: ""}
+                            lib_16 := ScoreMenuRow{text: ""}
+                            lib_17 := ScoreMenuRow{text: ""}
+                            lib_18 := ScoreMenuRow{text: ""}
+                            lib_19 := ScoreMenuRow{text: ""}
+                            lib_20 := ScoreMenuRow{text: ""}
+                            lib_21 := ScoreMenuRow{text: ""}
+                            lib_22 := ScoreMenuRow{text: ""}
+                            lib_23 := ScoreMenuRow{text: ""}
+                            lib_24 := ScoreMenuRow{text: ""}
+                            lib_25 := ScoreMenuRow{text: ""}
+                            lib_26 := ScoreMenuRow{text: ""}
+                            lib_27 := ScoreMenuRow{text: ""}
+                            lib_28 := ScoreMenuRow{text: ""}
+                            lib_29 := ScoreMenuRow{text: ""}
+                            lib_30 := ScoreMenuRow{text: ""}
+                            lib_31 := ScoreMenuRow{text: ""}
+                            lib_32 := ScoreMenuRow{text: ""}
+                            lib_33 := ScoreMenuRow{text: ""}
+                            lib_34 := ScoreMenuRow{text: ""}
+                            lib_35 := ScoreMenuRow{text: ""}
+                            lib_36 := ScoreMenuRow{text: ""}
+                            lib_37 := ScoreMenuRow{text: ""}
+                            lib_38 := ScoreMenuRow{text: ""}
+                            lib_39 := ScoreMenuRow{text: ""}
+                        }
+                    }
+
                     dialog_text := View{
                         visible: false width: Fill height: Fit flow: Down spacing: 6
                         dialog_annotation := ScoreTextInput{empty_text: "Annotation text"}
@@ -497,10 +830,9 @@ script_mod! {
                         visible: false width: Fill height: Fit flow: Down
                         ScoreRow{
                             ScoreLabelDim{text: "Page layout"} Filler{}
-                            page_single := ScoreButtonFlat{text: "Single"}
+                            page_single := ScoreButtonFlat{text: "Pages"}
                             page_two := ScoreButtonFlat{text: "Two-up"}
                             page_continuous := ScoreButtonFlat{text: "Continuous"}
-                            page_overview := ScoreButtonFlat{text: "Overview"}
                         }
                         ScoreRow{
                             ScoreLabelDim{text: "Staff size"} Filler{}
@@ -534,6 +866,7 @@ script_mod! {
                         key_row_17 := ScoreRow{height: 21 key_name_17 := ScoreLabel{text: ""} Filler{} key_action_17 := ScoreLabelDim{text: ""}}
                         key_row_18 := ScoreRow{height: 21 key_name_18 := ScoreLabel{text: ""} Filler{} key_action_18 := ScoreLabelDim{text: ""}}
                         key_row_19 := ScoreRow{height: 21 key_name_19 := ScoreLabel{text: ""} Filler{} key_action_19 := ScoreLabelDim{text: ""}}
+                        key_row_20 := ScoreRow{height: 21 key_name_20 := ScoreLabel{text: ""} Filler{} key_action_20 := ScoreLabelDim{text: ""}}
                     }
 
                     dialog_about := View{
@@ -768,9 +1101,45 @@ impl ScoreShell {
         }
     }
 
+    /// The popup the open menu draws into, if any.
+    fn open_menu_path(&self) -> Option<&'static [LiveId]> {
+        Some(match self.open_menu {
+            1 => ids!(file_menu),
+            2 => ids!(edit_menu),
+            3 => ids!(view_menu),
+            4 => ids!(play_menu),
+            5 => ids!(notation_menu),
+            6 => ids!(help_menu),
+            _ => return None,
+        })
+    }
+
+    /// A press anywhere outside the open menu closes it, the way a menu bar
+    /// has always worked. Without this the popup stayed up over the score
+    /// while the click went to whatever was under it.
+    fn close_menu_on_outside_press(&mut self, cx: &mut Cx, event: &Event) {
+        let Event::MouseDown(mouse) = event else {
+            return;
+        };
+        let Some(popup) = self.open_menu_path() else {
+            return;
+        };
+        let inside_popup = self.view.widget(cx, popup).area().rect(cx).contains(mouse.abs);
+        let inside_bar = self
+            .view
+            .view(cx, ids!(menu_bar))
+            .area()
+            .rect(cx)
+            .contains(mouse.abs);
+        if !inside_popup && !inside_bar {
+            self.close_menu(cx);
+        }
+    }
+
     fn close_menu(&mut self, cx: &mut Cx) {
         self.open_menu = 0;
         cx.redraw_all();
+        cx.clear_all_hovers();
     }
 
     /// Open (or close) one menu, remembering where its button sits.
@@ -785,6 +1154,12 @@ impl ScoreShell {
             self.menu_anchor = Some(dvec2(rect.pos.x, rect.pos.y + rect.size.y));
         }
         cx.redraw_all();
+        // A popup that opens under the pointer keeps the ordinary hover-outs
+        // from arriving, so the menu-bar button that opened it stayed lit
+        // forever — the "sticky grey" the reader saw. One clear puts every
+        // widget's hover visual back where the pointer actually is; the row or
+        // button under it lights again on the next movement.
+        cx.clear_all_hovers();
     }
 
     fn dialog_kind(&self, scope: &mut Scope) -> DialogKind {
@@ -834,7 +1209,7 @@ impl ScoreShell {
                 layout: draft.layout,
                 zoom: draft.zoom,
             }),
-            DialogKind::Keymap | DialogKind::About | DialogKind::None => {
+            DialogKind::Keymap | DialogKind::About | DialogKind::Library | DialogKind::None => {
                 cx.action(ScoreAction::CloseDialog)
             }
         }
@@ -848,14 +1223,8 @@ impl ScoreShell {
         let Some(anchor) = self.menu_anchor else {
             return;
         };
-        let popup = match self.open_menu {
-            1 => ids!(file_menu),
-            2 => ids!(edit_menu),
-            3 => ids!(view_menu),
-            4 => ids!(play_menu),
-            5 => ids!(notation_menu),
-            6 => ids!(help_menu),
-            _ => return,
+        let Some(popup) = self.open_menu_path() else {
+            return;
         };
         if let Some(mut view) = self.view.view(cx, popup).borrow_mut() {
             view.walk.abs_pos = Some(anchor);
@@ -897,6 +1266,11 @@ impl ScoreShell {
                 "The text stays anchored to the note you tapped.",
                 "Add",
             ),
+            DialogKind::Library => (
+                "Music library",
+                "Every score in your music folder. Pick one to open and play it.",
+                "Done",
+            ),
             DialogKind::None => ("", "", ""),
         };
         self.view.label(cx, ids!(dialog_title)).set_text(cx, title);
@@ -906,7 +1280,10 @@ impl ScoreShell {
         // Keymap and About have one outcome; a Cancel next to Done means nothing.
         self.view.button(cx, ids!(dialog_cancel)).set_visible(
             cx,
-            !matches!(dialog, DialogKind::Keymap | DialogKind::About),
+            !matches!(
+                dialog,
+                DialogKind::Keymap | DialogKind::About | DialogKind::Library
+            ),
         );
 
         let file = matches!(dialog, DialogKind::Open | DialogKind::SaveAs);
@@ -929,6 +1306,9 @@ impl ScoreShell {
         self.view
             .view(cx, ids!(dialog_about))
             .set_visible(cx, dialog == DialogKind::About);
+        self.view
+            .view(cx, ids!(dialog_library))
+            .set_visible(cx, dialog == DialogKind::Library);
 
         match &state.ui.dialog_error {
             Some(error) => {
@@ -956,6 +1336,197 @@ impl ScoreShell {
         if dialog == DialogKind::About {
             self.sync_about(cx, state);
         }
+        if dialog == DialogKind::Library {
+            self.sync_library(cx, state);
+        }
+    }
+
+    /// The music library browser. Rows the folder does not fill are hidden
+    /// rather than left blank, and a folder with nothing in it says why in a
+    /// sentence instead of showing an empty box.
+    fn sync_library(&mut self, cx: &mut Cx2d, state: &ScoreAppState) {
+        self.view
+            .label(cx, ids!(library_summary))
+            .set_text(cx, &state.library.summary());
+        // An empty folder gets a sentence, not a tall empty box.
+        let listed = !state.library.entries().is_empty();
+        self.view.view(cx, ids!(library_list)).set_visible(cx, listed);
+        match state.library.empty_state() {
+            Some(explanation) => {
+                self.view.label(cx, ids!(library_empty)).set_visible(cx, true);
+                self.view.label(cx, ids!(library_empty)).set_text(cx, explanation);
+            }
+            None => self.view.label(cx, ids!(library_empty)).set_visible(cx, false),
+        }
+        let open_path = state.document.path();
+        let visible = state.library_visible();
+        for (row, path) in LIBRARY_ROWS.iter().enumerate() {
+            match visible.get(row) {
+                Some(entry) => {
+                    let playing = open_path
+                        .is_some_and(|open| crate::library::same_file(open, &entry.path));
+                    let recent = state
+                        .prefs
+                        .recent
+                        .first()
+                        .is_some_and(|last| crate::library::same_file(last, &entry.path));
+                    // The piece on screen, then the one opened last: the
+                    // browser sits next to the existing recents list rather
+                    // than keeping a second one of its own.
+                    let mark = if playing {
+                        "✓ "
+                    } else if recent {
+                        "· "
+                    } else {
+                        "   "
+                    };
+                    self.view.button(cx, path).set_visible(cx, true);
+                    self.view
+                        .button(cx, path)
+                        .set_text(cx, &format!("{mark}{}", entry.line()));
+                    self.view.button(cx, path).set_enabled(cx, !playing);
+                }
+                None => self.view.button(cx, path).set_visible(cx, false),
+            }
+        }
+        let pages = state.library_last_page() + 1;
+        let paged = pages > 1;
+        for path in [ids!(library_prev), ids!(library_next)] {
+            self.view.button(cx, path).set_visible(cx, paged);
+        }
+        self.view.label(cx, ids!(library_page_label)).set_text(
+            cx,
+            &if paged {
+                format!("page {} / {pages}", state.library_page + 1)
+            } else {
+                String::new()
+            },
+        );
+        self.view
+            .button(cx, ids!(library_prev))
+            .set_enabled(cx, state.library_page > 0);
+        self.view
+            .button(cx, ids!(library_next))
+            .set_enabled(cx, state.library_page + 1 < pages);
+    }
+
+    /// The one panel that holds the whole piano sound. Preset list, the six
+    /// mechanism amounts, the output EQ and the room, plus what has been moved
+    /// away from the preset — a dot on the control and a count in the header.
+    fn sync_sound_panel(&mut self, cx: &mut Cx2d, state: &ScoreAppState) {
+        let sound = &state.sound;
+        let current = sound::preset(sound.preset);
+        self.view.label(cx, ids!(sound_preset_name)).set_text(
+            cx,
+            &if sound::preset_is_effect(sound.preset) {
+                format!("{}  ·  effect", sound::preset_name(sound.preset))
+            } else {
+                sound::preset_name(sound.preset).to_string()
+            },
+        );
+        self.view
+            .label(cx, ids!(sound_preset_desc))
+            .set_text(cx, current.description);
+        let moved = sound.diverged().count();
+        self.view.label(cx, ids!(sound_state)).set_text(
+            cx,
+            &match moved {
+                0 => "as voiced".to_string(),
+                1 => "1 control moved".to_string(),
+                count => format!("{count} controls moved"),
+            },
+        );
+        self.view
+            .button(cx, ids!(sound_reset))
+            .set_enabled(cx, moved > 0);
+
+        for (index, row) in PRESET_ROWS.iter().enumerate() {
+            let listed = index < PIANO_PRESETS.len();
+            self.view.button(cx, row).set_visible(cx, listed);
+            self.view
+                .label(cx, PRESET_DESCRIPTIONS[index])
+                .set_visible(cx, listed);
+            if !listed {
+                continue;
+            }
+            let selected = index == sound.preset;
+            self.view.button(cx, row).set_text(
+                cx,
+                &format!(
+                    "{}{}",
+                    if selected { "✓ " } else { "    " },
+                    sound::preset_name(index)
+                ),
+            );
+            let description = sound::preset(index).description;
+            self.view.label(cx, PRESET_DESCRIPTIONS[index]).set_text(
+                cx,
+                &if sound::preset_is_effect(index) {
+                    format!("Effect · {description}")
+                } else {
+                    description.to_string()
+                },
+            );
+        }
+
+        for (index, param) in SoundParam::ALL.into_iter().enumerate() {
+            let value = param.get(sound);
+            self.view
+                .slider(cx, SOUND_SLIDERS[index])
+                .set_value(cx, param.to_position(value));
+            // A dot marks a control the user has nudged off the preset.
+            self.view.label(cx, SOUND_SLIDER_NAMES[index]).set_text(
+                cx,
+                &if sound.is_diverged(param) {
+                    format!("• {}", param.label())
+                } else {
+                    param.label().to_string()
+                },
+            );
+            self.view
+                .label(cx, SOUND_SLIDER_VALUES[index])
+                .set_text(cx, &param.format(value));
+        }
+
+        let sympathetic = sound.voicing.sympathetic;
+        let wide_open = sympathetic >= SoundParam::Sympathetic.range().1 - 1.0e-3;
+        self.view
+            .button(cx, ids!(sound_dampers))
+            .set_text(cx, if wide_open { "✓ Dampers off" } else { "Dampers off" });
+        self.view
+            .button(cx, ids!(sound_dampers))
+            .set_enabled(cx, !wide_open);
+        self.view.label(cx, ids!(sound_dampers_note)).set_text(
+            cx,
+            if wide_open {
+                "Every damper off: the whole instrument answers every note."
+            } else if sympathetic > DAMPERS_LIFTING {
+                "The dampers are lifting — cross-note resonance is opening up."
+            } else if sympathetic > 0.0 {
+                "Sympathetic strings at the voiced level. Push past 1.25 and the dampers start to come off."
+            } else {
+                "Sympathetic field off: only the strings you strike sound."
+            },
+        );
+        // What the instrument is putting out, read back from the audio thread.
+        // Nothing else in this panel is a measurement, so it is also the one
+        // control surface that proves the settings landed.
+        let peak = state.playback.output_peak();
+        self.view.label(cx, ids!(sound_meter)).set_text(
+            cx,
+            &if peak > 1.0e-5 {
+                format!("{:.1} dB", 20.0 * peak.log10())
+            } else {
+                "silent".to_string()
+            },
+        );
+        self.view.label(cx, ids!(sound_hint)).set_text(
+            cx,
+            match state.ui.sound_focus {
+                Some(param) => param.hint(),
+                None => "Every control here reaches the sounding instrument. Presets that change the physical design rebuild it and cross-fade, so a change mid-phrase never cuts.",
+            },
+        );
     }
 
     fn sync_file_dialog(&mut self, cx: &mut Cx2d, state: &ScoreAppState) {
@@ -1049,7 +1620,6 @@ impl ScoreShell {
             (ids!(page_single), PageLayout::Single),
             (ids!(page_two), PageLayout::TwoUp),
             (ids!(page_continuous), PageLayout::Continuous),
-            (ids!(page_overview), PageLayout::Overview),
         ] {
             let selected = draft.layout == layout;
             self.view.button(cx, path).set_text(
@@ -1119,8 +1689,88 @@ impl ScoreShell {
 /// Named-row helpers. The DSL declares a fixed number of slots because the
 /// script has no loops; these keep the Rust side from repeating the ids.
 const RECENT_SLOTS: usize = 6;
-const KEYMAP_SLOTS: usize = 20;
+const KEYMAP_SLOTS: usize = 21;
 const ABOUT_SLOTS: usize = 7;
+
+/// One row per shipped instrument preset, in `PIANO_PRESETS` order.
+const PRESET_ROWS: &[&[LiveId]] = ids_array!(
+    preset_0, preset_1, preset_2, preset_3, preset_4, preset_5, preset_6, preset_7, preset_8,
+    preset_9, preset_10, preset_11, preset_12, preset_13, preset_14, preset_15, preset_16,
+    preset_17, preset_18, preset_19,
+);
+const PRESET_DESCRIPTIONS: &[&[LiveId]] = ids_array!(
+    preset_0_desc, preset_1_desc, preset_2_desc, preset_3_desc, preset_4_desc, preset_5_desc,
+    preset_6_desc, preset_7_desc, preset_8_desc, preset_9_desc, preset_10_desc, preset_11_desc,
+    preset_12_desc, preset_13_desc, preset_14_desc, preset_15_desc, preset_16_desc,
+    preset_17_desc, preset_18_desc, preset_19_desc,
+);
+
+/// One slider per [`SoundParam`], in `SoundParam::ALL` order. Kept honest by
+/// `sound_panel_has_a_slider_for_every_parameter`.
+const SOUND_SLIDERS: &[&[LiveId]] = ids_array!(
+    sl_body_tap,
+    sl_knock,
+    sl_roughness,
+    sl_phantoms,
+    sl_attack_noise,
+    sl_sympathetic,
+    sl_shelf_db,
+    sl_shelf_hz,
+    sl_bell_hz,
+    sl_bell_db,
+    sl_bell_q,
+    sl_tone_bass,
+    sl_tone_treble,
+    sl_master,
+    sl_reverb_mix,
+    sl_early,
+);
+const SOUND_SLIDER_NAMES: &[&[LiveId]] = ids_array!(
+    sl_body_tap_name,
+    sl_knock_name,
+    sl_roughness_name,
+    sl_phantoms_name,
+    sl_attack_noise_name,
+    sl_sympathetic_name,
+    sl_shelf_db_name,
+    sl_shelf_hz_name,
+    sl_bell_hz_name,
+    sl_bell_db_name,
+    sl_bell_q_name,
+    sl_tone_bass_name,
+    sl_tone_treble_name,
+    sl_master_name,
+    sl_reverb_mix_name,
+    sl_early_name,
+);
+const SOUND_SLIDER_VALUES: &[&[LiveId]] = ids_array!(
+    sl_body_tap_value,
+    sl_knock_value,
+    sl_roughness_value,
+    sl_phantoms_value,
+    sl_attack_noise_value,
+    sl_sympathetic_value,
+    sl_shelf_db_value,
+    sl_shelf_hz_value,
+    sl_bell_hz_value,
+    sl_bell_db_value,
+    sl_bell_q_value,
+    sl_tone_bass_value,
+    sl_tone_treble_value,
+    sl_master_value,
+    sl_reverb_mix_value,
+    sl_early_value,
+);
+
+/// One row per listed library entry; the browser pages when a folder holds
+/// more than this.
+const LIBRARY_ROWS: &[&[LiveId]] = ids_array!(
+    lib_0, lib_1, lib_2, lib_3, lib_4, lib_5, lib_6, lib_7,
+    lib_8, lib_9, lib_10, lib_11, lib_12, lib_13, lib_14, lib_15,
+    lib_16, lib_17, lib_18, lib_19, lib_20, lib_21, lib_22, lib_23,
+    lib_24, lib_25, lib_26, lib_27, lib_28, lib_29, lib_30, lib_31,
+    lib_32, lib_33, lib_34, lib_35, lib_36, lib_37, lib_38, lib_39,
+);
 
 fn recent_row(index: usize) -> &'static [LiveId] {
     match index {
@@ -1154,7 +1804,8 @@ fn keymap_row(index: usize) -> (&'static [LiveId], &'static [LiveId], &'static [
         16 => (ids!(key_row_16), ids!(key_name_16), ids!(key_action_16)),
         17 => (ids!(key_row_17), ids!(key_name_17), ids!(key_action_17)),
         18 => (ids!(key_row_18), ids!(key_name_18), ids!(key_action_18)),
-        _ => (ids!(key_row_19), ids!(key_name_19), ids!(key_action_19)),
+        19 => (ids!(key_row_19), ids!(key_name_19), ids!(key_action_19)),
+        _ => (ids!(key_row_20), ids!(key_name_20), ids!(key_action_20)),
     }
 }
 
@@ -1259,6 +1910,7 @@ fn makepad_score_ui_native_extension() -> &'static str {
 
 impl Widget for ScoreShell {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.close_menu_on_outside_press(cx, event);
         self.view.handle_event(cx, event, scope);
         self.handle_controls_reveal(cx, event, scope);
         let Event::Actions(actions) = event else {
@@ -1277,7 +1929,7 @@ impl Widget for ScoreShell {
         self.emit_button(cx, actions, ids!(layout_single), ScoreAction::SetPageLayout(PageLayout::Single));
         self.emit_button(cx, actions, ids!(layout_two), ScoreAction::SetPageLayout(PageLayout::TwoUp));
         self.emit_button(cx, actions, ids!(layout_continuous), ScoreAction::SetPageLayout(PageLayout::Continuous));
-        self.emit_button(cx, actions, ids!(layout_overview), ScoreAction::SetPageLayout(PageLayout::Overview));
+        self.emit_button(cx, actions, ids!(layout_overview), ScoreAction::FitAllPages);
         self.emit_button(cx, actions, ids!(zoom_out), ScoreAction::ZoomBy(1.0 / 1.12));
         self.emit_button(cx, actions, ids!(zoom_in), ScoreAction::ZoomBy(1.12));
         self.emit_button(cx, actions, ids!(fit_page), ScoreAction::FitPage);
@@ -1354,12 +2006,62 @@ impl Widget for ScoreShell {
         ] {
             self.emit_button(cx, actions, path, ScoreAction::SetReverbPreset(preset));
         }
-        self.emit_button(cx, actions, ids!(room_mix_down), ScoreAction::SetReverbMix { delta: -0.05 });
-        self.emit_button(cx, actions, ids!(room_mix_up), ScoreAction::SetReverbMix { delta: 0.05 });
         self.emit_button(cx, actions, ids!(room_player), ScoreAction::SetPerspective(Perspective::Player));
         self.emit_button(cx, actions, ids!(room_audience), ScoreAction::SetPerspective(Perspective::Audience));
+
+        // The sound panel: instrument presets, the mechanism/tone/room
+        // sliders, and the two shortcuts that sit next to them.
+        for (index, row) in PRESET_ROWS.iter().enumerate().take(PIANO_PRESETS.len()) {
+            self.emit_button(cx, actions, row, ScoreAction::SetPianoPreset(index));
+        }
+        for (index, param) in SoundParam::ALL.into_iter().enumerate() {
+            if let Some(position) = self.view.slider(cx, SOUND_SLIDERS[index]).slided(actions) {
+                cx.action(ScoreAction::SetSoundParam {
+                    param,
+                    value: param.from_position(position),
+                });
+            }
+        }
+        self.emit_button(cx, actions, ids!(sound_reset), ScoreAction::ResetSoundToPreset);
+        self.emit_button(cx, actions, ids!(sound_dampers), ScoreAction::LiftDampers);
+        for path in [ids!(pianist_sound), ids!(play_sound)] {
+            if self.view.button(cx, path).clicked(actions) {
+                cx.action(ScoreAction::SetMode(ProductMode::Editor));
+                cx.action(ScoreAction::SetInspectorTab(InspectorTab::Sound));
+                self.close_menu(cx);
+            }
+        }
+
+        // The music library browser.
+        for path in [ids!(pianist_music), ids!(file_library)] {
+            if self.view.button(cx, path).clicked(actions) {
+                cx.action(ScoreAction::OpenDialog(DialogKind::Library));
+                self.close_menu(cx);
+            }
+        }
+        for (row, path) in LIBRARY_ROWS.iter().enumerate() {
+            self.emit_button(cx, actions, path, ScoreAction::OpenLibraryEntry(row));
+        }
+        self.emit_button(cx, actions, ids!(library_rescan), ScoreAction::RescanLibrary);
+        self.emit_button(cx, actions, ids!(library_prev), ScoreAction::LibraryPage(-1));
+        self.emit_button(cx, actions, ids!(library_next), ScoreAction::LibraryPage(1));
+        if self.view.button(cx, ids!(library_browse)).clicked(actions) {
+            cx.action(ScoreAction::Browse(BrowseTarget::LibraryDirectory));
+        }
+        if self
+            .view
+            .text_input(cx, ids!(library_dir_input))
+            .returned(actions)
+            .is_some()
+        {
+            let typed = self.view.text_input(cx, ids!(library_dir_input)).text();
+            let typed = typed.trim().to_string();
+            if !typed.is_empty() {
+                cx.action(ScoreAction::SetLibraryDir(PathBuf::from(typed)));
+            }
+        }
         self.emit_button(cx, actions, ids!(pianist_fit), ScoreAction::FitPage);
-        self.emit_button(cx, actions, ids!(pianist_overview), ScoreAction::SetPageLayout(PageLayout::Overview));
+        self.emit_button(cx, actions, ids!(pianist_overview), ScoreAction::FitAllPages);
 
         if self.view.button(cx, ids!(tempo_down)).clicked(actions) {
             if let Some(state) = scope.data.get_mut::<ScoreAppState>() {
@@ -1385,6 +2087,7 @@ impl Widget for ScoreShell {
 
         self.emit_button(cx, actions, ids!(inspector_properties), ScoreAction::SetInspectorTab(InspectorTab::Properties));
         self.emit_button(cx, actions, ids!(inspector_mixer), ScoreAction::SetInspectorTab(InspectorTab::Mixer));
+        self.emit_button(cx, actions, ids!(inspector_sound), ScoreAction::SetInspectorTab(InspectorTab::Sound));
         self.emit_button(cx, actions, ids!(inspector_history), ScoreAction::SetInspectorTab(InspectorTab::History));
         self.emit_button(cx, actions, ids!(history_undo), ScoreAction::Undo);
         self.emit_button(cx, actions, ids!(history_redo), ScoreAction::Redo);
@@ -1429,7 +2132,7 @@ impl Widget for ScoreShell {
         menu_action!(view_single, ScoreAction::SetPageLayout(PageLayout::Single));
         menu_action!(view_two, ScoreAction::SetPageLayout(PageLayout::TwoUp));
         menu_action!(view_continuous, ScoreAction::SetPageLayout(PageLayout::Continuous));
-        menu_action!(view_overview, ScoreAction::SetPageLayout(PageLayout::Overview));
+        menu_action!(view_overview, ScoreAction::FitAllPages);
         menu_action!(view_fit, ScoreAction::FitPage);
         menu_action!(view_zoom_in, ScoreAction::ZoomBy(1.12));
         menu_action!(view_zoom_out, ScoreAction::ZoomBy(1.0 / 1.12));
@@ -1471,7 +2174,6 @@ impl Widget for ScoreShell {
             (ids!(page_single), PageLayout::Single),
             (ids!(page_two), PageLayout::TwoUp),
             (ids!(page_continuous), PageLayout::Continuous),
-            (ids!(page_overview), PageLayout::Overview),
         ] {
             self.emit_button(cx, actions, path, ScoreAction::SetDialogLayout(layout));
         }
@@ -1528,6 +2230,10 @@ impl Widget for ScoreShell {
                 };
                 self.view.text_input(cx, ids!(dialog_path)).set_text(cx, &seed);
                 self.view.text_input(cx, ids!(dialog_annotation)).set_text(cx, "");
+                let folder = state.library.dir_text();
+                self.view
+                    .text_input(cx, ids!(library_dir_input))
+                    .set_text(cx, &folder);
             }
             let editor = state.ui.mode == ProductMode::Editor && state.ui.chrome_visible;
             self.view.view(cx, ids!(editor_top)).set_visible(cx, editor);
@@ -1576,7 +2282,6 @@ impl Widget for ScoreShell {
                 (ids!(layout_single), PageLayout::Single),
                 (ids!(layout_two), PageLayout::TwoUp),
                 (ids!(layout_continuous), PageLayout::Continuous),
-                (ids!(layout_overview), PageLayout::Overview),
             ] {
                 let selected = state.ui.page_layout == layout;
                 self.view.button(cx, path).set_text(
@@ -1644,14 +2349,20 @@ impl Widget for ScoreShell {
             let properties = state.ui.inspector_tab == InspectorTab::Properties;
             self.view.view(cx, ids!(properties_page)).set_visible(cx, properties);
             self.view.view(cx, ids!(mixer_page)).set_visible(cx, state.ui.inspector_tab == InspectorTab::Mixer);
+            let sound_tab = state.ui.inspector_tab == InspectorTab::Sound;
+            self.view.view(cx, ids!(sound_page)).set_visible(cx, sound_tab);
             self.view.view(cx, ids!(history_page)).set_visible(cx, state.ui.inspector_tab == InspectorTab::History);
             for (path, tab) in [
                 (ids!(inspector_properties), InspectorTab::Properties),
                 (ids!(inspector_mixer), InspectorTab::Mixer),
+                (ids!(inspector_sound), InspectorTab::Sound),
                 (ids!(inspector_history), InspectorTab::History),
             ] {
                 let selected = state.ui.inspector_tab == tab;
                 self.view.button(cx, path).set_enabled(cx, !selected);
+            }
+            if sound_tab {
+                self.sync_sound_panel(cx, state);
             }
             self.view.label(cx, ids!(selection_kind)).set_text(cx, &state.selection_description());
             if let Some(element) = state.ui.selection.active.and_then(|id| state.document.element(id)) {
@@ -1704,9 +2415,8 @@ impl Widget for ScoreShell {
                     self.view.button(cx, solo).set_text(cx, if channel.solo { "✓S" } else { "S" });
                 }
             }
-            let room = state.practice.room;
+            let room = state.sound.room;
             self.view.label(cx, ids!(room_name)).set_text(cx, &room_summary(room));
-            self.view.label(cx, ids!(room_mix)).set_text(cx, &format!("{:.0}%", room.mix * 100.0));
             for (path, preset) in [
                 (ids!(room_practice), REVERB_PRESETS[0]),
                 (ids!(room_studio), REVERB_PRESETS[1]),
@@ -1743,5 +2453,62 @@ impl Widget for ScoreShell {
             self.sync_dialog(cx, state_snapshot);
         }
         self.view.draw_walk(cx, scope, walk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The DSL declares one fixed slot per row because the script has no
+    /// loops. A slot that goes missing, or an id typed twice, would silently
+    /// drive the wrong widget — so the tables are checked against the lists
+    /// they exist to display.
+    #[test]
+    fn every_declared_row_matches_the_list_it_shows() {
+        assert_eq!(SOUND_SLIDERS.len(), SoundParam::ALL.len());
+        assert_eq!(SOUND_SLIDER_NAMES.len(), SoundParam::ALL.len());
+        assert_eq!(SOUND_SLIDER_VALUES.len(), SoundParam::ALL.len());
+        assert!(
+            PRESET_ROWS.len() >= PIANO_PRESETS.len(),
+            "{} presets ship but the panel only has {} rows",
+            PIANO_PRESETS.len(),
+            PRESET_ROWS.len()
+        );
+        assert_eq!(PRESET_ROWS.len(), PRESET_DESCRIPTIONS.len());
+        assert_eq!(LIBRARY_ROWS.len(), crate::state::LIBRARY_PAGE);
+        assert_eq!(KEYMAP_SLOTS, KEYMAP_ROWS.len());
+
+        let mut every: Vec<LiveId> = Vec::new();
+        for table in [
+            PRESET_ROWS,
+            PRESET_DESCRIPTIONS,
+            SOUND_SLIDERS,
+            SOUND_SLIDER_NAMES,
+            SOUND_SLIDER_VALUES,
+            LIBRARY_ROWS,
+        ] {
+            for path in table {
+                assert_eq!(path.len(), 1, "row ids are single names");
+                every.push(path[0]);
+            }
+        }
+        let unique: std::collections::BTreeSet<LiveId> = every.iter().copied().collect();
+        assert_eq!(unique.len(), every.len(), "a row id is used twice");
+    }
+
+    /// The fixed slot helpers must cover their whole range, not silently fold
+    /// the tail onto the last row.
+    #[test]
+    fn the_indexed_row_helpers_cover_every_slot() {
+        let recent: std::collections::BTreeSet<LiveId> =
+            (0..RECENT_SLOTS).map(|index| recent_row(index)[0]).collect();
+        assert_eq!(recent.len(), RECENT_SLOTS);
+        let keymap: std::collections::BTreeSet<LiveId> =
+            (0..KEYMAP_SLOTS).map(|index| keymap_row(index).0[0]).collect();
+        assert_eq!(keymap.len(), KEYMAP_SLOTS);
+        let about: std::collections::BTreeSet<LiveId> =
+            (0..ABOUT_SLOTS).map(|index| about_row(index)[0]).collect();
+        assert_eq!(about.len(), ABOUT_SLOTS);
     }
 }

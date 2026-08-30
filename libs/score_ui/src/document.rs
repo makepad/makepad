@@ -240,16 +240,8 @@ impl ScoreLoader {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let bytes = std::fs::read(path).map_err(|error| DocumentError::Io(error.to_string()))?;
-        if matches!(extension.as_str(), "musicxml" | "mxl" | "xml") {
-            let result = makepad_score_import::import_musicxml_bytes(&bytes)
-                .map_err(|error| DocumentError::Native(error.to_string()))?;
-            return ScoreWorkspace::new(result.score, ACTOR, 32)
-                .map_err(|error| DocumentError::Native(error.to_string()));
-        }
-        if matches!(extension.as_str(), "mid" | "midi") {
-            let result = makepad_score_import::import_midi_bytes(&bytes)
-                .map_err(|error| DocumentError::Native(error.to_string()))?;
-            return ScoreWorkspace::new(result.score, ACTOR, 32)
+        if let Some(score) = Self::import_score(&bytes, &extension)? {
+            return ScoreWorkspace::new(score, ACTOR, 32)
                 .map_err(|error| DocumentError::Native(error.to_string()));
         }
         if let Ok(workspace) = ScoreWorkspace::from_bytes(&bytes) {
@@ -259,6 +251,24 @@ impl ScoreLoader {
             .map_err(|error| DocumentError::Native(error.to_string()))?;
         ScoreWorkspace::new(score, ACTOR, 32)
             .map_err(|error| DocumentError::Native(error.to_string()))
+    }
+
+    /// MusicXML or MIDI bytes as a score. `None` means the extension is not an
+    /// import format, so the caller should read the bytes natively. Bytes
+    /// rather than a path, because the application also ships a piece of its
+    /// own and imports it straight out of the executable.
+    pub fn import_score(bytes: &[u8], extension: &str) -> Result<Option<Score>, DocumentError> {
+        if matches!(extension, "musicxml" | "mxl" | "xml") {
+            let result = makepad_score_import::import_musicxml_bytes(bytes)
+                .map_err(|error| DocumentError::Native(error.to_string()))?;
+            return Ok(Some(result.score));
+        }
+        if matches!(extension, "mid" | "midi") {
+            let result = makepad_score_import::import_midi_bytes(bytes)
+                .map_err(|error| DocumentError::Native(error.to_string()))?;
+            return Ok(Some(result.score));
+        }
+        Ok(None)
     }
 }
 
@@ -293,12 +303,36 @@ impl ScoreDocument {
 
     pub fn open(path: PathBuf) -> Result<Self, DocumentError> {
         let workspace = ScoreLoader::load(&path)?;
-        let mut generator = IdGenerator::new(ACTOR);
-        // Native IDs may come from any actor. Allocating in our actor domain
-        // avoids collision; burn a conservative prefix for imported files.
-        for _ in 0..10_000 {
-            let _ = generator.next::<AnnotationTag>();
-        }
+        Self::adopt_foreign(workspace, Some(path))
+    }
+
+    /// A score the application ships inside its own executable.
+    ///
+    /// The title is the application's, not the file's: an imported MIDI titles
+    /// itself after its first track ("Piano right"), which is not the name of
+    /// the piece. There is no path, so the shipped piece behaves like a new
+    /// document — Save asks where, and nothing can overwrite the resource.
+    pub fn open_bundled(
+        bytes: &[u8],
+        extension: &str,
+        title: &str,
+    ) -> Result<Self, DocumentError> {
+        let mut score = ScoreLoader::import_score(bytes, extension)?.ok_or(
+            DocumentError::ImportUnavailable("the shipped score's format"),
+        )?;
+        score.title = title.to_string();
+        let workspace = ScoreWorkspace::new(score, ACTOR, 32)
+            .map_err(|error| DocumentError::Native(error.to_string()))?;
+        Self::adopt_foreign(workspace, None)
+    }
+
+    /// Take on a workspace this application did not author: imported IDs may
+    /// come from any actor, so allocation continues in our own actor domain
+    /// after a conservative prefix is burned.
+    fn adopt_foreign(
+        workspace: ScoreWorkspace,
+        path: Option<PathBuf>,
+    ) -> Result<Self, DocumentError> {
         let layer = workspace
             .score()
             .annotation_layers
@@ -306,7 +340,7 @@ impl ScoreDocument {
             .next()
             .copied()
             .unwrap_or(Id::new(ACTOR, 9_999));
-        Self::from_workspace(workspace, Some(path), 10_001, layer)
+        Self::from_workspace(workspace, path, 10_001, layer)
     }
 
     fn from_workspace(

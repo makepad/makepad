@@ -178,11 +178,22 @@ impl RenderPlanner {
             if !page_rect.intersects(screen_viewport_px) || view.transform.scale <= 0.0 {
                 continue;
             }
-            let page_viewport = view.transform.inverse_rect(screen_viewport_px);
+            // The page stays in the plan for as long as any of it is on
+            // screen, even when none of its *items* are. A page's outer margin
+            // carries no paint, so dropping the page for having no visible
+            // items took its sheet of paper with it and made the whole page
+            // pop out while a band of it was still inside the viewport.
+            //
+            // Item bounds are engraved bounds; the drawn ink can sit up to a
+            // pixel outside them once a hairline is snapped to the device grid
+            // and given its antialiasing fringe. Query one output pixel wide
+            // so an item at the edge does not blink out a frame early.
+            let margin = 1.0 / view.transform.scale;
+            let page_viewport = view
+                .transform
+                .inverse_rect(screen_viewport_px)
+                .expanded(margin);
             let visible = view.page.visible_indices(page_viewport);
-            if visible.is_empty() {
-                continue;
-            }
             let page_slot = pages.len() as u16;
             for paint_index in visible.iter().copied() {
                 let item = &view.page.items()[paint_index];
@@ -383,6 +394,43 @@ mod tests {
         for batch in &plan.batches {
             assert!(!batch.items.is_empty());
         }
+    }
+
+    /// A page's outer margin carries no ink. Panning it to the edge used to
+    /// take the whole sheet out of the plan — paper included — while a band of
+    /// it was still on screen, so the page popped out early.
+    #[test]
+    fn a_page_still_on_screen_keeps_its_paper_without_visible_items() {
+        let page = page();
+        // A viewport sitting entirely in the page's empty right-hand margin.
+        let plan = RenderPlanner.plan(
+            &[PageView {
+                page,
+                transform: Transform::IDENTITY,
+            }],
+            Rect::from_xywh(97.0, 40.0, 2.5, 10.0),
+            &OverlayState::default(),
+            OverlayMetrics::default(),
+        );
+        assert_eq!(plan.pages.len(), 1, "the page is still on screen");
+        assert_eq!(plan.visible_items(), 0, "none of its items are");
+        assert_eq!(plan.pages[0].visible_items, 0);
+    }
+
+    /// And a page genuinely off screen is still dropped.
+    #[test]
+    fn a_page_off_screen_is_dropped() {
+        let page = page();
+        let plan = RenderPlanner.plan(
+            &[PageView {
+                page,
+                transform: Transform::IDENTITY,
+            }],
+            Rect::from_xywh(400.0, 400.0, 100.0, 100.0),
+            &OverlayState::default(),
+            OverlayMetrics::default(),
+        );
+        assert!(plan.pages.is_empty());
     }
 
     #[test]

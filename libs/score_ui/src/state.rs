@@ -5,8 +5,10 @@
 use crate::{
     action::*,
     document::{DocumentError, DragTarget, NoteDrag, PartUiState, ScoreDocument},
-    playback::{PlaybackBridge, RoomSettings},
+    library::MusicLibrary,
+    playback::PlaybackBridge,
     prefs::ScorePrefs,
+    sound::{self, SoundParam, SoundSettings},
 };
 use makepad_score::{model::AnnotationKind, symbol::Articulation};
 use makepad_score_play::PlaybackState;
@@ -38,13 +40,28 @@ impl SelectionState {
 /// hides its controls the instant the pointer stops is unusable.
 pub const CONTROLS_DWELL_S: f64 = 2.6;
 
+/// The view gliding to a page somebody asked for by name — a menu, a key, the
+/// transport, the playback cursor. Panning by hand does not use it: dragging
+/// *is* the movement, and a glide would fight it.
+///
+/// The target is a page rather than a point, so the glide stays correct if the
+/// window resizes or the zoom changes while it runs.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PageTurnState {
-    pub from: usize,
-    pub to: usize,
+pub struct PageGlide {
+    pub page: usize,
+    /// Where the view was when the glide started, in window points.
+    pub from: DVec2,
     pub progress: f64,
     pub active: bool,
 }
+
+/// How long the view takes to glide to a page it was sent to.
+pub const PAGE_GLIDE_S: f64 = 0.28;
+
+/// The zoom range the whole application agrees on. The bottom is "the entire
+/// document as a row of thumbnails", the top is a magnifier over one system.
+pub const ZOOM_MIN: f64 = 0.05;
+pub const ZOOM_MAX: f64 = 6.0;
 
 #[derive(Clone, Debug)]
 pub struct ScoreUiState {
@@ -56,9 +73,24 @@ pub struct ScoreUiState {
     /// The pointer is on the control strip itself. Never fade while it is.
     pub controls_pinned: bool,
     pub page_layout: PageLayout,
+    /// The page the reader is actually looking at. Derived from the view
+    /// wherever the view moved on its own (a grab-pan, a scrollbar, a zoom),
+    /// and set directly by anything that *sends* the reader to a page.
     pub current_page: usize,
     pub zoom: f64,
-    pub continuous_scroll: f64,
+    /// Where the document sits in the viewport, in window points: the offset
+    /// of the document's origin from the canvas's top-left corner. One offset
+    /// for every layout, shared by grab-pan, both scrollbars, the zoom and the
+    /// page glide, so none of them can disagree about where the reader is.
+    pub pan: DVec2,
+    /// A glide towards a page the reader was sent to.
+    pub glide: PageGlide,
+    /// Ask the canvas to put the current page back under the reader without
+    /// animating: a fresh document, a new layout, Fit page.
+    pub recentre: bool,
+    /// Ask the canvas for the zoom that holds the whole document. The zoom is
+    /// geometry the canvas owns, so the request travels rather than the value.
+    pub fit_all: bool,
     pub selection: SelectionState,
     pub hover: Option<SemanticId>,
     pub caret: Option<SemanticId>,
@@ -67,10 +99,12 @@ pub struct ScoreUiState {
     pub annotation_tool: AnnotationTool,
     pub pending_annotation_target: Option<SemanticId>,
     pub inspector_tab: InspectorTab,
+    /// The sound control last touched, so the panel can explain that one
+    /// rather than showing sixteen paragraphs at once.
+    pub sound_focus: Option<SoundParam>,
     pub dialog: DialogKind,
     pub context_menu_at: Option<DVec2>,
     pub context_semantic: Option<SemanticId>,
-    pub turn: PageTurnState,
     pub status: String,
     pub text_input_focused: bool,
     /// What the open dialog is about to apply, and what went wrong last time.
@@ -98,7 +132,10 @@ impl Default for ScoreUiState {
             page_layout: PageLayout::Single,
             current_page: 0,
             zoom: 1.0,
-            continuous_scroll: 0.0,
+            pan: DVec2::default(),
+            glide: PageGlide::default(),
+            recentre: true,
+            fit_all: false,
             selection: SelectionState::default(),
             hover: None,
             caret: None,
@@ -107,10 +144,10 @@ impl Default for ScoreUiState {
             annotation_tool: AnnotationTool::None,
             pending_annotation_target: None,
             inspector_tab: InspectorTab::Properties,
+            sound_focus: None,
             dialog: DialogKind::None,
             context_menu_at: None,
             context_semantic: None,
-            turn: PageTurnState::default(),
             status: "Pianist mode · move the pointer for controls · ⌘E to edit".into(),
             text_input_focused: false,
             draft: DialogDraft {
@@ -124,6 +161,43 @@ impl Default for ScoreUiState {
 }
 
 impl ScoreUiState {
+    /// The face the application opens with. The editor by default — it is the
+    /// whole instrument, and pianist mode is one keystroke away from it — but
+    /// a reader who chose the pianist face keeps it.
+    pub fn from_prefs(prefs: &ScorePrefs) -> Self {
+        let mut ui = Self::default();
+        if prefs.start_in_editor {
+            ui.mode = ProductMode::Editor;
+            ui.chrome_visible = true;
+            ui.status = "Editor mode · notation tools revealed".into();
+        }
+        ui
+    }
+
+    /// Send the reader to a page: the view glides there rather than cutting,
+    /// and `current_page` is the request until the glide lands. Every command
+    /// that names a page goes through here, so the header, the scrollbars and
+    /// the paper can never be looking at different pages.
+    pub fn go_to_page(&mut self, page: usize) {
+        if self.current_page == page && self.glide.active {
+            return;
+        }
+        self.current_page = page;
+        self.glide = PageGlide {
+            page,
+            from: self.pan,
+            progress: 0.0,
+            active: true,
+        };
+    }
+
+    /// Put the current page back under the reader with no animation at all:
+    /// a document that just opened, a layout that just changed, Fit page.
+    pub fn recentre_now(&mut self) {
+        self.glide.active = false;
+        self.recentre = true;
+    }
+
     /// Any pointer movement brings the controls up and restarts the dwell.
     /// Returns true when the visible state actually changed.
     pub fn reveal_controls(&mut self, now: f64) -> bool {
@@ -166,7 +240,6 @@ pub struct PracticeState {
     pub loop_start_quarter: f64,
     pub loop_end_quarter: f64,
     pub playing: bool,
-    pub room: RoomSettings,
     /// When Play was last asked for. The engine takes an audio block or two to
     /// answer, so the published clock is only trusted after this much grace.
     pub play_requested_at: f64,
@@ -187,7 +260,6 @@ impl Default for PracticeState {
             loop_start_quarter: 0.0,
             loop_end_quarter: 4.0,
             playing: false,
-            room: RoomSettings::default(),
             play_requested_at: f64::NEG_INFINITY,
         }
     }
@@ -216,9 +288,15 @@ pub struct ScoreAppState {
     pub document: ScoreDocument,
     pub ui: ScoreUiState,
     pub practice: PracticeState,
+    /// Everything that shapes the piano, as the sound panel edits it.
+    pub sound: SoundSettings,
     pub playback: PlaybackBridge,
     pub parts: Vec<PartUiState>,
     pub prefs: ScorePrefs,
+    /// The browsable folder of scores; scanned the first time it is opened.
+    pub library: MusicLibrary,
+    /// Which page of the library list the browser is showing.
+    pub library_page: usize,
     midi_input: MidiInput,
     midi_output: MidiOutput,
     midi_ready: bool,
@@ -226,6 +304,11 @@ pub struct ScoreAppState {
     midi_hover: Vec<u8>,
     /// Hidden verification instances must stay silent, MIDI included.
     midi_muted: bool,
+    /// A hover is sounding, so it can be released when the piece starts.
+    hover_sounding: bool,
+    /// The device rate the current instrument was built for. `None` until the
+    /// audio callback has reported one.
+    instrument_rate: Option<f32>,
 }
 
 impl Default for ScoreAppState {
@@ -238,26 +321,34 @@ impl Default for ScoreAppState {
         practice.follow_cursor = prefs.follow_cursor;
         let playback = PlaybackBridge::new(document.score(), practice.tempo, practice.count_in);
         let parts = document.parts();
-        let mut ui = ScoreUiState::default();
-        if prefs.start_in_editor {
-            ui.mode = ProductMode::Editor;
-            ui.chrome_visible = true;
-            ui.status = "Editor mode · notation tools revealed".into();
+        // The stored instrument, or the app default when nothing is stored.
+        // A name that is no longer in the shipped list falls back rather than
+        // resolving to whatever now sits at that index.
+        let mut sound = SoundSettings::default();
+        if let Some(preset) = sound::preset_index_by_name(&prefs.instrument) {
+            sound.apply_preset(preset);
         }
+        let mut ui = ScoreUiState::from_prefs(&prefs);
         ui.draft.tempo = practice.tempo;
+        let library = MusicLibrary::new(prefs.library_dir.as_deref());
         Self {
             document,
             ui,
             practice,
+            sound,
             playback,
             parts,
             prefs,
+            library,
+            library_page: 0,
             midi_input: MidiInput::default(),
             midi_output: MidiOutput::default(),
             midi_ready: false,
             midi_ports: 0,
             midi_hover: Vec::new(),
             midi_muted: std::env::var_os("MAKEPAD_SCORE_MUTE").is_some(),
+            hover_sounding: false,
+            instrument_rate: None,
         }
     }
 }
@@ -265,10 +356,44 @@ impl Default for ScoreAppState {
 impl ScoreAppState {
     pub fn install_io(&mut self, cx: &mut Cx) {
         self.playback.install_audio_output(cx);
+        self.playback.set_sound(self.sound);
         if !self.midi_ready {
             self.midi_input = cx.midi_input();
             self.midi_output = cx.midi_output();
             self.midi_ready = true;
+        }
+    }
+
+    /// Open the piece the application ships inside its own executable.
+    ///
+    /// A resource that cannot be read costs the shipped piece and nothing
+    /// else: the built-in demo score stays on the desk and the status line
+    /// says why. Returns whether the shipped piece is what is now open.
+    pub fn open_bundled_score(
+        &mut self,
+        cx: &mut Cx,
+        bytes: &[u8],
+        extension: &str,
+        title: &str,
+        credit: &str,
+    ) -> bool {
+        match ScoreDocument::open_bundled(bytes, extension, title) {
+            Ok(document) => {
+                self.document = document;
+                self.parts = self.document.parts();
+                self.ui.current_page = 0;
+                self.ui.selection.clear();
+                self.ui.recentre_now();
+                self.adopt_score_tempo();
+                self.rebuild_playback(cx);
+                self.ui.status = credit.to_string();
+                true
+            }
+            Err(error) => {
+                self.ui.status =
+                    format!("{title} could not be read ({error}) · built-in demo score");
+                false
+            }
         }
     }
 
@@ -426,6 +551,47 @@ impl ScoreAppState {
         self.release_hover();
     }
 
+    /// True while the piece itself is sounding, read from the published audio
+    /// clock rather than the transport button's own flag: the two have drifted
+    /// apart before, and the pointer must not play notes over the music.
+    pub fn engine_playing(&self) -> bool {
+        self.playback.clock_snapshot().state == PlaybackState::Playing
+    }
+
+    /// Whether pointing at a note should sound it. The preference is the
+    /// user's setting; playing is the rule on top of it.
+    pub fn hover_audition_allowed(&self) -> bool {
+        self.prefs.audition_on_hover && !self.engine_playing()
+    }
+
+    /// The instrument a startup preset describes can only be built once the
+    /// audio device has reported its rate — a preset with a design override is
+    /// a different instrument, not a setting, and one built at the wrong rate
+    /// is the wrong piano. Called once a frame; two relaxed loads when idle.
+    fn settle_instrument(&mut self) {
+        let Some(rate) = self.playback.device_rate() else {
+            return;
+        };
+        if self.instrument_rate == Some(rate) {
+            return;
+        }
+        self.instrument_rate = Some(rate);
+        let preset = sound::preset(self.sound.preset);
+        if preset.needs_rebuild() {
+            self.playback.rebuild_instrument(preset);
+        }
+    }
+
+    /// A note the pointer was sounding when the transport started is released
+    /// rather than left ringing under the music.
+    fn settle_hover_audition(&mut self) {
+        if self.hover_sounding && self.engine_playing() {
+            self.hover_sounding = false;
+            self.playback.release_audition();
+            self.release_midi_hover();
+        }
+    }
+
     pub fn audition_pitch(&mut self, midi: u8) {
         self.release_midi_hover();
         self.playback.audition(0, &[midi]);
@@ -444,6 +610,10 @@ impl ScoreAppState {
         }
     }
 
+    /// The pointer moving over an element. The highlight is always taken —
+    /// seeing what you are pointing at is reading, and costs nothing — while
+    /// the *sound* is a separate decision: the user's hover-audition setting,
+    /// and never over a piece that is playing.
     pub fn audition_semantic(&mut self, semantic: Option<SemanticId>) {
         if self.ui.hover == semantic {
             return;
@@ -455,13 +625,14 @@ impl ScoreAppState {
             .and_then(|element| element.midi)
             .map(|pitch| vec![pitch])
             .unwrap_or_default();
-        if pitches.is_empty() {
-            self.playback.release_audition();
+        if pitches.is_empty() || !self.hover_audition_allowed() {
+            if self.hover_sounding {
+                self.hover_sounding = false;
+                self.playback.release_audition();
+            }
             return;
         }
-        if !self.prefs.audition_on_hover {
-            return;
-        }
+        self.hover_sounding = true;
         self.playback.audition(0, &pitches);
         if self.midi_ready && !self.midi_muted {
             for pitch in &pitches {
@@ -491,6 +662,7 @@ impl ScoreAppState {
 
     pub fn release_hover(&mut self) {
         self.ui.hover = None;
+        self.hover_sounding = false;
         self.playback.release_audition();
         self.release_midi_hover();
     }
@@ -554,6 +726,11 @@ impl ScoreAppState {
     }
 
     pub fn sync_follow_page(&mut self) {
+        // Hand over any instrument a rebuild preset asked for, and drop the
+        // one the audio thread finished with. Two relaxed loads when idle.
+        self.playback.service_instrument();
+        self.settle_instrument();
+        self.settle_hover_audition();
         self.playback
             .service_metronome(self.practice.metronome, self.practice.tempo);
         let engine_playing = self.playback.clock_snapshot().state == PlaybackState::Playing;
@@ -569,7 +746,11 @@ impl ScoreAppState {
         }
         let (position, _, _) = self.playback_overlay();
         if let Some(position) = position {
-            self.ui.current_page = (position.page.0 as usize).min(self.document.page_count().saturating_sub(1));
+            let page = (position.page.0 as usize)
+                .min(self.document.page_count().saturating_sub(1));
+            if page != self.ui.current_page {
+                self.ui.go_to_page(page);
+            }
         }
     }
 
@@ -668,7 +849,33 @@ fn score_opening_tempo(score: &makepad_score::model::Score) -> Option<f64> {
     })
 }
 
+/// How many library entries one page of the browser lists.
+pub const LIBRARY_PAGE: usize = 40;
+
 impl ScoreAppState {
+    /// Hand the whole sound to the audio thread. One release store; the synth
+    /// itself is never touched from here.
+    pub fn publish_sound(&mut self) {
+        self.playback.set_sound(self.sound);
+    }
+
+    /// The last page index the current library has entries for.
+    pub fn library_last_page(&self) -> usize {
+        self.library
+            .entries()
+            .len()
+            .saturating_sub(1)
+            / LIBRARY_PAGE
+    }
+
+    /// The slice of entries the browser is showing.
+    pub fn library_visible(&self) -> &[crate::library::LibraryEntry] {
+        let entries = self.library.entries();
+        let start = (self.library_page * LIBRARY_PAGE).min(entries.len());
+        let end = (start + LIBRARY_PAGE).min(entries.len());
+        &entries[start..end]
+    }
+
     fn adopt_score_tempo(&mut self) {
         if let Some(bpm) = score_opening_tempo(self.document.score()) {
             self.practice.tempo = bpm;
@@ -702,6 +909,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         }
         ScoreAction::SetPageLayout(layout) => {
             state.ui.page_layout = *layout;
+            state.ui.recentre_now();
             state.ui.status = format!("{} layout", layout.label());
         }
         ScoreAction::PageDelta(delta) => {
@@ -710,20 +918,32 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 let from = state.ui.current_page;
                 let to = (from as i64 + i64::from(*delta)).clamp(0, count as i64 - 1) as usize;
                 if from != to {
-                    state.ui.turn = PageTurnState { from, to, progress: 0.0, active: true };
-                    state.ui.current_page = to;
+                    state.ui.go_to_page(to);
                 }
             }
         }
-        ScoreAction::FirstPage => state.ui.current_page = 0,
-        ScoreAction::LastPage => state.ui.current_page = state.document.page_count().saturating_sub(1),
+        ScoreAction::FirstPage => state.ui.go_to_page(0),
+        ScoreAction::LastPage => {
+            state.ui.go_to_page(state.document.page_count().saturating_sub(1))
+        }
         ScoreAction::ZoomBy(factor) => {
-            state.ui.zoom = (state.ui.zoom * factor).clamp(0.12, 6.0);
+            // Zoom from a menu or a key has no pointer to zoom about, so it
+            // keeps the page it is on centred; the canvas zooms about the
+            // pointer for the wheel.
+            state.ui.zoom = (state.ui.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+            state.ui.go_to_page(state.ui.current_page);
+            state.ui.glide.active = true;
             state.ui.status = format!("Zoom {}%", (state.ui.zoom * 100.0).round());
+        }
+        ScoreAction::FitAllPages => {
+            // The canvas owns the geometry, so it works out the zoom that
+            // holds the whole document and recentres on the next frame.
+            state.ui.fit_all = true;
+            state.ui.status = "Whole document".into();
         }
         ScoreAction::FitPage => {
             state.ui.zoom = 1.0;
-            state.ui.continuous_scroll = 0.0;
+            state.ui.recentre_now();
             state.ui.status = "Fit page".into();
         }
         ScoreAction::RevealControls(visible) => {
@@ -805,19 +1025,55 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         }
         ScoreAction::SeekQuarter(quarter) => state.playback.seek_quarter(*quarter),
         ScoreAction::SetReverbPreset(preset) => {
-            state.practice.room.preset = *preset;
-            state.playback.set_room(state.practice.room);
+            state.sound.room.preset = *preset;
+            state.publish_sound();
             state.ui.status = format!("Room · {}", crate::playback::reverb_preset_label(*preset));
         }
-        ScoreAction::SetReverbMix { delta } => {
-            state.practice.room = state.practice.room.with_mix(state.practice.room.mix + delta);
-            state.playback.set_room(state.practice.room);
-            state.ui.status = format!("Reverb {:.0}%", state.practice.room.mix * 100.0);
-        }
         ScoreAction::SetPerspective(perspective) => {
-            state.practice.room.perspective = *perspective;
-            state.playback.set_room(state.practice.room);
+            state.sound.room.perspective = *perspective;
+            state.publish_sound();
             state.ui.status = format!("Listening from the {}", perspective_label(*perspective).to_lowercase());
+        }
+        ScoreAction::SetPianoPreset(index) => {
+            state.sound.apply_preset(*index);
+            state.ui.sound_focus = None;
+            let preset = sound::preset(state.sound.preset);
+            // The instrument is a choice, so it outlives the session.
+            state.prefs.instrument = preset.name.to_string();
+            state.prefs.save();
+            // A preset with a construction-time design override is a different
+            // instrument; one without is a voicing of this one and travels
+            // through the shared cell like any slider.
+            if preset.needs_rebuild() {
+                state.playback.rebuild_instrument(preset);
+            }
+            state.publish_sound();
+            state.ui.status = format!(
+                "{} · {}",
+                sound::preset_name(state.sound.preset),
+                preset.description
+            );
+        }
+        ScoreAction::SetSoundParam { param, value } => {
+            param.set(&mut state.sound, *value);
+            state.ui.sound_focus = Some(*param);
+            state.publish_sound();
+            state.ui.status = format!("{} · {}", param.label(), param.format(param.get(&state.sound)));
+        }
+        ScoreAction::ResetSoundToPreset => {
+            let preset_index = state.sound.preset;
+            state.sound.apply_preset(preset_index);
+            state.ui.sound_focus = None;
+            state.publish_sound();
+            state.ui.status = format!("Back to {}", sound::preset_name(preset_index));
+        }
+        ScoreAction::LiftDampers => {
+            let top = SoundParam::Sympathetic.range().1;
+            SoundParam::Sympathetic.set(&mut state.sound, top);
+            state.ui.sound_focus = Some(SoundParam::Sympathetic);
+            state.publish_sound();
+            state.ui.status =
+                "Dampers off · every string answers every note".into();
         }
         ScoreAction::SetAnnotationTool(tool) => {
             state.ui.annotation_tool = *tool;
@@ -946,6 +1202,19 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         ScoreAction::OpenDialog(dialog) => {
             state.ui.dialog = *dialog;
             state.ui.dialog_error = None;
+            if *dialog == DialogKind::Library {
+                // The folder is read here, not at launch: a browser nobody
+                // opens costs nothing.
+                state.library.ensure_scanned();
+                // Open on the page the piece being read is on.
+                state.library_page = state
+                    .document
+                    .path()
+                    .and_then(|path| state.library.index_of(path))
+                    .map(|index| index / LIBRARY_PAGE)
+                    .unwrap_or(state.library_page)
+                    .min(state.library_last_page());
+            }
             state.ui.draft = DialogDraft {
                 layout: state.ui.page_layout,
                 zoom: state.ui.zoom,
@@ -1013,7 +1282,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
             };
         }
         ScoreAction::SetDialogLayout(layout) => state.ui.draft.layout = *layout,
-        ScoreAction::SetDialogZoom(zoom) => state.ui.draft.zoom = zoom.clamp(0.12, 6.0),
+        ScoreAction::SetDialogZoom(zoom) => state.ui.draft.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX),
         ScoreAction::SetDialogTempo(tempo) => state.ui.draft.tempo = tempo.clamp(20.0, 400.0),
         ScoreAction::ApplyScoreSetup { tempo } => {
             state.practice.tempo = tempo.clamp(20.0, 400.0);
@@ -1023,7 +1292,8 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         }
         ScoreAction::ApplyPageSetup { layout, zoom } => {
             state.ui.page_layout = *layout;
-            state.ui.zoom = zoom.clamp(0.12, 6.0);
+            state.ui.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+            state.ui.recentre_now();
             state.ui.dialog = DialogKind::None;
             state.ui.status = format!(
                 "{} · staff {}%",
@@ -1035,10 +1305,17 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
             let title = match target {
                 BrowseTarget::Open => "Open a score",
                 BrowseTarget::SaveDirectory => "Choose a folder to save into",
+                BrowseTarget::LibraryDirectory => "Choose your music folder",
             };
             let mut dialog = FileDialog::new().set_title(title.to_string());
-            if let Some(dir) = &state.prefs.last_dir {
-                dialog = dialog.set_location(dir.clone());
+            let start = match target {
+                BrowseTarget::LibraryDirectory => {
+                    state.library.dir().map(std::path::Path::to_path_buf)
+                }
+                _ => state.prefs.last_dir.clone(),
+            };
+            if let Some(dir) = start {
+                dialog = dialog.set_location(dir);
             }
             // The one panel this platform layer actually implements chooses a
             // file OR a folder, which covers both callers.
@@ -1050,11 +1327,41 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 return apply_score_action(cx, state, &ScoreAction::OpenPath(path));
             }
         }
+        ScoreAction::OpenLibraryEntry(row) => {
+            let index = state.library_page * LIBRARY_PAGE + row;
+            if let Some(entry) = state.library.entries().get(index) {
+                let (path, line) = (entry.path.clone(), entry.line());
+                let opened = apply_score_action(cx, state, &ScoreAction::OpenPath(path));
+                // Say what was picked, not what the file titles itself.
+                if state.ui.dialog_error.is_none() {
+                    state.ui.status = line;
+                }
+                return opened;
+            }
+        }
+        ScoreAction::SetLibraryDir(dir) => {
+            state.library.set_dir(dir.clone());
+            state.library_page = 0;
+            state.prefs.library_dir = state.library.dir().map(PathBuf::from);
+            state.prefs.save();
+            state.ui.status = format!("Music library · {}", state.library.summary());
+        }
+        ScoreAction::RescanLibrary => {
+            state.library.rescan();
+            state.library_page = state.library_page.min(state.library_last_page());
+            state.ui.status = format!("Music library · {}", state.library.summary());
+        }
+        ScoreAction::LibraryPage(delta) => {
+            let last = state.library_last_page() as i64;
+            state.library_page =
+                (state.library_page as i64 + i64::from(*delta)).clamp(0, last) as usize;
+        }
         ScoreAction::OpenPath(path) => match ScoreDocument::open(path.clone()) {
             Ok(document) => {
                 state.document = document;
                 state.parts = state.document.parts();
                 state.ui.current_page = 0;
+                state.ui.recentre_now();
                 state.ui.selection.clear();
                 state.ui.dialog = DialogKind::None;
                 state.ui.dialog_error = None;
@@ -1062,7 +1369,15 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 state.prefs.save();
                 state.adopt_score_tempo();
                 state.rebuild_playback(cx);
-                state.ui.status = format!("Opened {}", path.display());
+                // The file name, not the score's own title: an imported MIDI
+                // often titles itself after its first track ("Piano right"),
+                // which is not what the user just picked.
+                state.ui.status = format!(
+                    "Opened {}",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                );
             }
             Err(error) => {
                 let message = format!("{}: {error}", path.display());
@@ -1110,6 +1425,7 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
                 state.document = document;
                 state.parts = state.document.parts();
                 state.ui.current_page = 0;
+                state.ui.recentre_now();
                 state.ui.selection.clear();
                 state.adopt_score_tempo();
                 state.rebuild_playback(cx);
@@ -1118,13 +1434,19 @@ pub fn apply_score_action(cx: &mut Cx, state: &mut ScoreAppState, action: &Score
         }
         ScoreAction::Quit => cx.quit(),
         ScoreAction::ContextMenu { at, semantic } => {
+            cx.clear_all_hovers();
             state.ui.context_menu_at = Some(*at);
             state.ui.context_semantic = semantic.map(SemanticId);
             if let Some(semantic) = state.ui.context_semantic {
                 state.ui.selection.replace(semantic);
             }
         }
-        ScoreAction::CloseContextMenu => state.ui.context_menu_at = None,
+        ScoreAction::CloseContextMenu => {
+            state.ui.context_menu_at = None;
+            // The context menu opens and closes under the pointer, so the row
+            // it leaves behind never gets its hover-out. Clear them.
+            cx.clear_all_hovers();
+        }
     }
     true
 }
@@ -1203,12 +1525,65 @@ mod tests {
         assert!(!practice.sync_transport(true, 21.0));
     }
 
+    /// The application opens in the editor, because that is what the shipped
+    /// preference says — the mode is a default, not a hard-coded face, so a
+    /// reader who chose pianist mode still gets it.
     #[test]
-    fn pianist_is_the_default_face() {
-        let state = ScoreAppState::default();
-        assert_eq!(state.ui.mode, ProductMode::Pianist);
-        assert!(!state.ui.chrome_visible);
-        assert!(!state.ui.controls_visible);
-        assert_eq!(state.ui.page_layout, PageLayout::Single);
+    fn the_opening_face_follows_the_preference() {
+        let editor = ScoreUiState::from_prefs(&ScorePrefs {
+            start_in_editor: true,
+            ..ScorePrefs::default()
+        });
+        assert_eq!(editor.mode, ProductMode::Editor);
+        assert!(editor.chrome_visible);
+        let pianist = ScoreUiState::from_prefs(&ScorePrefs {
+            start_in_editor: false,
+            ..ScorePrefs::default()
+        });
+        assert_eq!(pianist.mode, ProductMode::Pianist);
+        assert!(!pianist.chrome_visible);
+        assert!(!pianist.controls_visible);
+        // Shipped: the editor, the strip of pages, no scroll offset.
+        assert!(ScorePrefs::default().start_in_editor);
+        assert_eq!(ScoreUiState::default().page_layout, PageLayout::Single);
+        assert_eq!(ScoreUiState::default().pan, DVec2::default());
+    }
+
+    /// Pointing at a note sounds it while the score is stopped and stays
+    /// silent while the piece is playing — the halo is still taken either way,
+    /// because seeing what you are pointing at is reading, not playing.
+    ///
+    /// The rule reads the published audio clock, not the transport button's
+    /// own flag: those two have drifted apart before.
+    #[test]
+    fn hover_audition_is_gated_by_the_transport_under_the_preference() {
+        use makepad_score_play::AudioClockSnapshot;
+        let mut state = ScoreAppState::default();
+        state.prefs.audition_on_hover = true;
+        assert!(!state.engine_playing(), "a fresh state is not playing");
+        assert!(state.hover_audition_allowed());
+
+        state.playback.publish_clock_for_test(AudioClockSnapshot {
+            state: PlaybackState::Playing,
+            ..AudioClockSnapshot::default()
+        });
+        assert!(state.engine_playing());
+        assert!(!state.hover_audition_allowed(), "no notes over the music");
+
+        // The pointer still marks what it is over while the piece plays.
+        let semantic = state.document.all_note_semantics()[0];
+        state.audition_semantic(Some(semantic));
+        assert_eq!(state.ui.hover, Some(semantic), "the halo is still taken");
+
+        // Pausing hands the pointer its voice back.
+        state.playback.publish_clock_for_test(AudioClockSnapshot {
+            state: PlaybackState::Paused,
+            ..AudioClockSnapshot::default()
+        });
+        assert!(!state.engine_playing());
+        assert!(state.hover_audition_allowed());
+
+        state.prefs.audition_on_hover = false;
+        assert!(!state.hover_audition_allowed(), "the reader's setting still rules");
     }
 }

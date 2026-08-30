@@ -1,13 +1,14 @@
 use crate::{
-    project_rule_on_grid, project_staff_rules_on_grid, tessellate_ribbon, DashPattern,
-    GlyphItem, HighlightRole, InstanceBatch, LinearRgba, MusicFontRef, OverlayCommand, PaintKind,
-    PageLodPlan, PlannedItemRef, Point, Primitive, Rect, RenderPlan, RuleKind, ScorePalette,
-    SmuflGlyph, TextFontRef, TextRun, TileKey, Transform,
+    ink_floor, project_rule_on_grid, project_staff_rules_on_grid, tessellate_ribbon, DashPattern,
+    GlyphItem, HighlightRole, InkFloor, InstanceBatch, LinearRgba, MusicFontRef, OverlayCommand,
+    PaintKind, PageLodPlan, PlannedItemRef, Point, Primitive, ProjectedRule, Rect, RenderPlan,
+    Ribbon, RuleKind, ScorePalette, SmuflGlyph, TextFontRef, TextRun, TileKey, Transform,
 };
 use makepad_draw::{
     rect as mp_rect, vec4, Cx2d, DrawGlyph, DrawText, DrawVector, Vec2d,
 };
 use makepad_draw::shader::draw_glyph::GlyphShapeId;
+use makepad_draw::vector::{LineCap, LineJoin};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,7 +215,7 @@ impl MakepadScoreRenderer {
         };
         let opacity = options.opacity.clamp(0.0, 1.0);
         if !plan.pages.is_empty() {
-            draw_vector.begin();
+            begin_vector(draw_vector, options.device_scale);
             set_vector_color(draw_vector, multiply_alpha(palette.paper, opacity));
             for page in &plan.pages {
                 let size = page.page.page_size();
@@ -250,17 +251,16 @@ impl MakepadScoreRenderer {
                 crate::Pipeline::Primitive(_) => {
                     let staff_rules =
                         staff_rule_overrides(plan, batch, snap_progress, options.device_scale);
-                    draw_vector.begin();
+                    begin_vector(draw_vector, options.device_scale);
                     for item_ref in &batch.items {
                         let (item, transform) = resolve_item(plan, *item_ref);
                         let PaintKind::Primitive(primitive) = &item.kind else {
                             continue;
                         };
-                        set_vector_color(
-                            draw_vector,
-                            multiply_alpha(palette.resolve(item.ink), opacity),
-                        );
-                        if let Some(rect) = staff_rules.get(item_ref) {
+                        let color = multiply_alpha(palette.resolve(item.ink), opacity);
+                        if let Some(rule) = staff_rules.get(item_ref) {
+                            let rect = rule.rect_px;
+                            set_vector_color(draw_vector, multiply_alpha(color, rule.ink_alpha));
                             draw_vector.rect(
                                 rect.min.x as f32,
                                 rect.min.y as f32,
@@ -274,6 +274,7 @@ impl MakepadScoreRenderer {
                             draw_vector,
                             primitive,
                             transform,
+                            color,
                             snap_progress,
                             options.ribbon_error_px,
                             options.device_scale,
@@ -376,7 +377,7 @@ impl MakepadScoreRenderer {
                 } => {
                     let transform = plan.pages[page_slot as usize].transform;
                     let rect = transform.rect(rect_sp);
-                    draw_vector.begin();
+                    begin_vector(draw_vector, options.device_scale);
                     set_vector_color(
                         draw_vector,
                         palette
@@ -408,7 +409,7 @@ impl MakepadScoreRenderer {
                         span_sp.unwrap_or((0.0, page.page.page_size().y));
                     let top = page.transform.point(Point::new(x_sp, top_sp));
                     let height = (bottom_sp - top_sp).max(0.0) * page.transform.scale;
-                    draw_vector.begin();
+                    begin_vector(draw_vector, options.device_scale);
                     set_vector_color(draw_vector, palette.playback_cursor);
                     draw_vector.rect(
                         (top.x - width_px as f64 * 0.5) as f32,
@@ -445,12 +446,12 @@ impl MakepadScoreRenderer {
                             }
                         }
                         PaintKind::Primitive(primitive) => {
-                            draw_vector.begin();
-                            set_vector_color(draw_vector, color);
+                            begin_vector(draw_vector, options.device_scale);
                             append_primitive(
                                 draw_vector,
                                 primitive,
                                 transform,
+                                color,
                                 snap_progress,
                                 options.ribbon_error_px,
                                 options.device_scale,
@@ -542,7 +543,7 @@ fn staff_rule_overrides(
     batch: &InstanceBatch,
     snap_progress: f32,
     device_scale: f64,
-) -> BTreeMap<PlannedItemRef, Rect> {
+) -> BTreeMap<PlannedItemRef, ProjectedRule> {
     let mut groups: BTreeMap<(u16, u32), Vec<(PlannedItemRef, Rect)>> = BTreeMap::new();
     for item_ref in &batch.items {
         let (item, _) = resolve_item(plan, *item_ref);
@@ -578,30 +579,77 @@ fn staff_rule_overrides(
                 device_scale,
             ))
         {
-            projected.insert(item_ref, rule.rect_px);
+            projected.insert(item_ref, rule);
         }
     }
     projected
 }
 
+/// The antialiasing fringe `DrawVector` should bake, in path-local units.
+///
+/// Score geometry reaches the backend in logical points, so the library
+/// default of `1.0` spreads every filled edge over two *physical* pixels on a
+/// retina display. That is a whole extra device pixel of ink on each staff
+/// line, stem and beam, and it is most of why a zoomed-out page reads as a
+/// black mass. One physical pixel is the correct fringe at any density.
+fn vector_aa(device_scale: f64) -> f32 {
+    let scale = if device_scale.is_finite() && device_scale > 0.0 {
+        device_scale
+    } else {
+        1.0
+    };
+    (crate::MIN_INK_DEVICE_PX / scale) as f32
+}
+
+/// Opens a `DrawVector` session with the score's one-physical-pixel fringe.
+fn begin_vector(draw: &mut DrawVector, device_scale: f64) {
+    let aa = vector_aa(device_scale);
+    draw.cur_fill_aa = aa;
+    draw.cur_stroke_aa = aa;
+    draw.begin();
+}
+
 /// `dilate_px` inflates the emitted geometry by that many output pixels on
 /// every side. Zero draws the exact engraved shape; a wash asks for a small
 /// positive value so its soft edge reads around the ink it marks.
+///
+/// Anything the pixel grid is too coarse to draw at its engraved width is
+/// widened to the one-physical-pixel floor and given back the alpha that width
+/// would have covered — see [`crate::ink_floor`]. A wash is deliberately wider
+/// than the ink it marks, so it is exempt.
 #[allow(clippy::too_many_arguments)]
 fn append_primitive(
     draw: &mut DrawVector,
     primitive: &Primitive,
     transform: Transform,
+    color: LinearRgba,
     snap_progress: f32,
     ribbon_error_px: f64,
     device_scale: f64,
     dilate_px: f64,
 ) {
     let dilate = dilate_px.max(0.0);
+    let is_wash = dilate > 0.0;
+    let floor = |width: f64| {
+        if is_wash {
+            InkFloor { width, alpha: 1.0 }
+        } else {
+            ink_floor(width, device_scale)
+        }
+    };
+    let aa = vector_aa(device_scale);
     match primitive {
         Primitive::Rule { rect, .. } => {
-            let projected =
-                project_rule_on_grid(*rect, transform, snap_progress, device_scale).rect_px;
+            let rule = project_rule_on_grid(*rect, transform, snap_progress, device_scale);
+            let projected = rule.rect_px;
+            set_vector_color(
+                draw,
+                if is_wash {
+                    color
+                } else {
+                    multiply_alpha(color, rule.ink_alpha)
+                },
+            );
             draw.rect(
                 (projected.min.x - dilate) as f32,
                 (projected.min.y - dilate) as f32,
@@ -611,7 +659,21 @@ fn append_primitive(
             draw.fill();
         }
         Primitive::Beam(beam) => {
-            let points = beam.vertices().map(|point| transform.point(point));
+            // A beam is a slab, and two of them a quarter of a staff space
+            // apart. Left at full strength once its half-millimetre depth
+            // falls under a pixel, a beamed group fuses into one black bar.
+            let ink = floor(beam.thickness * transform.scale);
+            set_vector_color(draw, multiply_alpha(color, ink.alpha));
+            let start = transform.point(beam.start);
+            let end = transform.point(beam.end);
+            let half = ink.width * 0.5 + dilate;
+            let lead = if start.x <= end.x { -dilate } else { dilate };
+            let points = [
+                Point::new(start.x + lead, start.y - half),
+                Point::new(end.x - lead, end.y - half),
+                Point::new(end.x - lead, end.y + half),
+                Point::new(start.x + lead, start.y + half),
+            ];
             draw.move_to(points[0].x as f32, points[0].y as f32);
             for point in &points[1..] {
                 draw.line_to(point.x as f32, point.y as f32);
@@ -620,6 +682,19 @@ fn append_primitive(
             draw.fill();
         }
         Primitive::Ribbon(ribbon) => {
+            let endpoint = floor(ribbon.endpoint_thickness * transform.scale);
+            let midpoint = floor(ribbon.midpoint_thickness * transform.scale);
+            let engraved = ribbon.endpoint_thickness + ribbon.midpoint_thickness;
+            let drawn = (endpoint.width + midpoint.width) / transform.scale;
+            set_vector_color(
+                draw,
+                multiply_alpha(color, ((engraved / drawn) as f32).clamp(0.0, 1.0)),
+            );
+            let ribbon = &Ribbon {
+                endpoint_thickness: endpoint.width / transform.scale + dilate * 2.0,
+                midpoint_thickness: midpoint.width / transform.scale + dilate * 2.0,
+                ..*ribbon
+            };
             let mesh = tessellate_ribbon(*ribbon, transform.scale, ribbon_error_px);
             if mesh.vertices.len() < 4 {
                 return;
@@ -654,7 +729,7 @@ fn append_primitive(
             for (a, b) in [(tip + tip_gap, mouth + normal), (tip - tip_gap, mouth - normal)] {
                 append_line(draw, transform.point(a), transform.point(b));
             }
-            draw.stroke((*thickness * transform.scale + dilate * 2.0) as f32);
+            append_stroke(draw, color, floor(*thickness * transform.scale), dilate, aa);
         }
         Primitive::Bracket {
             x,
@@ -671,7 +746,7 @@ fn append_primitive(
             draw.line_to(b.x as f32, b.y as f32);
             draw.line_to(c.x as f32, c.y as f32);
             draw.line_to(d.x as f32, d.y as f32);
-            draw.stroke((*thickness * transform.scale + dilate * 2.0) as f32);
+            append_stroke(draw, color, floor(*thickness * transform.scale), dilate, aa);
         }
         Primitive::Line {
             start,
@@ -687,7 +762,7 @@ fn append_primitive(
             } else {
                 append_line(draw, transform.point(*start), transform.point(*end));
             }
-            draw.stroke((*thickness * transform.scale + dilate * 2.0) as f32);
+            append_stroke(draw, color, floor(*thickness * transform.scale), dilate, aa);
         }
         Primitive::TupletBracket {
             start,
@@ -722,9 +797,28 @@ fn append_primitive(
                 transform.point(*end),
                 transform.point(*end + hook_direction),
             );
-            draw.stroke((*thickness * transform.scale + dilate * 2.0) as f32);
+            append_stroke(draw, color, floor(*thickness * transform.scale), dilate, aa);
         }
     }
+}
+
+/// Strokes the accumulated path at the floored width, with the alpha that
+/// keeps the mark's engraved weight and a one-physical-pixel fringe.
+fn append_stroke(
+    draw: &mut DrawVector,
+    color: LinearRgba,
+    ink: InkFloor,
+    dilate: f64,
+    aa: f32,
+) {
+    set_vector_color(draw, multiply_alpha(color, ink.alpha));
+    draw.stroke_opts(
+        (ink.width + dilate * 2.0) as f32,
+        LineCap::Butt,
+        LineJoin::Miter,
+        4.0,
+        aa,
+    );
 }
 
 fn append_line(draw: &mut DrawVector, start: Point, end: Point) {

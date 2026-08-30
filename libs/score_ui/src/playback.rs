@@ -3,6 +3,7 @@
 //! physically modelled piano. The SoundFont sampler is kept only for the
 //! metronome click, which is a short transient rather than an instrument.
 
+use crate::sound::SoundSettings;
 use makepad_score::model::{EventKind, Rational, Score};
 use makepad_score_play::{
     Articulation as PlayArticulation, AtomicAudioClock, AudioClockSnapshot, AudioMessage,
@@ -13,14 +14,15 @@ use makepad_score_play::{
 };
 use makepad_piano_model::{
     fx::{Perspective, ReverbPreset},
-    Instrument, Piano, PianoEvent, TimedEvent as PianoTimedEvent,
+    Piano, PianoEvent, PianoPreset, TimedEvent as PianoTimedEvent, Voicing,
 };
 use makepad_soundfont::{metronome_click, NoSamples, Sampler, SamplerEvent, TimedEvent};
 use makepad_widgets::*;
 use std::{
     ops::Range,
+    ptr,
     sync::{
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -32,11 +34,18 @@ const VOICE_CAPACITY: usize = 96;
 const EVENT_CAPACITY: usize = 64;
 const SCRATCH_FRAMES: usize = 2048;
 const PLAN_RATE: u32 = 48_000;
+/// Peak-meter fall-back, per frame. Full scale to silence in about a third of
+/// a second — slow enough to read, fast enough to follow a phrase.
+const PEAK_FALL_PER_FRAME: f32 = 1.0 / 16_384.0;
+/// How long a replaced instrument keeps sounding while it fades out. Swapping
+/// the piano mid-phrase would otherwise cut every ringing string and the room
+/// tail dead on one sample, which is a click; ~40 ms of fade is inaudible.
+const INSTRUMENT_FADE_FRAMES: u32 = 2048;
 
-/// The room the piano is heard in. Values reach the audio thread through
-/// [`SharedRoom`]: plain atomics, no lock, no allocation, applied at the top of
-/// a render block. Keeping the whole binding in one small struct is what makes
-/// it cheap to follow `makepad_piano_model`'s API if it moves.
+/// The room the piano is heard in. One part of [`SoundSettings`]; it reaches
+/// the audio thread through the same shared cell as everything else there —
+/// plain atomics, no lock, no allocation, applied at the top of a render
+/// block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RoomSettings {
     pub preset: ReverbPreset,
@@ -47,13 +56,6 @@ pub struct RoomSettings {
 
 impl RoomSettings {
     pub const MIX_MAX: f32 = 1.0;
-
-    pub fn with_mix(self, mix: f32) -> Self {
-        Self {
-            mix: mix.clamp(0.0, Self::MIX_MAX),
-            ..self
-        }
-    }
 }
 
 impl Default for RoomSettings {
@@ -94,38 +96,188 @@ fn preset_from_index(index: u32) -> ReverbPreset {
         .map_or(ReverbPreset::Studio, |(preset, _)| *preset)
 }
 
-/// UI writes, audio thread reads. `revision` is the only thing the audio side
-/// polls, so an unchanged room costs one relaxed load per block.
+/// Everything that shapes the piano, as plain atomics. UI writes, audio thread
+/// reads. `revision` is the only thing the audio side polls, so a sound nobody
+/// is editing costs one relaxed load per block.
+///
+/// This is the whole binding to `makepad_piano_model`'s control surface: the
+/// six voicing amounts, the output EQ and trim, and the room. Every one of
+/// them is documented safe to set between `process()` calls, so applying them
+/// at the top of a render block allocates nothing and locks nothing.
 #[derive(Debug, Default)]
-struct SharedRoom {
+struct SharedSound {
     revision: AtomicU32,
+    // Room.
     preset: AtomicU32,
     mix_bits: AtomicU32,
     audience: AtomicU32,
+    early_bits: AtomicU32,
+    // Voicing: the runtime mechanism mix.
+    body_tap: AtomicU32,
+    knock: AtomicU32,
+    roughness: AtomicU32,
+    phantoms: AtomicU32,
+    attack_noise: AtomicU32,
+    sympathetic: AtomicU32,
+    // Output EQ and trim.
+    shelf_db: AtomicU32,
+    shelf_hz: AtomicU32,
+    bell_hz: AtomicU32,
+    bell_db: AtomicU32,
+    bell_q: AtomicU32,
+    tone_bass: AtomicU32,
+    tone_treble: AtomicU32,
+    master: AtomicU32,
 }
 
-impl SharedRoom {
-    fn publish(&self, room: RoomSettings) {
-        self.preset.store(preset_index(room.preset), Ordering::Relaxed);
-        self.mix_bits
-            .store(room.mix.clamp(0.0, RoomSettings::MIX_MAX).to_bits(), Ordering::Relaxed);
+impl SharedSound {
+    fn publish(&self, sound: SoundSettings) {
+        let store = |cell: &AtomicU32, value: f32| cell.store(value.to_bits(), Ordering::Relaxed);
+        self.preset.store(preset_index(sound.room.preset), Ordering::Relaxed);
+        store(&self.mix_bits, sound.room.mix.clamp(0.0, RoomSettings::MIX_MAX));
         self.audience.store(
-            u32::from(matches!(room.perspective, Perspective::Audience)),
+            u32::from(matches!(sound.room.perspective, Perspective::Audience)),
             Ordering::Relaxed,
         );
+        store(&self.early_bits, sound.early_reflections);
+        store(&self.body_tap, sound.voicing.body_tap);
+        store(&self.knock, sound.voicing.knock);
+        store(&self.roughness, sound.voicing.roughness);
+        store(&self.phantoms, sound.voicing.phantoms);
+        store(&self.attack_noise, sound.voicing.attack_noise);
+        store(&self.sympathetic, sound.voicing.sympathetic);
+        store(&self.shelf_db, sound.eq_shelf_db);
+        store(&self.shelf_hz, sound.eq_shelf_hz);
+        store(&self.bell_hz, sound.eq_bell_hz);
+        store(&self.bell_db, sound.eq_bell_db);
+        store(&self.bell_q, sound.eq_bell_q);
+        store(&self.tone_bass, sound.tone_bass_db);
+        store(&self.tone_treble, sound.tone_treble_db);
+        store(&self.master, sound.master_gain);
         // Release last: the audio thread acquires this and then reads the rest.
         self.revision.fetch_add(1, Ordering::Release);
     }
 
-    fn read(&self) -> RoomSettings {
-        RoomSettings {
-            preset: preset_from_index(self.preset.load(Ordering::Relaxed)),
-            mix: f32::from_bits(self.mix_bits.load(Ordering::Relaxed)),
-            perspective: if self.audience.load(Ordering::Relaxed) == 0 {
-                Perspective::Player
-            } else {
-                Perspective::Audience
+    fn read(&self) -> SoundSettings {
+        let load = |cell: &AtomicU32| f32::from_bits(cell.load(Ordering::Relaxed));
+        SoundSettings {
+            // The preset index is a UI label; the audio side only ever needs
+            // the values it produced, which are all published above.
+            preset: crate::sound::default_preset_index(),
+            voicing: Voicing {
+                body_tap: load(&self.body_tap),
+                knock: load(&self.knock),
+                roughness: load(&self.roughness),
+                phantoms: load(&self.phantoms),
+                attack_noise: load(&self.attack_noise),
+                sympathetic: load(&self.sympathetic),
             },
+            eq_shelf_db: load(&self.shelf_db),
+            eq_shelf_hz: load(&self.shelf_hz),
+            eq_bell_hz: load(&self.bell_hz),
+            eq_bell_db: load(&self.bell_db),
+            eq_bell_q: load(&self.bell_q),
+            tone_bass_db: load(&self.tone_bass),
+            tone_treble_db: load(&self.tone_treble),
+            master_gain: load(&self.master),
+            room: RoomSettings {
+                preset: preset_from_index(self.preset.load(Ordering::Relaxed)),
+                mix: load(&self.mix_bits),
+                perspective: if self.audience.load(Ordering::Relaxed) == 0 {
+                    Perspective::Player
+                } else {
+                    Perspective::Audience
+                },
+            },
+            early_reflections: load(&self.early_bits),
+        }
+    }
+}
+
+/// Handing a rebuilt instrument to the audio thread without allocating or
+/// freeing on it.
+///
+/// A preset with a construction-time `design` override is a different
+/// instrument: `Piano::new_with_preset` builds all 88 key designs and their
+/// modal banks, which allocates. So the UI thread builds it (well under a
+/// millisecond) and passes ownership through `incoming`; the audio thread
+/// takes it, and passes the instrument it replaced back through `retired` for
+/// the UI thread to drop. Neither slot ever holds more than one instrument:
+/// the audio side refuses to take a new one while it still owes the old one
+/// back, and the UI side refuses to offer one until the previous handoff has
+/// completed. Nothing is allocated, freed, or waited on inside the callback.
+#[derive(Debug, Default)]
+struct InstrumentHandoff {
+    incoming: AtomicPtr<Piano>,
+    retired: AtomicPtr<Piano>,
+}
+
+// The instrument is built on the UI thread and played on the audio thread.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Piano>();
+};
+
+impl InstrumentHandoff {
+    /// UI thread: offer a freshly built instrument. Handed back when the
+    /// previous swap has not finished, so the caller can simply try again on
+    /// the next frame with whatever the user has landed on by then.
+    fn offer(&self, piano: Box<Piano>) -> Option<Box<Piano>> {
+        if !self.retired.load(Ordering::Acquire).is_null() {
+            return Some(piano);
+        }
+        let raw = Box::into_raw(piano);
+        match self.incoming.compare_exchange(
+            ptr::null_mut(),
+            raw,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => None,
+            // Safety: the exchange failed, so the pointer was never published
+            // and this thread still owns it exclusively.
+            Err(_) => Some(unsafe { Box::from_raw(raw) }),
+        }
+    }
+
+    /// UI thread: take back the instrument the audio thread replaced, so it is
+    /// dropped here rather than in the callback.
+    fn reclaim(&self) -> Option<Box<Piano>> {
+        let raw = self.retired.swap(ptr::null_mut(), Ordering::Acquire);
+        // Safety: the audio thread published this pointer with Release and
+        // never touches it again.
+        (!raw.is_null()).then(|| unsafe { Box::from_raw(raw) })
+    }
+
+    /// Audio thread: adopt an offered instrument, but only while the previous
+    /// one has already been handed back.
+    fn take(&self) -> Option<Box<Piano>> {
+        if !self.retired.load(Ordering::Relaxed).is_null() {
+            return None;
+        }
+        let raw = self.incoming.swap(ptr::null_mut(), Ordering::Acquire);
+        // Safety: the UI thread published this pointer with Release and gave
+        // up its own copy in the same operation.
+        (!raw.is_null()).then(|| unsafe { Box::from_raw(raw) })
+    }
+
+    /// Audio thread: give a replaced instrument back to be dropped. Never
+    /// frees anything here — the slot is guaranteed empty because `take` only
+    /// hands an instrument over while it is.
+    fn retire(&self, piano: Box<Piano>) {
+        let previous = self.retired.swap(Box::into_raw(piano), Ordering::Release);
+        debug_assert!(previous.is_null(), "the retired slot was not empty");
+    }
+}
+
+impl Drop for InstrumentHandoff {
+    fn drop(&mut self) {
+        for slot in [&self.incoming, &self.retired] {
+            let raw = slot.swap(ptr::null_mut(), Ordering::Acquire);
+            if !raw.is_null() {
+                // Safety: nothing else can reach these pointers any more.
+                drop(unsafe { Box::from_raw(raw) });
+            }
         }
     }
 }
@@ -142,7 +294,13 @@ pub struct PlaybackBridge {
     scrub: ScrubController<16>,
     sequence: u32,
     next_metronome_quarter: Option<f64>,
-    room: Arc<SharedRoom>,
+    sound: Arc<SharedSound>,
+    instrument: Arc<InstrumentHandoff>,
+    /// A rebuilt instrument waiting for the audio thread to have room for it.
+    pending_instrument: Option<Box<Piano>>,
+    /// What the instrument is actually putting out, written by the audio
+    /// thread once per rendered span. One relaxed store; read for display.
+    peak: Arc<AtomicU32>,
     installed: bool,
 }
 
@@ -160,19 +318,78 @@ impl PlaybackBridge {
             scrub: ScrubController::new(ScrubConfig::for_sample_rate(PLAN_RATE)),
             sequence: 1_000_000,
             next_metronome_quarter: None,
-            room: {
-                let room = Arc::new(SharedRoom::default());
-                room.publish(RoomSettings::default());
-                room
+            sound: {
+                let sound = Arc::new(SharedSound::default());
+                sound.publish(SoundSettings::default());
+                sound
             },
+            instrument: Arc::new(InstrumentHandoff::default()),
+            pending_instrument: None,
+            peak: Arc::new(AtomicU32::new(0)),
             installed: false,
         }
     }
 
-    /// Hand new room settings to the audio thread. Lock-free by construction:
-    /// the synth itself is owned by the callback and is never touched here.
-    pub fn set_room(&self, room: RoomSettings) {
-        self.room.publish(room);
+    /// Hand the whole sound — instrument voicing, EQ, trim and room — to the
+    /// audio thread. Lock-free by construction: the synth itself is owned by
+    /// the callback and is never touched here.
+    pub fn set_sound(&self, sound: SoundSettings) {
+        self.sound.publish(sound);
+    }
+
+    /// Build the instrument a preset describes and hand it over.
+    ///
+    /// Only for presets whose `needs_rebuild()` is true: those change
+    /// construction-time design (felt, scale, radiation, board) and cannot be
+    /// reached with setters. Building costs well under a millisecond and
+    /// happens here, on the UI thread; the audio thread only ever swaps a
+    /// pointer and fades the instrument it replaced out. Publish the sound
+    /// itself with [`Self::set_sound`] as usual — the new instrument adopts it
+    /// on the block it arrives, so a slider the user had moved off the preset
+    /// survives the swap.
+    /// Publish a clock snapshot as if the audio thread had, so the rules the
+    /// transport gates — hover audition, the page follow, the Play/Pause
+    /// label — are testable without an audio device.
+    #[cfg(test)]
+    pub(crate) fn publish_clock_for_test(&self, snapshot: makepad_score_play::AudioClockSnapshot) {
+        self.clock.publish(snapshot);
+    }
+
+    /// The audio device's sample rate, once a callback has reported one.
+    /// `None` before the first block: an instrument built against a guessed
+    /// rate is the wrong piano, so construction waits for the real number.
+    pub fn device_rate(&self) -> Option<f32> {
+        let rate = f32::from_bits(self.device_rate_bits.load(Ordering::Relaxed));
+        (rate.is_finite() && rate >= 8_000.0).then_some(rate)
+    }
+
+    pub fn rebuild_instrument(&mut self, preset: &PianoPreset) {
+        let rate = f32::from_bits(self.device_rate_bits.load(Ordering::Relaxed));
+        let rate = if rate.is_finite() {
+            rate.clamp(8_000.0, 192_000.0)
+        } else {
+            PLAN_RATE as f32
+        };
+        // Latest request wins: an older pending build is simply dropped here.
+        self.pending_instrument = Some(Box::new(Piano::new_with_preset(rate, preset)));
+        self.service_instrument();
+    }
+
+    /// Drop whatever the audio thread handed back and retry a pending
+    /// handoff. Called once a frame; costs two relaxed loads when idle.
+    pub fn service_instrument(&mut self) {
+        drop(self.instrument.reclaim());
+        if let Some(piano) = self.pending_instrument.take() {
+            self.pending_instrument = self.instrument.offer(piano);
+        }
+    }
+
+    /// The instrument's own output level, as the audio thread last measured
+    /// it: peak sample magnitude with a meter fall-back. This is what the
+    /// synth rendered, so it moves with the sound controls whether or not the
+    /// samples reach a speaker.
+    pub fn output_peak(&self) -> f32 {
+        f32::from_bits(self.peak.load(Ordering::Relaxed)).clamp(0.0, 16.0)
     }
 
     pub fn rebuild_plan(&mut self, score: &Score, bpm: f64, count_in: bool) {
@@ -342,7 +559,9 @@ impl PlaybackBridge {
         let device_sample = self.device_sample.clone();
         let device_rate_bits = self.device_rate_bits.clone();
         let host_offset_ns = self.host_offset_ns.clone();
-        let room = self.room.clone();
+        let sound = self.sound.clone();
+        let instrument = self.instrument.clone();
+        let peak = self.peak.clone();
         let mut engine: Option<PlaybackEngine<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>> = None;
         let mut fallback_device_sample = 0_u64;
         let mut stream_generation = 1_u32;
@@ -353,7 +572,12 @@ impl PlaybackBridge {
             let rate = info.sample_rate.clamp(8_000.0, 384_000.0) as f32;
             device_rate_bits.store(rate.to_bits(), Ordering::Relaxed);
             if engine.is_none() {
-                engine = Some(PlaybackEngine::new(SamplerBackend::new(rate, room.clone())));
+                engine = Some(PlaybackEngine::new(SamplerBackend::new(
+                    rate,
+                    sound.clone(),
+                    instrument.clone(),
+                    peak.clone(),
+                )));
                 stream_generation = stream_generation.wrapping_add(1).max(1);
             }
             let frames = output.frame_count();
@@ -412,9 +636,16 @@ impl PlaybackBridge {
 }
 
 struct SamplerBackend {
-    room: Arc<SharedRoom>,
-    room_revision: u32,
-    piano: Piano,
+    sound: Arc<SharedSound>,
+    sound_revision: u32,
+    instrument: Arc<InstrumentHandoff>,
+    peak: Arc<AtomicU32>,
+    piano: Box<Piano>,
+    /// The instrument a preset rebuild replaced, still ringing itself out.
+    fading: Option<Box<Piano>>,
+    fade_frames_left: u32,
+    fade_left: [f32; SCRATCH_FRAMES],
+    fade_right: [f32; SCRATCH_FRAMES],
     piano_pending: [PianoTimedEvent; EVENT_CAPACITY],
     piano_pending_len: usize,
     /// note_id -> key, so a NoteOff (which carries no key) can reach the
@@ -432,12 +663,23 @@ struct SamplerBackend {
 }
 
 impl SamplerBackend {
-    fn new(sample_rate: f32, room: Arc<SharedRoom>) -> Self {
+    fn new(
+        sample_rate: f32,
+        sound: Arc<SharedSound>,
+        instrument: Arc<InstrumentHandoff>,
+        peak: Arc<AtomicU32>,
+    ) -> Self {
         Self {
-            room,
+            sound,
             // Zero forces the first block to adopt whatever the UI published.
-            room_revision: 0,
-            piano: Piano::new(sample_rate),
+            sound_revision: 0,
+            instrument,
+            peak,
+            piano: Box::new(Piano::new(sample_rate)),
+            fading: None,
+            fade_frames_left: 0,
+            fade_left: [0.0; SCRATCH_FRAMES],
+            fade_right: [0.0; SCRATCH_FRAMES],
             piano_pending: [PianoTimedEvent {
                 offset: 0,
                 event: PianoEvent::AllSoundOff,
@@ -477,16 +719,95 @@ impl SamplerBackend {
     }
 
     /// One relaxed load per block unless the UI actually moved something.
-    fn sync_room(&mut self) {
-        let revision = self.room.revision.load(Ordering::Acquire);
-        if revision == self.room_revision {
+    fn sync_sound(&mut self) {
+        let revision = self.sound.revision.load(Ordering::Acquire);
+        if revision == self.sound_revision {
             return;
         }
-        self.room_revision = revision;
-        let room = self.room.read();
-        self.piano.set_reverb_preset(room.preset);
-        self.piano.set_reverb_mix(room.mix);
-        self.piano.set_perspective(room.perspective);
+        self.sound_revision = revision;
+        let sound = self.sound.read();
+        self.apply_sound(sound);
+    }
+
+    /// The whole control surface in one place. Every setter here is documented
+    /// safe between `process()` calls: plain scalars and coefficient updates,
+    /// no allocation and no table rebuild.
+    fn apply_sound(&mut self, sound: SoundSettings) {
+        let piano = &mut self.piano;
+        piano.set_reverb_preset(sound.room.preset);
+        piano.set_reverb_mix(sound.room.mix);
+        piano.set_perspective(sound.room.perspective);
+        piano.set_early_reflection_level(sound.early_reflections);
+        piano.set_voicing(sound.voicing);
+        piano.set_eq_shelf(sound.eq_shelf_db, sound.eq_shelf_hz);
+        piano.set_eq_bell(sound.eq_bell_hz, sound.eq_bell_db, sound.eq_bell_q);
+        piano.set_tone(sound.tone_bass_db, sound.tone_treble_db);
+        piano.set_master_gain(sound.master_gain);
+    }
+
+    /// Adopt an instrument the UI rebuilt for a preset that changes the
+    /// physical design. The one it replaces keeps sounding while it fades, so
+    /// a preset change during a phrase is a crossfade rather than a cut; new
+    /// strikes go to the new instrument only.
+    fn sync_instrument(&mut self) {
+        if self.fading.is_some() {
+            // Still owe the last one back; the offer waits one fade.
+            return;
+        }
+        let Some(fresh) = self.instrument.take() else {
+            return;
+        };
+        self.fading = Some(std::mem::replace(&mut self.piano, fresh));
+        self.fade_frames_left = INSTRUMENT_FADE_FRAMES;
+        // The rebuild carries the preset's own voicing and room; re-apply the
+        // published sound so anything the user nudged off the preset survives.
+        // Revision zero means nothing has been published at all — the cell is
+        // still all zeros, and writing that over a built instrument would
+        // silence every mechanism in it.
+        let revision = self.sound.revision.load(Ordering::Acquire);
+        if revision != 0 {
+            let sound = self.sound.read();
+            self.apply_sound(sound);
+            self.sound_revision = revision;
+        }
+    }
+
+    /// Publish what this span actually rendered. A peak with a fall-back, so
+    /// the level reads as a level rather than flickering per block.
+    fn meter(&mut self, count: usize) {
+        let mut peak = f32::from_bits(self.peak.load(Ordering::Relaxed))
+            - count as f32 * PEAK_FALL_PER_FRAME;
+        if !(peak > 0.0) {
+            peak = 0.0;
+        }
+        for index in 0..count {
+            peak = peak
+                .max(self.scratch_left[index].abs())
+                .max(self.scratch_right[index].abs());
+        }
+        self.peak.store(peak.min(16.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Mix the outgoing instrument's tail under the new one.
+    fn render_fade(&mut self, count: usize) {
+        let Some(mut fading) = self.fading.take() else {
+            return;
+        };
+        fading.process(&[], &mut self.fade_left[..count], &mut self.fade_right[..count]);
+        let span = INSTRUMENT_FADE_FRAMES as f32;
+        for index in 0..count {
+            let left = self.fade_frames_left.saturating_sub(index as u32) as f32;
+            let gain = (left / span).clamp(0.0, 1.0);
+            self.scratch_left[index] += self.fade_left[index] * gain;
+            self.scratch_right[index] += self.fade_right[index] * gain;
+        }
+        self.fade_frames_left = self.fade_frames_left.saturating_sub(count as u32);
+        if self.fade_frames_left == 0 {
+            // Back to the UI thread, which is where it gets dropped.
+            self.instrument.retire(fading);
+        } else {
+            self.fading = Some(fading);
+        }
     }
 
     fn queue_piano(&mut self, event: PianoEvent) {
@@ -547,7 +868,8 @@ impl SynthBackend for SamplerBackend {
     }
 
     fn render_range(&mut self, channels: &mut [&mut [f32]], range: Range<usize>) {
-        self.sync_room();
+        self.sync_instrument();
+        self.sync_sound();
         let mut start = range.start;
         let mut first = true;
         while start < range.end {
@@ -577,6 +899,8 @@ impl SynthBackend for SamplerBackend {
                 self.scratch_left[index] += self.piano_left[index];
                 self.scratch_right[index] += self.piano_right[index];
             }
+            self.render_fade(count);
+            self.meter(count);
             if first {
                 self.pending_len = 0;
                 self.piano_pending_len = 0;
@@ -700,6 +1024,7 @@ fn rational_f64(value: Rational) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_piano_model::PIANO_PRESETS;
     use makepad_score::model::{Id, Measure};
     use makepad_score_play::PlaybackState;
 
@@ -756,38 +1081,202 @@ mod tests {
         assert_eq!(plan.end_sample(), plan.score_quarter_to_sample(end_quarter));
     }
 
-    /// The reverb binding must reach the audio thread without a lock and
+    fn test_backend(sound: Arc<SharedSound>) -> SamplerBackend {
+        SamplerBackend::new(
+            PLAN_RATE as f32,
+            sound,
+            Arc::new(InstrumentHandoff::default()),
+            Arc::new(AtomicU32::new(0)),
+        )
+    }
+
+    /// The sound binding must reach the audio thread without a lock and
     /// without the UI ever touching the synth. Publish, then render: the
-    /// backend has to have adopted the new room by the end of the first block.
+    /// backend has to have adopted the new values by the end of the first
+    /// block, and the piano has to be holding them.
     #[test]
-    fn room_settings_reach_the_audio_thread_through_the_shared_cell() {
-        let room = Arc::new(SharedRoom::default());
-        room.publish(RoomSettings {
+    fn sound_settings_reach_the_audio_thread_through_the_shared_cell() {
+        let shared = Arc::new(SharedSound::default());
+        let mut wanted = SoundSettings::default();
+        wanted.room = RoomSettings {
             preset: ReverbPreset::Cathedral,
             mix: 0.75,
             perspective: Perspective::Audience,
-        });
-        assert_eq!(
-            room.read(),
-            RoomSettings {
-                preset: ReverbPreset::Cathedral,
-                mix: 0.75,
-                perspective: Perspective::Audience,
-            }
-        );
-        let mut backend = SamplerBackend::new(PLAN_RATE as f32, room.clone());
+        };
+        wanted.voicing.sympathetic = 2.4;
+        wanted.voicing.knock = 0.25;
+        wanted.eq_shelf_db = -6.0;
+        wanted.eq_shelf_hz = 4000.0;
+        wanted.eq_bell_hz = 900.0;
+        wanted.eq_bell_db = 3.5;
+        wanted.eq_bell_q = 2.0;
+        wanted.tone_bass_db = 2.0;
+        wanted.tone_treble_db = -1.5;
+        wanted.master_gain = 1.4;
+        wanted.early_reflections = 1.1;
+        shared.publish(wanted);
+
+        let read = shared.read();
+        assert_eq!(read.room, wanted.room);
+        assert_eq!(read.voicing, wanted.voicing);
+        assert_eq!(read.master_gain, wanted.master_gain);
+
+        let mut backend = test_backend(shared.clone());
         let mut left = vec![0.0_f32; 64];
         let mut right = vec![0.0_f32; 64];
         let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
         backend.render_range(&mut channels, 0..64);
-        let adopted = backend.room_revision;
+        let adopted = backend.sound_revision;
         assert!(adopted > 0);
+        // Not just adopted: actually applied to the instrument.
+        assert_eq!(backend.piano.voicing(), wanted.voicing);
+        assert_eq!(backend.piano.reverb_mix(), wanted.room.mix);
+        assert_eq!(backend.piano.perspective(), wanted.room.perspective);
+        assert_eq!(backend.piano.early_reflection_level(), wanted.early_reflections);
+        assert_eq!(backend.piano.eq_shelf(), (wanted.eq_shelf_db, wanted.eq_shelf_hz));
+        assert_eq!(
+            backend.piano.eq_bell(),
+            (wanted.eq_bell_hz, wanted.eq_bell_db, wanted.eq_bell_q)
+        );
+        assert_eq!(
+            backend.piano.tone(),
+            (wanted.tone_bass_db, wanted.tone_treble_db)
+        );
+        assert_eq!(backend.piano.master_gain(), wanted.master_gain);
+
         // No further work while nothing moves.
         backend.render_range(&mut channels, 0..64);
-        assert_eq!(backend.room_revision, adopted);
-        room.publish(RoomSettings::default());
+        assert_eq!(backend.sound_revision, adopted);
+        shared.publish(SoundSettings::default());
         backend.render_range(&mut channels, 0..64);
-        assert!(backend.room_revision > adopted);
+        assert!(backend.sound_revision > adopted);
+        assert_eq!(backend.piano.voicing(), SoundSettings::default().voicing);
+    }
+
+    /// A rebuild preset is a different instrument. It is built on this thread,
+    /// swapped in by the audio thread, and the one it replaced comes back here
+    /// to be dropped — the callback allocates and frees nothing.
+    #[test]
+    fn a_rebuilt_instrument_is_handed_over_and_the_old_one_comes_back() {
+        let shared = Arc::new(SharedSound::default());
+        let handoff = Arc::new(InstrumentHandoff::default());
+        let mut backend = SamplerBackend::new(
+            PLAN_RATE as f32,
+            shared.clone(),
+            handoff.clone(),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let upright = PIANO_PRESETS
+            .iter()
+            .find(|preset| preset.name == "Upright")
+            .expect("the shipped list has an Upright");
+        assert!(upright.needs_rebuild(), "Upright changes the design");
+
+        // UI side: publish the preset's sound, build the instrument, offer it.
+        shared.publish(SoundSettings::from_preset(
+            PIANO_PRESETS
+                .iter()
+                .position(|preset| preset.name == "Upright")
+                .expect("the shipped list has an Upright"),
+            RoomSettings::default(),
+        ));
+        assert!(handoff
+            .offer(Box::new(Piano::new_with_preset(PLAN_RATE as f32, upright)))
+            .is_none());
+        // A second offer while the first is in flight comes straight back.
+        assert!(handoff
+            .offer(Box::new(Piano::new(PLAN_RATE as f32)))
+            .is_some());
+
+        let mut left = vec![0.0_f32; 512];
+        let mut right = vec![0.0_f32; 512];
+        {
+            let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+            backend.render_range(&mut channels, 0..512);
+        }
+        // The swap happened and the outgoing instrument is fading, not gone.
+        assert!(backend.fading.is_some());
+        assert!(handoff.reclaim().is_none(), "nothing is handed back mid-fade");
+        assert_eq!(backend.piano.voicing(), upright.voicing);
+
+        // Render the fade out.
+        for _ in 0..8 {
+            let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+            backend.render_range(&mut channels, 0..512);
+        }
+        assert!(backend.fading.is_none(), "the fade finished");
+        assert!(
+            handoff.reclaim().is_some(),
+            "the replaced instrument must come back to be dropped here"
+        );
+    }
+
+    /// Swapping the instrument mid-phrase must not cut the sound off: the
+    /// replaced piano keeps ringing under the new one for the fade.
+    #[test]
+    fn a_preset_swap_during_a_ringing_note_fades_instead_of_clicking() {
+        let shared = Arc::new(SharedSound::default());
+        let handoff = Arc::new(InstrumentHandoff::default());
+        let meter = Arc::new(AtomicU32::new(0));
+        let mut backend = SamplerBackend::new(
+            PLAN_RATE as f32,
+            shared.clone(),
+            handoff.clone(),
+            meter.clone(),
+        );
+        backend.dispatch(
+            SynthEvent {
+                source: makepad_score_play::EventSource::Playback,
+                kind: SynthEventKind::NoteOn {
+                    note_id: 1,
+                    key: 48,
+                    velocity: 60_000,
+                    part: 0,
+                    attack: 32_768,
+                },
+            },
+            SynthEventTiming {
+                block_offset: 0,
+                device_sample: 0,
+                timeline_sample: Some(0),
+                timeline_rate_q32: 1 << 32,
+            },
+        );
+        let mut left = vec![0.0_f32; 512];
+        let mut right = vec![0.0_f32; 512];
+        let mut before = 0.0_f32;
+        for _ in 0..8 {
+            left.fill(0.0);
+            right.fill(0.0);
+            let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+            backend.render_range(&mut channels, 0..512);
+            before = left.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        }
+        assert!(before > 1.0e-4, "the note is sounding before the swap");
+        // The meter is a real reading of what the instrument rendered.
+        assert!(f32::from_bits(meter.load(Ordering::Relaxed)) > 1.0e-4);
+
+        let felt = PIANO_PRESETS
+            .iter()
+            .find(|preset| preset.name == "Felt Piano")
+            .expect("the shipped list has a Felt Piano");
+        assert!(handoff
+            .offer(Box::new(Piano::new_with_preset(PLAN_RATE as f32, felt)))
+            .is_none());
+        left.fill(0.0);
+        right.fill(0.0);
+        let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+        backend.render_range(&mut channels, 0..512);
+        let after = left.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        // The new instrument has no voices, so anything at all in this block
+        // is the old one still ringing through the crossfade.
+        assert!(
+            after > before * 0.25,
+            "the swap cut the sound ({before} -> {after})"
+        );
+        // And the first sample of the block is continuous with the last of the
+        // previous one: no step, which is what a click is.
+        assert!(left[0].abs() < 1.0, "the swap produced a full-scale step");
     }
 
     #[test]
@@ -808,9 +1297,9 @@ mod tests {
         let mixer = PartMixer::<PART_CAPACITY>::new();
         let clock = AtomicAudioClock::new();
         let mut engine =
-            PlaybackEngine::<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>::new(
-                SamplerBackend::new(PLAN_RATE as f32, Arc::new(SharedRoom::default())),
-            );
+            PlaybackEngine::<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>::new(test_backend(
+                Arc::new(SharedSound::default()),
+            ));
         assert!(ring
             .push(AudioMessage {
                 at_device_sample: 0,

@@ -6,6 +6,19 @@ use std::path::PathBuf;
 
 app_main!(App);
 
+/// The piece the application ships, so a fresh start has real music on the
+/// desk instead of a synthetic exercise: Mozart's Rondo alla Turca, the third
+/// movement of the Piano Sonata No. 11 in A major, K331.
+///
+/// The engraving and this MIDI rendering of it are Mutopia's, published there
+/// as public domain — no attribution obligation and no share-alike, which is
+/// what makes it safe to carry inside a permissively licensed binary.
+const DEFAULT_SCORE: &[u8] = include_bytes!("../resources/mozart-k331-rondo-alla-turca.mid");
+const DEFAULT_SCORE_KIND: &str = "mid";
+const DEFAULT_SCORE_TITLE: &str = "Rondo alla Turca";
+const DEFAULT_SCORE_CREDIT: &str =
+    "Mozart · Rondo alla Turca · Piano Sonata No. 11 in A, K331, third movement";
+
 script_mod! {
     use mod.prelude.score.*
     use mod.widgets.*
@@ -45,10 +58,30 @@ impl App {
         }
     }
 
-    fn open_from_args(&mut self, cx: &mut Cx) {
-        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
+    /// What is on the desk when the application opens: the file the user
+    /// named, or the piece the application ships. A shipped resource that
+    /// cannot be read costs the piece and nothing else — the built-in demo
+    /// score stays, and the status line says what happened.
+    fn open_initial_score(&mut self, cx: &mut Cx) {
+        // The first NON-FLAG argument. `--remote` and friends belong to the
+        // platform layer, and taking argument one blindly meant a remote-driven
+        // launch tried to open a file called "--remote" and fell back to the
+        // demo score — which is exactly how this was found.
+        let named = std::env::args_os().skip(1).find(|argument| {
+            !argument.to_string_lossy().starts_with('-')
+        });
+        if let Some(path) = named.map(PathBuf::from) {
             self.dispatch(cx, &ScoreAction::OpenPath(path));
+            return;
         }
+        self.state.open_bundled_score(
+            cx,
+            DEFAULT_SCORE,
+            DEFAULT_SCORE_KIND,
+            DEFAULT_SCORE_TITLE,
+            DEFAULT_SCORE_CREDIT,
+        );
+        self.ui.redraw(cx);
     }
 }
 
@@ -65,7 +98,19 @@ impl MatchEvent for App {
                 match picked {
                     FileDialogAction::FolderSelected(path) => {
                         let path = path.clone();
-                        if self.state.ui.dialog == score_ui::DialogKind::SaveAs {
+                        if self.state.ui.dialog == score_ui::DialogKind::Library {
+                            // The library browses a folder; a file picked
+                            // inside one means that folder.
+                            let dir = if path.is_dir() {
+                                path
+                            } else {
+                                path.parent().map(std::path::Path::to_path_buf).unwrap_or(path)
+                            };
+                            self.dispatch(cx, &ScoreAction::SetLibraryDir(dir.clone()));
+                            self.ui
+                                .text_input(cx, ids!(library_dir_input))
+                                .set_text(cx, &dir.display().to_string());
+                        } else if self.state.ui.dialog == score_ui::DialogKind::SaveAs {
                             let name = self
                                 .state
                                 .document
@@ -124,7 +169,7 @@ impl AppMain for App {
         if !self.started && matches!(event, Event::Startup | Event::Draw(_)) {
             self.started = true;
             self.state.install_io(cx);
-            self.open_from_args(cx);
+            self.open_initial_score(cx);
         }
         self.state.pump_midi();
         if let Event::KeyDown(key) = event {
@@ -142,6 +187,35 @@ impl AppMain for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped piece has to be real music the application can actually
+    /// open, and it has to be titled by the application: the MIDI titles
+    /// itself after its first track, which is not the name of the piece.
+    #[test]
+    fn the_shipped_piece_opens_and_is_named_for_what_it_is() {
+        let document = score_ui::ScoreDocument::open_bundled(
+            DEFAULT_SCORE,
+            DEFAULT_SCORE_KIND,
+            DEFAULT_SCORE_TITLE,
+        )
+        .expect("the shipped Rondo alla Turca imports");
+        assert_eq!(document.title(), DEFAULT_SCORE_TITLE);
+        assert!(document.page_count() >= 1);
+        assert!(document.path().is_none(), "a shipped piece has no file to save over");
+    }
+
+    /// A resource that cannot be read must cost the shipped piece and nothing
+    /// else, so the fallback is the built-in demo score.
+    #[test]
+    fn unreadable_shipped_bytes_fall_back_rather_than_failing_to_start() {
+        assert!(score_ui::ScoreDocument::open_bundled(
+            b"not a midi file at all",
+            DEFAULT_SCORE_KIND,
+            DEFAULT_SCORE_TITLE,
+        )
+        .is_err());
+        assert!(score_ui::ScoreDocument::demo().is_ok());
+    }
 
     #[test]
     fn application_dsl_mounts_score_shell() {

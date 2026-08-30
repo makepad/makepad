@@ -188,6 +188,8 @@ impl Primitive {
                 thickness,
                 ..
             } => Rect::from_points([*start, *end]).expanded(opening * 0.5 + thickness * 0.5),
+            // The vertical spine is stroked, so its bounds have to include
+            // the half-thickness the stroke puts past each end as well.
             Self::Bracket {
                 x,
                 top,
@@ -196,9 +198,9 @@ impl Primitive {
                 hook,
             } => Rect::from_xywh(
                 *x - *thickness * 0.5,
-                *top,
+                *top - *thickness * 0.5,
                 *hook + *thickness,
-                *bottom - *top,
+                *bottom - *top + *thickness,
             ),
             Self::Line {
                 start,
@@ -816,6 +818,23 @@ mod tests {
             }
         );
         assert_ne!(page.fingerprint(), patched.fingerprint());
+    }
+
+    /// A cull uses these bounds, so they have to hold the ink the backend
+    /// actually strokes — half a thickness past each end of a bracket spine
+    /// included, or a bracket blinks out at the viewport edge.
+    #[test]
+    fn conservative_bounds_hold_the_stroked_ink() {
+        let bracket = Primitive::Bracket {
+            x: 10.0,
+            top: 4.0,
+            bottom: 20.0,
+            thickness: 0.5,
+            hook: 1.0,
+        };
+        let bounds = bracket.conservative_bounds();
+        assert_eq!(bounds.min, Point::new(9.75, 3.75));
+        assert_eq!(bounds.max, Point::new(11.25, 20.25));
     }
 
     #[test]

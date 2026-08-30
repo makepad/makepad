@@ -432,6 +432,9 @@ fn distance_to_line(point: Point, start: Point, end: Point) -> f64 {
 pub struct ProjectedRule {
     pub rect_px: Rect,
     pub snapped: bool,
+    /// Multiplier for the rule's ink alpha; see [`ink_floor`]. It is `1.0`
+    /// whenever the drawn rule is at least as thin as the engraved one.
+    pub ink_alpha: f32,
 }
 
 /// Physical pixels per unit of the transform's output space.
@@ -448,6 +451,57 @@ fn sane_device_scale(device_scale: f64) -> f64 {
     } else {
         LOGICAL_DEVICE_SCALE
     }
+}
+
+/// The thinnest mark a raster target can make: one physical pixel.
+pub const MIN_INK_DEVICE_PX: f64 = 1.0;
+
+/// A stroke too thin for the pixel grid, and the alpha that keeps its weight.
+///
+/// Below one physical pixel a mark cannot get thinner, only lighter. Drawing a
+/// 0.23 px staff line as a 1 px line at full strength lays down four times the
+/// ink the engraving asked for, and a page full of such lines — five per staff,
+/// a stem per note, a beam per pair — is why a zoomed-out score turns into a
+/// black mass. Draw the line at the floor so it never disappears, and give it
+/// the alpha its true width would have covered, and the page keeps exactly its
+/// engraved weight at every scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InkFloor {
+    /// The width to draw, in the same units as the requested width.
+    pub width: f64,
+    /// Factor to apply to the ink's alpha. `1.0` when nothing was widened.
+    pub alpha: f32,
+}
+
+/// Applies the one-device-pixel floor to a projected stroke width.
+///
+/// `width` is in output (logical) units; `device_scale` is physical pixels per
+/// output unit.
+pub fn ink_floor(width: f64, device_scale: f64) -> InkFloor {
+    let floor = MIN_INK_DEVICE_PX / sane_device_scale(device_scale);
+    if !width.is_finite() || width <= 0.0 {
+        return InkFloor {
+            width: floor,
+            alpha: 0.0,
+        };
+    }
+    if width >= floor {
+        return InkFloor { width, alpha: 1.0 };
+    }
+    InkFloor {
+        width: floor,
+        alpha: (width / floor) as f32,
+    }
+}
+
+/// The alpha that keeps `exact` units of ink after `drawn` units were laid
+/// down. Widening is the only thing this compensates; a rule drawn thinner
+/// than engraved is left alone, because nothing was added.
+fn ink_alpha_for(exact: f64, drawn: f64) -> f32 {
+    if !exact.is_finite() || !drawn.is_finite() || drawn <= 0.0 {
+        return 1.0;
+    }
+    ((exact / drawn) as f32).clamp(0.0, 1.0)
 }
 
 /// Projects an axis-aligned rule and applies the settled-screen hairline rule.
@@ -490,6 +544,7 @@ pub fn project_rule_on_grid(
         return ProjectedRule {
             rect_px: exact,
             snapped: false,
+            ink_alpha: 1.0,
         };
     }
 
@@ -506,9 +561,16 @@ pub fn project_rule_on_grid(
         target.min.x = edge;
         target.max.x = edge + display_thickness;
     }
+    let rect_px = lerp_rect(exact, target, progress);
+    let drawn = if horizontal {
+        rect_px.height()
+    } else {
+        rect_px.width()
+    };
     ProjectedRule {
-        rect_px: lerp_rect(exact, target, progress),
+        rect_px,
         snapped: progress >= 1.0,
+        ink_alpha: ink_alpha_for(thickness, drawn),
     }
 }
 
@@ -572,9 +634,11 @@ pub fn project_staff_rules_on_grid(
                 target.min.y = center - display_thickness * 0.5;
                 target.max.y = center + display_thickness * 0.5;
             }
+            let rect_px = lerp_rect(*rect, target, progress);
             ProjectedRule {
-                rect_px: lerp_rect(*rect, target, progress),
+                rect_px,
                 snapped: coherent_phase && progress >= 1.0,
+                ink_alpha: ink_alpha_for(rect.height(), rect_px.height()),
             }
         })
         .collect()
@@ -626,6 +690,100 @@ mod tests {
         assert_eq!(far.rect_px.height(), 0.5);
         // Edges land on the device grid so the line stays crisp.
         assert_eq!((retina.rect_px.min.y * 2.0).fract(), 0.0);
+    }
+
+    #[test]
+    fn the_hairline_floor_trades_width_for_alpha() {
+        // Above the floor nothing is touched.
+        let wide = ink_floor(3.0, 2.0);
+        assert_eq!(wide.width, 3.0);
+        assert_eq!(wide.alpha, 1.0);
+        // Exactly one physical pixel is the floor on a 2x display.
+        let exact = ink_floor(0.5, 2.0);
+        assert_eq!(exact.width, 0.5);
+        assert_eq!(exact.alpha, 1.0);
+        // Below it the stroke is widened to the floor and darkened by exactly
+        // the shortfall, so the ink it lays down is unchanged.
+        for width in [0.4, 0.25, 0.13, 0.02] {
+            let ink = ink_floor(width, 2.0);
+            assert_eq!(ink.width, 0.5, "the floor is one physical pixel");
+            assert!(
+                (ink.width * ink.alpha as f64 - width).abs() < 1e-6,
+                "{width} sp of ink became {}",
+                ink.width * ink.alpha as f64
+            );
+        }
+        // The floor follows the display, not the logical grid.
+        assert_eq!(ink_floor(0.3, 1.0).width, 1.0);
+        assert_eq!(ink_floor(0.1, 4.0).width, 0.25);
+        assert_eq!(ink_floor(0.3, 4.0).width, 0.3);
+    }
+
+    /// A staff line at 0.13 sp is under a physical pixel from about 4x zoom
+    /// downwards. Snapping it to the grid at full strength is what turned a
+    /// zoomed-out page into a black mass; snapped weight has to stay engraved
+    /// weight at every scale.
+    #[test]
+    fn snapped_rules_keep_their_engraved_weight() {
+        let engraved = 0.13;
+        let line = Rect::from_xywh(0.0, 10.0, 40.0, engraved);
+        for scale in [7.0, 3.43, 1.71, 0.86, 0.41] {
+            let transform = Transform {
+                translation: Point::new(0.0, 0.0),
+                scale,
+            };
+            let rule = project_rule_on_grid(line, transform, 1.0, 2.0);
+            let drawn = rule.rect_px.height();
+            assert!(
+                drawn * 2.0 >= MIN_INK_DEVICE_PX - 1e-9,
+                "at {scale} px/sp the line thinned to {drawn} and would drop out"
+            );
+            let ink = drawn * rule.ink_alpha as f64;
+            assert!(
+                (ink - engraved * scale).abs() < 1e-6,
+                "at {scale} px/sp the line lays down {ink} instead of {}",
+                engraved * scale
+            );
+        }
+    }
+
+    /// The same must hold for the five lines that share one snap phase.
+    #[test]
+    fn phase_locked_staff_rules_keep_their_engraved_weight() {
+        let engraved = 0.13;
+        let rules: Vec<_> = (0..5)
+            .map(|line| Rect::from_xywh(0.0, 10.0 + line as f64, 40.0, engraved))
+            .collect();
+        for scale in [3.43, 1.71, 0.86] {
+            let transform = Transform {
+                translation: Point::new(0.0, 0.0),
+                scale,
+            };
+            for rule in project_staff_rules_on_grid(&rules, transform, 1.0, 2.0) {
+                let ink = rule.rect_px.height() * rule.ink_alpha as f64;
+                assert!(
+                    (ink - engraved * scale).abs() < 1e-6,
+                    "at {scale} px/sp a staff line lays down {ink} instead of {}",
+                    engraved * scale
+                );
+            }
+        }
+    }
+
+    /// A rule already wide enough is never dimmed.
+    #[test]
+    fn rules_above_the_floor_keep_full_ink() {
+        let rule = project_rule_on_grid(
+            Rect::from_xywh(0.0, 10.0, 40.0, 0.5),
+            Transform {
+                translation: Point::ZERO,
+                scale: 8.0,
+            },
+            1.0,
+            2.0,
+        );
+        assert_eq!(rule.ink_alpha, 1.0);
+        assert_eq!(rule.rect_px.height(), 4.0);
     }
 
     #[test]

@@ -14,6 +14,8 @@ pub const MAX_RECENT: usize = 6;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScorePrefs {
     /// Open straight into the editing chrome instead of the pianist face.
+    /// On by default: the editor is the full instrument, and pianist mode is
+    /// one keystroke away from it.
     pub start_in_editor: bool,
     /// Sound a note when the pointer passes over it.
     pub audition_on_hover: bool,
@@ -27,6 +29,15 @@ pub struct ScorePrefs {
     pub dark_paper: bool,
     /// Directory the file dialogs start in.
     pub last_dir: Option<PathBuf>,
+    /// The instrument the app starts on, by its name in
+    /// [`makepad_piano_model::PIANO_PRESETS`]. A name rather than an index so
+    /// the choice survives the shipped instrument list growing or reordering,
+    /// and an unknown name simply falls back to the app default.
+    pub instrument: String,
+    /// Folder the music library browses. `None` falls back to whatever
+    /// [`crate::library::default_library_dir`] finds, so the browser is
+    /// useful out of the box and configurable the moment it is not.
+    pub library_dir: Option<PathBuf>,
     /// Most recently opened scores, newest first.
     pub recent: Vec<PathBuf>,
 }
@@ -34,13 +45,15 @@ pub struct ScorePrefs {
 impl Default for ScorePrefs {
     fn default() -> Self {
         Self {
-            start_in_editor: false,
+            start_in_editor: true,
             audition_on_hover: true,
             follow_cursor: true,
             metronome: false,
             count_in: false,
             dark_paper: false,
             last_dir: None,
+            library_dir: None,
+            instrument: crate::sound::DEFAULT_PRESET.to_string(),
             recent: Vec::new(),
         }
     }
@@ -75,6 +88,10 @@ impl ScorePrefs {
                 "count_in" => prefs.count_in = flag,
                 "dark_paper" => prefs.dark_paper = flag,
                 "last_dir" if !value.is_empty() => prefs.last_dir = Some(PathBuf::from(value)),
+                "library_dir" if !value.is_empty() => {
+                    prefs.library_dir = Some(PathBuf::from(value))
+                }
+                "instrument" if !value.is_empty() => prefs.instrument = value.to_string(),
                 "recent" if !value.is_empty() => {
                     let path = PathBuf::from(value);
                     if !prefs.recent.contains(&path) {
@@ -118,6 +135,10 @@ impl ScorePrefs {
         if let Some(dir) = &self.last_dir {
             out.push_str(&format!("last_dir = {}\n", dir.display()));
         }
+        if let Some(dir) = &self.library_dir {
+            out.push_str(&format!("library_dir = {}\n", dir.display()));
+        }
+        out.push_str(&format!("instrument = {}\n", self.instrument));
         for path in self.recent.iter().take(MAX_RECENT) {
             out.push_str(&format!("recent = {}\n", path.display()));
         }
@@ -164,6 +185,8 @@ mod tests {
             count_in: true,
             dark_paper: true,
             last_dir: Some(PathBuf::from("/tmp/scores")),
+            library_dir: Some(PathBuf::from("/tmp/library")),
+            instrument: "Upright".to_string(),
             recent: vec![PathBuf::from("/tmp/scores/a.mid")],
         };
         let text = prefs.to_text();
@@ -183,6 +206,8 @@ mod tests {
                 "count_in" => parsed.count_in = flag,
                 "dark_paper" => parsed.dark_paper = flag,
                 "last_dir" => parsed.last_dir = Some(PathBuf::from(value)),
+                "library_dir" => parsed.library_dir = Some(PathBuf::from(value)),
+                "instrument" => parsed.instrument = value.to_string(),
                 "recent" => parsed.recent.push(PathBuf::from(value)),
                 _ => {}
             }
@@ -212,6 +237,34 @@ mod tests {
         prefs.remember(Path::new("/tmp/a.mid"));
         assert_eq!(prefs.recent.len(), 2);
         assert_eq!(prefs.recent[0], PathBuf::from("/tmp/a.mid"));
+    }
+
+    /// A fresh install lands on the felt piano and in the editor. Both are
+    /// defaults, not forced values: a stored file overrides either.
+    #[test]
+    fn a_fresh_install_starts_felt_and_in_the_editor() {
+        let prefs = ScorePrefs::default();
+        assert_eq!(prefs.instrument, "Felt Piano");
+        assert!(prefs.start_in_editor);
+        assert!(crate::sound::preset_index_by_name(&prefs.instrument).is_some());
+    }
+
+    /// Someone who chose pianist mode and another instrument keeps both.
+    #[test]
+    fn a_stored_choice_beats_the_default() {
+        let text = "start_in_editor = 0\ninstrument = Concert Grand\n";
+        let mut prefs = ScorePrefs::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "start_in_editor" => prefs.start_in_editor = matches!(value, "1" | "true"),
+                "instrument" => prefs.instrument = value.to_string(),
+                _ => {}
+            }
+        }
+        assert!(!prefs.start_in_editor);
+        assert_eq!(prefs.instrument, "Concert Grand");
     }
 
     #[test]
