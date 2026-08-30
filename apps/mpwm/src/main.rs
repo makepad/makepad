@@ -158,9 +158,56 @@ script_mod! {
 /// Windows, and macOS before the first geometry event).
 const BAR_HEIGHT_FALLBACK: f64 = 26.0;
 
-/// The bar's height and the left padding its content starts at, both
-/// derived from the OS window-button rect.
+/// The bar's height and the left padding its content starts at. macOS puts
+/// its traffic lights on the left; Linux and Windows put caption buttons on
+/// the right, where they must not push the left cluster off screen.
 type BarMetrics = (f64, f64);
+
+fn bar_metrics_for_geom(geom: &WindowGeom) -> BarMetrics {
+    let buttons = geom.window_chrome_buttons;
+    if buttons.size.y <= 0.0 {
+        return (BAR_HEIGHT_FALLBACK, 84.0);
+    }
+    let height = (buttons.pos.y * 2.0 + buttons.size.y).ceil();
+    let buttons_are_on_left = buttons.pos.x + buttons.size.x <= geom.inner_size.x * 0.5;
+    let pad_left = if buttons_are_on_left {
+        buttons.pos.x + buttons.size.x + 12.0
+    } else {
+        8.0
+    };
+    (height, pad_left)
+}
+
+#[cfg(test)]
+mod bar_chrome_tests {
+    use super::*;
+
+    #[test]
+    fn left_caption_buttons_move_the_left_cluster_past_them() {
+        let geom = WindowGeom {
+            inner_size: dvec2(1000.0, 700.0),
+            window_chrome_buttons: Rect {
+                pos: dvec2(12.0, 9.0),
+                size: dvec2(72.0, 24.0),
+            },
+            ..Default::default()
+        };
+        assert_eq!(bar_metrics_for_geom(&geom), (42.0, 96.0));
+    }
+
+    #[test]
+    fn right_caption_buttons_do_not_push_the_left_cluster_off_screen() {
+        let geom = WindowGeom {
+            inner_size: dvec2(917.0, 1030.0),
+            window_chrome_buttons: Rect {
+                pos: dvec2(779.0, 0.0),
+                size: dvec2(138.0, 29.0),
+            },
+            ..Default::default()
+        };
+        assert_eq!(bar_metrics_for_geom(&geom), (29.0, 8.0));
+    }
+}
 
 #[derive(Script, ScriptHook)]
 pub struct App {
@@ -1848,17 +1895,11 @@ impl App {
     /// The bar IS this window's caption, so it has to be tall enough to
     /// center the OS window buttons and start its own content after them.
     /// Both numbers come from the platform's traffic-light rect (points,
-    /// top-left origin) exactly like the stock caption bar does.
+    /// top-left origin) exactly like the stock caption bar does. Right-side
+    /// caption buttons affect the height only; the bar's left cluster stays
+    /// at its normal edge inset.
     fn update_bar_chrome(&mut self, cx: &mut Cx, geom: &WindowGeom) {
-        let buttons = geom.window_chrome_buttons;
-        let (height, pad_left) = if buttons.size.y > 0.0 {
-            (
-                (buttons.pos.y * 2.0 + buttons.size.y).ceil(),
-                buttons.pos.x + buttons.size.x + 12.0,
-            )
-        } else {
-            (BAR_HEIGHT_FALLBACK, 84.0)
-        };
+        let (height, pad_left) = bar_metrics_for_geom(geom);
         if self.bar_metrics == Some((height, pad_left)) {
             return;
         }
