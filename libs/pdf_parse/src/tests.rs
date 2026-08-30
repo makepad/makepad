@@ -414,6 +414,7 @@ fn test_decode_text_winansi() {
         to_unicode: None,
         default_width: 600.0,
         cid_widths: None,
+        font_program: None,
     };
     let result = decode_text(&font, b"Hello");
     assert_eq!(result, "Hello");
@@ -432,6 +433,7 @@ fn test_char_width_base14() {
         to_unicode: None,
         default_width: 600.0,
         cid_widths: None,
+        font_program: None,
     };
     let w = char_width(&font, b'A' as u32);
     assert!(w > 0.0, "char width should be positive");
@@ -683,6 +685,7 @@ fn test_differences_decode_over_winansi() {
         to_unicode: None,
         default_width: 500.0,
         cid_widths: None,
+        font_program: None,
     };
     // 0x1F -> fi ligature via Differences; 0xF6 -> ö via the WinAnsi base.
     let s = crate::font::decode_text(&font, &[0x1F, b'n', 0xF6]);
@@ -708,6 +711,7 @@ fn test_cid_widths_take_priority() {
         to_unicode: None,
         default_width: 1000.0,
         cid_widths: Some(cid),
+        font_program: None,
     };
     assert_eq!(crate::font::char_width(&font, 5), 812.0);
     assert_eq!(crate::font::char_width(&font, 6), 1000.0); // DW fallback
@@ -819,6 +823,7 @@ fn test_differences_macroman_base_fallback() {
         to_unicode: None,
         default_width: 500.0,
         cid_widths: None,
+        font_program: None,
     };
     // 0x80 is Ä in MacRoman (€ in WinAnsi) — the base must win.
     assert_eq!(crate::font::decode_text(&font, &[0x80]), "Ä");
@@ -851,6 +856,7 @@ fn test_type0_without_w_uses_dw() {
         to_unicode: None,
         default_width: 725.0,
         cid_widths: Some(std::collections::HashMap::new()),
+        font_program: None,
     };
     // CID 65 ('A' under Identity) must take DW, not a base-14 estimate.
     assert_eq!(crate::font::char_width(&font, 65), 725.0);
