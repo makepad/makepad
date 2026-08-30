@@ -151,9 +151,14 @@ fn decay_times_and_double_decay() {
     let sig_early_env = env_sigma(0.10, 0.9);
     let sig_late_env = env_sigma(2.5, 5.5);
     println!("C3 envelope: sigma early {sig_early_env:.2}/s late {sig_late_env:.2}/s");
+    // Anchored to the C3 reference recording, which measures prompt 9.6 vs
+    // aftersound 7.0 dB/s (1.37x) — a clear but gentle two-stage, not the
+    // 1.8x an earlier version of this gate demanded (that figure predates
+    // the reference match; enforcing it pushed the unison split past what
+    // the real instrument shows).
     assert!(
-        sig_early_env > sig_late_env * 1.8,
-        "no double decay in the envelope: early {sig_early_env:.2} vs late {sig_late_env:.2}"
+        sig_early_env > sig_late_env * 1.3,
+        "no double decay in the envelope: early {sig_early_env:.2} vs late {sig_late_env:.2} (reference C3: 1.37x)"
     );
 
     // high partial decays much faster than the fundamental

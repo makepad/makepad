@@ -76,9 +76,12 @@ impl NoiseBurst {
 pub struct BodyTap {
     pos: u32,
     len: u32,
+    att: u32, // attack ramp length (samples)
     rng: u32,
     lp: f32,
     lp2: f32,
+    lp3: f32,
+    lp4: f32,
     c_hi: f32,
     ratio: f32, // per-burst c decay: c(t) = c_hi * ratio^(pos/len) precomputed as per-sample factor
     c_cur: f32,
@@ -87,15 +90,31 @@ pub struct BodyTap {
 
 impl BodyTap {
     pub fn new() -> Self {
-        Self { pos: 0, len: 0, rng: 1, lp: 0.0, lp2: 0.0, c_hi: 0.1, ratio: 1.0, c_cur: 0.0, amp: 0.0 }
+        Self {
+            pos: 0,
+            len: 0,
+            att: 1,
+            rng: 1,
+            lp: 0.0,
+            lp2: 0.0,
+            lp3: 0.0,
+            lp4: 0.0,
+            c_hi: 0.1,
+            ratio: 1.0,
+            c_cur: 0.0,
+            amp: 0.0,
+        }
     }
 
-    pub fn start(&mut self, len: u32, amp: f32, c_hi: f32, c_lo: f32, seed: u32) {
+    pub fn start(&mut self, len: u32, att: u32, amp: f32, c_hi: f32, c_lo: f32, seed: u32) {
         self.pos = 0;
         self.len = len.max(1);
+        self.att = att.clamp(1, self.len);
         self.rng = seed | 1;
         self.lp = 0.0;
         self.lp2 = 0.0;
+        self.lp3 = 0.0;
+        self.lp4 = 0.0;
         self.c_hi = c_hi;
         self.c_cur = c_hi;
         // per-sample multiplicative contraction from c_hi to c_lo over len
@@ -109,6 +128,7 @@ impl BodyTap {
             return;
         }
         let inv_len = 1.0 / self.len as f32;
+        let inv_att = 1.0 / self.att as f32;
         for slot in out.iter_mut().take(n) {
             if self.pos >= self.len {
                 break;
@@ -119,14 +139,32 @@ impl BodyTap {
             x ^= x << 5;
             self.rng = x;
             let white = (x >> 8) as f32 * (1.0 / 8_388_608.0) - 1.0;
-            // two poles (see NoiseBurst): a body tap is a dark, contracting
-            // rumble, not a bright noise spray
+            // Four cascaded poles at the contracting corner: the spray above
+            // the corner falls -24 dB/oct. With one or two poles the residue
+            // above ~5 kHz survives the direct radiation path's
+            // differentiator nearly flat to Nyquist, and a room full of
+            // per-note bursts of that reads as broadband crackle (measured:
+            // sample steps 25x the programme median, thousands per minute
+            // in dense music). Passband below the corner is unchanged.
             self.lp += self.c_cur * (white - self.lp);
             self.lp2 += self.c_cur * (self.lp - self.lp2);
+            self.lp3 += self.c_cur * (self.lp2 - self.lp3);
+            self.lp4 += self.c_cur * (self.lp3 - self.lp4);
             self.c_cur *= self.ratio;
             let ph = self.pos as f32 * inv_len;
-            let env = (1.0 - ph) * (1.0 - ph);
-            *slot += self.amp * env * self.lp2;
+            // The board's diffuse response BUILDS over a couple of
+            // milliseconds (a plate mode rings up over ~1/sigma); a
+            // half-cosine attack ramp replaces the old step-to-maximum
+            // envelope, which put a discontinuity at the front of every
+            // strike.
+            let rise = if self.pos < self.att {
+                let a = self.pos as f32 * inv_att;
+                0.5 - 0.5 * (core::f32::consts::PI * a).cos()
+            } else {
+                1.0
+            };
+            let env = (1.0 - ph) * (1.0 - ph) * rise;
+            *slot += self.amp * env * self.lp4;
             self.pos += 1;
         }
     }
@@ -331,7 +369,8 @@ impl Voice {
                 * if soft_pedal { 0.6 } else { 1.0 };
             let tseed = (self.key_idx as u32).wrapping_mul(0x2545_f491)
                 ^ self.strike_count.wrapping_mul(0x9e37_79b9) ^ 0x0b0d_15ea;
-            self.body_tap.start(key.cs_len, tamp, key.cs_c_hi, key.cs_c_lo, tseed);
+            let att = (0.0015 * sample_rate) as u32;
+            self.body_tap.start(key.cs_len, att, tamp, key.cs_c_hi, key.cs_c_lo, tseed);
         }
         let camp = vc.attack_noise * if soft_pedal { 0.5 } else { 1.0 } * key.click_amp * self.vel_norm.powf(key.click_vpow);
         let cseed = seed ^ 0x00c0_ffee;

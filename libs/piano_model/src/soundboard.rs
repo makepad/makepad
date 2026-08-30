@@ -40,7 +40,21 @@ pub fn radiativity(f: f64, p: &DesignParams) -> f64 {
     let hp2 = f / (f + p.rad_hp2);
     let x = (f / p.rad_lp) * (f / p.rad_lp);
     let lp = (1.0 / (1.0 + x)).powf(0.5 * p.rad_lp_pow);
-    hp1 * hp2 * lp
+    // Low-mid body emphasis: the board's main resonances sit in the
+    // ~100-400 Hz region and radiate the fundamentals of the middle octaves
+    // strongly — the reference recordings have the FUNDAMENTAL as the
+    // strongest partial through C3..C4 even though the strike comb feeds
+    // partial 2 five dB more force. A plateau that is flat down to the
+    // bass high-pass cannot reproduce that and reads as thin ("tinny").
+    // Fourth-order shelf keeps the emphasis out of the 500 Hz+ region, and
+    // a second-order high-pass at 120 Hz keeps it out of the deep bass:
+    // below the main resonance the board stops radiating again, and a
+    // C2 whose fundamental outweighs its partial cluster reads as boom,
+    // not body (the bass-speaks-through-partials law).
+    let b = f / p.rad_body_hz;
+    let b4 = b * b * b * b;
+    let body = 1.0 + p.rad_body * (1.0 / (1.0 + b4)) * (f * f / (f * f + 120.0 * 120.0));
+    hp1 * hp2 * lp * body
 }
 
 pub struct Soundboard {

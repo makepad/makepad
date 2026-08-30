@@ -650,3 +650,40 @@ fn decay_is_two_stage() {
     // not the 2.2x the old gate demanded
     assert!(early > 1.25 * late.max(0.2), "no two-stage decay: prompt {early:.1} vs aftersound {late:.1} dB/s");
 }
+
+/// Dense forte chords must not crackle. Per-note broadband noise bursts
+/// (attack noise, body tap, contact roughness) can slip past every spectral
+/// test above while stacking into continuous radio-static in real music:
+/// sample-to-sample steps 20x the programme median, thousands per minute —
+/// the ear caught it, the band metrics could not. Renders an alla-turca-like
+/// bed of two-hand mezzo-forte chords through the shipped output path (soft
+/// clip on, so level is bounded and the absolute threshold is meaningful)
+/// and counts impulsive steps. The pure string instrument measures 0; the
+/// spray-shaped taps that caused the complaint measure in the thousands.
+#[test]
+fn dense_chords_do_not_crackle() {
+    let mut p = Piano::new(FS);
+    p.set_reverb_mix(0.0);
+    p.set_early_reflection_level(0.0);
+    let mut script: Vec<Ev> = Vec::new();
+    for hit in 0..12u32 {
+        let t = 0.05 + 0.15 * hit as f64;
+        for key in [45u8, 52, 57, 69, 73, 76] {
+            script.push(ev(t, NoteOn { key, velocity: 76 }));
+            script.push(ev(t + 0.10, NoteOff { key }));
+        }
+    }
+    script.sort_by_key(|e| e.at);
+    let total = (2.4 * FS as f64) as usize;
+    let (l, r) = render(&mut p, &script, total, 256);
+    let mut count = 0usize;
+    for i in 1..total {
+        if (l[i] - l[i - 1]).abs() > 0.12 || (r[i] - r[i - 1]).abs() > 0.12 {
+            count += 1;
+        }
+    }
+    assert!(
+        count < 900,
+        "impulsive steps in dense chords: {count} samples jumped > 0.12 (crackle; the noisy-tap builds measure 3000-37000, clean builds < 300)"
+    );
+}

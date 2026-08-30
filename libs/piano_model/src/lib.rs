@@ -125,7 +125,7 @@ pub trait Instrument {
 /// just into the soft saturator (which then acts as the mastering limiter
 /// every commercial piano recording goes through), and a pp note stays
 /// ~20 dB under a ff one.
-const MASTER_GAIN: f32 = 0.07;
+const MASTER_GAIN: f32 = 0.102;
 /// A voice whose 64-sample bridge-force energy stays below this for ~16 ms
 /// is put to sleep (and its state zeroed, keeping wake-ups deterministic).
 const VOICE_SILENCE_POWER: f32 = 1e-5;

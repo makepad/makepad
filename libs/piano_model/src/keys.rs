@@ -482,14 +482,19 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     }
 }
 
-/// MIDI velocity (1..=127) to hammer speed in m/s: ~0.6 m/s pianissimo to
-/// ~6 m/s fortissimo. Calibrated against real performance MIDI, where the
-/// musically important range is velocity ~25-70 (medians 40-55 across a
-/// classical corpus): those must land at mezzo hammer speeds (~1.5-2.5 m/s,
-/// the Askenfelt-Jansson range), not down at pianissimo. The old 1.7
-/// exponent put velocity 40 at 1.0 m/s and whole pieces rendered ~25 dB
-/// under commercial listening level.
+/// MIDI velocity (1..=127) to hammer speed in m/s: ~0.3 m/s pianissimo to
+/// ~7 m/s fortissimo (Askenfelt-Jansson's measured range). Two constraints
+/// shaped this curve, in order:
+/// - the MEZZO point is pinned: velocity 50 lands at 1.59 m/s, exactly
+///   where the level calibration was done (real performance MIDI has its
+///   median at velocity 40-55; an earlier steeper curve put those at
+///   pianissimo speeds and whole pieces rendered ~25 dB under commercial
+///   listening level)
+/// - CONTRAST around that point is as wide as the mezzo pin allows: a C4
+///   render spans ~27 dB from velocity 30 to 127 (real performances span
+///   roughly 25-40 dB; a flatter earlier curve with a high floor measured
+///   ~24 dB and read as "everything at the same loudness")
 pub fn velocity_to_speed(vel: u8) -> f64 {
     let v = vel.min(127) as f64 / 127.0;
-    0.16 + 5.9 * v.powf(1.52)
+    0.10 + 7.2 * v.powf(1.70)
 }
