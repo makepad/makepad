@@ -102,6 +102,17 @@ impl TestMapBuild {
         self.stage != Stage::Idle
     }
 
+    /// Waiting to be started (or restarted after a failure): the only
+    /// states in which the start button does anything.
+    pub fn can_start(&self) -> bool {
+        matches!(self.stage, Stage::Offered | Stage::Failed(_))
+    }
+
+    /// Freshly offered and not yet running.
+    pub fn is_offered(&self) -> bool {
+        self.stage == Stage::Offered
+    }
+
     /// True while the bake is running and must not be started twice.
     pub fn is_running(&self) -> bool {
         matches!(self.stage, Stage::Fetching { .. } | Stage::Baking)
@@ -117,15 +128,16 @@ impl TestMapBuild {
         self.stage = Stage::Offered;
         self.headline = "No map data on this machine".to_string();
         self.log = vec![
-            "Amsterdam test map: ~143 MB download, about a minute of baking.".to_string(),
-            "Builds tiles, a routing graph and a search index under local/maps.".to_string(),
+            "Building an Amsterdam test map: ~143 MB download, then about a".to_string(),
+            "minute of baking. Tiles, a routing graph and a search index".to_string(),
+            "land under local/maps.".to_string(),
         ];
     }
 
     /// Start (or resume) the recipe: download the extract if it is not
     /// already here, then bake.
     pub fn start(&mut self, cx: &mut Cx) {
-        if self.is_running() {
+        if !self.can_start() {
             return;
         }
         self.fraction = 0.0;

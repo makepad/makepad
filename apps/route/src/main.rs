@@ -1073,6 +1073,9 @@ impl App {
             return;
         }
         self.testmap.offer_if_no_map(false);
+        if self.testmap.is_offered() {
+            self.testmap.start(cx);
+        }
         self.refresh_testmap_ui(cx);
     }
 
@@ -2138,13 +2141,16 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(testmap_start)).clicked(actions) {
-            self.testmap.start(cx);
-            self.refresh_testmap_ui(cx);
-        }
-        if self.ui.button(cx, ids!(testmap_dismiss)).clicked(actions) {
-            self.testmap.dismiss();
-            self.refresh_testmap_ui(cx);
+        if self.testmap.is_active() {
+            if self.testmap.can_start() && self.ui.button(cx, ids!(testmap_start)).clicked(actions)
+            {
+                self.testmap.start(cx);
+                self.refresh_testmap_ui(cx);
+            }
+            if self.ui.button(cx, ids!(testmap_dismiss)).clicked(actions) {
+                self.testmap.dismiss();
+                self.refresh_testmap_ui(cx);
+            }
         }
         if let Some((text, _)) = self.ui.text_input(cx, ids!(prompt_input)).returned(actions) {
             let text = text.trim().to_string();
