@@ -1503,20 +1503,32 @@ fn emit_tiberium(
     report: &mut ConvertReport,
     remap: &str,
 ) -> Result<(), String> {
+    // TI1..TI12 are twelve CELL VARIANTS of tiberium, and each variant's SHP
+    // carries the twelve GROWTH frames — the map's overlay byte picks the
+    // variant, the game's growth stage picks the frame. Taking frame 0 of
+    // every variant exported twelve kinds of almost-nothing (frame 0 is the
+    // sparsest growth), which is why the fields drew as a few grey specks.
+    // One variant's full frame run is the honest stage ladder.
     let mut frames = Vec::new();
-    for stage in 1..=12 {
-        let stem = format!("ti{stage}");
+    for variant in 1..=12 {
+        let stem = format!("ti{variant}");
         let Some(shp) = theater.shp(&stem) else {
             report.missing_shapes.insert(format!("{}.TEM", stem.to_ascii_uppercase()));
             continue;
         };
-        if let Some(indexed) = shp.frames().first() {
+        for indexed in shp.frames() {
+            if frames.len() >= 12 {
+                break;
+            }
             frames.push(SpritePixels {
                 rgba: indexed_transparent(indexed, palette),
                 width: shp.width() as u32,
                 height: shp.height() as u32,
                 rot: 0,
             });
+        }
+        if frames.len() >= 12 {
+            break;
         }
     }
     if frames.len() == 12 {
