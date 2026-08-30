@@ -2,10 +2,12 @@ mod bridge_bake;
 mod merge;
 mod mkmap;
 mod ocean;
-mod nav_build;
-mod native;
 mod pbf_audit;
-mod versatiles;
+mod testmap_cli;
+
+// The bake passes themselves live in the shared library, so an app can run
+// exactly what this CLI runs (apps/route bakes its own test map in-process).
+use makepad_map_build::{nav_build, native, versatiles};
 
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
@@ -26,6 +28,7 @@ Usage:
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
+  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store]
   makepad-map-tiles nav-build <source.osm.pbf> <basename> [--bbox w,s,e,n] [--skip-addresses]
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
@@ -35,6 +38,11 @@ Usage:
   makepad-map-tiles verify-mbtiles <archive.mbtiles> [--stride N]
 
 The legacy form without the 'versatiles' command is also accepted.
+
+testmap downloads one city extract (Amsterdam by default) and bakes the
+archive + nav artifacts an app needs to run with no other map data at all.
+Same passes as pbf-detail/pbf-base/nav-build, chained; ~1 minute after the
+download. apps/route runs this recipe in-process on first launch.
 
 Nav artifacts: nav-build writes <basename>.graph (routing graph) and
 <basename>.search (place/POI/street index) from one PBF scan.
@@ -183,6 +191,9 @@ fn run() -> Result<(), String> {
         }
         let output = paths.pop().ok_or("mbtiles-merge needs inputs and an output")?;
         return merge::merge(&paths, &output, zoom);
+    }
+    if args.first().is_some_and(|arg| arg == "testmap") {
+        return testmap_cli::run(&args);
     }
     if args.first().is_some_and(|arg| arg == "nav-build") {
         return nav_build::nav_build(nav_build::parse_nav_build_options(&args)?);

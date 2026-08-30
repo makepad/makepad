@@ -1,8 +1,8 @@
-pub(crate) mod bake;
-pub(crate) mod base;
-pub(crate) mod geom;
-pub(crate) mod mvt;
-pub(crate) mod schema;
+pub mod bake;
+pub mod base;
+pub mod geom;
+pub mod mvt;
+pub mod schema;
 mod spool;
 mod store;
 
@@ -322,17 +322,17 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
     let started = Instant::now();
     let mut stats = ConversionStats::default();
 
-    println!("Native OSM detail conversion");
-    println!("  source: {}", options.source.display());
-    println!("  output: {}", options.output.display());
-    println!("  store:  {}", options.store.display());
-    println!("  zoom:   {}", options.zoom);
-    println!("Pass 1/5: indexing relation member ways");
+    crate::step!("detail", "Native OSM detail conversion");
+    crate::note!("detail", "  source: {}", options.source.display());
+    crate::note!("detail", "  output: {}", options.output.display());
+    crate::note!("detail", "  store:  {}", options.store.display());
+    crate::note!("detail", "  zoom:   {}", options.zoom);
+    crate::step!("detail", "Pass 1/5: indexing relation member ways");
     let stage_started = Instant::now();
     mark_relation_ways(&options.source, &paths.relation_ways, &mut stats)?;
-    println!("  pass 1 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    crate::tick!("detail", 1.0 / 5.0, "  pass 1 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
 
-    println!("Pass 2/5: writing compressed node store and tagged node features");
+    crate::step!("detail", "Pass 2/5: writing compressed node store and tagged node features");
     let stage_started = Instant::now();
     let mut spool = BlockSpoolWriter::create(&paths.spool)?;
     build_nodes(
@@ -343,10 +343,10 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         &mut spool,
         &mut stats,
     )?;
-    println!("  pass 2 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    crate::tick!("detail", 2.0 / 5.0, "  pass 2 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     write_pass_stamp(&options, 2, &mut spool, &stats)?;
 
-    println!("Pass 3/5: resolving ways and writing tagged way features");
+    crate::step!("detail", "Pass 3/5: resolving ways and writing tagged way features");
     let stage_started = Instant::now();
     build_ways(
         &options.source,
@@ -355,7 +355,7 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         &mut spool,
         &mut stats,
     )?;
-    println!("  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    crate::tick!("detail", 3.0 / 5.0, "  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     write_pass_stamp(&options, 3, &mut spool, &stats)?;
 
     run_relations_and_finish(&options, header, &paths, spool, stats, started)
@@ -371,7 +371,7 @@ fn run_relations_and_finish(
     mut stats: ConversionStats,
     started: Instant,
 ) -> Result<(), String> {
-    println!("Pass 4/5: assembling tagged relation geometries");
+    crate::step!("detail", "Pass 4/5: assembling tagged relation geometries");
     let stage_started = Instant::now();
     build_relations(
         &options.source,
@@ -381,9 +381,9 @@ fn run_relations_and_finish(
         &mut stats,
         &options.store.join("spool-frontier.txt"),
     )?;
-    println!("  pass 4 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    crate::tick!("detail", 4.0 / 5.0, "  pass 4 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     let spool = spool.finish()?;
-    println!(
+    crate::note!("detail", 
         "Spool: {} blocks, {} records, {:.2} GiB",
         spool.blocks.len(),
         spool.records,
@@ -396,23 +396,23 @@ fn run_relations_and_finish(
     write_complete_marker(options, paths, &spool)?;
 
     if options.no_tiles {
-        println!("Pass 5/5 skipped (--no-tiles): store complete after pass 4");
-        println!("Scratch retained at {}", options.store.display());
+        crate::step!("detail", "Pass 5/5 skipped (--no-tiles): store complete after pass 4");
+        crate::note!("detail", "Scratch retained at {}", options.store.display());
         return Ok(());
     }
-    println!("Pass 5/5: external-sort blocks and stream MBTiles");
+    crate::step!("detail", "Pass 5/5: external-sort blocks and stream MBTiles");
     let stage_started = Instant::now();
     let output_stats = finish_tiles(options, &spool, header.bounds)?;
-    println!("  pass 5 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    crate::tick!("detail", 5.0 / 5.0, "  pass 5 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     print!("{report}");
-    println!(
+    crate::note!("detail", 
         "Done: {} tiles, {:.2} GiB payload, {:.2} GiB file in {:.1}s",
         output_stats.tile_count,
         output_stats.tile_bytes as f64 / 1_073_741_824.0,
         output_stats.file_bytes as f64 / 1_073_741_824.0,
         started.elapsed().as_secs_f64()
     );
-    println!("Scratch retained at {}", options.store.display());
+    crate::note!("detail", "Scratch retained at {}", options.store.display());
     Ok(())
 }
 
@@ -549,24 +549,24 @@ fn finish_existing_detail(
         return Err(format!("{} contains no completed tile blocks", paths.spool.display()));
     }
     let started = Instant::now();
-    println!("Resuming native detail output from completed scratch");
-    println!("  source: {}", options.source.display());
-    println!("  output: {}", options.output.display());
-    println!("  store:  {}", options.store.display());
-    println!("  zoom:   {}", options.zoom);
-    println!("  blocks: {}", spool.blocks.len());
+    crate::step!("detail", "Resuming native detail output from completed scratch");
+    crate::note!("detail", "  source: {}", options.source.display());
+    crate::note!("detail", "  output: {}", options.output.display());
+    crate::note!("detail", "  store:  {}", options.store.display());
+    crate::note!("detail", "  zoom:   {}", options.zoom);
+    crate::note!("detail", "  blocks: {}", spool.blocks.len());
     let output_stats = finish_tiles(options, &spool, header.bounds)?;
     if let Ok(report) = fs::read_to_string(&paths.audit) {
         print!("{report}");
     }
-    println!(
+    crate::note!("detail", 
         "Done: {} tiles, {:.2} GiB payload, {:.2} GiB file in {:.1}s",
         output_stats.tile_count,
         output_stats.tile_bytes as f64 / 1_073_741_824.0,
         output_stats.file_bytes as f64 / 1_073_741_824.0,
         started.elapsed().as_secs_f64()
     );
-    println!("Scratch retained at {}", options.store.display());
+    crate::note!("detail", "Scratch retained at {}", options.store.display());
     Ok(())
 }
 
@@ -662,15 +662,15 @@ fn resume_partial_detail(
     )?;
     let mut spool = BlockSpoolWriter::resume(&paths.spool, &stamped, records, bytes)?;
 
-    println!("Native OSM detail conversion (resumed after pass {stamp_pass})");
-    println!("  source: {}", options.source.display());
-    println!("  output: {}", options.output.display());
-    println!("  store:  {}", options.store.display());
-    println!("  zoom:   {}", options.zoom);
-    println!("  spool rolled back to {} blocks, {} records", stamped.len(), records);
+    crate::step!("detail", "Native OSM detail conversion (resumed after pass {stamp_pass})");
+    crate::note!("detail", "  source: {}", options.source.display());
+    crate::note!("detail", "  output: {}", options.output.display());
+    crate::note!("detail", "  store:  {}", options.store.display());
+    crate::note!("detail", "  zoom:   {}", options.zoom);
+    crate::note!("detail", "  spool rolled back to {} blocks, {} records", stamped.len(), records);
 
     if stamp_pass == 2 {
-        println!("Pass 3/5: resolving ways and writing tagged way features");
+        crate::step!("detail", "Pass 3/5: resolving ways and writing tagged way features");
         let stage_started = Instant::now();
         build_ways(
             &options.source,
@@ -679,7 +679,7 @@ fn resume_partial_detail(
             &mut spool,
             &mut stats,
         )?;
-        println!("  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+        crate::tick!("detail", 3.0 / 5.0, "  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
         write_pass_stamp(options, 3, &mut spool, &stats)?;
     }
     run_relations_and_finish(options, header.clone(), paths, spool, stats, started)
@@ -942,13 +942,13 @@ fn build_ways(
     let workers = std::thread::available_parallelism()
         .map(|n| (n.get().saturating_sub(3)).clamp(4, 12))
         .unwrap_or(4);
-    eprintln!("  loading node store into RAM...");
+    crate::note!("detail", "  loading node store into RAM...");
     let load_start = std::time::Instant::now();
     let flat_nodes = std::sync::Arc::new(crate::native::store::FlatNodeStore::load(
         &paths.node_data,
         &paths.node_index,
     )?);
-    eprintln!(
+    crate::note!("detail", 
         "  node store loaded in {:.1}s",
         load_start.elapsed().as_secs_f64()
     );
@@ -1119,7 +1119,7 @@ fn build_relations(
     use std::sync::mpsc::sync_channel;
     use std::sync::{Arc, Mutex};
 
-    eprintln!("  loading node + way stores into RAM...");
+    crate::note!("detail", "  loading node + way stores into RAM...");
     let load_start = std::time::Instant::now();
     let flat_nodes = Arc::new(crate::native::store::FlatNodeStore::load(
         &paths.node_data,
@@ -1129,7 +1129,7 @@ fn build_relations(
         &paths.way_data,
         &paths.way_index,
     )?);
-    eprintln!(
+    crate::note!("detail", 
         "  stores loaded in {:.1}s",
         load_start.elapsed().as_secs_f64()
     );
@@ -1675,13 +1675,13 @@ impl Progress {
     fn tick(&mut self, count: u64) {
         self.count += count;
         if self.last.elapsed() >= Duration::from_secs(5) {
-            println!("  {} {}", self.count, self.label);
+            crate::note!("detail", "  {} {}", self.count, self.label);
             self.last = Instant::now();
         }
     }
 
     fn finish(&self) {
-        println!("  {} {}", self.count, self.label);
+        crate::note!("detail", "  {} {}", self.count, self.label);
     }
 }
 

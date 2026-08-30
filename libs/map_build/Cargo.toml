@@ -1,0 +1,21 @@
+# Build map archives from OpenStreetMap PBF: the bake engine behind the
+# `makepad-map-tiles` CLI, and behind the in-app first-run test-map bake
+# (apps/route). Library-only on purpose — no CLI, no UI, no GUI deps — so
+# an app can run the exact same passes on a worker thread and report
+# progress into its own window.
+
+[package]
+name = "makepad-map-build"
+version = "0.1.0"
+edition = "2021"
+description = "OSM PBF → tile archive + navigation artifact bake passes"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+brotli = "8.0"
+makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-map-nav = { path = "../map_nav" }
+makepad-mbtile-reader = { path = "../mbtile_reader" }
+osmpbf = "0.3.8"
+serde_json = "1.0"
+smallvec = { path = "../smallvec" }

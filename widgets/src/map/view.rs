@@ -5919,6 +5919,35 @@ impl MapView {
     /// Rebuild every resident tile under the current style/mode while its
     /// previous geometry stays on screen (bucket sentinel → the normal
     /// stale-bucket restyle path picks it up and cross-fades).
+    /// Swap the tile source archives at runtime. Unlike the overlay swap
+    /// there is nothing worth keeping on screen: geometry from the old
+    /// archive is not this archive's, so every tile and both negative
+    /// caches go, and the normal request path refills from the new source.
+    /// (First-run bake: the app starts with no archive at all and points
+    /// the view at the one it just built.) Empty strings clear the
+    /// optional detail/bridge-dz sources.
+    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        if self.mbtiles_path == base
+            && self.detail_mbtiles_path == detail
+            && self.bridge_dz_mbtiles_path == bridge_dz
+        {
+            return;
+        }
+        self.mbtiles_path = base.to_string();
+        self.detail_mbtiles_path = detail.to_string();
+        self.bridge_dz_mbtiles_path = bridge_dz.to_string();
+        self.tiles.clear();
+        self.local_requested_tiles.clear();
+        self.local_missing_tiles.clear();
+        self.local_source_missing_logged = false;
+        // Force the zoom-range probe to re-read: the new archive declares
+        // its own minzoom/maxzoom (a city extract is not the planet).
+        self.local_source_zoom_range = None;
+        self.local_source_zoom_range_path = None;
+        self.local_source_zoom_range_checked = false;
+        self.redraw(cx);
+    }
+
     /// Swap the active geodata overlays; stale tiles keep rendering while
     /// rebuilt ones stream in with the new layer set.
     pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
@@ -6630,6 +6659,12 @@ impl MapViewRef {
     pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_overlay_paths(cx, paths);
+        }
+    }
+
+    pub fn set_source_paths(&self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_paths(cx, base, detail, bridge_dz);
         }
     }
 

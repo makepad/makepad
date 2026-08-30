@@ -22,6 +22,7 @@ mod local_agent;
 mod nav;
 mod nav_data;
 mod speech;
+mod testmap;
 mod tools;
 mod trip;
 mod voice;
@@ -33,10 +34,15 @@ use layers::{LayerState, TerrainUpdate, WindUpdate};
 use nav::{ActiveNav, NavAction, NavTick};
 use nav_data::{NavData, NavLoad, RadarData};
 use speech::Speech;
+use testmap::{Stage as TestMapStage, TestMapBuild};
 use trip::TripModel;
 use voice::{GateResult, VoiceGate};
 
 app_main!(App);
+
+/// Dam square, the point the map opens on and where a fresh test map
+/// lands.
+const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
 
 const SYSTEM_PROMPT: &str = "\
 You are the route assistant inside a live map app (Netherlands detail, Europe-wide places), \
@@ -530,6 +536,82 @@ script_mod! {
                             }
                         }
 
+                        // --- First-run test map (centered, over everything) ---
+                        View{
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 0.5 y: 0.5}
+                            testmap_panel := mod.widgets.glass.Panel{
+                                visible: false
+                                flow: Down
+                                width: 520
+                                height: Fit
+                                padding: Inset{left: 24, right: 24, top: 20, bottom: 20}
+                                spacing: 8
+                                draw_bg +: {
+                                    corner_radius: 14.0
+                                    tint_color: #xf8fbff
+                                    tint_alpha: 0.36
+                                }
+                                Label{
+                                    draw_text +: {
+                                        color: #x223038
+                                        text_style: theme.font_bold{font_size: 13}
+                                    }
+                                    text: "Amsterdam test map"
+                                }
+                                testmap_headline := Label{
+                                    width: Fill
+                                    draw_text +: {
+                                        color: #x223038
+                                        text_style: theme.font_bold{font_size: 10.5}
+                                    }
+                                }
+                                // Track and fill: the fill's width is set
+                                // from the bake fraction each frame.
+                                RoundedView{
+                                    width: 470
+                                    height: 10
+                                    margin: Inset{top: 2, bottom: 2}
+                                    draw_bg +: {
+                                        color: #x22303820
+                                        border_radius: 5.0
+                                    }
+                                    testmap_bar := RoundedView{
+                                        width: 0
+                                        height: Fill
+                                        draw_bg +: {
+                                            color: #x1d4ed8
+                                            border_radius: 5.0
+                                        }
+                                    }
+                                }
+                                testmap_status := PanelText{}
+                                testmap_log := Label{
+                                    width: Fill
+                                    draw_text +: {
+                                        color: #x6b7784
+                                        text_style: theme.font_regular{font_size: 8.5}
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    margin: Inset{top: 6}
+                                    testmap_start := AppButton{
+                                        padding: Inset{left: 14, right: 14, top: 8, bottom: 8}
+                                        text: "Build test map"
+                                    }
+                                    testmap_dismiss := AppButton{
+                                        padding: Inset{left: 14, right: 14, top: 8, bottom: 8}
+                                        text: "Not now"
+                                    }
+                                }
+                            }
+                        }
+
                         } // ui_layer
                     }
                 }
@@ -795,6 +877,13 @@ pub struct App {
     layers: LayerState,
     #[rust]
     layers_panel_open: bool,
+    /// First-run map acquisition (download + bake). Idle on a machine that
+    /// already has map data.
+    #[rust]
+    testmap: TestMapBuild,
+    /// The finished test map is adopted once, not on every poll.
+    #[rust]
+    testmap_adopted: bool,
     /// Route assistant popover (bottom-right button). Closed on every
     /// launch — nothing persisted.
     #[rust]
@@ -953,7 +1042,7 @@ impl App {
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
         // layers popover.
         self.apply_layers(cx);
-        nav_data::start_nav_load(self.nav_rx.sender());
+        self.adopt_map_source(cx);
         nav_data::start_radar_worker(self.radar_rx.sender());
         cx.start_location_updates();
         let speech = Speech::new();
@@ -961,6 +1050,102 @@ impl App {
         self.speech = Some(speech);
         self.init_agent(cx);
         self.update_ai_status(cx);
+    }
+
+    /// Point the map and the nav plane at whatever this machine has:
+    /// the production archives, else a baked test map, else nothing — in
+    /// which case the first-run popup offers to build one.
+    fn adopt_map_source(&mut self, cx: &mut Cx) {
+        if let Some(basename) = nav_data::nav_basename() {
+            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+        }
+        if testmap::production_archive_present() {
+            return;
+        }
+        let paths = self.testmap.paths.clone();
+        if paths.archive.is_file() {
+            // A test map is all we have: the ocean and bridge-elevation
+            // overlays belong to the production set and are not part of it.
+            let archive = paths.archive.to_string_lossy().into_owned();
+            let map = self.ui.map_view(cx, ids!(map));
+            map.set_source_paths(cx, &archive, &archive, "");
+            map.set_overlay_paths(cx, "");
+            return;
+        }
+        self.testmap.offer_if_no_map(false);
+        self.refresh_testmap_ui(cx);
+    }
+
+    /// Mirror the build state into the popup.
+    fn refresh_testmap_ui(&mut self, cx: &mut Cx) {
+        let active = self.testmap.is_active();
+        self.ui
+            .widget(cx, ids!(testmap_panel))
+            .set_visible(cx, active);
+        if !active {
+            return;
+        }
+        self.ui
+            .label(cx, ids!(testmap_headline))
+            .set_text(cx, &self.testmap.headline);
+        self.ui
+            .label(cx, ids!(testmap_status))
+            .set_text(cx, &self.testmap.status_line());
+        self.ui
+            .label(cx, ids!(testmap_log))
+            .set_text(cx, &self.testmap.log.join("\n"));
+        // The bar is a plain fill inside a fixed 470px track.
+        let width = (470.0 * self.testmap.fraction.clamp(0.0, 1.0) as f64).round();
+        let mut bar = self.ui.widget(cx, ids!(testmap_bar));
+        script_apply_eval!(cx, bar, {
+            width: #(width)
+        });
+        let running = self.testmap.is_running();
+        let done = matches!(self.testmap.stage, TestMapStage::Done);
+        self.ui
+            .button(cx, ids!(testmap_start))
+            .set_visible(cx, !running && !done);
+        self.ui.button(cx, ids!(testmap_start)).set_text(
+            cx,
+            if matches!(self.testmap.stage, TestMapStage::Failed(_)) {
+                "Try again"
+            } else {
+                "Build test map"
+            },
+        );
+        self.ui.button(cx, ids!(testmap_dismiss)).set_text(
+            cx,
+            match self.testmap.stage {
+                TestMapStage::Fetching { .. } => "Cancel",
+                TestMapStage::Done => "Start driving",
+                _ => "Not now",
+            },
+        );
+        // The bake owns the machine for a minute and has no cancel; the
+        // popup stays put rather than offering a button that does nothing.
+        self.ui
+            .button(cx, ids!(testmap_dismiss))
+            .set_visible(cx, !matches!(self.testmap.stage, TestMapStage::Baking));
+        self.ui.redraw(cx);
+    }
+
+    /// The bake finished: adopt what it built without a restart.
+    fn testmap_finished(&mut self, cx: &mut Cx) {
+        let paths = self.testmap.paths.clone();
+        let archive = paths.archive.to_string_lossy().into_owned();
+        let map = self.ui.map_view(cx, ids!(map));
+        map.set_source_paths(cx, &archive, &archive, "");
+        map.set_overlay_paths(cx, "");
+        map.set_center(cx, AMSTERDAM_CENTER.0, AMSTERDAM_CENTER.1);
+        nav_data::start_nav_load(
+            self.nav_rx.sender(),
+            paths.nav_basename.to_string_lossy().into_owned(),
+        );
+        self.push_entry(
+            cx,
+            EntryKind::Info,
+            "test map ready: Amsterdam tiles, routing graph and search index",
+        );
     }
 
     fn make_claude(api_key: String) -> Box<dyn Agent> {
@@ -1930,7 +2115,37 @@ impl App {
 }
 
 impl MatchEvent for App {
+    // The test-map download rides the platform's HTTP stack, which reports
+    // progress as the body streams. (DDG image search reads the same
+    // responses through its own state machine and ignores ids that are not
+    // its own, so both can listen.)
+    fn handle_http_progress(&mut self, cx: &mut Cx, request_id: LiveId, progress: &HttpProgress) {
+        if self.testmap.handle_http_progress(request_id, progress) {
+            self.refresh_testmap_ui(cx);
+        }
+    }
+
+    fn handle_http_response(&mut self, cx: &mut Cx, request_id: LiveId, response: &HttpResponse) {
+        if self.testmap.handle_http_response(request_id, response) {
+            self.refresh_testmap_ui(cx);
+        }
+    }
+
+    fn handle_http_request_error(&mut self, cx: &mut Cx, request_id: LiveId, err: &HttpError) {
+        if self.testmap.handle_http_error(request_id, &err.message) {
+            self.refresh_testmap_ui(cx);
+        }
+    }
+
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(testmap_start)).clicked(actions) {
+            self.testmap.start(cx);
+            self.refresh_testmap_ui(cx);
+        }
+        if self.ui.button(cx, ids!(testmap_dismiss)).clicked(actions) {
+            self.testmap.dismiss();
+            self.refresh_testmap_ui(cx);
+        }
         if let Some((text, _)) = self.ui.text_input(cx, ids!(prompt_input)).returned(actions) {
             let text = text.trim().to_string();
             if !text.is_empty() {
@@ -2215,6 +2430,16 @@ impl AppMain for App {
         if !self.busy && !self.voice_queue.is_empty() {
             let next = self.voice_queue.remove(0);
             self.send_user_prompt(cx, &next);
+        }
+        // The bake worker talks the same way every other worker here does.
+        if self.testmap.poll() {
+            let finished = matches!(self.testmap.stage, TestMapStage::Done)
+                && !self.testmap_adopted;
+            if finished {
+                self.testmap_adopted = true;
+                self.testmap_finished(cx);
+            }
+            self.refresh_testmap_ui(cx);
         }
         while let Ok(load) = self.nav_rx.try_recv() {
             match load {

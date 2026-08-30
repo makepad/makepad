@@ -267,7 +267,7 @@ fn validate_live_store(options: &BaseOptions) -> Result<bool, String> {
             bbox.as_csv()
         ));
     }
-    println!(
+    crate::note!("base", 
         "  live store: frontier {frontier:.0} covers bbox (far corner {:.0})",
         needed - FRONTIER_MARGIN
     );
@@ -523,20 +523,20 @@ struct AbNumbers {
 
 fn print_ab_numbers(ab: &AbNumbers, quality: u32, dict_len: usize) {
     let percent = |part: u64| part as f64 * 100.0 / ab.raw.max(1) as f64;
-    println!("  sample: {} tiles, {} raw MVT bytes", ab.tiles, ab.raw);
-    println!(
+    crate::note!("base", "  sample: {} tiles, {} raw MVT bytes", ab.tiles, ab.raw);
+    crate::note!("base", 
         "  gzip-fast:        {:>12} bytes ({:.1}% of raw)",
         ab.gzip,
         percent(ab.gzip)
     );
-    println!(
+    crate::note!("base", 
         "  brotli q{}:       {:>12} bytes ({:.1}% of raw, {:.1}% smaller than gzip)",
         quality,
         ab.brotli,
         percent(ab.brotli),
         (1.0 - ab.brotli as f64 / ab.gzip.max(1) as f64) * 100.0
     );
-    println!(
+    crate::note!("base", 
         "  brotli q{}+dict:  {:>12} bytes ({:.1}% of raw, {:.2}% smaller than plain brotli, dict {} bytes)",
         quality,
         ab.brotli_dict,
@@ -978,7 +978,7 @@ fn run_phase1(
                             + baseline.lowzoom_gzip as f64 * progress.br_over_gzip;
                         let remaining =
                             baseline.z14_tiles.saturating_sub(tiles) as f64;
-                        println!(
+                        crate::tick!("base", done_frac as f32 * EXTRACT_SPAN,
                             "  extract: {tiles}/{} z14 tiles ({:.1}%) | {:.2} GiB out (base {:.2} + detail {:.2} est) | {:.1}% of same-tiles gzip | {:.0} tiles/s | proj z14 {:.2} GiB, archive ~{:.2} GiB | ETA {:.1} min | cpu {:.0}%",
                             baseline.z14_tiles,
                             done_frac * 100.0,
@@ -993,7 +993,8 @@ fn run_phase1(
                             process_cpu_percent().unwrap_or(0.0)
                         );
                     }
-                    _ => println!(
+                    _ => crate::tick!("base",
+                        done as f32 / blocks.len().max(1) as f32 * EXTRACT_SPAN,
                         "  extract: block {done}/{} | {tiles} z14 tiles | {:.2} GiB z14 out | {} fragments | {:.0} tiles/s | cpu {:.0}%",
                         blocks.len(),
                         gib(out_bytes),
@@ -1242,7 +1243,7 @@ fn run_phase1(
             (Ok(summaries), None) => Ok(summaries),
         }
     })?;
-    println!(
+    crate::note!("base", 
         "  extract done: {} blocks, {} z14 tiles, {:.2} GiB z14 payload, {} fragment records in {:.1}s",
         blocks.len(),
         stats.tiles_done.load(Ordering::Relaxed),
@@ -1276,6 +1277,11 @@ struct ZoomProgress {
     last_log: Instant,
 }
 
+/// How much of the base stage's bar phase 1 (extract + z14 compression)
+/// owns. Phase 2 writes the pyramid into the archive and phase 3 tidies;
+/// on an Amsterdam-sized extract that split is roughly 39s to 12s.
+const EXTRACT_SPAN: f32 = 0.75;
+
 impl ZoomProgress {
     fn new(zoom: u8) -> Self {
         Self {
@@ -1291,7 +1297,7 @@ impl ZoomProgress {
         self.tiles += tiles;
         self.bytes += bytes;
         if self.last_log.elapsed() >= Duration::from_secs(2) {
-            println!(
+            crate::note!("base", 
                 "  z{}: {} tiles | {:.1} MiB | {:.0} tiles/s | cpu {:.0}%",
                 self.zoom,
                 self.tiles,
@@ -1303,8 +1309,12 @@ impl ZoomProgress {
         }
     }
 
-    fn finish(&self) {
-        println!(
+    fn finish(&self, max_zoom: u8) {
+        // Phase 2 walks z0 upwards, so a finished zoom is a real position
+        // in the run — the only fraction available here.
+        let done = (self.zoom as f32 + 1.0) / (max_zoom as f32 + 1.0);
+        crate::tick!("base",
+            EXTRACT_SPAN + (1.0 - EXTRACT_SPAN) * done,
             "  z{}: {} tiles, {:.1} MiB in {:.1}s",
             self.zoom,
             self.tiles,
@@ -1488,7 +1498,7 @@ fn write_archive(
                 (Ok(progress), None) => Ok(progress),
             }
         })?;
-        progress.finish();
+        progress.finish(options.max_zoom);
     }
 
     if emit_detail_zoom {
@@ -1519,7 +1529,7 @@ fn write_archive(
         // Structurally IO-bound: the z14 tiles were compressed during
         // extraction; this pass only streams the temp blocks into the
         // archive in rowid order, so CPU sits near one core by design.
-        println!("  z{DETAIL_ZOOM}: ordered copy of pre-compressed tiles (io-bound pass)");
+        crate::note!("base", "  z{DETAIL_ZOOM}: ordered copy of pre-compressed tiles (io-bound pass)");
         let mut progress = ZoomProgress::new(DETAIL_ZOOM);
         for (key, path) in block_files {
             let mut reader = BufReader::with_capacity(
@@ -1546,7 +1556,7 @@ fn write_archive(
                 progress.add(1, length as u64);
             }
         }
-        progress.finish();
+        progress.finish(options.max_zoom);
     }
 
     sink.finish(metadata)
@@ -1618,11 +1628,11 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
         quality: options.brotli_quality,
     };
 
-    println!("pbf-base: single-origin base+detail archive");
-    println!("  source:  {}", options.source.display());
-    println!("  output:  {}", options.output.display());
-    println!("  store:   {}", options.store.display());
-    println!(
+    crate::step!("base", "pbf-base: single-origin base+detail archive");
+    crate::note!("base", "  source:  {}", options.source.display());
+    crate::note!("base", "  output:  {}", options.output.display());
+    crate::note!("base", "  store:   {}", options.store.display());
+    crate::note!("base", 
         "  blocks:  {} of {} (bbox {})",
         selected.len(),
         summary.blocks.len(),
@@ -1631,7 +1641,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
             .map(|b| b.as_csv())
             .unwrap_or_else(|| "none".to_string())
     );
-    println!(
+    crate::note!("base", 
         "  codec:   brotli q{} dict={} threads={} max_zoom={}",
         options.brotli_quality, options.use_dict, options.threads, options.max_zoom
     );
@@ -1646,7 +1656,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
         // The dictionary must exist before any tile is compressed, so this
         // path keeps the separate sampling pass (parallel per block, but
         // bounded by block count — the price of --dict).
-        println!("Phase 0: sampling tiles for dict-v1 + A/B measurement");
+        crate::step!("base", "Phase 0: sampling tiles for dict-v1 + A/B measurement");
         let samples = sample_tiles(
             &spool_dir,
             &selected,
@@ -1663,7 +1673,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
         br_over_gzip = ab.brotli as f64 / ab.gzip.max(1) as f64;
         dict = Some(dictionary);
     } else {
-        println!(
+        crate::note!("base", 
             "Phase 0 skipped (no --dict): A/B sample is collected during extraction"
         );
     }
@@ -1675,7 +1685,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
     }
     fs::create_dir_all(&work).map_err(|err| format!("create {}: {err}", work.display()))?;
 
-    println!("Phase 1/3: extracting base layers + compressing z{DETAIL_ZOOM} tiles");
+    crate::step!("base", "Phase 1/3: extracting base layers + compressing z{DETAIL_ZOOM} tiles");
     let sample_state = SampleState {
         counter: AtomicU64::new(0),
         tiles: std::sync::Mutex::new(Vec::new()),
@@ -1701,7 +1711,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
     if !options.use_dict {
         let samples = std::mem::take(&mut *sample_state.tiles.lock().unwrap());
         if samples.is_empty() {
-            println!("  A/B: no z14 tiles sampled (nothing to measure)");
+            crate::note!("base", "  A/B: no z14 tiles sampled (nothing to measure)");
         } else {
             let dictionary = build_dictionary(&samples)?;
             let ab = measure_compression(
@@ -1710,12 +1720,12 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
                 &dictionary,
                 options.threads,
             )?;
-            println!("  A/B (sampled during extraction):");
+            crate::note!("base", "  A/B (sampled during extraction):");
             print_ab_numbers(&ab, options.brotli_quality, dictionary.len());
         }
     }
 
-    println!("Phase 2/3: writing archive zooms 0..={}", options.max_zoom);
+    crate::step!("base", "Phase 2/3: writing archive zooms 0..={}", options.max_zoom);
     let metadata = archive_metadata(&options, &header.bounds, &compression, dict.as_deref());
     let stats = match write_archive(
         &work,
@@ -1737,9 +1747,9 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
         }
     };
 
-    println!("Phase 3/3: cleaning work directory");
+    crate::step!("base", "Phase 3/3: cleaning work directory");
     fs::remove_dir_all(&work).map_err(|err| format!("remove {}: {err}", work.display()))?;
-    println!(
+    crate::note!("base", 
         "Done: {} tiles, {:.2} GiB payload, {:.2} GiB file in {:.1}s",
         stats.tile_count,
         stats.tile_bytes as f64 / 1_073_741_824.0,
