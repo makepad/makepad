@@ -77,8 +77,16 @@ pub fn define_macos_timer_delegate() -> *const Class {
             // names the boundary that contained it.
             eprintln!(
                 "makepad: PANIC contained at the {name} callback boundary \
-                 (#{count}); the app continues but may be in a wounded state"
+                 (#{count}); recovering: paint clock re-armed, next frame redraws"
             );
+            // The unwind skipped the tail of the event loop's timer branch —
+            // the part that re-arms timer 0. Without this the loop blocks
+            // in nextEvent for good: no paint, no bridge, an app that looks
+            // hung. Re-arm, and let the next tick run the recovery.
+            crate::os::apple::macos::macos::note_contained_panic();
+            crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                app.start_timer(0, 0.2, true);
+            });
         }
     }
 

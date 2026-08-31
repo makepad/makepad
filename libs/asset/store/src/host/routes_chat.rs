@@ -71,6 +71,9 @@ pub fn dispatch(
             session_send(conn, head, rc, id)
         }
         ["v1", "chat", "sessions", id, "events"] if is_read(m) => session_events(head, rc, id),
+        ["v1", "chat", "sessions", id, "transcript"] if is_read(m) => {
+            session_transcript(head, rc, id)
+        }
         ["v1", "chat", "sessions", id, "cancel"] if m == Method::Post => {
             session_cancel(conn, head, rc, id)
         }
@@ -133,7 +136,7 @@ fn session_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
     };
     check_known_fields(
         &body,
-        &["api_version", "namespace", "provider", "client"],
+        &["api_version", "namespace", "provider", "client", "client_key", "context_key"],
         "unknown chat session field",
     )?;
     match body_u64(&body, "api_version") {
@@ -153,12 +156,89 @@ fn session_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
             .and_then(ClientProfile::from_slug)
             .ok_or(Fail::Http(400, "unknown chat client profile"))?,
     };
+    // Durable identity: both keys make this a create-or-resume of ONE
+    // conversation per (principal, client, game). One key alone is a
+    // client bug, refused rather than half-honoured.
+    let keys = match (chat_key_of(&body, "client_key")?, chat_key_of(&body, "context_key")?) {
+        (Some(client_key), Some(context_key)) => Some((client_key, context_key)),
+        (None, None) => None,
+        _ => return Err(Fail::Http(400, "client_key and context_key go together")),
+    };
     let (owner, token) = auth_owner(head, rc, Some(&ns))?;
-    let view = match chat_of(rc)?.create(owner, ns, token, provider, profile) {
+    // Resuming/rebinding a conversation that currently lives under ANOTHER
+    // namespace additionally requires Chat on that ORIGINAL namespace —
+    // losing a namespace must mean losing its conversations.
+    let authorize_ns = |original: &str| require_chat_ns(head, rc, original).is_ok();
+    let (view, resumed) =
+        match chat_of(rc)?.create(owner, ns, token, provider, profile, keys, &authorize_ns) {
+            Ok(v) => v,
+            Err(e) => return Ok(chat_outcome(e)),
+        };
+    // 201 = a fresh session; 200 = the existing conversation came back.
+    let status = if resumed { 200 } else { 201 };
+    Ok(Outcome::Resp(Resp::json(status, &session_value(&view))))
+}
+
+/// An optional session key: absent/null is none; present, it must have the
+/// shape the client crate enforces (`wire::chat_key_ok`), so a key can
+/// never spell a path or carry a control byte to a screen.
+fn chat_key_of(body: &Value, key: &'static str) -> RouteResult<Option<String>> {
+    match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let s = v.as_str().ok_or(Fail::Http(400, "malformed chat key"))?;
+            if !makepad_asset_client::wire::chat_key_ok(s) {
+                return Err(Fail::Http(400, "malformed chat key"));
+            }
+            Ok(Some(s.to_string()))
+        }
+    }
+}
+
+/// The durable conversation as the client renders it: the LAST rows that
+/// fit the broker's budget (`TRANSCRIPT_MAX_ROWS` rows,
+/// `TRANSCRIPT_MAX_TEXT_BYTES` of text, each row clipped to
+/// `TRANSCRIPT_MAX_ROW_BYTES`), thinking stripped, one `tool` row per
+/// executed tool.
+fn session_transcript(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let (owner, _) = auth_owner(head, rc, None)?;
+    // Ownership alone is not enough: like send/cancel/delete, reading the
+    // conversation requires the Chat capability on the session's
+    // namespace — an owner that lost the namespace lost its transcripts.
+    let session = match chat_of(rc)?.get(owner, id.clone()) {
         Ok(v) => v,
         Err(e) => return Ok(chat_outcome(e)),
     };
-    Ok(Outcome::Resp(Resp::json(201, &session_value(&view))))
+    require_chat_ns(head, rc, &session.namespace)?;
+    let view = match chat_of(rc)?.transcript(owner, id) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    let rows: Vec<Value> = view
+        .rows
+        .iter()
+        .map(|row| {
+            let mut pairs = vec![("role", s(row.role.slug())), ("text", s(row.text.clone()))];
+            if let Some(tool) = &row.tool {
+                pairs.push(("tool", s(tool.clone())));
+            }
+            if let Some(outcome) = row.outcome {
+                pairs.push(("outcome", s(outcome)));
+            }
+            obj(pairs)
+        })
+        .collect();
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("session", s(view.id.as_str())),
+            ("provider", s(view.provider.slug())),
+            ("turn", Value::Int(view.turn.min(i64::MAX as u64) as i64)),
+            ("truncated", Value::Bool(view.truncated)),
+            ("messages", Value::Arr(rows)),
+        ]),
+    )))
 }
 
 /// The connected app's answer to a client-executed tool call (the game's
@@ -226,8 +306,22 @@ fn session_send(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, id: &str) -> Ro
         Err(o) => return Ok(o),
         Ok(r) => r?,
     };
-    check_known_fields(&body, &["text", "attachments"], "unknown chat send field")?;
+    check_known_fields(
+        &body,
+        &["text", "attachments", "dynamic_context"],
+        "unknown chat send field",
+    )?;
     let text = body_str(&body, "text")?.to_string();
+    let dynamic_context = match body.get("dynamic_context") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let text = value.as_str().ok_or(Fail::Http(400, "malformed dynamic context"))?;
+            if text.is_empty() || text.len() > 4096 || text.contains('\0') {
+                return Err(Fail::Http(400, "malformed dynamic context"));
+            }
+            Some(text.to_string())
+        }
+    };
     let attachments = attachments_of(&body)?;
     let (owner, _) = auth_owner(head, rc, None)?;
     let view = match chat_of(rc)?.get(owner, id.clone()) {
@@ -235,7 +329,7 @@ fn session_send(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, id: &str) -> Ro
         Err(e) => return Ok(chat_outcome(e)),
     };
     require_chat_ns(head, rc, &view.namespace)?;
-    let turn = match chat_of(rc)?.send(owner, id, text, attachments) {
+    let turn = match chat_of(rc)?.send(owner, id, text, attachments, dynamic_context) {
         Ok(t) => t,
         Err(e) => return Ok(chat_outcome(e)),
     };
@@ -364,7 +458,7 @@ fn attachments_of(body: &Value) -> RouteResult<Vec<AttachmentBinding>> {
 }
 
 fn provider_value(row: &ProviderStatus) -> Value {
-    let mut pairs = vec![("kind", s(row.kind.slug()))];
+    let mut pairs = vec![("kind", s(row.kind.slug())), ("locality", s(row.locality.slug()))];
     if row.available {
         pairs.push(("state", s("available")));
         if let Some(model) = &row.model {
@@ -380,7 +474,7 @@ fn provider_value(row: &ProviderStatus) -> Value {
 }
 
 fn session_value(view: &SessionView) -> Value {
-    obj(vec![
+    let mut pairs = vec![
         ("session", s(view.id.as_str())),
         ("namespace", s(view.namespace.clone())),
         ("provider", s(view.provider.slug())),
@@ -388,7 +482,15 @@ fn session_value(view: &SessionView) -> Value {
         ("state", s(view.state)),
         ("turn", Value::Int(view.turn.min(i64::MAX as u64) as i64)),
         ("idle", Value::Bool(view.idle)),
-    ])
+    ];
+    // Keyed sessions echo their durable identity; ephemeral ones omit it.
+    if let Some(key) = &view.client_key {
+        pairs.push(("client_key", s(key.clone())));
+    }
+    if let Some(key) = &view.context_key {
+        pairs.push(("context_key", s(key.clone())));
+    }
+    obj(pairs)
 }
 
 /// STRUCTURAL conversion between the chat wire's value and the host's —
@@ -435,6 +537,11 @@ fn chat_outcome(e: ChatFail) -> Outcome {
     match e {
         ChatFail::Down => Outcome::Resp(Resp::error(503, "state unavailable")),
         ChatFail::NotFound => Outcome::Resp(Resp::error(404, "not found")),
+        ChatFail::Forbidden => Outcome::Resp(Resp::error(403, "forbidden")),
+        ChatFail::Persist { message } => Outcome::Resp(Resp::json(
+            500,
+            &obj(vec![("error", s("persistence")), ("message", s(message))]),
+        )),
         ChatFail::Busy => Outcome::Resp(Resp::json(
             409,
             &obj(vec![("error", s("busy"))]),

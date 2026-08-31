@@ -36,7 +36,12 @@ use makepad_ai_stems::{CacheHeader, StemCache, Stem};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::time::Duration;
+
+/// How long the worker waits on the deck inbox before looking at the
+/// background one. Mirrors the separator's own split.
+const DECK_INBOX_WAIT_MS: u64 = 100;
 use std::sync::Arc;
 
 /// Sample rate whisper's mel front end expects.
@@ -1326,12 +1331,20 @@ pub struct LyricsJob {
 pub enum LyricsMsg {
     Status { deck: DeckId, gen: u64, text: String },
     Ready { deck: DeckId, gen: u64, digest: String, lyrics: Arc<TrackLyrics> },
+    /// A background bake let go of the worker, however it went. `Ready`
+    /// already files a transcript by digest whatever generation asked for
+    /// it, so this says nothing about the words — it only tells the host
+    /// the background lane is free again.
+    PrefetchDone { digest: String },
 }
 
 /// One transcription thread. The whisper model is expensive to load and
 /// thread-affine (Metal), so it is created here and never leaves.
 pub struct LyricsPool {
     tx: Sender<LyricsJob>,
+    /// The BACKGROUND inbox, kept apart so a queued track's transcript can
+    /// never sit in front of the deck the operator just cued.
+    prefetch_tx: Sender<LyricsJob>,
     rx: Receiver<LyricsMsg>,
 }
 
@@ -1344,17 +1357,48 @@ impl Default for LyricsPool {
 impl LyricsPool {
     pub fn new() -> LyricsPool {
         let (tx, jobs) = channel::<LyricsJob>();
+        let (prefetch_tx, prefetch_jobs) = channel::<LyricsJob>();
         let (out, rx) = channel::<LyricsMsg>();
         let _ = std::thread::Builder::new()
             .name("vj-lyrics".into())
             .spawn(move || {
                 let mut backend: Option<Transcriber> = None;
                 let mut backend_failed = false;
-                while let Ok(job) = jobs.recv() {
-                    run_job(job, &mut backend, &mut backend_failed, &out);
+                loop {
+                    // A deck's words come first; the background inbox is
+                    // read only once this one has gone quiet.
+                    let job = match jobs.recv_timeout(Duration::from_millis(DECK_INBOX_WAIT_MS)) {
+                        Ok(job) => job,
+                        Err(RecvTimeoutError::Timeout) => match prefetch_jobs.try_recv() {
+                            Ok(job) => job,
+                            Err(TryRecvError::Empty) => continue,
+                            Err(TryRecvError::Disconnected) => break,
+                        },
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    let prefetching = job.gen == crate::stems::PREFETCH_GEN;
+                    let digest = job.digest.clone();
+                    run_job(
+                        job,
+                        &cache_dir(),
+                        &crate::stems::cache_dir(),
+                        &mut backend,
+                        &mut backend_failed,
+                        &out,
+                    );
+                    if prefetching {
+                        let _ = out.send(LyricsMsg::PrefetchDone { digest });
+                    }
                 }
             });
-        LyricsPool { tx, rx }
+        LyricsPool { tx, prefetch_tx, rx }
+    }
+
+    /// Bake a queued track's transcript while nothing is asking. Carries
+    /// [`crate::stems::PREFETCH_GEN`], so its status lines reach no deck —
+    /// but `Ready` still files the words by digest, which is the point.
+    pub fn submit_prefetch(&self, job: LyricsJob) {
+        let _ = self.prefetch_tx.send(job);
     }
 
     pub fn submit(&self, job: LyricsJob) {
@@ -1377,14 +1421,18 @@ fn status(out: &Sender<LyricsMsg>, job: &LyricsJob, text: impl Into<String>) {
     let _ = out.send(LyricsMsg::Status { deck: job.deck, gen: job.gen, text: text.into() });
 }
 
+/// `dir` is the transcript cache and `stem_root` the separated-span cache.
+/// Both are passed rather than read from the environment here so the probe
+/// below — the one branch with no model in it — is testable on its own.
 fn run_job(
     job: LyricsJob,
+    dir: &std::path::Path,
+    stem_root: &std::path::Path,
     backend: &mut Option<Transcriber>,
     backend_failed: &mut bool,
     out: &Sender<LyricsMsg>,
 ) {
-    let dir = cache_dir();
-    if let Some(lyrics) = load_cached(&dir, &job.digest) {
+    if let Some(lyrics) = load_cached(dir, &job.digest) {
         let lines = lyrics.lines.len();
         let _ = out.send(LyricsMsg::Ready {
             deck: job.deck,
@@ -1396,6 +1444,23 @@ fn run_job(
         return;
     }
     if !job.bake {
+        // A probe that found nothing still has to SAY it found nothing.
+        //
+        // Returning in silence leaves this deck's lyrics status empty, and
+        // empty is precisely what the reader paints as "waiting for
+        // separation" — so the one path that knows the answer became the one
+        // path that never spoke, and a track whose stems finished long ago
+        // sat under a message about separation for the rest of the session.
+        // Which of the two things is actually missing is a question the span
+        // cache answers.
+        status(
+            out,
+            &job,
+            match crate::stems::cache_is_complete(stem_root, &job.digest, job.model_frames) {
+                true => "lyrics: no transcript",
+                false => "lyrics: waiting for separation",
+            },
+        );
         return;
     }
     if *backend_failed {
@@ -1792,6 +1857,159 @@ mod tests {
         assert!(dispatch.should_dispatch("bb", true));
         dispatch.forget("aa");
         assert!(dispatch.should_dispatch("aa", false));
+    }
+
+    // ---- the load-time probe ---------------------------------------------
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("makepad-vj-lyrics-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn probe_job(digest: &str, model_frames: u64) -> LyricsJob {
+        LyricsJob {
+            deck: DeckId::A,
+            gen: 7,
+            digest: digest.to_string(),
+            model_frames,
+            duration_secs: 120.0,
+            bake: false,
+        }
+    }
+
+    fn said(rx: &Receiver<LyricsMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let LyricsMsg::Status { text, .. } = message {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    /// A probe that finds no transcript has to SAY it found no transcript.
+    ///
+    /// Returning in silence leaves the deck's lyrics status empty, and empty
+    /// is exactly what the reader renders as "waiting for separation" — so
+    /// the one path that knows the answer is the one path that never speaks.
+    /// While the stems really are unseparated that fallback happens to be
+    /// true, and this is the case that says so out loud instead of by
+    /// omission.
+    #[test]
+    fn a_probe_that_finds_nothing_says_the_stems_are_not_ready() {
+        let lyrics_dir = temp_dir("probe-cold");
+        let stem_root = temp_dir("probe-cold-stems");
+        let (out, rx) = channel::<LyricsMsg>();
+        let mut backend = None;
+        let mut failed = false;
+
+        run_job(
+            probe_job(&"c".repeat(64), 4 * 44_100),
+            &lyrics_dir,
+            &stem_root,
+            &mut backend,
+            &mut failed,
+            &out,
+        );
+
+        assert_eq!(said(&rx), vec!["lyrics: waiting for separation".to_string()]);
+        let _ = std::fs::remove_dir_all(&lyrics_dir);
+        let _ = std::fs::remove_dir_all(&stem_root);
+    }
+
+    /// The lie this whole path existed to tell: stems separated end to end,
+    /// no transcript, and a reader reporting that it is waiting for the
+    /// separation that already finished. Once the stems are complete the
+    /// answer is about the WORDS, not about the stems.
+    #[test]
+    fn a_probe_over_finished_stems_does_not_blame_the_separation() {
+        let lyrics_dir = temp_dir("probe-warm");
+        let stem_root = temp_dir("probe-warm-stems");
+        let digest = "d".repeat(64);
+        let frames = 2 * makepad_ai_stems::CHUNK_STEP;
+        {
+            let mut cache =
+                StemCache::open(&stem_root, &digest, CacheHeader::for_track(frames as u64))
+                    .unwrap();
+            for span in 0..cache.span_count() {
+                let set: makepad_ai_stems::StemSet = std::array::from_fn(|_| {
+                    makepad_ai_stems::StereoBuf {
+                        left: vec![0.0; makepad_ai_stems::CHUNK_STEP],
+                        right: vec![0.0; makepad_ai_stems::CHUNK_STEP],
+                    }
+                });
+                cache
+                    .write_span(span * makepad_ai_stems::CHUNK_STEP, &set)
+                    .unwrap();
+            }
+            assert!(cache.is_complete());
+        }
+        let (out, rx) = channel::<LyricsMsg>();
+        let mut backend = None;
+        let mut failed = false;
+
+        run_job(
+            probe_job(&digest, frames as u64),
+            &lyrics_dir,
+            &stem_root,
+            &mut backend,
+            &mut failed,
+            &out,
+        );
+
+        assert_eq!(said(&rx), vec!["lyrics: no transcript".to_string()]);
+        let _ = std::fs::remove_dir_all(&lyrics_dir);
+        let _ = std::fs::remove_dir_all(&stem_root);
+    }
+
+    /// The probe's happy path, unchanged: a track transcribed in an earlier
+    /// session hangs its words from the cache without a job.
+    #[test]
+    fn a_probe_that_finds_a_transcript_hands_it_over() {
+        let lyrics_dir = temp_dir("probe-hit");
+        let stem_root = temp_dir("probe-hit-stems");
+        let digest = "e".repeat(64);
+        let lyrics = TrackLyrics {
+            backend: "whisper".into(),
+            model: "ggml-large-v3-turbo.bin".into(),
+            language: "en".into(),
+            duration_secs: 120.0,
+            onset: OnsetStats { snapped: 1, mean_ms: 20.0, max_ms: 40.0 },
+            lines: vec![line(1.0, 2.0, "already known")],
+        };
+        store_cached(&lyrics_dir, &digest, &lyrics);
+        let (out, rx) = channel::<LyricsMsg>();
+        let mut backend = None;
+        let mut failed = false;
+
+        run_job(
+            probe_job(&digest, 4 * 44_100),
+            &lyrics_dir,
+            &stem_root,
+            &mut backend,
+            &mut failed,
+            &out,
+        );
+
+        let mut ready = 0;
+        let mut texts = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                LyricsMsg::Ready { lyrics, .. } => {
+                    ready += 1;
+                    assert_eq!(lyrics.lines.len(), 1);
+                }
+                LyricsMsg::Status { text, .. } => texts.push(text),
+                // A deck job never reports one.
+                LyricsMsg::PrefetchDone { .. } => panic!("a deck job prefetched"),
+            }
+        }
+        assert_eq!(ready, 1, "the cached transcript has to reach the deck");
+        assert_eq!(texts, vec!["lyrics: 1 lines (cached)".to_string()]);
+        let _ = std::fs::remove_dir_all(&lyrics_dir);
+        let _ = std::fs::remove_dir_all(&stem_root);
     }
 
     // ---- onsets ----------------------------------------------------------

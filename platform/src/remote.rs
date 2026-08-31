@@ -45,6 +45,13 @@ mod imp {
     // ------------------------------------------------------------------
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// True when this process was started with `--remote` (any form). Pure
+    /// argv scan, usable before the bridge itself is up — the platform's
+    /// focus policy reads it while the first window is being created.
+    pub fn requested() -> bool {
+        std::env::args().any(|a| a == "--remote" || a.starts_with("--remote="))
+    }
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
     /// Grab request ids live in the top half of the id space, like the file
@@ -145,6 +152,17 @@ mod imp {
             window: Option<usize>,
             tx: Sender<Reply>,
         },
+        /// A tweaker-overlay operation. The route only parses; the whole
+        /// answer comes from `Cx::tweak_callback` (registered by the widgets
+        /// crate), so platform stays below widgets in the dependency order.
+        Tweak {
+            op: String,
+            args: Vec<(String, String)>,
+            /// Answer only after the next frame is drawn, so a following
+            /// grab sees the applied change on screen.
+            wait: bool,
+            tx: Sender<Reply>,
+        },
         Quit(Sender<Reply>),
     }
 
@@ -157,6 +175,9 @@ mod imp {
             dx: f64,
             dy: f64,
             mods: RemoteKeyModifiers,
+            /// Hardware-faithful: route through the same pointer-lock/pin
+            /// transform physical mouse events take (`/m?hw=1`).
+            hw: bool,
         },
         Key {
             down: bool,
@@ -183,10 +204,19 @@ mod imp {
         Err(String),
     }
 
-    /// `(target repaint_id, responder)` — resolved once the app has drawn a
-    /// frame that includes whatever the request did.
-    fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>)>> {
-        static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>)>>> = OnceLock::new();
+    /// `(target repaint_id, responder, payload)` — resolved once the app has
+    /// drawn a frame that includes whatever the request did. `payload` is the
+    /// JSON to answer with (a tweak op's result); `None` answers with the
+    /// generic `{"ok":1,"f":N}` frame ack.
+    /// Last hw-injected pointer position: hw moves carry deltas computed
+    /// against it, like hardware events carry NSEvent deltas.
+    fn hw_last() -> &'static Mutex<Option<crate::makepad_math::DVec2>> {
+        static W: OnceLock<Mutex<Option<crate::makepad_math::DVec2>>> = OnceLock::new();
+        W.get_or_init(|| Mutex::new(None))
+    }
+
+    fn frame_waiters() -> &'static Mutex<Vec<(u64, Sender<Reply>, Option<String>)>> {
+        static W: OnceLock<Mutex<Vec<(u64, Sender<Reply>, Option<String>)>>> = OnceLock::new();
         W.get_or_init(|| Mutex::new(Vec::new()))
     }
 
@@ -542,9 +572,13 @@ mod imp {
         // Resolve anyone who asked to be answered after the next frame.
         let repaint_id = cx.repaint_id;
         let mut waiters = frame_waiters().lock().unwrap();
-        waiters.retain(|(target, tx)| {
+        waiters.retain(|(target, tx, payload)| {
             if repaint_id >= *target {
-                let _ = tx.send(Reply::Text(format!("{{\"ok\":1,\"f\":{repaint_id}}}")));
+                let text = match payload {
+                    Some(payload) => payload.clone(),
+                    None => format!("{{\"ok\":1,\"f\":{repaint_id}}}"),
+                };
+                let _ = tx.send(Reply::Text(text));
                 false
             } else {
                 true
@@ -615,6 +649,84 @@ mod imp {
                 };
                 let time = cx.seconds_since_app_start();
                 for input in inputs {
+                    // Hardware-faithful injection: the same platform path
+                    // (and pointer-pin transform) physical events take.
+                    if let Input::Mouse {
+                        kind,
+                        x,
+                        y,
+                        button,
+                        dx,
+                        dy,
+                        mods,
+                        hw: true,
+                    } = input
+                    {
+                        let raw = dvec2(x, y);
+                        match kind {
+                            MouseKind::Move => {
+                                let (seed, delta) = {
+                                    let mut last = hw_last().lock().unwrap();
+                                    let seed = last.unwrap_or(raw);
+                                    let delta = dvec2(raw.x - seed.x, raw.y - seed.y);
+                                    *last = Some(raw);
+                                    (seed, delta)
+                                };
+                                cx.dispatch_hw_mouse_move(
+                                    window_id,
+                                    raw,
+                                    delta,
+                                    seed,
+                                    mods.into_key_modifiers(),
+                                    time,
+                                );
+                            }
+                            MouseKind::Down => {
+                                *hw_last().lock().unwrap() = Some(raw);
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::MouseDown(RemoteMouseDown {
+                                        time,
+                                        x,
+                                        y,
+                                        button_raw_bits: 1 << button,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                            MouseKind::Up => {
+                                cx.dispatch_hw_pin_release();
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::MouseUp(RemoteMouseUp {
+                                        time,
+                                        x,
+                                        y,
+                                        button_raw_bits: 1 << button,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                            MouseKind::Scroll => {
+                                cx.dispatch_studio_msg(
+                                    StudioToApp::Scroll(RemoteScroll {
+                                        time,
+                                        x,
+                                        y,
+                                        sx: dx,
+                                        sy: dy,
+                                        is_mouse: true,
+                                        modifiers: mods,
+                                    }),
+                                    window_id,
+                                    dvec2(0.0, 0.0),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let msg = match input {
                         Input::Mouse {
                             kind,
@@ -624,6 +736,7 @@ mod imp {
                             dx,
                             dy,
                             mods,
+                            hw: _,
                         } => match kind {
                             MouseKind::Move => StudioToApp::MouseMove(RemoteMouseMove {
                                 time,
@@ -681,7 +794,7 @@ mod imp {
                     frame_waiters()
                         .lock()
                         .unwrap()
-                        .push((cx.repaint_id + 1, tx));
+                        .push((cx.repaint_id + 1, tx, None));
                 } else {
                     let _ = tx.send(Reply::Ok);
                 }
@@ -809,6 +922,27 @@ mod imp {
                 push_log_line(line);
                 let _ = tx.send(Reply::Ok);
                 cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+            }
+            Cmd::Tweak { op, args, wait, tx } => {
+                let result = match cx.tweak_callback {
+                    Some(callback) => callback(cx, &op, &args),
+                    None => Err("no tweaker (this app has no widgets ui root)".to_string()),
+                };
+                match result {
+                    Ok(json) => {
+                        if wait {
+                            frame_waiters()
+                                .lock()
+                                .unwrap()
+                                .push((cx.repaint_id + 1, tx, Some(json)));
+                        } else {
+                            let _ = tx.send(Reply::Text(json));
+                        }
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(Reply::Err(msg));
+                    }
+                }
             }
             Cmd::Quit(tx) => {
                 let line = "[makepad-remote] remote quit".to_string();
@@ -973,6 +1107,25 @@ mod imp {
                 let window = p.window();
                 reply_to_out(ask(move |tx| Cmd::Close { window, tx }, 4))
             }
+            // The tweaker overlay (design feedback). Thin: parse here, decide
+            // in the widgets-side callback. `wait` answers after the next
+            // drawn frame so a following grab sees the change.
+            "/tweak" => route_tweak("toggle", p, true),
+            "/tweak/state" => route_tweak("state", p, false),
+            "/tweak/apply" => route_tweak("apply", p, true),
+            "/tweak/diff" => route_tweak("diff", p, false),
+            "/tweak/clear" => route_tweak("clear", p, false),
+            "/tweak/final" => route_tweak_final(p),
+            // Escape hatch for tweaker ops that don't have (or need) a named
+            // route yet: /tweak/op?op=NAME&... — the callback decides.
+            "/tweak/op" => match p.get(&["op"]) {
+                Some(op) => route_tweak(&op.to_string(), p, false),
+                None => err("need op="),
+            },
+            // The window PNG with the overlay's outlines/annotations in it:
+            // the overlay draws inside the window's own pass, so the ordinary
+            // grab pipeline already composites it.
+            "/tweak/grab" => route_grab(p),
             "/quit" => reply_to_out(ask(|tx| Cmd::Quit(tx), 4)),
             _ => err("no route"),
         }
@@ -989,6 +1142,7 @@ mod imp {
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
              /g?w=&scale=&raw= grab window w (default: first). writes a png, returns {{\"png\":path,\"w\":id,\"sz\":[w,h]}}; raw=1 sends image/png bytes\n\
              /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
+                               add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
@@ -996,6 +1150,12 @@ mod imp {
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
+             /tweak?on=1|0     the TWEAKER design-feedback overlay (also F12 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
+             /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
+             /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
+             /tweak/final      coalesced end state per widget (original -> final); adds \"png\" when the user drew\n\
+             /tweak/grab       window grab with the overlay composited (same as /g while tweaking)\n\
              /close?w=ID       close one window the normal way\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
@@ -1008,6 +1168,54 @@ mod imp {
             status.windows.len(),
             dir,
         )
+    }
+
+    fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
+        let op = op.to_string();
+        let args = p.0.clone();
+        // A `wait` op only resolves on the next drawn frame; give it the
+        // same slack as an input wait.
+        let timeout = if wait { 6 } else { 4 };
+        reply_to_out(ask(move |tx| Cmd::Tweak { op, args, wait, tx }, timeout))
+    }
+
+    /// `/tweak/final` — the coalesced end state. When the answer says the
+    /// user drew (`"drew":1`), grab the window too and name the composited
+    /// PNG in the same JSON, so the caller sees what the drawings mean
+    /// without a second round trip.
+    fn route_tweak_final(p: &Params) -> Out {
+        let args = p.0.clone();
+        let reply = ask(
+            move |tx| Cmd::Tweak {
+                op: "final".to_string(),
+                args,
+                wait: false,
+                tx,
+            },
+            4,
+        );
+        let mut json = match reply {
+            Reply::Text(text) => text,
+            other => return reply_to_out(other),
+        };
+        if json.contains("\"drew\":1") && json.ends_with('}') {
+            match grab_one(p.window(), p.f64(&["scale"], 1.0))
+                .and_then(|grabbed| write_grab(grabbed.window_id, &grabbed.png))
+            {
+                Ok(path) => {
+                    json.pop();
+                    json.push_str(&format!(
+                        ",\"png\":{}}}",
+                        json_str(&path.display().to_string())
+                    ));
+                }
+                Err(msg) => {
+                    json.pop();
+                    json.push_str(&format!(",\"png_err\":{}}}", json_str(&msg)));
+                }
+            }
+        }
+        Out::Json(200, json)
     }
 
     fn route_status(p: &Params) -> Out {
@@ -1079,6 +1287,7 @@ mod imp {
         let dx = p.f64(&["dx", "sx"], 0.0);
         let dy = p.f64(&["dy", "sy"], 0.0);
         let mods = p.mods();
+        let hw = p.flag(&["hw"]);
         let mouse = |kind| Input::Mouse {
             kind,
             x,
@@ -1087,6 +1296,7 @@ mod imp {
             dx,
             dy,
             mods,
+            hw,
         };
         let inputs = match kind.as_str() {
             "move" => vec![mouse(MouseKind::Move)],

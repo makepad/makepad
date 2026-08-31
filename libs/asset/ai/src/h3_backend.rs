@@ -226,6 +226,42 @@ pub fn check_canvas_within_tier(
     Ok(())
 }
 
+/// Wire name of H3's optional LAST-frame keyframe inside
+/// `GenerateRequestJson::inputs`. The first frame keeps riding on
+/// `input_b64`, so a first+last request is:
+///
+/// ```json
+/// {"model":"minimax-h3-q4-24g","prompt":"...",
+///  "input_b64":"<start PNG>","input_content_type":"image/png",
+///  "inputs":[{"name":"last_frame","content_type":"image/png",
+///             "data_b64":"<end PNG>"}]}
+/// ```
+pub const H3_LAST_FRAME_INPUT: &str = "last_frame";
+
+/// Decode one keyframe PNG into `(rgb8, width, height)`. Empty bytes = the
+/// keyframe was not supplied; a bad content type or a bad PNG is a loud
+/// Params error, never a silent downgrade to a workflow with fewer anchors.
+fn decode_keyframe_png(
+    what: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<Option<(Vec<u8>, u32, u32)>, AssetAiError> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if !content_type.starts_with("image/png") && !content_type.is_empty() {
+        return Err(AssetAiError::Params(format!(
+            "minimax-h3: {what} content type {content_type:?} not supported (image/png only)"
+        )));
+    }
+    let (rgba, w, h) = crate::trellis_backend::decode_png_rgba8(bytes)?;
+    let mut rgb = vec![0u8; w * h * 3];
+    for (dst, src) in rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
+        dst.copy_from_slice(&src[..3]);
+    }
+    Ok(Some((rgb, w as u32, h as u32)))
+}
+
 /// One generation request handed to the generator.
 #[derive(Clone, Debug)]
 pub struct VideoJob {
@@ -239,6 +275,17 @@ pub struct VideoJob {
     /// The video VISIBLY starts from this image — the pipeline VAE-encodes it
     /// into never-denoised leading rows and feeds it to the vision tower.
     pub input_rgb: Option<(Vec<u8>, u32, u32)>,
+    /// fl2va LAST-frame keyframe, same shape as `input_rgb`. Arrives on the
+    /// wire as the named input `last_frame` (see [`H3_LAST_FRAME_INPUT`]),
+    /// beside `input_b64` which stays the first frame. Either, both or
+    /// neither may be present: none = t2v, first only = the i2v this backend
+    /// always did, last only = a clip that ENDS on the image, both = first +
+    /// last conditioning. The weights are FL2VA and support all four.
+    ///
+    /// Neither anchor is copied into the output pixel-for-pixel: the
+    /// conditioning rows are dropped before the VAE decode, so the generated
+    /// endpoints RESEMBLE their anchors rather than reproduce them.
+    pub last_input_rgb: Option<(Vec<u8>, u32, u32)>,
     /// true (default) = decode the jointly-denoised audio latents and mux an
     /// AAC track. false = skip the audio VAE decode and mux a silent mp4.
     /// The DiT still denoises the audio rows either way — there is no
@@ -527,31 +574,38 @@ impl ContentBackend for H3Backend {
         // i2v (fl2va): an input image is DECODED HERE so a bad relay fails
         // the job loudly — the pipeline must never silently ignore an image
         // and degrade to t2v.
-        let input_rgb = match params.input_bytes.is_empty() {
-            true => None,
-            false => {
-                if !params.input_content_type.starts_with("image/png")
-                    && !params.input_content_type.is_empty()
-                {
-                    return Err(AssetAiError::Params(format!(
-                        "minimax-h3: input_b64 content type {:?} not supported (image/png only)",
-                        params.input_content_type
-                    )));
-                }
-                let (rgba, w, h) = crate::trellis_backend::decode_png_rgba8(&params.input_bytes)?;
-                let mut rgb = vec![0u8; w * h * 3];
-                for (dst, src) in rgb.chunks_exact_mut(3).zip(rgba.chunks_exact(4)) {
-                    dst.copy_from_slice(&src[..3]);
-                }
-                Some((rgb, w as u32, h as u32))
-            }
+        let input_rgb = decode_keyframe_png(
+            "input_b64",
+            &params.input_bytes,
+            &params.input_content_type,
+        )?;
+        // The optional LAST frame rides on the generic named-input list as
+        // `last_frame` (protocol.rs `GenerateRequestJson::inputs`). Any other
+        // named input stays ignored, exactly as before this existed: callers
+        // send `last_frame` speculatively to nodes that may predate it, and
+        // a stricter H3 would turn those into hard job failures.
+        let last_input_rgb = match params
+            .inputs
+            .iter()
+            .find(|input| input.name == H3_LAST_FRAME_INPUT)
+        {
+            None => None,
+            Some(input) => decode_keyframe_png(
+                H3_LAST_FRAME_INPUT,
+                &input.bytes,
+                &input.content_type,
+            )?,
         };
         let h264 = wants_h264(&params.codec)?;
-        // Canvas: t2v snaps the request (or the default) to 16; i2v snaps to
-        // the 32-grid the vision tower needs and, when no canvas was asked
-        // for, derives it from the keyframe's aspect so the first frame is
-        // not distorted.
-        let (width, height) = match &input_rgb {
+        // Canvas: t2v snaps the request (or the default) to 16; fl2va snaps
+        // to the 32-grid the vision tower needs and, when no canvas was asked
+        // for, derives it from the GEOMETRY ANCHOR's aspect so that keyframe
+        // is not distorted. The geometry anchor is the first keyframe in
+        // packed order — the first frame when there is one, otherwise the
+        // last frame (upstream `before_encoder.py` resolves the canvas from
+        // `keyframes[0]` the same way).
+        let geometry_anchor = input_rgb.as_ref().or(last_input_rgb.as_ref());
+        let (width, height) = match geometry_anchor {
             None => (
                 snap_dim(params.width.unwrap_or(DEFAULT_WIDTH)),
                 snap_dim(params.height.unwrap_or(DEFAULT_HEIGHT)),
@@ -569,6 +623,7 @@ impl ContentBackend for H3Backend {
             steps: params.steps.unwrap_or(DEFAULT_STEPS).clamp(2, 100),
             seed: params.seed,
             input_rgb,
+            last_input_rgb,
             audio: params.audio.unwrap_or(true),
         };
         check_canvas_within_tier(
@@ -836,6 +891,7 @@ mod h3_gen {
         h3_generate_with_control, H3CondCache, H3ComponentFile, H3GenerateParams, H3KeyframeInput,
         H3ModelSet, H3RunControl, H3WeightFormat,
     };
+    use makepad_ai_h3::h3::H3KeyframeAnchor;
     use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
     use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
@@ -1033,18 +1089,28 @@ mod h3_gen {
                 ));
             }
 
-            // fl2va keyframe: the decoded input image + the tokenized
-            // "<Picture 1>: " label of its vision block.
-            let keyframe = job.input_rgb.as_ref().map(|(rgb, w, h)| H3KeyframeInput {
-                rgb: rgb.clone(),
-                width: *w as usize,
-                height: *h as usize,
-                picture_label_ids: self
-                    .tokenizer
-                    .as_ref()
-                    .unwrap()
-                    .encode("<Picture 1>: "),
-            });
+            // fl2va keyframes in PACKED ORDER: the first frame (anchor
+            // First), then the last frame (anchor Last), each with the
+            // tokenized "<Picture i>: " label of its vision block. Upstream
+            // resolves the same order and the same 1-based per-modality
+            // numbering (before_encoder.py lines 118-123, encoders.py line
+            // 286), so a last-only request labels its one image
+            // "<Picture 1>: ".
+            let mut keyframes: Vec<H3KeyframeInput> = Vec::new();
+            for (image, anchor) in [
+                (job.input_rgb.as_ref(), H3KeyframeAnchor::First),
+                (job.last_input_rgb.as_ref(), H3KeyframeAnchor::Last),
+            ] {
+                let Some((rgb, w, h)) = image else { continue };
+                let label = format!("<Picture {}>: ", keyframes.len() + 1);
+                keyframes.push(H3KeyframeInput {
+                    rgb: rgb.clone(),
+                    width: *w as usize,
+                    height: *h as usize,
+                    anchor,
+                    picture_label_ids: self.tokenizer.as_ref().unwrap().encode(&label),
+                });
+            }
 
             let params = H3GenerateParams {
                 width: job.width as usize,
@@ -1053,7 +1119,7 @@ mod h3_gen {
                 num_inference_steps: job.steps as usize,
                 token_ids,
                 seed: job.seed,
-                keyframe,
+                keyframes,
                 video_noise_rows: None,
                 audio_noise_rows: None,
                 condition_rows_override: None,
@@ -1216,7 +1282,7 @@ mod h3_mux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::GenerateRequestJson;
+    use crate::protocol::{GenerateRequestJson, NamedInputJson};
 
     fn video_params(request: GenerateRequestJson) -> GenerateParams {
         GenerateParams::from_request(&request).unwrap()
@@ -1954,6 +2020,192 @@ mod tests {
             .generate(&params, &mut sink, &CancelToken::new())
             .unwrap();
         assert_eq!(artifacts.len(), 1);
+    }
+
+    /// An 8x4 gradient PNG (the two-keyframe tests' stock image).
+    fn gradient_png(w: usize, h: usize, tint: u8) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[
+                    (x * 16) as u8,
+                    (y * 16) as u8,
+                    tint,
+                    255,
+                ]);
+            }
+        }
+        crate::testpattern::encode_png_rgba(&rgba, w, h).unwrap()
+    }
+
+    fn last_frame_input(png: &[u8]) -> NamedInputJson {
+        NamedInputJson {
+            name: H3_LAST_FRAME_INPUT.to_string(),
+            content_type: "image/png".to_string(),
+            data_b64: b64(png),
+        }
+    }
+
+    /// WIRE CONTRACT. `input_b64` stays the first frame; the optional last
+    /// frame arrives as the named input `last_frame`. Both reach the
+    /// generator decoded, on the same job.
+    #[test]
+    fn last_frame_named_input_flows_to_generator() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                let (first, fw, fh) = job.input_rgb.as_ref().expect("first frame must flow");
+                let (last, lw, lh) = job
+                    .last_input_rgb
+                    .as_ref()
+                    .expect("last frame must flow");
+                assert_eq!((*fw, *fh), (8, 4));
+                assert_eq!((*lw, *lh), (8, 4));
+                assert_eq!(first.len(), 8 * 4 * 3);
+                assert_eq!(last.len(), 8 * 4 * 3);
+                // Two DIFFERENT images: the blue channel carries the tint.
+                assert_ne!(first, last);
+                assert_eq!(first[2], 30);
+                assert_eq!(last[2], 200);
+                Ok(stub_clip(job))
+            }),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("a boat sails away".to_string()),
+            input_b64: Some(b64(&gradient_png(8, 4, 30))),
+            input_content_type: Some("image/png".to_string()),
+            inputs: Some(vec![last_frame_input(&gradient_png(8, 4, 200))]),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        assert_eq!(
+            backend
+                .generate(&params, &mut sink, &CancelToken::new())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Last-only: no `input_b64`, just the named `last_frame`. The clip ENDS
+    /// on the image, and the canvas is derived from it (it is the geometry
+    /// anchor when there is no first frame).
+    #[test]
+    fn last_frame_alone_is_a_valid_job_and_sets_the_canvas() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(job.input_rgb.is_none(), "no first frame was sent");
+                let (_, w, h) = job.last_input_rgb.as_ref().expect("last frame must flow");
+                assert_eq!((*w, *h), (8, 4));
+                // Canvas derived from the last frame's aspect (wide), on the
+                // vision tower's 32 grid.
+                assert_eq!(job.width % 32, 0);
+                assert_eq!(job.height % 32, 0);
+                assert!(job.width > job.height);
+                Ok(stub_clip(job))
+            }),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("a boat arrives".to_string()),
+            inputs: Some(vec![last_frame_input(&gradient_png(8, 4, 77))]),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        assert_eq!(
+            backend
+                .generate(&params, &mut sink, &CancelToken::new())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// PARITY. A request with no `last_frame` is exactly the first-only job
+    /// it always was, and an UNKNOWN named input stays ignored — callers send
+    /// `last_frame` speculatively to nodes that may predate it, so a
+    /// stricter H3 would turn a forward-compatible request into a failure.
+    #[test]
+    fn absent_or_unknown_named_inputs_leave_the_first_only_job_alone() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(job.input_rgb.is_some());
+                assert!(job.last_input_rgb.is_none(), "no last frame was sent");
+                Ok(stub_clip(job))
+            }),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let mut sink = |_: &str, _: f64| {};
+        for inputs in [
+            None,
+            Some(vec![NamedInputJson {
+                name: "reference_image".to_string(),
+                content_type: "image/png".to_string(),
+                data_b64: b64(&gradient_png(8, 4, 5)),
+            }]),
+        ] {
+            let params = video_params(GenerateRequestJson {
+                model: "minimax-h3".to_string(),
+                prompt: Some("a boat sails away".to_string()),
+                input_b64: Some(b64(&gradient_png(8, 4, 30))),
+                input_content_type: Some("image/png".to_string()),
+                inputs,
+                ..GenerateRequestJson::default()
+            });
+            assert_eq!(
+                backend
+                    .generate(&params, &mut sink, &CancelToken::new())
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    /// A `last_frame` that is not a PNG, or is not decodable, fails the job
+    /// loudly — the same rule `input_b64` has always had.
+    #[test]
+    fn malformed_last_frame_is_a_params_error() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| Ok(stub_clip(job))),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let mut sink = |_: &str, _: f64| {};
+        // Wrong content type.
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("a boat".to_string()),
+            input_b64: Some(b64(&gradient_png(8, 4, 30))),
+            input_content_type: Some("image/png".to_string()),
+            inputs: Some(vec![NamedInputJson {
+                name: H3_LAST_FRAME_INPUT.to_string(),
+                content_type: "image/jpeg".to_string(),
+                data_b64: b64(&gradient_png(8, 4, 30)),
+            }]),
+            ..GenerateRequestJson::default()
+        });
+        assert!(matches!(
+            backend.generate(&params, &mut sink, &CancelToken::new()),
+            Err(AssetAiError::Params(_))
+        ));
+        // Undecodable bytes.
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("a boat".to_string()),
+            input_b64: Some(b64(&gradient_png(8, 4, 30))),
+            input_content_type: Some("image/png".to_string()),
+            inputs: Some(vec![last_frame_input(b"not a png at all")]),
+            ..GenerateRequestJson::default()
+        });
+        assert!(backend
+            .generate(&params, &mut sink, &CancelToken::new())
+            .is_err());
     }
 
     /// Undecodable image input is a loud Params error, not a silent t2v run.

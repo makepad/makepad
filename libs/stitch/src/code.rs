@@ -1,9 +1,11 @@
 use {
     crate::{
         aliasable_box::AliasableBox,
+        config::Extensions,
         decode::{Decode, DecodeError, Decoder},
         exec::{self, ThreadedInstr},
         ref_::RefType,
+        simd::V128,
         val::ValType,
     },
     std::sync::Arc,
@@ -122,6 +124,51 @@ pub(crate) trait InstrVisitor {
     fn visit_f64_const(&mut self, val: f64) -> Result<(), Self::Error>;
     fn visit_un_op(&mut self, info: UnOpInfo) -> Result<(), Self::Error>;
     fn visit_bin_op(&mut self, info: BinOpInfo) -> Result<(), Self::Error>;
+
+    // Vector (v128) instructions.
+    //
+    // These have their own visitor methods (instead of reusing
+    // `visit_un_op`/`visit_bin_op`) because `v128` operands are never
+    // register-resident: every `v128` input is read from the stack, and
+    // every `v128` output is written to a stack slot whose offset is an
+    // explicit immediate in the threaded code.
+    fn visit_v128_load(&mut self, arg: MemArg) -> Result<(), Self::Error>;
+    fn visit_v128_store(&mut self, arg: MemArg) -> Result<(), Self::Error>;
+    fn visit_v128_const(&mut self, val: V128) -> Result<(), Self::Error>;
+    fn visit_i8x16_shuffle(&mut self, lanes: [u8; 16]) -> Result<(), Self::Error>;
+    fn visit_f32x4_splat(&mut self) -> Result<(), Self::Error>;
+    fn visit_f32x4_extract_lane(&mut self, lane: u8) -> Result<(), Self::Error>;
+    fn visit_f32x4_replace_lane(&mut self, lane: u8) -> Result<(), Self::Error>;
+    fn visit_v128_any_true(&mut self) -> Result<(), Self::Error>;
+    fn visit_v128_bitselect(&mut self) -> Result<(), Self::Error>;
+    fn visit_v128_un_op(&mut self, info: V128UnOpInfo) -> Result<(), Self::Error>;
+    fn visit_v128_bin_op(&mut self, info: V128BinOpInfo) -> Result<(), Self::Error>;
+    fn visit_v128_reduce_op(&mut self, info: V128ReduceOpInfo) -> Result<(), Self::Error>;
+}
+
+/// Info for a `v128 -> v128` operation. Input and output are always on the
+/// stack, so there is only one instruction variant.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct V128UnOpInfo {
+    pub(crate) _name: &'static str,
+    pub(crate) instr: ThreadedInstr,
+}
+
+/// Info for a `v128 x v128 -> v128` operation. Inputs and output are always
+/// on the stack, so there is only one instruction variant.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct V128BinOpInfo {
+    pub(crate) _name: &'static str,
+    pub(crate) instr: ThreadedInstr,
+}
+
+/// Info for a `v128 x v128 -> f32` reduction (e.g. the nonstandard dot
+/// products). Inputs are always on the stack; the scalar result goes to
+/// the float register.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct V128ReduceOpInfo {
+    pub(crate) _name: &'static str,
+    pub(crate) instr: ThreadedInstr,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +205,7 @@ impl Decode for BlockType {
             0x7E => Ok(BlockType::ValType(Some(ValType::I64))),
             0x7D => Ok(BlockType::ValType(Some(ValType::F32))),
             0x7C => Ok(BlockType::ValType(Some(ValType::F64))),
+            0x7B => Ok(BlockType::ValType(Some(ValType::V128))),
             0x70 => Ok(BlockType::ValType(Some(ValType::FuncRef))),
             0x6F => Ok(BlockType::ValType(Some(ValType::ExternRef))),
             byte => {
@@ -234,6 +282,7 @@ pub(crate) fn decode_instr<V>(
     decoder: &mut Decoder<'_>,
     label_idxs: &mut Vec<u32>,
     visitor: &mut V,
+    exts: Extensions,
 ) -> Result<(), V::Error>
 where
     V: InstrVisitor,
@@ -2340,6 +2389,524 @@ where
             17 => visitor.visit_table_fill(decoder.decode()?),
             _ => Err(DecodeError::new("illegal opcode"))?,
         },
+        0xFD => decode_simd_instr(decoder, visitor),
+        0xE0 => {
+            if !exts.ext_math {
+                return Err(DecodeError::new("illegal opcode"))?;
+            }
+            decode_ext_math_instr(decoder, visitor)
+        }
+        _ => Err(DecodeError::new("illegal opcode"))?,
+    }
+}
+
+/// Decodes the subset of the Wasm SIMD proposal that stitch implements.
+///
+/// This covers everything needed for packed `f32x4` math: `v128`
+/// load/store/const, `i8x16.shuffle`, `f32x4` splat/extract/replace lane,
+/// the `f32x4` comparisons and arithmetic (including `pmin`/`pmax` and the
+/// rounding instructions), and the `v128` bitwise instructions. All other
+/// SIMD instructions are rejected with "illegal opcode", exactly as before.
+fn decode_simd_instr<V>(decoder: &mut Decoder<'_>, visitor: &mut V) -> Result<(), V::Error>
+where
+    V: InstrVisitor,
+    V::Error: From<DecodeError>,
+{
+    fn decode_lane_idx<const MAX: u8>(decoder: &mut Decoder<'_>) -> Result<u8, DecodeError> {
+        let lane = decoder.read_byte()?;
+        if lane >= MAX {
+            return Err(DecodeError::new("invalid lane index"));
+        }
+        Ok(lane)
+    }
+
+    match decoder.decode::<u32>()? {
+        // v128.load
+        0 => visitor.visit_v128_load(decoder.decode()?),
+        // v128.store
+        11 => visitor.visit_v128_store(decoder.decode()?),
+        // v128.const
+        12 => {
+            let bytes: [u8; 16] = decoder.read_bytes(16)?.try_into().unwrap();
+            visitor.visit_v128_const(V128::from_bytes(bytes))
+        }
+        // i8x16.shuffle
+        13 => {
+            let lanes: [u8; 16] = decoder.read_bytes(16)?.try_into().unwrap();
+            if lanes.iter().any(|lane| *lane >= 32) {
+                return Err(DecodeError::new("invalid lane index"))?;
+            }
+            visitor.visit_i8x16_shuffle(lanes)
+        }
+        // f32x4.splat
+        19 => visitor.visit_f32x4_splat(),
+        // f32x4.extract_lane
+        31 => visitor.visit_f32x4_extract_lane(decode_lane_idx::<4>(decoder)?),
+        // f32x4.replace_lane
+        32 => visitor.visit_f32x4_replace_lane(decode_lane_idx::<4>(decoder)?),
+        // f32x4.eq/ne/lt/gt/le/ge
+        65 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_eq",
+            instr: exec::f32x4_eq,
+        }),
+        66 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_ne",
+            instr: exec::f32x4_ne,
+        }),
+        67 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_lt",
+            instr: exec::f32x4_lt,
+        }),
+        68 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_gt",
+            instr: exec::f32x4_gt,
+        }),
+        69 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_le",
+            instr: exec::f32x4_le,
+        }),
+        70 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_ge",
+            instr: exec::f32x4_ge,
+        }),
+        // v128.not/and/andnot/or/xor/bitselect/any_true
+        77 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "v128_not",
+            instr: exec::v128_not,
+        }),
+        78 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "v128_and",
+            instr: exec::v128_and,
+        }),
+        79 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "v128_andnot",
+            instr: exec::v128_andnot,
+        }),
+        80 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "v128_or",
+            instr: exec::v128_or,
+        }),
+        81 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "v128_xor",
+            instr: exec::v128_xor,
+        }),
+        82 => visitor.visit_v128_bitselect(),
+        83 => visitor.visit_v128_any_true(),
+        // f32x4.ceil/floor/trunc/nearest
+        103 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_ceil",
+            instr: exec::f32x4_ceil,
+        }),
+        104 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_floor",
+            instr: exec::f32x4_floor,
+        }),
+        105 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_trunc",
+            instr: exec::f32x4_trunc,
+        }),
+        106 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_nearest",
+            instr: exec::f32x4_nearest,
+        }),
+        // f32x4.abs/neg/sqrt/add/sub/mul/div/min/max/pmin/pmax
+        224 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_abs",
+            instr: exec::f32x4_abs,
+        }),
+        225 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_neg",
+            instr: exec::f32x4_neg,
+        }),
+        227 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_sqrt",
+            instr: exec::f32x4_sqrt,
+        }),
+        228 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_add",
+            instr: exec::f32x4_add,
+        }),
+        229 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_sub",
+            instr: exec::f32x4_sub,
+        }),
+        230 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_mul",
+            instr: exec::f32x4_mul,
+        }),
+        231 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_div",
+            instr: exec::f32x4_div,
+        }),
+        232 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_min",
+            instr: exec::f32x4_min,
+        }),
+        233 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_max",
+            instr: exec::f32x4_max,
+        }),
+        234 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_pmin",
+            instr: exec::f32x4_pmin,
+        }),
+        235 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_pmax",
+            instr: exec::f32x4_pmax,
+        }),
+        _ => Err(DecodeError::new("illegal opcode"))?,
+    }
+}
+
+/// Decodes the NONSTANDARD float math opcodes (prefix byte 0xE0, enabled
+/// via [`Extensions::ext_math`]).
+///
+/// Subopcode layout (one byte):
+/// - 0x00..=0x0C: scalar f32 sin, cos, tan, asin, acos, atan, exp, ln,
+///   atan2, pow, rmin, rmax, rem
+/// - 0x10..=0x1C: scalar f64, same order
+/// - 0x20..=0x2C: packed f32x4, same order
+/// - 0x2D..=0x2F: packed dot-product reductions (dot2, dot3, dot4)
+fn decode_ext_math_instr<V>(decoder: &mut Decoder<'_>, visitor: &mut V) -> Result<(), V::Error>
+where
+    V: InstrVisitor,
+    V::Error: From<DecodeError>,
+{
+    fn un_op_info(
+        name: &'static str,
+        type_: ValType,
+        instr_s: ThreadedInstr,
+        instr_r: ThreadedInstr,
+    ) -> UnOpInfo {
+        UnOpInfo {
+            _name: name,
+            input_type: type_,
+            output_type: Some(type_),
+            instr_s,
+            instr_r,
+            instr_i: None,
+        }
+    }
+
+    fn bin_op_info(
+        name: &'static str,
+        type_: ValType,
+        instrs: [ThreadedInstr; 7],
+    ) -> BinOpInfo {
+        let [ss, rs, is, ir, sr, si, ri] = instrs;
+        BinOpInfo {
+            _name: name,
+            input_type_0: type_,
+            input_type_1: type_,
+            output_type: Some(type_),
+            instr_ss: ss,
+            instr_rs: rs,
+            instr_is: is,
+            instr_ir: ir,
+            instr_ii: None,
+            instr_sr: sr,
+            instr_si: si,
+            instr_ri: ri,
+            instr_rr: None,
+        }
+    }
+
+    match decoder.read_byte()? {
+        // Scalar f32
+        0x00 => visitor.visit_un_op(un_op_info(
+            "f32_sin",
+            ValType::F32,
+            exec::f32_sin_s,
+            exec::f32_sin_r,
+        )),
+        0x01 => visitor.visit_un_op(un_op_info(
+            "f32_cos",
+            ValType::F32,
+            exec::f32_cos_s,
+            exec::f32_cos_r,
+        )),
+        0x02 => visitor.visit_un_op(un_op_info(
+            "f32_tan",
+            ValType::F32,
+            exec::f32_tan_s,
+            exec::f32_tan_r,
+        )),
+        0x03 => visitor.visit_un_op(un_op_info(
+            "f32_asin",
+            ValType::F32,
+            exec::f32_asin_s,
+            exec::f32_asin_r,
+        )),
+        0x04 => visitor.visit_un_op(un_op_info(
+            "f32_acos",
+            ValType::F32,
+            exec::f32_acos_s,
+            exec::f32_acos_r,
+        )),
+        0x05 => visitor.visit_un_op(un_op_info(
+            "f32_atan",
+            ValType::F32,
+            exec::f32_atan_s,
+            exec::f32_atan_r,
+        )),
+        0x06 => visitor.visit_un_op(un_op_info(
+            "f32_exp",
+            ValType::F32,
+            exec::f32_exp_s,
+            exec::f32_exp_r,
+        )),
+        0x07 => visitor.visit_un_op(un_op_info(
+            "f32_ln",
+            ValType::F32,
+            exec::f32_ln_s,
+            exec::f32_ln_r,
+        )),
+        0x08 => visitor.visit_bin_op(bin_op_info(
+            "f32_atan2",
+            ValType::F32,
+            [
+                exec::f32_atan2_ss,
+                exec::f32_atan2_rs,
+                exec::f32_atan2_is,
+                exec::f32_atan2_ir,
+                exec::f32_atan2_sr,
+                exec::f32_atan2_si,
+                exec::f32_atan2_ri,
+            ],
+        )),
+        0x09 => visitor.visit_bin_op(bin_op_info(
+            "f32_pow",
+            ValType::F32,
+            [
+                exec::f32_pow_ss,
+                exec::f32_pow_rs,
+                exec::f32_pow_is,
+                exec::f32_pow_ir,
+                exec::f32_pow_sr,
+                exec::f32_pow_si,
+                exec::f32_pow_ri,
+            ],
+        )),
+        0x0A => visitor.visit_bin_op(bin_op_info(
+            "f32_rmin",
+            ValType::F32,
+            [
+                exec::f32_rmin_ss,
+                exec::f32_rmin_rs,
+                exec::f32_rmin_is,
+                exec::f32_rmin_ir,
+                exec::f32_rmin_sr,
+                exec::f32_rmin_si,
+                exec::f32_rmin_ri,
+            ],
+        )),
+        0x0B => visitor.visit_bin_op(bin_op_info(
+            "f32_rmax",
+            ValType::F32,
+            [
+                exec::f32_rmax_ss,
+                exec::f32_rmax_rs,
+                exec::f32_rmax_is,
+                exec::f32_rmax_ir,
+                exec::f32_rmax_sr,
+                exec::f32_rmax_si,
+                exec::f32_rmax_ri,
+            ],
+        )),
+        0x0C => visitor.visit_bin_op(bin_op_info(
+            "f32_rem",
+            ValType::F32,
+            [
+                exec::f32_rem_ss,
+                exec::f32_rem_rs,
+                exec::f32_rem_is,
+                exec::f32_rem_ir,
+                exec::f32_rem_sr,
+                exec::f32_rem_si,
+                exec::f32_rem_ri,
+            ],
+        )),
+        // Scalar f64
+        0x10 => visitor.visit_un_op(un_op_info(
+            "f64_sin",
+            ValType::F64,
+            exec::f64_sin_s,
+            exec::f64_sin_r,
+        )),
+        0x11 => visitor.visit_un_op(un_op_info(
+            "f64_cos",
+            ValType::F64,
+            exec::f64_cos_s,
+            exec::f64_cos_r,
+        )),
+        0x12 => visitor.visit_un_op(un_op_info(
+            "f64_tan",
+            ValType::F64,
+            exec::f64_tan_s,
+            exec::f64_tan_r,
+        )),
+        0x13 => visitor.visit_un_op(un_op_info(
+            "f64_asin",
+            ValType::F64,
+            exec::f64_asin_s,
+            exec::f64_asin_r,
+        )),
+        0x14 => visitor.visit_un_op(un_op_info(
+            "f64_acos",
+            ValType::F64,
+            exec::f64_acos_s,
+            exec::f64_acos_r,
+        )),
+        0x15 => visitor.visit_un_op(un_op_info(
+            "f64_atan",
+            ValType::F64,
+            exec::f64_atan_s,
+            exec::f64_atan_r,
+        )),
+        0x16 => visitor.visit_un_op(un_op_info(
+            "f64_exp",
+            ValType::F64,
+            exec::f64_exp_s,
+            exec::f64_exp_r,
+        )),
+        0x17 => visitor.visit_un_op(un_op_info(
+            "f64_ln",
+            ValType::F64,
+            exec::f64_ln_s,
+            exec::f64_ln_r,
+        )),
+        0x18 => visitor.visit_bin_op(bin_op_info(
+            "f64_atan2",
+            ValType::F64,
+            [
+                exec::f64_atan2_ss,
+                exec::f64_atan2_rs,
+                exec::f64_atan2_is,
+                exec::f64_atan2_ir,
+                exec::f64_atan2_sr,
+                exec::f64_atan2_si,
+                exec::f64_atan2_ri,
+            ],
+        )),
+        0x19 => visitor.visit_bin_op(bin_op_info(
+            "f64_pow",
+            ValType::F64,
+            [
+                exec::f64_pow_ss,
+                exec::f64_pow_rs,
+                exec::f64_pow_is,
+                exec::f64_pow_ir,
+                exec::f64_pow_sr,
+                exec::f64_pow_si,
+                exec::f64_pow_ri,
+            ],
+        )),
+        0x1A => visitor.visit_bin_op(bin_op_info(
+            "f64_rmin",
+            ValType::F64,
+            [
+                exec::f64_rmin_ss,
+                exec::f64_rmin_rs,
+                exec::f64_rmin_is,
+                exec::f64_rmin_ir,
+                exec::f64_rmin_sr,
+                exec::f64_rmin_si,
+                exec::f64_rmin_ri,
+            ],
+        )),
+        0x1B => visitor.visit_bin_op(bin_op_info(
+            "f64_rmax",
+            ValType::F64,
+            [
+                exec::f64_rmax_ss,
+                exec::f64_rmax_rs,
+                exec::f64_rmax_is,
+                exec::f64_rmax_ir,
+                exec::f64_rmax_sr,
+                exec::f64_rmax_si,
+                exec::f64_rmax_ri,
+            ],
+        )),
+        0x1C => visitor.visit_bin_op(bin_op_info(
+            "f64_rem",
+            ValType::F64,
+            [
+                exec::f64_rem_ss,
+                exec::f64_rem_rs,
+                exec::f64_rem_is,
+                exec::f64_rem_ir,
+                exec::f64_rem_sr,
+                exec::f64_rem_si,
+                exec::f64_rem_ri,
+            ],
+        )),
+        // Packed f32x4
+        0x20 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_sin",
+            instr: exec::f32x4_sin,
+        }),
+        0x21 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_cos",
+            instr: exec::f32x4_cos,
+        }),
+        0x22 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_tan",
+            instr: exec::f32x4_tan,
+        }),
+        0x23 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_asin",
+            instr: exec::f32x4_asin,
+        }),
+        0x24 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_acos",
+            instr: exec::f32x4_acos,
+        }),
+        0x25 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_atan",
+            instr: exec::f32x4_atan,
+        }),
+        0x26 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_exp",
+            instr: exec::f32x4_exp,
+        }),
+        0x27 => visitor.visit_v128_un_op(V128UnOpInfo {
+            _name: "f32x4_ln",
+            instr: exec::f32x4_ln,
+        }),
+        0x28 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_atan2",
+            instr: exec::f32x4_atan2,
+        }),
+        0x29 => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_pow",
+            instr: exec::f32x4_pow,
+        }),
+        0x2A => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_rmin",
+            instr: exec::f32x4_rmin,
+        }),
+        0x2B => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_rmax",
+            instr: exec::f32x4_rmax,
+        }),
+        0x2C => visitor.visit_v128_bin_op(V128BinOpInfo {
+            _name: "f32x4_rem",
+            instr: exec::f32x4_rem,
+        }),
+        // Packed reductions: left-associated f32 dot product over the
+        // first 2/3/4 lanes.
+        0x2D => visitor.visit_v128_reduce_op(V128ReduceOpInfo {
+            _name: "f32x4_dot2",
+            instr: exec::f32x4_dot2,
+        }),
+        0x2E => visitor.visit_v128_reduce_op(V128ReduceOpInfo {
+            _name: "f32x4_dot3",
+            instr: exec::f32x4_dot3,
+        }),
+        0x2F => visitor.visit_v128_reduce_op(V128ReduceOpInfo {
+            _name: "f32x4_dot4",
+            instr: exec::f32x4_dot4,
+        }),
         _ => Err(DecodeError::new("illegal opcode"))?,
     }
 }

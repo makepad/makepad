@@ -15,6 +15,7 @@ script_mod! {
 
     mod.widgets.CheckBoxBase = #(CheckBox::register_widget(vm))
 
+    /** The flat checkbox: an inset mark box with a stroked check, plus its label. */
     mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
         width: Fit
         height: Fit
@@ -27,15 +28,24 @@ script_mod! {
             margin: theme.mspace_h_1{left: 13.}
         }
 
+        /** The mark box material: an SDF box with a stroked checkmark on top. */
         draw_bg +: {
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** checked mix 0..1 step 0.01 */
             active: instance(0.0)
 
+            /** mark box side length in pixels 8..32 step 1 */
             size: uniform(15.0)
+            /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
+            /** corner rounding radius, halved for the mark box 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
 
             color: uniform(theme.color_inset)
@@ -52,7 +62,9 @@ script_mod! {
             border_color_focus: uniform(theme.color_bevel_focus)
             border_color_disabled: uniform(theme.color_bevel_disabled)
 
+            /** checkmark size as a fraction of the mark box 0..1 step 0.05 */
             mark_size: uniform(0.65)
+            /** the check/knob ink, hidden while unchecked */
             mark_color: uniform(theme.color_u_hidden)
             mark_color_hover: uniform(theme.color_u_hidden)
             mark_color_down: uniform(theme.color_u_hidden)
@@ -118,11 +130,17 @@ script_mod! {
             }
         }
 
+        /** The checkbox label ink, state-mixed with the mark box. */
         draw_text +: {
+            /** keyboard-focus mix 0..1 step 0.01 */
             focus: instance(0.0)
+            /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
+            /** pressed mix 0..1 step 0.01 */
             down: instance(0.0)
+            /** checked mix 0..1 step 0.01 */
             active: instance(0.0)
+            /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
 
             ink_centered: true
@@ -239,11 +257,13 @@ script_mod! {
         }
     }
 
+    /** The flat toggle: the checkbox retuned as a pill with a sliding knob. */
     mod.widgets.ToggleFlat = mod.widgets.CheckBoxFlat{
         label_walk +: {
             margin: theme.mspace_h_1{left: 27.}
         }
 
+        /** The pill material: a 1.6:1 box whose knob slides and fills on active. */
         draw_bg +: {
             mark_color: theme.color_label_outer
             mark_color_hover: theme.color_label_outer_active
@@ -342,6 +362,7 @@ script_mod! {
         }
     }
 
+    /** The custom checkbox: no mark box drawn, for a caller-supplied icon. */
     mod.widgets.CheckBoxCustom = mod.widgets.CheckBox{
         width: Fit
         height: Fit

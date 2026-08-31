@@ -22,6 +22,7 @@ pub mod quake3_import;
 // vj, asset-ui) parse them without linking the importer. Re-exported here
 // so every existing `crate::stateful_billboard::` /
 // `makepad_asset_importer::stateful_billboard::` path keeps compiling.
+pub use makepad_asset_data::dimensions;
 pub use makepad_asset_data::stateful_billboard;
 pub mod world_preview;
 pub use makepad_asset_data::world_place;

@@ -321,6 +321,64 @@ mod tests {
         assert_eq!(r.cat.as_deref(), Some("building"));
     }
 
+    /// The prompt IS the contract: the closed vocabularies live in two
+    /// places (this file's tables and the text the model is shown), and a
+    /// word in one but not the other is a facet that either never gets
+    /// asked for or gets asked for and then silently dropped. Extract the
+    /// lists back OUT of the prompt text and compare, so the v7 rewrite —
+    /// and every rewrite after it — cannot drift.
+    fn vocab_in(prompt: &str, line_key: &str, marker: &str) -> Vec<String> {
+        let line = prompt
+            .lines()
+            .find(|l| l.starts_with(&format!("{line_key}: ")))
+            .unwrap_or_else(|| panic!("prompt has no `{line_key}:` line"));
+        let tail = line
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("`{line_key}:` line has no `{marker}`"))
+            .1;
+        // The list ends where the explanation starts: a full stop or an
+        // em dash. Neither can appear inside a vocabulary word.
+        let tail = tail.split(['.', '\u{2014}']).next().unwrap_or(tail);
+        tail.split_whitespace().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn kit_prompt_vocabularies_match_the_parse_tables() {
+        let p = crate::PROMPT;
+        assert_eq!(vocab_in(p, "cat", "list only: "), CATEGORIES);
+        assert_eq!(vocab_in(p, "role", "list only: "), ROLES);
+        assert_eq!(vocab_in(p, "conn", "one word from: "), CONNECTIONS);
+        assert_eq!(vocab_in(p, "size", "one of: "), SIZES);
+        assert_eq!(vocab_in(p, "style", "words from: "), STYLES);
+        // Every line the parser knows is actually asked for.
+        for key in ["what", "cat", "role", "conn", "size", "colors", "style", "desc"] {
+            assert!(
+                p.lines().any(|l| l.starts_with(&format!("{key}: "))),
+                "kit prompt never asks for `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn person_prompt_vocabularies_match_the_parse_tables() {
+        let p = crate::PROMPT_PERSON;
+        assert_eq!(vocab_in(p, "age", "one word from: "), AGES);
+        assert_eq!(vocab_in(p, "build", "one word from: "), BUILDS);
+        assert_eq!(vocab_in(p, "face", "headwear from: "), FACE);
+        for key in ["what", "age", "build", "hair", "face", "job", "colors", "desc", "back"] {
+            assert!(
+                p.lines().any(|l| l.starts_with(&format!("{key}: "))),
+                "person prompt never asks for `{key}`"
+            );
+        }
+        // The hair line is a shape+colour sentence, not a bare list, so it
+        // is checked by containment rather than equality.
+        let hair_line = p.lines().find(|l| l.starts_with("hair: ")).unwrap();
+        for word in HAIR {
+            assert!(hair_line.contains(word), "hair line never offers `{word}`");
+        }
+    }
+
     #[test]
     fn clamps_runaway_fields() {
         let long = "desc: ".to_string() + &vec!["word"; 40].join(" ");

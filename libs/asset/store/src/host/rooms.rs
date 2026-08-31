@@ -40,6 +40,9 @@ use std::sync::Mutex;
 /// hundred bytes; this is a bound against a stuck client, not a product
 /// limit.
 pub const MAX_ROOMS: usize = 64;
+/// Sanity bound on a reported player count; a room is a LAN game, not a
+/// stadium.
+pub const MAX_PLAYERS: u32 = 256;
 /// Longest game id a room may name.
 pub const MAX_GAME_BYTES: usize = 64;
 /// Longest invite string. `ip:tcp:udp#key` is ~90 bytes for IPv4 and ~110
@@ -68,6 +71,10 @@ pub struct Room {
     pub invite: String,
     /// Who to say the room belongs to ("Joined rik's room").
     pub host: String,
+    /// People in the world right now, host included — the host reports it
+    /// on every heartbeat, so a games list can say "2 playing" beside the
+    /// row. Starts at 1 (the host) on claim.
+    pub players: u32,
     pub created_ms: u64,
     pub expires_ms: u64,
 }
@@ -181,6 +188,7 @@ impl RoomRegistry {
             game: game.to_string(),
             invite: invite.to_string(),
             host: host.to_string(),
+            players: 1,
             created_ms: now_ms,
             expires_ms: now_ms.saturating_add(ttl_ms),
         };
@@ -201,6 +209,19 @@ impl RoomRegistry {
         ttl_ms: u64,
         now_ms: u64,
     ) -> Result<Room, RoomError> {
+        self.heartbeat_with(id, token, ttl_ms, None, now_ms)
+    }
+
+    /// A heartbeat that also reports how many people are in the world.
+    /// `None` leaves the last count alone (an older client).
+    pub fn heartbeat_with(
+        &self,
+        id: &str,
+        token: &str,
+        ttl_ms: u64,
+        players: Option<u32>,
+        now_ms: u64,
+    ) -> Result<Room, RoomError> {
         check_ttl(ttl_ms)?;
         let mut games = self.games.lock().unwrap_or_else(|e| e.into_inner());
         games.retain(|_, e| e.room.expires_ms > now_ms);
@@ -212,6 +233,9 @@ impl RoomRegistry {
             return Err(RoomError::NotYourRoom);
         }
         entry.room.expires_ms = now_ms.saturating_add(ttl_ms);
+        if let Some(players) = players {
+            entry.room.players = players.clamp(1, MAX_PLAYERS);
+        }
         Ok(entry.room.clone())
     }
 

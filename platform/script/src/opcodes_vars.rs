@@ -15,11 +15,14 @@ impl<'a> ScriptVm<'a> {
     // Object/Array begin handlers
 
     pub(crate) fn handle_begin_proto(&mut self) {
+        let ip = self.bx.threads.cur_ref().trap.ip;
         let proto = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let me = self
             .bx
             .heap
             .new_with_proto_checked(proto, self.bx.threads.cur().trap.pass());
+        // the construction site: cascade view / doc lookup key
+        self.bx.heap.set_made_at(me, ip);
         self.bx.threads.cur().mes.push(ScriptMe::Object(me));
         self.bx.threads.cur().trap.goto_next();
     }
@@ -231,7 +234,9 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub(crate) fn handle_begin_bare(&mut self) {
+        let ip = self.bx.threads.cur_ref().trap.ip;
         let me = self.bx.heap.new_object();
+        self.bx.heap.set_made_at(me, ip);
         self.bx.threads.cur().mes.push(ScriptMe::Object(me));
         self.bx.threads.cur().trap.goto_next();
     }

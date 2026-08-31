@@ -23,6 +23,13 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The CEF distribution this crate was built against (from the prebuilt's
+/// `cef_version.h`), e.g. `138.0.59+g21d63d5+chromium-138.0.7204.306`.
+pub const CEF_VERSION: &str = match option_env!("MAKEPAD_CEF_VERSION") {
+    Some(version) => version,
+    None => "unknown",
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapResult {
     Continue,
@@ -68,9 +75,46 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    bootstrap, do_message_loop_work, initialize, reexec_into_app_bundle_if_needed, shutdown,
-    Browser,
+    accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
+    is_initialized, prepare, reexec_into_app_bundle_if_needed, set_background_color, shutdown,
+    startup_phases, AcceleratedStats, Browser, RenderMode,
 };
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+    None,
+    Software,
+    Accelerated,
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AcceleratedStats {
+    pub frames: u64,
+    pub last_width: usize,
+    pub last_height: usize,
+    pub last_format: i32,
+    pub last_blit_micros: u64,
+    pub total_blit_micros: u64,
+    pub dropped_no_target: u64,
+    pub target_frames: u64,
+    pub last_copy_width: usize,
+    pub last_copy_height: usize,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn accelerated_paint_requested() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_background_color(_argb: u32) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn background_color() -> u32 {
+    0
+}
 
 #[cfg(not(target_os = "macos"))]
 pub struct Browser;
@@ -148,6 +192,89 @@ impl Browser {
     pub fn take_frame(&mut self) -> Option<Frame> {
         None
     }
+
+    pub fn is_accelerated(&self) -> bool {
+        false
+    }
+
+    pub fn render_mode(&self) -> RenderMode {
+        RenderMode::None
+    }
+
+    pub fn accelerated_stats(&self) -> AcceleratedStats {
+        AcceleratedStats::default()
+    }
+
+    pub fn set_accelerated_target(
+        &mut self,
+        _iosurface: *mut std::ffi::c_void,
+        _width: usize,
+        _height: usize,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn clear_accelerated_target(&mut self) {}
+
+    pub fn accelerated_frame_counter(&self) -> u64 {
+        0
+    }
+
+    pub fn nav_generation(&self) -> u64 {
+        0
+    }
+
+    pub fn title(&self) -> String {
+        String::new()
+    }
+
+    pub fn url(&self) -> String {
+        String::new()
+    }
+
+    pub fn is_loading(&self) -> bool {
+        false
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        false
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        false
+    }
+
+    pub fn go_back(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn go_forward(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn reload(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn stop_load(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn set_hidden(&mut self, _hidden: bool) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        false
+    }
+
+    pub fn take_popup_requests(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn take_favicon(&mut self) -> Option<Frame> {
+        None
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -161,6 +288,21 @@ pub fn do_message_loop_work() {}
 #[cfg(not(target_os = "macos"))]
 pub fn initialize() -> Result<()> {
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prepare() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_initialized() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn startup_phases() -> Option<(u128, u128)> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]

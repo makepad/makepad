@@ -114,6 +114,60 @@ impl std::fmt::Display for ScriptLoc {
 }
 
 impl ScriptCode {
+    /// The source text of the fn whose body starts at `ip` — the `fn` token's
+    /// line through the matching closing brace — plus where it lives. What
+    /// the design tweaker shows under a material well: the pixel/vertex
+    /// function as written, docs included, for a code-only rewrite.
+    pub fn fn_source_text(&self, ip: ScriptIp) -> Option<(ScriptLoc, String)> {
+        let loc = self.ip_to_loc(ip)?;
+        let bodies = self.bodies.borrow();
+        let body = bodies.get(ip.body as usize)?;
+        let source_map = &body.parser.source_map;
+        // Synthetic opcodes map to no token; take the nearest mapped one on
+        // either side, as `ip_to_loc` does.
+        let ip_index = (ip.index as usize).min(source_map.len().saturating_sub(1));
+        let token_index = (0..=ip_index)
+            .rev()
+            .find_map(|i| source_map.get(i).and_then(|slot| *slot))
+            .or_else(|| {
+                ((ip_index + 1)..source_map.len()).find_map(|i| source_map.get(i).and_then(|slot| *slot))
+            })?;
+        let (row, _col) = body.tokenizer.token_index_to_row_col(token_index)?;
+        let code = &body.effective_code;
+        let lines: Vec<&str> = code.split_inclusive('\n').collect();
+        // The ip maps to a token INSIDE the fn; walk back to the header line
+        // (the nearest line above holding `fn`), then take from there to the
+        // matching closing brace.
+        let mut header = (row as usize).min(lines.len().saturating_sub(1));
+        while header > 0 && !lines[header].contains("fn") {
+            header -= 1;
+        }
+        let start: usize = lines[..header].iter().map(|l| l.len()).sum();
+        let rest = &code[start.min(code.len())..];
+        // From the first `{` after the fn header to its matching `}`.
+        let open = rest.find('{')?;
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in rest[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        // Include the header line (e.g. `pixel: fn() {`) from its own start.
+        let line_start = rest[..open].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let text = rest[line_start..end].to_string();
+        Some((loc, text))
+    }
+
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
             let source_map = &body.parser.source_map;

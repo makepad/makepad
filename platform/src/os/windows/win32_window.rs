@@ -78,7 +78,8 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowRect, MoveWindow, PostMessageW,
-                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                        ShowWindow,
                         CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM,
                         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
                         HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
@@ -163,6 +164,14 @@ unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -
     unsafe { ImmSetCandidateWindow(himc, lpcandidate) }
 }
 
+// `SetWindowTextW` is not present in the vendored (pruned) `windows` crate's
+// `WindowsAndMessaging` module; bind it the same way as the shims above.
+#[inline]
+unsafe fn SetWindowTextW(hwnd: HWND, lpstring: PCWSTR) -> windows_core::BOOL {
+    windows_core::link!("user32.dll" "system" fn SetWindowTextW(hwnd : HWND, lpstring : PCWSTR) -> windows_core::BOOL);
+    unsafe { SetWindowTextW(hwnd, lpstring) }
+}
+
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -232,6 +241,13 @@ pub struct Win32Window {
 }
 
 impl Win32Window {
+    pub fn set_title(&self, title: &str) {
+        let title = encode_wide(title);
+        unsafe {
+            let _ = SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr()));
+        }
+    }
+
     /// Opt into Win11 rounded corners for overlapped custom-chrome windows.
     /// No-ops on older Windows (DwmSetWindowAttribute returns an error).
     fn apply_win11_window_shape(hwnd: HWND, small_radius: bool) {
@@ -575,7 +591,7 @@ impl Win32Window {
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
         let drop_target: IDropTarget = DropTarget {
-            drag_item: RefCell::new(None),
+            drag_items: RefCell::new(None),
             hwnd,
         }
         .into();
@@ -1217,14 +1233,32 @@ impl Win32Window {
                 let message = unsafe { Box::from_raw(lparam.0 as *mut DropTargetMessage) };
 
                 match *message {
-                    DropTargetMessage::Leave => {
-                        if with_win32_app(|app| app.is_dragging_internal.get()) {
+                    DropTargetMessage::Leave(was_delivered) => {
+                        // An internal drag and an external one both end
+                        // here. The old guard let only internal ones
+                        // through, so a file dragged into the window and
+                        // out again never told the app the pointer had
+                        // gone — and every hover highlight a widget lit on
+                        // the way in stayed lit for the rest of the run.
+                        //
+                        // But DragEnd means "the drag you were told about
+                        // has ended", not "something left the window": OLE
+                        // calls DragLeave even when DragEnter's conversion
+                        // failed (unsupported format, a DROPFILES
+                        // parse_dropfiles rejected), and the app was never
+                        // told about that drag in the first place. Firing
+                        // unconditionally would send it a DragEnd — with
+                        // its synthesized MouseUp and hover cycle — for a
+                        // drag it never saw start. was_delivered is that
+                        // guard now, sourced from whether DropTarget's
+                        // drag_items was actually Some.
+                        if was_delivered || with_win32_app(|app| app.is_dragging_internal.get()) {
                             // TODO: cancel DoDragDrop somehow
                             window.do_callback(Win32Event::DragEnd);
                         }
                     }
-                    DropTargetMessage::Enter(flags, mut point, effect, drag_item)
-                    | DropTargetMessage::Over(flags, mut point, effect, drag_item) => {
+                    DropTargetMessage::Enter(flags, mut point, effect, drag_items)
+                    | DropTargetMessage::Over(flags, mut point, effect, drag_items) => {
                         // decode message
                         let _ = unsafe {
                             ScreenToClient(window.hwnd, &mut point as *mut POINTL as *mut POINT)
@@ -1254,18 +1288,18 @@ impl Win32Window {
                                 x: point.x as f64 / dpi_factor,
                                 y: point.y as f64 / dpi_factor,
                             },
-                            items: Arc::new(vec![drag_item]),
+                            items: Arc::new(drag_items),
                             response: Arc::new(Mutex::new(response)),
                         }));
                     }
 
-                    DropTargetMessage::Drop(flags, mut point, _effect, drag_item) => {
+                    DropTargetMessage::Drop(flags, mut point, _effect, drag_items) => {
                         // decode message
                         let _ = unsafe {
                             ScreenToClient(window.hwnd, &mut point as *mut POINTL as *mut POINT)
                         };
 
-                        //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_item: {:?}",point.x,point.y,flags.0,response,drag_item);
+                        //log!("dropping at ({},{}), flags: {:04X}, response: {:?}, drag_items: {:?}",point.x,point.y,flags.0,response,drag_items);
                         let dpi_factor = window.get_dpi_factor();
 
                         // send to makepad
@@ -1281,7 +1315,7 @@ impl Win32Window {
                                 x: point.x as f64 / dpi_factor,
                                 y: point.y as f64 / dpi_factor,
                             },
-                            items: Arc::new(vec![drag_item]),
+                            items: Arc::new(drag_items),
                         }));
 
                         window.do_callback(Win32Event::DragEnd);

@@ -1,5 +1,16 @@
 workspace.members = [
     # === app ===
+    "apps/mpbrowser",
+    "apps/mpterm",
+    "apps/mpwm",
+    "apps/mpsheets",
+    "libs/mp_theme",
+    "libs/mp_wm_api",
+    "apps/mptask",
+    "apps/mpimage",
+    "apps/mpvideo",
+    "apps/mppdf",
+    "apps/mpfiles",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
@@ -39,6 +50,7 @@ workspace.members = [
     "examples/datagrid",
     "examples/todo",
     "examples/portallist_hit",
+    "examples/modal_footprint",
     "examples/vector",
     "examples/aichat",
     "examples/pdf",
@@ -79,6 +91,7 @@ workspace.members = [
     "libs/audio_lyrics",
     # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
     "libs/audio_sidechannels",
+    "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
     # === mkfl motion payload + classical optical flow + all-intra re-encode

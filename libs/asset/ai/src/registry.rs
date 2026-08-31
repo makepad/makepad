@@ -178,6 +178,14 @@ pub enum Domain {
     /// prompt: this is one object, reconstructed at the requested gaussian
     /// budget, and the two are neither substitutable nor comparable in cost.
     Splat,
+    /// Image + prompt -> text answer (a VLM: the language model with its
+    /// vision tower attached). Its own domain rather than a mode of `Text`,
+    /// for the same reason `Edit` is not a mode of `Image`: a vision model
+    /// fails closed without an input image, so text affinity must never
+    /// route a plain prompt-expansion job to it. The serving shape is the
+    /// chat shape — one prompt in, one answer out, weights resident between
+    /// requests — which is why a box that serves chat can serve this.
+    Vision,
 }
 
 impl Domain {
@@ -203,6 +211,7 @@ impl Domain {
             "inpaint" => Some(Domain::Inpaint),
             "enhance" => Some(Domain::Enhance),
             "splat" => Some(Domain::Splat),
+            "vision" => Some(Domain::Vision),
             _ => None,
         }
     }
@@ -229,6 +238,7 @@ impl Domain {
             Domain::Inpaint => "inpaint",
             Domain::Enhance => "enhance",
             Domain::Splat => "splat",
+            Domain::Vision => "vision",
         }
     }
 }

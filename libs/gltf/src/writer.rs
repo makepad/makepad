@@ -592,6 +592,271 @@ pub struct GlbTexturedPart<'a> {
     pub detail_scale: [f32; 2],
 }
 
+/// One authored rigid part for [`write_glb_named_parts`]. Positions are in
+/// model space; the writer stores them relative to `pivot` and puts that
+/// pivot on the matching glTF node. This preserves the author's useful
+/// articulation origin without changing the rendered model-space geometry.
+pub struct GlbNamedPart<'a> {
+    pub name: &'a str,
+    pub positions: &'a [[f32; 3]],
+    pub indices: &'a [u32],
+    pub pivot: [f32; 3],
+    pub color: [f32; 4],
+    /// Index in this slice. A parent must precede its child.
+    pub parent: Option<usize>,
+    /// Optional idle-motion manifest. The writer also emits a standards-based
+    /// glTF clip so the engine and ordinary viewers share one asset truth.
+    pub animation: Option<GlbPartAnimation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlbPartAnimationKind { Swing, Spin, Bob }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlbPartAnimation {
+    pub kind: GlbPartAnimationKind,
+    /// 0=x, 1=y, 2=z.
+    pub axis: usize,
+    pub degrees: f32,
+    pub hz: f32,
+    pub amp: f32,
+}
+
+/// Serialize rigid named parts as one glTF node + mesh + material per part.
+///
+/// This is deliberately a structural writer: it does not merge authored
+/// parts into primitives of one mesh, because node names and pivots are part
+/// of the model-program asset contract.
+pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
+    let mut b = GlbBinBuilder::new();
+    let mut nodes = Vec::new();
+    let mut meshes = Vec::new();
+    let mut materials = Vec::new();
+    let mut animations = Vec::new();
+    let mut children = vec![Vec::<usize>::new(); parts.len()];
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(parent) = part.parent {
+            assert!(parent < index, "part parent must precede child");
+            children[parent].push(index);
+        }
+    }
+
+    for part in parts {
+        if part.positions.is_empty() || part.indices.len() < 3 {
+            continue;
+        }
+        assert!(part.indices.len() % 3 == 0, "indices must be triangles");
+        assert!(
+            part.indices.iter().all(|&index| index < part.positions.len() as u32),
+            "part index out of range"
+        );
+
+        let local_positions: Vec<[f32; 3]> = part
+            .positions
+            .iter()
+            .map(|p| {
+                [
+                    p[0] - part.pivot[0],
+                    p[1] - part.pivot[1],
+                    p[2] - part.pivot[2],
+                ]
+            })
+            .collect();
+        let normals = compute_vertex_normals(&local_positions, part.indices);
+
+        let mut index_bytes = Vec::with_capacity(part.indices.len() * 4);
+        for &index in part.indices {
+            index_bytes.extend_from_slice(&index.to_le_bytes());
+        }
+        let index_accessor = b.accessor(
+            &index_bytes,
+            5125,
+            part.indices.len(),
+            "SCALAR",
+            None,
+            Some(34963),
+        );
+        let mut position_values = Vec::with_capacity(local_positions.len() * 3);
+        for position in &local_positions {
+            position_values.extend_from_slice(position);
+        }
+        let position_accessor =
+            b.f32_accessor(&position_values, 3, "VEC3", true, Some(34962));
+        let mut normal_values = Vec::with_capacity(normals.len() * 3);
+        for normal in &normals {
+            normal_values.extend_from_slice(normal);
+        }
+        let normal_accessor =
+            b.f32_accessor(&normal_values, 3, "VEC3", false, Some(34962));
+        let mut color_values = Vec::with_capacity(local_positions.len() * 3);
+        for _ in &local_positions {
+            color_values.extend_from_slice(&part.color[..3]);
+        }
+        let color_accessor =
+            b.f32_accessor(&color_values, 3, "VEC3", false, Some(34962));
+
+        let mesh_index = meshes.len();
+        let material_index = materials.len();
+        meshes.push(format!(
+            "{{\"name\":\"{}\",\"primitives\":[{{\"attributes\":{{\"POSITION\":{position_accessor},\"NORMAL\":{normal_accessor},\"COLOR_0\":{color_accessor}}},\"indices\":{index_accessor},\"material\":{material_index},\"mode\":4}}]}}",
+            json_escape(part.name)
+        ));
+        let [r, g, blue, a] = part.color.map(|v| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        });
+        materials.push(format!(
+            "{{\"name\":\"{}\",\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{r},{g},{blue},{a}],\"metallicFactor\":0.0,\"roughnessFactor\":0.72}}}}",
+            json_escape(part.name)
+        ));
+        let translation = match part.parent {
+            Some(parent) => [
+                part.pivot[0] - parts[parent].pivot[0],
+                part.pivot[1] - parts[parent].pivot[1],
+                part.pivot[2] - parts[parent].pivot[2],
+            ],
+            None => part.pivot,
+        };
+        let children_json = if children[mesh_index].is_empty() {
+            String::new()
+        } else {
+            format!(
+                ",\"children\":[{}]",
+                children[mesh_index].iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+            )
+        };
+        let extras_json = part.animation.map_or_else(String::new, |animation| {
+            let kind = match animation.kind {
+                GlbPartAnimationKind::Swing => "swing",
+                GlbPartAnimationKind::Spin => "spin",
+                GlbPartAnimationKind::Bob => "bob",
+            };
+            let axis = ["x", "y", "z"][animation.axis.min(2)];
+            format!(
+                ",\"extras\":{{\"states\":[\"idle-a\",\"idle-b\"],\"default\":\"idle-a\",\"kind\":\"localgen-{kind}\",\"axis\":\"{axis}\",\"degrees\":{},\"hz\":{},\"amp\":{}}}",
+                fmt_f32(animation.degrees), fmt_f32(animation.hz), fmt_f32(animation.amp)
+            )
+        });
+        nodes.push(format!(
+            "{{\"name\":\"{}\",\"mesh\":{mesh_index},\"translation\":[{},{},{}]{children_json}{extras_json}}}",
+            json_escape(part.name),
+            fmt_f32(translation[0]),
+            fmt_f32(translation[1]),
+            fmt_f32(translation[2]),
+        ));
+
+        if let Some(animation) = part.animation {
+            let hz = animation.hz.max(0.001);
+            let (times, values, path, width) = match animation.kind {
+                GlbPartAnimationKind::Swing => {
+                    let times = vec![0.0, 0.25 / hz, 0.75 / hz, 1.0 / hz];
+                    let quaternion = |degrees: f32| {
+                        let half = degrees.to_radians() * 0.5;
+                        let mut value = [0.0, 0.0, 0.0, half.cos()];
+                        value[animation.axis.min(2)] = half.sin();
+                        value
+                    };
+                    let mut values = Vec::new();
+                    for degrees in [0.0, animation.degrees, -animation.degrees, 0.0] {
+                        values.extend_from_slice(&quaternion(degrees));
+                    }
+                    (times, values, "rotation", 4)
+                }
+                GlbPartAnimationKind::Spin => {
+                    let times = vec![0.0, 0.5 / hz, 1.0 / hz];
+                    let mut values = Vec::new();
+                    for degrees in [0.0f32, 180.0, 360.0] {
+                        let half = degrees.to_radians() * 0.5;
+                        let mut value = [0.0, 0.0, 0.0, half.cos()];
+                        value[animation.axis.min(2)] = half.sin();
+                        values.extend_from_slice(&value);
+                    }
+                    (times, values, "rotation", 4)
+                }
+                GlbPartAnimationKind::Bob => {
+                    let times = vec![0.0, 0.25 / hz, 0.75 / hz, 1.0 / hz];
+                    let mut values = Vec::new();
+                    for offset in [0.0, animation.amp, -animation.amp, 0.0] {
+                        let mut value = translation;
+                        value[animation.axis.min(2)] += offset;
+                        values.extend_from_slice(&value);
+                    }
+                    (times, values, "translation", 3)
+                }
+            };
+            let input = b.f32_accessor(&times, 1, "SCALAR", true, None);
+            let output = b.f32_accessor(
+                &values,
+                width,
+                if width == 4 { "VEC4" } else { "VEC3" },
+                false,
+                None,
+            );
+            animations.push(format!(
+                "{{\"name\":\"{}\",\"samplers\":[{{\"input\":{input},\"output\":{output},\"interpolation\":\"LINEAR\"}}],\"channels\":[{{\"sampler\":0,\"target\":{{\"node\":{mesh_index},\"path\":\"{path}\"}}}}]}}",
+                json_escape(part.name)
+            ));
+        }
+    }
+
+    if nodes.is_empty() {
+        return write_glb_mesh(
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0, 1, 2],
+        );
+    }
+    let scene_nodes = parts.iter().enumerate()
+        .filter(|(_, part)| part.parent.is_none())
+        .map(|(index, _)| index.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let animations_json = if animations.is_empty() {
+        String::new()
+    } else {
+        format!("\"animations\":[{}],", animations.join(","))
+    };
+    let json = format!(
+        concat!(
+            "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"makepad-gltf-writer\"}},",
+            "\"scene\":0,\"scenes\":[{{\"nodes\":[{}]}}],",
+            "\"nodes\":[{}],\"meshes\":[{}],\"materials\":[{}],{}",
+            "\"accessors\":[{}],\"bufferViews\":[{}],",
+            "\"buffers\":[{{\"byteLength\":{}}}]}}"
+        ),
+        scene_nodes,
+        nodes.join(","),
+        meshes.join(","),
+        materials.join(","),
+        animations_json,
+        b.accessors.join(","),
+        b.views.join(","),
+        b.bin.len(),
+    );
+    let mut json_bytes = json.into_bytes();
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(b' ');
+    }
+    let mut bin = b.bin;
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+    out.extend_from_slice(&json_bytes);
+    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+    out.extend_from_slice(&bin);
+    out
+}
+
 /// Several textured parts as one mesh (one primitive + material each).
 /// Identical image bytes are stored once and shared. Sampler is linear +
 /// repeat so wall/floor UVs can tile.

@@ -822,6 +822,11 @@ impl WaylandCx {
                 // requiring xdg_wm_base v3, which `wayland_state.rs` does not bind. This arm
                 // is correct as a permanent no-op.
                 CxOsOp::RepositionWindow(_window_id, _size) => {}
+                CxOsOp::SetWindowTitle(window_id, title) => {
+                    if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
+                        window.toplevel.set_title(title);
+                    }
+                }
                 CxOsOp::SetWindowVisuals(_window_id, visuals) => {
                     if visuals.backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();

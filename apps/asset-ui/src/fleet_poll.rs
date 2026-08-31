@@ -58,7 +58,45 @@ pub struct FleetPoll {
     pub loras: Vec<Vec<String>>,
     /// Endpoints with any request in flight (index-parallel to snapshots).
     busy: Vec<bool>,
+    /// Consecutive failed `/health` probes per endpoint. A box is only
+    /// declared offline after [`OFFLINE_AFTER`] of them: a node denoising a
+    /// whole GPU or streaming 17 GB of weights answers late, and late is not
+    /// the same as gone. The panel used to flip such a box to "down" on the
+    /// first slow answer and back on the next, once a second.
+    health_fails: Vec<u32>,
+    /// A failing streak has already been reported for this endpoint, per
+    /// probe kind (health, models); cleared by that probe's next success.
+    /// Without it a busy node writes one log line per poll — the log filled
+    /// with thousands of them while every box in fact answered 200 to curl.
+    /// The two are separate because a box that answers `/health` and drops
+    /// `/models` would otherwise clear the latch every round and complain
+    /// every round.
+    health_quiet: Vec<bool>,
+    models_quiet: Vec<bool>,
     in_flight: HashMap<LiveId, InFlight>,
+}
+
+/// Consecutive `/health` failures before a box is shown as offline.
+/// Three misses at the poll cadence is several seconds of real silence, well
+/// past any answer a loaded box is merely slow to give.
+const OFFLINE_AFTER: u32 = 3;
+
+/// What a failed `/health` probe means for a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeVerdict {
+    /// Keep showing the box exactly as it was; `remaining` more consecutive
+    /// misses would declare it offline.
+    Hold { remaining: u32 },
+    /// Enough silence: the box is gone, not merely busy.
+    Offline,
+}
+
+fn verdict_after_misses(misses: u32) -> ProbeVerdict {
+    if misses >= OFFLINE_AFTER {
+        ProbeVerdict::Offline
+    } else {
+        ProbeVerdict::Hold { remaining: OFFLINE_AFTER - misses }
+    }
 }
 
 impl FleetPoll {
@@ -69,6 +107,9 @@ impl FleetPoll {
             jobs: Vec::new(),
             loras: Vec::new(),
             busy: Vec::new(),
+            health_fails: Vec::new(),
+            health_quiet: Vec::new(),
+            models_quiet: Vec::new(),
             in_flight: HashMap::new(),
         }
     }
@@ -79,6 +120,25 @@ impl FleetPoll {
         self.jobs.remove(index);
         self.loras.remove(index);
         self.busy.remove(index);
+        self.health_fails.remove(index);
+        self.health_quiet.remove(index);
+        self.models_quiet.remove(index);
+    }
+
+    /// One `/health` answer landed: the row is live and its miss streak
+    /// (and the log-once latch) resets. Returns the streak it ended.
+    fn note_health_ok(&mut self, index: usize) -> u32 {
+        let missed = self.health_fails[index];
+        self.health_fails[index] = 0;
+        self.health_quiet[index] = false;
+        missed
+    }
+
+    /// One `/health` probe missed. The row is NOT touched until the verdict
+    /// says offline — a box mid-denoise or mid-download is still there.
+    fn note_health_miss(&mut self, index: usize) -> ProbeVerdict {
+        self.health_fails[index] = self.health_fails[index].saturating_add(1);
+        verdict_after_misses(self.health_fails[index])
     }
 
     fn row_by_url(&self, url: &str) -> Option<usize> {
@@ -123,6 +183,9 @@ impl FleetPoll {
                 self.jobs.push(Vec::new());
                 self.loras.push(Vec::new());
                 self.busy.push(false);
+                self.health_fails.push(0);
+                self.health_quiet.push(false);
+                self.models_quiet.push(false);
                 changed = true;
             }
         }
@@ -206,12 +269,14 @@ impl FleetPoll {
     /// (caller redraws the fleet panel). A response for a row that was
     /// coalesced or lease-expired while the request flew is dropped.
     pub fn handle_response(&mut self, cx: &mut Cx, item: &NetworkResponse) -> bool {
-        let (request_id, response) = match item {
+        let (request_id, response, transport_error) = match item {
             NetworkResponse::HttpResponse {
                 request_id,
                 response,
-            } => (*request_id, Some(response)),
-            NetworkResponse::HttpError { request_id, .. } => (*request_id, None),
+            } => (*request_id, Some(response), None),
+            NetworkResponse::HttpError { request_id, error } => {
+                (*request_id, None, Some(error.message.clone()))
+            }
             _ => return false,
         };
         let Some(in_flight) = self.in_flight.remove(&request_id) else {
@@ -222,15 +287,22 @@ impl FleetPoll {
         };
         match in_flight.pending {
             Pending::Health => {
+                let status = response.map(|r| r.status_code);
                 let health = response
                     .filter(|r| r.status_code == 200)
                     .and_then(|r| r.get_string_body())
                     .and_then(|body| HealthJson::deserialize_json_lenient(&body).ok());
                 let up = health.is_some();
-                self.latency_ms[index] =
-                    up.then(|| in_flight.sent_at.elapsed().as_millis() as u64);
-                self.snapshots[index].health = health;
                 if up {
+                    let missed = self.note_health_ok(index);
+                    if missed > 0 {
+                        log!(
+                            "fleet: {} answered again after {missed} missed probe(s)",
+                            in_flight.base_url
+                        );
+                    }
+                    self.latency_ms[index] = Some(in_flight.sent_at.elapsed().as_millis() as u64);
+                    self.snapshots[index].health = health;
                     // A fresh health may prove this row aliases another
                     // (same node_key/node_id) — collapse before fetching
                     // models so the duplicate never renders.
@@ -240,49 +312,114 @@ impl FleetPoll {
                         let url = format!("{base_url}/models");
                         self.get(cx, base_url, url, Pending::Models);
                     }
-                } else {
-                    self.snapshots[index].models.clear();
-                    self.busy[index] = false;
+                    return true;
                 }
-                true
+                // SLOW IS NOT GONE. A missed probe costs the row its
+                // latency reading and nothing else until the misses pile up.
+                let verdict = self.note_health_miss(index);
+                self.latency_ms[index] = None;
+                self.busy[index] = false;
+                let reason = transport_error.unwrap_or_else(|| match status {
+                    Some(code) => format!("HTTP {code}"),
+                    None => "unreadable /health".to_string(),
+                });
+                let was_up = self.snapshots[index].is_up();
+                match verdict {
+                    ProbeVerdict::Offline => {
+                        if was_up {
+                            // ONE line, naming the reason, at the moment the
+                            // box actually goes offline.
+                            log!(
+                                "fleet: {} offline after {OFFLINE_AFTER} failed /health probes: \
+                                 {reason}",
+                                in_flight.base_url
+                            );
+                        }
+                        self.snapshots[index].health = None;
+                        self.snapshots[index].models.clear();
+                        was_up
+                    }
+                    ProbeVerdict::Hold { remaining } => {
+                        if !self.health_quiet[index] {
+                            self.health_quiet[index] = true;
+                            log!(
+                                "fleet: {} missed a /health probe ({reason}) — holding it up \
+                                 for {remaining} more",
+                                in_flight.base_url
+                            );
+                        }
+                        // The row keeps its last known health and models: a
+                        // busy box is still the same box.
+                        false
+                    }
+                }
             }
             Pending::Models => {
                 self.busy[index] = false;
+                // One line per failing STREAK. A saturated box drops a
+                // model probe now and then; that is worth knowing once, not
+                // thirty times a minute.
+                let complain = |quiet: &mut bool, message: String| {
+                    if !*quiet {
+                        *quiet = true;
+                        log!("{}", message);
+                    }
+                };
+                let quiet = &mut self.models_quiet[index];
                 let models = match response {
                     Some(response) if response.status_code == 200 => {
                         match response.get_string_body() {
                             Some(body) => match ModelsJson::deserialize_json_lenient(&body) {
                                 Ok(models) => Some(models),
                                 Err(error) => {
-                                    log!(
-                                        "fleet: {} /models JSON rejected ({} bytes): {:?}",
-                                        in_flight.base_url,
-                                        body.len(),
-                                        error
+                                    complain(
+                                        quiet,
+                                        format!(
+                                            "fleet: {} /models JSON rejected ({} bytes): {:?}",
+                                            in_flight.base_url,
+                                            body.len(),
+                                            error
+                                        ),
                                     );
                                     None
                                 }
                             },
                             None => {
-                                log!("fleet: {} /models returned no text body", in_flight.base_url);
+                                complain(
+                                    quiet,
+                                    format!(
+                                        "fleet: {} /models returned no text body",
+                                        in_flight.base_url
+                                    ),
+                                );
                                 None
                             }
                         }
                     }
                     Some(response) => {
-                        log!(
-                            "fleet: {} /models returned HTTP {}",
-                            in_flight.base_url,
-                            response.status_code
+                        complain(
+                            quiet,
+                            format!(
+                                "fleet: {} /models returned HTTP {}",
+                                in_flight.base_url, response.status_code
+                            ),
                         );
                         None
                     }
                     None => {
-                        log!("fleet: {} /models request failed", in_flight.base_url);
+                        complain(
+                            quiet,
+                            format!(
+                                "fleet: {} /models request failed ({}) — keeping its last model list",
+                                in_flight.base_url,
+                                transport_error.as_deref().unwrap_or("no response")
+                            ),
+                        );
                         None
                     }
                 };
                 if let Some(models) = models {
+                    *quiet = false;
                     self.snapshots[index].models = models.models;
                 }
                 // Live job list last (running + queued, other clients too).
@@ -463,6 +600,66 @@ mod tests {
             node_id,
             fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
         }
+    }
+
+    /// SLOW IS NOT GONE. Under a full-GPU denoise or a 17 GB weight pull a
+    /// box answers late; the panel used to flip it to "down" on the first
+    /// miss and back on the next, once a second, while every box in fact
+    /// answered 200 to curl.
+    #[test]
+    fn a_busy_box_survives_missed_probes_and_only_then_goes_offline() {
+        let mut fleet = fleet(&["http://10.0.0.165:8123"]);
+        fleet.snapshots[0].health = Some(health(1000, "key-a"));
+        fleet.snapshots[0].models = ModelsJson::deserialize_json_lenient(
+            r#"{"models":[{"id":"minimax-h3","domain":"video","backend":"h3","available":true,"gated":false,"state":"ready"}]}"#,
+        )
+        .expect("test models json parses")
+        .models;
+
+        // Two misses: still up, still holding its model list.
+        assert_eq!(fleet.note_health_miss(0), ProbeVerdict::Hold { remaining: 2 });
+        assert!(fleet.snapshots[0].is_up());
+        assert_eq!(fleet.note_health_miss(0), ProbeVerdict::Hold { remaining: 1 });
+        assert!(fleet.snapshots[0].is_up());
+        assert_eq!(fleet.snapshots[0].models.len(), 1);
+
+        // One answer and the streak is gone — no flicker, no lost state.
+        assert_eq!(fleet.note_health_ok(0), 2);
+        assert_eq!(fleet.note_health_miss(0), ProbeVerdict::Hold { remaining: 2 });
+
+        // Sustained silence IS offline.
+        fleet.note_health_miss(0);
+        assert_eq!(fleet.note_health_miss(0), ProbeVerdict::Offline);
+    }
+
+    #[test]
+    fn the_offline_verdict_needs_a_full_streak() {
+        assert_eq!(verdict_after_misses(0), ProbeVerdict::Hold { remaining: 3 });
+        assert_eq!(verdict_after_misses(1), ProbeVerdict::Hold { remaining: 2 });
+        assert_eq!(verdict_after_misses(OFFLINE_AFTER - 1), ProbeVerdict::Hold { remaining: 1 });
+        assert_eq!(verdict_after_misses(OFFLINE_AFTER), ProbeVerdict::Offline);
+        assert_eq!(verdict_after_misses(99), ProbeVerdict::Offline);
+    }
+
+    /// The log-once latch: a failing streak says so once, not once per poll.
+    /// The old behaviour wrote 16-32 identical lines per box per minute.
+    #[test]
+    fn a_failing_streak_is_reported_once_not_once_per_poll() {
+        let mut fleet = fleet(&["http://10.0.0.165:8123"]);
+        fleet.snapshots[0].health = Some(health(1000, "key-a"));
+        assert!(!fleet.health_quiet[0], "a healthy row has nothing latched");
+        // The handler latches on the first complaint of a streak.
+        fleet.health_quiet[0] = true;
+        fleet.note_health_miss(0);
+        assert!(fleet.health_quiet[0], "still latched: no second line");
+        // A success unlatches it, so the NEXT streak is reported again.
+        fleet.note_health_ok(0);
+        assert!(!fleet.health_quiet[0]);
+        // A box that answers /health and drops /models keeps its OWN latch,
+        // so it does not complain once per poll forever.
+        fleet.models_quiet[0] = true;
+        fleet.note_health_ok(0);
+        assert!(fleet.models_quiet[0]);
     }
 
     #[test]

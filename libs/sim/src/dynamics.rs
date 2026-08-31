@@ -20,7 +20,7 @@
 
 use makepad_math::*;
 
-use crate::entity::{push_mass_of, BodyKind, Entity, Shape};
+use crate::entity::{push_mass_of, BodyKind, Entity, HurtBox, Shape};
 use crate::terrain::{Terrain, TERRAIN_ID};
 use crate::TICK_DT;
 
@@ -43,12 +43,12 @@ use makepad_box3d::recording::{write_registry, RecBuffer, Recording};
 use makepad_box3d::recording_replay::load_registry;
 use makepad_box3d::shape::{
     create_capsule_shape, create_height_field_shape, create_hull_shape, create_mesh_shape,
-    create_sphere_shape, shape_get_user_data,
+    create_sphere_shape, destroy_shape, shape_get_user_data, shape_set_hull,
 };
 use makepad_box3d::types::{
     default_body_def, default_shape_def, default_surface_material, default_world_def, BodyType,
-    Capsule, CollisionPlane, Filter, HeightFieldDef, MeshDef, QueryFilter, ShapeProxy, Sphere,
-    SurfaceMaterial,
+    Capsule, CollisionPlane, Filter, HeightFieldDef, HullData, MeshDef, QueryFilter, ShapeProxy,
+    Sphere, SurfaceMaterial,
 };
 use makepad_box3d::world_snapshot::{deserialize_into_shell, serialize_world};
 
@@ -72,6 +72,9 @@ pub const SUBSTEPS: i32 = 4;
 //   visually solid decor" contract without the decor ever touching the
 //   solver. The continuous-collision pass also consults these masks, so a
 //   fast rigid can never TOI-clip against decor or a capsule.
+// - WALK HURT shapes are zero-density query ghosts attached to rigid bodies.
+//   Only the capsule-mover query sees them: they make a tall vehicle's visible
+//   body block a walker while its low chassis remains the sole solver shape.
 
 /// Solid statics, kinematics and the terrain heightfield.
 pub const CAT_WORLD: u64 = 1 << 0;
@@ -84,6 +87,9 @@ pub const CAT_DECOR: u64 = 1 << 3;
 /// Articulated character limbs. They collide with world geometry and ordinary
 /// rigids, but not mover capsules or other ragdolls (including their own).
 pub const CAT_RAGDOLL: u64 = 1 << 4;
+/// A rigid's presentation-matched walking obstacle. Shapes in this category
+/// answer only the capsule mover query and never form solver contacts.
+pub const CAT_WALK_HURT: u64 = 1 << 5;
 /// Category carried by QUERIES only — never by a shape. Its presence in a
 /// shape's mask is what makes that shape ray-visible.
 pub const CAT_QUERY: u64 = 1 << 62;
@@ -144,6 +150,13 @@ struct MirrorEntry {
     entity_id: u64,
     body: BodyId,
     kind: MirrorKind,
+    /// Optional zero-mass shape carrying a rigid's presentation bounds for
+    /// capsule walking only. It shares the rigid transform but no solver
+    /// category, so chassis mass/inertia and contacts remain untouched.
+    walk_hurt_shape: Option<ShapeId>,
+    /// Geometry currently applied to `walk_hurt_shape`. Kept separately from
+    /// the entity so a live renderer bounds update can replace only the ghost.
+    walk_hurt_box: Option<HurtBox>,
     /// Last pose pushed to / read from box3d, compared BIT-exactly to detect
     /// outside writes (script verbs, rollback). For rigids these are the
     /// read-back values; for statics/kinematics the last mirrored pose.
@@ -321,6 +334,14 @@ impl RigidDynamics {
     pub fn rigid_body_of(&self, entity_id: u64) -> Option<BodyId> {
         let at = self.find(entity_id)?;
         (self.mirror[at].kind == MirrorKind::Rigid).then(|| self.mirror[at].body)
+    }
+
+    /// The mirrored box3d body of ANY kind (rigid, kinematic, static …) —
+    /// for callers that only need an id to exclude from a query, like the
+    /// trashed car hull grounding its own downward ray.
+    pub fn mirror_body_of(&self, entity_id: u64) -> Option<BodyId> {
+        let at = self.find(entity_id)?;
+        Some(self.mirror[at].body)
     }
 
     /// Adopt this tick's read-back as the baseline for `entity_id`, so a pose
@@ -708,6 +729,102 @@ fn sane_extent(v: f32) -> f32 {
     }
 }
 
+fn sane_center(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+/// Only collidable rigids need a second walking envelope. Static/mover hurt
+/// boxes remain weapon targets, and `collide:false` rigids mirror as Decor.
+fn walk_hurt_box(e: &Entity, kind: MirrorKind) -> Option<HurtBox> {
+    if kind != MirrorKind::Rigid {
+        return None;
+    }
+    let hurt = e.hurt_box?;
+    Some(HurtBox {
+        center: vec3f(
+            sane_center(hurt.center.x),
+            sane_center(hurt.center.y),
+            sane_center(hurt.center.z),
+        ),
+        half: vec3f(
+            sane_extent(hurt.half.x),
+            sane_extent(hurt.half.y),
+            sane_extent(hurt.half.z),
+        ),
+    })
+}
+
+fn walk_hurt_hull(hurt: HurtBox) -> std::sync::Arc<HullData> {
+    make_offset_box_hull(
+        hurt.half.x,
+        hurt.half.y,
+        hurt.half.z,
+        b3vec3(hurt.center.x, hurt.center.y, hurt.center.z),
+    )
+}
+
+fn create_walk_hurt_shape(
+    world: &mut World,
+    body: BodyId,
+    entity_id: u64,
+    hurt: HurtBox,
+) -> ShapeId {
+    let mut shape_def = default_shape_def();
+    // This shape is a query proxy, not part of the rigid. Zero density keeps
+    // it harmless even if a future caller explicitly reapplies body mass;
+    // skipping the mass update preserves the chassis tensor bit-for-bit now.
+    shape_def.density = 0.0;
+    shape_def.update_body_mass = false;
+    shape_def.invoke_contact_creation = false;
+    shape_def.user_data = entity_id;
+    shape_def.filter = Filter {
+        category_bits: CAT_WALK_HURT,
+        mask_bits: CAT_QUERY,
+        group_index: 0,
+    };
+    create_hull_shape(world, body, &shape_def, &walk_hurt_hull(hurt))
+}
+
+fn create_mirror_entry(world: &mut World, e: &Entity, kind: MirrorKind) -> MirrorEntry {
+    let body = create_mirror_body(world, e, kind);
+    let walk_hurt_box = walk_hurt_box(e, kind);
+    let walk_hurt_shape = walk_hurt_box
+        .map(|hurt| create_walk_hurt_shape(world, body, e.id, hurt));
+    MirrorEntry {
+        entity_id: e.id,
+        body,
+        kind,
+        walk_hurt_shape,
+        walk_hurt_box,
+        pos: e.pos,
+        yaw: e.yaw,
+        orient: e.orient,
+        vel: e.vel,
+        prev_vel: e.vel,
+    }
+}
+
+/// Renderer-measured suspension offsets can drift by sub-millimetres while a
+/// vehicle settles. Do not rebuild the query proxy (and wake its body) for
+/// invisible noise; larger changes still track live bodywork within 1 mm.
+fn walk_hurt_changed(applied: Option<HurtBox>, wanted: Option<HurtBox>) -> bool {
+    const EPS: f32 = 1.0e-3;
+    match (applied, wanted) {
+        (None, None) => false,
+        (Some(a), Some(b)) => {
+            let dc = a.center - b.center;
+            let dh = a.half - b.half;
+            dc.x.abs() > EPS
+                || dc.y.abs() > EPS
+                || dc.z.abs() > EPS
+                || dh.x.abs() > EPS
+                || dh.y.abs() > EPS
+                || dh.z.abs() > EPS
+        }
+        _ => true,
+    }
+}
+
 fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId {
     let mut body_def = default_body_def();
     body_def.body_type = match kind {
@@ -739,6 +856,10 @@ fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId
     // visitor shapes that opted in). Event flag only — no solver effect.
     if kind == MirrorKind::Rigid {
         shape_def.enable_sensor_events = true;
+        // The block layer consumes exact solver impact speeds for universal
+        // vehicle crush damage. Contact-hit events are observation only; the
+        // solver response and the existing mover-sensor path are unchanged.
+        shape_def.enable_hit_events = true;
     }
     match kind {
         // D2: the mover capsule. Radius covers the AABB footprint, clamped by
@@ -1027,17 +1148,7 @@ pub fn reconcile(
                 destroy_body(&mut dynamics.world, entry.body);
             }
             (None, Some(kind)) => {
-                let body = create_mirror_body(&mut dynamics.world, e, kind);
-                out.push(MirrorEntry {
-                    entity_id: e.id,
-                    body,
-                    kind,
-                    pos: e.pos,
-                    yaw: e.yaw,
-                    orient: e.orient,
-                    vel: e.vel,
-                    prev_vel: e.vel,
-                });
+                out.push(create_mirror_entry(&mut dynamics.world, e, kind));
             }
             (Some(mut entry), Some(kind)) => {
                 if entry.kind != kind {
@@ -1046,19 +1157,33 @@ pub fn reconcile(
                     // rollback could restore an older entity under a reused
                     // id. Destroy + recreate keeps every flip correct.
                     destroy_body(&mut dynamics.world, entry.body);
-                    let body = create_mirror_body(&mut dynamics.world, e, kind);
-                    entry = MirrorEntry {
-                        entity_id: e.id,
-                        body,
-                        kind,
-                        pos: e.pos,
-                        yaw: e.yaw,
-                        orient: e.orient,
-                        vel: e.vel,
-                        prev_vel: e.vel,
-                    };
+                    entry = create_mirror_entry(&mut dynamics.world, e, kind);
                     out.push(entry);
                     continue;
+                }
+                let wanted_hurt = walk_hurt_box(e, kind);
+                if walk_hurt_changed(entry.walk_hurt_box, wanted_hurt) {
+                    match (entry.walk_hurt_shape, wanted_hurt) {
+                        (Some(shape), Some(hurt)) => {
+                            shape_set_hull(&mut dynamics.world, shape, &walk_hurt_hull(hurt));
+                            entry.walk_hurt_box = Some(hurt);
+                        }
+                        (Some(shape), None) => {
+                            destroy_shape(&mut dynamics.world, shape, false);
+                            entry.walk_hurt_shape = None;
+                            entry.walk_hurt_box = None;
+                        }
+                        (None, Some(hurt)) => {
+                            entry.walk_hurt_shape = Some(create_walk_hurt_shape(
+                                &mut dynamics.world,
+                                entry.body,
+                                e.id,
+                                hurt,
+                            ));
+                            entry.walk_hurt_box = Some(hurt);
+                        }
+                        (None, None) => {}
+                    }
                 }
                 match kind {
                     MirrorKind::Static | MirrorKind::Decor => {
@@ -1436,14 +1561,15 @@ pub fn projectile_ccd(
 
 // ------------------------------------------------------ capsule mover (P3)
 
-/// Query filter for the opt-in capsule mover: the world and rigids block it;
+/// Query filter for the opt-in capsule mover: the world, rigid chassis and a
+/// rigid's presentation-matched walking envelope block it;
 /// other movers' sensor capsules never do (movers pass through movers — the
 /// documented contract) and decor stays walk-through, exactly as it is for
 /// the AABB sweep.
 fn capsule_mover_filter() -> QueryFilter {
     QueryFilter {
         category_bits: CAT_QUERY,
-        mask_bits: CAT_WORLD | CAT_RIGID,
+        mask_bits: CAT_WORLD | CAT_RIGID | CAT_WALK_HURT,
         id: 0,
         name: "capsule_mover",
     }
