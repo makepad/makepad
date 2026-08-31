@@ -17872,15 +17872,6 @@ p2 {}
         self.ui.redraw(cx);
     }
 
-    /// The listing's HAS chips, in [`PASSES`] order so a chip and the thing
-    /// it filters on can never drift apart.
-    const MUSIC_HAS_CHIPS: [&'static [LiveId]; 4] = [
-        ids!(music_has_stem),
-        ids!(music_has_krk),
-        ids!(music_has_key),
-        ids!(music_has_bpm),
-    ];
-
     /// The dialog's widget ids, in [`PASSES`] order so the two never drift.
     const PREP_BOXES: [(&'static [LiveId], &'static [LiveId]); 4] = [
         (ids!(prep_stems_explorer), ids!(prep_stems_queue)),
@@ -25046,13 +25037,15 @@ p2 {}
             let on = self.music_autoplay || self.deck_target == DeckTarget::Mix;
             self.paint_lit(cx, ids!(music_autoplay), on);
         }
-        // The HAS chips: each one narrows the listing to rows that already
-        // carry that work, and several together narrow to rows carrying all
-        // of it.
-        for (index, chip) in Self::MUSIC_HAS_CHIPS.iter().enumerate() {
-            if self.ui.button(cx, chip).clicked(actions) {
-                self.music_has[index] = !self.music_has[index];
-                self.paint_lit(cx, chip, self.music_has[index]);
+        // The FILTER chip's ticks, in `PASSES` order so a tick and the thing
+        // it filters on cannot drift apart. Each narrows the listing to rows
+        // that already carry that work, and several together narrow to rows
+        // carrying all of it.
+        if let Some((index, on)) =
+            self.ui.drop_toggles(cx, ids!(music_has_filter)).toggled(actions)
+        {
+            if let Some(slot) = self.music_has.get_mut(index) {
+                *slot = on;
                 self.music_rows_dirty = true;
             }
         }

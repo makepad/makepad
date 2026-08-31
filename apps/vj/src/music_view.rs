@@ -2939,14 +2939,18 @@ script_mod! {
                                 text: "IMPORT"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/import.svg") }
                             }
-                            // What the app is allowed to work out about a track
-                            // before anyone asks to play it. Icon-only, so it
+                            // The explorer's menu: what may be worked out
+                            // ahead of the set, which columns each list
+                            // carries, and where the cache lives. A MENU
+                            // mark rather than a gear — a gear promises
+                            // settings for the thing beside it, and this
+                            // opens the lists' own menu. Icon-only, so it
                             // takes the house icon button rather than a bare
                             // Button, which would leave the glyph off-centre.
                             music_prep_cfg := MusicIconButton{
                                 width: 24
                                 height: 20
-                                draw_icon +: { svg: crate_resource("self:resources/icons/gear.svg") }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/menu.svg") }
                             }
                             // Fit, not a fixed 90: the count is four characters and a
                             // slash, and the dead width it used to carry pushed the
@@ -2985,8 +2989,14 @@ script_mod! {
                         // Narrow the listing to what has already been worked
                         // out. Several at once AND together: "a key and a
                         // tempo" is the harmonic-mixing question, and it is
-                        // not answerable one column at a time. Lit chips are
-                        // in force; the row reads as off when none are.
+                        // not answerable one column at a time.
+                        //
+                        // One chip that drops a list of ticks, not four chips
+                        // in a row: four of them cost most of a narrow
+                        // console's line to say something the operator reads
+                        // once a set. Closed, the chip carries the count, so
+                        // a filter that is narrowing the listing still says
+                        // so without being opened.
                         View{
                             width: Fill
                             height: Fit
@@ -2994,26 +3004,11 @@ script_mod! {
                             spacing: 6
                             padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
-                            MusicLabel{width: Fit text: "HAS"}
-                            music_has_stem := MusicChipButton{
+                            music_has_filter := DropToggles{
                                 height: 18
-                                text: "STEMS"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/levels.svg") }
-                            }
-                            music_has_krk := MusicChipButton{
-                                height: 18
-                                text: "KARAOKE"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/karaoke.svg") }
-                            }
-                            music_has_key := MusicChipButton{
-                                height: 18
-                                text: "KEY"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/note.svg") }
-                            }
-                            music_has_bpm := MusicChipButton{
-                                height: 18
-                                text: "BPM"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/beat_lock.svg") }
+                                text: "FILTER"
+                                labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
+                                draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
                             }
                             // What the filters left, and what the background
                             // passes are doing about the rest.
