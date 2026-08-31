@@ -197,6 +197,33 @@ pub fn clamp_point_to_screens(screens: &[ScreenGeom], point: Vec2d) -> Vec2d {
 /// The size a window falls back to when the requested one carries no usable information.
 pub const DEFAULT_WINDOW_SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
 
+/// The largest extent a window may be given.
+///
+/// A floor alone is not enough: a state file holding a huge number reaches the backend just as
+/// readily as a zero, and an extent no renderer can back is as unusable as an empty one. 16384 is
+/// the point past which drivers stop being able to render the surface at all — it is the smallest
+/// `GL_MAX_TEXTURE_SIZE` and maximum viewport dimension in practical use — and it is far larger
+/// than any real arrangement of displays, so nothing legitimate is clipped by it.
+pub const MAX_WINDOW_SIZE: Vec2d = Vec2d { x: 16384.0, y: 16384.0 };
+
+/// Reduces a *resize* request to an extent a windowing system can act on, or `None` when the
+/// request carries no usable size at all.
+///
+/// Creating a window and resizing one need the same guard but answer a bad request differently.
+/// A create has to produce a window regardless, so [`sanitize_window_geom`] substitutes
+/// [`DEFAULT_WINDOW_SIZE`]; a resize has an existing, working window to leave alone, so a request
+/// that says nothing is refused outright rather than turned into a size the caller never asked
+/// for. `None` means "keep the window as it is, and say why".
+pub fn sanitize_resize(size: Vec2d) -> Option<Vec2d> {
+    if !(size.x.is_finite() && size.y.is_finite() && size.x >= 1.0 && size.y >= 1.0) {
+        return None;
+    }
+    Some(dvec2(
+        size.x.clamp(MIN_WINDOW_SIZE.x, MAX_WINDOW_SIZE.x),
+        size.y.clamp(MIN_WINDOW_SIZE.y, MAX_WINDOW_SIZE.y),
+    ))
+}
+
 /// Reduces a requested window size and position to values a windowing system can act on,
 /// without needing to know anything about the attached displays.
 ///
@@ -214,9 +241,13 @@ pub fn sanitize_window_geom(position: Option<Vec2d>, size: Vec2d) -> (Option<Vec
     // rather than the floor, which would restore a technically-visible 200x120 sliver. A small
     // positive size is a real request and is only raised to something grabbable.
     let size = if size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0 {
+        // Capped as well as floored: a saved size far past what any renderer can back is not a
+        // window the app can start with. On Windows, macOS and X11 the fit against the attached
+        // displays would cut it down anyway, but Wayland enumerates no displays, so without this
+        // the raw number reaches `wl_egl_window_create` and `eglCreateWindowSurface`.
         dvec2(
-            size.x.max(MIN_WINDOW_SIZE.x),
-            size.y.max(MIN_WINDOW_SIZE.y),
+            size.x.clamp(MIN_WINDOW_SIZE.x, MAX_WINDOW_SIZE.x),
+            size.y.clamp(MIN_WINDOW_SIZE.y, MAX_WINDOW_SIZE.y),
         )
     } else {
         DEFAULT_WINDOW_SIZE
@@ -449,6 +480,41 @@ mod tests {
         assert_eq!(
             sanitize_window_geom(None, dvec2(50.0, 40.0)).1,
             MIN_WINDOW_SIZE
+        );
+    }
+
+    #[test]
+    fn a_size_no_renderer_can_back_is_capped_rather_than_passed_on() {
+        // Wayland enumerates no displays, so this cap is the only thing between a state file
+        // holding 1e9 and `eglCreateWindowSurface`.
+        let (_, size) = sanitize_window_geom(None, dvec2(1e9, 1e9));
+        assert_eq!(size, MAX_WINDOW_SIZE);
+        let (_, size) = sanitize_window_geom(None, dvec2(1e9, 800.0));
+        assert_eq!(size, dvec2(MAX_WINDOW_SIZE.x, 800.0));
+    }
+
+    #[test]
+    fn a_resize_that_carries_no_usable_size_is_refused_not_substituted() {
+        // Unlike a create, a resize has a working window to leave alone.
+        for bad in [
+            dvec2(0.0, 0.0),
+            dvec2(-800.0, -600.0),
+            dvec2(f64::NAN, f64::NAN),
+            dvec2(f64::INFINITY, 600.0),
+            dvec2(0.5, 600.0),
+        ] {
+            assert_eq!(sanitize_resize(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_resize_is_held_between_the_minimum_and_the_maximum() {
+        assert_eq!(sanitize_resize(dvec2(900.0, 600.0)), Some(dvec2(900.0, 600.0)));
+        assert_eq!(sanitize_resize(dvec2(1.0, 1.0)), Some(MIN_WINDOW_SIZE));
+        assert_eq!(sanitize_resize(dvec2(1e9, 1e9)), Some(MAX_WINDOW_SIZE));
+        assert_eq!(
+            sanitize_resize(dvec2(100000.0, 100000.0)),
+            Some(MAX_WINDOW_SIZE)
         );
     }
 

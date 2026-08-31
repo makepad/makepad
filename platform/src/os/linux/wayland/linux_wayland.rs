@@ -765,11 +765,63 @@ impl WaylandCx {
                         window.toplevel.unset_fullscreen();
                     }
                 }
-                CxOsOp::ResizeWindow(window_id, size) => {}
+                CxOsOp::ResizeWindow(window_id, size) => {
+                    // A Wayland client has no "set my size" request. Window geometry is by
+                    // default whatever the surface commits -- `xdg_surface.set_window_geometry`:
+                    // "If never set, the value is the full bounds of the surface ... This
+                    // updates dynamically on every commit" -- and this backend never sets it,
+                    // so a self-resize is just the next frame committed at a different extent.
+                    // The paint path derives the EGL extent and the viewport destination from
+                    // `window_geom.inner_size`, so writing it here is the whole operation.
+                    //
+                    // Only a floating toplevel may choose its own size. Under xdg_toplevel's
+                    // `maximized` state the configured window geometry must be obeyed "or the
+                    // xdg_wm_base.invalid_surface_state error is raised", which disconnects the
+                    // client; under `fullscreen` the configured geometry is a maximum. The
+                    // configure handler folds both states into `is_fullscreen`, so that one
+                    // flag gates the operation. Popups take their extent from their positioner
+                    // and are deliberately not matched here.
+                    if let Some(window) =
+                        state.windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        if window.window_geom.is_fullscreen {
+                            crate::error!(
+                                "ResizeWindow ignored: a maximized or fullscreen Wayland toplevel \
+                                 must keep the size the compositor configured."
+                            );
+                        } else if let Some(size) = crate::screen::sanitize_resize(size) {
+                            // Wayland surface coordinates are already logical points, so unlike
+                            // X11 and Win32 -- which scale the request into device pixels -- the
+                            // requested size is the surface extent as-is.
+                            window.window_geom.inner_size = size;
+                            window.window_geom.outer_size = size;
+                            let native_geom = window.window_geom.clone();
+                            let cx_window = &mut cx.windows[window_id];
+                            cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
+                            let layout_geom =
+                                cx_window.native_window_geom_to_layout(native_geom);
+                            cx_window.window_geom = layout_geom;
+                            if let Some(main_pass_id) = cx_window.main_pass_id {
+                                cx.redraw_pass_and_child_passes(main_pass_id);
+                            }
+                        } else {
+                            crate::error!(
+                                "ResizeWindow ignored: {}x{} is not a usable surface extent.",
+                                size.x,
+                                size.y
+                            );
+                        }
+                    }
+                }
                 // A Wayland client is not told where its windows are and cannot move them;
                 // the compositor owns placement, so a window here is never left off-screen
                 // by a restored position the way it can be on Windows, macOS and X11.
-                CxOsOp::RepositionWindow(window_id, size) => {}
+                // xdg_toplevel exposes no absolute-positioning request: `move` is
+                // interactive and serial-gated ("This request must be used in response to
+                // some sort of user action"), and `reposition` is an xdg_popup request
+                // requiring xdg_wm_base v3, which `wayland_state.rs` does not bind. This arm
+                // is correct as a permanent no-op.
+                CxOsOp::RepositionWindow(_window_id, _size) => {}
                 CxOsOp::SetWindowTitle(window_id, title) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
                         window.toplevel.set_title(title);
@@ -1130,9 +1182,14 @@ impl WaylandCx {
                         }
                         if let Some(viewport) = window.viewport.as_ref() {
                             viewport.set_source(-1., -1., -1., -1.);
+                            // `wp_viewport.set_destination` raises the `bad_value` protocol
+                            // error, which disconnects the client, on a zero or negative
+                            // extent, and a float-to-int cast turns both a negative and a NaN
+                            // into zero. Floor the destination the way `resize_buffers` floors
+                            // the EGL extent.
                             viewport.set_destination(
-                                window.window_geom.inner_size.x as i32,
-                                window.window_geom.inner_size.y as i32,
+                                window.window_geom.inner_size.x.max(1.0) as i32,
+                                window.window_geom.inner_size.y.max(1.0) as i32,
                             );
                         }
                         let pix_width =
@@ -1162,9 +1219,14 @@ impl WaylandCx {
                         window.resize_buffers();
                         if let Some(viewport) = window.viewport.as_ref() {
                             viewport.set_source(-1., -1., -1., -1.);
+                            // `wp_viewport.set_destination` raises the `bad_value` protocol
+                            // error, which disconnects the client, on a zero or negative
+                            // extent, and a float-to-int cast turns both a negative and a NaN
+                            // into zero. Floor the destination the way `resize_buffers` floors
+                            // the EGL extent.
                             viewport.set_destination(
-                                window.window_geom.inner_size.x as i32,
-                                window.window_geom.inner_size.y as i32,
+                                window.window_geom.inner_size.x.max(1.0) as i32,
+                                window.window_geom.inner_size.y.max(1.0) as i32,
                             );
                         }
                         let pix_width =
