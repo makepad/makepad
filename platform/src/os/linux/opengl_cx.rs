@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::{c_void, CString};
 
 use crate::{
@@ -28,7 +29,18 @@ pub struct OpenglCx {
     /// (see `linux_wayland.rs`). Set the `MAKEPAD_NO_VSYNC` env var to request `0`
     /// (uncapped) for benchmarking.
     pub swap_interval: egl_sys::EGLint,
+
+    /// Once-per-outage latch for `eglMakeCurrent` failures. Both the windowed path in
+    /// `draw_pass_to_window` and `make_current` run every frame, so an unlatched log would
+    /// fill the terminal. Cleared on the next success, so a later outage is reported again.
+    pub make_current_error_logged: Cell<bool>,
+    /// Once-per-outage latch for `eglSwapBuffers` failures.
+    pub swap_error_logged: Cell<bool>,
 }
+
+/// `EGL_CONTEXT_LOST`. EGL reports this when the context and every GL object made from it
+/// have been destroyed by a power-management event or a GPU reset.
+pub const EGL_CONTEXT_LOST: u32 = 0x300E;
 
 fn egl_error_name(error: egl_sys::EGLint) -> &'static str {
     match error as u32 {
@@ -241,16 +253,49 @@ impl OpenglCx {
             egl_platform,
             egl_platform_display,
             swap_interval,
+            make_current_error_logged: Cell::new(false),
+            swap_error_logged: Cell::new(false),
         }
     }
 
-    pub fn make_current(&self) {
+    /// Returns whether the context became current. A `false` means every GL call that
+    /// follows runs with no current context and is silently dropped, so callers that can
+    /// skip their GL work should.
+    pub fn make_current(&self) -> bool {
         unsafe {
-            (self.libegl.eglMakeCurrent.unwrap())(
+            let ok = (self.libegl.eglMakeCurrent.unwrap())(
                 self.egl_display,
                 egl_sys::EGL_NO_SURFACE,
                 egl_sys::EGL_NO_SURFACE,
                 self.egl_context,
+            );
+            if ok == 0 {
+                // `eglGetError` is called outside the latch: it clears EGL's per-thread
+                // error, and skipping it would leak a stale code into the next report.
+                let egl_error = (self.libegl.eglGetError.unwrap())();
+                self.report_egl_error("eglMakeCurrent(no surface)", egl_error);
+                return false;
+            }
+            self.make_current_error_logged.set(false);
+            true
+        }
+    }
+
+    /// Logs an `eglMakeCurrent` failure once per outage, naming a lost context explicitly
+    /// so a report of "the window went black" arrives with its cause attached.
+    fn report_egl_error(&self, what: &str, egl_error: egl_sys::EGLint) {
+        if self.make_current_error_logged.replace(true) {
+            return;
+        }
+        crate::error!(
+            "{} failed error=0x{:04x} ({})",
+            what,
+            egl_error as u32,
+            egl_error_name(egl_error)
+        );
+        if egl_error as u32 == EGL_CONTEXT_LOST {
+            crate::error!(
+                "EGL reports the context was lost (GPU reset or power-management event). Every GL \n                 object made from it is dead; this process cannot render again without a full \n                 context rebuild, which this backend does not perform."
             );
         }
     }
@@ -292,15 +337,13 @@ impl Cx {
                 opengl_cx.egl_context,
             );
             if make_current_ok == 0 {
+                // `eglGetError` is called outside the latch: it clears EGL's per-thread
+                // error, and skipping it would leak a stale code into the next report.
                 let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
-                crate::error!(
-                    "eglMakeCurrent failed surface={:?} error=0x{:04x} ({})",
-                    egl_surface,
-                    egl_error as u32,
-                    egl_error_name(egl_error)
-                );
+                opengl_cx.report_egl_error("eglMakeCurrent", egl_error);
                 return false;
             }
+            opengl_cx.make_current_error_logged.set(false);
             // Apply the configured swap interval (vsync) on the now-current window surface.
             // Re-applied per frame because it is surface-scoped and surfaces are recreated
             // on resize; the call is cheap and idempotent.
@@ -471,13 +514,24 @@ impl Cx {
             let swap_ok =
                 (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
             if swap_ok == 0 {
+                // `eglGetError` is called outside the latch: it clears EGL's per-thread
+                // error, and skipping it would leak a stale code into the next report.
                 let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
-                crate::error!(
-                    "eglSwapBuffers failed surface={:?} error=0x{:04x} ({})",
-                    egl_surface,
-                    egl_error as u32,
-                    egl_error_name(egl_error)
-                );
+                if !opengl_cx.swap_error_logged.replace(true) {
+                    crate::error!(
+                        "eglSwapBuffers failed surface={:?} error=0x{:04x} ({})",
+                        egl_surface,
+                        egl_error as u32,
+                        egl_error_name(egl_error)
+                    );
+                    if egl_error as u32 == EGL_CONTEXT_LOST {
+                        crate::error!(
+                            "EGL reports the context was lost (GPU reset or power-management event). \n                             Every GL object made from it is dead; this process cannot render \n                             again without a full context rebuild, which this backend does not \n                             perform."
+                        );
+                    }
+                }
+            } else {
+                opengl_cx.swap_error_logged.set(false);
             }
             swap_ok != 0
         }
