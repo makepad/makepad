@@ -2956,7 +2956,11 @@ script_mod! {
                             // slash, and the dead width it used to carry pushed the
                             // load target away from it for nothing.
                             music_count := MusicLabel{width: Fit text: ""}
-                            MusicLabel{text: "load"}
+                            // Hides on a narrow console: the dropdown beside
+                            // it collapses to its icon there, and a word
+                            // introducing a wordless control is the first
+                            // thing that should go.
+                            music_load_label := MusicLabel{text: "load"}
                             deck_target := DropDown{labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]}
                             // Latched, the deck a picked track lands on starts as
                             // soon as its decode finishes — "select and it plays".
