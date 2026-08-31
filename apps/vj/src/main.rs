@@ -22119,9 +22119,11 @@ p2 {}
         if let Some(mut list) = list.borrow_mut::<VjTrackList>() {
             list.set_narrow(narrow);
         }
-        // The word in front of the load target goes with the target's own
-        // words: once the dropdown is down to an icon, a label introducing a
-        // wordless control is the emptiest thing on the line.
+        // The load target drops its words for its marks, and the word in
+        // front of it goes with them: once the dropdown is down to an icon,
+        // a label introducing a wordless control is the emptiest thing on
+        // the line.
+        self.ui.drop_down(cx, ids!(deck_target)).set_icon_only(cx, narrow);
         self.ui.label(cx, ids!(music_load_label)).set_visible(cx, !narrow);
         // STEM/KRK carry the same S/K abbreviation as the sort arrows do,
         // and both cells just changed width above — without this the words

@@ -43,6 +43,22 @@ script_mod! {
             }
         }
 
+        /** The per-item icon ink. Flat rather than state-mixed like `draw_text`,
+        because a chrome glyph has to stay readable against the row's active
+        fill; the row itself already carries the state. */
+        draw_icon +: {
+            color: theme.color_label_inner
+        }
+
+        /** The icon sits in front of the label with a small gap. This is only
+        walked when the dropdown handed this row an icon, so a menu without
+        icons keeps exactly its old metrics. */
+        icon_walk: Walk{
+            width: 10
+            height: Fit
+            margin: Inset{right: 5.0}
+        }
+
         draw_bg +: {
             active: instance(0.0)
             hover: instance(0.0)
@@ -379,6 +395,17 @@ pub struct PopupMenuItem {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText,
+    /// The row's icon, seated by the menu before each draw the same way `label`
+    /// is. Left empty by every caller that does not pass one, and an empty
+    /// `DrawSvg` is never walked, so an icon-less menu keeps its old metrics.
+    #[live]
+    draw_icon: DrawSvg,
+    /// Hold the icon slot open on a row that has no icon of its own, so a list
+    /// where only some items carry one still reads as a column of labels. Off
+    /// unless the menu says otherwise, which is what keeps an icon-less menu on
+    /// its old metrics.
+    #[rust]
+    reserve_icon: bool,
 
     #[layout]
     layout: Layout,
@@ -431,6 +458,11 @@ pub struct PopupMenu {
     pub tree_parent: WidgetUid,
     #[rust]
     init_select_item: Option<PopupMenuItemId>,
+    /// Whether this pass draws an icon column. Set per open by whoever fills
+    /// the menu, alongside `tree_parent`, since one menu instance is shared by
+    /// every dropdown on the same template and only some of them have icons.
+    #[rust]
+    pub icon_column: bool,
 
     #[rust]
     count: usize,
@@ -476,8 +508,26 @@ pub enum PopupMenuAction {
 pub struct PopupMenuItemId(pub LiveId);
 
 impl PopupMenuItem {
+    /// Point the row's icon at `svg`, or clear it. Only writes on an actual
+    /// change: a `ScriptHandleRef` is a GC root, and re-seating one every frame
+    /// churns the root table and makes `DrawSvg` think the document moved.
+    pub fn set_icon(&mut self, svg: Option<&ScriptHandleRef>) {
+        let want = svg.map(|s| s.as_handle());
+        if self.draw_icon.svg.as_ref().map(|s| s.as_handle()) != want {
+            self.draw_icon.svg = svg.cloned();
+        }
+    }
+
     pub fn draw_item(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
+        // Guarded rather than left to `DrawSvg`'s own empty-document bail, so
+        // the turtle provably never sees the icon walk when there is no icon
+        // and no column to hold open.
+        if self.draw_icon.svg.is_some() {
+            self.draw_icon.draw_walk(cx, self.icon_walk);
+        } else if self.reserve_icon {
+            cx.walk_turtle(self.icon_walk);
+        }
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
@@ -568,6 +618,19 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
+        self.draw_item_with_icon(cx, item_id, label, None)
+    }
+
+    /// As `draw_item`, plus the icon to draw in front of the label. Kept as a
+    /// second entry point so every caller that has no icons keeps the old
+    /// signature — and, with `None`, the old pixels.
+    pub fn draw_item_with_icon(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        icon: Option<&ScriptHandleRef>,
+    ) {
         self.count += 1;
 
         let menu_item = self.menu_item;
@@ -579,6 +642,8 @@ impl PopupMenu {
             .clone();
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
+            menu_item.set_icon(icon);
+            menu_item.reserve_icon = self.icon_column;
         }
         // Re-seat on every draw: one menu instance is shared by every dropdown
         // that uses the same template, so the items belong to whichever

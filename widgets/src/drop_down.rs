@@ -23,7 +23,13 @@ script_mod! {
     mod.widgets.DropDownFlat = set_type_default() do mod.widgets.DropDownBase{
         width: Fit
         height: Fit
-        align: TopLeft
+        // Centred, not TopLeft: a face carrying an icon beside its label
+        // gives the shorter of the two the slack, and top-aligning it put
+        // the icon three points above the words it belongs to. The popup's
+        // own rows already centre, so this is the two halves of one control
+        // agreeing. A label-only face has one walk and no slack, which is
+        // every call site that predates icons — the change cannot move them.
+        align: Align{x: 0.0, y: 0.5}
 
         padding: theme.mspace_1{left: theme.space_2, right: 22.5}
         margin: theme.mspace_v_1{}
@@ -70,6 +76,23 @@ script_mod! {
                     self.disabled
                 )
             }
+        }
+
+        /** The selected item's icon ink. Flat rather than state-mixed like
+        `draw_text`, because a chrome glyph has to stay readable over the
+        pressed face; the face itself already carries the state. */
+        draw_icon +: {
+            color: theme.color_label_inner
+        }
+
+        /** The icon sits in front of the label with a small gap, which
+        `icon_only` drops again since there is then nothing to separate from.
+        Only walked for a dropdown that was given `icons`, so a dropdown
+        without them keeps exactly its old metrics. */
+        icon_walk: Walk{
+            width: 10
+            height: Fit
+            margin: Inset{right: 5.0}
         }
 
         /** The dropdown face: an SDF box with a bevel stroke and a filled corner arrow. */
@@ -394,6 +417,13 @@ pub struct DropDown {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawLabelText,
+    /// Re-pointed at the selected item's icon on every draw, and left empty for
+    /// a dropdown that was given none — an empty `DrawSvg` is never walked, so
+    /// the face keeps its old metrics.
+    #[live]
+    draw_icon: DrawSvg,
+    #[live]
+    icon_walk: Walk,
 
     #[walk]
     walk: Walk,
@@ -408,6 +438,18 @@ pub struct DropDown {
 
     #[live]
     labels: Vec<String>,
+
+    /// Icons parallel to `labels`, one per item. Short is fine: an item past
+    /// the end of this list simply draws no icon, so a caller can give icons to
+    /// the few entries that have one and leave the rest as words.
+    #[live]
+    icons: Vec<DropDownIcon>,
+
+    /// Draw the closed face as the selected item's icon alone, for a console
+    /// too narrow for words. The popup still shows icon and label both — the
+    /// list is where the operator reads what an item means.
+    #[live]
+    icon_only: bool,
 
     #[live]
     popup_menu_position: PopupMenuPosition,
@@ -433,6 +475,40 @@ pub struct DropDown {
 #[derive(Default, Clone)]
 struct PopupMenuGlobal {
     map: Rc<RefCell<ComponentMap<ScriptValue, PopupMenu>>>,
+}
+
+/// One entry of `DropDown::icons`.
+///
+/// A `Vec` field only accepts elements the script layer marks as derivable, so
+/// the bare `Option<ScriptHandleRef>` that `DrawSvg::svg` uses cannot be the
+/// element type directly. Wrapping it in a derived struct earns that marker;
+/// `on_custom_apply` then takes the resource handle a `crate_resource(...)` in
+/// the DSL array evaluates to, so the call site stays a flat list of handles
+/// rather than a list of one-field objects.
+#[derive(Script)]
+pub struct DropDownIcon {
+    #[live]
+    svg: Option<ScriptHandleRef>,
+}
+
+impl ScriptHook for DropDownIcon {
+    fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        value.is_nil() || value.as_handle().is_some()
+    }
+
+    fn on_custom_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) -> bool {
+        if value.as_handle().is_none() {
+            return false;
+        }
+        self.svg.script_apply(vm, apply, scope, value);
+        true
+    }
 }
 
 #[derive(Script, ScriptHook)]
@@ -517,15 +593,53 @@ impl DropDown {
         self.draw_bg.end(cx);
     }
 
+    /// The icon for item `index`, or `None` where the caller gave fewer icons
+    /// than labels (or none at all).
+    fn icon_at(&self, index: usize) -> Option<&ScriptHandleRef> {
+        self.icons.get(index).and_then(|icon| icon.svg.as_ref())
+    }
+
+    /// Point `draw_icon` at item `index`'s icon and report whether there is one.
+    /// Only writes on an actual change: a `ScriptHandleRef` is a GC root, and
+    /// re-seating one every frame churns the root table for nothing.
+    fn seat_icon(&mut self, index: usize) -> bool {
+        let want = self.icons.get(index).and_then(|icon| icon.svg.as_ref());
+        if self.draw_icon.svg.as_ref().map(|s| s.as_handle()) != want.map(|s| s.as_handle()) {
+            self.draw_icon.svg = want.cloned();
+        }
+        self.draw_icon.svg.is_some()
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
 
-        if let Some(val) = self.labels.get(self.selected_item) {
-            self.draw_text
-                .draw_walk(cx, Walk::fit(), Align::default(), val);
-        } else {
-            self.draw_text
-                .draw_walk(cx, Walk::fit(), Align::default(), " ");
+        let has_icon = self.seat_icon(self.selected_item);
+        if has_icon {
+            // The gap in `icon_walk` exists to hold the label off the glyph;
+            // with the label gone there is nothing to hold off, and a collapsed
+            // face should be as narrow as the icon.
+            let icon_walk = if self.icon_only {
+                Walk {
+                    margin: Inset::default(),
+                    ..self.icon_walk
+                }
+            } else {
+                self.icon_walk
+            };
+            self.draw_icon.draw_walk(cx, icon_walk);
+        }
+
+        // `icon_only` lets the icon stand in for the words. An item that was
+        // given no icon has nothing to stand in for them, so it keeps them
+        // rather than leaving the operator a blank face.
+        if !(self.icon_only && has_icon) {
+            if let Some(val) = self.labels.get(self.selected_item) {
+                self.draw_text
+                    .draw_walk(cx, Walk::fit(), Align::default(), val);
+            } else {
+                self.draw_text
+                    .draw_walk(cx, Walk::fit(), Align::default(), " ");
+            }
         }
         self.draw_bg.end(cx);
 
@@ -539,6 +653,7 @@ impl DropDown {
             // One menu instance serves every dropdown with the same template,
             // so claim its items for this dropdown while they draw.
             popup_menu.tree_parent = self.uid;
+            popup_menu.icon_column = !self.icons.is_empty();
             popup_menu.begin(cx);
 
             match self.popup_menu_position {
@@ -549,7 +664,7 @@ impl DropDown {
                         if i == self.selected_item {
                             item_pos = Some(cx.turtle().pos());
                         }
-                        popup_menu.draw_item(cx, node_id, &item);
+                        popup_menu.draw_item_with_icon(cx, node_id, &item, self.icon_at(i));
                     }
 
                     popup_menu.end(
@@ -561,7 +676,7 @@ impl DropDown {
                 PopupMenuPosition::BelowInput => {
                     for (i, item) in self.labels.iter().enumerate() {
                         let node_id = LiveId(i as u64).into();
-                        popup_menu.draw_item(cx, node_id, &item);
+                        popup_menu.draw_item_with_icon(cx, node_id, &item, self.icon_at(i));
                     }
 
                     let area = self.draw_bg.area().rect(cx);
@@ -820,6 +935,25 @@ impl DropDownRef {
             return inner.selected_item;
         }
         0
+    }
+
+    /// Collapse the closed face to the selected item's icon, or spell it out
+    /// again. The host drives this off its own width, so it fires on every
+    /// resize step — hence the guard against redrawing for an unchanged value.
+    pub fn set_icon_only(&self, cx: &mut Cx, icon_only: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.icon_only != icon_only {
+                inner.icon_only = icon_only;
+                inner.draw_bg.redraw(cx);
+            }
+        }
+    }
+
+    pub fn icon_only(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.icon_only;
+        }
+        false
     }
 
     pub fn selected_label(&self) -> String {

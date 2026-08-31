@@ -2961,7 +2961,25 @@ script_mod! {
                             // introducing a wordless control is the first
                             // thing that should go.
                             music_load_label := MusicLabel{text: "load"}
-                            deck_target := DropDown{labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]}
+                            // Each target wears a mark, so a narrow console
+                            // can drop the words and still be read: the
+                            // decks are A and B on every other surface here,
+                            // OFF is the power sign, and the mix target is a
+                            // fader. The height is PINNED because the face
+                            // is `height: Fit` — collapsed to its icon it
+                            // would otherwise stand six points shorter than
+                            // the chips it sits between.
+                            deck_target := DropDown{
+                                height: 22
+                                labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]
+                                icons: [
+                                    crate_resource("self:resources/icons/auto.svg")
+                                    crate_resource("self:resources/icons/deck_a.svg")
+                                    crate_resource("self:resources/icons/deck_b.svg")
+                                    crate_resource("self:resources/icons/off.svg")
+                                    crate_resource("self:resources/icons/mix.svg")
+                                ]
+                            }
                             // Latched, the deck a picked track lands on starts as
                             // soon as its decode finishes — "select and it plays".
                             // An EJECT turned a quarter turn: the bar leads,
