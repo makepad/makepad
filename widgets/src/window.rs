@@ -1437,6 +1437,73 @@ impl WindowRef {
             inner.configure_macos_window(cx, config);
         }
     }
+
+    pub fn set_transparent(&self, cx: &mut Cx, transparent: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_transparent(cx, transparent);
+        }
+    }
+
+    pub fn set_backdrop(&self, cx: &mut Cx, backdrop: WindowBackdrop) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.set_backdrop(cx, backdrop);
+        }
+    }
+
+    pub fn is_direct_composition(&self, cx: &Cx) -> bool {
+        self.borrow()
+            .map(|inner| inner.window.handle.is_direct_composition(cx))
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowRef {
+    pub fn dcomp_create_child(&self, cx: &mut Cx, z: DcompChildZ) -> Option<DcompChildId> {
+        self.borrow_mut()
+            .map(|mut inner| inner.window.handle.dcomp_create_child(cx, z))
+    }
+
+    pub fn dcomp_set_child_content(
+        &self,
+        cx: &mut Cx,
+        child_id: DcompChildId,
+        content: Option<DcompContent>,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner
+                .window
+                .handle
+                .dcomp_set_child_content(cx, child_id, content);
+        }
+    }
+
+    pub fn dcomp_set_child_solid(&self, cx: &mut Cx, child_id: DcompChildId, color: Vec4) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner
+                .window
+                .handle
+                .dcomp_set_child_solid(cx, child_id, color);
+        }
+    }
+
+    pub fn dcomp_set_child_geom(&self, cx: &mut Cx, child_id: DcompChildId, geom: DcompChildGeom) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.dcomp_set_child_geom(cx, child_id, geom);
+        }
+    }
+
+    pub fn dcomp_set_child_z(&self, cx: &mut Cx, child_id: DcompChildId, z: DcompChildZ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.dcomp_set_child_z(cx, child_id, z);
+        }
+    }
+
+    pub fn dcomp_remove_child(&self, cx: &mut Cx, child_id: DcompChildId) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.dcomp_remove_child(cx, child_id);
+        }
+    }
 }
 
 impl Widget for Window {

@@ -22317,6 +22317,89 @@ pub const WAIT_TIMEOUT: WAIT_EVENT = WAIT_EVENT(258u32);
 pub struct WPARAM(pub usize);
 }
 pub mod Graphics{
+pub mod Direct2D{
+pub mod Common{
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_2DAFFINETRANSFORM_INTERPOLATION_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_BLEND_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_BORDER_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_COLORMATRIX_ALPHA_MODE(pub i32);
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct D2D1_COLOR_F {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_COMPOSITE_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D2D1_TURBULENCE_NOISE(pub i32);
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct D2D_MATRIX_5X4_F {
+    pub Anonymous: D2D_MATRIX_5X4_F_0,
+}
+impl Default for D2D_MATRIX_5X4_F {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union D2D_MATRIX_5X4_F_0 {
+    pub Anonymous: D2D_MATRIX_5X4_F_0_0,
+    pub m: [f32; 20],
+}
+impl Default for D2D_MATRIX_5X4_F_0 {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct D2D_MATRIX_5X4_F_0_0 {
+    pub _11: f32,
+    pub _12: f32,
+    pub _13: f32,
+    pub _14: f32,
+    pub _21: f32,
+    pub _22: f32,
+    pub _23: f32,
+    pub _24: f32,
+    pub _31: f32,
+    pub _32: f32,
+    pub _33: f32,
+    pub _34: f32,
+    pub _41: f32,
+    pub _42: f32,
+    pub _43: f32,
+    pub _44: f32,
+    pub _51: f32,
+    pub _52: f32,
+    pub _53: f32,
+    pub _54: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct D2D_RECT_F {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+}
+}
 pub mod Direct3D{
 pub const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: D3D_PRIMITIVE_TOPOLOGY = D3D_PRIMITIVE_TOPOLOGY(4i32);
 #[repr(transparent)]
@@ -24726,12 +24809,6 @@ impl ID3D11Device {
     }
     pub unsafe fn CreateQuery(&self, pquerydesc: *const D3D11_QUERY_DESC, ppquery: Option<*mut Option<ID3D11Query>>) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).CreateQuery)(windows_core::Interface::as_raw(self), pquerydesc, ppquery.unwrap_or(core::mem::zeroed()) as _).ok() }
-    }
-    pub unsafe fn OpenSharedResource<T>(&self, hresource: super::super::Foundation::HANDLE, result__: *mut Option<T>) -> windows_core::Result<()>
-    where
-        T: windows_core::Interface,
-    {
-        unsafe { (windows_core::Interface::vtable(self).OpenSharedResource)(windows_core::Interface::as_raw(self), hresource, &T::IID, result__ as *mut _ as *mut _).ok() }
     }
     pub unsafe fn GetImmediateContext(&self) -> windows_core::Result<ID3D11DeviceContext> {
         unsafe {
@@ -29637,6 +29714,3001 @@ impl ID3DDeviceContextState_Vtbl {
 }
 impl windows_core::RuntimeName for ID3DDeviceContextState {}
 }
+pub mod DirectComposition{
+#[cfg(feature = "Win32_Graphics_Dxgi")]
+#[inline]
+pub unsafe fn DCompositionCreateDevice<P0, T>(dxgidevice: P0) -> windows_core::Result<T>
+where
+    P0: windows_core::Param<super::Dxgi::IDXGIDevice>,
+    T: windows_core::Interface,
+{
+    windows_core::link!("dcomp.dll" "system" fn DCompositionCreateDevice(dxgidevice : * mut core::ffi::c_void, iid : *const windows_core::GUID, dcompositiondevice : *mut *mut core::ffi::c_void) -> windows_core::HRESULT);
+    let mut result__ = core::ptr::null_mut();
+    unsafe { DCompositionCreateDevice(dxgidevice.param().abi(), &T::IID, &mut result__).and_then(|| windows_core::Type::from_abi(result__)) }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_BACKFACE_VISIBILITY(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_BITMAP_INTERPOLATION_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_BORDER_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_COMPOSITE_MODE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_DEPTH_MODE(pub i32);
+#[repr(C)]
+#[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DCOMPOSITION_FRAME_STATISTICS {
+    pub lastFrameTime: i64,
+    pub currentCompositionRate: super::Dxgi::Common::DXGI_RATIONAL,
+    pub currentTime: i64,
+    pub timeFrequency: i64,
+    pub nextEstimatedFrameTime: i64,
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DCOMPOSITION_OPACITY_MODE(pub i32);
+windows_core::imp::define_interface!(IDCompositionAffineTransform2DEffect, IDCompositionAffineTransform2DEffect_Vtbl, 0x0b74b9e8_cdd6_492f_bbbc_5ed32157026d);
+impl core::ops::Deref for IDCompositionAffineTransform2DEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionAffineTransform2DEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionAffineTransform2DEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetInterpolationMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_2DAFFINETRANSFORM_INTERPOLATION_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetInterpolationMode: usize,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetBorderMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_BORDER_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetBorderMode: usize,
+    pub SetTransformMatrix: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Matrix3x2) -> windows_core::HRESULT,
+    pub SetTransformMatrixElement: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTransformMatrixElement2: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, f32) -> windows_core::HRESULT,
+    pub SetSharpness: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetSharpness2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionAnimation, IDCompositionAnimation_Vtbl, 0xcbfd91d9_51b2_45e4_b3de_d19ccfb863c5);
+windows_core::imp::interface_hierarchy!(IDCompositionAnimation, windows_core::IUnknown);
+impl IDCompositionAnimation {
+    pub unsafe fn End(&self, endoffset: f64, endvalue: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).End)(windows_core::Interface::as_raw(self), endoffset, endvalue).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionAnimation_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub Reset: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAbsoluteBeginTime: unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub AddCubic: unsafe extern "system" fn(*mut core::ffi::c_void, f64, f32, f32, f32, f32) -> windows_core::HRESULT,
+    pub AddSinusoidal: unsafe extern "system" fn(*mut core::ffi::c_void, f64, f32, f32, f32, f32) -> windows_core::HRESULT,
+    pub AddRepeat: unsafe extern "system" fn(*mut core::ffi::c_void, f64, f64) -> windows_core::HRESULT,
+    pub End: unsafe extern "system" fn(*mut core::ffi::c_void, f64, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionAnimation_Impl: windows_core::IUnknownImpl {
+    fn Reset(&self) -> windows_core::Result<()>;
+    fn SetAbsoluteBeginTime(&self, begintime: i64) -> windows_core::Result<()>;
+    fn AddCubic(&self, beginoffset: f64, constantcoefficient: f32, linearcoefficient: f32, quadraticcoefficient: f32, cubiccoefficient: f32) -> windows_core::Result<()>;
+    fn AddSinusoidal(&self, beginoffset: f64, bias: f32, amplitude: f32, frequency: f32, phase: f32) -> windows_core::Result<()>;
+    fn AddRepeat(&self, beginoffset: f64, durationtorepeat: f64) -> windows_core::Result<()>;
+    fn End(&self, endoffset: f64, endvalue: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionAnimation_Vtbl {
+    pub const fn new<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn Reset<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::Reset(this).into()
+            }
+        }
+        unsafe extern "system" fn SetAbsoluteBeginTime<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, begintime: i64) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::SetAbsoluteBeginTime(this, core::mem::transmute_copy(&begintime)).into()
+            }
+        }
+        unsafe extern "system" fn AddCubic<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, beginoffset: f64, constantcoefficient: f32, linearcoefficient: f32, quadraticcoefficient: f32, cubiccoefficient: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::AddCubic(this, core::mem::transmute_copy(&beginoffset), core::mem::transmute_copy(&constantcoefficient), core::mem::transmute_copy(&linearcoefficient), core::mem::transmute_copy(&quadraticcoefficient), core::mem::transmute_copy(&cubiccoefficient)).into()
+            }
+        }
+        unsafe extern "system" fn AddSinusoidal<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, beginoffset: f64, bias: f32, amplitude: f32, frequency: f32, phase: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::AddSinusoidal(this, core::mem::transmute_copy(&beginoffset), core::mem::transmute_copy(&bias), core::mem::transmute_copy(&amplitude), core::mem::transmute_copy(&frequency), core::mem::transmute_copy(&phase)).into()
+            }
+        }
+        unsafe extern "system" fn AddRepeat<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, beginoffset: f64, durationtorepeat: f64) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::AddRepeat(this, core::mem::transmute_copy(&beginoffset), core::mem::transmute_copy(&durationtorepeat)).into()
+            }
+        }
+        unsafe extern "system" fn End<Identity: IDCompositionAnimation_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, endoffset: f64, endvalue: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionAnimation_Impl::End(this, core::mem::transmute_copy(&endoffset), core::mem::transmute_copy(&endvalue)).into()
+            }
+        }
+        Self {
+            base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Reset: Reset::<Identity, OFFSET>,
+            SetAbsoluteBeginTime: SetAbsoluteBeginTime::<Identity, OFFSET>,
+            AddCubic: AddCubic::<Identity, OFFSET>,
+            AddSinusoidal: AddSinusoidal::<Identity, OFFSET>,
+            AddRepeat: AddRepeat::<Identity, OFFSET>,
+            End: End::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionAnimation as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionAnimation {}
+windows_core::imp::define_interface!(IDCompositionArithmeticCompositeEffect, IDCompositionArithmeticCompositeEffect_Vtbl, 0x3b67dfa8_e3dd_4e61_b640_46c2f3d739dc);
+impl core::ops::Deref for IDCompositionArithmeticCompositeEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionArithmeticCompositeEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionArithmeticCompositeEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetCoefficients: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector4) -> windows_core::HRESULT,
+    pub SetClampOutput: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetCoefficient1: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCoefficient12: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCoefficient2: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCoefficient22: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCoefficient3: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCoefficient32: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCoefficient4: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCoefficient42: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionArithmeticCompositeEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetCoefficients(&self, coefficients: *const windows_numerics::Vector4) -> windows_core::Result<()>;
+    fn SetClampOutput(&self, clampoutput: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetCoefficient1(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCoefficient12(&self, coeffcient1: f32) -> windows_core::Result<()>;
+    fn SetCoefficient2(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCoefficient22(&self, coefficient2: f32) -> windows_core::Result<()>;
+    fn SetCoefficient3(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCoefficient32(&self, coefficient3: f32) -> windows_core::Result<()>;
+    fn SetCoefficient4(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCoefficient42(&self, coefficient4: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionArithmeticCompositeEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetCoefficients<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, coefficients: *const windows_numerics::Vector4) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficients(this, core::mem::transmute_copy(&coefficients)).into()
+            }
+        }
+        unsafe extern "system" fn SetClampOutput<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, clampoutput: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetClampOutput(this, core::mem::transmute_copy(&clampoutput)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient1<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient1(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient12<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, coeffcient1: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient12(this, core::mem::transmute_copy(&coeffcient1)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient2<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient2(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient22<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, coefficient2: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient22(this, core::mem::transmute_copy(&coefficient2)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient3<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient3(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient32<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, coefficient3: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient32(this, core::mem::transmute_copy(&coefficient3)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient4<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient4(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCoefficient42<Identity: IDCompositionArithmeticCompositeEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, coefficient4: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionArithmeticCompositeEffect_Impl::SetCoefficient42(this, core::mem::transmute_copy(&coefficient4)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetCoefficients: SetCoefficients::<Identity, OFFSET>,
+            SetClampOutput: SetClampOutput::<Identity, OFFSET>,
+            SetCoefficient1: SetCoefficient1::<Identity, OFFSET>,
+            SetCoefficient12: SetCoefficient12::<Identity, OFFSET>,
+            SetCoefficient2: SetCoefficient2::<Identity, OFFSET>,
+            SetCoefficient22: SetCoefficient22::<Identity, OFFSET>,
+            SetCoefficient3: SetCoefficient3::<Identity, OFFSET>,
+            SetCoefficient32: SetCoefficient32::<Identity, OFFSET>,
+            SetCoefficient4: SetCoefficient4::<Identity, OFFSET>,
+            SetCoefficient42: SetCoefficient42::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionArithmeticCompositeEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionArithmeticCompositeEffect {}
+windows_core::imp::define_interface!(IDCompositionBlendEffect, IDCompositionBlendEffect_Vtbl, 0x33ecdc0a_578a_4a11_9c14_0cb90517f9c5);
+impl core::ops::Deref for IDCompositionBlendEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionBlendEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionBlendEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_BLEND_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetMode: usize,
+}
+windows_core::imp::define_interface!(IDCompositionBrightnessEffect, IDCompositionBrightnessEffect_Vtbl, 0x6027496e_cb3a_49ab_934f_d798da4f7da6);
+impl core::ops::Deref for IDCompositionBrightnessEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionBrightnessEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionBrightnessEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetWhitePoint: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector2) -> windows_core::HRESULT,
+    pub SetBlackPoint: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector2) -> windows_core::HRESULT,
+    pub SetWhitePointX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetWhitePointX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetWhitePointY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetWhitePointY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBlackPointX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlackPointX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBlackPointY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlackPointY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionBrightnessEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetWhitePoint(&self, whitepoint: *const windows_numerics::Vector2) -> windows_core::Result<()>;
+    fn SetBlackPoint(&self, blackpoint: *const windows_numerics::Vector2) -> windows_core::Result<()>;
+    fn SetWhitePointX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetWhitePointX2(&self, whitepointx: f32) -> windows_core::Result<()>;
+    fn SetWhitePointY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetWhitePointY2(&self, whitepointy: f32) -> windows_core::Result<()>;
+    fn SetBlackPointX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlackPointX2(&self, blackpointx: f32) -> windows_core::Result<()>;
+    fn SetBlackPointY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlackPointY2(&self, blackpointy: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionBrightnessEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetWhitePoint<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, whitepoint: *const windows_numerics::Vector2) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetWhitePoint(this, core::mem::transmute_copy(&whitepoint)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlackPoint<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, blackpoint: *const windows_numerics::Vector2) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetBlackPoint(this, core::mem::transmute_copy(&blackpoint)).into()
+            }
+        }
+        unsafe extern "system" fn SetWhitePointX<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetWhitePointX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetWhitePointX2<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, whitepointx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetWhitePointX2(this, core::mem::transmute_copy(&whitepointx)).into()
+            }
+        }
+        unsafe extern "system" fn SetWhitePointY<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetWhitePointY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetWhitePointY2<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, whitepointy: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetWhitePointY2(this, core::mem::transmute_copy(&whitepointy)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlackPointX<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetBlackPointX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlackPointX2<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, blackpointx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetBlackPointX2(this, core::mem::transmute_copy(&blackpointx)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlackPointY<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetBlackPointY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlackPointY2<Identity: IDCompositionBrightnessEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, blackpointy: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionBrightnessEffect_Impl::SetBlackPointY2(this, core::mem::transmute_copy(&blackpointy)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetWhitePoint: SetWhitePoint::<Identity, OFFSET>,
+            SetBlackPoint: SetBlackPoint::<Identity, OFFSET>,
+            SetWhitePointX: SetWhitePointX::<Identity, OFFSET>,
+            SetWhitePointX2: SetWhitePointX2::<Identity, OFFSET>,
+            SetWhitePointY: SetWhitePointY::<Identity, OFFSET>,
+            SetWhitePointY2: SetWhitePointY2::<Identity, OFFSET>,
+            SetBlackPointX: SetBlackPointX::<Identity, OFFSET>,
+            SetBlackPointX2: SetBlackPointX2::<Identity, OFFSET>,
+            SetBlackPointY: SetBlackPointY::<Identity, OFFSET>,
+            SetBlackPointY2: SetBlackPointY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionBrightnessEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionBrightnessEffect {}
+windows_core::imp::define_interface!(IDCompositionClip, IDCompositionClip_Vtbl, 0x64ac3703_9d3f_45ec_a109_7cac0e7a13a7);
+windows_core::imp::interface_hierarchy!(IDCompositionClip, windows_core::IUnknown);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionClip_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+}
+pub trait IDCompositionClip_Impl: windows_core::IUnknownImpl {}
+impl IDCompositionClip_Vtbl {
+    pub const fn new<Identity: IDCompositionClip_Impl, const OFFSET: isize>() -> Self {
+        Self { base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>() }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionClip as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionClip {}
+windows_core::imp::define_interface!(IDCompositionColorMatrixEffect, IDCompositionColorMatrixEffect_Vtbl, 0xc1170a22_3ce2_4966_90d4_55408bfc84c4);
+impl core::ops::Deref for IDCompositionColorMatrixEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionColorMatrixEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionColorMatrixEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetMatrix: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::Direct2D::Common::D2D_MATRIX_5X4_F) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetMatrix: usize,
+    pub SetMatrixElement: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetMatrixElement2: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, f32) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetAlphaMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_COLORMATRIX_ALPHA_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetAlphaMode: usize,
+    pub SetClampOutput: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionCompositeEffect, IDCompositionCompositeEffect_Vtbl, 0x576616c0_a231_494d_a38d_00fd5ec4db46);
+impl core::ops::Deref for IDCompositionCompositeEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionCompositeEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionCompositeEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_COMPOSITE_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetMode: usize,
+}
+windows_core::imp::define_interface!(IDCompositionDevice, IDCompositionDevice_Vtbl, 0xc37ea93a_e7aa_450d_b16f_9746cb0407f3);
+windows_core::imp::interface_hierarchy!(IDCompositionDevice, windows_core::IUnknown);
+impl IDCompositionDevice {
+    pub unsafe fn Commit(&self) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Commit)(windows_core::Interface::as_raw(self)).ok() }
+    }
+    pub unsafe fn CreateTargetForHwnd(&self, hwnd: super::super::Foundation::HWND, topmost: bool) -> windows_core::Result<IDCompositionTarget> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateTargetForHwnd)(windows_core::Interface::as_raw(self), hwnd, topmost.into(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub unsafe fn CreateVisual(&self) -> windows_core::Result<IDCompositionVisual> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateVisual)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub unsafe fn CreateRectangleClip(&self) -> windows_core::Result<IDCompositionRectangleClip> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateRectangleClip)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    }
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionDevice_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub Commit: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub WaitForCommitCompletion: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub GetFrameStatistics: unsafe extern "system" fn(*mut core::ffi::c_void, *mut DCOMPOSITION_FRAME_STATISTICS) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    GetFrameStatistics: usize,
+    pub CreateTargetForHwnd: unsafe extern "system" fn(*mut core::ffi::c_void, super::super::Foundation::HWND, windows_core::BOOL, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateVisual: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub CreateSurface: unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32, super::Dxgi::Common::DXGI_FORMAT, super::Dxgi::Common::DXGI_ALPHA_MODE, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    CreateSurface: usize,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub CreateVirtualSurface: unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32, super::Dxgi::Common::DXGI_FORMAT, super::Dxgi::Common::DXGI_ALPHA_MODE, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    CreateVirtualSurface: usize,
+    pub CreateSurfaceFromHandle: unsafe extern "system" fn(*mut core::ffi::c_void, super::super::Foundation::HANDLE, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateSurfaceFromHwnd: unsafe extern "system" fn(*mut core::ffi::c_void, super::super::Foundation::HWND, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateTranslateTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateScaleTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateRotateTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateSkewTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateMatrixTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateTransformGroup: unsafe extern "system" fn(*mut core::ffi::c_void, *const *mut core::ffi::c_void, u32, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateTranslateTransform3D: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateScaleTransform3D: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateRotateTransform3D: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateMatrixTransform3D: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateTransform3DGroup: unsafe extern "system" fn(*mut core::ffi::c_void, *const *mut core::ffi::c_void, u32, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateEffectGroup: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateRectangleClip: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CreateAnimation: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub CheckDeviceState: unsafe extern "system" fn(*mut core::ffi::c_void, *mut windows_core::BOOL) -> windows_core::HRESULT,
+}
+#[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+pub trait IDCompositionDevice_Impl: windows_core::IUnknownImpl {
+    fn Commit(&self) -> windows_core::Result<()>;
+    fn WaitForCommitCompletion(&self) -> windows_core::Result<()>;
+    fn GetFrameStatistics(&self) -> windows_core::Result<DCOMPOSITION_FRAME_STATISTICS>;
+    fn CreateTargetForHwnd(&self, hwnd: super::super::Foundation::HWND, topmost: windows_core::BOOL) -> windows_core::Result<IDCompositionTarget>;
+    fn CreateVisual(&self) -> windows_core::Result<IDCompositionVisual>;
+    fn CreateSurface(&self, width: u32, height: u32, pixelformat: super::Dxgi::Common::DXGI_FORMAT, alphamode: super::Dxgi::Common::DXGI_ALPHA_MODE) -> windows_core::Result<IDCompositionSurface>;
+    fn CreateVirtualSurface(&self, initialwidth: u32, initialheight: u32, pixelformat: super::Dxgi::Common::DXGI_FORMAT, alphamode: super::Dxgi::Common::DXGI_ALPHA_MODE) -> windows_core::Result<IDCompositionVirtualSurface>;
+    fn CreateSurfaceFromHandle(&self, handle: super::super::Foundation::HANDLE) -> windows_core::Result<windows_core::IUnknown>;
+    fn CreateSurfaceFromHwnd(&self, hwnd: super::super::Foundation::HWND) -> windows_core::Result<windows_core::IUnknown>;
+    fn CreateTranslateTransform(&self) -> windows_core::Result<IDCompositionTranslateTransform>;
+    fn CreateScaleTransform(&self) -> windows_core::Result<IDCompositionScaleTransform>;
+    fn CreateRotateTransform(&self) -> windows_core::Result<IDCompositionRotateTransform>;
+    fn CreateSkewTransform(&self) -> windows_core::Result<IDCompositionSkewTransform>;
+    fn CreateMatrixTransform(&self) -> windows_core::Result<IDCompositionMatrixTransform>;
+    fn CreateTransformGroup(&self, transforms: *const Option<IDCompositionTransform>, elements: u32) -> windows_core::Result<IDCompositionTransform>;
+    fn CreateTranslateTransform3D(&self) -> windows_core::Result<IDCompositionTranslateTransform3D>;
+    fn CreateScaleTransform3D(&self) -> windows_core::Result<IDCompositionScaleTransform3D>;
+    fn CreateRotateTransform3D(&self) -> windows_core::Result<IDCompositionRotateTransform3D>;
+    fn CreateMatrixTransform3D(&self) -> windows_core::Result<IDCompositionMatrixTransform3D>;
+    fn CreateTransform3DGroup(&self, transforms3d: *const Option<IDCompositionTransform3D>, elements: u32) -> windows_core::Result<IDCompositionTransform3D>;
+    fn CreateEffectGroup(&self) -> windows_core::Result<IDCompositionEffectGroup>;
+    fn CreateRectangleClip(&self) -> windows_core::Result<IDCompositionRectangleClip>;
+    fn CreateAnimation(&self) -> windows_core::Result<IDCompositionAnimation>;
+    fn CheckDeviceState(&self) -> windows_core::Result<windows_core::BOOL>;
+}
+#[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+impl IDCompositionDevice_Vtbl {
+    pub const fn new<Identity: IDCompositionDevice_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn Commit<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionDevice_Impl::Commit(this).into()
+            }
+        }
+        unsafe extern "system" fn WaitForCommitCompletion<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionDevice_Impl::WaitForCommitCompletion(this).into()
+            }
+        }
+        unsafe extern "system" fn GetFrameStatistics<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, statistics: *mut DCOMPOSITION_FRAME_STATISTICS) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::GetFrameStatistics(this) {
+                    Ok(ok__) => {
+                        statistics.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateTargetForHwnd<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, hwnd: super::super::Foundation::HWND, topmost: windows_core::BOOL, target: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateTargetForHwnd(this, core::mem::transmute_copy(&hwnd), core::mem::transmute_copy(&topmost)) {
+                    Ok(ok__) => {
+                        target.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateVisual<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, visual: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateVisual(this) {
+                    Ok(ok__) => {
+                        visual.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateSurface<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, width: u32, height: u32, pixelformat: super::Dxgi::Common::DXGI_FORMAT, alphamode: super::Dxgi::Common::DXGI_ALPHA_MODE, surface: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateSurface(this, core::mem::transmute_copy(&width), core::mem::transmute_copy(&height), core::mem::transmute_copy(&pixelformat), core::mem::transmute_copy(&alphamode)) {
+                    Ok(ok__) => {
+                        surface.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateVirtualSurface<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, initialwidth: u32, initialheight: u32, pixelformat: super::Dxgi::Common::DXGI_FORMAT, alphamode: super::Dxgi::Common::DXGI_ALPHA_MODE, virtualsurface: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateVirtualSurface(this, core::mem::transmute_copy(&initialwidth), core::mem::transmute_copy(&initialheight), core::mem::transmute_copy(&pixelformat), core::mem::transmute_copy(&alphamode)) {
+                    Ok(ok__) => {
+                        virtualsurface.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateSurfaceFromHandle<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, handle: super::super::Foundation::HANDLE, surface: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateSurfaceFromHandle(this, core::mem::transmute_copy(&handle)) {
+                    Ok(ok__) => {
+                        surface.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateSurfaceFromHwnd<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, hwnd: super::super::Foundation::HWND, surface: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateSurfaceFromHwnd(this, core::mem::transmute_copy(&hwnd)) {
+                    Ok(ok__) => {
+                        surface.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateTranslateTransform<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, translatetransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateTranslateTransform(this) {
+                    Ok(ok__) => {
+                        translatetransform.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateScaleTransform<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scaletransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateScaleTransform(this) {
+                    Ok(ok__) => {
+                        scaletransform.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateRotateTransform<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, rotatetransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateRotateTransform(this) {
+                    Ok(ok__) => {
+                        rotatetransform.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateSkewTransform<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, skewtransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateSkewTransform(this) {
+                    Ok(ok__) => {
+                        skewtransform.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateMatrixTransform<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, matrixtransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateMatrixTransform(this) {
+                    Ok(ok__) => {
+                        matrixtransform.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateTransformGroup<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, transforms: *const *mut core::ffi::c_void, elements: u32, transformgroup: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateTransformGroup(this, core::mem::transmute_copy(&transforms), core::mem::transmute_copy(&elements)) {
+                    Ok(ok__) => {
+                        transformgroup.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateTranslateTransform3D<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, translatetransform3d: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateTranslateTransform3D(this) {
+                    Ok(ok__) => {
+                        translatetransform3d.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateScaleTransform3D<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scaletransform3d: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateScaleTransform3D(this) {
+                    Ok(ok__) => {
+                        scaletransform3d.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateRotateTransform3D<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, rotatetransform3d: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateRotateTransform3D(this) {
+                    Ok(ok__) => {
+                        rotatetransform3d.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateMatrixTransform3D<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, matrixtransform3d: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateMatrixTransform3D(this) {
+                    Ok(ok__) => {
+                        matrixtransform3d.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateTransform3DGroup<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, transforms3d: *const *mut core::ffi::c_void, elements: u32, transform3dgroup: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateTransform3DGroup(this, core::mem::transmute_copy(&transforms3d), core::mem::transmute_copy(&elements)) {
+                    Ok(ok__) => {
+                        transform3dgroup.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateEffectGroup<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, effectgroup: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateEffectGroup(this) {
+                    Ok(ok__) => {
+                        effectgroup.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateRectangleClip<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, clip: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateRectangleClip(this) {
+                    Ok(ok__) => {
+                        clip.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CreateAnimation<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CreateAnimation(this) {
+                    Ok(ok__) => {
+                        animation.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn CheckDeviceState<Identity: IDCompositionDevice_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, pfvalid: *mut windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IDCompositionDevice_Impl::CheckDeviceState(this) {
+                    Ok(ok__) => {
+                        pfvalid.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Commit: Commit::<Identity, OFFSET>,
+            WaitForCommitCompletion: WaitForCommitCompletion::<Identity, OFFSET>,
+            GetFrameStatistics: GetFrameStatistics::<Identity, OFFSET>,
+            CreateTargetForHwnd: CreateTargetForHwnd::<Identity, OFFSET>,
+            CreateVisual: CreateVisual::<Identity, OFFSET>,
+            CreateSurface: CreateSurface::<Identity, OFFSET>,
+            CreateVirtualSurface: CreateVirtualSurface::<Identity, OFFSET>,
+            CreateSurfaceFromHandle: CreateSurfaceFromHandle::<Identity, OFFSET>,
+            CreateSurfaceFromHwnd: CreateSurfaceFromHwnd::<Identity, OFFSET>,
+            CreateTranslateTransform: CreateTranslateTransform::<Identity, OFFSET>,
+            CreateScaleTransform: CreateScaleTransform::<Identity, OFFSET>,
+            CreateRotateTransform: CreateRotateTransform::<Identity, OFFSET>,
+            CreateSkewTransform: CreateSkewTransform::<Identity, OFFSET>,
+            CreateMatrixTransform: CreateMatrixTransform::<Identity, OFFSET>,
+            CreateTransformGroup: CreateTransformGroup::<Identity, OFFSET>,
+            CreateTranslateTransform3D: CreateTranslateTransform3D::<Identity, OFFSET>,
+            CreateScaleTransform3D: CreateScaleTransform3D::<Identity, OFFSET>,
+            CreateRotateTransform3D: CreateRotateTransform3D::<Identity, OFFSET>,
+            CreateMatrixTransform3D: CreateMatrixTransform3D::<Identity, OFFSET>,
+            CreateTransform3DGroup: CreateTransform3DGroup::<Identity, OFFSET>,
+            CreateEffectGroup: CreateEffectGroup::<Identity, OFFSET>,
+            CreateRectangleClip: CreateRectangleClip::<Identity, OFFSET>,
+            CreateAnimation: CreateAnimation::<Identity, OFFSET>,
+            CheckDeviceState: CheckDeviceState::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionDevice as windows_core::Interface>::IID
+    }
+}
+#[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+impl windows_core::RuntimeName for IDCompositionDevice {}
+windows_core::imp::define_interface!(IDCompositionEffect, IDCompositionEffect_Vtbl, 0xec81b08f_bfcb_4e8d_b193_a915587999e8);
+windows_core::imp::interface_hierarchy!(IDCompositionEffect, windows_core::IUnknown);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionEffect_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+}
+pub trait IDCompositionEffect_Impl: windows_core::IUnknownImpl {}
+impl IDCompositionEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionEffect_Impl, const OFFSET: isize>() -> Self {
+        Self { base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>() }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionEffect {}
+windows_core::imp::define_interface!(IDCompositionEffectGroup, IDCompositionEffectGroup_Vtbl, 0xa7929a74_e6b2_4bd6_8b95_4040119ca34d);
+impl core::ops::Deref for IDCompositionEffectGroup {
+    type Target = IDCompositionEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionEffectGroup, windows_core::IUnknown, IDCompositionEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionEffectGroup_Vtbl {
+    pub base__: IDCompositionEffect_Vtbl,
+    pub SetOpacity: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOpacity2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTransform3D: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+pub trait IDCompositionEffectGroup_Impl: IDCompositionEffect_Impl {
+    fn SetOpacity(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOpacity2(&self, opacity: f32) -> windows_core::Result<()>;
+    fn SetTransform3D(&self, transform3d: windows_core::Ref<IDCompositionTransform3D>) -> windows_core::Result<()>;
+}
+impl IDCompositionEffectGroup_Vtbl {
+    pub const fn new<Identity: IDCompositionEffectGroup_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetOpacity<Identity: IDCompositionEffectGroup_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionEffectGroup_Impl::SetOpacity(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOpacity2<Identity: IDCompositionEffectGroup_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, opacity: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionEffectGroup_Impl::SetOpacity2(this, core::mem::transmute_copy(&opacity)).into()
+            }
+        }
+        unsafe extern "system" fn SetTransform3D<Identity: IDCompositionEffectGroup_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, transform3d: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionEffectGroup_Impl::SetTransform3D(this, core::mem::transmute_copy(&transform3d)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetOpacity: SetOpacity::<Identity, OFFSET>,
+            SetOpacity2: SetOpacity2::<Identity, OFFSET>,
+            SetTransform3D: SetTransform3D::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionEffectGroup as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionEffectGroup {}
+windows_core::imp::define_interface!(IDCompositionFilterEffect, IDCompositionFilterEffect_Vtbl, 0x30c421d5_8cb2_4e9f_b133_37be270d4ac2);
+impl core::ops::Deref for IDCompositionFilterEffect {
+    type Target = IDCompositionEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionFilterEffect, windows_core::IUnknown, IDCompositionEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionFilterEffect_Vtbl {
+    pub base__: IDCompositionEffect_Vtbl,
+    pub SetInput: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void, u32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionFilterEffect_Impl: IDCompositionEffect_Impl {
+    fn SetInput(&self, index: u32, input: windows_core::Ref<windows_core::IUnknown>, flags: u32) -> windows_core::Result<()>;
+}
+impl IDCompositionFilterEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionFilterEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetInput<Identity: IDCompositionFilterEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, input: *mut core::ffi::c_void, flags: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionFilterEffect_Impl::SetInput(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&input), core::mem::transmute_copy(&flags)).into()
+            }
+        }
+        Self { base__: IDCompositionEffect_Vtbl::new::<Identity, OFFSET>(), SetInput: SetInput::<Identity, OFFSET> }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionFilterEffect {}
+windows_core::imp::define_interface!(IDCompositionGaussianBlurEffect, IDCompositionGaussianBlurEffect_Vtbl, 0x45d4d0b7_1bd4_454e_8894_2bfa68443033);
+impl core::ops::Deref for IDCompositionGaussianBlurEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionGaussianBlurEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionGaussianBlurEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetStandardDeviation: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetStandardDeviation2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetBorderMode: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_BORDER_MODE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetBorderMode: usize,
+}
+windows_core::imp::define_interface!(IDCompositionHueRotationEffect, IDCompositionHueRotationEffect_Vtbl, 0x6db9f920_0770_4781_b0c6_381912f9d167);
+impl core::ops::Deref for IDCompositionHueRotationEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionHueRotationEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionHueRotationEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetAngle: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAngle2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionHueRotationEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetAngle(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAngle2(&self, amountdegrees: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionHueRotationEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionHueRotationEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetAngle<Identity: IDCompositionHueRotationEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionHueRotationEffect_Impl::SetAngle(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngle2<Identity: IDCompositionHueRotationEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amountdegrees: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionHueRotationEffect_Impl::SetAngle2(this, core::mem::transmute_copy(&amountdegrees)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetAngle: SetAngle::<Identity, OFFSET>,
+            SetAngle2: SetAngle2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionHueRotationEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionHueRotationEffect {}
+windows_core::imp::define_interface!(IDCompositionLinearTransferEffect, IDCompositionLinearTransferEffect_Vtbl, 0x4305ee5b_c4a0_4c88_9385_67124e017683);
+impl core::ops::Deref for IDCompositionLinearTransferEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionLinearTransferEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionLinearTransferEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetRedYIntercept: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetRedYIntercept2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetRedSlope: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetRedSlope2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetRedDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetGreenYIntercept: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetGreenYIntercept2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetGreenSlope: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetGreenSlope2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetGreenDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetBlueYIntercept: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlueYIntercept2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBlueSlope: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlueSlope2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBlueDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetAlphaYIntercept: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAlphaYIntercept2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAlphaSlope: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAlphaSlope2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAlphaDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetClampOutput: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+}
+pub trait IDCompositionLinearTransferEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetRedYIntercept(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetRedYIntercept2(&self, redyintercept: f32) -> windows_core::Result<()>;
+    fn SetRedSlope(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetRedSlope2(&self, redslope: f32) -> windows_core::Result<()>;
+    fn SetRedDisable(&self, reddisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetGreenYIntercept(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetGreenYIntercept2(&self, greenyintercept: f32) -> windows_core::Result<()>;
+    fn SetGreenSlope(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetGreenSlope2(&self, greenslope: f32) -> windows_core::Result<()>;
+    fn SetGreenDisable(&self, greendisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetBlueYIntercept(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlueYIntercept2(&self, blueyintercept: f32) -> windows_core::Result<()>;
+    fn SetBlueSlope(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlueSlope2(&self, blueslope: f32) -> windows_core::Result<()>;
+    fn SetBlueDisable(&self, bluedisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetAlphaYIntercept(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAlphaYIntercept2(&self, alphayintercept: f32) -> windows_core::Result<()>;
+    fn SetAlphaSlope(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAlphaSlope2(&self, alphaslope: f32) -> windows_core::Result<()>;
+    fn SetAlphaDisable(&self, alphadisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetClampOutput(&self, clampoutput: windows_core::BOOL) -> windows_core::Result<()>;
+}
+impl IDCompositionLinearTransferEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetRedYIntercept<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetRedYIntercept(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedYIntercept2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, redyintercept: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetRedYIntercept2(this, core::mem::transmute_copy(&redyintercept)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedSlope<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetRedSlope(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedSlope2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, redslope: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetRedSlope2(this, core::mem::transmute_copy(&redslope)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedDisable<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, reddisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetRedDisable(this, core::mem::transmute_copy(&reddisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenYIntercept<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetGreenYIntercept(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenYIntercept2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, greenyintercept: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetGreenYIntercept2(this, core::mem::transmute_copy(&greenyintercept)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenSlope<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetGreenSlope(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenSlope2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, greenslope: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetGreenSlope2(this, core::mem::transmute_copy(&greenslope)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenDisable<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, greendisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetGreenDisable(this, core::mem::transmute_copy(&greendisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueYIntercept<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetBlueYIntercept(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueYIntercept2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, blueyintercept: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetBlueYIntercept2(this, core::mem::transmute_copy(&blueyintercept)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueSlope<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetBlueSlope(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueSlope2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, blueslope: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetBlueSlope2(this, core::mem::transmute_copy(&blueslope)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueDisable<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, bluedisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetBlueDisable(this, core::mem::transmute_copy(&bluedisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaYIntercept<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetAlphaYIntercept(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaYIntercept2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, alphayintercept: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetAlphaYIntercept2(this, core::mem::transmute_copy(&alphayintercept)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaSlope<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetAlphaSlope(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaSlope2<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, alphaslope: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetAlphaSlope2(this, core::mem::transmute_copy(&alphaslope)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaDisable<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, alphadisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetAlphaDisable(this, core::mem::transmute_copy(&alphadisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetClampOutput<Identity: IDCompositionLinearTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, clampoutput: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionLinearTransferEffect_Impl::SetClampOutput(this, core::mem::transmute_copy(&clampoutput)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetRedYIntercept: SetRedYIntercept::<Identity, OFFSET>,
+            SetRedYIntercept2: SetRedYIntercept2::<Identity, OFFSET>,
+            SetRedSlope: SetRedSlope::<Identity, OFFSET>,
+            SetRedSlope2: SetRedSlope2::<Identity, OFFSET>,
+            SetRedDisable: SetRedDisable::<Identity, OFFSET>,
+            SetGreenYIntercept: SetGreenYIntercept::<Identity, OFFSET>,
+            SetGreenYIntercept2: SetGreenYIntercept2::<Identity, OFFSET>,
+            SetGreenSlope: SetGreenSlope::<Identity, OFFSET>,
+            SetGreenSlope2: SetGreenSlope2::<Identity, OFFSET>,
+            SetGreenDisable: SetGreenDisable::<Identity, OFFSET>,
+            SetBlueYIntercept: SetBlueYIntercept::<Identity, OFFSET>,
+            SetBlueYIntercept2: SetBlueYIntercept2::<Identity, OFFSET>,
+            SetBlueSlope: SetBlueSlope::<Identity, OFFSET>,
+            SetBlueSlope2: SetBlueSlope2::<Identity, OFFSET>,
+            SetBlueDisable: SetBlueDisable::<Identity, OFFSET>,
+            SetAlphaYIntercept: SetAlphaYIntercept::<Identity, OFFSET>,
+            SetAlphaYIntercept2: SetAlphaYIntercept2::<Identity, OFFSET>,
+            SetAlphaSlope: SetAlphaSlope::<Identity, OFFSET>,
+            SetAlphaSlope2: SetAlphaSlope2::<Identity, OFFSET>,
+            SetAlphaDisable: SetAlphaDisable::<Identity, OFFSET>,
+            SetClampOutput: SetClampOutput::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionLinearTransferEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionLinearTransferEffect {}
+windows_core::imp::define_interface!(IDCompositionMatrixTransform, IDCompositionMatrixTransform_Vtbl, 0x16cdff07_c503_419c_83f2_0965c7af1fa6);
+impl core::ops::Deref for IDCompositionMatrixTransform {
+    type Target = IDCompositionTransform;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionMatrixTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D, IDCompositionTransform);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionMatrixTransform_Vtbl {
+    pub base__: IDCompositionTransform_Vtbl,
+    pub SetMatrix: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Matrix3x2) -> windows_core::HRESULT,
+    pub SetMatrixElement: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetMatrixElement2: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionMatrixTransform_Impl: IDCompositionTransform_Impl {
+    fn SetMatrix(&self, matrix: *const windows_numerics::Matrix3x2) -> windows_core::Result<()>;
+    fn SetMatrixElement(&self, row: i32, column: i32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetMatrixElement2(&self, row: i32, column: i32, value: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionMatrixTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionMatrixTransform_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetMatrix<Identity: IDCompositionMatrixTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, matrix: *const windows_numerics::Matrix3x2) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform_Impl::SetMatrix(this, core::mem::transmute_copy(&matrix)).into()
+            }
+        }
+        unsafe extern "system" fn SetMatrixElement<Identity: IDCompositionMatrixTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, row: i32, column: i32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform_Impl::SetMatrixElement(this, core::mem::transmute_copy(&row), core::mem::transmute_copy(&column), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetMatrixElement2<Identity: IDCompositionMatrixTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, row: i32, column: i32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform_Impl::SetMatrixElement2(this, core::mem::transmute_copy(&row), core::mem::transmute_copy(&column), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform_Vtbl::new::<Identity, OFFSET>(),
+            SetMatrix: SetMatrix::<Identity, OFFSET>,
+            SetMatrixElement: SetMatrixElement::<Identity, OFFSET>,
+            SetMatrixElement2: SetMatrixElement2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionMatrixTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionTransform as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionMatrixTransform {}
+windows_core::imp::define_interface!(IDCompositionMatrixTransform3D, IDCompositionMatrixTransform3D_Vtbl, 0x4b3363f0_643b_41b7_b6e0_ccf22d34467c);
+impl core::ops::Deref for IDCompositionMatrixTransform3D {
+    type Target = IDCompositionTransform3D;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionMatrixTransform3D, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionMatrixTransform3D_Vtbl {
+    pub base__: IDCompositionTransform3D_Vtbl,
+    pub SetMatrix: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Matrix4x4) -> windows_core::HRESULT,
+    pub SetMatrixElement: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetMatrixElement2: unsafe extern "system" fn(*mut core::ffi::c_void, i32, i32, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionMatrixTransform3D_Impl: IDCompositionTransform3D_Impl {
+    fn SetMatrix(&self, matrix: *const windows_numerics::Matrix4x4) -> windows_core::Result<()>;
+    fn SetMatrixElement(&self, row: i32, column: i32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetMatrixElement2(&self, row: i32, column: i32, value: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionMatrixTransform3D_Vtbl {
+    pub const fn new<Identity: IDCompositionMatrixTransform3D_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetMatrix<Identity: IDCompositionMatrixTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, matrix: *const windows_numerics::Matrix4x4) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform3D_Impl::SetMatrix(this, core::mem::transmute_copy(&matrix)).into()
+            }
+        }
+        unsafe extern "system" fn SetMatrixElement<Identity: IDCompositionMatrixTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, row: i32, column: i32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform3D_Impl::SetMatrixElement(this, core::mem::transmute_copy(&row), core::mem::transmute_copy(&column), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetMatrixElement2<Identity: IDCompositionMatrixTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, row: i32, column: i32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionMatrixTransform3D_Impl::SetMatrixElement2(this, core::mem::transmute_copy(&row), core::mem::transmute_copy(&column), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform3D_Vtbl::new::<Identity, OFFSET>(),
+            SetMatrix: SetMatrix::<Identity, OFFSET>,
+            SetMatrixElement: SetMatrixElement::<Identity, OFFSET>,
+            SetMatrixElement2: SetMatrixElement2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionMatrixTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionMatrixTransform3D {}
+windows_core::imp::define_interface!(IDCompositionRectangleClip, IDCompositionRectangleClip_Vtbl, 0x9842ad7d_d9cf_4908_aed7_48b51da5e7c2);
+impl core::ops::Deref for IDCompositionRectangleClip {
+    type Target = IDCompositionClip;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionRectangleClip, windows_core::IUnknown, IDCompositionClip);
+impl IDCompositionRectangleClip {
+    pub unsafe fn SetLeft2(&self, left: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetLeft2)(windows_core::Interface::as_raw(self), left).ok() }
+    }
+    pub unsafe fn SetTop2(&self, top: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetTop2)(windows_core::Interface::as_raw(self), top).ok() }
+    }
+    pub unsafe fn SetRight2(&self, right: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetRight2)(windows_core::Interface::as_raw(self), right).ok() }
+    }
+    pub unsafe fn SetBottom2(&self, bottom: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetBottom2)(windows_core::Interface::as_raw(self), bottom).ok() }
+    }
+    }
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionRectangleClip_Vtbl {
+    pub base__: IDCompositionClip_Vtbl,
+    pub SetLeft: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetLeft2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTop: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTop2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetRight: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetRight2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBottom: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBottom2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTopLeftRadiusX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTopLeftRadiusX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTopLeftRadiusY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTopLeftRadiusY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTopRightRadiusX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTopRightRadiusX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTopRightRadiusY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTopRightRadiusY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBottomLeftRadiusX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBottomLeftRadiusX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBottomLeftRadiusY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBottomLeftRadiusY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBottomRightRadiusX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBottomRightRadiusX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBottomRightRadiusY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBottomRightRadiusY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionRectangleClip_Impl: IDCompositionClip_Impl {
+    fn SetLeft(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetLeft2(&self, left: f32) -> windows_core::Result<()>;
+    fn SetTop(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetTop2(&self, top: f32) -> windows_core::Result<()>;
+    fn SetRight(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetRight2(&self, right: f32) -> windows_core::Result<()>;
+    fn SetBottom(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBottom2(&self, bottom: f32) -> windows_core::Result<()>;
+    fn SetTopLeftRadiusX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetTopLeftRadiusX2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetTopLeftRadiusY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetTopLeftRadiusY2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetTopRightRadiusX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetTopRightRadiusX2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetTopRightRadiusY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetTopRightRadiusY2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetBottomLeftRadiusX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBottomLeftRadiusX2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetBottomLeftRadiusY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBottomLeftRadiusY2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetBottomRightRadiusX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBottomRightRadiusX2(&self, radius: f32) -> windows_core::Result<()>;
+    fn SetBottomRightRadiusY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBottomRightRadiusY2(&self, radius: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionRectangleClip_Vtbl {
+    pub const fn new<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetLeft<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetLeft(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetLeft2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, left: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetLeft2(this, core::mem::transmute_copy(&left)).into()
+            }
+        }
+        unsafe extern "system" fn SetTop<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTop(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetTop2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, top: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTop2(this, core::mem::transmute_copy(&top)).into()
+            }
+        }
+        unsafe extern "system" fn SetRight<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetRight(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetRight2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, right: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetRight2(this, core::mem::transmute_copy(&right)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottom<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottom(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottom2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, bottom: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottom2(this, core::mem::transmute_copy(&bottom)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopLeftRadiusX<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopLeftRadiusX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopLeftRadiusX2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopLeftRadiusX2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopLeftRadiusY<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopLeftRadiusY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopLeftRadiusY2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopLeftRadiusY2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopRightRadiusX<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopRightRadiusX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopRightRadiusX2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopRightRadiusX2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopRightRadiusY<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopRightRadiusY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetTopRightRadiusY2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetTopRightRadiusY2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomLeftRadiusX<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomLeftRadiusX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomLeftRadiusX2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomLeftRadiusX2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomLeftRadiusY<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomLeftRadiusY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomLeftRadiusY2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomLeftRadiusY2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomRightRadiusX<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomRightRadiusX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomRightRadiusX2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomRightRadiusX2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomRightRadiusY<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomRightRadiusY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBottomRightRadiusY2<Identity: IDCompositionRectangleClip_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, radius: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRectangleClip_Impl::SetBottomRightRadiusY2(this, core::mem::transmute_copy(&radius)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionClip_Vtbl::new::<Identity, OFFSET>(),
+            SetLeft: SetLeft::<Identity, OFFSET>,
+            SetLeft2: SetLeft2::<Identity, OFFSET>,
+            SetTop: SetTop::<Identity, OFFSET>,
+            SetTop2: SetTop2::<Identity, OFFSET>,
+            SetRight: SetRight::<Identity, OFFSET>,
+            SetRight2: SetRight2::<Identity, OFFSET>,
+            SetBottom: SetBottom::<Identity, OFFSET>,
+            SetBottom2: SetBottom2::<Identity, OFFSET>,
+            SetTopLeftRadiusX: SetTopLeftRadiusX::<Identity, OFFSET>,
+            SetTopLeftRadiusX2: SetTopLeftRadiusX2::<Identity, OFFSET>,
+            SetTopLeftRadiusY: SetTopLeftRadiusY::<Identity, OFFSET>,
+            SetTopLeftRadiusY2: SetTopLeftRadiusY2::<Identity, OFFSET>,
+            SetTopRightRadiusX: SetTopRightRadiusX::<Identity, OFFSET>,
+            SetTopRightRadiusX2: SetTopRightRadiusX2::<Identity, OFFSET>,
+            SetTopRightRadiusY: SetTopRightRadiusY::<Identity, OFFSET>,
+            SetTopRightRadiusY2: SetTopRightRadiusY2::<Identity, OFFSET>,
+            SetBottomLeftRadiusX: SetBottomLeftRadiusX::<Identity, OFFSET>,
+            SetBottomLeftRadiusX2: SetBottomLeftRadiusX2::<Identity, OFFSET>,
+            SetBottomLeftRadiusY: SetBottomLeftRadiusY::<Identity, OFFSET>,
+            SetBottomLeftRadiusY2: SetBottomLeftRadiusY2::<Identity, OFFSET>,
+            SetBottomRightRadiusX: SetBottomRightRadiusX::<Identity, OFFSET>,
+            SetBottomRightRadiusX2: SetBottomRightRadiusX2::<Identity, OFFSET>,
+            SetBottomRightRadiusY: SetBottomRightRadiusY::<Identity, OFFSET>,
+            SetBottomRightRadiusY2: SetBottomRightRadiusY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionRectangleClip as windows_core::Interface>::IID || iid == &<IDCompositionClip as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionRectangleClip {}
+windows_core::imp::define_interface!(IDCompositionRotateTransform, IDCompositionRotateTransform_Vtbl, 0x641ed83c_ae96_46c5_90dc_32774cc5c6d5);
+impl core::ops::Deref for IDCompositionRotateTransform {
+    type Target = IDCompositionTransform;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionRotateTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D, IDCompositionTransform);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionRotateTransform_Vtbl {
+    pub base__: IDCompositionTransform_Vtbl,
+    pub SetAngle: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAngle2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionRotateTransform_Impl: IDCompositionTransform_Impl {
+    fn SetAngle(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAngle2(&self, angle: f32) -> windows_core::Result<()>;
+    fn SetCenterX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterX2(&self, centerx: f32) -> windows_core::Result<()>;
+    fn SetCenterY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterY2(&self, centery: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionRotateTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetAngle<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetAngle(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngle2<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, angle: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetAngle2(this, core::mem::transmute_copy(&angle)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetCenterX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX2<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetCenterX2(this, core::mem::transmute_copy(&centerx)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetCenterY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY2<Identity: IDCompositionRotateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centery: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform_Impl::SetCenterY2(this, core::mem::transmute_copy(&centery)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform_Vtbl::new::<Identity, OFFSET>(),
+            SetAngle: SetAngle::<Identity, OFFSET>,
+            SetAngle2: SetAngle2::<Identity, OFFSET>,
+            SetCenterX: SetCenterX::<Identity, OFFSET>,
+            SetCenterX2: SetCenterX2::<Identity, OFFSET>,
+            SetCenterY: SetCenterY::<Identity, OFFSET>,
+            SetCenterY2: SetCenterY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionRotateTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionTransform as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionRotateTransform {}
+windows_core::imp::define_interface!(IDCompositionRotateTransform3D, IDCompositionRotateTransform3D_Vtbl, 0xd8f5b23f_d429_4a91_b55a_d2f45fd75b18);
+impl core::ops::Deref for IDCompositionRotateTransform3D {
+    type Target = IDCompositionTransform3D;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionRotateTransform3D, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionRotateTransform3D_Vtbl {
+    pub base__: IDCompositionTransform3D_Vtbl,
+    pub SetAngle: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAngle2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAxisX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAxisX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAxisY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAxisY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAxisZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAxisZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionRotateTransform3D_Impl: IDCompositionTransform3D_Impl {
+    fn SetAngle(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAngle2(&self, angle: f32) -> windows_core::Result<()>;
+    fn SetAxisX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAxisX2(&self, axisx: f32) -> windows_core::Result<()>;
+    fn SetAxisY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAxisY2(&self, axisy: f32) -> windows_core::Result<()>;
+    fn SetAxisZ(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAxisZ2(&self, axisz: f32) -> windows_core::Result<()>;
+    fn SetCenterX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterX2(&self, centerx: f32) -> windows_core::Result<()>;
+    fn SetCenterY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterY2(&self, centery: f32) -> windows_core::Result<()>;
+    fn SetCenterZ(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterZ2(&self, centerz: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionRotateTransform3D_Vtbl {
+    pub const fn new<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetAngle<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAngle(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngle2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, angle: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAngle2(this, core::mem::transmute_copy(&angle)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisX<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisX2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, axisx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisX2(this, core::mem::transmute_copy(&axisx)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisY<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisY2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, axisy: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisY2(this, core::mem::transmute_copy(&axisy)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisZ<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisZ(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAxisZ2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, axisz: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetAxisZ2(this, core::mem::transmute_copy(&axisz)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterX2(this, core::mem::transmute_copy(&centerx)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centery: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterY2(this, core::mem::transmute_copy(&centery)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterZ<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterZ(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterZ2<Identity: IDCompositionRotateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerz: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionRotateTransform3D_Impl::SetCenterZ2(this, core::mem::transmute_copy(&centerz)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform3D_Vtbl::new::<Identity, OFFSET>(),
+            SetAngle: SetAngle::<Identity, OFFSET>,
+            SetAngle2: SetAngle2::<Identity, OFFSET>,
+            SetAxisX: SetAxisX::<Identity, OFFSET>,
+            SetAxisX2: SetAxisX2::<Identity, OFFSET>,
+            SetAxisY: SetAxisY::<Identity, OFFSET>,
+            SetAxisY2: SetAxisY2::<Identity, OFFSET>,
+            SetAxisZ: SetAxisZ::<Identity, OFFSET>,
+            SetAxisZ2: SetAxisZ2::<Identity, OFFSET>,
+            SetCenterX: SetCenterX::<Identity, OFFSET>,
+            SetCenterX2: SetCenterX2::<Identity, OFFSET>,
+            SetCenterY: SetCenterY::<Identity, OFFSET>,
+            SetCenterY2: SetCenterY2::<Identity, OFFSET>,
+            SetCenterZ: SetCenterZ::<Identity, OFFSET>,
+            SetCenterZ2: SetCenterZ2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionRotateTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionRotateTransform3D {}
+windows_core::imp::define_interface!(IDCompositionSaturationEffect, IDCompositionSaturationEffect_Vtbl, 0xa08debda_3258_4fa4_9f16_9174d3fe93b1);
+impl core::ops::Deref for IDCompositionSaturationEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionSaturationEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionSaturationEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetSaturation: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetSaturation2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionSaturationEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetSaturation(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetSaturation2(&self, ratio: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionSaturationEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionSaturationEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetSaturation<Identity: IDCompositionSaturationEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSaturationEffect_Impl::SetSaturation(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetSaturation2<Identity: IDCompositionSaturationEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, ratio: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSaturationEffect_Impl::SetSaturation2(this, core::mem::transmute_copy(&ratio)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetSaturation: SetSaturation::<Identity, OFFSET>,
+            SetSaturation2: SetSaturation2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionSaturationEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionSaturationEffect {}
+windows_core::imp::define_interface!(IDCompositionScaleTransform, IDCompositionScaleTransform_Vtbl, 0x71fde914_40ef_45ef_bd51_68b037c339f9);
+impl core::ops::Deref for IDCompositionScaleTransform {
+    type Target = IDCompositionTransform;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionScaleTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D, IDCompositionTransform);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionScaleTransform_Vtbl {
+    pub base__: IDCompositionTransform_Vtbl,
+    pub SetScaleX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetScaleX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetScaleY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetScaleY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionScaleTransform_Impl: IDCompositionTransform_Impl {
+    fn SetScaleX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetScaleX2(&self, scalex: f32) -> windows_core::Result<()>;
+    fn SetScaleY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetScaleY2(&self, scaley: f32) -> windows_core::Result<()>;
+    fn SetCenterX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterX2(&self, centerx: f32) -> windows_core::Result<()>;
+    fn SetCenterY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterY2(&self, centery: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionScaleTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetScaleX<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetScaleX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleX2<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scalex: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetScaleX2(this, core::mem::transmute_copy(&scalex)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleY<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetScaleY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleY2<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scaley: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetScaleY2(this, core::mem::transmute_copy(&scaley)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetCenterX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX2<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetCenterX2(this, core::mem::transmute_copy(&centerx)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetCenterY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY2<Identity: IDCompositionScaleTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centery: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform_Impl::SetCenterY2(this, core::mem::transmute_copy(&centery)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform_Vtbl::new::<Identity, OFFSET>(),
+            SetScaleX: SetScaleX::<Identity, OFFSET>,
+            SetScaleX2: SetScaleX2::<Identity, OFFSET>,
+            SetScaleY: SetScaleY::<Identity, OFFSET>,
+            SetScaleY2: SetScaleY2::<Identity, OFFSET>,
+            SetCenterX: SetCenterX::<Identity, OFFSET>,
+            SetCenterX2: SetCenterX2::<Identity, OFFSET>,
+            SetCenterY: SetCenterY::<Identity, OFFSET>,
+            SetCenterY2: SetCenterY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionScaleTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionTransform as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionScaleTransform {}
+windows_core::imp::define_interface!(IDCompositionScaleTransform3D, IDCompositionScaleTransform3D_Vtbl, 0x2a9e9ead_364b_4b15_a7c4_a1997f78b389);
+impl core::ops::Deref for IDCompositionScaleTransform3D {
+    type Target = IDCompositionTransform3D;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionScaleTransform3D, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionScaleTransform3D_Vtbl {
+    pub base__: IDCompositionTransform3D_Vtbl,
+    pub SetScaleX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetScaleX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetScaleY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetScaleY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetScaleZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetScaleZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionScaleTransform3D_Impl: IDCompositionTransform3D_Impl {
+    fn SetScaleX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetScaleX2(&self, scalex: f32) -> windows_core::Result<()>;
+    fn SetScaleY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetScaleY2(&self, scaley: f32) -> windows_core::Result<()>;
+    fn SetScaleZ(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetScaleZ2(&self, scalez: f32) -> windows_core::Result<()>;
+    fn SetCenterX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterX2(&self, centerx: f32) -> windows_core::Result<()>;
+    fn SetCenterY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterY2(&self, centery: f32) -> windows_core::Result<()>;
+    fn SetCenterZ(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterZ2(&self, centerz: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionScaleTransform3D_Vtbl {
+    pub const fn new<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetScaleX<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleX2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scalex: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleX2(this, core::mem::transmute_copy(&scalex)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleY<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleY2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scaley: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleY2(this, core::mem::transmute_copy(&scaley)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleZ<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleZ(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetScaleZ2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scalez: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetScaleZ2(this, core::mem::transmute_copy(&scalez)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterX2(this, core::mem::transmute_copy(&centerx)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centery: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterY2(this, core::mem::transmute_copy(&centery)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterZ<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterZ(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterZ2<Identity: IDCompositionScaleTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerz: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionScaleTransform3D_Impl::SetCenterZ2(this, core::mem::transmute_copy(&centerz)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform3D_Vtbl::new::<Identity, OFFSET>(),
+            SetScaleX: SetScaleX::<Identity, OFFSET>,
+            SetScaleX2: SetScaleX2::<Identity, OFFSET>,
+            SetScaleY: SetScaleY::<Identity, OFFSET>,
+            SetScaleY2: SetScaleY2::<Identity, OFFSET>,
+            SetScaleZ: SetScaleZ::<Identity, OFFSET>,
+            SetScaleZ2: SetScaleZ2::<Identity, OFFSET>,
+            SetCenterX: SetCenterX::<Identity, OFFSET>,
+            SetCenterX2: SetCenterX2::<Identity, OFFSET>,
+            SetCenterY: SetCenterY::<Identity, OFFSET>,
+            SetCenterY2: SetCenterY2::<Identity, OFFSET>,
+            SetCenterZ: SetCenterZ::<Identity, OFFSET>,
+            SetCenterZ2: SetCenterZ2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionScaleTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionScaleTransform3D {}
+windows_core::imp::define_interface!(IDCompositionShadowEffect, IDCompositionShadowEffect_Vtbl, 0x4ad18ac0_cfd2_4c2f_bb62_96e54fdb6879);
+impl core::ops::Deref for IDCompositionShadowEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionShadowEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionShadowEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetStandardDeviation: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetStandardDeviation2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetColor: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector4) -> windows_core::HRESULT,
+    pub SetRed: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetRed2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetGreen: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetGreen2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetBlue: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlue2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAlpha: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAlpha2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionShadowEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetStandardDeviation(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetStandardDeviation2(&self, amount: f32) -> windows_core::Result<()>;
+    fn SetColor(&self, color: *const windows_numerics::Vector4) -> windows_core::Result<()>;
+    fn SetRed(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetRed2(&self, amount: f32) -> windows_core::Result<()>;
+    fn SetGreen(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetGreen2(&self, amount: f32) -> windows_core::Result<()>;
+    fn SetBlue(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlue2(&self, amount: f32) -> windows_core::Result<()>;
+    fn SetAlpha(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAlpha2(&self, amount: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionShadowEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetStandardDeviation<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetStandardDeviation(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetStandardDeviation2<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amount: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetStandardDeviation2(this, core::mem::transmute_copy(&amount)).into()
+            }
+        }
+        unsafe extern "system" fn SetColor<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, color: *const windows_numerics::Vector4) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetColor(this, core::mem::transmute_copy(&color)).into()
+            }
+        }
+        unsafe extern "system" fn SetRed<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetRed(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetRed2<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amount: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetRed2(this, core::mem::transmute_copy(&amount)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreen<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetGreen(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreen2<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amount: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetGreen2(this, core::mem::transmute_copy(&amount)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlue<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetBlue(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlue2<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amount: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetBlue2(this, core::mem::transmute_copy(&amount)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlpha<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetAlpha(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlpha2<Identity: IDCompositionShadowEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, amount: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionShadowEffect_Impl::SetAlpha2(this, core::mem::transmute_copy(&amount)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetStandardDeviation: SetStandardDeviation::<Identity, OFFSET>,
+            SetStandardDeviation2: SetStandardDeviation2::<Identity, OFFSET>,
+            SetColor: SetColor::<Identity, OFFSET>,
+            SetRed: SetRed::<Identity, OFFSET>,
+            SetRed2: SetRed2::<Identity, OFFSET>,
+            SetGreen: SetGreen::<Identity, OFFSET>,
+            SetGreen2: SetGreen2::<Identity, OFFSET>,
+            SetBlue: SetBlue::<Identity, OFFSET>,
+            SetBlue2: SetBlue2::<Identity, OFFSET>,
+            SetAlpha: SetAlpha::<Identity, OFFSET>,
+            SetAlpha2: SetAlpha2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionShadowEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionShadowEffect {}
+windows_core::imp::define_interface!(IDCompositionSkewTransform, IDCompositionSkewTransform_Vtbl, 0xe57aa735_dcdb_4c72_9c61_0591f58889ee);
+impl core::ops::Deref for IDCompositionSkewTransform {
+    type Target = IDCompositionTransform;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionSkewTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D, IDCompositionTransform);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionSkewTransform_Vtbl {
+    pub base__: IDCompositionTransform_Vtbl,
+    pub SetAngleX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAngleX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetAngleY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAngleY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetCenterY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCenterY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionSkewTransform_Impl: IDCompositionTransform_Impl {
+    fn SetAngleX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAngleX2(&self, anglex: f32) -> windows_core::Result<()>;
+    fn SetAngleY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAngleY2(&self, angley: f32) -> windows_core::Result<()>;
+    fn SetCenterX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterX2(&self, centerx: f32) -> windows_core::Result<()>;
+    fn SetCenterY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetCenterY2(&self, centery: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionSkewTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetAngleX<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetAngleX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngleX2<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, anglex: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetAngleX2(this, core::mem::transmute_copy(&anglex)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngleY<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetAngleY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAngleY2<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, angley: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetAngleY2(this, core::mem::transmute_copy(&angley)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetCenterX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterX2<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centerx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetCenterX2(this, core::mem::transmute_copy(&centerx)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetCenterY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetCenterY2<Identity: IDCompositionSkewTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, centery: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSkewTransform_Impl::SetCenterY2(this, core::mem::transmute_copy(&centery)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform_Vtbl::new::<Identity, OFFSET>(),
+            SetAngleX: SetAngleX::<Identity, OFFSET>,
+            SetAngleX2: SetAngleX2::<Identity, OFFSET>,
+            SetAngleY: SetAngleY::<Identity, OFFSET>,
+            SetAngleY2: SetAngleY2::<Identity, OFFSET>,
+            SetCenterX: SetCenterX::<Identity, OFFSET>,
+            SetCenterX2: SetCenterX2::<Identity, OFFSET>,
+            SetCenterY: SetCenterY::<Identity, OFFSET>,
+            SetCenterY2: SetCenterY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionSkewTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionTransform as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionSkewTransform {}
+windows_core::imp::define_interface!(IDCompositionSurface, IDCompositionSurface_Vtbl, 0xbb8a4953_2c99_4f5a_96f5_4819027fa3ac);
+windows_core::imp::interface_hierarchy!(IDCompositionSurface, windows_core::IUnknown);
+impl IDCompositionSurface {
+    pub unsafe fn Scroll(&self, scrollrect: Option<*const super::super::Foundation::RECT>, cliprect: Option<*const super::super::Foundation::RECT>, offsetx: i32, offsety: i32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Scroll)(windows_core::Interface::as_raw(self), scrollrect.unwrap_or(core::mem::zeroed()) as _, cliprect.unwrap_or(core::mem::zeroed()) as _, offsetx, offsety).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionSurface_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub BeginDraw: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::super::Foundation::RECT, *const windows_core::GUID, *mut *mut core::ffi::c_void, *mut super::super::Foundation::POINT) -> windows_core::HRESULT,
+    pub EndDraw: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SuspendDraw: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub ResumeDraw: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub Scroll: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::super::Foundation::RECT, *const super::super::Foundation::RECT, i32, i32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionSurface_Impl: windows_core::IUnknownImpl {
+    fn BeginDraw(&self, updaterect: *const super::super::Foundation::RECT, iid: *const windows_core::GUID, updateobject: *mut *mut core::ffi::c_void, updateoffset: *mut super::super::Foundation::POINT) -> windows_core::Result<()>;
+    fn EndDraw(&self) -> windows_core::Result<()>;
+    fn SuspendDraw(&self) -> windows_core::Result<()>;
+    fn ResumeDraw(&self) -> windows_core::Result<()>;
+    fn Scroll(&self, scrollrect: *const super::super::Foundation::RECT, cliprect: *const super::super::Foundation::RECT, offsetx: i32, offsety: i32) -> windows_core::Result<()>;
+}
+impl IDCompositionSurface_Vtbl {
+    pub const fn new<Identity: IDCompositionSurface_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn BeginDraw<Identity: IDCompositionSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, updaterect: *const super::super::Foundation::RECT, iid: *const windows_core::GUID, updateobject: *mut *mut core::ffi::c_void, updateoffset: *mut super::super::Foundation::POINT) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSurface_Impl::BeginDraw(this, core::mem::transmute_copy(&updaterect), core::mem::transmute_copy(&iid), core::mem::transmute_copy(&updateobject), core::mem::transmute_copy(&updateoffset)).into()
+            }
+        }
+        unsafe extern "system" fn EndDraw<Identity: IDCompositionSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSurface_Impl::EndDraw(this).into()
+            }
+        }
+        unsafe extern "system" fn SuspendDraw<Identity: IDCompositionSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSurface_Impl::SuspendDraw(this).into()
+            }
+        }
+        unsafe extern "system" fn ResumeDraw<Identity: IDCompositionSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSurface_Impl::ResumeDraw(this).into()
+            }
+        }
+        unsafe extern "system" fn Scroll<Identity: IDCompositionSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, scrollrect: *const super::super::Foundation::RECT, cliprect: *const super::super::Foundation::RECT, offsetx: i32, offsety: i32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionSurface_Impl::Scroll(this, core::mem::transmute_copy(&scrollrect), core::mem::transmute_copy(&cliprect), core::mem::transmute_copy(&offsetx), core::mem::transmute_copy(&offsety)).into()
+            }
+        }
+        Self {
+            base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            BeginDraw: BeginDraw::<Identity, OFFSET>,
+            EndDraw: EndDraw::<Identity, OFFSET>,
+            SuspendDraw: SuspendDraw::<Identity, OFFSET>,
+            ResumeDraw: ResumeDraw::<Identity, OFFSET>,
+            Scroll: Scroll::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionSurface as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionSurface {}
+windows_core::imp::define_interface!(IDCompositionTableTransferEffect, IDCompositionTableTransferEffect_Vtbl, 0x9b7e82e2_69c5_4eb4_a5f5_a7033f5132cd);
+impl core::ops::Deref for IDCompositionTableTransferEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTableTransferEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTableTransferEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetRedTable: unsafe extern "system" fn(*mut core::ffi::c_void, *const f32, u32) -> windows_core::HRESULT,
+    pub SetGreenTable: unsafe extern "system" fn(*mut core::ffi::c_void, *const f32, u32) -> windows_core::HRESULT,
+    pub SetBlueTable: unsafe extern "system" fn(*mut core::ffi::c_void, *const f32, u32) -> windows_core::HRESULT,
+    pub SetAlphaTable: unsafe extern "system" fn(*mut core::ffi::c_void, *const f32, u32) -> windows_core::HRESULT,
+    pub SetRedDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetGreenDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetBlueDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetAlphaDisable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetClampOutput: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+    pub SetRedTableValue: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetRedTableValue2: unsafe extern "system" fn(*mut core::ffi::c_void, u32, f32) -> windows_core::HRESULT,
+    pub SetGreenTableValue: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetGreenTableValue2: unsafe extern "system" fn(*mut core::ffi::c_void, u32, f32) -> windows_core::HRESULT,
+    pub SetBlueTableValue: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBlueTableValue2: unsafe extern "system" fn(*mut core::ffi::c_void, u32, f32) -> windows_core::HRESULT,
+    pub SetAlphaTableValue: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetAlphaTableValue2: unsafe extern "system" fn(*mut core::ffi::c_void, u32, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionTableTransferEffect_Impl: IDCompositionFilterEffect_Impl {
+    fn SetRedTable(&self, tablevalues: *const f32, count: u32) -> windows_core::Result<()>;
+    fn SetGreenTable(&self, tablevalues: *const f32, count: u32) -> windows_core::Result<()>;
+    fn SetBlueTable(&self, tablevalues: *const f32, count: u32) -> windows_core::Result<()>;
+    fn SetAlphaTable(&self, tablevalues: *const f32, count: u32) -> windows_core::Result<()>;
+    fn SetRedDisable(&self, reddisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetGreenDisable(&self, greendisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetBlueDisable(&self, bluedisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetAlphaDisable(&self, alphadisable: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetClampOutput(&self, clampoutput: windows_core::BOOL) -> windows_core::Result<()>;
+    fn SetRedTableValue(&self, index: u32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetRedTableValue2(&self, index: u32, value: f32) -> windows_core::Result<()>;
+    fn SetGreenTableValue(&self, index: u32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetGreenTableValue2(&self, index: u32, value: f32) -> windows_core::Result<()>;
+    fn SetBlueTableValue(&self, index: u32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetBlueTableValue2(&self, index: u32, value: f32) -> windows_core::Result<()>;
+    fn SetAlphaTableValue(&self, index: u32, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetAlphaTableValue2(&self, index: u32, value: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionTableTransferEffect_Vtbl {
+    pub const fn new<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetRedTable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, tablevalues: *const f32, count: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetRedTable(this, core::mem::transmute_copy(&tablevalues), core::mem::transmute_copy(&count)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenTable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, tablevalues: *const f32, count: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetGreenTable(this, core::mem::transmute_copy(&tablevalues), core::mem::transmute_copy(&count)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueTable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, tablevalues: *const f32, count: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetBlueTable(this, core::mem::transmute_copy(&tablevalues), core::mem::transmute_copy(&count)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaTable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, tablevalues: *const f32, count: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetAlphaTable(this, core::mem::transmute_copy(&tablevalues), core::mem::transmute_copy(&count)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedDisable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, reddisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetRedDisable(this, core::mem::transmute_copy(&reddisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenDisable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, greendisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetGreenDisable(this, core::mem::transmute_copy(&greendisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueDisable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, bluedisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetBlueDisable(this, core::mem::transmute_copy(&bluedisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaDisable<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, alphadisable: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetAlphaDisable(this, core::mem::transmute_copy(&alphadisable)).into()
+            }
+        }
+        unsafe extern "system" fn SetClampOutput<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, clampoutput: windows_core::BOOL) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetClampOutput(this, core::mem::transmute_copy(&clampoutput)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedTableValue<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetRedTableValue(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetRedTableValue2<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetRedTableValue2(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenTableValue<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetGreenTableValue(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetGreenTableValue2<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetGreenTableValue2(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueTableValue<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetBlueTableValue(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetBlueTableValue2<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetBlueTableValue2(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaTableValue<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetAlphaTableValue(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetAlphaTableValue2<Identity: IDCompositionTableTransferEffect_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, index: u32, value: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTableTransferEffect_Impl::SetAlphaTableValue2(this, core::mem::transmute_copy(&index), core::mem::transmute_copy(&value)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionFilterEffect_Vtbl::new::<Identity, OFFSET>(),
+            SetRedTable: SetRedTable::<Identity, OFFSET>,
+            SetGreenTable: SetGreenTable::<Identity, OFFSET>,
+            SetBlueTable: SetBlueTable::<Identity, OFFSET>,
+            SetAlphaTable: SetAlphaTable::<Identity, OFFSET>,
+            SetRedDisable: SetRedDisable::<Identity, OFFSET>,
+            SetGreenDisable: SetGreenDisable::<Identity, OFFSET>,
+            SetBlueDisable: SetBlueDisable::<Identity, OFFSET>,
+            SetAlphaDisable: SetAlphaDisable::<Identity, OFFSET>,
+            SetClampOutput: SetClampOutput::<Identity, OFFSET>,
+            SetRedTableValue: SetRedTableValue::<Identity, OFFSET>,
+            SetRedTableValue2: SetRedTableValue2::<Identity, OFFSET>,
+            SetGreenTableValue: SetGreenTableValue::<Identity, OFFSET>,
+            SetGreenTableValue2: SetGreenTableValue2::<Identity, OFFSET>,
+            SetBlueTableValue: SetBlueTableValue::<Identity, OFFSET>,
+            SetBlueTableValue2: SetBlueTableValue2::<Identity, OFFSET>,
+            SetAlphaTableValue: SetAlphaTableValue::<Identity, OFFSET>,
+            SetAlphaTableValue2: SetAlphaTableValue2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTableTransferEffect as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionFilterEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTableTransferEffect {}
+windows_core::imp::define_interface!(IDCompositionTarget, IDCompositionTarget_Vtbl, 0xeacdd04c_117e_4e17_88f4_d1b12b0e3d89);
+windows_core::imp::interface_hierarchy!(IDCompositionTarget, windows_core::IUnknown);
+impl IDCompositionTarget {
+    pub unsafe fn SetRoot<P0>(&self, visual: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IDCompositionVisual>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetRoot)(windows_core::Interface::as_raw(self), visual.param().abi()).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTarget_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub SetRoot: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+pub trait IDCompositionTarget_Impl: windows_core::IUnknownImpl {
+    fn SetRoot(&self, visual: windows_core::Ref<IDCompositionVisual>) -> windows_core::Result<()>;
+}
+impl IDCompositionTarget_Vtbl {
+    pub const fn new<Identity: IDCompositionTarget_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetRoot<Identity: IDCompositionTarget_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, visual: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTarget_Impl::SetRoot(this, core::mem::transmute_copy(&visual)).into()
+            }
+        }
+        Self { base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(), SetRoot: SetRoot::<Identity, OFFSET> }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTarget as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTarget {}
+windows_core::imp::define_interface!(IDCompositionTransform, IDCompositionTransform_Vtbl, 0xfd55faa7_37e0_4c20_95d2_9be45bc33f55);
+impl core::ops::Deref for IDCompositionTransform {
+    type Target = IDCompositionTransform3D;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTransform_Vtbl {
+    pub base__: IDCompositionTransform3D_Vtbl,
+}
+pub trait IDCompositionTransform_Impl: IDCompositionTransform3D_Impl {}
+impl IDCompositionTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionTransform_Impl, const OFFSET: isize>() -> Self {
+        Self { base__: IDCompositionTransform3D_Vtbl::new::<Identity, OFFSET>() }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTransform {}
+windows_core::imp::define_interface!(IDCompositionTransform3D, IDCompositionTransform3D_Vtbl, 0x71185722_246b_41f2_aad1_0443f7f4bfc2);
+impl core::ops::Deref for IDCompositionTransform3D {
+    type Target = IDCompositionEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTransform3D, windows_core::IUnknown, IDCompositionEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTransform3D_Vtbl {
+    pub base__: IDCompositionEffect_Vtbl,
+}
+pub trait IDCompositionTransform3D_Impl: IDCompositionEffect_Impl {}
+impl IDCompositionTransform3D_Vtbl {
+    pub const fn new<Identity: IDCompositionTransform3D_Impl, const OFFSET: isize>() -> Self {
+        Self { base__: IDCompositionEffect_Vtbl::new::<Identity, OFFSET>() }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTransform3D {}
+windows_core::imp::define_interface!(IDCompositionTranslateTransform, IDCompositionTranslateTransform_Vtbl, 0x06791122_c6f0_417d_8323_269e987f5954);
+impl core::ops::Deref for IDCompositionTranslateTransform {
+    type Target = IDCompositionTransform;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTranslateTransform, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D, IDCompositionTransform);
+impl IDCompositionTranslateTransform {
+    pub unsafe fn SetOffsetX2(&self, offsetx: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetX2)(windows_core::Interface::as_raw(self), offsetx).ok() }
+    }
+    pub unsafe fn SetOffsetY2(&self, offsety: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetY2)(windows_core::Interface::as_raw(self), offsety).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTranslateTransform_Vtbl {
+    pub base__: IDCompositionTransform_Vtbl,
+    pub SetOffsetX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetOffsetY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionTranslateTransform_Impl: IDCompositionTransform_Impl {
+    fn SetOffsetX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOffsetX2(&self, offsetx: f32) -> windows_core::Result<()>;
+    fn SetOffsetY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOffsetY2(&self, offsety: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionTranslateTransform_Vtbl {
+    pub const fn new<Identity: IDCompositionTranslateTransform_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetOffsetX<Identity: IDCompositionTranslateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform_Impl::SetOffsetX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetX2<Identity: IDCompositionTranslateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, offsetx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform_Impl::SetOffsetX2(this, core::mem::transmute_copy(&offsetx)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetY<Identity: IDCompositionTranslateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform_Impl::SetOffsetY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetY2<Identity: IDCompositionTranslateTransform_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, offsety: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform_Impl::SetOffsetY2(this, core::mem::transmute_copy(&offsety)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform_Vtbl::new::<Identity, OFFSET>(),
+            SetOffsetX: SetOffsetX::<Identity, OFFSET>,
+            SetOffsetX2: SetOffsetX2::<Identity, OFFSET>,
+            SetOffsetY: SetOffsetY::<Identity, OFFSET>,
+            SetOffsetY2: SetOffsetY2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTranslateTransform as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionTransform as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTranslateTransform {}
+windows_core::imp::define_interface!(IDCompositionTranslateTransform3D, IDCompositionTranslateTransform3D_Vtbl, 0x91636d4b_9ba1_4532_aaf7_e3344994d788);
+impl core::ops::Deref for IDCompositionTranslateTransform3D {
+    type Target = IDCompositionTransform3D;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTranslateTransform3D, windows_core::IUnknown, IDCompositionEffect, IDCompositionTransform3D);
+impl IDCompositionTranslateTransform3D {
+    pub unsafe fn SetOffsetX2(&self, offsetx: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetX2)(windows_core::Interface::as_raw(self), offsetx).ok() }
+    }
+    pub unsafe fn SetOffsetY2(&self, offsety: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetY2)(windows_core::Interface::as_raw(self), offsety).ok() }
+    }
+    }
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTranslateTransform3D_Vtbl {
+    pub base__: IDCompositionTransform3D_Vtbl,
+    pub SetOffsetX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetOffsetY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetOffsetZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionTranslateTransform3D_Impl: IDCompositionTransform3D_Impl {
+    fn SetOffsetX(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOffsetX2(&self, offsetx: f32) -> windows_core::Result<()>;
+    fn SetOffsetY(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOffsetY2(&self, offsety: f32) -> windows_core::Result<()>;
+    fn SetOffsetZ(&self, animation: windows_core::Ref<IDCompositionAnimation>) -> windows_core::Result<()>;
+    fn SetOffsetZ2(&self, offsetz: f32) -> windows_core::Result<()>;
+}
+impl IDCompositionTranslateTransform3D_Vtbl {
+    pub const fn new<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn SetOffsetX<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetX(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetX2<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, offsetx: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetX2(this, core::mem::transmute_copy(&offsetx)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetY<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetY(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetY2<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, offsety: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetY2(this, core::mem::transmute_copy(&offsety)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetZ<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, animation: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetZ(this, core::mem::transmute_copy(&animation)).into()
+            }
+        }
+        unsafe extern "system" fn SetOffsetZ2<Identity: IDCompositionTranslateTransform3D_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, offsetz: f32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionTranslateTransform3D_Impl::SetOffsetZ2(this, core::mem::transmute_copy(&offsetz)).into()
+            }
+        }
+        Self {
+            base__: IDCompositionTransform3D_Vtbl::new::<Identity, OFFSET>(),
+            SetOffsetX: SetOffsetX::<Identity, OFFSET>,
+            SetOffsetX2: SetOffsetX2::<Identity, OFFSET>,
+            SetOffsetY: SetOffsetY::<Identity, OFFSET>,
+            SetOffsetY2: SetOffsetY2::<Identity, OFFSET>,
+            SetOffsetZ: SetOffsetZ::<Identity, OFFSET>,
+            SetOffsetZ2: SetOffsetZ2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionTranslateTransform3D as windows_core::Interface>::IID || iid == &<IDCompositionEffect as windows_core::Interface>::IID || iid == &<IDCompositionTransform3D as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionTranslateTransform3D {}
+windows_core::imp::define_interface!(IDCompositionTurbulenceEffect, IDCompositionTurbulenceEffect_Vtbl, 0xa6a55bda_c09c_49f3_9193_a41922c89715);
+impl core::ops::Deref for IDCompositionTurbulenceEffect {
+    type Target = IDCompositionFilterEffect;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionTurbulenceEffect, windows_core::IUnknown, IDCompositionEffect, IDCompositionFilterEffect);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionTurbulenceEffect_Vtbl {
+    pub base__: IDCompositionFilterEffect_Vtbl,
+    pub SetOffset: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector2) -> windows_core::HRESULT,
+    pub SetBaseFrequency: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector2) -> windows_core::HRESULT,
+    pub SetSize: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Vector2) -> windows_core::HRESULT,
+    pub SetNumOctaves: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
+    pub SetSeed: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetNoise: unsafe extern "system" fn(*mut core::ffi::c_void, super::Direct2D::Common::D2D1_TURBULENCE_NOISE) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetNoise: usize,
+    pub SetStitchable: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionVirtualSurface, IDCompositionVirtualSurface_Vtbl, 0xae471c51_5f53_4a24_8d3e_d0c39c30b3f0);
+impl core::ops::Deref for IDCompositionVirtualSurface {
+    type Target = IDCompositionSurface;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionVirtualSurface, windows_core::IUnknown, IDCompositionSurface);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionVirtualSurface_Vtbl {
+    pub base__: IDCompositionSurface_Vtbl,
+    pub Resize: unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32) -> windows_core::HRESULT,
+    pub Trim: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::super::Foundation::RECT, u32) -> windows_core::HRESULT,
+}
+pub trait IDCompositionVirtualSurface_Impl: IDCompositionSurface_Impl {
+    fn Resize(&self, width: u32, height: u32) -> windows_core::Result<()>;
+    fn Trim(&self, rectangles: *const super::super::Foundation::RECT, count: u32) -> windows_core::Result<()>;
+}
+impl IDCompositionVirtualSurface_Vtbl {
+    pub const fn new<Identity: IDCompositionVirtualSurface_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn Resize<Identity: IDCompositionVirtualSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, width: u32, height: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionVirtualSurface_Impl::Resize(this, core::mem::transmute_copy(&width), core::mem::transmute_copy(&height)).into()
+            }
+        }
+        unsafe extern "system" fn Trim<Identity: IDCompositionVirtualSurface_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, rectangles: *const super::super::Foundation::RECT, count: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IDCompositionVirtualSurface_Impl::Trim(this, core::mem::transmute_copy(&rectangles), core::mem::transmute_copy(&count)).into()
+            }
+        }
+        Self { base__: IDCompositionSurface_Vtbl::new::<Identity, OFFSET>(), Resize: Resize::<Identity, OFFSET>, Trim: Trim::<Identity, OFFSET> }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IDCompositionVirtualSurface as windows_core::Interface>::IID || iid == &<IDCompositionSurface as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IDCompositionVirtualSurface {}
+windows_core::imp::define_interface!(IDCompositionVisual, IDCompositionVisual_Vtbl, 0x4d93059d_097b_4651_9a60_f0f25116e2f3);
+windows_core::imp::interface_hierarchy!(IDCompositionVisual, windows_core::IUnknown);
+impl IDCompositionVisual {
+    pub unsafe fn SetOffsetX2(&self, offsetx: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetX2)(windows_core::Interface::as_raw(self), offsetx).ok() }
+    }
+    pub unsafe fn SetOffsetY2(&self, offsety: f32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetOffsetY2)(windows_core::Interface::as_raw(self), offsety).ok() }
+    }
+    pub unsafe fn SetClip<P0>(&self, clip: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IDCompositionClip>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetClip)(windows_core::Interface::as_raw(self), clip.param().abi()).ok() }
+    }
+    pub unsafe fn SetContent<P0>(&self, content: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IUnknown>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetContent)(windows_core::Interface::as_raw(self), content.param().abi()).ok() }
+    }
+    pub unsafe fn AddVisual<P0, P2>(&self, visual: P0, insertabove: bool, referencevisual: P2) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IDCompositionVisual>,
+        P2: windows_core::Param<IDCompositionVisual>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).AddVisual)(windows_core::Interface::as_raw(self), visual.param().abi(), insertabove.into(), referencevisual.param().abi()).ok() }
+    }
+    pub unsafe fn RemoveVisual<P0>(&self, visual: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IDCompositionVisual>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).RemoveVisual)(windows_core::Interface::as_raw(self), visual.param().abi()).ok() }
+    }
+    }
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionVisual_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub SetOffsetX: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetX2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetOffsetY: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetY2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTransform2: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Matrix3x2) -> windows_core::HRESULT,
+    pub SetTransformParent: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetEffect: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetBitmapInterpolationMode: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_BITMAP_INTERPOLATION_MODE) -> windows_core::HRESULT,
+    pub SetBorderMode: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_BORDER_MODE) -> windows_core::HRESULT,
+    pub SetClip: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub SetClip2: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::Direct2D::Common::D2D_RECT_F) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    SetClip2: usize,
+    pub SetContent: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub AddVisual: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, windows_core::BOOL, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub RemoveVisual: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub RemoveAllVisuals: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetCompositeMode: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_COMPOSITE_MODE) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionVisual2, IDCompositionVisual2_Vtbl, 0xe8de1639_4331_4b26_bc5f_6a321d347a85);
+impl core::ops::Deref for IDCompositionVisual2 {
+    type Target = IDCompositionVisual;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionVisual2, windows_core::IUnknown, IDCompositionVisual);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionVisual2_Vtbl {
+    pub base__: IDCompositionVisual_Vtbl,
+    pub SetOpacityMode: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_OPACITY_MODE) -> windows_core::HRESULT,
+    pub SetBackFaceVisibility: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_BACKFACE_VISIBILITY) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionVisual3, IDCompositionVisual3_Vtbl, 0x2775f462_b6c1_4015_b0be_b3e7d6a4976d);
+impl core::ops::Deref for IDCompositionVisual3 {
+    type Target = IDCompositionVisualDebug;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionVisual3, windows_core::IUnknown, IDCompositionVisual, IDCompositionVisual2, IDCompositionVisualDebug);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionVisual3_Vtbl {
+    pub base__: IDCompositionVisualDebug_Vtbl,
+    pub SetDepthMode: unsafe extern "system" fn(*mut core::ffi::c_void, DCOMPOSITION_DEPTH_MODE) -> windows_core::HRESULT,
+    pub SetOffsetZ: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOffsetZ2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetOpacity: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetOpacity2: unsafe extern "system" fn(*mut core::ffi::c_void, f32) -> windows_core::HRESULT,
+    pub SetTransform: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SetTransform2: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_numerics::Matrix4x4) -> windows_core::HRESULT,
+    pub SetVisible: unsafe extern "system" fn(*mut core::ffi::c_void, windows_core::BOOL) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IDCompositionVisualDebug, IDCompositionVisualDebug_Vtbl, 0xfed2b808_5eb4_43a0_aea3_35f65280f91b);
+impl core::ops::Deref for IDCompositionVisualDebug {
+    type Target = IDCompositionVisual2;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IDCompositionVisualDebug, windows_core::IUnknown, IDCompositionVisual, IDCompositionVisual2);
+#[repr(C)]
+#[doc(hidden)]
+pub struct IDCompositionVisualDebug_Vtbl {
+    pub base__: IDCompositionVisual2_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Direct2D_Common")]
+    pub EnableHeatMap: unsafe extern "system" fn(*mut core::ffi::c_void, *const super::Direct2D::Common::D2D1_COLOR_F) -> windows_core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Direct2D_Common"))]
+    EnableHeatMap: usize,
+    pub DisableHeatMap: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub EnableRedrawRegions: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub DisableRedrawRegions: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+}
 pub mod Dwm{
 #[cfg(feature = "Win32_UI_Controls")]
 #[inline]
@@ -30204,6 +33276,7 @@ pub struct DXGI_RGBA {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_SCALING(pub i32);
 pub const DXGI_SCALING_NONE: DXGI_SCALING = DXGI_SCALING(1i32);
+pub const DXGI_SCALING_STRETCH: DXGI_SCALING = DXGI_SCALING(0i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DXGI_SHARED_RESOURCE {
@@ -31134,7 +34207,18 @@ impl IDXGIFactory2 {
             (windows_core::Interface::vtable(self).CreateSwapChainForHwnd)(windows_core::Interface::as_raw(self), pdevice.param().abi(), hwnd, pdesc, pfullscreendesc.unwrap_or(core::mem::zeroed()) as _, prestricttooutput.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
         }
     }
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn CreateSwapChainForComposition<P0, P2>(&self, pdevice: P0, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: P2) -> windows_core::Result<IDXGISwapChain1>
+    where
+        P0: windows_core::Param<windows_core::IUnknown>,
+        P2: windows_core::Param<IDXGIOutput>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateSwapChainForComposition)(windows_core::Interface::as_raw(self), pdevice.param().abi(), pdesc, prestricttooutput.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
     }
+}
 #[repr(C)]
 #[doc(hidden)]
 pub struct IDXGIFactory2_Vtbl {
@@ -32253,14 +35337,6 @@ impl core::ops::Deref for IDXGIResource {
     }
 }
 windows_core::imp::interface_hierarchy!(IDXGIResource, windows_core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
-impl IDXGIResource {
-    pub unsafe fn GetSharedHandle(&self) -> windows_core::Result<super::super::Foundation::HANDLE> {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).GetSharedHandle)(windows_core::Interface::as_raw(self), &mut result__).map(|| result__)
-        }
-    }
-    }
 #[repr(C)]
 #[doc(hidden)]
 pub struct IDXGIResource_Vtbl {
@@ -33167,6 +36243,7 @@ pub mod Common{
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_ALPHA_MODE(pub i32);
 pub const DXGI_ALPHA_MODE_IGNORE: DXGI_ALPHA_MODE = DXGI_ALPHA_MODE(3i32);
+pub const DXGI_ALPHA_MODE_PREMULTIPLIED: DXGI_ALPHA_MODE = DXGI_ALPHA_MODE(1i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_COLOR_SPACE_TYPE(pub i32);
@@ -34593,6 +37670,35 @@ pub unsafe fn MFCreateMediaType() -> windows_core::Result<IMFMediaType> {
     }
 }
 #[inline]
+pub unsafe fn MFCreateMemoryBuffer(cbmaxlength: u32) -> windows_core::Result<IMFMediaBuffer> {
+    windows_core::link!("mfplat.dll" "system" fn MFCreateMemoryBuffer(cbmaxlength : u32, ppbuffer : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        MFCreateMemoryBuffer(cbmaxlength, &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+    }
+}
+#[inline]
+pub unsafe fn MFCreateSample() -> windows_core::Result<IMFSample> {
+    windows_core::link!("mfplat.dll" "system" fn MFCreateSample(ppimfsample : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        MFCreateSample(&mut result__).and_then(|| windows_core::Type::from_abi(result__))
+    }
+}
+#[inline]
+pub unsafe fn MFCreateSinkWriterFromURL<P0, P1, P2>(pwszoutputurl: P0, pbytestream: P1, pattributes: P2) -> windows_core::Result<IMFSinkWriter>
+where
+    P0: windows_core::Param<windows_core::PCWSTR>,
+    P1: windows_core::Param<IMFByteStream>,
+    P2: windows_core::Param<IMFAttributes>,
+{
+    windows_core::link!("mfreadwrite.dll" "system" fn MFCreateSinkWriterFromURL(pwszoutputurl : windows_core::PCWSTR, pbytestream : * mut core::ffi::c_void, pattributes : * mut core::ffi::c_void, ppsinkwriter : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
+    unsafe {
+        let mut result__ = core::mem::zeroed();
+        MFCreateSinkWriterFromURL(pwszoutputurl.param().abi(), pbytestream.param().abi(), pattributes.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+    }
+}
+#[inline]
 pub unsafe fn MFCreateSourceReaderFromMediaSource<P0, P1>(pmediasource: P0, pattributes: P1) -> windows_core::Result<IMFSourceReader>
 where
     P0: windows_core::Param<IMFMediaSource>,
@@ -34635,6 +37741,7 @@ pub unsafe fn MFStartup(version: u32, dwflags: u32) -> windows_core::Result<()> 
     unsafe { MFStartup(version, dwflags).ok() }
 }
 pub const CLSID_MFMediaEngineClassFactory: windows_core::GUID = windows_core::GUID::from_u128(0xb44392da_499b_446b_a4cb_005fead0e6d5);
+pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 #[repr(C)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DEVICE_INFO {
@@ -35141,6 +38248,11 @@ impl IMFASFStreamConfig_Vtbl {
 impl windows_core::RuntimeName for IMFASFStreamConfig {}
 windows_core::imp::define_interface!(IMFASFStreamPrioritization, IMFASFStreamPrioritization_Vtbl, 0x699bdc27_bbaf_49ff_8e38_9c39c9b5e088);
 windows_core::imp::interface_hierarchy!(IMFASFStreamPrioritization, windows_core::IUnknown);
+impl IMFASFStreamPrioritization {
+    pub unsafe fn AddStream(&self, wstreamnumber: u16, wstreamflags: u16) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).AddStream)(windows_core::Interface::as_raw(self), wstreamnumber, wstreamflags).ok() }
+    }
+    }
 #[repr(C)]
 #[doc(hidden)]
 pub struct IMFASFStreamPrioritization_Vtbl {
@@ -35463,6 +38575,9 @@ impl IMFAttributes {
     }
     pub unsafe fn GetAllocatedString(&self, guidkey: *const windows_core::GUID, ppwszvalue: *mut windows_core::PWSTR, pcchlength: *mut u32) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).GetAllocatedString)(windows_core::Interface::as_raw(self), guidkey, ppwszvalue as _, pcchlength as _).ok() }
+    }
+    pub unsafe fn GetBlob(&self, guidkey: *const windows_core::GUID, pbuf: &mut [u8], pcbblobsize: Option<*mut u32>) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetBlob)(windows_core::Interface::as_raw(self), guidkey, core::mem::transmute(pbuf.as_ptr()), pbuf.len().try_into().unwrap(), pcbblobsize.unwrap_or(core::mem::zeroed()) as _).ok() }
     }
     pub unsafe fn SetUINT32(&self, guidkey: *const windows_core::GUID, unvalue: u32) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetUINT32)(windows_core::Interface::as_raw(self), guidkey, unvalue).ok() }
@@ -36820,6 +39935,9 @@ impl IMFMediaBuffer {
     }
     pub unsafe fn Unlock(&self) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).Unlock)(windows_core::Interface::as_raw(self)).ok() }
+    }
+    pub unsafe fn SetCurrentLength(&self, cbcurrentlength: u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetCurrentLength)(windows_core::Interface::as_raw(self), cbcurrentlength).ok() }
     }
     }
 #[repr(C)]
@@ -40316,11 +43434,29 @@ impl core::ops::Deref for IMFSample {
 }
 windows_core::imp::interface_hierarchy!(IMFSample, windows_core::IUnknown, IMFAttributes);
 impl IMFSample {
+    pub unsafe fn SetSampleTime(&self, hnssampletime: i64) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetSampleTime)(windows_core::Interface::as_raw(self), hnssampletime).ok() }
+    }
+    pub unsafe fn SetSampleDuration(&self, hnssampleduration: i64) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetSampleDuration)(windows_core::Interface::as_raw(self), hnssampleduration).ok() }
+    }
     pub unsafe fn GetBufferByIndex(&self, dwindex: u32) -> windows_core::Result<IMFMediaBuffer> {
         unsafe {
             let mut result__ = core::mem::zeroed();
             (windows_core::Interface::vtable(self).GetBufferByIndex)(windows_core::Interface::as_raw(self), dwindex, &mut result__).and_then(|| windows_core::Type::from_abi(result__))
         }
+    }
+    pub unsafe fn ConvertToContiguousBuffer(&self) -> windows_core::Result<IMFMediaBuffer> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ConvertToContiguousBuffer)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub unsafe fn AddBuffer<P0>(&self, pbuffer: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<IMFMediaBuffer>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).AddBuffer)(windows_core::Interface::as_raw(self), pbuffer.param().abi()).ok() }
     }
     }
 #[repr(C)]
@@ -40671,6 +43807,201 @@ impl IMFSensorStream_Vtbl {
 }
 #[cfg(all(feature = "Win32_System_Com_StructuredStorage", feature = "Win32_System_Variant"))]
 impl windows_core::RuntimeName for IMFSensorStream {}
+windows_core::imp::define_interface!(IMFSinkWriter, IMFSinkWriter_Vtbl, 0x3137f1cd_fe5e_4805_a5d8_fb477448cb3d);
+windows_core::imp::interface_hierarchy!(IMFSinkWriter, windows_core::IUnknown);
+impl IMFSinkWriter {
+    pub unsafe fn AddStream<P0>(&self, ptargetmediatype: P0) -> windows_core::Result<u32>
+    where
+        P0: windows_core::Param<IMFMediaType>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).AddStream)(windows_core::Interface::as_raw(self), ptargetmediatype.param().abi(), &mut result__).map(|| result__)
+        }
+    }
+    pub unsafe fn SetInputMediaType<P1, P2>(&self, dwstreamindex: u32, pinputmediatype: P1, pencodingparameters: P2) -> windows_core::Result<()>
+    where
+        P1: windows_core::Param<IMFMediaType>,
+        P2: windows_core::Param<IMFAttributes>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetInputMediaType)(windows_core::Interface::as_raw(self), dwstreamindex, pinputmediatype.param().abi(), pencodingparameters.param().abi()).ok() }
+    }
+    pub unsafe fn BeginWriting(&self) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).BeginWriting)(windows_core::Interface::as_raw(self)).ok() }
+    }
+    pub unsafe fn WriteSample<P1>(&self, dwstreamindex: u32, psample: P1) -> windows_core::Result<()>
+    where
+        P1: windows_core::Param<IMFSample>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).WriteSample)(windows_core::Interface::as_raw(self), dwstreamindex, psample.param().abi()).ok() }
+    }
+    pub unsafe fn Flush(&self, dwstreamindex: u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Flush)(windows_core::Interface::as_raw(self), dwstreamindex).ok() }
+    }
+    pub unsafe fn Finalize(&self) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Finalize)(windows_core::Interface::as_raw(self)).ok() }
+    }
+    }
+#[repr(C)]
+#[doc(hidden)]
+pub struct IMFSinkWriter_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub AddStream: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut u32) -> windows_core::HRESULT,
+    pub SetInputMediaType: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub BeginWriting: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub WriteSample: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub SendStreamTick: unsafe extern "system" fn(*mut core::ffi::c_void, u32, i64) -> windows_core::HRESULT,
+    pub PlaceMarker: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *const core::ffi::c_void) -> windows_core::HRESULT,
+    pub NotifyEndOfSegment: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
+    pub Flush: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
+    pub Finalize: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub GetServiceForStream: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *const windows_core::GUID, *const windows_core::GUID, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub GetStatistics: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut MF_SINK_WRITER_STATISTICS) -> windows_core::HRESULT,
+}
+pub trait IMFSinkWriter_Impl: windows_core::IUnknownImpl {
+    fn AddStream(&self, ptargetmediatype: windows_core::Ref<IMFMediaType>) -> windows_core::Result<u32>;
+    fn SetInputMediaType(&self, dwstreamindex: u32, pinputmediatype: windows_core::Ref<IMFMediaType>, pencodingparameters: windows_core::Ref<IMFAttributes>) -> windows_core::Result<()>;
+    fn BeginWriting(&self) -> windows_core::Result<()>;
+    fn WriteSample(&self, dwstreamindex: u32, psample: windows_core::Ref<IMFSample>) -> windows_core::Result<()>;
+    fn SendStreamTick(&self, dwstreamindex: u32, lltimestamp: i64) -> windows_core::Result<()>;
+    fn PlaceMarker(&self, dwstreamindex: u32, pvcontext: *const core::ffi::c_void) -> windows_core::Result<()>;
+    fn NotifyEndOfSegment(&self, dwstreamindex: u32) -> windows_core::Result<()>;
+    fn Flush(&self, dwstreamindex: u32) -> windows_core::Result<()>;
+    fn Finalize(&self) -> windows_core::Result<()>;
+    fn GetServiceForStream(&self, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::Result<()>;
+    fn GetStatistics(&self, dwstreamindex: u32, pstats: *mut MF_SINK_WRITER_STATISTICS) -> windows_core::Result<()>;
+}
+impl IMFSinkWriter_Vtbl {
+    pub const fn new<Identity: IMFSinkWriter_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn AddStream<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, ptargetmediatype: *mut core::ffi::c_void, pdwstreamindex: *mut u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IMFSinkWriter_Impl::AddStream(this, core::mem::transmute_copy(&ptargetmediatype)) {
+                    Ok(ok__) => {
+                        pdwstreamindex.write(core::mem::transmute(ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn SetInputMediaType<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pinputmediatype: *mut core::ffi::c_void, pencodingparameters: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::SetInputMediaType(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pinputmediatype), core::mem::transmute_copy(&pencodingparameters)).into()
+            }
+        }
+        unsafe extern "system" fn BeginWriting<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::BeginWriting(this).into()
+            }
+        }
+        unsafe extern "system" fn WriteSample<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, psample: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::WriteSample(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&psample)).into()
+            }
+        }
+        unsafe extern "system" fn SendStreamTick<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, lltimestamp: i64) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::SendStreamTick(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&lltimestamp)).into()
+            }
+        }
+        unsafe extern "system" fn PlaceMarker<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pvcontext: *const core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::PlaceMarker(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pvcontext)).into()
+            }
+        }
+        unsafe extern "system" fn NotifyEndOfSegment<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::NotifyEndOfSegment(this, core::mem::transmute_copy(&dwstreamindex)).into()
+            }
+        }
+        unsafe extern "system" fn Flush<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::Flush(this, core::mem::transmute_copy(&dwstreamindex)).into()
+            }
+        }
+        unsafe extern "system" fn Finalize<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::Finalize(this).into()
+            }
+        }
+        unsafe extern "system" fn GetServiceForStream<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::GetServiceForStream(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&guidservice), core::mem::transmute_copy(&riid), core::mem::transmute_copy(&ppvobject)).into()
+            }
+        }
+        unsafe extern "system" fn GetStatistics<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pstats: *mut MF_SINK_WRITER_STATISTICS) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriter_Impl::GetStatistics(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pstats)).into()
+            }
+        }
+        Self {
+            base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            AddStream: AddStream::<Identity, OFFSET>,
+            SetInputMediaType: SetInputMediaType::<Identity, OFFSET>,
+            BeginWriting: BeginWriting::<Identity, OFFSET>,
+            WriteSample: WriteSample::<Identity, OFFSET>,
+            SendStreamTick: SendStreamTick::<Identity, OFFSET>,
+            PlaceMarker: PlaceMarker::<Identity, OFFSET>,
+            NotifyEndOfSegment: NotifyEndOfSegment::<Identity, OFFSET>,
+            Flush: Flush::<Identity, OFFSET>,
+            Finalize: Finalize::<Identity, OFFSET>,
+            GetServiceForStream: GetServiceForStream::<Identity, OFFSET>,
+            GetStatistics: GetStatistics::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IMFSinkWriter as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IMFSinkWriter {}
+windows_core::imp::define_interface!(IMFSinkWriterEx, IMFSinkWriterEx_Vtbl, 0x588d72ab_5bc1_496a_8714_b70617141b25);
+impl core::ops::Deref for IMFSinkWriterEx {
+    type Target = IMFSinkWriter;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+windows_core::imp::interface_hierarchy!(IMFSinkWriterEx, windows_core::IUnknown, IMFSinkWriter);
+impl IMFSinkWriterEx {
+    pub unsafe fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: Option<*mut windows_core::GUID>, pptransform: *mut Option<IMFTransform>) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetTransformForStream)(windows_core::Interface::as_raw(self), dwstreamindex, dwtransformindex, pguidcategory.unwrap_or(core::mem::zeroed()) as _, core::mem::transmute(pptransform)).ok() }
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IMFSinkWriterEx_Vtbl {
+    pub base__: IMFSinkWriter_Vtbl,
+    pub GetTransformForStream: unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32, *mut windows_core::GUID, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+pub trait IMFSinkWriterEx_Impl: IMFSinkWriter_Impl {
+    fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: *mut windows_core::GUID, pptransform: windows_core::OutRef<IMFTransform>) -> windows_core::Result<()>;
+}
+impl IMFSinkWriterEx_Vtbl {
+    pub const fn new<Identity: IMFSinkWriterEx_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn GetTransformForStream<Identity: IMFSinkWriterEx_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: *mut windows_core::GUID, pptransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IMFSinkWriterEx_Impl::GetTransformForStream(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&dwtransformindex), core::mem::transmute_copy(&pguidcategory), core::mem::transmute_copy(&pptransform)).into()
+            }
+        }
+        Self { base__: IMFSinkWriter_Vtbl::new::<Identity, OFFSET>(), GetTransformForStream: GetTransformForStream::<Identity, OFFSET> }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IMFSinkWriterEx as windows_core::Interface>::IID || iid == &<IMFSinkWriter as windows_core::Interface>::IID
+    }
+}
+impl windows_core::RuntimeName for IMFSinkWriterEx {}
 windows_core::imp::define_interface!(IMFSourceBuffer, IMFSourceBuffer_Vtbl, 0xe2cd3a4b_af25_4d3d_9110_da0e6f8ee877);
 windows_core::imp::interface_hierarchy!(IMFSourceBuffer, windows_core::IUnknown);
 impl IMFSourceBuffer {
@@ -41195,6 +44526,11 @@ impl core::ops::Deref for IMFSourceReaderEx {
     }
 }
 windows_core::imp::interface_hierarchy!(IMFSourceReaderEx, windows_core::IUnknown, IMFSourceReader);
+impl IMFSourceReaderEx {
+    pub unsafe fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: Option<*mut windows_core::GUID>, pptransform: *mut Option<IMFTransform>) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetTransformForStream)(windows_core::Interface::as_raw(self), dwstreamindex, dwtransformindex, pguidcategory.unwrap_or(core::mem::zeroed()) as _, core::mem::transmute(pptransform)).ok() }
+    }
+}
 #[repr(C)]
 #[doc(hidden)]
 pub struct IMFSourceReaderEx_Vtbl {
@@ -41967,6 +45303,14 @@ impl IMFTopologyNode_Vtbl {
 impl windows_core::RuntimeName for IMFTopologyNode {}
 windows_core::imp::define_interface!(IMFTransform, IMFTransform_Vtbl, 0xbf94c121_5b05_4e6f_8000_ba598961414d);
 windows_core::imp::interface_hierarchy!(IMFTransform, windows_core::IUnknown);
+impl IMFTransform {
+    pub unsafe fn GetAttributes(&self) -> windows_core::Result<IMFAttributes> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetAttributes)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    }
 #[repr(C)]
 #[doc(hidden)]
 pub struct IMFTransform_Vtbl {
@@ -42443,7 +45787,9 @@ pub struct MFAYUVSample {
     pub bYValue: u8,
     pub bSampleAlpha8: u8,
 }
+pub const MFAudioFormat_AAC: windows_core::GUID = windows_core::GUID::from_u128(0x00001610_0000_0010_8000_00aa00389b71);
 pub const MFAudioFormat_Float: windows_core::GUID = windows_core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+pub const MFAudioFormat_PCM: windows_core::GUID = windows_core::GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MFBYTESTREAM_SEEK_ORIGIN(pub i32);
@@ -42506,6 +45852,9 @@ pub const MFSTARTUP_FULL: u32 = 0u32;
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MFSTREAMSINK_MARKER_TYPE(pub i32);
+pub const MFT_CATEGORY_VIDEO_ENCODER: windows_core::GUID = windows_core::GUID::from_u128(0xf79eac7d_e545_4387_bdee_d647d7bde42a);
+pub const MFT_ENUM_HARDWARE_URL_Attribute: windows_core::GUID = windows_core::GUID::from_u128(0x2fb866ac_b078_4942_ab6c_003d05cda674);
+pub const MFT_FRIENDLY_NAME_Attribute: windows_core::GUID = windows_core::GUID::from_u128(0x314ffbae_5b41_4c95_9c19_4e7d586face3);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MFT_INPUT_STREAM_INFO {
@@ -42533,6 +45882,7 @@ pub struct MFT_OUTPUT_STREAM_INFO {
     pub cbSize: u32,
     pub cbAlignment: u32,
 }
+pub const MFTranscodeContainerType_MPEG4: windows_core::GUID = windows_core::GUID::from_u128(0xdc6cd05d_b9d0_40ef_bd35_fa622c1ab28a);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MFVIDEOFORMAT {
@@ -42567,6 +45917,8 @@ pub struct MFVideoCompressedInfo {
     pub AvgBitErrorRate: i64,
     pub MaxKeyFrameSpacing: u32,
 }
+pub const MFVideoFormat_H264: windows_core::GUID = windows_core::GUID::from_u128(0x34363248_0000_0010_8000_00aa00389b71);
+pub const MFVideoFormat_HEVC: windows_core::GUID = windows_core::GUID::from_u128(0x43564548_0000_0010_8000_00aa00389b71);
 pub const MFVideoFormat_MJPG: windows_core::GUID = windows_core::GUID::from_u128(0x47504a4d_0000_0010_8000_00aa00389b71);
 pub const MFVideoFormat_NV12: windows_core::GUID = windows_core::GUID::from_u128(0x3231564e_0000_0010_8000_00aa00389b71);
 pub const MFVideoFormat_RGB24: windows_core::GUID = windows_core::GUID::from_u128(0x00000014_0000_0010_8000_00aa00389b71);
@@ -42593,6 +45945,7 @@ pub struct MFVideoInfo {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MFVideoInterlaceMode(pub i32);
+pub const MFVideoInterlace_Progressive: MFVideoInterlaceMode = MFVideoInterlaceMode(2i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MFVideoLighting(pub i32);
@@ -42693,23 +46046,50 @@ pub struct MF_MSE_ERROR(pub i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MF_MSE_READY(pub i32);
+pub const MF_MT_ALL_SAMPLES_INDEPENDENT: windows_core::GUID = windows_core::GUID::from_u128(0xc9173739_5e56_461c_b713_46fb995cb95f);
 pub const MF_MT_AUDIO_AVG_BYTES_PER_SECOND: windows_core::GUID = windows_core::GUID::from_u128(0x1aab75c8_cfef_451c_ab95_ac034b8e1731);
 pub const MF_MT_AUDIO_BITS_PER_SAMPLE: windows_core::GUID = windows_core::GUID::from_u128(0xf2deb57f_40fa_4764_aa33_ed4f2d1ff669);
 pub const MF_MT_AUDIO_BLOCK_ALIGNMENT: windows_core::GUID = windows_core::GUID::from_u128(0x322de230_9eeb_43bd_ab7a_ff412251541d);
 pub const MF_MT_AUDIO_NUM_CHANNELS: windows_core::GUID = windows_core::GUID::from_u128(0x37e48bf5_645e_4c5b_89de_ada9e29b696a);
 pub const MF_MT_AUDIO_SAMPLES_PER_SECOND: windows_core::GUID = windows_core::GUID::from_u128(0x5faeeae7_0290_4c31_9e8a_c534f68d9dba);
+pub const MF_MT_AVG_BITRATE: windows_core::GUID = windows_core::GUID::from_u128(0x20332624_fb0d_4d9e_bd0d_cbf6786c102e);
+pub const MF_MT_DEFAULT_STRIDE: windows_core::GUID = windows_core::GUID::from_u128(0x644b4e48_1e02_4516_b0eb_c01ca9d49ac6);
 pub const MF_MT_FRAME_RATE: windows_core::GUID = windows_core::GUID::from_u128(0xc459a2e8_3d2c_4e44_b132_fee5156c7bb0);
 pub const MF_MT_FRAME_SIZE: windows_core::GUID = windows_core::GUID::from_u128(0x1652c33d_d6b2_4012_b834_72030849a37d);
 pub const MF_MT_INTERLACE_MODE: windows_core::GUID = windows_core::GUID::from_u128(0xe2724bb8_e676_4806_b4b2_a8d6efb44ccd);
 pub const MF_MT_MAJOR_TYPE: windows_core::GUID = windows_core::GUID::from_u128(0x48eba18e_f8c9_4687_bf11_0a74c9f96a8f);
+pub const MF_MT_MINIMUM_DISPLAY_APERTURE: windows_core::GUID = windows_core::GUID::from_u128(0xd7388766_18fe_48c6_a177_ee894867c8c4);
 pub const MF_MT_PIXEL_ASPECT_RATIO: windows_core::GUID = windows_core::GUID::from_u128(0xc6376a1e_8d0a_4027_be45_6d9a0ad39bb6);
 pub const MF_MT_SUBTYPE: windows_core::GUID = windows_core::GUID::from_u128(0xf7e34c9a_42e8_4714_b74b_cb29d72c35e5);
 pub const MF_MT_VIDEO_NOMINAL_RANGE: windows_core::GUID = windows_core::GUID::from_u128(0xc21b8ee5_b956_4071_8daf_325edf5cab11);
+pub const MF_MT_VIDEO_PROFILE: windows_core::GUID = windows_core::GUID::from_u128(0xad76a80b_2d5c_4e0b_b375_64e520137036);
 pub const MF_MT_YUV_MATRIX: windows_core::GUID = windows_core::GUID::from_u128(0x3e23d450_2c75_4d25_a00e_b91670d12327);
 pub const MF_PD_DURATION: windows_core::GUID = windows_core::GUID::from_u128(0x6c990d33_bb8e_477a_8598_0d5d96fcd88a);
 pub const MF_READWRITE_DISABLE_CONVERTERS: windows_core::GUID = windows_core::GUID::from_u128(0x98d5b065_1374_4847_8d5d_31520fee7156);
 pub const MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: windows_core::GUID = windows_core::GUID::from_u128(0xa634a91c_822b_41b9_a494_4de4643612b0);
 pub const MF_SA_D3D11_BINDFLAGS: windows_core::GUID = windows_core::GUID::from_u128(0xeacf97ad_065c_4408_bee3_fdcbfd128be2);
+pub const MF_SINK_WRITER_DISABLE_THROTTLING: windows_core::GUID = windows_core::GUID::from_u128(0x08b845d8_2b74_4afe_9d53_be16d2d5ae4f);
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MF_SINK_WRITER_STATISTICS {
+    pub cb: u32,
+    pub llLastTimestampReceived: i64,
+    pub llLastTimestampEncoded: i64,
+    pub llLastTimestampProcessed: i64,
+    pub llLastStreamTickReceived: i64,
+    pub llLastSinkSampleRequest: i64,
+    pub qwNumSamplesReceived: u64,
+    pub qwNumSamplesEncoded: u64,
+    pub qwNumSamplesProcessed: u64,
+    pub qwNumStreamTicksReceived: u64,
+    pub dwByteCountQueued: u32,
+    pub qwByteCountProcessed: u64,
+    pub dwNumOutstandingSinkSampleRequests: u32,
+    pub dwAverageSampleRateReceived: u32,
+    pub dwAverageSampleRateEncoded: u32,
+    pub dwAverageSampleRateProcessed: u32,
+}
+pub const MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED: MF_SOURCE_READER_FLAG = MF_SOURCE_READER_FLAG(32i32);
 pub const MF_SOURCE_READERF_ENDOFSTREAM: MF_SOURCE_READER_FLAG = MF_SOURCE_READER_FLAG(2i32);
 pub const MF_SOURCE_READERF_STREAMTICK: MF_SOURCE_READER_FLAG = MF_SOURCE_READER_FLAG(256i32);
 pub const MF_SOURCE_READER_ALL_STREAMS: MF_SOURCE_READER_CONSTANTS = MF_SOURCE_READER_CONSTANTS(-2i32);
@@ -42720,6 +46100,7 @@ pub struct MF_SOURCE_READER_CONSTANTS(pub i32);
 pub const MF_SOURCE_READER_D3D11_BIND_FLAGS: windows_core::GUID = windows_core::GUID::from_u128(0x33f3197b_f73a_4e14_8d85_0e4c4368788d);
 pub const MF_SOURCE_READER_D3D_MANAGER: windows_core::GUID = windows_core::GUID::from_u128(0xec822da2_e1e9_4b29_a0d8_563c719f5269);
 pub const MF_SOURCE_READER_DISABLE_DXVA: windows_core::GUID = windows_core::GUID::from_u128(0xaa456cfd_3943_4a1e_a77d_1838c0ea2e35);
+pub const MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING: windows_core::GUID = windows_core::GUID::from_u128(0x0f81da2c_b537_4672_a8b2_a681b17307a3);
 pub const MF_SOURCE_READER_FIRST_AUDIO_STREAM: MF_SOURCE_READER_CONSTANTS = MF_SOURCE_READER_CONSTANTS(-3i32);
 pub const MF_SOURCE_READER_FIRST_VIDEO_STREAM: MF_SOURCE_READER_CONSTANTS = MF_SOURCE_READER_CONSTANTS(-4i32);
 #[repr(transparent)]
@@ -42765,408 +46146,8 @@ pub struct MF_STREAM_STATE(pub i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MF_TOPOLOGY_TYPE(pub i32);
-pub const MF_VERSION: u32 = 131184u32;
-#[inline]
-pub unsafe fn MFCreateMemoryBuffer(cbmaxlength: u32) -> windows_core::Result<IMFMediaBuffer> {
-    windows_core::link!("mfplat.dll" "system" fn MFCreateMemoryBuffer(cbmaxlength : u32, ppbuffer : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
-    unsafe {
-        let mut result__ = core::mem::zeroed();
-        MFCreateMemoryBuffer(cbmaxlength, &mut result__).and_then(|| windows_core::Type::from_abi(result__))
-    }
-}
-#[inline]
-pub unsafe fn MFCreateSample() -> windows_core::Result<IMFSample> {
-    windows_core::link!("mfplat.dll" "system" fn MFCreateSample(ppimfsample : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
-    unsafe {
-        let mut result__ = core::mem::zeroed();
-        MFCreateSample(&mut result__).and_then(|| windows_core::Type::from_abi(result__))
-    }
-}
-#[inline]
-pub unsafe fn MFCreateSinkWriterFromURL<P0, P1, P2>(pwszoutputurl: P0, pbytestream: P1, pattributes: P2) -> windows_core::Result<IMFSinkWriter>
-where
-    P0: windows_core::Param<windows_core::PCWSTR>,
-    P1: windows_core::Param<IMFByteStream>,
-    P2: windows_core::Param<IMFAttributes>,
-{
-    windows_core::link!("mfreadwrite.dll" "system" fn MFCreateSinkWriterFromURL(pwszoutputurl : windows_core::PCWSTR, pbytestream : * mut core::ffi::c_void, pattributes : * mut core::ffi::c_void, ppsinkwriter : *mut * mut core::ffi::c_void) -> windows_core::HRESULT);
-    unsafe {
-        let mut result__ = core::mem::zeroed();
-        MFCreateSinkWriterFromURL(pwszoutputurl.param().abi(), pbytestream.param().abi(), pattributes.param().abi(), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
-    }
-}
-impl IMFASFStreamPrioritization {
-    pub unsafe fn AddStream(&self, wstreamnumber: u16, wstreamflags: u16) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).AddStream)(windows_core::Interface::as_raw(self), wstreamnumber, wstreamflags).ok() }
-    }
-    }
-pub const CODECAPI_AVEncMPVGOPSize: windows_core::GUID = windows_core::GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
-windows_core::imp::define_interface!(ICodecAPI, ICodecAPI_Vtbl, 0x901db4c7_31ce_41a2_85dc_8fa0bf41b8da);
-windows_core::imp::interface_hierarchy!(ICodecAPI, windows_core::IUnknown);
-impl ICodecAPI {
-    pub unsafe fn IsSupported(&self, api: *const windows_core::GUID) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).IsSupported)(windows_core::Interface::as_raw(self), api).ok() }
-    }
-    pub unsafe fn IsModifiable(&self, api: *const windows_core::GUID) -> windows_core::HRESULT {
-        unsafe { (windows_core::Interface::vtable(self).IsModifiable)(windows_core::Interface::as_raw(self), api) }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn GetParameterRange(&self, api: *const windows_core::GUID, valuemin: *mut super::super::System::Variant::VARIANT, valuemax: *mut super::super::System::Variant::VARIANT, steppingdelta: *mut super::super::System::Variant::VARIANT) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetParameterRange)(windows_core::Interface::as_raw(self), api, core::mem::transmute(valuemin), core::mem::transmute(valuemax), core::mem::transmute(steppingdelta)).ok() }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn GetParameterValues(&self, api: *const windows_core::GUID, values: *mut *mut super::super::System::Variant::VARIANT, valuescount: *mut u32) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetParameterValues)(windows_core::Interface::as_raw(self), api, values as _, valuescount as _).ok() }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn GetDefaultValue(&self, api: *const windows_core::GUID) -> windows_core::Result<super::super::System::Variant::VARIANT> {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).GetDefaultValue)(windows_core::Interface::as_raw(self), api, &mut result__).map(|| core::mem::transmute(result__))
-        }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn GetValue(&self, api: *const windows_core::GUID) -> windows_core::Result<super::super::System::Variant::VARIANT> {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).GetValue)(windows_core::Interface::as_raw(self), api, &mut result__).map(|| core::mem::transmute(result__))
-        }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn SetValue(&self, api: *const windows_core::GUID, value: *const super::super::System::Variant::VARIANT) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetValue)(windows_core::Interface::as_raw(self), api, core::mem::transmute(value)).ok() }
-    }
-    pub unsafe fn RegisterForEvent(&self, api: *const windows_core::GUID, userdata: isize) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).RegisterForEvent)(windows_core::Interface::as_raw(self), api, userdata).ok() }
-    }
-    pub unsafe fn UnregisterForEvent(&self, api: *const windows_core::GUID) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).UnregisterForEvent)(windows_core::Interface::as_raw(self), api).ok() }
-    }
-    pub unsafe fn SetAllDefaults(&self) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetAllDefaults)(windows_core::Interface::as_raw(self)).ok() }
-    }
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub unsafe fn SetValueWithNotify(&self, api: *const windows_core::GUID, value: *const super::super::System::Variant::VARIANT, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetValueWithNotify)(windows_core::Interface::as_raw(self), api, core::mem::transmute(value), changedparam as _, changedparamcount as _).ok() }
-    }
-    pub unsafe fn SetAllDefaultsWithNotify(&self, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetAllDefaultsWithNotify)(windows_core::Interface::as_raw(self), changedparam as _, changedparamcount as _).ok() }
-    }
-    #[cfg(feature = "Win32_System_Com")]
-    pub unsafe fn GetAllSettings<P0>(&self, __midl__icodecapi0000: P0) -> windows_core::Result<()>
-    where
-        P0: windows_core::Param<super::super::System::Com::IStream>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).GetAllSettings)(windows_core::Interface::as_raw(self), __midl__icodecapi0000.param().abi()).ok() }
-    }
-    #[cfg(feature = "Win32_System_Com")]
-    pub unsafe fn SetAllSettings<P0>(&self, __midl__icodecapi0001: P0) -> windows_core::Result<()>
-    where
-        P0: windows_core::Param<super::super::System::Com::IStream>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).SetAllSettings)(windows_core::Interface::as_raw(self), __midl__icodecapi0001.param().abi()).ok() }
-    }
-    #[cfg(feature = "Win32_System_Com")]
-    pub unsafe fn SetAllSettingsWithNotify<P0>(&self, __midl__icodecapi0002: P0, changedparam: *mut *mut windows_core::GUID, changedparamcount: *mut u32) -> windows_core::Result<()>
-    where
-        P0: windows_core::Param<super::super::System::Com::IStream>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).SetAllSettingsWithNotify)(windows_core::Interface::as_raw(self), __midl__icodecapi0002.param().abi(), changedparam as _, changedparamcount as _).ok() }
-    }
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct ICodecAPI_Vtbl {
-    pub base__: windows_core::IUnknown_Vtbl,
-    pub IsSupported: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
-    pub IsModifiable: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub GetParameterRange: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT, *mut super::super::System::Variant::VARIANT, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    GetParameterRange: usize,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub GetParameterValues: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut *mut super::super::System::Variant::VARIANT, *mut u32) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    GetParameterValues: usize,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub GetDefaultValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    GetDefaultValue: usize,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub GetValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *mut super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    GetValue: usize,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub SetValue: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *const super::super::System::Variant::VARIANT) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    SetValue: usize,
-    pub RegisterForEvent: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, isize) -> windows_core::HRESULT,
-    pub UnregisterForEvent: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID) -> windows_core::HRESULT,
-    pub SetAllDefaults: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant"))]
-    pub SetValueWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *const windows_core::GUID, *const super::super::System::Variant::VARIANT, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_System_Ole", feature = "Win32_System_Variant")))]
-    SetValueWithNotify: usize,
-    pub SetAllDefaultsWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
-    #[cfg(feature = "Win32_System_Com")]
-    pub GetAllSettings: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
-    #[cfg(not(feature = "Win32_System_Com"))]
-    GetAllSettings: usize,
-    #[cfg(feature = "Win32_System_Com")]
-    pub SetAllSettings: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
-    #[cfg(not(feature = "Win32_System_Com"))]
-    SetAllSettings: usize,
-    #[cfg(feature = "Win32_System_Com")]
-    pub SetAllSettingsWithNotify: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut *mut windows_core::GUID, *mut u32) -> windows_core::HRESULT,
-    #[cfg(not(feature = "Win32_System_Com"))]
-    SetAllSettingsWithNotify: usize,
-}
-windows_core::imp::define_interface!(IMFSinkWriter, IMFSinkWriter_Vtbl, 0x3137f1cd_fe5e_4805_a5d8_fb477448cb3d);
-windows_core::imp::interface_hierarchy!(IMFSinkWriter, windows_core::IUnknown);
-impl IMFSinkWriter {
-    pub unsafe fn GetServiceForStream(&self, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetServiceForStream)(windows_core::Interface::as_raw(self), dwstreamindex, guidservice, riid, ppvobject as _).ok() }
-    }
-    pub unsafe fn AddStream<P0>(&self, ptargetmediatype: P0) -> windows_core::Result<u32>
-    where
-        P0: windows_core::Param<IMFMediaType>,
-    {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).AddStream)(windows_core::Interface::as_raw(self), ptargetmediatype.param().abi(), &mut result__).map(|| result__)
-        }
-    }
-    pub unsafe fn SetInputMediaType<P1, P2>(&self, dwstreamindex: u32, pinputmediatype: P1, pencodingparameters: P2) -> windows_core::Result<()>
-    where
-        P1: windows_core::Param<IMFMediaType>,
-        P2: windows_core::Param<IMFAttributes>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).SetInputMediaType)(windows_core::Interface::as_raw(self), dwstreamindex, pinputmediatype.param().abi(), pencodingparameters.param().abi()).ok() }
-    }
-    pub unsafe fn BeginWriting(&self) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).BeginWriting)(windows_core::Interface::as_raw(self)).ok() }
-    }
-    pub unsafe fn WriteSample<P1>(&self, dwstreamindex: u32, psample: P1) -> windows_core::Result<()>
-    where
-        P1: windows_core::Param<IMFSample>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).WriteSample)(windows_core::Interface::as_raw(self), dwstreamindex, psample.param().abi()).ok() }
-    }
-    pub unsafe fn Finalize(&self) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).Finalize)(windows_core::Interface::as_raw(self)).ok() }
-    }
-    }
-#[repr(C)]
-#[doc(hidden)]
-pub struct IMFSinkWriter_Vtbl {
-    pub base__: windows_core::IUnknown_Vtbl,
-    pub AddStream: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut u32) -> windows_core::HRESULT,
-    pub SetInputMediaType: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub BeginWriting: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub WriteSample: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub SendStreamTick: unsafe extern "system" fn(*mut core::ffi::c_void, u32, i64) -> windows_core::HRESULT,
-    pub PlaceMarker: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *const core::ffi::c_void) -> windows_core::HRESULT,
-    pub NotifyEndOfSegment: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
-    pub Flush: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> windows_core::HRESULT,
-    pub Finalize: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub GetServiceForStream: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *const windows_core::GUID, *const windows_core::GUID, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
-    pub GetStatistics: unsafe extern "system" fn(*mut core::ffi::c_void, u32, *mut MF_SINK_WRITER_STATISTICS) -> windows_core::HRESULT,
-}
-pub trait IMFSinkWriter_Impl: windows_core::IUnknownImpl {
-    fn AddStream(&self, ptargetmediatype: windows_core::Ref<IMFMediaType>) -> windows_core::Result<u32>;
-    fn SetInputMediaType(&self, dwstreamindex: u32, pinputmediatype: windows_core::Ref<IMFMediaType>, pencodingparameters: windows_core::Ref<IMFAttributes>) -> windows_core::Result<()>;
-    fn BeginWriting(&self) -> windows_core::Result<()>;
-    fn WriteSample(&self, dwstreamindex: u32, psample: windows_core::Ref<IMFSample>) -> windows_core::Result<()>;
-    fn SendStreamTick(&self, dwstreamindex: u32, lltimestamp: i64) -> windows_core::Result<()>;
-    fn PlaceMarker(&self, dwstreamindex: u32, pvcontext: *const core::ffi::c_void) -> windows_core::Result<()>;
-    fn NotifyEndOfSegment(&self, dwstreamindex: u32) -> windows_core::Result<()>;
-    fn Flush(&self, dwstreamindex: u32) -> windows_core::Result<()>;
-    fn Finalize(&self) -> windows_core::Result<()>;
-    fn GetServiceForStream(&self, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::Result<()>;
-    fn GetStatistics(&self, dwstreamindex: u32, pstats: *mut MF_SINK_WRITER_STATISTICS) -> windows_core::Result<()>;
-}
-impl IMFSinkWriter_Vtbl {
-    pub const fn new<Identity: IMFSinkWriter_Impl, const OFFSET: isize>() -> Self {
-        unsafe extern "system" fn AddStream<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, ptargetmediatype: *mut core::ffi::c_void, pdwstreamindex: *mut u32) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                match IMFSinkWriter_Impl::AddStream(this, core::mem::transmute_copy(&ptargetmediatype)) {
-                    Ok(ok__) => {
-                        pdwstreamindex.write(core::mem::transmute(ok__));
-                        windows_core::HRESULT(0)
-                    }
-                    Err(err) => err.into(),
-                }
-            }
-        }
-        unsafe extern "system" fn SetInputMediaType<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pinputmediatype: *mut core::ffi::c_void, pencodingparameters: *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::SetInputMediaType(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pinputmediatype), core::mem::transmute_copy(&pencodingparameters)).into()
-            }
-        }
-        unsafe extern "system" fn BeginWriting<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::BeginWriting(this).into()
-            }
-        }
-        unsafe extern "system" fn WriteSample<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, psample: *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::WriteSample(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&psample)).into()
-            }
-        }
-        unsafe extern "system" fn SendStreamTick<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, lltimestamp: i64) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::SendStreamTick(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&lltimestamp)).into()
-            }
-        }
-        unsafe extern "system" fn PlaceMarker<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pvcontext: *const core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::PlaceMarker(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pvcontext)).into()
-            }
-        }
-        unsafe extern "system" fn NotifyEndOfSegment<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::NotifyEndOfSegment(this, core::mem::transmute_copy(&dwstreamindex)).into()
-            }
-        }
-        unsafe extern "system" fn Flush<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::Flush(this, core::mem::transmute_copy(&dwstreamindex)).into()
-            }
-        }
-        unsafe extern "system" fn Finalize<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::Finalize(this).into()
-            }
-        }
-        unsafe extern "system" fn GetServiceForStream<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, guidservice: *const windows_core::GUID, riid: *const windows_core::GUID, ppvobject: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::GetServiceForStream(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&guidservice), core::mem::transmute_copy(&riid), core::mem::transmute_copy(&ppvobject)).into()
-            }
-        }
-        unsafe extern "system" fn GetStatistics<Identity: IMFSinkWriter_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, pstats: *mut MF_SINK_WRITER_STATISTICS) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriter_Impl::GetStatistics(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&pstats)).into()
-            }
-        }
-        Self {
-            base__: windows_core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            AddStream: AddStream::<Identity, OFFSET>,
-            SetInputMediaType: SetInputMediaType::<Identity, OFFSET>,
-            BeginWriting: BeginWriting::<Identity, OFFSET>,
-            WriteSample: WriteSample::<Identity, OFFSET>,
-            SendStreamTick: SendStreamTick::<Identity, OFFSET>,
-            PlaceMarker: PlaceMarker::<Identity, OFFSET>,
-            NotifyEndOfSegment: NotifyEndOfSegment::<Identity, OFFSET>,
-            Flush: Flush::<Identity, OFFSET>,
-            Finalize: Finalize::<Identity, OFFSET>,
-            GetServiceForStream: GetServiceForStream::<Identity, OFFSET>,
-            GetStatistics: GetStatistics::<Identity, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows_core::GUID) -> bool {
-        iid == &<IMFSinkWriter as windows_core::Interface>::IID
-    }
-}
-impl windows_core::RuntimeName for IMFSinkWriter {}
-windows_core::imp::define_interface!(IMFSinkWriterEx, IMFSinkWriterEx_Vtbl, 0x588d72ab_5bc1_496a_8714_b70617141b25);
-impl core::ops::Deref for IMFSinkWriterEx {
-    type Target = IMFSinkWriter;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-windows_core::imp::interface_hierarchy!(IMFSinkWriterEx, windows_core::IUnknown, IMFSinkWriter);
-impl IMFSinkWriterEx {
-    pub unsafe fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: Option<*mut windows_core::GUID>, pptransform: *mut Option<IMFTransform>) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetTransformForStream)(windows_core::Interface::as_raw(self), dwstreamindex, dwtransformindex, pguidcategory.unwrap_or(core::mem::zeroed()) as _, core::mem::transmute(pptransform)).ok() }
-    }
-}
-#[repr(C)]
-#[doc(hidden)]
-pub struct IMFSinkWriterEx_Vtbl {
-    pub base__: IMFSinkWriter_Vtbl,
-    pub GetTransformForStream: unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32, *mut windows_core::GUID, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
-}
-pub trait IMFSinkWriterEx_Impl: IMFSinkWriter_Impl {
-    fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: *mut windows_core::GUID, pptransform: windows_core::OutRef<IMFTransform>) -> windows_core::Result<()>;
-}
-impl IMFSinkWriterEx_Vtbl {
-    pub const fn new<Identity: IMFSinkWriterEx_Impl, const OFFSET: isize>() -> Self {
-        unsafe extern "system" fn GetTransformForStream<Identity: IMFSinkWriterEx_Impl, const OFFSET: isize>(this: *mut core::ffi::c_void, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: *mut windows_core::GUID, pptransform: *mut *mut core::ffi::c_void) -> windows_core::HRESULT {
-            unsafe {
-                let this: &Identity = &*((this as *const *const ()).offset(OFFSET) as *const Identity);
-                IMFSinkWriterEx_Impl::GetTransformForStream(this, core::mem::transmute_copy(&dwstreamindex), core::mem::transmute_copy(&dwtransformindex), core::mem::transmute_copy(&pguidcategory), core::mem::transmute_copy(&pptransform)).into()
-            }
-        }
-        Self { base__: IMFSinkWriter_Vtbl::new::<Identity, OFFSET>(), GetTransformForStream: GetTransformForStream::<Identity, OFFSET> }
-    }
-    pub fn matches(iid: &windows_core::GUID) -> bool {
-        iid == &<IMFSinkWriterEx as windows_core::Interface>::IID || iid == &<IMFSinkWriter as windows_core::Interface>::IID
-    }
-}
-impl windows_core::RuntimeName for IMFSinkWriterEx {}
-impl IMFSourceReaderEx {
-    pub unsafe fn GetTransformForStream(&self, dwstreamindex: u32, dwtransformindex: u32, pguidcategory: Option<*mut windows_core::GUID>, pptransform: *mut Option<IMFTransform>) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetTransformForStream)(windows_core::Interface::as_raw(self), dwstreamindex, dwtransformindex, pguidcategory.unwrap_or(core::mem::zeroed()) as _, core::mem::transmute(pptransform)).ok() }
-    }
-}
-impl IMFTransform {
-    pub unsafe fn GetAttributes(&self) -> windows_core::Result<IMFAttributes> {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).GetAttributes)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    }
-pub const MFAudioFormat_AAC: windows_core::GUID = windows_core::GUID::from_u128(0x00001610_0000_0010_8000_00aa00389b71);
-pub const MFAudioFormat_PCM: windows_core::GUID = windows_core::GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
-pub const MFT_CATEGORY_VIDEO_ENCODER: windows_core::GUID = windows_core::GUID::from_u128(0xf79eac7d_e545_4387_bdee_d647d7bde42a);
-pub const MFT_ENUM_HARDWARE_URL_Attribute: windows_core::GUID = windows_core::GUID::from_u128(0x2fb866ac_b078_4942_ab6c_003d05cda674);
-pub const MFT_FRIENDLY_NAME_Attribute: windows_core::GUID = windows_core::GUID::from_u128(0x314ffbae_5b41_4c95_9c19_4e7d586face3);
-pub const MFTranscodeContainerType_MPEG4: windows_core::GUID = windows_core::GUID::from_u128(0xdc6cd05d_b9d0_40ef_bd35_fa622c1ab28a);
-pub const MFVideoFormat_H264: windows_core::GUID = windows_core::GUID::from_u128(0x34363248_0000_0010_8000_00aa00389b71);
-pub const MFVideoFormat_HEVC: windows_core::GUID = windows_core::GUID::from_u128(0x43564548_0000_0010_8000_00aa00389b71);
-pub const MFVideoInterlace_Progressive: MFVideoInterlaceMode = MFVideoInterlaceMode(2i32);
-pub const MF_MT_ALL_SAMPLES_INDEPENDENT: windows_core::GUID = windows_core::GUID::from_u128(0xc9173739_5e56_461c_b713_46fb995cb95f);
-pub const MF_MT_AVG_BITRATE: windows_core::GUID = windows_core::GUID::from_u128(0x20332624_fb0d_4d9e_bd0d_cbf6786c102e);
-pub const MF_MT_DEFAULT_STRIDE: windows_core::GUID = windows_core::GUID::from_u128(0x644b4e48_1e02_4516_b0eb_c01ca9d49ac6);
-pub const MF_MT_MINIMUM_DISPLAY_APERTURE: windows_core::GUID = windows_core::GUID::from_u128(0xd7388766_18fe_48c6_a177_ee894867c8c4);
-pub const MF_MT_VIDEO_PROFILE: windows_core::GUID = windows_core::GUID::from_u128(0xad76a80b_2d5c_4e0b_b375_64e520137036);
-pub const MF_SINK_WRITER_DISABLE_THROTTLING: windows_core::GUID = windows_core::GUID::from_u128(0x08b845d8_2b74_4afe_9d53_be16d2d5ae4f);
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MF_SINK_WRITER_STATISTICS {
-    pub cb: u32,
-    pub llLastTimestampReceived: i64,
-    pub llLastTimestampEncoded: i64,
-    pub llLastTimestampProcessed: i64,
-    pub llLastStreamTickReceived: i64,
-    pub llLastSinkSampleRequest: i64,
-    pub qwNumSamplesReceived: u64,
-    pub qwNumSamplesEncoded: u64,
-    pub qwNumSamplesProcessed: u64,
-    pub qwNumStreamTicksReceived: u64,
-    pub dwByteCountQueued: u32,
-    pub qwByteCountProcessed: u64,
-    pub dwNumOutstandingSinkSampleRequests: u32,
-    pub dwAverageSampleRateReceived: u32,
-    pub dwAverageSampleRateEncoded: u32,
-    pub dwAverageSampleRateProcessed: u32,
-}
-pub const MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED: MF_SOURCE_READER_FLAG = MF_SOURCE_READER_FLAG(32i32);
-pub const MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING: windows_core::GUID = windows_core::GUID::from_u128(0x0f81da2c_b537_4672_a8b2_a681b17307a3);
 pub const MF_TRANSCODE_CONTAINERTYPE: windows_core::GUID = windows_core::GUID::from_u128(0x150ff23f_4abc_478b_ac4f_e1916fba1cca);
+pub const MF_VERSION: u32 = 131184u32;
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct eAVEncH264VProfile(pub i32);
@@ -43175,36 +46156,6 @@ pub const eAVEncH264VProfile_Main: eAVEncH264VProfile = eAVEncH264VProfile(77i32
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct eAVEncH265VProfile(pub i32);
 pub const eAVEncH265VProfile_Main_420_8: eAVEncH265VProfile = eAVEncH265VProfile(1i32);
-impl IMFAttributes {
-    pub unsafe fn GetBlob(&self, guidkey: *const windows_core::GUID, pbuf: &mut [u8], pcbblobsize: Option<*mut u32>) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).GetBlob)(windows_core::Interface::as_raw(self), guidkey, core::mem::transmute(pbuf.as_ptr()), pbuf.len().try_into().unwrap(), pcbblobsize.unwrap_or(core::mem::zeroed()) as _).ok() }
-    }
-}
-impl IMFMediaBuffer {
-    pub unsafe fn SetCurrentLength(&self, cbcurrentlength: u32) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetCurrentLength)(windows_core::Interface::as_raw(self), cbcurrentlength).ok() }
-    }
-}
-impl IMFSample {
-    pub unsafe fn SetSampleTime(&self, hnssampletime: i64) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetSampleTime)(windows_core::Interface::as_raw(self), hnssampletime).ok() }
-    }
-    pub unsafe fn SetSampleDuration(&self, hnssampleduration: i64) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetSampleDuration)(windows_core::Interface::as_raw(self), hnssampleduration).ok() }
-    }
-    pub unsafe fn ConvertToContiguousBuffer(&self) -> windows_core::Result<IMFMediaBuffer> {
-        unsafe {
-            let mut result__ = core::mem::zeroed();
-            (windows_core::Interface::vtable(self).ConvertToContiguousBuffer)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
-        }
-    }
-    pub unsafe fn AddBuffer<P0>(&self, pbuffer: P0) -> windows_core::Result<()>
-    where
-        P0: windows_core::Param<IMFMediaBuffer>,
-    {
-        unsafe { (windows_core::Interface::vtable(self).AddBuffer)(windows_core::Interface::as_raw(self), pbuffer.param().abi()).ok() }
-    }
-}
 }
 pub mod Multimedia{
 pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows_core::GUID = windows_core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
@@ -45127,6 +48078,9 @@ impl IStream {
     pub unsafe fn Seek(&self, dlibmove: i64, dworigin: STREAM_SEEK, plibnewposition: Option<*mut u64>) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).Seek)(windows_core::Interface::as_raw(self), dlibmove, dworigin, plibnewposition.unwrap_or(core::mem::zeroed()) as _).ok() }
     }
+    pub unsafe fn Commit(&self, grfcommitflags: STGC) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Commit)(windows_core::Interface::as_raw(self), grfcommitflags.0 as _).ok() }
+    }
     }
 #[repr(C)]
 #[doc(hidden)]
@@ -46696,6 +49650,11 @@ impl IEnumSTATSTG_Vtbl {
 impl windows_core::RuntimeName for IEnumSTATSTG {}
 windows_core::imp::define_interface!(IStorage, IStorage_Vtbl, 0x0000000b_0000_0000_c000_000000000046);
 windows_core::imp::interface_hierarchy!(IStorage, windows_core::IUnknown);
+impl IStorage {
+    pub unsafe fn Commit(&self, grfcommitflags: u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Commit)(windows_core::Interface::as_raw(self), grfcommitflags).ok() }
+    }
+    }
 #[repr(C)]
 #[doc(hidden)]
 pub struct IStorage_Vtbl {
@@ -47613,9 +50572,6 @@ impl IRecordInfo_Vtbl {
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl windows_core::RuntimeName for IRecordInfo {}
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47629,11 +50585,9 @@ pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Variant::VARIANT,
 }
-impl PARAMFLAGS {
-    pub const fn contains(&self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PARAMFLAGS(pub u16);
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESC {
     fn default() -> Self {
@@ -47646,16 +50600,21 @@ impl Clone for PARAMDESCEX {
         unsafe { core::mem::transmute_copy(self) }
     }
 }
-impl core::ops::BitOr for PARAMFLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+impl PARAMFLAGS {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESCEX {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
+    }
+}
+impl core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {
@@ -48637,7 +51596,10 @@ impl IPropertyStore {
             (windows_core::Interface::vtable(self).GetValue)(windows_core::Interface::as_raw(self), key, &mut result__).map(|| core::mem::transmute(result__))
         }
     }
+    pub unsafe fn Commit(&self) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).Commit)(windows_core::Interface::as_raw(self)).ok() }
     }
+}
 #[repr(C)]
 #[doc(hidden)]
 pub struct IPropertyStore_Vtbl {
@@ -49534,6 +52496,7 @@ pub const WS_CLIPSIBLINGS: WINDOW_STYLE = WINDOW_STYLE(67108864u32);
 pub const WS_EX_ACCEPTFILES: WINDOW_EX_STYLE = WINDOW_EX_STYLE(16u32);
 pub const WS_EX_APPWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(262144u32);
 pub const WS_EX_LAYERED: WINDOW_EX_STYLE = WINDOW_EX_STYLE(524288u32);
+pub const WS_EX_NOREDIRECTIONBITMAP: WINDOW_EX_STYLE = WINDOW_EX_STYLE(2097152u32);
 pub const WS_EX_TOOLWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(128u32);
 pub const WS_EX_TOPMOST: WINDOW_EX_STYLE = WINDOW_EX_STYLE(8u32);
 pub const WS_EX_WINDOWEDGE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(256u32);

@@ -93,7 +93,7 @@ use {
                         WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
                         GetWindowPlacement, WINDOWPLACEMENT,
                         WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES,
-                        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
                         WS_EX_WINDOWEDGE, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
                         WINDOW_EX_STYLE, WINDOW_STYLE,
                     },
@@ -232,6 +232,8 @@ pub struct Win32Window {
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
     pub is_popup: bool,
+    /// HWND was created with `WS_EX_NOREDIRECTIONBITMAP` for DirectComposition.
+    pub is_direct_composition: bool,
     /// See `CxOsOp::SetChromelessWhenMaximized`: drop the maximized-state
     /// border/thickframe strip `extended_client_border_thickness` would
     /// otherwise keep, so a maximized window is a clean fullscreen client
@@ -370,8 +372,12 @@ impl Win32Window {
             cyTopHeight: 0,
             cyBottomHeight: 0,
         };
-        unsafe {
-            let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+        // A composition window has no redirection surface to extend into; DWM still
+        // paints its shadow and corners from the calls below.
+        if !self.is_direct_composition {
+            unsafe {
+                let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            }
         }
         Self::set_nc_rendering_enabled(self.hwnd);
         Self::apply_win11_window_shape(self.hwnd, self.is_popup);
@@ -540,6 +546,7 @@ impl Win32Window {
         title: &str,
         position: Option<Vec2d>,
         is_fullscreen: bool,
+        direct_composition: bool,
     ) -> Win32Window {
         let title = encode_wide(title);
 
@@ -547,7 +554,10 @@ impl Win32Window {
         // fully client-sized (WM_NCCALCSIZE); maximize keeps work-area insets.
         let style = WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
 
-        let style_ex = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW | WS_EX_ACCEPTFILES;
+        let mut style_ex = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW | WS_EX_ACCEPTFILES;
+        if direct_composition {
+            style_ex |= WS_EX_NOREDIRECTIONBITMAP;
+        }
 
         let (x, y) = match position {
             // A restored position can name a display that is gone, or hold values no display
@@ -616,6 +626,7 @@ impl Win32Window {
             track_mouse_event: false,
             is_fullscreen,
             is_popup: false,
+            is_direct_composition: direct_composition,
             chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
@@ -680,6 +691,7 @@ impl Win32Window {
             track_mouse_event: false,
             is_fullscreen: false,
             is_popup: true,
+            is_direct_composition: false,
             chromeless_when_maximized: false,
             ime_saved_himc: HIMC::default(),
         }
@@ -1644,6 +1656,28 @@ impl Win32Window {
     }
 
     pub fn apply_window_visuals(&mut self, visuals: WindowVisuals) {
+        if self.is_direct_composition {
+            // Every DWM effect below reads or replaces the redirection surface that
+            // `WS_EX_NOREDIRECTIONBITMAP` opted out of: a layered window has no bits
+            // to alpha-blend, DwmExtendFrameIntoClientArea has no frame to extend
+            // into, and Mica/acrylic and the accent blur have nothing to blur.
+            // Applying them anyway blanks the window.
+            //
+            // Composition always honours per-pixel alpha (PREMULTIPLIED). That is
+            // not `window.transparent`: layered-window / DWM-frame APIs are skipped
+            // below. `window.transparent` therefore does nothing on this path.
+            // `backdrop` has no equivalent at all.
+            if visuals.backdrop != WindowBackdrop::None {
+                crate::error!(
+                    "window.direct_composition ignores window.backdrop: DWM system backdrops \
+                     need a redirection surface"
+                );
+            }
+            Self::set_nc_rendering_enabled(self.hwnd);
+            Self::apply_win11_window_shape(self.hwnd, false);
+            return;
+        }
+
         const WCA_ACCENT_POLICY: u32 = 19;
         const ACCENT_DISABLED: u32 = 0;
         const ACCENT_ENABLE_BLURBEHIND: u32 = 3;

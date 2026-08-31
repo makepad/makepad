@@ -704,6 +704,11 @@ impl Cx {
             if !d3d11_cx.recreate_device() {
                 return;
             }
+            // The composition device is bound to the DXGI device that just died.
+            // Drop every window's tree so `create_swap_chain` can bind a fresh one.
+            for window in d3d11_windows.iter_mut() {
+                window.dcomp = None;
+            }
             self.os.d3d11_device = Some(d3d11_cx.device.clone());
             self.publish_d3d11_device_for_media();
         }
@@ -711,6 +716,13 @@ impl Cx {
         // The device is live again, so throw away every handle made from the old one. This
         // must happen before any window presents, or the first paint binds dead objects.
         self.d3d11_forget_gpu_resources();
+
+        if d3d11_windows
+            .iter()
+            .any(|window| window.win32_window.is_direct_composition)
+        {
+            let _ = d3d11_cx.dcomp_device();
+        }
 
         for window in d3d11_windows.iter_mut() {
             if !window.create_swap_chain(d3d11_cx) {
@@ -890,7 +902,7 @@ impl Cx {
     fn handle_platform_ops(
         &mut self,
         d3d11_windows: &mut Vec<D3d11Window>,
-        d3d11_cx: &D3d11Cx,
+        d3d11_cx: &mut D3d11Cx,
     ) -> EventFlow {
         let mut ret = EventFlow::Poll;
         let mut geom_changes = Vec::new();
@@ -899,19 +911,44 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     let (create_position, create_inner_size) = window.create_geom();
-                    let d3d11_window = D3d11Window::new(
+                    let title = window.create_title.clone();
+                    let is_fullscreen = window.is_fullscreen;
+                    let requested_composition = window.direct_composition;
+                    let mut created = D3d11Window::new(
                         window_id,
-                        &d3d11_cx,
+                        d3d11_cx,
                         create_inner_size,
                         create_position,
-                        &window.create_title,
-                        window.is_fullscreen,
+                        &title,
+                        is_fullscreen,
+                        requested_composition,
                     );
+                    if created.is_none() && requested_composition {
+                        crate::error!(
+                            "DirectComposition swap chain failed; retrying with a redirection-bitmap HWND"
+                        );
+                        created = D3d11Window::new(
+                            window_id,
+                            d3d11_cx,
+                            create_inner_size,
+                            create_position,
+                            &title,
+                            is_fullscreen,
+                            false,
+                        );
+                    }
+                    let Some(mut d3d11_window) = created else {
+                        crate::error!("CreateWindow failed for {window_id:?}");
+                        continue;
+                    };
                     let visuals = window.window_visuals();
-                    let mut d3d11_window = d3d11_window;
                     d3d11_window.win32_window.apply_window_visuals(visuals);
 
                     window.window_geom = d3d11_window.window_geom.clone();
+                    window.composition_active = d3d11_window.dcomp.is_some();
+                    if !window.composition_active {
+                        window.direct_composition = false;
+                    }
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
                     geom_changes.push(WindowGeomChangeEvent {
@@ -972,6 +1009,7 @@ impl Cx {
                     if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id)
                     {
                         self.windows[window_id].is_created = false;
+                        self.windows[window_id].composition_active = false;
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                     }
@@ -1270,9 +1308,146 @@ impl Cx {
                 CxOsOp::UpdateVideoSurfaceTexture(_) => {
                     // Android-only, no-op on Windows
                 }
+                CxOsOp::DcompCreateChild {
+                    window_id,
+                    child_id,
+                    z,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_create_child(child_id, z);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompCreateChild {
+                            window_id,
+                            child_id,
+                            z,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                CxOsOp::DcompSetChildContent {
+                    window_id,
+                    child_id,
+                    content,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_set_child_content(child_id, content);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompSetChildContent {
+                            window_id,
+                            child_id,
+                            content,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                CxOsOp::DcompSetChildSolid {
+                    window_id,
+                    child_id,
+                    color,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_set_child_solid(d3d11_cx, child_id, color);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompSetChildSolid {
+                            window_id,
+                            child_id,
+                            color,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                CxOsOp::DcompSetChildGeom {
+                    window_id,
+                    child_id,
+                    geom,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_set_child_geom(child_id, geom);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompSetChildGeom {
+                            window_id,
+                            child_id,
+                            geom,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                CxOsOp::DcompSetChildZ {
+                    window_id,
+                    child_id,
+                    z,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_set_child_z(child_id, z);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompSetChildZ {
+                            window_id,
+                            child_id,
+                            z,
+                        },
+                    ) {
+                        break;
+                    }
+                }
+                CxOsOp::DcompRemoveChild {
+                    window_id,
+                    child_id,
+                } => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.dcomp_remove_child(child_id);
+                    } else if !defer_dcomp_if_creating(
+                        self,
+                        window_id,
+                        CxOsOp::DcompRemoveChild {
+                            window_id,
+                            child_id,
+                        },
+                    ) {
+                        break;
+                    }
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
+            }
+        }
+        // Every composition window shares one IDCompositionDevice, so a single
+        // Commit publishes all of their tree edits. All ops are drained by now,
+        // so no window can be half-edited. On failure the windows keep their
+        // dirty flags and the next drain retries.
+        let mut owed_commit = false;
+        for window in d3d11_windows.iter_mut() {
+            owed_commit |= window.dcomp_prepare_commit();
+        }
+        if owed_commit && d3d11_cx.dcomp_commit() {
+            for window in d3d11_windows.iter_mut() {
+                window.dcomp_commit_published();
             }
         }
         if geom_changes.len() > 0 {
@@ -1282,6 +1457,21 @@ impl Cx {
             }
         }
         ret
+    }
+}
+
+/// Requeue a DirectComposition op only while this window's `CreateWindow` is
+/// still in the drain. Closed / never-created windows drop the op instead of
+/// retrying forever. Returns `false` when the drain should `break`.
+fn defer_dcomp_if_creating(cx: &mut Cx, window_id: WindowId, op: CxOsOp) -> bool {
+    let waiting_for_create = cx.platform_ops.iter().any(|queued| {
+        matches!(queued, CxOsOp::CreateWindow(id) if *id == window_id)
+    });
+    if waiting_for_create {
+        cx.defer_platform_op(op)
+    } else {
+        crate::error!("dropping CxOsOp::{op:?}: HWND for {window_id:?} is not available");
+        true
     }
 }
 

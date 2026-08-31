@@ -14,6 +14,7 @@ use crate::{
     makepad_script::shader_backend::*,
     makepad_script::*,
     os::{
+        windows::dcomp::{self, DcompWindow},
         windows::win32_app::{
             try_with_win32_app, with_win32_app, FALSE, TRUE,
         },
@@ -22,7 +23,7 @@ use crate::{
     script::vm::*,
     texture::Texture,
     texture::{CxTexture, TextureFormat, TextureId, TexturePixel, TextureUpdated},
-    window::WindowId,
+    window::{DcompChildGeom, DcompChildId, DcompChildZ, DcompContent, WindowId},
     windows::{
         core::{
             //ComInterface,
@@ -38,6 +39,7 @@ use crate::{
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
                     D3D_SRV_DIMENSION_TEXTURECUBE,
                 },
+                DirectComposition::IDCompositionDevice,
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
                     ID3D11DepthStencilView, ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11InputLayout,
@@ -66,7 +68,7 @@ use crate::{
                 },
                 Dxgi::{
                     Common::{
-                        DXGI_ALPHA_MODE_IGNORE,
+                        DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED,
                         DXGI_FORMAT,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
                         //DXGI_FORMAT_D32_FLOAT_S8X 24_UINT,
@@ -89,12 +91,13 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource,
+                    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGIKeyedMutex,
                     IDXGIResource1, IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2,
                     DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
                     DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
-                    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+                    DXGI_SCALING_NONE, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+                    DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
@@ -1421,6 +1424,10 @@ pub struct D3d11Window {
     pub resize_error_logged: bool,
     /// Same once-per-failure-episode latch for the `present` error path.
     pub present_error_logged: bool,
+    /// Composition tree for `window.direct_composition`, kept alive for as long as
+    /// the window presents. `None` on popups, on default redirection-bitmap
+    /// windows, and when composition setup failed.
+    pub dcomp: Option<DcompWindow>,
     /// Estimated display refresh period in seconds, refined from successive DXGI
     /// frame statistics (`SyncQPCTime` / `SyncRefreshCount` deltas) so the beat's
     /// target-flip timestamp lands on a real vblank rather than a nominal 60 Hz.
@@ -1447,16 +1454,30 @@ impl D3d11Window {
 
     pub fn new(
         window_id: WindowId,
-        d3d11_cx: &D3d11Cx,
+        d3d11_cx: &mut D3d11Cx,
         inner_size: Vec2d,
         position: Option<Vec2d>,
         title: &str,
         is_fullscreen: bool,
-    ) -> D3d11Window {
+        direct_composition: bool,
+    ) -> Option<D3d11Window> {
+        // Resolved before the HWND exists on purpose; see `D3d11Cx::dcomp_device`.
+        let dcomp_device = if direct_composition {
+            d3d11_cx.dcomp_device()
+        } else {
+            None
+        };
+        let direct_composition = dcomp_device.is_some();
+
         // create window, and then initialize it; this is needed because
         // GWLP_USERDATA needs to reference a stable and existing window
-        let mut win32_window =
-            Box::new(Win32Window::new(window_id, title, position, is_fullscreen));
+        let mut win32_window = Box::new(Win32Window::new(
+            window_id,
+            title,
+            position,
+            is_fullscreen,
+            direct_composition,
+        ));
         win32_window.init(inner_size);
         win32_window.set_ime_active(false);
         let wg = win32_window.get_window_geom();
@@ -1476,14 +1497,26 @@ impl D3d11Window {
             waitable_swap_chain: true,
             resize_error_logged: false,
             present_error_logged: false,
+            dcomp: None,
             refresh_period: DEFAULT_REFRESH_PERIOD,
             last_frame_stats: None,
             occluded_since: None,
             latency_timeout_since: None,
             device_lost: false,
         };
-        window.create_swap_chain(d3d11_cx);
-        window
+        if !window.create_swap_chain(d3d11_cx) {
+            // A WS_EX_NOREDIRECTIONBITMAP HWND without a composition tree never
+            // paints. Destroy it so the caller can retry with a redirection bitmap.
+            if window.win32_window.is_direct_composition {
+                crate::error!(
+                    "HWND already has WS_EX_NOREDIRECTIONBITMAP; destroying it instead of \
+                     pretending CreateSwapChainForHwnd can make this window visible"
+                );
+                window.win32_window.close_window();
+                return None;
+            }
+        }
+        Some(window)
     }
 
     pub fn new_popup(
@@ -1514,6 +1547,7 @@ impl D3d11Window {
             waitable_swap_chain: false,
             resize_error_logged: false,
             present_error_logged: false,
+            dcomp: None,
             refresh_period: DEFAULT_REFRESH_PERIOD,
             last_frame_stats: None,
             occluded_since: None,
@@ -1533,8 +1567,18 @@ impl D3d11Window {
     /// being passed in.
     fn swap_chain_desc(&self) -> DXGI_SWAP_CHAIN_DESC1 {
         let wg = &self.window_geom;
+        let composition = self.win32_window.is_direct_composition;
         DXGI_SWAP_CHAIN_DESC1 {
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            // Composition is where per-pixel alpha actually works: DWM blends the UI
+            // visual onto whatever is behind it. PREMULTIPLIED matches the pass blend
+            // (ONE / INV_SRC_ALPHA). A flip-model HWND swap chain has to be opaque;
+            // transparency on that path is the layered-window route in
+            // `apply_window_visuals` instead.
+            AlphaMode: if composition {
+                DXGI_ALPHA_MODE_PREMULTIPLIED
+            } else {
+                DXGI_ALPHA_MODE_IGNORE
+            },
             BufferCount: if self.waitable_swap_chain {
                 main_window_buffer_count()
             } else {
@@ -1553,7 +1597,13 @@ impl D3d11Window {
                 Count: 1,
                 Quality: 0,
             },
-            Scaling: DXGI_SCALING_NONE,
+            // Composition swap chains reject DXGI_SCALING_NONE; STRETCH also means
+            // a stale buffer is scaled to the window instead of leaving an uncovered gap.
+            Scaling: if composition {
+                DXGI_SCALING_STRETCH
+            } else {
+                DXGI_SCALING_NONE
+            },
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         }
@@ -1568,18 +1618,33 @@ impl D3d11Window {
     pub fn create_swap_chain(&mut self, d3d11_cx: &D3d11Cx) -> bool {
         debug_assert!(self.swap_chain.is_none());
         let desc = self.swap_chain_desc();
+        let composition = self.win32_window.is_direct_composition;
         unsafe {
-            let swap_chain = match d3d11_cx.factory.CreateSwapChainForHwnd(
-                &d3d11_cx.device,
-                self.win32_window.hwnd,
-                &desc,
-                None,
-                None,
-            ) {
-                Ok(sc) => sc,
-                Err(e) => {
-                    d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForHwnd", &e);
-                    return false;
+            let swap_chain = if composition {
+                match d3d11_cx.factory.CreateSwapChainForComposition(
+                    &d3d11_cx.device,
+                    &desc,
+                    None,
+                ) {
+                    Ok(sc) => sc,
+                    Err(e) => {
+                        d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForComposition", &e);
+                        return false;
+                    }
+                }
+            } else {
+                match d3d11_cx.factory.CreateSwapChainForHwnd(
+                    &d3d11_cx.device,
+                    self.win32_window.hwnd,
+                    &desc,
+                    None,
+                    None,
+                ) {
+                    Ok(sc) => sc,
+                    Err(e) => {
+                        d3d11_cx.note_error("IDXGIFactory2::CreateSwapChainForHwnd", &e);
+                        return false;
+                    }
                 }
             };
             let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
@@ -1598,13 +1663,16 @@ impl D3d11Window {
                 d3d11_cx.note_error("CreateRenderTargetView(backbuffer)", &e);
                 return false;
             }
-            // Cosmetic, and `sync_background_color` already ignores its result.
-            let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
-                r: 0.3,
-                g: 0.3,
-                b: 0.3,
-                a: 1.0,
-            });
+            // Only meaningful with DXGI_SCALING_NONE. A composition swap chain
+            // (and a NOREDIRECTIONBITMAP HWND) rejects it.
+            if !composition {
+                let _ = swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                    r: 0.3,
+                    g: 0.3,
+                    b: 0.3,
+                    a: 1.0,
+                });
+            }
 
             // Set the maximum frame latency on the swap chain (not the device) and, for a main
             // window, take its waitable object: the beat the event loop waits on, one credit
@@ -1626,6 +1694,24 @@ impl D3d11Window {
             } else if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
                 // Popups keep the low one-frame latency without requesting the waitable flag.
                 let _ = swap_chain2.SetMaximumFrameLatency(1);
+            }
+
+            if composition {
+                let Some(device) = d3d11_cx.dcomp_device.clone() else {
+                    crate::error!(
+                        "CreateSwapChainForComposition succeeded but no composition device is cached"
+                    );
+                    return false;
+                };
+                if let Some(dcomp) = self.dcomp.as_mut() {
+                    dcomp.sync_ui_swap_chain(&swap_chain);
+                } else {
+                    self.dcomp = Some(dcomp::bind_swapchain(
+                        device,
+                        self.win32_window.hwnd,
+                        &swap_chain,
+                    ));
+                }
             }
 
             self.swap_texture = Some(swap_texture);
@@ -1743,7 +1829,11 @@ impl D3d11Window {
     /// color. With DXGI_SCALING_NONE, any gap between the (old-size) swap
     /// chain buffer and the (new-size) window is filled with this color.
     /// By matching the app's background, the gap becomes invisible.
+    /// Composition swap chains stretch rather than leave a gap, so they skip it.
     pub fn sync_background_color(&self, clear_color: crate::makepad_math::Vec4f) {
+        if self.dcomp.is_some() || self.win32_window.is_direct_composition {
+            return;
+        }
         unsafe {
             let Some(swap_chain) = self.swap_chain.as_ref() else {
                 return;
@@ -1754,6 +1844,182 @@ impl D3d11Window {
                 b: clear_color.z,
                 a: clear_color.w,
             });
+        }
+    }
+
+    pub fn dcomp_create_child(&mut self, child_id: DcompChildId, z: DcompChildZ) {
+        match self.dcomp.as_mut() {
+            Some(dcomp) => dcomp.create_child(child_id, z),
+            None => crate::error!(
+                "DcompCreateChild: window {:?} is not a DirectComposition host",
+                self.window_id
+            ),
+        }
+    }
+
+    pub fn dcomp_set_child_content(&mut self, child_id: DcompChildId, content: Option<DcompContent>) {
+        match self.dcomp.as_mut() {
+            Some(dcomp) => dcomp.set_child_content(child_id, content),
+            None => crate::error!(
+                "DcompSetChildContent: window {:?} is not a DirectComposition host",
+                self.window_id
+            ),
+        }
+    }
+
+    /// Fills a child visual with one opaque colour, as a 1×1 composition swap
+    /// chain the child's scale stretches over whatever it has to cover.
+    ///
+    /// The size independence is the point. A caller that punches a hole through
+    /// the UI for a behind-UI child cannot keep the two aligned through a resize
+    /// — the hole arrives by swap-chain present and the child's transform by
+    /// DComp commit, with no ordering between them. Parking one of these at
+    /// [`DcompChildZ::BACKDROP`] makes that harmless: it needs no geometry
+    /// update of its own, so it is never the late layer, and the hole exposes
+    /// it instead of the desktop.
+    ///
+    /// A repeat call with the colour already on the child is dropped, so this is
+    /// safe to reach from a per-frame sync without allocating a swap chain a
+    /// frame.
+    pub fn dcomp_set_child_solid(
+        &mut self,
+        d3d11_cx: &D3d11Cx,
+        child_id: DcompChildId,
+        color: Vec4,
+    ) {
+        let Some(dcomp) = self.dcomp.as_mut() else {
+            crate::error!(
+                "DcompSetChildSolid: window {:?} is not a DirectComposition host",
+                self.window_id
+            );
+            return;
+        };
+        if !dcomp.solid_needs_paint(child_id, color) {
+            return;
+        }
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            BufferCount: 2,
+            Width: 1,
+            Height: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Flags: 0,
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Scaling: DXGI_SCALING_STRETCH,
+            Stereo: FALSE,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        };
+        unsafe {
+            let swap_chain =
+                match d3d11_cx
+                    .factory
+                    .CreateSwapChainForComposition(&d3d11_cx.device, &desc, None)
+                {
+                    Ok(swap_chain) => swap_chain,
+                    Err(error) => {
+                        crate::error!(
+                            "CreateSwapChainForComposition (solid child) failed: {error}"
+                        );
+                        return;
+                    }
+                };
+            let texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
+                Ok(texture) => texture,
+                Err(error) => {
+                    crate::error!("IDXGISwapChain1::GetBuffer (solid child) failed: {error}");
+                    return;
+                }
+            };
+            let mut render_target = None;
+            if let Err(error) =
+                d3d11_cx
+                    .device
+                    .CreateRenderTargetView(&texture, None, Some(&mut render_target))
+            {
+                crate::error!("CreateRenderTargetView (solid child) failed: {error}");
+                return;
+            }
+            let Some(render_target) = render_target else {
+                return;
+            };
+            // The chain is PREMULTIPLIED, so the colour goes in premultiplied.
+            let premul = [
+                color.x * color.w,
+                color.y * color.w,
+                color.z * color.w,
+                color.w,
+            ];
+            d3d11_cx
+                .context
+                .ClearRenderTargetView(&render_target, &premul);
+            if let Err(error) = swap_chain.Present(0, DXGI_PRESENT(0)).ok() {
+                crate::error!("IDXGISwapChain1::Present (solid child) failed: {error}");
+                return;
+            }
+            match swap_chain.cast::<crate::windows::core::IUnknown>() {
+                Ok(unknown) => {
+                    let content = DcompContent::from_raw_iunknown(unknown.into_raw());
+                    dcomp.set_child_solid(child_id, content, color);
+                }
+                Err(error) => {
+                    crate::error!("solid child swap chain has no IUnknown: {error}");
+                }
+            }
+        }
+    }
+
+    pub fn dcomp_set_child_geom(&mut self, child_id: DcompChildId, geom: DcompChildGeom) {
+        match self.dcomp.as_mut() {
+            Some(dcomp) => dcomp.set_child_geom(child_id, geom),
+            None => crate::error!(
+                "DcompSetChildGeom: window {:?} is not a DirectComposition host",
+                self.window_id
+            ),
+        }
+    }
+
+    pub fn dcomp_set_child_z(&mut self, child_id: DcompChildId, z: DcompChildZ) {
+        match self.dcomp.as_mut() {
+            Some(dcomp) => dcomp.set_child_z(child_id, z),
+            None => crate::error!(
+                "DcompSetChildZ: window {:?} is not a DirectComposition host",
+                self.window_id
+            ),
+        }
+    }
+
+    pub fn dcomp_remove_child(&mut self, child_id: DcompChildId) {
+        if let Some(dcomp) = self.dcomp.as_mut() {
+            dcomp.remove_child(child_id);
+        }
+    }
+
+    /// Runs deferred composition work and reports whether a `Commit` is owed.
+    /// The device is shared, so the caller commits once for all windows and then
+    /// calls [`Self::dcomp_commit_published`].
+    pub fn dcomp_prepare_commit(&mut self) -> bool {
+        // Field-wise borrow: the UI swap chain and the tree are separate fields.
+        let Self {
+            dcomp, swap_chain, ..
+        } = self;
+        match dcomp.as_mut() {
+            Some(dcomp) => {
+                if let Some(swap_chain) = swap_chain.as_ref() {
+                    dcomp.sync_ui_swap_chain(swap_chain);
+                }
+                dcomp.prepare_commit()
+            }
+            None => false,
+        }
+    }
+
+    pub fn dcomp_commit_published(&mut self) {
+        if let Some(dcomp) = self.dcomp.as_mut() {
+            dcomp.commit_published();
         }
     }
 
@@ -1923,9 +2189,15 @@ impl D3d11Window {
             // A present that actually landed clears the occlusion back-off.
             self.occluded_since = None;
 
-            // During an active window resize, synchronize with the DWM compositor so the
-            // freshly-presented frame is composited before the desktop is repainted at the new size.
-            if self.is_in_resize {
+            // A composition window needs no per-frame IDCompositionDevice::Commit:
+            // the visual tree is unchanged and DWM picks up new swap-chain contents
+            // from Present alone. ResizeBuffers likewise keeps the same swap chain,
+            // so the visual follows the new buffer size on its own.
+
+            // HWND live-resize uses DwmFlush so SCALING_NONE gaps stay filled.
+            // Composition already stretches and scales child visuals; flushing
+            // every WM_SIZING frame parks this thread and starves Erika's audio pump.
+            if self.is_in_resize && self.dcomp.is_none() {
                 dwm_flush();
             }
             true
@@ -2059,6 +2331,13 @@ pub struct D3d11Cx {
     pub context: ID3D11DeviceContext,
     pub query: ID3D11Query,
     pub factory: IDXGIFactory2,
+    /// One composition device for the process: every `DcompWindow` holds a clone
+    /// of it, so a single `Commit` publishes every window's tree and DWM sees one
+    /// composition channel instead of one per window. Created on the first
+    /// composition window; `None` also means "probed and unavailable" once
+    /// `dcomp_probed` is set.
+    dcomp_device: Option<IDCompositionDevice>,
+    dcomp_probed: bool,
     /// The device has been removed or reset, so every object created from it is dead and the
     /// recovery driver owns the window until it has rebuilt them. A `Cell` because every
     /// resource-creation site in this file holds only a `&D3d11Cx`.
@@ -2126,6 +2405,8 @@ impl D3d11Cx {
             context,
             factory,
             query,
+            dcomp_device: None,
+            dcomp_probed: false,
             device_lost: Cell::new(false),
             other_error_logged: Cell::new(false),
         }
@@ -2141,6 +2422,9 @@ impl D3d11Cx {
                 self.device = device;
                 self.context = context;
                 self.query = query;
+                // The composition device is created from this DXGI device; the old one is dead.
+                self.dcomp_device = None;
+                self.dcomp_probed = false;
                 self.other_error_logged.set(false);
                 true
             }
@@ -2180,6 +2464,40 @@ impl D3d11Cx {
         } else if !self.other_error_logged.replace(true) {
             crate::error!("D3D11 {} failed, device still alive: {}", what, err);
         }
+    }
+
+    /// The shared composition device, created on first use.
+    ///
+    /// Doubles as the pre-HWND probe: `WS_EX_NOREDIRECTIONBITMAP` is fixed at
+    /// `CreateWindowExW` and a window carrying it without a composition tree
+    /// never shows anything, so a machine that cannot give us a device has to be
+    /// detected while the caller can still fall back to a redirection-bitmap
+    /// window. The probe result is cached, so a machine without composition does
+    /// not re-probe and re-log for every window.
+    pub fn dcomp_device(&mut self) -> Option<IDCompositionDevice> {
+        if !self.dcomp_probed {
+            self.dcomp_probed = true;
+            self.dcomp_device = self
+                .device
+                .cast::<IDXGIDevice>()
+                .ok()
+                .and_then(|dxgi_device| dcomp::create_device(&dxgi_device));
+        }
+        self.dcomp_device.clone()
+    }
+
+    /// One `IDCompositionDevice::Commit` for every composition window. Returns
+    /// whether the tree edits were published; on `false` the callers keep their
+    /// dirty flags and retry.
+    pub fn dcomp_commit(&self) -> bool {
+        let Some(device) = self.dcomp_device.as_ref() else {
+            return false;
+        };
+        if let Err(error) = unsafe { device.Commit() } {
+            crate::error!("IDCompositionDevice::Commit failed: {error}");
+            return false;
+        }
+        true
     }
 
     pub fn start_querying(&self) {

@@ -736,6 +736,11 @@ version = "0.3.2"
 default-features = false
 
 path = "../windows-future"
+[dependencies.windows-numerics]
+version = "0.3.1"
+default-features = false
+
+path = "../windows-numerics"
 [lints.rust]
 missing_unsafe_on_extern = "warn"
 

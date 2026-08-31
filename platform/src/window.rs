@@ -192,6 +192,238 @@ impl WindowVisuals {
     }
 }
 
+/// One DirectComposition child visual on a `window.direct_composition` window.
+///
+/// Allocated by [`WindowHandle::dcomp_create_child`]. Windows-only: the
+/// matching `CxOsOp` variants are `cfg(target_os = "windows")`.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DcompChildId(pub u64);
+
+/// Z-order of a child visual relative to Makepad's UI swap chain.
+///
+/// DirectComposition draws a visual's children on top of that visual's own
+/// content, so the host tree is a content-less root with the UI as one child.
+/// **0 is reserved for that UI visual.** Negative values sit behind it; positive
+/// values sit in front. Same-z children are ordered by id (lower id further back).
+/// Passing `0` for a child snaps to [`Self::BEHIND`].
+///
+/// This is not a compositor and not a closed set of roles. The UI is one
+/// bitmap; a child can only be in front of or behind that bitmap. Conventional
+/// constants below pick the usual slots:
+///
+/// | Constant | Value | Use |
+/// | --- | --- | --- |
+/// | [`Self::BACKDROP`] | `i32::MIN` | Opaque fill under every other behind-UI child |
+/// | [`Self::BEHIND`] | `-1` | Video / camera underlay |
+/// | [`Self::UI`] | `0` | Reserved; not a valid child z |
+/// | [`Self::FRONT`] | `1` | Native overlay above the UI |
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DcompChildZ(pub i32);
+
+#[cfg(target_os = "windows")]
+impl DcompChildZ {
+    /// Opaque fill that must stay under every other behind-UI child, whatever
+    /// order they were created in. Pair with [`WindowHandle::dcomp_set_child_solid`]:
+    /// a hole punched through the UI cannot stay pixel-exact with a behind-UI
+    /// child through a resize (Present vs DComp Commit), so whatever the hole
+    /// exposes should land on this instead of the desktop.
+    pub const BACKDROP: Self = Self(i32::MIN);
+    /// Typical underlay (video, camera), immediately behind the UI.
+    pub const BEHIND: Self = Self(-1);
+    /// Reserved for the UI swap chain. Not a valid child z.
+    pub const UI: Self = Self(0);
+    /// Native overlay above Makepad pixels.
+    pub const FRONT: Self = Self(1);
+
+    pub fn is_front(self) -> bool {
+        self.0 > 0
+    }
+
+    /// `0` cannot share the UI's slot.
+    pub fn sanitized(self) -> Self {
+        if self.0 == 0 {
+            Self::BEHIND
+        } else {
+            self
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Default for DcompChildZ {
+    fn default() -> Self {
+        Self::BEHIND
+    }
+}
+
+/// Placement of a child visual, in **physical pixels** from the window's
+/// client origin. Logical Makepad coordinates must be multiplied by DPI first.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DcompChildGeom {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Stretch the child's swap-chain bitmap to `width`×`height`. `1` is 1:1.
+    /// Used while live-resizing so an old buffer still covers a punched hole.
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub visible: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl Default for DcompChildGeom {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            visible: false,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl DcompChildGeom {
+    pub fn is_shown(&self) -> bool {
+        self.visible && self.width > 0.0 && self.height > 0.0
+    }
+
+    /// Non-finite offsets/sizes become 0; negative size is clamped.
+    pub fn sanitized(self) -> Self {
+        fn coord(v: f32) -> f32 {
+            if v.is_finite() { v } else { 0.0 }
+        }
+        fn extent(v: f32) -> f32 {
+            if v.is_finite() { v.max(0.0) } else { 0.0 }
+        }
+        fn scale(v: f32) -> f32 {
+            if v.is_finite() && v > 0.0 { v } else { 1.0 }
+        }
+        Self {
+            x: coord(self.x),
+            y: coord(self.y),
+            width: extent(self.width),
+            height: extent(self.height),
+            scale_x: scale(self.scale_x),
+            scale_y: scale(self.scale_y),
+            visible: self.visible,
+        }
+    }
+
+    /// Layout/DPI rounding can wobble by a fraction of a pixel; skip DWM
+    /// commits unless the visual actually moved.
+    pub fn approx_eq(self, other: Self) -> bool {
+        const EPS: f32 = 0.5;
+        const SCALE_EPS: f32 = 0.001;
+        self.visible == other.visible
+            && (self.x - other.x).abs() <= EPS
+            && (self.y - other.y).abs() <= EPS
+            && (self.width - other.width).abs() <= EPS
+            && (self.height - other.height).abs() <= EPS
+            && (self.scale_x - other.scale_x).abs() <= SCALE_EPS
+            && (self.scale_y - other.scale_y).abs() <= SCALE_EPS
+    }
+}
+
+/// COM content for [`IDCompositionVisual::SetContent`](https://learn.microsoft.com/windows/win32/api/dcomp/nf-dcomp-idcompositionvisual-setcontent).
+///
+/// Typically an `IDXGISwapChain1` from `CreateSwapChainForComposition`. The
+/// pointer owns one `IUnknown` reference; dropping this value `Release`s it.
+/// Not `Send`/`Sync`: DirectComposition and the COM pointer are UI-thread only.
+#[cfg(target_os = "windows")]
+pub struct DcompContent {
+    ptr: *mut std::ffi::c_void,
+    _not_send_sync: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(target_os = "windows")]
+impl DcompContent {
+    /// Takes ownership of one `IUnknown` reference.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid COM `IUnknown *` (or null). DirectComposition
+    /// only accepts composition swap chains and a few other content types.
+    pub unsafe fn from_raw_iunknown(ptr: *mut std::ffi::c_void) -> Self {
+        Self {
+            ptr,
+            _not_send_sync: std::marker::PhantomData,
+        }
+    }
+
+    pub fn as_raw(&self) -> *mut std::ffi::c_void {
+        self.ptr
+    }
+
+    /// Relinquishes the reference without `Release`. Used when transferring
+    /// the pointer into a Windows backend call that takes ownership.
+    pub fn into_raw(self) -> *mut std::ffi::c_void {
+        let ptr = self.ptr;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for DcompContent {
+    fn drop(&mut self) {
+        unsafe {
+            use crate::windows::core::Interface;
+            if !self.ptr.is_null() {
+                drop(crate::windows::core::IUnknown::from_raw(self.ptr));
+                self.ptr = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Clone for DcompContent {
+    fn clone(&self) -> Self {
+        unsafe {
+            use crate::windows::core::Interface;
+            if self.ptr.is_null() {
+                return Self {
+                    ptr: std::ptr::null_mut(),
+                    _not_send_sync: std::marker::PhantomData,
+                };
+            }
+            let Some(unk) = crate::windows::core::IUnknown::from_raw_borrowed(&self.ptr) else {
+                return Self {
+                    ptr: std::ptr::null_mut(),
+                    _not_send_sync: std::marker::PhantomData,
+                };
+            };
+            Self {
+                ptr: unk.clone().into_raw(),
+                _not_send_sync: std::marker::PhantomData,
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl PartialEq for DcompContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for DcompContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DcompContent")
+            .field("ptr", &self.ptr)
+            .finish()
+    }
+}
+
 impl WindowId {
     pub fn id(&self) -> usize {
         self.0
@@ -414,6 +646,10 @@ pub struct ScriptWindowHandle {
     pub topmost: bool,
     #[live]
     pub transparent: bool,
+    /// Create-time Windows DirectComposition path (`CreateSwapChainForComposition`).
+    /// Ignored after the HWND exists; other platforms ignore it.
+    #[live]
+    pub direct_composition: bool,
     #[live(WindowBackdrop::None)]
     pub backdrop: WindowBackdrop,
     #[live(1.0)]
@@ -461,6 +697,9 @@ impl ScriptHook for ScriptWindowHandle {
         cx.windows[window_id].kind_id = self.kind_id;
         if self.dpi_override.is_some() {
             cx.windows[window_id].dpi_override = self.dpi_override;
+        }
+        if !cx.windows[window_id].is_created {
+            cx.windows[window_id].direct_composition = self.direct_composition;
         }
         let visuals = WindowVisuals {
             transparent: self.transparent,
@@ -612,6 +851,15 @@ impl WindowHandle {
         self.set_window_visuals(cx, visuals);
     }
 
+    /// Whether this window currently presents through DirectComposition.
+    ///
+    /// False before the HWND exists, after it is closed, and on every
+    /// non-Windows platform. The create-time request is `CxWindow::direct_composition`.
+    pub fn is_direct_composition(&self, cx: &Cx) -> bool {
+        let window = &cx.windows[self.window_id()];
+        window.is_created && window.composition_active
+    }
+
     pub fn set_backdrop_intensity(&mut self, cx: &mut Cx, backdrop_intensity: f32) {
         let mut visuals = cx.windows[self.window_id()].window_visuals();
         visuals.backdrop_intensity = backdrop_intensity;
@@ -638,6 +886,194 @@ impl WindowHandle {
 
     pub fn close(&mut self, cx: &mut Cx) {
         cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
+    }
+}
+
+/// DirectComposition child visuals. Windows-only: the matching `CxOsOp` variants
+/// are `cfg(target_os = "windows")`, so this whole impl is gated the same way.
+#[cfg(target_os = "windows")]
+impl WindowHandle {
+    fn dcomp_should_queue(&self, cx: &Cx) -> bool {
+        let window = &cx.windows[self.window_id()];
+        !window.is_created || window.composition_active
+    }
+
+    /// Allocates a child visual behind or in front of the Makepad UI visual.
+    ///
+    /// The id is unique even when the op is not queued (HWND swap-chain host).
+    pub fn dcomp_create_child(&mut self, cx: &mut Cx, z: DcompChildZ) -> DcompChildId {
+        let window_id = self.window_id();
+        let should_queue = self.dcomp_should_queue(cx);
+        let window = &mut cx.windows[window_id];
+        window.dcomp_child_seq = window.dcomp_child_seq.saturating_add(1);
+        let child_id = DcompChildId(window.dcomp_child_seq);
+        let z = z.sanitized();
+        if should_queue {
+            cx.platform_ops.push_back(CxOsOp::DcompCreateChild {
+                window_id,
+                child_id,
+                z,
+            });
+        }
+        child_id
+    }
+
+    pub fn dcomp_set_child_content(
+        &mut self,
+        cx: &mut Cx,
+        child_id: DcompChildId,
+        content: Option<DcompContent>,
+    ) {
+        if !self.dcomp_should_queue(cx) {
+            return;
+        }
+        let window_id = self.window_id();
+        cx.platform_ops.retain(|op| {
+            !matches!(
+                op,
+                CxOsOp::DcompSetChildContent {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                } if *id == window_id && *cid == child_id
+            )
+        });
+        cx.platform_ops.push_back(CxOsOp::DcompSetChildContent {
+            window_id,
+            child_id,
+            content,
+        });
+    }
+
+    /// Fills a child visual with one opaque colour. A child at
+    /// [`DcompChildZ::BACKDROP`] that needs no geometry of its own is the usual
+    /// caller: see that constant for why.
+    ///
+    /// Allocates a 1×1 composition swap chain per call, so call it once per
+    /// child (or once per colour change) rather than from a per-frame sync.
+    pub fn dcomp_set_child_solid(&mut self, cx: &mut Cx, child_id: DcompChildId, color: Vec4) {
+        if !self.dcomp_should_queue(cx) {
+            return;
+        }
+        let window_id = self.window_id();
+        cx.platform_ops.retain(|op| {
+            !matches!(
+                op,
+                CxOsOp::DcompSetChildSolid {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                } if *id == window_id && *cid == child_id
+            )
+        });
+        cx.platform_ops.push_back(CxOsOp::DcompSetChildSolid {
+            window_id,
+            child_id,
+            color,
+        });
+    }
+
+    pub fn dcomp_set_child_geom(&mut self, cx: &mut Cx, child_id: DcompChildId, geom: DcompChildGeom) {
+        if !self.dcomp_should_queue(cx) {
+            return;
+        }
+        let window_id = self.window_id();
+        cx.platform_ops.retain(|op| {
+            !matches!(
+                op,
+                CxOsOp::DcompSetChildGeom {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                } if *id == window_id && *cid == child_id
+            )
+        });
+        cx.platform_ops.push_back(CxOsOp::DcompSetChildGeom {
+            window_id,
+            child_id,
+            geom,
+        });
+    }
+
+    /// Moves an existing child to a different z. See [`DcompChildZ`].
+    ///
+    /// The host restacks every child against the new value, so the result does
+    /// not depend on the order the children were created in.
+    pub fn dcomp_set_child_z(&mut self, cx: &mut Cx, child_id: DcompChildId, z: DcompChildZ) {
+        if !self.dcomp_should_queue(cx) {
+            return;
+        }
+        let window_id = self.window_id();
+        let z = z.sanitized();
+        cx.platform_ops.retain(|op| {
+            !matches!(
+                op,
+                CxOsOp::DcompSetChildZ {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                } if *id == window_id && *cid == child_id
+            )
+        });
+        cx.platform_ops.push_back(CxOsOp::DcompSetChildZ {
+            window_id,
+            child_id,
+            z,
+        });
+    }
+
+    pub fn dcomp_remove_child(&mut self, cx: &mut Cx, child_id: DcompChildId) {
+        if !self.dcomp_should_queue(cx) {
+            return;
+        }
+        let window_id = self.window_id();
+        let mut dropped_create = false;
+        cx.platform_ops.retain(|op| {
+            let same_child = match op {
+                CxOsOp::DcompCreateChild {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                }
+                | CxOsOp::DcompSetChildContent {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                }
+                | CxOsOp::DcompSetChildSolid {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                }
+                | CxOsOp::DcompSetChildGeom {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                }
+                | CxOsOp::DcompSetChildZ {
+                    window_id: id,
+                    child_id: cid,
+                    ..
+                }
+                | CxOsOp::DcompRemoveChild {
+                    window_id: id,
+                    child_id: cid,
+                } => *id == window_id && *cid == child_id,
+                _ => false,
+            };
+            if same_child {
+                dropped_create |= matches!(op, CxOsOp::DcompCreateChild { .. });
+                false
+            } else {
+                true
+            }
+        });
+        if !dropped_create {
+            cx.platform_ops.push_back(CxOsOp::DcompRemoveChild {
+                window_id,
+                child_id,
+            });
+        }
     }
 }
 
@@ -680,6 +1116,11 @@ pub struct CxWindow {
     pub popup_size: Option<Vec2d>,
     pub popup_grab_keyboard: bool,
     pub transparent: bool,
+    pub direct_composition: bool,
+    /// Set when the native window actually bound a composition tree.
+    pub composition_active: bool,
+    #[cfg(target_os = "windows")]
+    pub(crate) dcomp_child_seq: u64,
     pub backdrop: WindowBackdrop,
     pub backdrop_intensity: f32,
     pub macos: MacosWindowConfig,
@@ -706,6 +1147,10 @@ impl Default for CxWindow {
             popup_size: None,
             popup_grab_keyboard: true,
             transparent: false,
+            direct_composition: false,
+            composition_active: false,
+            #[cfg(target_os = "windows")]
+            dcomp_child_seq: 0,
             backdrop: WindowBackdrop::None,
             backdrop_intensity: 1.0,
             macos: MacosWindowConfig::default(),
@@ -924,6 +1369,255 @@ mod tests {
         assert!(!cx_window.transparent);
         assert_eq!(cx_window.backdrop, WindowBackdrop::None);
         assert_eq!(cx_window.backdrop_intensity, 1.0);
+        assert!(!cx_window.composition_active);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_create_child_allocates_ids_and_queues_ops() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        cx.platform_ops.clear();
+
+        let a = window.dcomp_create_child(&mut cx, DcompChildZ::BEHIND);
+        let b = window.dcomp_create_child(&mut cx, DcompChildZ::FRONT);
+        assert_ne!(a, b);
+
+        window.dcomp_set_child_geom(
+            &mut cx,
+            a,
+            DcompChildGeom {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                visible: true,
+                ..Default::default()
+            },
+        );
+        window.dcomp_set_child_geom(
+            &mut cx,
+            a,
+            DcompChildGeom {
+                x: 10.0,
+                y: 20.0,
+                width: 30.0,
+                height: 40.0,
+                visible: true,
+                ..Default::default()
+            },
+        );
+
+        let geom_ops = cx
+            .platform_ops
+            .iter()
+            .filter(|op| matches!(op, CxOsOp::DcompSetChildGeom { child_id, .. } if *child_id == a))
+            .count();
+        assert_eq!(geom_ops, 1);
+        assert!(matches!(
+            cx.platform_ops.back(),
+            Some(CxOsOp::DcompSetChildGeom {
+                geom: DcompChildGeom {
+                    x: 10.0,
+                    width: 30.0,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_child_geom_sanitizes_non_finite_and_negative_extent() {
+        let geom = DcompChildGeom {
+            x: f32::NAN,
+            y: f32::NEG_INFINITY,
+            width: -8.0,
+            height: f32::INFINITY,
+            visible: true,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(geom.x, 0.0);
+        assert_eq!(geom.y, 0.0);
+        assert_eq!(geom.width, 0.0);
+        assert_eq!(geom.height, 0.0);
+        assert!(!geom.is_shown());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_child_z_is_relative_to_ui_at_zero() {
+        assert_eq!(DcompChildZ::UI.0, 0);
+        assert_eq!(DcompChildZ(0).sanitized(), DcompChildZ::BEHIND);
+        assert!(DcompChildZ::BACKDROP < DcompChildZ::BEHIND);
+        assert!(DcompChildZ::BEHIND < DcompChildZ::FRONT);
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        cx.platform_ops.clear();
+        let _ = window.dcomp_create_child(&mut cx, DcompChildZ(0));
+        assert!(matches!(
+            cx.platform_ops.back(),
+            Some(CxOsOp::DcompCreateChild {
+                z: DcompChildZ(-1),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn is_direct_composition_is_false_until_the_hwnd_is_bound() {
+        let mut cx = test_cx();
+        let window = WindowHandle::new(&mut cx);
+        cx.windows[window.window_id()].direct_composition = true;
+        assert!(!window.is_direct_composition(&cx));
+        cx.windows[window.window_id()].is_created = true;
+        cx.windows[window.window_id()].composition_active = true;
+        assert!(window.is_direct_composition(&cx));
+        cx.windows[window.window_id()].is_created = false;
+        cx.windows[window.window_id()].composition_active = false;
+        assert!(!window.is_direct_composition(&cx));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_create_child_does_not_queue_on_an_hwnd_swapchain_host() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        cx.windows[window.window_id()].is_created = true;
+        cx.windows[window.window_id()].composition_active = false;
+        cx.platform_ops.clear();
+        let _ = window.dcomp_create_child(&mut cx, DcompChildZ::BEHIND);
+        assert!(cx.platform_ops.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_remove_child_cancels_pending_create() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        cx.platform_ops.clear();
+        let id = window.dcomp_create_child(&mut cx, DcompChildZ::BEHIND);
+        window.dcomp_set_child_geom(
+            &mut cx,
+            id,
+            DcompChildGeom {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                visible: true,
+                ..Default::default()
+            },
+        );
+        window.dcomp_set_child_solid(&mut cx, id, vec4(0.0, 0.0, 0.0, 1.0));
+        window.dcomp_set_child_z(&mut cx, id, DcompChildZ::FRONT);
+        window.dcomp_remove_child(&mut cx, id);
+        assert!(cx.platform_ops.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_set_child_z_keeps_only_the_last_value_per_child() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        let a = window.dcomp_create_child(&mut cx, DcompChildZ::BEHIND);
+        let b = window.dcomp_create_child(&mut cx, DcompChildZ::BEHIND);
+        cx.platform_ops.clear();
+        window.dcomp_set_child_z(&mut cx, a, DcompChildZ::FRONT);
+        window.dcomp_set_child_z(&mut cx, b, DcompChildZ::BACKDROP);
+        // Reserved z snaps to BEHIND here, not in the backend, so the op that
+        // reaches the host is already valid.
+        window.dcomp_set_child_z(&mut cx, a, DcompChildZ::UI);
+        let zs: Vec<_> = cx
+            .platform_ops
+            .iter()
+            .filter_map(|op| match op {
+                CxOsOp::DcompSetChildZ { child_id, z, .. } => Some((*child_id, *z)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            zs,
+            vec![(b, DcompChildZ::BACKDROP), (a, DcompChildZ::BEHIND)]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_set_child_solid_dedups_per_child() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        let a = window.dcomp_create_child(&mut cx, DcompChildZ::BACKDROP);
+        let b = window.dcomp_create_child(&mut cx, DcompChildZ::BACKDROP);
+        cx.platform_ops.clear();
+        window.dcomp_set_child_solid(&mut cx, a, vec4(1.0, 0.0, 0.0, 1.0));
+        window.dcomp_set_child_solid(&mut cx, b, vec4(0.0, 1.0, 0.0, 1.0));
+        window.dcomp_set_child_solid(&mut cx, a, vec4(0.0, 0.0, 1.0, 1.0));
+        let solids: Vec<_> = cx
+            .platform_ops
+            .iter()
+            .filter_map(|op| match op {
+                CxOsOp::DcompSetChildSolid {
+                    child_id, color, ..
+                } => Some((*child_id, *color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            solids,
+            vec![(b, vec4(0.0, 1.0, 0.0, 1.0)), (a, vec4(0.0, 0.0, 1.0, 1.0))]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_content_and_geom_queue_before_create() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        cx.platform_ops.clear();
+        let id = DcompChildId(7);
+        window.dcomp_set_child_content(&mut cx, id, None);
+        window.dcomp_set_child_geom(
+            &mut cx,
+            id,
+            DcompChildGeom {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                visible: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            cx.platform_ops.front(),
+            Some(CxOsOp::DcompSetChildContent { child_id, .. }) if *child_id == id
+        ));
+        assert!(matches!(
+            cx.platform_ops.back(),
+            Some(CxOsOp::DcompSetChildGeom { child_id, .. }) if *child_id == id
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dcomp_child_geom_approx_eq_tolerates_subpixel_jitter() {
+        let a = DcompChildGeom {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+            visible: true,
+            ..Default::default()
+        };
+        let mut b = a;
+        b.x += 0.25;
+        b.width += 0.4;
+        assert!(a.approx_eq(b));
+        b.x += 1.0;
+        assert!(!a.approx_eq(b));
     }
 
     #[test]
@@ -1081,6 +1775,7 @@ mod tests {
             dpi_override: Some(2.0),
             topmost: false,
             transparent: true,
+            direct_composition: false,
             backdrop: WindowBackdrop::Blur,
             backdrop_intensity: 0.5,
             macos: MacosWindowConfig::floating_panel(),

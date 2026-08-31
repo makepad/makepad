@@ -272,3 +272,6 @@ pub use {
     smallvec,
     smallvec::SmallVec,
 };
+
+#[cfg(target_os = "windows")]
+pub use crate::window::{DcompChildGeom, DcompChildId, DcompChildZ, DcompContent};

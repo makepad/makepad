@@ -2500,6 +2500,9 @@ fn main() {
     enabled_features.extend(load_enabled_windows_features(Path::new(
         "./platform/network/Cargo.toml",
     )));
+    enabled_features.extend(load_enabled_windows_features(Path::new(
+        "./platform/video/Cargo.toml",
+    )));
 
     let mut explicit_imports = HashSet::new();
     let mut glob_imports: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
@@ -2527,6 +2530,20 @@ fn main() {
     let network_windows_src_dir = Path::new("./platform/network/src/backend/windows");
     if network_windows_src_dir.is_dir() {
         for entry in fs::read_dir(network_windows_src_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("rs") {
+                continue;
+            }
+            let (file_explicit, file_globs) = collect_imports_from_file(&path);
+            explicit_imports.extend(file_explicit);
+            glob_imports.extend(file_globs);
+            collect_method_usage_from_file(&path, &mut used_methods);
+        }
+    }
+    let video_src_dir = Path::new("./platform/video/src");
+    if video_src_dir.is_dir() {
+        for entry in fs::read_dir(video_src_dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             if path.extension().and_then(|v| v.to_str()) != Some("rs") {
