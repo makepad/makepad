@@ -1777,6 +1777,52 @@ fn metal_hang_watchdog_start() {
     });
 }
 
+/// `MTLCommandBufferStatusError`: the buffer's GPU work did not run.
+const MTL_COMMAND_BUFFER_STATUS_ERROR: u64 = 5;
+
+/// Command buffers that ended in error since launch. Bounds the log below.
+static METAL_CB_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// A command buffer that ends in `MTLCommandBufferStatusError` produced no pixels:
+/// whatever it was going to draw is missing from the frame, and nothing else in the
+/// backend notices, because Metal runs the completion handler either way, so
+/// `METAL_CB_COMPLETED` advances, `frames_in_flight` drains and the hang watchdog stays
+/// quiet over a stale or black window. Name the failure and the passes that were in the
+/// buffer. Status and error are readable from inside the completion handler.
+fn report_command_buffer_error(cb: ObjcId, seq: u64, entry: Option<&InFlightCb>) {
+    let status: u64 = unsafe { msg_send![cb, status] };
+    if status != MTL_COMMAND_BUFFER_STATUS_ERROR {
+        return;
+    }
+    let count = METAL_CB_ERRORS.fetch_add(1, Ordering::Relaxed);
+    if count >= 32 {
+        return;
+    }
+    let error: ObjcId = unsafe { msg_send![cb, error] };
+    let (code, description) = if error != nil {
+        let code: i64 = unsafe { msg_send![error, code] };
+        let desc: ObjcId = unsafe { msg_send![error, localizedDescription] };
+        (code, nsstring_to_string(desc))
+    } else {
+        (0, "no NSError attached".to_string())
+    };
+    let passes = entry
+        .map(|entry| describe_passes(&entry.passes))
+        .unwrap_or_else(|| "(no in-flight entry)".to_string());
+    crate::error!(
+        "[metal] command buffer #{} failed with MTLCommandBufferError {}: {}. Its frame did not render. Passes: {}{}",
+        seq,
+        code,
+        description,
+        passes,
+        if count == 31 {
+            " (further command-buffer errors suppressed)"
+        } else {
+            ""
+        },
+    );
+}
+
 /// A Shared `MTLBuffer` carrying one Vec-texture upload from the CPU to a
 /// blit. Whoever holds the struct owns the retain.
 struct StagingBuffer {
@@ -1960,6 +2006,7 @@ impl MetalCx {
                             .position(|entry| entry.seq == seq)
                             .and_then(|at| queue.remove(at))
                     };
+                    report_command_buffer_error(cb, seq, entry.as_ref());
                     if let (Some(threshold), Some(entry)) = (gpu_trace_threshold_ms(), entry) {
                         let start: f64 = unsafe { msg_send![cb, GPUStartTime] };
                         let end: f64 = unsafe { msg_send![cb, GPUEndTime] };

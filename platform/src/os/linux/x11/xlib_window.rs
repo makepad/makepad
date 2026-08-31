@@ -4,7 +4,7 @@ use {
         area::Area, cursor::MouseCursor, event::*,
         makepad_math::{dvec2, Rect, Vec2d},
         os::linux::x11::x11_screen::x11_screens,
-        screen::fit_window_rect_to_screens,
+        screen::{fit_window_rect_to_screens, sanitize_resize},
         window::WindowId,
     },
     std::{
@@ -852,9 +852,47 @@ impl XlibWindow {
         }
     }
 
-    pub fn set_outer_size(&self, _size: Vec2d) {}
+    /// Resizes the window to `size`, given in logical pixels.
+    ///
+    /// X11 draws no decorations of its own — the window manager reparents the client into its
+    /// own frame — so the client window's extent IS its inner size, and the outer size is not
+    /// something a client can set. `set_outer_size` therefore delegates here rather than
+    /// pretending to a precision it does not have.
+    pub fn set_inner_size(&self, size: Vec2d) {
+        let Some(window) = self.window else {
+            return;
+        };
+        // A request that carries no usable size is refused rather than clamped: flooring a zero
+        // or a negative to the CARD16 minimum would produce a one-pixel window, which is a worse
+        // answer than leaving the window alone. Matches what the Wayland backend does.
+        let Some(size) = sanitize_resize(size) else {
+            crate::error!(
+                "ResizeWindow ignored: {}x{} is not a usable window extent.",
+                size.x,
+                size.y
+            );
+            return;
+        };
+        unsafe {
+            let display = get_xlib_app_global().display;
+            let dpi = self.get_dpi_factor();
+            // X11 encodes an extent as CARD16 and rejects zero with a BadValue, which without
+            // an error handler installed would terminate the process.
+            x11_sys::XResizeWindow(
+                display,
+                window,
+                clamp_extent(size.x * dpi),
+                clamp_extent(size.y * dpi),
+            );
+            x11_sys::XFlush(display);
+        }
+    }
 
-    pub fn set_inner_size(&self, _size: Vec2d) {}
+    /// The window manager owns the decoration frame, so a client can only ask for its own
+    /// extent; this is the inner size by another name.
+    pub fn set_outer_size(&self, size: Vec2d) {
+        self.set_inner_size(size);
+    }
 
     pub fn get_dpi_factor(&self) -> f64 {
         unsafe {
