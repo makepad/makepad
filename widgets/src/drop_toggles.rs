@@ -21,8 +21,21 @@
 //! [`DropTogglesAction::Toggled`]; hosts push their own state back in with
 //! `set_active_mask`, which is why the on/off set is carried as a bit per
 //! item rather than a Vec<bool> nobody wants to diff.
+//!
+//! While it is open the popover GRABS THE POINTER (`cx.sweep_lock`, the same
+//! pairing every other popup in this crate uses). It has to: the panel floats
+//! over widgets that were already walked this dispatch, so marking the press
+//! handled by the time it reaches us is too late — the row under the panel
+//! has fired already. The lock refuses every hit test that does not name the
+//! chip's area, and is handed back the moment the popover closes.
+//!
+//! The on/off set is stored RAW and masked against the current row count on
+//! every read. That is what makes the two setters agree: `set_active_mask`
+//! before `set_labels` keeps the whole mask instead of dropping it on the
+//! floor, and a bit with no row behind it is never counted, never lights the
+//! chip, and comes back if the labels that own it come back.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{event::TouchState, makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum DropTogglesAction {
@@ -74,7 +87,10 @@ script_mod! {
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, theme.corner_radius)
-                sdf.fill(self.color.mix(self.color_hover, max(self.hover, self.open)))
+                // fill_KEEP: a plain fill wipes the shape and the stroke that
+                // follows lands on nothing, which is a silent way to lose the
+                // one mark that says a filter is in force.
+                sdf.fill_keep(self.color.mix(self.color_hover, max(self.hover, self.open)))
                 sdf.stroke(self.border_color.mix(self.border_color_lit, self.lit), 1.0)
                 return sdf.result
             }
@@ -97,7 +113,7 @@ script_mod! {
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, theme.corner_radius)
-                sdf.fill(self.color)
+                sdf.fill_keep(self.color)
                 sdf.stroke(self.border_color, 1.0)
                 return sdf.result
             }
@@ -118,7 +134,7 @@ script_mod! {
             active: 0.0
             color: uniform(theme.color_u_hidden)
             color_active: uniform(#xff5c39)
-            border_color: uniform(#xffffff3d)
+            border_color: uniform(#xffffff26)
             border_color_hover: uniform(#xffffff70)
             border_color_active: uniform(#xff5c39)
             // The tick ink is the panel fill, so a lit box reads as a hole
@@ -149,7 +165,7 @@ script_mod! {
         draw_label +: {
             hover: 0.0
             active: 0.0
-            color: #x9aa8b6
+            color: #x8e9aa7
             color_hover: uniform(#xd6dee6)
             color_active: uniform(#xf4f7fa)
             text_style: theme.font_bold{font_size: 9}
@@ -177,6 +193,10 @@ const MARK_GAP: f64 = 8.0;
 /// Keep this much window edge free when the panel has to be pushed back on.
 const EDGE: f64 = 6.0;
 /// A u32 carries the on/off set, so 32 items is the ceiling by construction.
+/// Everything past it is DROPPED — not drawn, not hit-tested, not toggled.
+/// `1u32 << 32` panics in debug and silently wraps to `1 << 0` in release, so
+/// a 33rd row would toggle the first one; the ceiling has to be enforced, not
+/// merely written down.
 const MAX_ITEMS: usize = 32;
 
 #[derive(Script, ScriptHook)]
@@ -251,29 +271,35 @@ pub struct DropToggles {
     #[live]
     pub text: String,
     /// One row per label, in order. Index in the action is an index here.
+    /// Only the first [`MAX_ITEMS`] are ever drawn or hit-tested.
     #[live]
     pub labels: Vec<String>,
     /// Icon ink while anything is on.
     #[live]
     pub icon_color_lit: Vec4f,
 
-    /// Bit i = item i is on.
+    /// Bit i = item i is on, held RAW: bits past the current row count are
+    /// kept but dormant, so a host may push its saved mask in before it has
+    /// pushed the labels and lose nothing. Every read goes through
+    /// `visible_mask`, which is what stops a dormant bit from being counted
+    /// or from lighting the chip.
     #[rust]
     active: u32,
     #[rust]
     open: bool,
     #[rust]
     hover_row: Option<usize>,
-    /// The icon's rest ink, taken from the call site on the first draw so
-    /// the lit state can hand it back untouched.
-    #[rust]
-    icon_color_rest: Vec4f,
-    #[rust]
-    icon_color_init: bool,
     /// The window this drew into last, for the edge flip/clamp. The event
     /// side has no `Cx2d` to ask, so the draw side leaves it here.
     #[rust]
     pass_size: DVec2,
+    /// The chip's FINAL rect, captured on the event side. Mid-draw the chip
+    /// only knows its pre-alignment position — a chip in a right-aligned row
+    /// has not been moved yet — and the flip/clamp decision needs the place
+    /// the operator actually clicked. Sizes are honest at draw time; only
+    /// positions lie.
+    #[rust]
+    chip_rect: Rect,
     /// The popover rect of the last draw (event-side hit tests use it).
     #[rust]
     panel_rect: Rect,
@@ -284,6 +310,24 @@ pub struct DropToggles {
 impl ScriptHook for DropToggles {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    /// A live re-apply keeps the instance and every `#[rust]` field, so state
+    /// that indexes into `labels` outlives the labels themselves. A shorter
+    /// list would leave the hover on a row that is no longer there. The
+    /// active mask needs no repair here — it is masked on read against the
+    /// current row count, so shrinking the list makes the high bits dormant
+    /// rather than stale, and growing it back brings them home.
+    fn on_after_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.hover_row.is_some_and(|row| row >= self.item_count()) {
+            self.hover_row = None;
+        }
     }
 }
 
@@ -313,19 +357,37 @@ fn row_layout() -> Layout {
 }
 
 impl DropToggles {
-    /// Replace the item labels. Clears nothing — the active mask is kept
-    /// and truncated to the new length.
+    /// Rows that actually exist. `labels` is a live field a script can set to
+    /// anything, so the ceiling is applied HERE rather than trusted upstream:
+    /// every loop, hit test and bit shift in this file counts to this.
+    fn item_count(&self) -> usize {
+        self.labels.len().min(MAX_ITEMS)
+    }
+
+    /// The stored mask with the dormant bits — the ones no row stands behind —
+    /// cut away. Everything public reads through this.
+    fn visible_mask(&self) -> u32 {
+        self.active & mask_for_len(self.item_count())
+    }
+
+    /// Replace the item labels. Clears nothing: bits belonging to rows that
+    /// are gone go dormant rather than being destroyed, so a host may push a
+    /// mask and its labels in EITHER order and end up in the same place.
+    /// Anything past [`MAX_ITEMS`] is dropped on the way in.
     pub fn set_labels(&mut self, cx: &mut Cx, labels: &[String]) {
-        self.labels = labels.to_vec();
-        self.active &= mask_for_len(self.labels.len());
-        if let Some(row) = self.hover_row {
-            if row >= self.labels.len() {
-                self.hover_row = None;
-            }
+        self.labels = labels.iter().take(MAX_ITEMS).cloned().collect();
+        if self.hover_row.is_some_and(|row| row >= self.labels.len()) {
+            self.hover_row = None;
+        }
+        if self.labels.is_empty() {
+            self.set_open(cx, false);
         }
         self.redraw_all(cx);
     }
 
+    /// Set one item. Indices from [`MAX_ITEMS`] up are refused — there is no
+    /// bit for them. An index that is merely past the CURRENT last label is
+    /// accepted and parked: see `active`.
     pub fn set_active(&mut self, cx: &mut Cx, index: usize, on: bool) {
         if index >= MAX_ITEMS || bit(self.active, index) == on {
             return;
@@ -335,16 +397,19 @@ impl DropToggles {
     }
 
     pub fn is_active(&self, index: usize) -> bool {
-        bit(self.active, index)
+        index < self.item_count() && bit(self.active, index)
     }
 
-    /// Bit i = item i. Handy for hosts that keep their own [bool; N].
+    /// Bit i = item i. Handy for hosts that keep their own [bool; N]. Only
+    /// bits with a row behind them are reported.
     pub fn active_mask(&self) -> u32 {
-        self.active
+        self.visible_mask()
     }
 
+    /// Takes the mask WHOLE, whatever the labels currently are. Masking it
+    /// against the row count here is what used to make an early restore —
+    /// mask first, labels second — evaporate against `mask_for_len(0)`.
     pub fn set_active_mask(&mut self, cx: &mut Cx, mask: u32) {
-        let mask = mask & mask_for_len(self.labels.len());
         if self.active != mask {
             self.active = mask;
             self.redraw_all(cx);
@@ -353,7 +418,7 @@ impl DropToggles {
 
     /// How many are on, for the chip's badge.
     pub fn active_count(&self) -> usize {
-        self.active.count_ones() as usize
+        self.visible_mask().count_ones() as usize
     }
 
     fn toggle_bit(&mut self, index: usize, on: bool) {
@@ -370,21 +435,26 @@ impl DropToggles {
         if count == 0 {
             self.text.clone()
         } else if self.text.is_empty() {
-            format!("{}", count)
+            count.to_string()
         } else {
             format!("{} {}", self.text, count)
         }
     }
 
-    /// Wide enough for the longest label without eliding, tall enough for
-    /// every row. Measured off the label font so a call site restyling the
-    /// rows does not saw the text in half.
+    /// Tall enough for every row, and an ESTIMATE of wide enough for the
+    /// longest label: character count times font size times a fudge, with
+    /// PANEL_MAX_W as a hard ceiling. It is not a measured run — only
+    /// `font_size` is read, no advance widths — so a wide-glyph label, or one
+    /// past roughly 35 characters, will still run into the ceiling and elide.
+    /// It stays an estimate because the offset has to be known on the EVENT
+    /// side, where there is no `Cx2d` to lay text out in.
     fn panel_size(&self) -> DVec2 {
-        let rows = self.labels.len().max(1) as f64;
+        let rows = self.item_count().max(1) as f64;
         let font = (self.draw_label.text_style.font_size as f64).max(6.0);
         let chars = self
             .labels
             .iter()
+            .take(MAX_ITEMS)
             .map(|label| label.chars().count())
             .max()
             .unwrap_or(1) as f64;
@@ -400,7 +470,17 @@ impl DropToggles {
     fn panel_offset(&self, chip: Rect) -> DVec2 {
         let size = self.panel_size();
         let pass = self.pass_size;
-        let mut offset = dvec2(0.0, chip.size.y + PANEL_GAP);
+        // The only two vertical places the panel is ever allowed to be. It is
+        // never pinned to the WINDOW instead: a panel pulled back over the
+        // chip would take a press as a row toggle and then hand the same
+        // press to the chip, closing the popover on a pick — the one thing
+        // this widget promises cannot happen. Overrunning the window edge is
+        // the lesser fault, so in the degenerate case (taller than the window
+        // has room for on either side) the panel keeps its edge against the
+        // chip and lets the roomier side show what it can.
+        let below = chip.size.y + PANEL_GAP;
+        let above = -(size.y + PANEL_GAP);
+        let mut offset = dvec2(0.0, below);
         if pass.x > 0.0 {
             let right = pass.x - EDGE - size.x;
             if chip.pos.x > right {
@@ -410,20 +490,27 @@ impl DropToggles {
                 offset.x = EDGE - chip.pos.x;
             }
         }
-        if pass.y > 0.0 && chip.pos.y + offset.y + size.y > pass.y - EDGE {
-            let above = -(size.y + PANEL_GAP);
-            offset.y = if chip.pos.y + above >= EDGE {
-                above
-            } else {
-                (pass.y - EDGE - size.y - chip.pos.y).max(EDGE - chip.pos.y)
-            };
+        if pass.y > 0.0 && chip.pos.y + below + size.y > pass.y - EDGE {
+            let room_below = (pass.y - EDGE) - (chip.pos.y + below);
+            let room_above = (chip.pos.y - PANEL_GAP) - EDGE;
+            // Fitting above implies room_above >= size.y > room_below, so the
+            // one comparison covers both the flip and the fallback.
+            offset.y = if room_above > room_below { above } else { below };
         }
         offset
     }
 
-    /// Which row an absolute point lands on, panel-relative.
+    /// Which row a WINDOW-absolute point lands on. `None` for anything off
+    /// the panel, for the panel's own padding above the first row and below
+    /// the last, and for the ROW_INSET gutters the rows are drawn inboard of
+    /// — a press in the gutter is a press beside a row, not on it.
     fn row_at(&self, abs: DVec2) -> Option<usize> {
         if !self.panel_rect.contains(abs) {
+            return None;
+        }
+        if abs.x < self.panel_rect.pos.x + ROW_INSET
+            || abs.x > self.panel_rect.pos.x + self.panel_rect.size.x - ROW_INSET
+        {
             return None;
         }
         let row = ((abs.y - self.panel_rect.pos.y - PANEL_PAD_Y) / ROW_H).floor();
@@ -431,7 +518,7 @@ impl DropToggles {
             return None;
         }
         let row = row as usize;
-        if row < self.labels.len() {
+        if row < self.item_count() {
             Some(row)
         } else {
             None
@@ -445,11 +532,60 @@ impl DropToggles {
         self.draw_bg.redraw(cx);
     }
 
+    /// Opening takes the pointer for the whole widget tree and closing hands
+    /// it back — the pairing every popup in this crate uses. Without it the
+    /// panel is a picture: the widgets it floats over are walked first and
+    /// have already acted on the press by the time this widget sees it.
+    ///
+    /// A chip with no rows refuses to open at all. An empty 118x34 box that
+    /// answers nothing is a hole in the screen, and one that has taken the
+    /// pointer lock is a hole that swallows the rest of the window with it.
     fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        let open = open && self.item_count() > 0;
         if self.open != open {
             self.open = open;
             self.hover_row = None;
+            if open {
+                cx.sweep_lock(self.draw_bg.area());
+            } else {
+                cx.sweep_unlock(self.draw_bg.area());
+            }
             self.draw_bg.set_uniform(cx, id!(open), &[if open { 1.0 } else { 0.0 }]);
+            self.redraw_all(cx);
+        }
+    }
+
+    /// A press while the popover is open. Returns true when it landed inside
+    /// the panel, meaning the caller must mark the event handled: the sweep
+    /// lock already turned away everything walked BEFORE this widget, and
+    /// this stops anything walked after it.
+    ///
+    /// `primary` is false for the secondary and middle buttons: they may
+    /// dismiss the popover from outside, but they never work a row and never
+    /// reach through it to whatever is underneath.
+    fn press_at(&mut self, cx: &mut Cx, abs: DVec2, primary: bool) -> bool {
+        if self.panel_rect.contains(abs) {
+            if primary {
+                if let Some(row) = self.row_at(abs) {
+                    let on = !bit(self.active, row);
+                    self.toggle_bit(row, on);
+                    let uid = self.widget_uid();
+                    cx.widget_action(uid, DropTogglesAction::Toggled(row, on));
+                    self.redraw_all(cx);
+                }
+            }
+            return true;
+        }
+        if !self.chip_rect.contains(abs) {
+            self.set_open(cx, false);
+        }
+        false
+    }
+
+    fn hover_at(&mut self, cx: &mut Cx, abs: DVec2) {
+        let row = self.row_at(abs);
+        if row != self.hover_row {
+            self.hover_row = row;
             self.redraw_all(cx);
         }
     }
@@ -459,20 +595,22 @@ impl Widget for DropToggles {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let count = self.active_count();
         let lit = count > 0;
-        if !self.icon_color_init {
-            self.icon_color_init = true;
-            self.icon_color_rest = self.draw_icon.color;
+        // Set, draw, RESTORE. `draw_icon.color` is the call site's rest ink
+        // and the only place that ink lives, so a widget that overwrites it
+        // for good has nothing left to read back: a live re-apply would hand
+        // in a fresh colour and then find it already clobbered by the last
+        // frame, and a capture taken while lit would enshrine the accent as
+        // the rest state. Straight at the field, too — a script apply naming
+        // `draw_icon` re-applies the whole object and drops the loaded
+        // document with it.
+        let icon_rest = self.draw_icon.color;
+        if lit {
+            self.draw_icon.color = self.icon_color_lit;
         }
-        // Straight at the field: a script apply naming `draw_icon` re-applies
-        // the whole object and drops the loaded document with it.
-        self.draw_icon.color = if lit {
-            self.icon_color_lit
-        } else {
-            self.icon_color_rest
-        };
         self.draw_bg.lit = if lit { 1.0 } else { 0.0 };
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_icon.color = icon_rest;
         let chip_text = self.chip_text(count);
         if !chip_text.is_empty() {
             self.draw_text
@@ -484,9 +622,17 @@ impl Widget for DropToggles {
             // Everything the overlay pass needs is worked out here, before
             // the draw list is borrowed out of `self`.
             self.pass_size = cx.current_pass_size();
-            let chip = self.draw_bg.area().rect(cx);
+            let drawn = self.draw_bg.area().rect(cx);
+            let anchor = Rect {
+                pos: if self.chip_rect.size.y > 0.0 {
+                    self.chip_rect.pos
+                } else {
+                    drawn.pos
+                },
+                size: drawn.size,
+            };
             let panel_size = self.panel_size();
-            let offset = self.panel_offset(chip);
+            let offset = self.panel_offset(anchor);
             let mask = self.active;
             let hover_row = self.hover_row;
             if let Some(draw_list) = self.draw_list.as_mut() {
@@ -505,7 +651,7 @@ impl Widget for DropToggles {
                 let panel = cx.turtle().rect();
                 let row_x = panel.pos.x + ROW_INSET;
                 let row_w = (panel.size.x - ROW_INSET * 2.0).max(1.0);
-                for (index, label) in self.labels.iter().enumerate() {
+                for (index, label) in self.labels.iter().take(MAX_ITEMS).enumerate() {
                     let y = panel.pos.y + PANEL_PAD_Y + index as f64 * ROW_H;
                     let on = bit(mask, index);
                     self.draw_row.hover = if hover_row == Some(index) { 1.0 } else { 0.0 };
@@ -538,45 +684,53 @@ impl Widget for DropToggles {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        let uid = self.widget_uid();
         // The popover owns the pointer while open: a press on a row toggles
         // that row and NOTHING else, a press outside chip AND panel closes.
         // The CHIP toggle itself lives in the hits arm below — one press,
-        // one state change.
+        // one state change. Raw events rather than `hits` because the panel
+        // has no area of its own; the sweep lock taken in `set_open` is what
+        // keeps every other widget out of these same presses.
         if self.open {
             // The panel hangs off the chip deterministically.
             let chip = self.draw_bg.area().rect(cx);
+            self.chip_rect = chip;
             self.panel_rect = Rect {
                 pos: chip.pos + self.panel_offset(chip),
                 size: self.panel_size(),
             };
             match event {
                 Event::MouseDown(me) => {
-                    if self.panel_rect.contains(me.abs) {
-                        if let Some(row) = self.row_at(me.abs) {
-                            let on = !bit(self.active, row);
-                            self.toggle_bit(row, on);
-                            cx.widget_action(uid, DropTogglesAction::Toggled(row, on));
-                            self.redraw_all(cx);
+                    if self.press_at(cx, me.abs, me.button.is_primary()) {
+                        me.handled.set(self.draw_bg.area());
+                    }
+                }
+                // Touch never becomes a MouseDown: `hits` synthesises a
+                // FingerDown from it for the chip, but the panel is not an
+                // area, so without this arm the popover opens on a phone and
+                // then answers nothing at all — not a row, not a dismiss.
+                Event::TouchUpdate(te) => {
+                    if let Some(touch) = te.touches.first() {
+                        match touch.state {
+                            TouchState::Start => {
+                                if self.press_at(cx, touch.abs, true) {
+                                    touch.handled.set(self.draw_bg.area());
+                                }
+                            }
+                            TouchState::Move => self.hover_at(cx, touch.abs),
+                            _ => {}
                         }
-                    } else if !chip.contains(me.abs) {
-                        self.set_open(cx, false);
                     }
                 }
-                Event::MouseMove(me) => {
-                    let row = self.row_at(me.abs);
-                    if row != self.hover_row {
-                        self.hover_row = row;
-                        self.redraw_all(cx);
-                    }
-                }
+                Event::MouseMove(me) => self.hover_at(cx, me.abs),
                 Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
                     self.set_open(cx, false);
                 }
                 _ => {}
             }
         }
-        match event.hits(cx, self.draw_bg.area()) {
+        // Named as its own sweep area, or the lock this widget took would
+        // turn the chip's own hits away along with everyone else's.
+        match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
                 self.draw_bg.redraw(cx);
@@ -585,7 +739,8 @@ impl Widget for DropToggles {
                 self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
                 self.draw_bg.redraw(cx);
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.chip_rect = self.draw_bg.area().rect(cx);
                 self.set_open(cx, !self.open);
             }
             _ => {}
@@ -616,9 +771,7 @@ impl DropTogglesRef {
     }
 
     pub fn is_active(&self, index: usize) -> bool {
-        self.borrow()
-            .map(|inner| inner.is_active(index))
-            .unwrap_or(false)
+        self.borrow().map(|i| i.is_active(index)).unwrap_or(false)
     }
 
     pub fn active_mask(&self) -> u32 {
@@ -632,8 +785,6 @@ impl DropTogglesRef {
     }
 
     pub fn active_count(&self) -> usize {
-        self.borrow()
-            .map(|inner| inner.active_count())
-            .unwrap_or(0)
+        self.borrow().map(|i| i.active_count()).unwrap_or(0)
     }
 }
