@@ -90,6 +90,129 @@ pub struct NavChunk {
     pub floor: [f32; CHUNK_AREA],
 }
 
+/// A STREAMED level's own authored walkability, folded into the derived
+/// grid as one static layer.
+///
+/// The derived grid reads terrain, static solids and water — everything the
+/// engine itself built. A streamed level is neither: its ground is one flat
+/// textured quad and its walls live in a sidecar the importer wrote. Without
+/// this layer such a level has no walkable cells at all (no terrain, no
+/// static bodies), so every flow field fails and every mover falls back to
+/// straight-line steering through the walls.
+///
+/// The layer therefore does two things: it declares the level's ground
+/// height inside its extent (making the map walkable in the first place),
+/// and it marks the cells the level says are impassable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticBlocked {
+    /// World-space (x, z) of the layer's `(0, 0)` cell corner.
+    pub origin: [f32; 2],
+    /// Metres per authored cell (NOT [`NAV_CELL`] — one authored cell
+    /// usually covers many nav cells).
+    pub cell: f32,
+    pub width: u32,
+    pub height: u32,
+    /// Row-major `width * height`; `true` = impassable.
+    pub blocked: Vec<bool>,
+    /// Ground height of the level's flat floor, metres. Also the fallback
+    /// height wherever `floors` is empty.
+    pub floor: f32,
+    /// The most a body may CLIMB and the most it may FALL between adjacent
+    /// cells on this ground, in metres — the level's own step height and
+    /// fall limit, as its walker declared them.
+    ///
+    /// The derived grid's own [`NAV_EDGE_RISE`] is a symmetric legibility
+    /// limit for TERRAIN: past ~61 degrees a slope reads as a cliff and paths
+    /// should go around it. A streamed level's floors are not a slope. Its
+    /// rooms sit whole metres apart and its bodies drop into them on purpose,
+    /// so one symmetric 0.9 m rule cut the level's own graph at every real
+    /// step down — an army ordered across the map stopped at the first ledge
+    /// its own walker would have walked off. Zero (the default) keeps
+    /// `NAV_EDGE_RISE` for both directions, which is every world that is not
+    /// a streamed level.
+    pub climb: f32,
+    pub fall: f32,
+    /// Row-major `width * height` walk-surface height per cell, when the
+    /// level publishes one. EMPTY means "one flat floor everywhere" — a
+    /// tiled strategy map, whose ground really is a single plane.
+    ///
+    /// A streamed 3D level is not flat: its rooms sit at a dozen different
+    /// heights, and a single `floor` would either bury half the map or
+    /// float the other half. The derived grid's own cell-to-cell rise check
+    /// ([`NAV_EDGE_RISE`]) then does the rest: a stair is walkable, a cliff
+    /// edge is not, and a flow field routes around both without knowing
+    /// what a level is.
+    pub floors: Vec<f32>,
+}
+
+impl StaticBlocked {
+    /// May a body step from a cell at `here` to one at `next`? Climbing and
+    /// falling are separate limits, because on a real level they are.
+    #[inline]
+    pub fn step_ok(&self, here: f32, next: f32) -> bool {
+        let climb = if self.climb > 0.0 { self.climb } else { NAV_EDGE_RISE };
+        let fall = if self.fall > 0.0 { self.fall } else { NAV_EDGE_RISE };
+        next - here <= climb && here - next <= fall
+    }
+
+    /// Walk-surface height of authored cell `i`.
+    #[inline]
+    pub fn floor_at(&self, i: usize) -> f32 {
+        self.floors.get(i).copied().unwrap_or(self.floor)
+    }
+
+    /// Row-major index of the authored cell containing world `(x, z)`.
+    #[inline]
+    pub fn index_at(&self, x: f32, z: f32) -> Option<usize> {
+        if self.cell <= 0.0 || self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let fx = (x - self.origin[0]) / self.cell;
+        let fz = (z - self.origin[1]) / self.cell;
+        if fx < 0.0 || fz < 0.0 {
+            return None;
+        }
+        let (cx, cz) = (fx as u32, fz as u32);
+        if cx >= self.width || cz >= self.height {
+            return None;
+        }
+        Some((cz as usize) * (self.width as usize) + cx as usize)
+    }
+
+    #[inline]
+    pub fn is_blocked_at(&self, x: f32, z: f32) -> bool {
+        self.index_at(x, z)
+            .map(|i| self.blocked[i])
+            .unwrap_or(false)
+    }
+
+    /// Deterministic fingerprint — the invalidation key.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        };
+        mix(self.origin[0].to_bits() as u64);
+        mix(self.origin[1].to_bits() as u64);
+        mix(self.cell.to_bits() as u64);
+        mix(self.floor.to_bits() as u64);
+        mix(self.width as u64);
+        mix(self.height as u64);
+        mix(self.climb.to_bits() as u64);
+        mix(self.fall.to_bits() as u64);
+        for (i, b) in self.blocked.iter().enumerate() {
+            if *b {
+                mix(i as u64);
+            }
+        }
+        for f in &self.floors {
+            mix(f.to_bits() as u64);
+        }
+        h
+    }
+}
+
 /// The world's walkability grid: chunked, lazily derived, dirty-flagged.
 /// Lives on [`GameWorld`] beside `dynamics` — derived state, reconciled
 /// against the entities, never replicated (only the simulating host runs
@@ -125,6 +248,9 @@ pub struct NavMap {
     /// Bumped whenever coverage or content is invalidated — path caches and
     /// flow fields key on it to know when to re-plan.
     pub generation: u64,
+    /// The streamed level's authored layer, if one was installed. `Arc`'d so
+    /// a world snapshot stays cheap.
+    static_blocked: Option<Arc<StaticBlocked>>,
 }
 
 /// The world geometry a derivation reads. Borrowed out of [`GameWorld`] by
@@ -134,6 +260,9 @@ pub struct NavSrc<'a> {
     pub terrain: Option<&'a Terrain>,
     pub render_rev: u64,
     pub tick: u64,
+    /// The streamed level's authored walkability layer. Cloned out of the
+    /// map before the split borrow, so it is an owned handle here.
+    pub static_blocked: Option<Arc<StaticBlocked>>,
 }
 
 impl NavMap {
@@ -187,6 +316,74 @@ impl NavMap {
         if tick.saturating_sub(self.last_invalidation_tick) >= REBUILD_COOLDOWN_TICKS {
             self.flush_pending(tick);
         }
+    }
+
+    /// Install (or replace) the streamed level's authored walkability layer.
+    ///
+    /// `blocked` lists the impassable cells of a `size.0 * size.1` grid whose
+    /// `(0, 0)` corner sits at world `origin`, each cell `cell` metres wide;
+    /// `floor` is the level's ground height. Passing an empty grid
+    /// (`size.0 == 0`) removes the layer. The whole grid is re-derived
+    /// immediately: a level change is not a per-tick obstacle edit.
+    pub fn set_static_blocked(
+        &mut self,
+        cells: &[(u32, u32)],
+        size: (u32, u32),
+        origin: [f32; 2],
+        cell: f32,
+        floor: f32,
+    ) {
+        let layer = if size.0 == 0 || size.1 == 0 || cell <= 0.0 {
+            None
+        } else {
+            let mut blocked = vec![false; (size.0 as usize) * (size.1 as usize)];
+            for (cx, cz) in cells {
+                if *cx < size.0 && *cz < size.1 {
+                    blocked[(*cz as usize) * (size.0 as usize) + *cx as usize] = true;
+                }
+            }
+            Some(StaticBlocked {
+                origin,
+                cell,
+                width: size.0,
+                height: size.1,
+                blocked,
+                floor,
+                climb: 0.0,
+                fall: 0.0,
+                floors: Vec::new(),
+            })
+        };
+        self.set_static_layer(layer);
+    }
+
+    /// Install (or replace) a fully-formed authored layer — the form a
+    /// streamed 3D level uses, because it carries a floor height PER CELL
+    /// rather than one plane ([`StaticBlocked::floors`]). `None` removes it.
+    pub fn set_static_layer(&mut self, layer: Option<StaticBlocked>) {
+        let layer = layer
+            .filter(|l| l.width != 0 && l.height != 0 && l.cell > 0.0)
+            .map(Arc::new);
+        if self.static_blocked.as_deref() == layer.as_deref() {
+            return;
+        }
+        self.static_blocked = layer;
+        // Coverage bounds change with the layer, so the whole layout is
+        // rebuilt rather than a set of chunks dirtied.
+        self.synced_once = false;
+        self.chunks.clear();
+        self.pending_chunks.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Drop the streamed level's authored layer (level unload).
+    pub fn clear_static_blocked(&mut self) {
+        self.set_static_blocked(&[], (0, 0), [0.0; 2], 0.0, 0.0);
+    }
+
+    /// The installed layer, if any.
+    pub fn static_blocked(&self) -> Option<&StaticBlocked> {
+        self.static_blocked.as_deref()
     }
 
     fn flush_pending(&mut self, tick: u64) {
@@ -299,6 +496,13 @@ fn rebuild_layout(map: &mut NavMap, src: &NavSrc, entity_hash: u64, trev: u64) {
         max.y = max.y.max(e.pos.z + e.half.z);
         any = true;
     }
+    if let Some(layer) = src.static_blocked.as_deref() {
+        min.x = min.x.min(layer.origin[0]);
+        min.y = min.y.min(layer.origin[1]);
+        max.x = max.x.max(layer.origin[0] + layer.width as f32 * layer.cell);
+        max.y = max.y.max(layer.origin[1] + layer.height as f32 * layer.cell);
+        any = true;
+    }
     if !any {
         map.w = 0;
         map.h = 0;
@@ -333,6 +537,20 @@ fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
     let x = (cx as f32 + 0.5) * NAV_CELL;
     let z = (cz as f32 + 0.5) * NAV_CELL;
     let mut floor: Option<f32> = src.terrain.and_then(|t| t.height_at(x, z));
+    // The streamed level's authored layer is ground in its own right: a flat
+    // strategy map has no terrain and no static solids under it, so without
+    // this seed not one of its cells would be walkable.
+    let mut grid_blocked = false;
+    if let Some(layer) = src.static_blocked.as_deref() {
+        if let Some(i) = layer.index_at(x, z) {
+            // A streamed 3D level publishes a height per cell; a tiled map
+            // publishes one plane. Either way this is the level's own word
+            // on where its floor is here.
+            let h = layer.floor_at(i);
+            floor = Some(floor.map_or(h, |f: f32| f.max(h)));
+            grid_blocked = layer.blocked[i];
+        }
+    }
     let inflate = NAV_CELL * 0.5;
     // (top, bottom) of every static solid over this cell. Entities are sorted
     // by id; the sort below is by height with total_cmp — fully deterministic.
@@ -394,7 +612,7 @@ fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
             blocked = true;
         }
     }
-    (floor, blocked)
+    (floor, blocked || grid_blocked)
 }
 
 /// Derive one chunk. A 1-cell apron is derived alongside so the CLEAR
@@ -445,6 +663,18 @@ fn derive_cells(src: &NavSrc, base_cx: i32, base_cz: i32) -> NavChunk {
         }
     }
     chunk
+}
+
+/// May a route step between two adjacent cells at these floor heights?
+///
+/// The world's own symmetric [`NAV_EDGE_RISE`] unless a streamed level
+/// installed its walker's real climb/fall limits ([`StaticBlocked::step_ok`]).
+#[inline]
+fn step_ok(src: &NavSrc, here: f32, next: f32) -> bool {
+    match src.static_blocked.as_deref() {
+        Some(layer) => layer.step_ok(here, next),
+        None => (next - here).abs() <= NAV_EDGE_RISE,
+    }
 }
 
 #[inline]
@@ -544,7 +774,7 @@ pub fn line_passable(map: &mut NavMap, src: &NavSrc, a: Vec3f, b: Vec3f, mask: u
             return None;
         }
         let (flags, floor) = cell(map, src, cx, cz);
-        if flags & mask == 0 || (floor - last_floor).abs() > NAV_EDGE_RISE {
+        if flags & mask == 0 || !step_ok(src, last_floor, floor) {
             return Some(false);
         }
         last_floor = floor;
@@ -676,7 +906,7 @@ fn astar(
                 continue;
             }
             let (nf, nfloor) = cell(map, src, nx, nz);
-            if nf & mask == 0 || (nfloor - here_floor).abs() > NAV_EDGE_RISE {
+            if nf & mask == 0 || !step_ok(src, here_floor, nfloor) {
                 continue;
             }
             // No corner cutting: diagonals need both orthogonal cells open.
@@ -863,7 +1093,7 @@ pub fn build_flow(map: &mut NavMap, src: &NavSrc, target: Vec3f, around: &[Vec3f
                 continue;
             }
             let (nf, nfloor) = cell(map, src, nx, nz);
-            if nf & FLAG_WALKABLE == 0 || (nfloor - here_floor).abs() > NAV_EDGE_RISE {
+            if nf & FLAG_WALKABLE == 0 || !step_ok(src, here_floor, nfloor) {
                 continue;
             }
             if dx != 0 && dz != 0 {
@@ -1034,6 +1264,9 @@ fn planar(a: Vec3f, b: Vec3f) -> f32 {
 
 impl GameWorld {
     fn nav_src(&mut self) -> (&mut NavMap, NavSrc<'_>) {
+        // Cloned (one `Arc` bump) before the split borrow so the derivation
+        // can read the layer while the map itself is borrowed mutably.
+        let static_blocked = self.nav.static_blocked.clone();
         let GameWorld {
             nav,
             entities,
@@ -1049,8 +1282,34 @@ impl GameWorld {
                 terrain: terrain.as_ref(),
                 render_rev: *render_rev,
                 tick: *tick,
+                static_blocked,
             },
         )
+    }
+
+    /// Fold a streamed level's authored walkability into the derived grid —
+    /// see [`NavMap::set_static_blocked`]. Call once per level load.
+    pub fn nav_set_static_blocked(
+        &mut self,
+        cells: &[(u32, u32)],
+        size: (u32, u32),
+        origin: [f32; 2],
+        cell: f32,
+        floor: f32,
+    ) {
+        self.nav.set_static_blocked(cells, size, origin, cell, floor);
+    }
+
+    /// Fold a streamed 3D level's own walkable surface in — the same layer,
+    /// but with a floor HEIGHT per cell ([`StaticBlocked::floors`]) so a
+    /// map with rooms at a dozen heights is one navigable ground.
+    pub fn nav_set_static_layer(&mut self, layer: StaticBlocked) {
+        self.nav.set_static_layer(Some(layer));
+    }
+
+    /// Drop the streamed level's authored layer (level unload).
+    pub fn nav_clear_static_blocked(&mut self) {
+        self.nav.clear_static_blocked();
     }
 
     /// Straight-line passability for a standard agent; None = no coverage.
@@ -1106,6 +1365,10 @@ impl GameWorld {
         mix(map.min_cz as u64);
         mix(map.w as u64);
         mix(map.h as u64);
+        // The streamed level's authored layer is part of what the grid IS,
+        // so the determinism gate hashes its descriptor as well as the cell
+        // flags it produced.
+        mix(src.static_blocked.as_deref().map_or(0, |l| l.fingerprint()));
         for cz in 0..(map.h / NAV_CHUNK) {
             for cx in 0..(map.w / NAV_CHUNK) {
                 // Touch one cell to force the chunk build.
@@ -1191,6 +1454,69 @@ mod tests {
             "crossing must be inside the gap, was x={x_at_wall}"
         );
         assert_eq!(*path.last().unwrap(), to, "path ends at the exact goal");
+    }
+
+    /// A streamed strategy map: no terrain, no static bodies, only the
+    /// authored grid. The layer must make the map walkable at all, mark its
+    /// wall impassable, and make a flow field route around that wall.
+    #[test]
+    fn an_authored_grid_makes_a_flat_level_walkable_and_its_wall_solid() {
+        const CELL: f32 = 6.0;
+        let mut world = GameWorld::new();
+        // Nothing to walk on until the layer says otherwise.
+        assert_eq!(
+            world.nav_line_clear(vec3f(3.0, 0.0, 3.0), vec3f(9.0, 0.0, 3.0)),
+            None,
+            "an empty world has no coverage"
+        );
+        // 6x6 cells, a wall across row 3 with one gap at column 2.
+        let blocked: Vec<(u32, u32)> = [0u32, 1, 3, 4, 5].iter().map(|cx| (*cx, 3)).collect();
+        world.nav_set_static_blocked(&blocked, (6, 6), [0.0, 0.0], CELL, 0.0);
+
+        let open = vec3f(9.0, 0.0, 3.0);
+        let across = vec3f(9.0, 0.0, 33.0);
+        assert_eq!(
+            world.nav_line_clear(open, across),
+            Some(false),
+            "the authored wall blocks the straight line"
+        );
+        assert_eq!(
+            world.nav_line_clear(vec3f(3.0, 0.0, 3.0), vec3f(27.0, 0.0, 3.0)),
+            Some(true),
+            "the rest of the map is open ground"
+        );
+
+        let mut path = Vec::new();
+        assert!(world.nav_find_path(open, across, &mut path), "route exists");
+        let crossing = path
+            .windows(2)
+            .find(|w| (w[0].z <= 3.5 * CELL) != (w[1].z <= 3.5 * CELL))
+            .expect("path crosses the wall row");
+        let t = (3.5 * CELL - crossing[0].z) / (crossing[1].z - crossing[0].z);
+        let x_at_wall = crossing[0].x + (crossing[1].x - crossing[0].x) * t;
+        assert!(
+            (2.0 * CELL..3.0 * CELL).contains(&x_at_wall),
+            "the detour must go through the gap column, was x={x_at_wall}"
+        );
+
+        // The group flow field sees the same wall.
+        let flow = world
+            .nav_flow_field(across, &[open])
+            .expect("flow field over the covered map");
+        let (dir, _) = flow.sample(open).expect("the start is inside the field");
+        assert!(
+            dir.x > 0.0 && dir.z > 0.0,
+            "the field must send the group toward the gap, dir=({},{})",
+            dir.x,
+            dir.z
+        );
+
+        // The gate covers the layer, and dropping it drops the coverage.
+        let hashed = world.nav_grid_hash();
+        assert_eq!(hashed, world.nav_grid_hash(), "stable");
+        world.nav_clear_static_blocked();
+        assert_ne!(hashed, world.nav_grid_hash(), "the layer is part of the grid");
+        assert_eq!(world.nav_line_clear(open, across), None, "coverage went with it");
     }
 
     #[test]

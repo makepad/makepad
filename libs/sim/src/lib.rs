@@ -384,5 +384,6 @@ mod tests {
         let snap = w.clone();
         w.tick = 120;
         assert_eq!(snap.tick, 60);
+        assert_eq!(w.tick, 120);
     }
 }

@@ -93,7 +93,7 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 
 /// A uniform grid over a mesh's triangles. Rebuilt per model and dropped
 /// straight after — it exists only for the duration of one bake.
-struct TriGrid {
+pub(crate) struct TriGrid {
     min: Vec3f,
     inv_cell: Vec3f,
     dim: [usize; 3],
@@ -1163,41 +1163,6 @@ mod tests {
 
 
 
-
-    /// One big floor quad, unoccluded.
-    fn big_quad() -> (Vec<Vec3f>, Vec<Vec3f>, Vec<u32>) {
-        let p = vec![
-            v(-4.0, 0.0, -4.0), v(4.0, 0.0, -4.0), v(4.0, 0.0, 4.0), v(-4.0, 0.0, 4.0),
-        ];
-        let n = vec![v(0.0, 1.0, 0.0); 4];
-        let i = vec![0, 1, 2, 0, 2, 3];
-        (p, n, i)
-    }
-
-    /// A floor quad with a wall standing along z = 0 — the Kenney case.
-    fn floor_with_wall() -> (Vec<Vec3f>, Vec<Vec3f>, Vec<u32>) {
-        let mut p = vec![
-            v(-4.0, 0.0, -4.0), v(4.0, 0.0, -4.0), v(4.0, 0.0, 4.0), v(-4.0, 0.0, 4.0),
-        ];
-        let mut n = vec![v(0.0, 1.0, 0.0); 4];
-        let mut i = vec![0, 1, 2, 0, 2, 3];
-        let base = p.len() as u32;
-        p.extend_from_slice(&[
-            v(-4.0, 0.0, 0.0), v(4.0, 0.0, 0.0), v(4.0, 3.0, 0.0), v(-4.0, 3.0, 0.0),
-        ]);
-        n.extend_from_slice(&[v(0.0, 0.0, 1.0); 4]);
-        i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        (p, n, i)
-    }
-}
-
-#[cfg(test)]
-mod probe {
-    use super::*;
-
-    fn v(x: f32, y: f32, z: f32) -> Vec3f {
-        Vec3f { x, y, z }
-    }
 
     /// Ground truth: a floor meeting a wall at z = 0. Walk out from the crease
     /// and print what the sampler actually returns.

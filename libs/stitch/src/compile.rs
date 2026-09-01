@@ -2064,7 +2064,7 @@ impl<'a> InstrVisitor for Compile<'a> {
         // We only need to swap the order in which the operands are emitted for the _si variant,
         // since we never emit anything for register operands.
         match (self.opd(1).kind(), self.opd(0).kind()) {
-            (OpdKind::Stack, OpdKind::Imm) if info.instr_is == info.instr_si => {
+            (OpdKind::Stack, OpdKind::Imm) if std::ptr::fn_addr_eq(info.instr_is, info.instr_si) => {
                 self.emit_opd(1);
                 self.emit_opd(0);
                 self.pop_opd();

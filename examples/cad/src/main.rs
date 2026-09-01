@@ -2,7 +2,13 @@ pub use makepad_code_editor;
 pub use makepad_widgets;
 pub use makepad_xr;
 
-use makepad_ai::*;
+use makepad_ai_hub::{
+    chat_wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind},
+    providers::{
+        claude_api::ClaudeApiChatProvider,
+        provider::{ChatProvider, ProviderEvent, TurnInput},
+    },
+};
 use makepad_code_editor::{
     code_editor::{CodeEditorAction, KeepCursorInView},
     decoration::DecorationSet,
@@ -16,7 +22,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 app_main!(App);
 
@@ -35,8 +41,6 @@ let top_rib = cube(2.0, 0.24, 0.30, true)
 render(shell.merge(left_boss).merge(right_boss).merge(top_rib))"#;
 
 const LIVE_UPDATE_INTERVAL: f64 = 0.08;
-const LOCAL_OPENAI_URL: &str = "http://10.0.0.168:8080/v1/chat/completions";
-const LOCAL_OPENAI_MODEL: &str = "Gemma4Unlim-31B-ModelOptFullAttn-FullCal128.gguf";
 const GENERATED_DIR: &str = "generated";
 const GENERATED_SCRIPT_FILE: &str = "current.cad";
 const GENERATED_OBJ_FILE: &str = "current.obj";
@@ -1503,6 +1507,104 @@ impl BackendType {
     }
 }
 
+enum AiWorkerCommand {
+    Send(TurnInput),
+    Cancel,
+}
+
+enum AiWorkerEvent {
+    Availability(ProviderAvailability),
+    Delta(String),
+    Done(String),
+    Error(String),
+}
+
+struct AiWorker {
+    command_tx: Sender<AiWorkerCommand>,
+    event_rx: Receiver<AiWorkerEvent>,
+}
+
+impl AiWorker {
+    fn new(cx: &mut Cx) -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        cx.spawn_thread(move || ai_worker_loop(command_rx, event_tx));
+        Self {
+            command_tx,
+            event_rx,
+        }
+    }
+
+    fn send(&self, input: TurnInput) -> Result<(), String> {
+        self.command_tx
+            .send(AiWorkerCommand::Send(input))
+            .map_err(|_| "AI provider worker ended".to_string())
+    }
+
+    fn cancel(&self) {
+        let _ = self.command_tx.send(AiWorkerCommand::Cancel);
+    }
+
+    fn poll(&self) -> Vec<AiWorkerEvent> {
+        self.event_rx.try_iter().collect()
+    }
+}
+
+fn emit_ai_worker_event(event_tx: &Sender<AiWorkerEvent>, event: AiWorkerEvent) -> bool {
+    if event_tx.send(event).is_err() {
+        return false;
+    }
+    SignalToUI::set_ui_signal();
+    true
+}
+
+fn ai_worker_loop(command_rx: Receiver<AiWorkerCommand>, event_tx: Sender<AiWorkerEvent>) {
+    let mut provider =
+        ClaudeApiChatProvider::from_env(ProviderKind::ClaudeCli, None);
+    if !emit_ai_worker_event(
+        &event_tx,
+        AiWorkerEvent::Availability(provider.availability()),
+    ) {
+        return;
+    }
+
+    loop {
+        match command_rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(AiWorkerCommand::Send(input)) => {
+                if let Err(error) = provider.begin_turn(&input) {
+                    if !emit_ai_worker_event(&event_tx, AiWorkerEvent::Error(error)) {
+                        return;
+                    }
+                }
+            }
+            Ok(AiWorkerCommand::Cancel) => provider.cancel(),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                provider.cancel();
+                return;
+            }
+        }
+
+        for event in provider.poll() {
+            let event = match event {
+                ProviderEvent::Delta(text) => Some(AiWorkerEvent::Delta(text)),
+                ProviderEvent::Done { text } => Some(AiWorkerEvent::Done(text)),
+                ProviderEvent::Error(error) => Some(AiWorkerEvent::Error(error)),
+                ProviderEvent::FunctionCall { .. } => Some(AiWorkerEvent::Error(
+                    "AI provider requested an unsupported function".to_string(),
+                )),
+                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => None,
+            };
+            if let Some(event) = event {
+                if !emit_ai_worker_event(&event_tx, event) {
+                    provider.cancel();
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct CadCodeEditor {
     #[uid]
@@ -1622,15 +1724,15 @@ pub struct App {
     #[rust]
     current_prompt_title: String,
     #[rust]
-    agent: Option<Box<dyn Agent>>,
-    #[rust]
-    session_id: Option<SessionId>,
-    #[rust]
-    current_prompt: Option<PromptId>,
+    ai_worker: Option<AiWorker>,
+    #[rust(false)]
+    current_prompt: bool,
     #[rust]
     active_backend: BackendType,
     #[rust]
     backend_available: bool,
+    #[rust]
+    backend_unavailable_reason: String,
     #[rust]
     ai_response_buffer: String,
     #[rust]
@@ -1668,53 +1770,19 @@ impl App {
 
     fn create_backend_session(&mut self, cx: &mut Cx, backend: BackendType) {
         self.cancel_ai_prompt(cx);
-        self.agent = None;
-        self.session_id = None;
-        self.current_prompt = None;
+        self.ai_worker = None;
+        self.current_prompt = false;
         self.ai_response_buffer.clear();
         self.ai_prompt_started_at = None;
         self.active_backend = backend;
-
-        let agent = match backend {
-            BackendType::ClaudeSplash => {
-                self.backend_available = ClaudeCodeAgent::is_available();
-                self.backend_available
-                    .then(|| Box::new(ClaudeCodeAgent::new()) as Box<dyn Agent>)
-            }
-            BackendType::LocalOpenAi => {
-                self.backend_available = true;
-                Some(
-                    Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
-                        BackendConfig::OpenAI {
-                            api_key: String::new(),
-                            model: LOCAL_OPENAI_MODEL.to_string(),
-                            base_url: Some(LOCAL_OPENAI_URL.to_string()),
-                            reasoning_effort: None,
-                        },
-                    )))) as Box<dyn Agent>,
-                )
-            }
-        };
-
-        let Some(agent) = agent else {
-            self.update_ai_status(cx);
-            return;
-        };
-
-        let config = SessionConfig {
-            cwd: Some(env!("CARGO_MANIFEST_DIR").to_string()),
-            system_prompt: Some(Self::cad_system_prompt()),
-            ..Default::default()
-        };
-        self.agent = Some(agent);
-        if let Some(agent) = &mut self.agent {
-            self.session_id = Some(agent.create_session(cx, config));
-        }
+        self.backend_available = false;
+        self.backend_unavailable_reason.clear();
+        self.ai_worker = Some(AiWorker::new(cx));
         self.update_ai_status(cx);
     }
 
     fn update_ai_status(&self, cx: &mut Cx) {
-        let status = if self.current_prompt.is_some() {
+        let status = if self.current_prompt {
             let chars = self.ai_response_buffer.len();
             let elapsed_ms = self
                 .ai_prompt_started_at
@@ -1737,13 +1805,10 @@ impl App {
             }
         } else if self.backend_available {
             self.active_backend.status_label().to_string()
+        } else if self.backend_unavailable_reason.is_empty() {
+            "Checking AI provider availability...".to_string()
         } else {
-            match self.active_backend {
-                BackendType::ClaudeSplash => {
-                    "Claude Code not found. Set CLAUDE_CODE_PATH or install claude.".to_string()
-                }
-                BackendType::LocalOpenAi => "Local OpenAI backend unavailable".to_string(),
-            }
+            format!("Unavailable: {}", self.backend_unavailable_reason)
         };
         self.ui
             .label(cx, ids!(ai_status_label))
@@ -1760,7 +1825,7 @@ impl App {
     }
 
     fn send_ai_prompt(&mut self, cx: &mut Cx) {
-        if self.current_prompt.is_some() {
+        if self.current_prompt {
             return;
         }
         let prompt_input = self.ui.text_input(cx, ids!(cad_prompt_input));
@@ -1771,18 +1836,12 @@ impl App {
         self.current_prompt_title = prompt.trim().to_string();
         self.update_prompt_title(cx);
 
-        let (agent, session_id) = match (&mut self.agent, self.session_id) {
-            (Some(agent), Some(session_id)) => (agent, session_id),
-            _ => {
-                self.update_ai_status(cx);
-                return;
-            }
+        let Some(worker) = &self.ai_worker else {
+            self.update_ai_status(cx);
+            return;
         };
-        if !agent.is_session_ready(session_id) {
-            self.ui
-                .label(cx, ids!(ai_status_label))
-                .set_text(cx, "AI backend is still starting");
-            self.ui.redraw(cx);
+        if !self.backend_available {
+            self.update_ai_status(cx);
             return;
         }
 
@@ -1794,7 +1853,17 @@ impl App {
         );
 
         self.ai_response_buffer.clear();
-        self.current_prompt = Some(agent.send_prompt(cx, session_id, &request));
+        let turn = TurnInput::new(
+            Self::cad_system_prompt(),
+            vec![ChatMessage::new(ChatRole::User, request)],
+        );
+        if let Err(error) = worker.send(turn) {
+            self.ui
+                .label(cx, ids!(ai_status_label))
+                .set_text(cx, &format!("Error: {}", error));
+            return;
+        }
+        self.current_prompt = true;
         self.ai_prompt_started_at = Some(Instant::now());
         prompt_input.set_text(cx, "");
         self.set_ai_busy(cx, true);
@@ -1803,9 +1872,12 @@ impl App {
     }
 
     fn cancel_ai_prompt(&mut self, cx: &mut Cx) {
-        let was_busy = self.current_prompt.is_some();
-        if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
-            agent.cancel_prompt(cx, prompt_id);
+        let was_busy = self.current_prompt;
+        if was_busy {
+            if let Some(worker) = &self.ai_worker {
+                worker.cancel();
+            }
+            self.current_prompt = false;
         }
         self.ai_response_buffer.clear();
         self.ai_prompt_started_at = None;
@@ -1886,7 +1958,7 @@ impl App {
 
     fn apply_ai_response(&mut self, cx: &mut Cx) {
         let script = Self::extract_cad_script(&self.ai_response_buffer);
-        self.current_prompt = None;
+        self.current_prompt = false;
         self.ai_prompt_started_at = None;
         self.set_ai_busy(cx, false);
         if script.trim().is_empty() {
@@ -1921,12 +1993,12 @@ impl App {
             worker.request(CadRebuildRequest {
                 seq,
                 source,
-                allow_progressive_preview: self.current_prompt.is_some(),
+                allow_progressive_preview: self.current_prompt,
                 save_output,
             });
         }
 
-        let status = if self.current_prompt.is_some() {
+        let status = if self.current_prompt {
             "Computing streamed 3D model...".to_string()
         } else {
             "Computing 3D model...".to_string()
@@ -1984,7 +2056,7 @@ impl App {
                 self.ui.redraw(cx);
             }
             CadRebuildPayload::Error(err) => {
-                let status = if self.current_prompt.is_some() {
+                let status = if self.current_prompt {
                     "Streaming CAD script...".to_string()
                 } else {
                     format!("Error: {}", err)
@@ -1995,39 +2067,43 @@ impl App {
         }
     }
 
-    fn drain_agent_events(&mut self, cx: &mut Cx, event: &Event) {
-        let events = if let Some(agent) = &mut self.agent {
-            agent.handle_event(cx, event)
+    fn drain_agent_events(&mut self, cx: &mut Cx, _event: &Event) {
+        let events = if let Some(worker) = &self.ai_worker {
+            worker.poll()
         } else {
             Vec::new()
         };
 
         for event in events {
             match event {
-                AgentEvent::SessionReady { .. } => {
+                AiWorkerEvent::Availability(ProviderAvailability::Available { .. }) => {
+                    self.backend_available = true;
+                    self.backend_unavailable_reason.clear();
                     self.update_ai_status(cx);
                 }
-                AgentEvent::SessionError { error, .. } => {
+                AiWorkerEvent::Availability(ProviderAvailability::Unavailable { reason }) => {
                     self.backend_available = false;
-                    self.current_prompt = None;
+                    self.backend_unavailable_reason = reason;
+                    self.current_prompt = false;
                     self.ai_prompt_started_at = None;
                     self.set_ai_busy(cx, false);
-                    self.ui
-                        .label(cx, ids!(ai_status_label))
-                        .set_text(cx, &format!("Error: {}", error));
+                    self.update_ai_status(cx);
                 }
-                AgentEvent::TextDelta { text, .. } => {
+                AiWorkerEvent::Delta(text) => {
                     self.ai_response_buffer.push_str(&text);
                     self.stream_ai_response_to_editor(cx);
                     self.update_ai_status(cx);
                     self.ui.redraw(cx);
                     cx.redraw_all();
                 }
-                AgentEvent::TurnComplete { .. } => {
+                AiWorkerEvent::Done(full_text) => {
+                    if self.ai_response_buffer.is_empty() {
+                        self.ai_response_buffer = full_text;
+                    }
                     self.apply_ai_response(cx);
                 }
-                AgentEvent::PromptError { error, .. } => {
-                    self.current_prompt = None;
+                AiWorkerEvent::Error(error) => {
+                    self.current_prompt = false;
                     self.ai_prompt_started_at = None;
                     self.set_ai_busy(cx, false);
                     self.ui
@@ -2035,7 +2111,6 @@ impl App {
                         .set_text(cx, &format!("Error: {}", error));
                     self.ui.redraw(cx);
                 }
-                AgentEvent::ToolRequest { .. } => {}
             }
         }
     }
@@ -2068,13 +2143,13 @@ impl MatchEvent for App {
 
     fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
         if self.live_update_timer.is_timer(event).is_some() {
-            self.request_rebuild(cx, false, self.current_prompt.is_none());
+            self.request_rebuild(cx, false, !self.current_prompt);
             self.drain_rebuild_results(cx);
             self.drain_agent_events(cx, &Event::Signal);
             if self.rebuild_pending {
                 self.ui.redraw(cx);
             }
-            if self.current_prompt.is_some() {
+            if self.current_prompt {
                 self.update_ai_status(cx);
                 self.ui.redraw(cx);
             }
@@ -2120,7 +2195,7 @@ impl MatchEvent for App {
         }
         for action in actions {
             if matches!(action.cast(), CadCodeEditorAction::TextDidChange) {
-                self.request_rebuild(cx, false, self.current_prompt.is_none());
+                self.request_rebuild(cx, false, !self.current_prompt);
             }
         }
     }

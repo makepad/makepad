@@ -23,7 +23,7 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 mod picker;
-use picker::{pick_local_video, PickedMediaAction};
+use picker::{pick_local_video, picked_video};
 
 app_main!(App);
 
@@ -765,16 +765,9 @@ pub struct App {
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
-            if let Some(picked) = action.downcast_ref::<PickedMediaAction>() {
-                if let Some(err) = picked.error.as_ref() {
-                    error!("video_player: open file failed: {err}");
-                    continue;
-                }
-                let Some(path) = picked.path_or_uri.as_ref() else {
-                    continue;
-                };
+            if let Some(path) = picked_video(action) {
                 if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
-                    vp.request_open_media(cx, path);
+                    vp.request_open_media(cx, &path);
                 }
             }
         }
@@ -791,7 +784,7 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(open_button)).clicked(actions) {
-            pick_local_video();
+            pick_local_video(cx);
             if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
                 vp.show_controls_bar(cx);
             }
