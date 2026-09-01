@@ -8,7 +8,7 @@ use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
     gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
     gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_linear_nt_cached_f8_mm,
-    gpu_mul, gpu_rope_half,
+    gpu_add_cols_broadcast, gpu_mul, gpu_rope_half,
     gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
 };
 use crate::weights::BodyWeights;
@@ -31,6 +31,8 @@ struct Bf16Linear {
     /// The same weight as FP8 E4M3 with one per-tensor scale, when the
     /// FP8 mode is on; `None` after a backend refused it.
     f8: std::cell::RefCell<Option<(Vec<u8>, f32)>>,
+    /// The bias resident on the device for the FP8 path (uploaded once).
+    bias_gpu: std::cell::RefCell<Option<GpuTensor>>,
 }
 
 /// Quantise a bf16-packed weight to E4M3 with a per-tensor absmax scale
@@ -69,6 +71,7 @@ impl Bf16Linear {
             out,
             bias,
             f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
         })
     }
 
@@ -94,6 +97,7 @@ impl Bf16Linear {
             out,
             bias,
             f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
         })
     }
 
@@ -109,6 +113,7 @@ impl Bf16Linear {
             out: DINO_DIM,
             bias: weights.f32_shaped(&format!("{name}.bias"), &[DINO_DIM])?,
             f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
         })
     }
 
@@ -143,8 +148,11 @@ impl Bf16Linear {
                 if self.bias.is_empty() {
                     return Ok(out);
                 }
-                let bias = gpu_upload(&self.bias, 1, self.out).map_err(DiffusionError::model)?;
-                return gpu_add_rows_broadcast_cols(&out, &bias);
+                let mut slot = self.bias_gpu.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(gpu_upload(&self.bias, 1, self.out).map_err(DiffusionError::model)?);
+                }
+                return gpu_add_rows_broadcast_cols(&out, slot.as_ref().unwrap());
             }
             Some(Err(_)) => {
                 *self.f8.borrow_mut() = None;
@@ -202,19 +210,9 @@ pub struct BodyDino {
     final_norm_b: Vec<f32>,
 }
 
-/// Bias add broadcast over rows: `out[r] = x[r] + bias`. The stack's
-/// `gpu_add` wants equal shapes, so the bias is tiled to the row count
-/// once per call (a 1280-wide vector; cheap next to the GEMM it follows).
+/// Bias add broadcast over rows: `out[r] = x[r] + bias`.
 fn gpu_add_rows_broadcast_cols(x: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor> {
-    let cols = x.cols();
-    let rows = x.rows();
-    let bias_host = gpu_download(bias).map_err(DiffusionError::model)?;
-    let mut tiled = Vec::with_capacity(rows * cols);
-    for _ in 0..rows {
-        tiled.extend_from_slice(&bias_host[..cols]);
-    }
-    let tiled = gpu_upload(&tiled, rows, cols).map_err(DiffusionError::model)?;
-    gpu_add(x, &tiled).map_err(DiffusionError::model)
+    gpu_add_cols_broadcast(x, bias).map_err(DiffusionError::model)
 }
 
 fn bf16_bytes_shaped(

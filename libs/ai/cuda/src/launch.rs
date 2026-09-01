@@ -1388,6 +1388,15 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_cuda_add_cols_broadcast_f32(
+            x: *const f32,
+            bias: *const f32,
+            out: *mut f32,
+            rows: u32,
+            cols: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_rope_half_bf16_f32(
             input: *const f32,
             cos_table: *const f32,
@@ -11389,6 +11398,33 @@ mod imp {
                 )
             };
             gpu_check(add_status)?;
+            Ok(out)
+        })
+    }
+
+    /// `out[r] = x[r] + bias` for an f32 `[rows, cols]` tensor and a
+    /// `cols`-wide bias (a linear's bias after a bias-free GEMM).
+    pub fn gpu_add_cols_broadcast(x: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor, String> {
+        if x.half || bias.half || bias.rows * bias.cols != x.cols {
+            return Err(format!(
+                "gpu_add_cols_broadcast shape mismatch {}x{} half={} vs bias {}x{} half={}",
+                x.rows, x.cols, x.half, bias.rows, bias.cols, bias.half
+            ));
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, x.cols)?;
+            let status = unsafe {
+                makepad_cuda_add_cols_broadcast_f32(
+                    x.device_ptr()?,
+                    bias.device_ptr()?,
+                    out.device_ptr()?,
+                    x.rows as u32,
+                    x.cols as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
             Ok(out)
         })
     }

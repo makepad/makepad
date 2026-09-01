@@ -3224,6 +3224,17 @@ mod imp {
         }
     }
 
+    pub fn gpu_add_cols_broadcast(_x: &GpuTensor, _bias: &GpuTensor) -> Result<GpuTensor, String> {
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::add_cols_broadcast(_x, _bias);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
     pub fn gpu_add(_a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
