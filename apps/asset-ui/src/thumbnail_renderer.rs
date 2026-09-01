@@ -947,7 +947,7 @@ impl ThumbnailRenderer {
         }
 
         let encoded = rgba.and_then(|rgba| {
-            makepad_asset_ai::testpattern::encode_png_rgba(&rgba, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+            makepad_ai_hub::testpattern::encode_png_rgba(&rgba, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
                 .map_err(|error| log!("thumbnail {file}: PNG encode failed: {error}"))
                 .ok()
         });

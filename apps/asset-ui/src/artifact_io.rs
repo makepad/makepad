@@ -911,7 +911,7 @@ mod tests {
         // pixels + its cache-source key; garbage comes back as an honest
         // None (the app pins a badge instead of retrying forever).
         let sidecar = dir.join("lib-1.glb.thumb");
-        let png = makepad_asset_ai::testpattern::encode_png_rgba(
+        let png = makepad_ai_hub::testpattern::encode_png_rgba(
             &[255u8; 6 * 4 * 4],
             6,
             4,
@@ -996,7 +996,7 @@ mod tests {
             let y = (i / 1024) as u8;
             px.copy_from_slice(&[x, y, 128, 255]);
         }
-        let png = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, 1024, 1024).unwrap();
+        let png = makepad_ai_hub::testpattern::encode_png_rgba(&rgba, 1024, 1024).unwrap();
         std::fs::write(&render, &png).unwrap();
         io.request(IoRequest {
             file: "lib-flux.png".into(),
@@ -1066,7 +1066,7 @@ mod tests {
             let v = if y < 64 { 200 } else { 20 };
             px.copy_from_slice(&[v, v, v, 255]);
         }
-        let png = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, 512, 128).unwrap();
+        let png = makepad_ai_hub::testpattern::encode_png_rgba(&rgba, 512, 128).unwrap();
         std::fs::write(&composite, &png).unwrap();
         let fft_views = vec![
             ThumbnailView {

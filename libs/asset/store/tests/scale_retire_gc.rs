@@ -56,7 +56,7 @@ fn asset_id_of(i: usize) -> AssetId {
 struct Rig {
     root: std::path::PathBuf,
     assets: usize,
-    revisions_per_asset: usize,
+
 }
 
 impl Rig {
@@ -74,7 +74,7 @@ impl Rig {
         let mut sql = String::with_capacity(8 * 1024 * 1024);
         sql.push_str("PRAGMA synchronous=OFF;BEGIN;");
         let mut in_batch = 0usize;
-        let mut flush = |sql: &mut String, force: bool, in_batch: &mut usize| {
+        let flush = |sql: &mut String, force: bool, in_batch: &mut usize| {
             if *in_batch >= 2_000 || force {
                 sql.push_str("COMMIT;");
                 raw::exec(&db, sql);
@@ -153,7 +153,7 @@ impl Rig {
             "built {assets} assets x {revisions_per_asset} revisions in {:?}",
             t0.elapsed()
         );
-        Rig { root, assets, revisions_per_asset }
+        Rig { root, assets }
     }
 
     fn open(&self) -> AssetServerCore {

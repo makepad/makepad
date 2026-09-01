@@ -6,39 +6,31 @@
 //! and headless workers are all clients of ONE catalog, and they come and go
 //! independently. When the catalog lives inside one of those apps, that
 //! app's lifetime becomes everybody's lifetime: closing the Asset UI window
-//! takes the store, the chat broker and the events hub down under every
-//! other connected client, which they see as `503 state unavailable`
-//! mid-session. This binary breaks that coupling — the server outlives every
-//! window.
+//! takes the store and the events hub down under every other connected
+//! client, which they see as `503 state unavailable` mid-session. This
+//! binary breaks that coupling — the server outlives every window.
 //!
 //! # What it carries
 //!
-//! [`Host::start`] composes three things that a fleet of clients needs, all
-//! of them existing, tested code:
+//! [`Host::start`] composes two things, both existing, tested code:
 //!
 //! 1. [`makepad_asset_store::AssetServer`] — catalog + CAS over the control
-//!    and data planes, the chat broker (including client-executed tool
-//!    parking for game sessions), the games publish path, the committed
-//!    events hub, the job queue and worker/lease protocol, the lease + blob
-//!    GC janitor, and the LAN discovery beacon.
+//!    and data planes, the games publish path, the committed events hub,
+//!    game rooms, the blob GC janitor, and the LAN discovery beacon.
 //! 2. The **library publisher** (`makepad_asset_importer::watch`) — whatever
 //!    the generation pipelines write into the ai-content library becomes
 //!    catalog rows. Headless, so it belongs beside the server rather than
 //!    inside a UI.
-//! 3. The **fleet job coordinator** (`makepad_asset_importer::gen_service`)
-//!    — claims queued generation jobs, dispatches them to the asset-ai GPU
-//!    boxes the LAN announces, publishes the verified results, and
-//!    advertises what the fleet can execute right now on
-//!    `GET /v1/job-profiles`. Without it, jobs any client enqueues sit at
-//!    "waiting for agent" forever.
 //!
 //! # What deliberately stays client-side
 //!
-//! Loops that DERIVE content using resources only a UI process has — the
-//! offscreen thumbnail renders (`Cx`, a GPU surface, the splat/mesh
-//! viewers), the classic-game import wizards, the stems/lyrics analysis
-//! bake — stay in the app and reach the catalog as ordinary clients. Moving
-//! them here would mean giving a headless daemon a window.
+//! Everything that CREATES content (aicore: "the store stores, the client
+//! creates"). Generation runs in the creating apps over their own ai-hub
+//! fleet connections (`makepad-asset-creator`), chat sessions live in-app,
+//! and loops that derive content with resources only a UI process has — the
+//! offscreen thumbnail renders, the classic-game import wizards, the
+//! stems/lyrics analysis bake — stay in the app and reach the catalog as
+//! ordinary clients.
 //!
 //! # Single-owner laws
 //!
@@ -48,11 +40,6 @@
 //!   let it attach (see the README).
 //! - An `AssetClient` cache root is single-owner too, so each loop gets its
 //!   own child of the work root.
-//! - The job coordinator is at most ONE per process (its stop flag is a
-//!   `'static`, borrowed by the service for the thread's whole life). A
-//!   second [`Host`] with `jobs` enabled in the same process refuses the
-//!   coordinator and says so in [`Host::jobs_error`] rather than starting a
-//!   second claimer that would fight the first for leases.
 
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRights};
 use makepad_asset_store::{AssetServer, DiscoveryConfig, ServerConfig};
@@ -62,9 +49,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-/// Default namespace the coordinator advertises and publishes into. Same
-/// value the Asset UI's in-process coordinator uses, so a job enqueued
-/// against either host is routed identically.
+/// Default namespace the library publisher publishes into. Same value the
+/// creator apps publish with, so rows from either path sit side by side.
 pub const DEFAULT_NAMESPACE: &str = "gen";
 
 /// Everything the host needs. Every knob is a named field: nothing here is
@@ -85,37 +71,18 @@ pub struct HostConfig {
     pub beacon: bool,
     /// ai-content library to publish continuously. `None` = no publisher.
     pub library: Option<PathBuf>,
-    /// Run the fleet job coordinator.
-    pub jobs: bool,
-    /// Let the coordinator advertise the fleet's executable job profiles.
-    /// Ignored when `jobs` is false.
-    pub announce: bool,
-    /// Explicit GPU-box URL list; `None` = LAN discovery.
-    pub fleet_file: Option<PathBuf>,
-    /// Namespace for published rows and advertised profiles.
+    /// Namespace for published rows.
     pub namespace: String,
     /// Parent for the loops' single-owner client caches. Defaults to the
     /// server root's parent, which puts them exactly where the Asset UI's
     /// own hosting mode puts them.
     pub work_root: PathBuf,
-    /// Chat: local Qwen fleet node base URLs. Empty = LAN fleet discovery,
-    /// same as the Asset UI's embedded broker.
-    pub chat_fleet_bases: Vec<String>,
-    /// Named fleet the chat broker talks to. Empty = `default`.
-    pub chat_fleet: String,
-    /// Live chat sessions this server will hold at once, and how many any
-    /// one principal may hold. A box that serves several parallel chat
-    /// slots wants these raised; the defaults (32 / 8) match the library.
-    /// 0 = keep the library default.
-    pub chat_max_sessions: usize,
-    pub chat_max_sessions_per_owner: usize,
     /// Log to stderr.
     pub log: bool,
 }
 
 impl HostConfig {
-    /// Deployment defaults: ephemeral planes on every interface, beacon on,
-    /// both background loops on, LAN fleet.
+    /// Deployment defaults: ephemeral planes on every interface, beacon on.
     pub fn new(root: PathBuf) -> Self {
         let work_root = root
             .parent()
@@ -127,81 +94,48 @@ impl HostConfig {
             data_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             beacon: true,
             library: None,
-            jobs: true,
-            announce: true,
-            fleet_file: None,
             namespace: DEFAULT_NAMESPACE.to_string(),
             work_root,
-            chat_fleet_bases: Vec::new(),
-            chat_fleet: String::new(),
-            chat_max_sessions: 0,
-            chat_max_sessions_per_owner: 0,
             log: true,
         }
     }
 }
 
 /// A running host. Dropping it (or calling [`Host::shutdown`]) stops the
-/// loops first and the server last, so nothing is still publishing into a
-/// catalog that is closing.
+/// publisher first and the server last, so nothing is still publishing into
+/// a catalog that is closing.
 pub struct Host {
-    // Declaration order IS drop order: both loops are joined while the
-    // server they talk to is still answering.
+    // Declaration order IS drop order: the loop is joined while the server
+    // it talks to is still answering.
     publish: Option<BackgroundLoop>,
-    jobs: Option<BackgroundLoop>,
     server: Option<AssetServer>,
     endpoints: ApiEndpoints,
     server_id: [u8; 16],
     token: String,
     library_error: Option<String>,
-    jobs_error: Option<String>,
 }
 
 /// One owned background thread plus the flag that stops it.
 struct BackgroundLoop {
-    stop: Stop,
+    stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
-}
-
-/// A loop's stop flag. The library watcher takes `&AtomicBool` and can own a
-/// per-host `Arc`; the generation service borrows a `&'static` for the
-/// thread's whole life, so there is exactly one of those per process.
-enum Stop {
-    Owned(Arc<AtomicBool>),
-    Static(&'static AtomicBool),
-}
-
-impl Stop {
-    fn raise(&self) {
-        match self {
-            Stop::Owned(flag) => flag.store(true, Ordering::Release),
-            Stop::Static(flag) => flag.store(true, Ordering::Release),
-        }
-    }
 }
 
 impl Drop for BackgroundLoop {
     fn drop(&mut self) {
-        self.stop.raise();
+        self.stop.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
     }
 }
 
-/// Stop flag for the one in-process job coordinator; see the module header.
-static JOBS_STOP: AtomicBool = AtomicBool::new(false);
-/// Set while a coordinator is live, so a second one is refused instead of
-/// silently competing for the same leases.
-static JOBS_RUNNING: AtomicBool = AtomicBool::new(false);
-
 impl Host {
-    /// Bring the server up, then the background loops.
+    /// Bring the server up, then the publisher.
     ///
-    /// The SERVER is the only thing whose failure is fatal — a loop that
-    /// cannot start is reported ([`Host::library_error`],
-    /// [`Host::jobs_error`]) and logged, never a reason to deny every client
-    /// its catalog.
+    /// The SERVER is the only thing whose failure is fatal — a publisher
+    /// that cannot start is reported ([`Host::library_error`]) and logged,
+    /// never a reason to deny every client its catalog.
     pub fn start(config: &HostConfig) -> Result<Host, String> {
         let mut cfg = ServerConfig::new(config.root.clone());
         cfg.control_addr = config.control_addr;
@@ -211,14 +145,6 @@ impl Host {
         // root the same way it does against an Asset-UI-hosted server.
         cfg.bootstrap_admin = true;
         cfg.discovery = config.beacon.then(DiscoveryConfig::lan_default);
-        cfg.chat.fleet_bases = config.chat_fleet_bases.clone();
-        cfg.chat.fleet = config.chat_fleet.clone();
-        if config.chat_max_sessions > 0 {
-            cfg.chat.max_sessions = config.chat_max_sessions;
-        }
-        if config.chat_max_sessions_per_owner > 0 {
-            cfg.chat.max_sessions_per_owner = config.chat_max_sessions_per_owner;
-        }
         cfg.log = config.log;
         let server = AssetServer::start(cfg).map_err(|error| format!("asset server: {error}"))?;
 
@@ -242,37 +168,23 @@ impl Host {
                 }
             },
         };
-        let (jobs, jobs_error) = if config.jobs {
-            match start_coordinator(config, endpoints, server_id, &token) {
-                Ok(handle) => (Some(handle), None),
-                Err(error) => {
-                    log(config.log, &format!("job coordinator: {error}"));
-                    (None, Some(error))
-                }
-            }
-        } else {
-            (None, None)
-        };
 
         log(
             config.log,
             &format!(
-                "asset host up: control {} data {} · publisher {} · coordinator {}",
+                "asset host up: control {} data {} · publisher {}",
                 endpoints.control,
                 endpoints.data,
                 publish.as_ref().map_or("off", |_| "on"),
-                jobs.as_ref().map_or("off", |_| "on"),
             ),
         );
         Ok(Host {
             publish,
-            jobs,
             server: Some(server),
             endpoints,
             server_id,
             token,
             library_error,
-            jobs_error,
         })
     }
 
@@ -295,24 +207,14 @@ impl Host {
         self.publish.is_some()
     }
 
-    pub fn coordinator_running(&self) -> bool {
-        self.jobs.is_some()
-    }
-
     /// Why the library publisher is not running, when it was asked for.
     pub fn library_error(&self) -> Option<&str> {
         self.library_error.as_deref()
     }
 
-    /// Why the job coordinator is not running, when it was asked for.
-    pub fn jobs_error(&self) -> Option<&str> {
-        self.jobs_error.as_deref()
-    }
-
-    /// Stop the loops, then the server. Idempotent; also runs on drop.
+    /// Stop the publisher, then the server. Idempotent; also runs on drop.
     pub fn shutdown(&mut self) {
         drop(self.publish.take());
-        drop(self.jobs.take());
         if let Some(mut server) = self.server.take() {
             server.shutdown();
         }
@@ -379,64 +281,7 @@ fn start_publisher(
             log(log_enabled, "library publisher: stopped");
         })
         .map_err(|error| format!("cannot spawn the publisher thread: {error}"))?;
-    Ok(BackgroundLoop {
-        stop: Stop::Owned(stop),
-        join: Some(join),
-    })
-}
-
-/// Claim queued generation jobs and dispatch them to the GPU fleet.
-fn start_coordinator(
-    config: &HostConfig,
-    endpoints: ApiEndpoints,
-    server_id: [u8; 16],
-    token: &str,
-) -> Result<BackgroundLoop, String> {
-    use makepad_asset_importer::gen_service::{FleetSource, GenServiceConfig};
-    if JOBS_RUNNING.swap(true, Ordering::AcqRel) {
-        return Err("a job coordinator is already running in this process".to_string());
-    }
-    JOBS_STOP.store(false, Ordering::Release);
-    let service = GenServiceConfig {
-        servers: vec![endpoints],
-        server_id: Some(server_id),
-        token: token.to_string(),
-        cache_root: config.work_root.join("jobs-cache"),
-        namespace: config.namespace.clone(),
-        suffix: "asset-host".to_string(),
-        rights: PublishRights::generated_cc0(),
-        fleet: match &config.fleet_file {
-            Some(path) => FleetSource::File(path.clone()),
-            None => FleetSource::Lan,
-        },
-        announce: config.announce,
-        log: config.log,
-    };
-    let log_enabled = config.log;
-    let join = std::thread::Builder::new()
-        .name("asset-host-jobs".to_string())
-        .spawn(move || {
-            log(
-                log_enabled,
-                &format!(
-                    "job coordinator: {} -> the GPU fleet",
-                    service.servers[0].control
-                ),
-            );
-            makepad_asset_importer::gen_service::run(&service, &JOBS_STOP);
-            log(log_enabled, "job coordinator: stopped");
-            JOBS_RUNNING.store(false, Ordering::Release);
-        });
-    match join {
-        Ok(join) => Ok(BackgroundLoop {
-            stop: Stop::Static(&JOBS_STOP),
-            join: Some(join),
-        }),
-        Err(error) => {
-            JOBS_RUNNING.store(false, Ordering::Release);
-            Err(format!("cannot spawn the coordinator thread: {error}"))
-        }
-    }
+    Ok(BackgroundLoop { stop, join: Some(join) })
 }
 
 fn log(enabled: bool, message: &str) {
@@ -462,15 +307,13 @@ mod tests {
     }
 
     /// An isolated host: loopback-only ephemeral planes, NO beacon (a test
-    /// must never advertise itself to the operator's LAN), no coordinator
-    /// (it would claim the real fleet's jobs).
+    /// must never advertise itself to the operator's LAN).
     fn isolated(name: &str) -> HostConfig {
         let base = test_root(name);
         let mut config = HostConfig::new(base.join("server"));
         config.control_addr = "127.0.0.1:0".parse().unwrap();
         config.data_addr = "127.0.0.1:0".parse().unwrap();
         config.beacon = false;
-        config.jobs = false;
         config.log = false;
         config.work_root = base.join("work");
         config
@@ -551,7 +394,6 @@ mod tests {
     fn the_work_root_defaults_beside_the_server_root() {
         let config = HostConfig::new(PathBuf::from("/store/local/asset-ui/asset-server"));
         assert_eq!(config.work_root, PathBuf::from("/store/local/asset-ui"));
-        assert!(config.jobs, "a fleet host coordinates jobs by default");
         assert!(config.beacon, "a fleet host is discoverable by default");
         assert_eq!(config.namespace, DEFAULT_NAMESPACE);
         assert_eq!(

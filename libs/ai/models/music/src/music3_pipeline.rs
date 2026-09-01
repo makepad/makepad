@@ -10,18 +10,22 @@ use crate::music3::{
     MUSIC3_DIT_IN_CHANNELS, MUSIC3_FLOW_CFG, MUSIC3_FLOW_STEPS, MUSIC3_FRAME_RATE,
     MUSIC3_MIN_SECONDS, MUSIC3_OVERLAP_LATENT, MUSIC3_SAMPLE_RATE, MUSIC3_VAE_UPSAMPLE,
 };
-use crate::music3_ar::music3_ar_sample_with_progress;
+use crate::music3_ar::{music3_ar_sample_with_progress, Music3ReferenceMask};
 use crate::music3_dit::{music3_dit_sample_window, Music3DitPrepared};
 use crate::music3_lm::Music3LmPrepared;
 use crate::music3_quant::{
     load_condition_encoder_from, load_vocoder_from, Music3GgufFile, Music3GgufPack,
     Music3GgufPaths,
 };
+use crate::music3_reference::{
+    music3_encode_reference, Music3ReferenceAudio, Music3ReferenceWeights,
+    MUSIC3_REFERENCE_MAX_INTERVAL,
+};
 use crate::music3_rvq::Music3RvqPrepared;
 use crate::music3_vocoder::Music3Vocoder;
 use crate::music3_weights::Music3Shards;
 use crate::{DiffusionError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The audio.cpp GGUF pack members the render tail loads lazily after AR
 /// (DiT, condition encoder, vocoder), split off the pack so the LM/RVQ
@@ -61,11 +65,24 @@ fn open_gguf_pack(model_dir: &Path) -> Result<Option<(Music3Shards, Music3Shards
     )))
 }
 
+/// Optional reference clip (`music3.md`): encoded to semantic candidates
+/// BEFORE the LM loads, then every `interval`-th AR frame inside the clip
+/// draws from those candidates. `weights_dir` holds the optional
+/// `dav-pth` / `rvq-encoder` registry files (the bf16 `MiniMax-Music3`
+/// tree; the Q4 pack borrows them from there).
+pub struct Music3Reference {
+    pub audio: Music3ReferenceAudio,
+    pub interval: usize,
+    pub weights_dir: PathBuf,
+}
+
 pub struct Music3Generate {
     pub caption: String,
     pub lyrics: String,
     pub seconds: f64,
     pub seed: u64,
+    /// `None` = the text-only path, byte-for-byte unchanged.
+    pub reference: Option<Music3Reference>,
 }
 
 /// Planar stereo `[2, samples]` at 44.1 kHz.
@@ -97,8 +114,52 @@ pub fn music3_generate_with_progress(
         0.03,
     );
 
-    progress("load lm", 0.04);
     let bench = std::env::var_os("MAKEPAD_MUSIC3_BENCH").is_some();
+    // Reference encode runs on the host before the 8B LM is resident, so
+    // the text-only VRAM numbers stay valid.
+    let reference_mask = match &req.reference {
+        Some(reference) => {
+            if !(1..=MUSIC3_REFERENCE_MAX_INTERVAL).contains(&reference.interval) {
+                return Err(DiffusionError::workflow(format!(
+                    "music3 reference interval {} outside 1..={MUSIC3_REFERENCE_MAX_INTERVAL}",
+                    reference.interval
+                )));
+            }
+            let weights = Music3ReferenceWeights::resolve(&reference.weights_dir)?;
+            let t_ref = std::time::Instant::now();
+            let encoded = music3_encode_reference(
+                &weights,
+                &reference.audio,
+                &mut |stage, k, n| {
+                    let u = (k as f64 / n.max(1) as f64).clamp(0.0, 1.0);
+                    progress(&format!("reference {stage} {k}/{n}"), 0.032 + 0.006 * u);
+                },
+                should_cancel,
+            )?;
+            if bench {
+                eprintln!(
+                    "BENCH reference_wall={:.3} frames={} interval={}",
+                    t_ref.elapsed().as_secs_f64(),
+                    encoded.frames,
+                    reference.interval
+                );
+            }
+            progress(
+                &format!(
+                    "reference {} frames interval {}",
+                    encoded.frames, reference.interval
+                ),
+                0.039,
+            );
+            Some(Music3ReferenceMask {
+                c0_topk: encoded.c0_topk,
+                interval: reference.interval,
+            })
+        }
+        None => None,
+    };
+
+    progress("load lm", 0.04);
     let t_load = std::time::Instant::now();
     let (lm, rvq, pack_tail) = match open_gguf_pack(model_dir)? {
         Some((lm, rvq, tail)) => (lm, rvq, Some(tail)),
@@ -125,6 +186,7 @@ pub fn music3_generate_with_progress(
         max_frames,
         min_frames,
         req.seed,
+        reference_mask.as_ref(),
         should_cancel,
         &mut |stage, k, n| {
             let n = n.max(1) as f64;
@@ -263,7 +325,7 @@ fn official_chunk_denoise_decode(
     frames: usize,
     seed: u64,
     after_ar: f64,
-    dit0: f64,
+    _dit0: f64,
     should_cancel: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(&str, f64),
 ) -> Result<Vec<f32>> {

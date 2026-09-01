@@ -364,10 +364,6 @@ pub struct AssetStore {
     /// `embedded` so it is joined while the server it publishes into is
     /// still alive.
     publish: Option<PublishLoop>,
-    /// In-process job coordinator: claims generation jobs queued on the
-    /// hosted server (the VJ's GEN tab, chat) and dispatches them to the
-    /// LAN fleet. Without it those jobs sit at "waiting for agent" forever.
-    jobs: Option<JobLoop>,
     /// LIVECODING: observed origin directories → catalog, no copy. Declared
     /// BEFORE `embedded` for the same reason `publish` is: joined while the
     /// server it publishes into is still alive.
@@ -397,10 +393,11 @@ pub struct AssetStore {
     pub selected: Option<AssetId>,
     pub detail: Remote<AssetDetailDto>,
     detail_req: Option<RequestId>,
-    /// Advertised generation capabilities (`/v1/jobs/profiles`) — the REAL
-    /// server-side generation surface for the Runs panel.
+    /// Generation capabilities of the LIVE LAN fleet, built by probing the
+    /// boxes directly (the store advertises nothing any more — generation
+    /// is client-driven, aicore §9).
     pub profiles: Remote<Vec<JobProfileDto>>,
-    profiles_req: Option<RequestId>,
+    profiles_rx: Option<std::sync::mpsc::Receiver<Vec<JobProfileDto>>>,
     /// Committed catalog events, newest first, capped.
     pub events: VecDeque<CatalogEventDto>,
     /// The event feed delivered its initial cursor and is following commits.
@@ -657,6 +654,22 @@ impl AssetStore {
                 }
             }
         }
+        // Fleet-built generation profiles landing from their worker thread.
+        if let Some(rx) = &self.profiles_rx {
+            match rx.try_recv() {
+                Ok(profiles) => {
+                    self.profiles_rx = None;
+                    self.profiles = Remote::Ready(profiles);
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.profiles_rx = None;
+                    self.profiles = Remote::Failed("fleet probe thread died".to_string());
+                    changed = true;
+                }
+            }
+        }
         let mut catalog_events = Vec::new();
         let mut feed_events = Vec::new();
         if let Some(handles) = &mut self.handles {
@@ -795,7 +808,6 @@ impl AssetStore {
         if self.host_loops == HostLoops::Run {
             self.publish =
                 start_publish_loop(&server, token, self.library_dir.clone());
-            self.jobs = start_job_loop(&server, token);
             // LIVECODING: observed origin directories, catalogued in place.
             // Only the HOST runs this — reference admission is loopback
             // privilege, so an attached client never observes for somebody
@@ -810,7 +822,7 @@ impl AssetStore {
     ///
     /// The subscriber only reports FAILED polls: a poll that succeeds with
     /// nothing to report sends no event at all, so a blip that healed would
-    /// otherwise look like a death forever. A profiles fetch is a plain
+    /// otherwise look like a death forever. A GC status fetch is a plain
     /// authenticated GET that changes nothing, and its answer — success, or
     /// even a refusal, which is still a server talking — clears the loss.
     fn submit_probe(&mut self) {
@@ -818,10 +830,7 @@ impl AssetStore {
             return;
         }
         let Some(handles) = &mut self.handles else { return };
-        if let Ok(id) = handles
-            .catalog
-            .submit(ClientRequest::FetchJobProfiles { domain: None })
-        {
+        if let Ok(id) = handles.catalog.submit(ClientRequest::GcStatus) {
             self.probe_req = Some(id);
         }
     }
@@ -847,7 +856,7 @@ impl AssetStore {
         self.search_continuation = false;
         self.next_cursor = None;
         self.detail_req = None;
-        self.profiles_req = None;
+        self.profiles_rx = None;
         self.probe_req = None;
         self.gc_req = None;
         self.gc_cancel_req = None;
@@ -1136,18 +1145,23 @@ impl AssetStore {
         }
     }
 
+    /// Build the generation-profile list from the LIVE fleet: probe the
+    /// boxes the LAN announces and let the shared profile builder say what
+    /// they can execute right now. Runs on its own thread — LAN probes must
+    /// never stall a frame — and lands through `profiles_rx` in [`Self::poll`].
     fn submit_profiles(&mut self) {
-        let Some(handles) = &mut self.handles else { return };
-        match handles
-            .catalog
-            .submit(ClientRequest::FetchJobProfiles { domain: None })
-        {
-            Ok(id) => {
-                self.profiles_req = Some(id);
-                self.profiles = Remote::Loading;
-            }
-            Err(error) => self.profiles = Remote::Failed(error.to_string()),
-        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.profiles_rx = Some(rx);
+        self.profiles = Remote::Loading;
+        let _ = std::thread::Builder::new()
+            .name("asset-ui-profiles".to_string())
+            .spawn(move || {
+                let snapshots = makepad_asset_creator::runner::fleet_snapshots();
+                let profiles = makepad_asset_importer::gen_profiles::build_profiles(
+                    &snapshots, "gen",
+                );
+                let _ = tx.send(profiles);
+            });
     }
 
     fn on_catalog_event(&mut self, event: ClientEvent) -> bool {
@@ -1237,8 +1251,6 @@ impl AssetStore {
             0
         } else if Some(id) == self.detail_req {
             1
-        } else if Some(id) == self.profiles_req {
-            2
         } else {
             return false;
         };
@@ -1285,10 +1297,6 @@ impl AssetStore {
                         self.detail_req = None;
                         self.detail = Remote::Ready(detail);
                     }
-                    (2, ClientOutput::JobProfiles(profiles)) => {
-                        self.profiles_req = None;
-                        self.profiles = Remote::Ready(profiles);
-                    }
                     // A mismatched output shape for a tracked id is a
                     // protocol-level surprise — surface it, don't guess.
                     (0, other) => {
@@ -1297,13 +1305,9 @@ impl AssetStore {
                         self.next_cursor = None;
                         self.search = Remote::Failed(format!("unexpected output {other:?}"));
                     }
-                    (1, other) => {
+                    (_, other) => {
                         self.detail_req = None;
                         self.detail = Remote::Failed(format!("unexpected output {other:?}"));
-                    }
-                    (_, other) => {
-                        self.profiles_req = None;
-                        self.profiles = Remote::Failed(format!("unexpected output {other:?}"));
                     }
                 }
                 true
@@ -1319,13 +1323,9 @@ impl AssetStore {
                         self.next_cursor = None;
                         self.search = Remote::Failed(error.to_string());
                     }
-                    1 => {
+                    _ => {
                         self.detail_req = None;
                         self.detail = Remote::Failed(error.to_string());
-                    }
-                    _ => {
-                        self.profiles_req = None;
-                        self.profiles = Remote::Failed(error.to_string());
                     }
                 }
                 true
@@ -1660,10 +1660,6 @@ fn start_embedded_asset_server_at(
     // the only loopback caller that uses it is this app's own observer (see
     // `start_observe_loop`) cataloguing directories the user pointed it at.
     cfg.blob_refs = makepad_asset_store::BlobRefPolicy::local_host();
-    // The chat broker listens for the SAME fleet this app's panel shows
-    // (`MAKEPAD_AI_FLEET`, defaulted in `setup` before this runs). Left
-    // empty it followed its own default and heard none of the `gen` boxes.
-    cfg.chat.fleet = makepad_asset_ai::discovery::wanted_fleet();
     cfg.log = true;
     let server = makepad_asset_store::AssetServer::start(cfg)
         .map_err(|e| format!("embedded asset server: {e}"))?;
@@ -1675,76 +1671,6 @@ fn start_embedded_asset_server_at(
         return Err("admin token file empty".into());
     }
     Ok((server, token))
-}
-
-/// Stop flag for the single in-process job coordinator (see PUBLISH_STOP).
-static JOBS_STOP: AtomicBool = AtomicBool::new(false);
-
-/// Owns the job-coordinator thread; dropping the store stops and joins it.
-struct JobLoop {
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Drop for JobLoop {
-    fn drop(&mut self) {
-        JOBS_STOP.store(true, Ordering::Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-/// Claim + dispatch generation jobs from the hosted server to the fleet the
-/// LAN announces (the same boxes the asset-ui's own pipelines use).
-///
-/// This runs the SHARED generation service, so the embedded server gets the
-/// same behaviour as a standalone worker: one claim loop per fleet box (N
-/// queued jobs of a kind drain across the N boxes that serve it), every
-/// wired kind rather than video alone, and a live advertisement on
-/// `GET /v1/job-profiles` of what those boxes can actually execute — which
-/// is what stops a client enqueueing a tier whose weights are on no box.
-fn start_job_loop(
-    server: &makepad_asset_store::AssetServer,
-    token: &str,
-) -> Option<JobLoop> {
-    let endpoints = localized_endpoints(server);
-    let server_id = server.server_id();
-    let token = token.to_string();
-    let cache = asset_ui_home().join("jobs-cache");
-    JOBS_STOP.store(false, Ordering::Release);
-    let join = std::thread::Builder::new()
-        .name("asset-ui-jobs".to_string())
-        .spawn(move || {
-            use makepad_asset_importer::gen_service::{FleetSource, GenServiceConfig};
-            log!(
-                "job loop: coordinating jobs on {}/{} → LAN fleet",
-                endpoints.control,
-                endpoints.data
-            );
-            makepad_asset_importer::gen_service::run(
-                &GenServiceConfig {
-                    servers: vec![endpoints],
-                    server_id: Some(server_id),
-                    token,
-                    cache_root: cache,
-                    namespace: "gen".to_string(),
-                    suffix: "asset-ui".to_string(),
-                    rights: makepad_asset_client::PublishRights::generated_cc0(),
-                    fleet: FleetSource::Lan,
-                    announce: true,
-                    log: true,
-                },
-                &JOBS_STOP,
-            );
-            log!("job loop: stopped");
-        });
-    match join {
-        Ok(join) => Some(JobLoop { join: Some(join) }),
-        Err(error) => {
-            log!("job loop: could not spawn: {error}");
-            None
-        }
-    }
 }
 
 /// Stop flag for the single in-process publish loop. A `static` (not an

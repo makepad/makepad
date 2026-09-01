@@ -67,6 +67,90 @@ pub struct Family {
     /// mover lift_1 start=sfx/doom1/dspstart stop=sfx/doom1/dspstop move=sfx/doom1/dsstnmov
     /// ```
     pub movers: Vec<(String, Vec<(String, String)>)>,
+    /// How this level is PLAYED, when it is not the default first-person
+    /// walk: `"rts"` means a tiled top-down strategy map (top-down camera,
+    /// unit orders, a walkability grid). Empty on every level written
+    /// before modes existed, which is exactly the walker default.
+    ///
+    /// ```text
+    /// mode rts
+    /// cell 6.0
+    /// grid worlds/valley.grid
+    /// house north color=e8c040 side=0
+    /// ```
+    pub mode: String,
+    /// Metres per map cell on a tiled level. Zero = not a tiled level.
+    pub cell: f32,
+    /// Namespace-relative key of the walkability grid sidecar
+    /// ([`world_grid`](crate::world_grid)). Empty = none.
+    pub grid: String,
+    /// The playable houses: `(name, sRGB colour bytes, side index)`. The
+    /// colour is the tint a house's units are remapped to; the side index
+    /// groups houses that share a tech tree. Empty on non-strategy levels.
+    pub houses: Vec<(String, [u8; 3], u32)>,
+    /// Artwork keys whose DEFINITIONS the level wants even though no row
+    /// places one — a skirmish map's buildable set.
+    ///
+    /// A `mode rts` level's production rules come from the definitions that
+    /// ride on the artwork (`unit class=… cost=…`), and a runtime only reads
+    /// the manifests its rows name. On a multiplayer map that starts empty
+    /// that is nothing at all: no construction yard, no tank, no roster. This
+    /// line is the level saying which pack content it plays WITH, in the same
+    /// namespace-relative keys the rows use, repeatable:
+    ///
+    /// ```text
+    /// roster billboards/cnc/mcv billboards/cnc/fact billboards/cnc/harv
+    /// ```
+    pub roster: Vec<String>,
+    /// The level's own GAMEPLAY RULES, as raw `key=value` pairs in file
+    /// order. Every one of them overrides an engine constant, and a level
+    /// that declares none plays exactly as the engine's defaults do.
+    ///
+    /// Dotted keys reach the nested groups; `victory=` is repeatable and
+    /// comma-separated so the whitespace-split line still reads:
+    ///
+    /// ```text
+    /// rules credits_per_second=50 min_build_ticks=20 harvest.load_ticks=8
+    /// rules power.brownout_scale=0.25 wave.min_units=4 tech_level=2
+    /// rules victory=timer,team=north,seconds=600 victory=eliminate
+    /// ```
+    ///
+    /// The engine (not this crate) knows which keys exist; the sidecar just
+    /// carries them, so a new rule needs no schema change here.
+    pub rules: Vec<(String, String)>,
+}
+
+impl Family {
+    /// The house row named `name`, if the level has one.
+    pub fn house(&self, name: &str) -> Option<&(String, [u8; 3], u32)> {
+        self.houses.iter().find(|(n, _, _)| n == name)
+    }
+
+    /// A house's tint as 0..1 sRGB components.
+    pub fn house_color(&self, name: &str) -> Option<[f32; 3]> {
+        self.house(name)
+            .map(|(_, c, _)| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0])
+    }
+}
+
+/// `e8c040` / `#e8c040` -> `[0xe8, 0xc0, 0x40]`.
+pub fn parse_hex_rgb(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    // A decimal `r,g,b` triple is the other spelling the contract uses for a
+    // colour (§2's `remap <r,g,b> …`), and a reader that only knew hex threw
+    // every entry of a converted pack's house ramp away — which read on
+    // screen as two houses in one colour.
+    if s.contains(',') {
+        let mut it = s.split(',');
+        let mut byte = || it.next()?.trim().parse::<u8>().ok();
+        let (r, g, b) = (byte()?, byte()?, byte()?);
+        return it.next().is_none().then_some([r, g, b]);
+    }
+    if s.len() != 6 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?])
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +174,38 @@ pub struct Place {
     /// 0x0010). Zero for placements from formats that carry no such flags,
     /// and for old `.place` rows written before this field existed.
     pub flags: u32,
+    /// Which house owns this piece. Empty = neutral.
+    pub team: String,
+    /// Health as a FRACTION of the piece's full hit points, `0..1`. Rows
+    /// written before this key existed parse as `1.0` — undamaged.
+    pub health: f32,
+    /// Metres above the ground plane this floor-aligned card draws at, so
+    /// overlapping cards on one flat map have a stable order instead of
+    /// z-fighting. Zero = the spawning class picks its own default.
+    pub layer: f32,
+    /// Richness stage of a `resource` row (frame index into its sheet).
+    pub stage: u32,
+}
+
+impl Default for Place {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: String::new(),
+            asset: String::new(),
+            pos: [0.0; 3],
+            yaw: 0.0,
+            class: String::new(),
+            width: 0.0,
+            height: 0.0,
+            align: String::new(),
+            flags: 0,
+            team: String::new(),
+            health: 1.0,
+            layer: 0.0,
+            stage: 0,
+        }
+    }
 }
 
 impl WorldPlace {
@@ -126,6 +242,31 @@ impl WorldPlace {
         for (event, key) in &f.events {
             out.push_str(&format!("event {event} {key}\n"));
         }
+        if !f.mode.is_empty() {
+            out.push_str(&format!("mode {}\n", f.mode));
+        }
+        if f.cell > 0.0 {
+            out.push_str(&format!("cell {}\n", f.cell));
+        }
+        if !f.grid.is_empty() {
+            out.push_str(&format!("grid {}\n", f.grid));
+        }
+        for (name, color, side) in &f.houses {
+            out.push_str(&format!(
+                "house {name} color={:02x}{:02x}{:02x} side={side}\n",
+                color[0], color[1], color[2]
+            ));
+        }
+        if !f.roster.is_empty() {
+            out.push_str(&format!("roster {}\n", f.roster.join(" ")));
+        }
+        if !f.rules.is_empty() {
+            out.push_str("rules");
+            for (key, value) in &f.rules {
+                out.push_str(&format!(" {key}={value}"));
+            }
+            out.push('\n');
+        }
         for (part, sounds) in &f.movers {
             out.push_str(&format!("mover {part}"));
             for (event, key) in sounds {
@@ -142,8 +283,20 @@ impl WorldPlace {
             if p.width > 0.0 && p.height > 0.0 {
                 out.push_str(&format!(" w={:.4} h={:.4}", p.width, p.height));
             }
+            if !p.team.is_empty() {
+                out.push_str(&format!(" team={}", p.team));
+            }
+            if (p.health - 1.0).abs() > 1e-4 {
+                out.push_str(&format!(" hp={:.2}", p.health));
+            }
             if !p.align.is_empty() {
                 out.push_str(&format!(" align={}", p.align));
+            }
+            if p.layer != 0.0 {
+                out.push_str(&format!(" layer={}", p.layer));
+            }
+            if p.stage != 0 {
+                out.push_str(&format!(" stage={}", p.stage));
             }
             if !p.class.is_empty() {
                 out.push_str(&format!(" class={}", p.class));
@@ -195,6 +348,37 @@ impl WorldPlace {
                     }
                 }
                 "loadout" => family.loadout = it.map(String::from).collect(),
+                "mode" => family.mode = it.next().unwrap_or("").to_string(),
+                "cell" => family.cell = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                "grid" => family.grid = it.next().unwrap_or("").to_string(),
+                // Repeatable: one long line and several short ones say the
+                // same thing, which is what a generator needs.
+                "roster" => family.roster.extend(it.map(String::from)),
+                // Repeatable, like `roster`: several short lines and one
+                // long one say the same thing. Pairs are kept RAW and in
+                // file order — the engine owns the vocabulary, not the
+                // sidecar, so a rule this reader has never heard of still
+                // reaches whoever does know it.
+                "rules" => family.rules.extend(
+                    it.filter_map(|kv| kv.split_once('='))
+                        .filter(|(k, _)| !k.is_empty())
+                        .map(|(k, v)| (k.to_string(), v.to_string())),
+                ),
+                "house" => {
+                    let Some(name) = it.next() else { continue };
+                    let mut color = [0xffu8; 3];
+                    let mut side = 0u32;
+                    for kv in it {
+                        if let Some(v) = kv.strip_prefix("color=") {
+                            if let Some(c) = parse_hex_rgb(v) {
+                                color = c;
+                            }
+                        } else if let Some(v) = kv.strip_prefix("side=") {
+                            side = v.parse().unwrap_or(0);
+                        }
+                    }
+                    family.houses.push((name.to_string(), color, side));
+                }
                 "weapon" => {
                     if let (Some(id), Some(key)) = (it.next(), it.next()) {
                         family.weapons.push((id.to_string(), key.to_string()));
@@ -251,6 +435,12 @@ impl WorldPlace {
                     // `flags` is a newer, optional attribute: rows written
                     // before it existed simply lack the key and default to 0.
                     let mut flags = 0u32;
+                    let mut team = String::new();
+                    // Undamaged unless the row says otherwise, so every row
+                    // written before `hp=` existed reads as full health.
+                    let mut health = 1.0f32;
+                    let mut layer = 0.0f32;
+                    let mut stage = 0u32;
                     for extra in it {
                         if let Some(v) = extra.strip_prefix("class=") {
                             class = v.to_string();
@@ -262,6 +452,14 @@ impl WorldPlace {
                             align = v.to_string();
                         } else if let Some(v) = extra.strip_prefix("flags=") {
                             flags = v.parse().unwrap_or(0);
+                        } else if let Some(v) = extra.strip_prefix("team=") {
+                            team = v.to_string();
+                        } else if let Some(v) = extra.strip_prefix("hp=") {
+                            health = v.parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
+                        } else if let Some(v) = extra.strip_prefix("layer=") {
+                            layer = v.parse().unwrap_or(0.0);
+                        } else if let Some(v) = extra.strip_prefix("stage=") {
+                            stage = v.parse().unwrap_or(0);
                         }
                     }
                     places.push(Place {
@@ -275,6 +473,10 @@ impl WorldPlace {
                         height,
                         align,
                         flags,
+                        team,
+                        health,
+                        layer,
+                        stage,
                     });
                 }
                 _ => {}
@@ -557,6 +759,7 @@ mod tests {
                     height: 0.0,
                     align: String::new(),
                     flags: 0,
+                    ..Place::default()
                 },
                 Place {
                     id: "thing-1".into(),
@@ -569,6 +772,7 @@ mod tests {
                     height: 0.0,
                     align: String::new(),
                     flags: 0,
+                    ..Place::default()
                 },
             ],
             family: Default::default(),
@@ -602,6 +806,7 @@ mod tests {
                 align: String::new(),
                 // skill 3 (0x0002) + skill 4/5 (0x0004) + ambush (0x0008)
                 flags: 0x000E,
+                ..Place::default()
             }],
             family: Default::default(),
         };
@@ -622,6 +827,151 @@ mod tests {
         let parsed = WorldPlace::parse(text).expect("parse");
         assert_eq!(parsed.places.len(), 1);
         assert_eq!(parsed.places[0].flags, 0);
+    }
+
+    /// The strategy-map facts (`mode`/`cell`/`grid`/`house`) and the row
+    /// keys they bring (`team=`, `hp=`, `layer=`, `stage=`) survive the
+    /// round trip, and a sidecar written before they existed still parses
+    /// with a full-health, neutral, layer-0 default.
+    #[test]
+    fn a_roster_survives_the_round_trip_and_accepts_several_lines() {
+        let mut place = WorldPlace {
+            source: "pack".into(),
+            world: "worlds/acres".into(),
+            ..WorldPlace::default()
+        };
+        place.family.mode = "rts".into();
+        place.family.cell = 6.0;
+        place.family.roster = vec![
+            "billboards/pack/mcv".into(),
+            "billboards/pack/yard".into(),
+        ];
+        let back = WorldPlace::parse(&place.to_text()).unwrap();
+        assert_eq!(back.family.roster, place.family.roster);
+
+        // Repeatable, because a generator writing one key per line is as
+        // legitimate as one writing them all on one.
+        let split = WorldPlace::parse(
+            "world-place 1\nsource pack\nworld worlds/acres\nmode rts\n\
+             roster billboards/pack/mcv\nroster billboards/pack/yard billboards/pack/tank\n",
+        )
+        .unwrap();
+        assert_eq!(
+            split.family.roster,
+            vec![
+                "billboards/pack/mcv".to_string(),
+                "billboards/pack/yard".to_string(),
+                "billboards/pack/tank".to_string(),
+            ]
+        );
+
+        // A level that declares none writes none — an older reader sees the
+        // sidecar it always saw.
+        let mut bare = place.clone();
+        bare.family.roster.clear();
+        assert!(!bare.to_text().contains("roster"));
+    }
+
+    /// A MAP may carry the round's rules. They round-trip verbatim, several
+    /// lines are one list, and a sidecar that declares none writes none —
+    /// which is the whole point: no rules line, engine defaults, today's
+    /// game.
+    #[test]
+    fn a_rules_line_carries_the_levels_gameplay_constants() {
+        let mut place = WorldPlace {
+            source: "pack".into(),
+            world: "worlds/acres".into(),
+            ..WorldPlace::default()
+        };
+        place.family.mode = "rts".into();
+        place.family.rules = vec![
+            ("credits_per_second".into(), "50".into()),
+            ("harvest.load_ticks".into(), "8".into()),
+            ("victory".into(), "timer,team=north,seconds=600".into()),
+        ];
+        let back = WorldPlace::parse(&place.to_text()).unwrap();
+        assert_eq!(back.family.rules, place.family.rules);
+
+        let split = WorldPlace::parse(
+            "world-place 1\nsource pack\nworld worlds/acres\nmode rts\n\
+             rules credits_per_second=50\nrules wave.min_units=4 tech_level=2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            split.family.rules,
+            vec![
+                ("credits_per_second".to_string(), "50".to_string()),
+                ("wave.min_units".to_string(), "4".to_string()),
+                ("tech_level".to_string(), "2".to_string()),
+            ]
+        );
+
+        let mut bare = place.clone();
+        bare.family.rules.clear();
+        assert!(!bare.to_text().contains("rules"));
+    }
+
+    #[test]
+    fn strategy_map_facts_and_row_keys_round_trip() {
+        let mut place = WorldPlace {
+            source: "pack".into(),
+            world: "worlds/valley".into(),
+            ..WorldPlace::default()
+        };
+        place.family.mode = "rts".into();
+        place.family.cell = 6.0;
+        place.family.grid = "worlds/valley.grid".into();
+        place.family.houses.push(("north".into(), [0xe8, 0xc0, 0x40], 0));
+        place.family.houses.push(("south".into(), [0xd0, 0x20, 0x20], 1));
+        place.places.push(Place {
+            id: "u-12".into(),
+            kind: "unit".into(),
+            asset: "billboards/pack/tank".into(),
+            pos: [18.0, 0.10, 42.0],
+            team: "north".into(),
+            health: 0.75,
+            align: "floor".into(),
+            layer: 0.10,
+            class: "vehicle".into(),
+            ..Place::default()
+        });
+        place.places.push(Place {
+            id: "r-91".into(),
+            kind: "resource".into(),
+            asset: "billboards/pack/patch".into(),
+            pos: [21.0, 0.04, 27.0],
+            align: "floor".into(),
+            layer: 0.04,
+            stage: 7,
+            class: "resource".into(),
+            ..Place::default()
+        });
+        let text = place.to_text();
+        assert!(text.contains("mode rts\n"), "{text}");
+        assert!(text.contains("cell 6\n"), "{text}");
+        assert!(text.contains("grid worlds/valley.grid\n"), "{text}");
+        assert!(text.contains("house north color=e8c040 side=0\n"), "{text}");
+        assert!(text.contains(" team=north hp=0.75 align=floor layer=0.1"), "{text}");
+        assert!(text.contains(" stage=7"), "{text}");
+        let back = WorldPlace::parse(&text).expect("parse");
+        assert_eq!(back.family.mode, "rts");
+        assert_eq!(back.family.cell, 6.0);
+        assert_eq!(back.family.grid, "worlds/valley.grid");
+        assert_eq!(back.family.houses, place.family.houses);
+        assert_eq!(back.family.house_color("south"), Some([0xd0 as f32 / 255.0, 0x20 as f32 / 255.0, 0x20 as f32 / 255.0]));
+        assert_eq!(back.places, place.places);
+
+        let old = WorldPlace::parse(
+            "world-place 1\nsource doom\nworld w\n\
+             place thing-0 character billboards/doom1/poss 1.0 0.0 2.0 0.0 class=3004\n",
+        )
+        .expect("parse");
+        assert!(old.family.mode.is_empty());
+        assert!(old.family.houses.is_empty());
+        assert_eq!(old.places[0].health, 1.0);
+        assert_eq!(old.places[0].layer, 0.0);
+        assert_eq!(old.places[0].stage, 0);
+        assert!(old.places[0].team.is_empty());
     }
 
     #[test]

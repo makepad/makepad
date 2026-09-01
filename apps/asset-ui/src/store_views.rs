@@ -16,7 +16,7 @@ use crate::pipeline::{
     format_clock, format_music_duration, stage_display_name, CandidateSet, Pipeline, StageState,
 };
 use crate::runs_chip::{CardKey, RunCard};
-use makepad_asset_ai::fleet::BoxSnapshot;
+use makepad_ai_hub::fleet::BoxSnapshot;
 use makepad_asset_widgets::{AssetThumb, ThumbMedia};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
@@ -2035,7 +2035,7 @@ pub fn runs_rows(
     rows.push(StoreRow::Section("FLEET WORKERS · LAN".into()));
     if fleet.is_empty() {
         rows.push(StoreRow::Note(
-            "No GPU boxes on the LAN — start a makepad-asset-ai fleet service.".into(),
+            "No GPU boxes on the LAN — start a makepad-ai-hub fleet service.".into(),
         ));
     }
     // One row per PHYSICAL host; several service instances on one box list

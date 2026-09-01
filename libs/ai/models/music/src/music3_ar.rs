@@ -246,6 +246,77 @@ fn music3_rvq_depth_sample_cfg(
     Ok((codes, parts))
 }
 
+/// Reference-audio constraint for the semantic draw (`music3.md`): on every
+/// `interval`-th EMITTED frame inside the encoded clip, the `c0` sample is
+/// restricted to the reference encoder's top-5 semantic codes. The seven
+/// acoustic books are never constrained — they stay MiniMax's. Built from
+/// `music3_reference::Music3ReferenceEncoding::c0_topk`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Music3ReferenceMask {
+    /// Per reference frame, semantic codes `0..16384` (no vocab offset).
+    pub c0_topk: Vec<[u32; crate::music3_reference::MUSIC3_REFERENCE_CANDIDATES]>,
+    /// `1..=10`: 1 constrains every frame, 10 every tenth.
+    pub interval: usize,
+}
+
+impl Music3ReferenceMask {
+    /// Candidates for emitted frame `frame` (the AR warm-up draw is frame
+    /// -1 and never constrained, as in the adapter). `None` = free draw.
+    pub fn candidates(
+        &self,
+        frame: usize,
+    ) -> Option<&[u32; crate::music3_reference::MUSIC3_REFERENCE_CANDIDATES]> {
+        if self.interval == 0 || frame % self.interval != 0 {
+            return None;
+        }
+        self.c0_topk.get(frame)
+    }
+}
+
+/// Apply a reference mask to CFG-guided semantic logits, after the cond
+/// top-50 cut and before sampling. `guided` / `raw` share one layout (band
+/// or full vocab; `index_of` maps a GLOBAL vocab id into it); `raw` is the
+/// same CFG value before the top-50 cut. Rule: keep `audio_end` as it is
+/// (EOS must still be able to fire) and the five candidates; everything
+/// else goes to -inf. If none of the candidates survived the top-50 cut,
+/// the candidates are restored from `raw` — the clip is never silently
+/// ignored. Sampling then runs the same Philox draw as the free path, so
+/// unconstrained frames stay bit-identical to text-only generation.
+pub(crate) fn apply_reference_mask(
+    guided: &mut [f32],
+    raw: &[f32],
+    index_of: &dyn Fn(u32) -> Option<usize>,
+    candidates: &[u32; crate::music3_reference::MUSIC3_REFERENCE_CANDIDATES],
+    end: u32,
+    lo: u32,
+) {
+    const NONE: usize = usize::MAX;
+    let mut keep = [NONE; 1 + crate::music3_reference::MUSIC3_REFERENCE_CANDIDATES];
+    keep[0] = index_of(end).filter(|i| *i < guided.len()).unwrap_or(NONE);
+    let mut survives = false;
+    for (slot, code) in candidates.iter().enumerate() {
+        let idx = index_of(lo.wrapping_add(*code)).filter(|i| *i < guided.len());
+        keep[slot + 1] = idx.unwrap_or(NONE);
+        if let Some(i) = idx {
+            if guided[i].is_finite() {
+                survives = true;
+            }
+        }
+    }
+    for (i, v) in guided.iter_mut().enumerate() {
+        if !keep.contains(&i) {
+            *v = f32::NEG_INFINITY;
+        }
+    }
+    if !survives {
+        for &i in &keep[1..] {
+            if i != NONE && i < raw.len() {
+                guided[i] = raw[i];
+            }
+        }
+    }
+}
+
 /// Sampled AR: cond+uncond KV decode, CFG 1.5, top-k 50. Stops on
 /// `<|audio_end|>` after `min_frames`, or at `max_frames`.
 pub fn music3_ar_sample(
@@ -269,6 +340,7 @@ pub fn music3_ar_sample(
         max_frames,
         min_frames,
         seed,
+        None,
         &|| false,
         &mut |_, _, _| {},
     )
@@ -276,6 +348,8 @@ pub fn music3_ar_sample(
 
 /// Same as [`music3_ar_sample`]. `progress` is `(stage, done, total)`:
 /// `prefill-cond` / `prefill-uncond` over 36 layers, then `lm` over frames.
+/// `reference` constrains the semantic draw on its frames (see
+/// [`Music3ReferenceMask`]); `None` is the text-only path, unchanged.
 pub fn music3_ar_sample_with_progress(
     lm: &Music3Shards,
     lm_prep: &Music3LmPrepared,
@@ -286,6 +360,7 @@ pub fn music3_ar_sample_with_progress(
     max_frames: usize,
     min_frames: usize,
     seed: u64,
+    reference: Option<&Music3ReferenceMask>,
     should_cancel: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(&str, usize, usize),
 ) -> Result<Vec<f32>> {
@@ -384,6 +459,9 @@ pub fn music3_ar_sample_with_progress(
             return Err(DiffusionError::Cancelled);
         }
         let t0 = std::time::Instant::now();
+        // Emitted frame = frame_index - 1; the warm-up draw is free.
+        let mask_candidates = reference
+            .and_then(|mask| frame_index.checked_sub(1).and_then(|f| mask.candidates(f)));
         let guided = if full_head {
             let mut cond_logits = music3_lm_head(lm, &cond_h)?;
             let mut uncond_logits = music3_lm_head(lm, &uncond_h)?;
@@ -399,19 +477,31 @@ pub fn music3_ar_sample_with_progress(
             }
             let thresh = kth_largest(&cond_logits, MUSIC3_AR_TOP_K);
             let mut guided = cond_logits.clone();
+            let mut raw = mask_candidates.map(|_| Vec::with_capacity(guided.len()));
             for (g, (c, u)) in guided
                 .iter_mut()
                 .zip(cond_logits.iter().zip(uncond_logits.iter()))
             {
-                *g = *u + MUSIC3_AR_CFG * (*c - *u);
-                if *c < thresh {
-                    *g = f32::NEG_INFINITY;
+                let v = *u + MUSIC3_AR_CFG * (*c - *u);
+                if let Some(raw) = raw.as_mut() {
+                    raw.push(v);
                 }
+                *g = if *c < thresh { f32::NEG_INFINITY } else { v };
             }
             for (i, v) in guided.iter_mut().enumerate() {
                 if i != end && !(i >= lo && i < hi) {
                     *v = f32::NEG_INFINITY;
                 }
+            }
+            if let (Some(candidates), Some(raw)) = (mask_candidates, raw.as_ref()) {
+                apply_reference_mask(
+                    &mut guided,
+                    raw,
+                    &|global| Some(global as usize),
+                    candidates,
+                    end as u32,
+                    lo as u32,
+                );
             }
             // MAKEPAD_MUSIC3_DUMP_GUIDED=<dir>: dump the vocab-masked
             // cond+uncond logits every 5th frame (bias measurement leg).
@@ -437,12 +527,24 @@ pub fn music3_ar_sample_with_progress(
             uncond_logits.extend_from_slice(&band_u);
             let thresh = kth_largest(&cond_logits, MUSIC3_AR_TOP_K);
             let mut guided = cond_logits;
+            let mut raw = mask_candidates.map(|_| Vec::with_capacity(guided.len()));
             for (g, u) in guided.iter_mut().zip(uncond_logits.iter()) {
                 let c = *g;
-                *g = *u + MUSIC3_AR_CFG * (c - *u);
-                if c < thresh {
-                    *g = f32::NEG_INFINITY;
+                let v = *u + MUSIC3_AR_CFG * (c - *u);
+                if let Some(raw) = raw.as_mut() {
+                    raw.push(v);
                 }
+                *g = if c < thresh { f32::NEG_INFINITY } else { v };
+            }
+            if let (Some(candidates), Some(raw)) = (mask_candidates, raw.as_ref()) {
+                apply_reference_mask(
+                    &mut guided,
+                    raw,
+                    &|global| band_index(global as usize),
+                    candidates,
+                    end as u32,
+                    lo as u32,
+                );
             }
             guided
         };
@@ -755,7 +857,7 @@ fn kth_largest(xs: &[f32], k: usize) -> f32 {
 /// Gumbel-max with Philox4x32-10, subsequence = flat index, one counter step
 /// per draw. Matches official `_sample_top_k` on this box (seed 7 first
 /// semantic = 152931, uniform-1024 = 564).
-pub(crate) struct TorchPhilox {
+pub struct TorchPhilox {
     seed: u64,
     counter: u64,
 }
@@ -988,5 +1090,75 @@ mod tests {
         let logits = vec![0.0f32; 8];
         let mut rng = TorchPhilox::new(7);
         assert_eq!(sample_top_k(&logits, 8, &mut rng), 0);
+    }
+
+    /// Band layout toy: index 0 = audio_end, index i = semantic code i-1.
+    fn band(global: u32, end: u32, lo: u32) -> Option<usize> {
+        if global == end {
+            Some(0)
+        } else if global >= lo {
+            Some((global - lo) as usize + 1)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn reference_mask_keeps_candidates_and_eos_only() {
+        let (end, lo) = (100u32, 1000u32);
+        let raw: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        // Top-50 cut already removed code 9 (index 10).
+        let mut guided = raw.clone();
+        guided[10] = f32::NEG_INFINITY;
+        let candidates = [0u32, 2, 4, 6, 9];
+        apply_reference_mask(&mut guided, &raw, &|g| band(g, end, lo), &candidates, end, lo);
+        // EOS keeps its guided value; candidates 0,2,4,6 keep theirs; 9 was
+        // cut by top-50 and stays cut (others survived); the rest is -inf.
+        assert_eq!(guided[0], 0.0);
+        assert_eq!(guided[1], 1.0);
+        assert_eq!(guided[3], 3.0);
+        assert_eq!(guided[5], 5.0);
+        assert_eq!(guided[7], 7.0);
+        assert!(guided[10].is_infinite());
+        for i in [2usize, 4, 6, 8, 9, 11] {
+            assert!(guided[i].is_infinite(), "index {i} should be masked");
+        }
+    }
+
+    #[test]
+    fn reference_mask_falls_back_to_candidates_when_top50_dropped_them_all() {
+        let (end, lo) = (100u32, 1000u32);
+        let raw: Vec<f32> = (0..12).map(|i| -(i as f32)).collect();
+        let mut guided = raw.clone();
+        let candidates = [1u32, 3, 5, 7, 9];
+        for c in candidates {
+            guided[c as usize + 1] = f32::NEG_INFINITY;
+        }
+        apply_reference_mask(&mut guided, &raw, &|g| band(g, end, lo), &candidates, end, lo);
+        for c in candidates {
+            assert_eq!(guided[c as usize + 1], raw[c as usize + 1]);
+        }
+        assert_eq!(guided[0], raw[0]);
+        // Non-candidates (codes 2 and 10 = indices 3 and 11) stay masked.
+        assert!(guided[3].is_infinite() && guided[11].is_infinite());
+        // A candidate outside the layout is ignored, not a panic.
+        let mut guided = raw.clone();
+        apply_reference_mask(&mut guided, &raw, &|g| band(g, end, lo), &[0, 50_000, 1, 2, 3], end, lo);
+        assert_eq!(guided[1], raw[1]);
+    }
+
+    #[test]
+    fn reference_mask_frame_rule() {
+        let mask = Music3ReferenceMask {
+            c0_topk: vec![[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15]],
+            interval: 2,
+        };
+        assert_eq!(mask.candidates(0), Some(&[1, 2, 3, 4, 5]));
+        assert_eq!(mask.candidates(1), None);
+        assert_eq!(mask.candidates(2), Some(&[11, 12, 13, 14, 15]));
+        // Past the clip the AR is free again.
+        assert_eq!(mask.candidates(4), None);
+        let every = Music3ReferenceMask { c0_topk: mask.c0_topk.clone(), interval: 1 };
+        assert!(every.candidates(1).is_some());
     }
 }

@@ -19,6 +19,7 @@ description = "Provider-explicit chat + content-tool protocol over the Makepad A
 [dependencies]
 makepad-asset-data = { path = "../data" }
 makepad-asset-client = { path = "../client" }
+makepad-ai-hub = { path = "../../ai/hub", default-features = false }
 makepad-network = { path = "../../../platform/network" }
 # The broker-side `assets.query` tool: read-only SQL over the co-located
 # server's own catalog file (see src/catalog_sql.rs).

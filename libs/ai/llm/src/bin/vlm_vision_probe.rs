@@ -136,7 +136,7 @@ fn main() {
 
     let t1 = Instant::now();
     let mut tower =
-        VisionTower::load(mmproj_path, prepared.n_patches()).expect("load vision tower");
+        VisionTower::load(mmproj_path).expect("load vision tower");
     println!("tower loaded in {:.2} s", t1.elapsed().as_secs_f64());
 
     let t2 = Instant::now();

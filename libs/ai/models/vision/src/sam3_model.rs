@@ -15,7 +15,7 @@
 //! text attention (paper says causal), and pixel-decoder fusion order.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_attention_packed_causal, gpu_attention_packed_cross,
+    gpu_add, gpu_attention_packed, gpu_attention_packed_cross,
     gpu_attention_packed_cross_bias,
     gpu_attention_packed_flash2_d64, gpu_birefnet_image_to_patches,
     gpu_rpb_expand,
@@ -27,8 +27,7 @@ use crate::backend::{
     gpu_layer_norm_mod, gpu_sam3_refine_boxes, gpu_sam3_rpb_axial, gpu_sam3_sine_embed,
     gpu_upload_into, GpuStepGraph,
     gpu_linear_f32_resident, gpu_linear_nt_cached, gpu_linear_nt_cached_bf16_f32acc, gpu_mul,
-    gpu_pixel_shuffle_planar_cached, gpu_reshape, gpu_rope_half,
-    gpu_silu,
+    gpu_pixel_shuffle_planar_cached, gpu_reshape, gpu_silu,
     gpu_rope_interleaved, gpu_slice_cols, gpu_slice_rows, gpu_upload, gpu_upload_u32,
     gpu_upsample_nearest2x, GpuLinearPart, GpuTensor,
 };

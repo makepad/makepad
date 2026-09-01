@@ -1445,6 +1445,7 @@ fn convert_md5_billboard(
         actor: None,
         weapon: None,
         metres_per_pixel: 0.0,
+        ..Default::default()
     };
     let rel_path = format!("{key}.billboard");
     // One packed sheet per actor, never one PNG per rendered pose.

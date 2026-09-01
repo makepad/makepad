@@ -200,30 +200,6 @@ impl EventBody {
         }
     }
 
-    /// A pipeline reached a terminal state. `state` is DERIVED from the
-    /// stage jobs at announcement time, never stored.
-    pub fn pipeline(
-        ns: &str,
-        pipeline: String,
-        state: &'static str,
-        ts_ms: u64,
-    ) -> EventBody {
-        EventBody {
-            kind: KIND_PIPELINE_FINISHED,
-            namespace: ns.to_string(),
-            asset_id: None,
-            revision: None,
-            game_id: None,
-            game_revision: None,
-            alias: None,
-            model_preview: None,
-            pipeline: Some(pipeline),
-            pipeline_state: Some(state),
-            content_kind: None,
-            ts_ms,
-        }
-    }
-
     pub fn with_revision(mut self, rev: String) -> EventBody {
         self.revision = Some(rev);
         self
