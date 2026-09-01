@@ -1,5 +1,5 @@
 //! macOS backend for the low-latency stream decoder: `VTDecompressionSession`
-//! driven directly from Annex-B access units.
+//! driven directly from Annex-B access units. H.264 and HEVC.
 //!
 //! The decoder (re)builds its `CMFormatDescription`/`VTDecompressionSession`
 //! whenever it sees SPS/PPS NALs (every keyframe packet carries them, per
@@ -88,21 +88,23 @@ pub struct AppleStreamDecoder {
     session: VTDecompressionSessionRef,
     format_desc: CMFormatDescriptionRef,
     shared: Box<Mutex<DecoderShared>>,
+    codec: StreamVideoCodec,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
+    /// HEVC only; H.264 has no VPS.
+    vps: Option<Vec<u8>>,
 }
 
 impl AppleStreamDecoder {
     pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
-        if !matches!(codec, StreamVideoCodec::H264) {
-            return Err(VideoFileError::new("apple stream decoder: only H264 is implemented"));
-        }
         Ok(Self {
             session: std::ptr::null_mut(),
             format_desc: std::ptr::null_mut(),
             shared: Box::new(Mutex::new(DecoderShared { frames: Vec::new() })),
+            codec,
             sps: None,
             pps: None,
+            vps: None,
         })
     }
 
@@ -110,6 +112,9 @@ impl AppleStreamDecoder {
         let (Some(sps), Some(pps)) = (&self.sps, &self.pps) else {
             return Ok(());
         };
+        if matches!(self.codec, StreamVideoCodec::Hevc) && self.vps.is_none() {
+            return Ok(());
+        }
         if !self.session.is_null() {
             VTDecompressionSessionInvalidate(self.session);
             CFRelease(self.session as *const c_void);
@@ -119,20 +124,38 @@ impl AppleStreamDecoder {
             CFRelease(self.format_desc as *const c_void);
             self.format_desc = std::ptr::null_mut();
         }
-        let ptrs: [*const u8; 2] = [sps.as_ptr(), pps.as_ptr()];
-        let sizes: [usize; 2] = [sps.len(), pps.len()];
         let mut format_desc: CMFormatDescriptionRef = std::ptr::null_mut();
-        let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-            std::ptr::null(),
-            2,
-            ptrs.as_ptr(),
-            sizes.as_ptr(),
-            4,
-            &mut format_desc,
-        );
+        let status = match self.codec {
+            StreamVideoCodec::H264 => {
+                let ptrs: [*const u8; 2] = [sps.as_ptr(), pps.as_ptr()];
+                let sizes: [usize; 2] = [sps.len(), pps.len()];
+                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    std::ptr::null(),
+                    2,
+                    ptrs.as_ptr(),
+                    sizes.as_ptr(),
+                    4,
+                    &mut format_desc,
+                )
+            }
+            StreamVideoCodec::Hevc => {
+                let vps = self.vps.as_ref().unwrap();
+                let ptrs: [*const u8; 3] = [vps.as_ptr(), sps.as_ptr(), pps.as_ptr()];
+                let sizes: [usize; 3] = [vps.len(), sps.len(), pps.len()];
+                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    std::ptr::null(),
+                    3,
+                    ptrs.as_ptr(),
+                    sizes.as_ptr(),
+                    4,
+                    std::ptr::null(),
+                    &mut format_desc,
+                )
+            }
+        };
         if status != 0 || format_desc.is_null() {
             return Err(VideoFileError::with_code(
-                "CMVideoFormatDescriptionCreateFromH264ParameterSets",
+                "CMVideoFormatDescriptionCreateFromParameterSets",
                 status,
             ));
         }
@@ -163,16 +186,33 @@ impl AppleStreamDecoder {
         let mut vcl_nals: Vec<&[u8]> = Vec::new();
         let mut params_updated = false;
         for nal in &nals {
-            match annex_b::nal_unit_type(nal) {
-                annex_b::NAL_TYPE_SPS => {
-                    self.sps = Some(nal.to_vec());
-                    params_updated = true;
-                }
-                annex_b::NAL_TYPE_PPS => {
-                    self.pps = Some(nal.to_vec());
-                    params_updated = true;
-                }
-                _ => vcl_nals.push(nal),
+            match self.codec {
+                StreamVideoCodec::H264 => match annex_b::nal_unit_type(nal) {
+                    annex_b::NAL_TYPE_SPS => {
+                        self.sps = Some(nal.to_vec());
+                        params_updated = true;
+                    }
+                    annex_b::NAL_TYPE_PPS => {
+                        self.pps = Some(nal.to_vec());
+                        params_updated = true;
+                    }
+                    _ => vcl_nals.push(nal),
+                },
+                StreamVideoCodec::Hevc => match annex_b::hevc_nal_unit_type(nal) {
+                    annex_b::HEVC_NAL_TYPE_VPS => {
+                        self.vps = Some(nal.to_vec());
+                        params_updated = true;
+                    }
+                    annex_b::HEVC_NAL_TYPE_SPS => {
+                        self.sps = Some(nal.to_vec());
+                        params_updated = true;
+                    }
+                    annex_b::HEVC_NAL_TYPE_PPS => {
+                        self.pps = Some(nal.to_vec());
+                        params_updated = true;
+                    }
+                    _ => vcl_nals.push(nal),
+                },
             }
         }
         if params_updated {
