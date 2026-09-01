@@ -3753,6 +3753,39 @@ extern "C" cudaError_t makepad_cuda_group_norm_planar_multi_f32(
 // the rest pass through. cos/sin tables are [token][rot_half]; both rotated
 // halves share the same table entry (the reference duplicates the frequency
 // block, so cos[i + rot_half] == cos[i]).
+// out[r, c] = x[r, c] + bias[c]: a per-column broadcast add (a linear's
+// bias after a GEMM that has no bias epilogue).
+static __global__ void makepad_cuda_add_cols_broadcast_f32_kernel(
+        const float * __restrict__ x,
+        const float * __restrict__ bias,
+        float * __restrict__ out,
+        uint32_t rows,
+        uint32_t cols) {
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t total = static_cast<size_t>(rows) * cols;
+    if (i >= total) {
+        return;
+    }
+    out[i] = x[i] + bias[i % cols];
+}
+
+extern "C" cudaError_t makepad_cuda_add_cols_broadcast_f32(
+        const float * x,
+        const float * bias,
+        float * out,
+        uint32_t rows,
+        uint32_t cols,
+        cudaStream_t stream) {
+    const size_t total = static_cast<size_t>(rows) * cols;
+    if (total == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t block = 256;
+    const uint32_t grid = static_cast<uint32_t>((total + block - 1) / block);
+    makepad_cuda_add_cols_broadcast_f32_kernel<<<grid, block, 0, stream>>>(x, bias, out, rows, cols);
+    return cudaGetLastError();
+}
+
 static __global__ void makepad_cuda_rope_half_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ cos_table,

@@ -181,6 +181,24 @@ pub fn add(a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor, String> {
     Ok(tensor(a.rows, a.cols, out))
 }
 
+/// `out[r] = a[r] + bias` with a `cols`-wide bias broadcast over rows.
+pub fn add_cols_broadcast(a: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor, String> {
+    if bias.rows * bias.cols != a.cols {
+        return Err(format!(
+            "metal add_cols_broadcast bias width {} != {} cols",
+            bias.rows * bias.cols,
+            a.cols
+        ));
+    }
+    let ad = data(a)?;
+    let bd = data(bias)?;
+    let mut out = Vec::with_capacity(ad.len());
+    for row in ad.chunks_exact(a.cols) {
+        out.extend(row.iter().zip(bd.iter()).map(|(x, b)| x + b));
+    }
+    Ok(tensor(a.rows, a.cols, out))
+}
+
 pub fn mul(a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor, String> {
     let ad = data(a)?;
     let bd = data(b)?;

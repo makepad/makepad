@@ -27,7 +27,7 @@ pub use metal::{
 /// Activations stay on the GPU across a whole transformer step — see the
 /// flux device path in flux_transformer.rs.
 pub use crate::gpu::{
-    gpu_act_f16_enabled, gpu_add, gpu_add_bf16, gpu_alias_snake_updown2x,
+    gpu_act_f16_enabled, gpu_add, gpu_add_bf16, gpu_add_cols_broadcast, gpu_alias_snake_updown2x,
     gpu_attention_cross_fused_enabled,
     gpu_attention_gqa_decode_bf16, gpu_attention_gqa_decode_pair_bf16, gpu_attention_packed,
     gpu_attention_packed_bf16,
