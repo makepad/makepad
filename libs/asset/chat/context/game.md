@@ -87,8 +87,22 @@ never hand-place their tiles. They are deterministic from seed:
   road surfaces — asphalt with markings, graded over the hills with the
   ground pressed to match, and a real BRIDGE with piers over anything too
   deep to embank. Paths are waypoint lists in world metres: EDIT a road by
-  moving its waypoints and re-calling. Where a road crosses a railway a
-  LEVEL CROSSING is generated automatically.
+  moving its waypoints and re-calling. CROSSINGS ARE AUTOMATIC — never
+  build junction geometry by hand: road x rail = a level crossing with
+  warning masts and BARRIER GATES that close for approaching trains; road
+  x road = a junction patch with stop lines and WORKING STOPLIGHTS
+  (deterministic cycle; autodriven cars brake at red and at closed gates,
+  so town traffic just works). `style: "highway"` lays a dual carriageway
+  (median barrier, guard rails, gentler grades) that GRADE-SEPARATES:
+  crossing any other road or rail becomes an OVERPASS on piers instead of
+  a flat junction.
+- `game.river({seed | path: [vec3,...], width, depth})` — ONE CALL CARVES
+  A RIVER: the channel is cut into the terrain along a spline (banks
+  feathered and recoloured), chained water volumes follow it (things
+  float, boats drive), and the river is REGISTERED: any road or rail laid
+  AFTER it crosses on a BRIDGE automatically — deck clearing the water,
+  piers standing in the shallows. Call game.river BEFORE the roads and
+  railways that must bridge it; never ford a river with a flat road.
 - `game.racetrack({seed, size, complexity})` — a complete circuit as one
   generated road surface (true swept corners, graded, bridged) — returns
   slots, checkpoints, start and waypoints. A race's essential shape is:
@@ -295,10 +309,14 @@ EXPLICITLY asks to build something from parts.
   lamp at `scale: 8` is a 30 m tower. Never place kit models unscaled
   next to people.
   STREETS ARE NEVER HAND-LAID: city and village streets come from
-  game.city / game.village (measured kit tiles at their true scale);
-  open roads, circuits and railways come from game.road_network /
-  game.racetrack / game.traintrack, which GENERATE the surface (a
-  hand-laid road tile next to a real car is 2-3x too narrow).
+  game.city / game.village, which now GENERATE their street surfaces
+  through the same corridor machinery as the open roads — graded over
+  hills, pressed into the ground, junction patches and stoplights where
+  they cross; open roads, circuits and railways come from
+  game.road_network / game.racetrack / game.traintrack, which GENERATE
+  the surface (a hand-laid road tile next to a real car is 2-3x too
+  narrow). Generated surfaces are SOLID: characters walk on the deck,
+  cars queue at red lights and closed crossing gates on their own.
 - Layout = a real village: game.village lays the street; 4-6 DIFFERENT
   complete buildings on both sides facing the street (doors toward it),
   a small plaza (fantasy-town fountain-round, scale: 2) with trees and a
