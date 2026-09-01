@@ -10,6 +10,7 @@
 //! [`SpeechOutput`] alone gives an app a voice; the filter alone gives an
 //! open-mic app a "was that meant for me?" gate.
 
+pub mod agent_seam;
 pub mod filter;
 pub mod pipeline;
 #[cfg(feature = "local-llm")]

@@ -123,6 +123,10 @@ name = "sa3-generate"
 path = "src/bin/sa3_generate.rs"
 
 [[bin]]
+name = "sa3-bake"
+path = "src/bin/sa3_bake.rs"
+
+[[bin]]
 name = "trellis-generate"
 path = "src/bin/trellis_generate.rs"
 

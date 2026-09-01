@@ -335,6 +335,73 @@ pub struct CatalogPageDto {
     pub facets: Vec<CatalogFacet>,
 }
 
+/// One bounded result from `POST /v1/assets/query`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetsQueryDto {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+
+pub fn parse_assets_query(v: &Value) -> ClientResult<AssetsQueryDto> {
+    const MAX_COLUMNS: usize = 2048;
+    const MAX_COLUMN_BYTES: usize = 4096;
+    const MAX_ROWS: usize = 200;
+    const MAX_VALUE_BYTES: usize = 640;
+
+    let columns_v = need(v, "columns", "assets query columns")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "assets query columns" })?;
+    if columns_v.len() > MAX_COLUMNS {
+        return Err(ClientError::Protocol { what: "assets query columns too many" });
+    }
+    let mut columns = Vec::with_capacity(columns_v.len());
+    for column in columns_v {
+        let column = column
+            .as_str()
+            .ok_or(ClientError::Protocol { what: "assets query column" })?;
+        if column.len() > MAX_COLUMN_BYTES {
+            return Err(ClientError::Protocol { what: "assets query column" });
+        }
+        columns.push(column.to_string());
+    }
+
+    let rows_v = need(v, "rows", "assets query rows")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "assets query rows" })?;
+    if rows_v.len() > MAX_ROWS {
+        return Err(ClientError::Protocol { what: "assets query rows too many" });
+    }
+    let mut rows = Vec::with_capacity(rows_v.len());
+    for row in rows_v {
+        let cells = row
+            .as_arr()
+            .ok_or(ClientError::Protocol { what: "assets query row" })?;
+        if cells.len() != columns.len() {
+            return Err(ClientError::Protocol { what: "assets query row width" });
+        }
+        let mut parsed = Vec::with_capacity(cells.len());
+        for cell in cells {
+            let cell = cell
+                .as_str()
+                .ok_or(ClientError::Protocol { what: "assets query value" })?;
+            if cell.len() > MAX_VALUE_BYTES || cell.chars().any(char::is_control) {
+                return Err(ClientError::Protocol { what: "assets query value" });
+            }
+            parsed.push(cell.to_string());
+        }
+        rows.push(parsed);
+    }
+
+    Ok(AssetsQueryDto {
+        columns,
+        rows,
+        truncated: need_bool(v, "truncated", "assets query truncated")?,
+        elapsed_ms: need_u64(v, "elapsed_ms", "assets query elapsed_ms")?,
+    })
+}
+
 pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
     let hits_v = need(v, "hits", "catalog hits")?
         .as_arr()
@@ -1303,10 +1370,6 @@ impl JobStateDto {
         })
     }
 
-    /// Crate-facing strict parse (worker finish responses).
-    pub(crate) fn parse_pub(s: &str) -> Option<Self> {
-        Self::parse(s)
-    }
 }
 
 /// One job's visible state. `result_asset`/`result_revision` are parsed
@@ -2976,7 +3039,7 @@ impl ChatProviderKind {
     /// Human label for a picker.
     pub fn label(self) -> &'static str {
         match self {
-            Self::FleetQwen => "Qwen · asset-ai fleet",
+            Self::FleetQwen => "Qwen · ai-hub fleet",
             Self::OpenAi => "OpenAI · API",
             Self::Grok => "Grok · API",
             Self::ClaudeCli => "Claude Code · CLI on server",
@@ -2996,7 +3059,7 @@ impl ChatProviderKind {
 }
 
 /// Where a provider's model runs — the server's word, carried per row.
-/// `Local` = the asset-ai fleet on the LAN; `Cloud` = a vendor, whether by
+/// `Local` = the ai-hub fleet on the LAN; `Cloud` = a vendor, whether by
 /// API key or by a CLI logged in on the server host. A "local AI only"
 /// lock filters on this and nothing else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

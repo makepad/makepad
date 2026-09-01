@@ -1,6 +1,6 @@
 //! Fleet discovery over `cx.http_request`: polls `GET /health` +
 //! `GET /models` on every fleet endpoint and feeds the parsed JSON into
-//! [`makepad_asset_ai::fleet::BoxSnapshot`]s — the scheduler
+//! [`makepad_ai_hub::fleet::BoxSnapshot`]s — the scheduler
 //! (`fleet::pick_box` / `pick_for_domain`) is pure over those snapshots.
 //!
 //! Endpoint lifecycle (the part that keeps the fleet free of duplicates):
@@ -25,9 +25,9 @@
 //! keyed by url, not row index — rows may be coalesced away mid-flight and
 //! the late response is then dropped instead of updating the wrong box.
 
-use makepad_asset_ai::discovery::DiscoveredNode;
-use makepad_asset_ai::fleet::BoxSnapshot;
-use makepad_asset_ai::protocol::{HealthJson, JobStatusJson, JobsJson, LorasJson, ModelsJson};
+use makepad_ai_hub::discovery::DiscoveredNode;
+use makepad_ai_hub::fleet::BoxSnapshot;
+use makepad_ai_hub::protocol::{HealthJson, JobStatusJson, JobsJson, LorasJson, ModelsJson};
 use makepad_micro_serde::DeJson;
 use makepad_widgets::*;
 use std::collections::HashMap;
@@ -598,7 +598,7 @@ mod tests {
         DiscoveredNode {
             base_url: base_url.to_string(),
             node_id,
-            fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
+            fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
         }
     }
 

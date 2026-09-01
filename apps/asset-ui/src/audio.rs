@@ -601,7 +601,7 @@ pub fn waveform_thumbnail_png(pcm: &WavPcm) -> Option<Vec<u8>> {
         WAVEFORM_THUMB_W,
         WAVEFORM_THUMB_H,
     ) {
-        return makepad_asset_ai::testpattern::encode_png_rgba(
+        return makepad_ai_hub::testpattern::encode_png_rgba(
             &rgba,
             WAVEFORM_THUMB_W,
             WAVEFORM_THUMB_H,
@@ -618,7 +618,7 @@ pub fn waveform_thumbnail_png(pcm: &WavPcm) -> Option<Vec<u8>> {
             (pixel >> 24) as u8,
         ]);
     }
-    makepad_asset_ai::testpattern::encode_png_rgba(&rgba, WAVEFORM_THUMB_W, WAVEFORM_THUMB_H)
+    makepad_ai_hub::testpattern::encode_png_rgba(&rgba, WAVEFORM_THUMB_W, WAVEFORM_THUMB_H)
         .ok()
 }
 
@@ -675,7 +675,7 @@ mod tests {
         // Round-trip against the service's own encoder shape: a 100-sample
         // 24kHz mono ramp.
         let samples: Vec<f32> = (0..100).map(|i| i as f32 / 100.0 - 0.5).collect();
-        let wav = makepad_asset_ai::wav::encode_wav_pcm16_mono(&samples, 24_000);
+        let wav = makepad_ai_hub::wav::encode_wav_pcm16_mono(&samples, 24_000);
         let pcm = parse_wav(&wav).unwrap();
         assert_eq!(pcm.sample_rate, 24_000);
         assert_eq!(pcm.channels, 1);

@@ -631,7 +631,7 @@ mod tests {
         // `text`, so the claim filter and the router agree.)
         assert!(kinds_for_domains(&["text".to_string()])
             .contains(&"text.expand".to_string()));
-        assert!(makepad_asset_ai::fleet::role_allows(
+        assert!(makepad_ai_hub::fleet::role_allows(
             "http://192.0.2.89:8123",
             "text"
         ));

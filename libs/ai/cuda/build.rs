@@ -534,10 +534,42 @@ fn report_tool_output(tool: &str, output: &std::process::Output) {
     } else {
         text.into_owned()
     };
-    for line in text.lines().filter(|line| !line.trim().is_empty()).take(12) {
-        println!("cargo:warning={tool}: {line}");
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    // The first real diagnostic, then the tail. nvcc prefaces a failure with
+    // hundreds of warnings out of the vendored headers, so a fixed window at
+    // the start reports the weather and never the crash — which is how a
+    // compile failure here used to read as twelve lines of "floating-point
+    // value does not fit" and no reason at all. The tail is included
+    // unconditionally because that is where "N errors detected" lands, and
+    // because a tool that died without printing a diagnostic still has to say
+    // something.
+    let is_diagnostic =
+        |line: &&str| line.contains("error:") || line.contains("error C") || line.contains("Error:");
+    let head = lines.iter().position(is_diagnostic).map(|at| {
+        let start = at.saturating_sub(2);
+        (start, (start + REPORTED_TOOL_LINES).min(lines.len()))
+    });
+    let tail_start = lines.len().saturating_sub(REPORTED_TOOL_TAIL_LINES);
+    let mut printed_to = 0usize;
+    for (start, end) in head.into_iter().chain(std::iter::once((tail_start, lines.len()))) {
+        let start = start.max(printed_to);
+        if start >= end {
+            continue;
+        }
+        if start > printed_to {
+            println!("cargo:warning={tool}: ... {} line(s) elided", start - printed_to);
+        }
+        for line in &lines[start..end] {
+            println!("cargo:warning={tool}: {line}");
+        }
+        printed_to = end;
     }
 }
+
+/// How much of a failing tool's first diagnostic to forward as cargo warnings.
+const REPORTED_TOOL_LINES: usize = 30;
+/// And how much of its tail, where the summary line lives.
+const REPORTED_TOOL_TAIL_LINES: usize = 15;
 
 fn dir_has_file_starting_with(dir: &Path, prefix: &str) -> bool {
     fs::read_dir(dir).is_ok_and(|entries| {

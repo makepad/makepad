@@ -77,7 +77,7 @@ fn main() {
     let vision_config = VisionConfig::from_gguf(&gguf).expect("vision config");
     let t0 = Instant::now();
     let prepared = preprocess_rgb8(&rgb, w, h, &vision_config).expect("preprocess");
-    let mut tower = VisionTower::load(mmproj_path, prepared.n_patches()).expect("vision tower");
+    let mut tower = VisionTower::load(mmproj_path).expect("vision tower");
     let embeddings = tower.encode(&prepared).expect("encode image");
     eprintln!(
         "vision: {}x{} -> {}x{} tokens ({}) in {:.2}s",

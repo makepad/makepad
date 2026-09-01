@@ -35,6 +35,7 @@ fn run_with_history(
         system,
         messages,
         tools_enabled: true,
+        dynamic_context: String::new(),
     };
     provider.begin_turn(&input).expect("begin turn");
     let deadline = Instant::now() + Duration::from_secs(180);

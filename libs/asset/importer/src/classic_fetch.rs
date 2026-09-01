@@ -87,6 +87,41 @@ pub fn fetch_spec(source: ClassicSource) -> Option<ClassicFetchSpec> {
             urls: &[crate::tdm_zipsync::TDM_INSTALLER_INI_URL],
             label: "The Dark Mod official zipsync (tdm_installer.ini + mirror PK4s)",
         }),
+        ClassicSource::Cnc => Some(ClassicFetchSpec {
+            urls: &[
+                "https://openra.ppmsite.com/cnc-packages.zip",
+                "https://openra.baxxster.no/openra/cnc-packages.zip",
+                "https://openra.0x47.net/cnc-packages.zip",
+                "https://srvdonate.ut.mephi.ru/openra/cnc-packages.zip",
+            ],
+            label: "C&C Tiberian Dawn freeware base files (EA 2007 release, community mirror zip)",
+        }),
+        ClassicSource::RedAlert => Some(ClassicFetchSpec {
+            urls: &[
+                "https://openra.ppmsite.com/ra-packages.zip",
+                "https://openra.baxxster.no/openra/ra-packages.zip",
+                "https://openra.0x47.net/ra-packages.zip",
+                "https://srvdonate.ut.mephi.ru/openra/ra-packages.zip",
+            ],
+            label: "C&C Red Alert freeware base files (EA release, community mirror zip)",
+        }),
+        ClassicSource::TiberianSun => Some(ClassicFetchSpec {
+            urls: &[
+                "https://openra.ppmsite.com/ts-packages.zip",
+                "https://openra.baxxster.no/openra/ts-packages.zip",
+                "https://openra.0x47.net/ts-packages.zip",
+                "https://srvdonate.ut.mephi.ru/openra/ts-packages.zip",
+            ],
+            label: "C&C Tiberian Sun freeware base files (EA release, community mirror zip)",
+        }),
+        ClassicSource::Dune2000 => Some(ClassicFetchSpec {
+            urls: &[
+                "https://openra.ppmsite.com/d2k-quickinstall.zip",
+                "https://openra.baxxster.no/openra/d2k-quickinstall.zip",
+                "https://republic.community/hosted/files/command-and-conquer/openra/d2k-quickinstall.zip",
+            ],
+            label: "Dune 2000 freeware base files (EA release, community mirror quick-install zip)",
+        }),
     }
 }
 
@@ -101,6 +136,12 @@ pub fn has_source_payload(source: ClassicSource, dir: &Path) -> bool {
         ClassicSource::Duke3d => payload_files(dir)
             .iter()
             .any(|name| name.to_ascii_lowercase().ends_with(".grp")),
+        ClassicSource::Cnc | ClassicSource::RedAlert | ClassicSource::TiberianSun => payload_files(dir)
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("conquer.mix")),
+        ClassicSource::Dune2000 => payload_files(dir)
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("palette.bin")),
         _ => has_classic_payload(dir),
     }
 }
@@ -275,7 +316,8 @@ fn is_archive_name(name: &str) -> bool {
 fn is_keep_name(name: &str) -> bool {
     const EXTS: &[&str] = &[
         ".wad", ".pak", ".pk3", ".pk4", ".grp", ".map", ".bsp", ".mdl", ".md2", ".md3",
-        ".md5mesh", ".spr", ".wav", ".tga", ".wal", ".lmp", ".proc",
+        ".md5mesh", ".spr", ".wav", ".tga", ".wal", ".lmp", ".proc", ".mix",
+        ".r8", ".bin", ".rs",
     ];
     EXTS.iter().any(|ext| name.ends_with(ext))
 }
@@ -509,13 +551,22 @@ mod tests {
             ClassicSource::Duke3d,
             ClassicSource::Quake2,
             ClassicSource::Quake3,
+            ClassicSource::Cnc,
+            ClassicSource::RedAlert,
+            ClassicSource::TiberianSun,
+            ClassicSource::Dune2000,
         ] {
             let spec = fetch_spec(source).unwrap_or_else(|| panic!("{source:?} needs a fetch URL"));
             for url in spec.urls {
                 assert!(
                     url.starts_with("https://archive.org/")
                         || url.starts_with("https://github.com/")
-                        || url.starts_with("https://ftp.gwdg.de/pub/misc/ftp.idsoftware.com/"),
+                        || url.starts_with("https://ftp.gwdg.de/pub/misc/ftp.idsoftware.com/")
+                        || url.starts_with("https://openra.ppmsite.com/")
+                        || url.starts_with("https://openra.baxxster.no/openra/")
+                        || url.starts_with("https://openra.0x47.net/")
+                        || url.starts_with("https://srvdonate.ut.mephi.ru/openra/")
+                        || url.starts_with("https://republic.community/hosted/files/command-and-conquer/openra/"),
                     "{source:?} url {url}"
                 );
             }

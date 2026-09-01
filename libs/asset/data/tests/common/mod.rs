@@ -1,6 +1,7 @@
 //! Shared fixtures: one fully populated instance of every canonical document,
 //! built from fixed bytes so golden digests are stable across restart and
 //! platform.
+#![allow(dead_code)] // each test binary uses a subset of these fixtures
 
 use makepad_asset_data::*;
 

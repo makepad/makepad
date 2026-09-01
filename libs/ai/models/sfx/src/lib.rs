@@ -3,6 +3,7 @@
 //! `crate::emit_progress` / `crate::error` paths inside moved modules
 //! keep compiling unchanged.
 
+#![allow(dead_code)] // a lane crate keeps reference and debug paths beside the shipping ones
 pub use makepad_ai_common::backend;
 pub use makepad_ai_common::error;
 pub use makepad_ai_common::metal_accel;
@@ -14,6 +15,7 @@ pub use makepad_ai_common::{
 
 pub mod sa3;
 pub mod sa3_ae;
+pub mod sa3_bake;
 pub mod sa3_pipeline;
 pub mod sa3_text;
 pub mod sa3_tokenizer;

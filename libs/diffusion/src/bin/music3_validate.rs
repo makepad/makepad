@@ -35,11 +35,15 @@ use makepad_diffusion::music3_lm::{
     music3_mlp_from_post_norm, Music3LmPrepared, Music3LmSession, Music3MlpDump,
 };
 use makepad_diffusion::music3_pipeline::{
-    music3_generate, music3_planar_stereo, music3_render_hiddens, Music3Generate,
+    music3_generate, music3_planar_stereo, music3_render_hiddens, Music3Generate, Music3Reference,
 };
 use makepad_diffusion::music3_rvq::{
     music3_rvq_audio_head_rows, music3_rvq_evict, music3_rvq_forward, music3_rvq_forward_pair,
     music3_rvq_project_rows, Music3RvqPrepared,
+};
+use makepad_diffusion::music3_reference::{
+    music3_encode_reference, music3_reference_interval, Music3ReferenceAudio,
+    Music3ReferenceWeights,
 };
 use makepad_diffusion::music3_vocoder::Music3Vocoder;
 use makepad_diffusion::music3_weights::Music3Shards;
@@ -415,6 +419,110 @@ fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
         println!("== decodepair ==");
         run_decode_pair_check()?;
     }
+    // reference-encode --wav <path> [--dump <dir>] [--out <codes.npy>]:
+    // clip -> DAV -> RVQ v4 codes [T, 8] + c0 top-5. With --dump, compares
+    // against the python adapter's `reference_codes.npy` ([T, 8] int64 from
+    // `adapter.predict_codes`) and `reference_c0_top5.npy` ([T, 5]) when
+    // present: per-book Hamming, c0 top-1 agreement on the first 128
+    // frames, and whether the dump's c0 sits inside the native top-5.
+    if stage == "reference-encode" {
+        let arg = |key: &str| -> Option<String> {
+            std::env::args()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .find(|w| w[0] == key)
+                .map(|w| w[1].clone())
+        };
+        let wav = arg("--wav").ok_or("--wav <audio file> is required for reference-encode")?;
+        let (left, right, rate) = load_wav_stereo(Path::new(&wav))?;
+        println!(
+            "== reference-encode {wav} {:.2}s @{rate} ==",
+            left.len() as f64 / rate as f64
+        );
+        let refw = Music3ReferenceWeights::resolve(weights).map_err(|e| e.to_string())?;
+        let t0 = Instant::now();
+        let enc = music3_encode_reference(
+            &refw,
+            &Music3ReferenceAudio { left, right, rate },
+            &mut |stage, k, n| println!("  {stage} {k}/{n}"),
+            &|| false,
+        )
+        .map_err(|e| e.to_string())?;
+        println!(
+            "  frames={} shape=[{},8] wall={:.2}s",
+            enc.frames,
+            enc.codes.len(),
+            t0.elapsed().as_secs_f64()
+        );
+        let in_range = enc
+            .codes
+            .iter()
+            .all(|c| c[0] < MUSIC3_SEMANTIC_VOCAB as u32 && c[1..].iter().all(|v| *v < 1024));
+        let top_ok = enc
+            .c0_topk
+            .iter()
+            .zip(&enc.codes)
+            .all(|(t, c)| t[0] == c[0] && t.iter().all(|v| *v < MUSIC3_SEMANTIC_VOCAB as u32));
+        if !in_range || !top_ok {
+            return Err("reference-encode: codes out of range or top-5[0] != argmax".into());
+        }
+        println!("  ok c0<{MUSIC3_SEMANTIC_VOCAB} c1..7<1024 top5[0]==c0");
+        for (f, c) in enc.codes.iter().take(8).enumerate() {
+            println!("  f{f} {:?} top5={:?}", c, enc.c0_topk[f]);
+        }
+        if let Some(out) = arg("--out") {
+            let flat: Vec<i64> = enc.codes.iter().flat_map(|c| c.iter().map(|v| *v as i64)).collect();
+            write_npy_i64_val(&out, &flat, &[enc.codes.len(), 8])?;
+            let top_out = out.replace(".npy", "_c0_top5.npy");
+            let flat: Vec<i64> = enc.c0_topk.iter().flat_map(|c| c.iter().map(|v| *v as i64)).collect();
+            write_npy_i64_val(&top_out, &flat, &[enc.c0_topk.len(), 5])?;
+            println!("  wrote {out} + {top_out}");
+        }
+        if let Some(dump) = dump {
+            let codes_path = dump.join("reference_codes.npy");
+            if codes_path.is_file() {
+                let npy = load_npy(&codes_path)?;
+                let vals = npy.as_i64()?;
+                let t = npy.shape.first().copied().unwrap_or(0);
+                if npy.shape.len() != 2 || npy.shape[1] != 8 || vals.len() != t * 8 {
+                    return Err(format!("{}: expected [T, 8], got {:?}", codes_path.display(), npy.shape));
+                }
+                let n = t.min(enc.codes.len());
+                let first = n.min(128);
+                let mut mismatch = [0usize; 8];
+                let mut first_c0_miss = 0usize;
+                let mut in_top5 = 0usize;
+                for f in 0..n {
+                    for b in 0..8 {
+                        if vals[f * 8 + b] != enc.codes[f][b] as i64 {
+                            mismatch[b] += 1;
+                        }
+                    }
+                    if f < first && vals[f * 8] != enc.codes[f][0] as i64 {
+                        first_c0_miss += 1;
+                    }
+                    if enc.c0_topk[f].iter().any(|v| *v as i64 == vals[f * 8]) {
+                        in_top5 += 1;
+                    }
+                }
+                println!(
+                    "  vs dump: frames native={} dump={} compared={n}; c0 top-1 mismatch first{first}={first_c0_miss} all={}; dump c0 in native top-5 = {in_top5}/{n}",
+                    enc.codes.len(),
+                    t,
+                    mismatch[0]
+                );
+                println!("  per-book hamming over {n} frames: {mismatch:?}");
+                if first_c0_miss == 0 {
+                    println!("  reference-encode c0 top-1 PASS (first {first} frames exact)");
+                } else {
+                    println!("  reference-encode c0 top-1 DIFF: {first_c0_miss}/{first} (bf16 oracle vs f32 native; check top-5 containment)");
+                }
+            } else {
+                println!("  (no {} — dump comparison skipped)", codes_path.display());
+            }
+        }
+    }
+
     if stage == "generate" {
         let seconds: f64 = std::env::args()
             .collect::<Vec<_>>()
@@ -464,10 +572,39 @@ fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
                 .map(|w| w[1].clone())
                 .unwrap_or_else(|| "[Instrumental]".into())
         };
+        // --reference <audio file> [--strength 0..1]: reference-audio
+        // conditioning (music3.md). The clip is read as WAV here; the
+        // service accepts MP3/FLAC/Ogg too through its decoders.
+        let reference = if let Some(path) = std::env::args()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|w| w[0] == "--reference")
+            .map(|w| w[1].clone())
+        {
+            let strength: Option<f32> = std::env::args()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .find(|w| w[0] == "--strength")
+                .and_then(|w| w[1].parse().ok());
+            let (left, right, rate) = load_wav_stereo(Path::new(&path))?;
+            let interval = music3_reference_interval(strength);
+            println!(
+                "  reference {path} {:.2}s @{rate} strength={strength:?} interval={interval}",
+                left.len() as f64 / rate as f64
+            );
+            Some(Music3Reference {
+                audio: Music3ReferenceAudio { left, right, rate },
+                interval,
+                weights_dir: weights.to_path_buf(),
+            })
+        } else {
+            None
+        };
         println!(
-            "== generate {seconds}s seed={seed} caption={:?} lyrics_chars={} -> {out} ==",
+            "== generate {seconds}s seed={seed} caption={:?} lyrics_chars={} reference={} -> {out} ==",
             caption,
-            lyrics.chars().count()
+            lyrics.chars().count(),
+            reference.is_some()
         );
         run_generate(
             weights,
@@ -476,6 +613,7 @@ fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
             Path::new(&out),
             &caption,
             &lyrics,
+            reference,
         )?;
     }
     println!("music3-validate PASS");
@@ -2429,6 +2567,7 @@ fn run_generate(
     out: &Path,
     caption: &str,
     lyrics: &str,
+    reference: Option<Music3Reference>,
 ) -> Result<(), String> {
     // MAKEPAD_MUSIC3_BENCH_RUNS=N: run 1 warm-up + N timed generates in-process
     // (weights stay GPU-cached), print each wall and the median. Matches the
@@ -2442,6 +2581,7 @@ fn run_generate(
         lyrics: lyrics.to_string(),
         seconds,
         seed,
+        reference,
     };
     let t0 = Instant::now();
     let mut audio = music3_generate(weights, &req).map_err(|e| e.to_string())?;
@@ -2485,6 +2625,93 @@ fn run_generate(
         n,
         t0.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+/// PCM RIFF/WAV (16-bit / 24-bit / 32-bit int, 32-bit float) -> planar
+/// stereo at the file's rate; mono is duplicated, extra channels dropped.
+fn load_wav_stereo(path: &Path) -> Result<(Vec<f32>, Vec<f32>, u32), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(format!("{}: not a RIFF/WAVE file", path.display()));
+    }
+    let mut pos = 12usize;
+    let mut fmt: Option<(u16, u16, u32, u16)> = None;
+    let mut data: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
+        let body = &bytes[pos + 8..(pos + 8 + size).min(bytes.len())];
+        match id {
+            b"fmt " if body.len() >= 16 => {
+                fmt = Some((
+                    u16::from_le_bytes([body[0], body[1]]),
+                    u16::from_le_bytes([body[2], body[3]]),
+                    u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+                    u16::from_le_bytes([body[14], body[15]]),
+                ));
+            }
+            b"data" => data = Some(body),
+            _ => {}
+        }
+        pos += 8 + size + (size & 1);
+    }
+    let (tag, channels, rate, bits) = fmt.ok_or("missing fmt chunk")?;
+    let data = data.ok_or("missing data chunk")?;
+    if channels == 0 || bits % 8 != 0 || bits == 0 {
+        return Err(format!("wav: channels={channels} bits={bits}"));
+    }
+    let bytes_per = bits as usize / 8;
+    let frame_bytes = channels as usize * bytes_per;
+    let frames = data.len() / frame_bytes;
+    let mut left = Vec::with_capacity(frames);
+    let mut right = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let mut sample = |ch: usize| -> Result<f32, String> {
+            let at = f * frame_bytes + ch * bytes_per;
+            Ok(match (tag, bits) {
+                (3, 32) => f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]),
+                (1 | 0xFFFE, 16) => i16::from_le_bytes([data[at], data[at + 1]]) as f32 / 32768.0,
+                (1 | 0xFFFE, 24) => {
+                    (((data[at + 2] as i32) << 24 | (data[at + 1] as i32) << 16 | (data[at] as i32) << 8) >> 8) as f32
+                        / 8_388_608.0
+                }
+                (1 | 0xFFFE, 32) => {
+                    i32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as f32 / 2_147_483_648.0
+                }
+                _ => return Err(format!("wav: unsupported tag {tag} bits {bits}")),
+            })
+        };
+        left.push(sample(0)?);
+        right.push(sample(if channels > 1 { 1 } else { 0 })?);
+    }
+    if frames == 0 {
+        return Err("wav: no frames".into());
+    }
+    Ok((left, right, rate))
+}
+
+fn write_npy_i64_val(path: &str, data: &[i64], shape: &[usize]) -> Result<(), String> {
+    use std::io::Write;
+    let shape_txt = if shape.len() == 1 {
+        format!("({},)", shape[0])
+    } else {
+        format!("({})", shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "))
+    };
+    let mut dict = format!("{{'descr': '<i8', 'fortran_order': False, 'shape': {shape_txt}, }}");
+    let prefix = 10usize;
+    let mut header_len = dict.len() + 1;
+    let pad = (16 - ((prefix + header_len) % 16)) % 16;
+    header_len += pad;
+    dict.push_str(&" ".repeat(pad));
+    dict.push('\n');
+    let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    f.write_all(b"\x93NUMPY\x01\x00").map_err(|e| e.to_string())?;
+    f.write_all(&(header_len as u16).to_le_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(dict.as_bytes()).map_err(|e| e.to_string())?;
+    for v in data {
+        f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

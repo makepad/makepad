@@ -735,45 +735,16 @@ impl<'a> Gc<'a> {
         Ok((scanned, marked, last, exhausted))
     }
 
-    /// The exact input bytes a QUEUED operation was armed against. The
-    /// operation may outlive the retirement of its base asset; its worker
-    /// must still find the bytes the store handed it.
+    /// The operations queue left the store (aicore P7): this mark source
+    /// is a finished no-op — nothing queues inputs any more, and rows on an
+    /// old root pin nothing.
     fn mark_queued_operations(
         &self,
-        db: &Db,
-        row: &RunRow,
-        batch: u32,
+        _db: &Db,
+        _row: &RunRow,
+        _batch: u32,
     ) -> ServerResult<(u64, u64, Option<Vec<u8>>, bool)> {
-        // The state test is applied in Rust, not in the WHERE: a filtered
-        // page could return fewer rows than the batch while more rows exist
-        // beyond the cursor, which would end the source early. Every mark
-        // source pages on its ordering key alone for exactly that reason.
-        let mut s = db.prepare(
-            "gc mark queued operations",
-            "SELECT operation_id, spec, state FROM operations
-             WHERE operation_id > ?1
-             ORDER BY operation_id LIMIT ?2",
-        )?;
-        s.bind_blob(1, row.mark_cursor.as_deref().unwrap_or(&[]))?;
-        s.bind_u64(2, batch as u64)?;
-        let mut rows: Vec<(Vec<u8>, Vec<u8>, String)> = Vec::new();
-        while s.step()? {
-            rows.push((s.column_blob(0), s.column_blob(1), s.column_text(2)));
-        }
-        drop(s);
-        let exhausted = (rows.len() as u32) < batch;
-        let last = rows.last().map(|r| r.0.clone());
-        let mut marked = 0u64;
-        let scanned = rows.len() as u64;
-        for (_, spec, state) in &rows {
-            if state != "queued" {
-                continue;
-            }
-            for blob in crate::operations::spec_input_blobs(spec)? {
-                marked += mark_blob(db, row.run_id, &blob)?;
-            }
-        }
-        Ok((scanned, marked, last, exhausted))
+        Ok((0, 0, None, true))
     }
 
     // ---- phase 3: sweep ----------------------------------------------------

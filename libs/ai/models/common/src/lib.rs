@@ -8,6 +8,7 @@
 //! Family-private internals stay in the family crates.
 
 pub mod accel;
+pub mod audio;
 pub mod backend;
 pub mod dtype;
 pub mod error;

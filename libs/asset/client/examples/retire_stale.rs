@@ -23,7 +23,7 @@ fn main() {
 
     let mut config = ClientConfig::new(std::env::temp_dir().join("retire-stale-cache"));
     config.token = Some(token);
-    let mut client =
+    let client =
         AssetClient::connect(config, ApiEndpoints { control, data }, None).expect("connect");
 
     let mut cursor = None;

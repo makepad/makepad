@@ -3097,6 +3097,7 @@ fn bsp46_place(
             height: 0.0,
             align: String::new(),
             flags: 0,
+            ..Default::default()
         });
         i += 1;
     }

@@ -378,9 +378,9 @@ impl AceVaeDecoder {
 
     pub fn decode_device(&self, latents: &[f32], frames: usize) -> Result<(Vec<f32>, Vec<f32>)> {
         use makepad_ai_sfx::sa3::dev_err;
-        use makepad_ai_sfx::sa3::F16Weight;
+        
         use makepad_ai_common::backend::cuda::{
-            gpu_add, gpu_concat_rows, gpu_download, gpu_linear_nt_cached, gpu_slice_rows, gpu_upload,
+            gpu_add, gpu_download, gpu_upload,
             GpuTensor,
         };
 
@@ -495,7 +495,7 @@ impl AceVaeDecoder {
         }
 
         let conv = &self.conv_in;
-        let (mut y, mut nlen) = conv_tm(
+        let (y, nlen) = conv_tm(
             &x, len, &conv.w, &conv.b, conv.out_ch, conv.in_ch, conv.k, conv.dilation, conv.padding, "acevae.in",
         )?;
         x = y;

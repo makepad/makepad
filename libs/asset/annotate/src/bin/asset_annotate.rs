@@ -1,10 +1,10 @@
-//! The annotation pass's operator tool.
+//! The annotation record's operator tool.
 //!
-//! The pass itself does not run here any more: it is an Asset Server job
-//! (`annotate.asset`) that a `vision` fleet box claims off the queue. What
-//! is left is what an operator still needs a command for — QUEUE the work
-//! for a kit or the whole catalog, CURATE a kind, and WIPE what the pass
-//! wrote — plus `--list-kits`, which the Asset UI reads.
+//! The store's annotation JOB QUEUE is gone (aicore P7) — nothing mints
+//! `annotate.asset` jobs any more, and a vision pass runs from a creator
+//! app over its own fleet connection. What an operator still needs a
+//! command for: CURATE a kind, WIPE what a pass wrote, verify the pass is
+//! nondestructive — plus `--list-kits`, which the Asset UI reads.
 //!
 //! Nothing here creates an asset revision, uploads a blob, or touches an
 //! alias: the pass writes only the mutable annotation record, so a full wipe
@@ -51,8 +51,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: makepad-asset-annotate [options]
 
-With no verb: QUEUE the annotation work the catalog still owes as
-`annotate.asset` jobs, which a vision fleet box claims and runs.
+Verbs (one required): --set-kind / --wipe / --verify-nondestructive /
+--list-kits. (The QUEUE verb left with the store's job queue.)
 
   --store DIR         asset-server state dir (default {DEFAULT_STORE})
   --kit NAME          queue/select only assets carrying this category label
@@ -357,45 +357,12 @@ fn run() -> Result<(), String> {
         let candidates = load_candidates(&mut db, &cfg)?;
         return wipe(&api, &candidates, cfg.dry_run);
     }
-    queue(&api, &cfg)
-}
-
-/// Queue what the catalog still owes, as jobs the fleet claims.
-///
-/// ONE request: the server picks the assets (`annotation_backlog`), mints a
-/// job id derived from asset + annotator version so a second sweep is a
-/// no-op, and the vision boxes drain it. That is the whole reason this is
-/// not a loop in a command any more — the work has to outlive the shell it
-/// was asked from.
-fn queue(api: &Api, cfg: &Config) -> Result<(), String> {
-    let before = api
-        .annotate_summary(cfg.kit.as_deref())
-        .map_err(|e| format!("annotate summary: {e:?}"))?;
-    let label = cfg.kit.as_deref().unwrap_or("the whole catalog");
-    println!(
-        "{label}: {} described at {}, {} owed · queue {} pending / {} running / {} failed",
-        before.annotated,
-        before.version_tag,
-        before.owed,
-        before.pending,
-        before.running,
-        before.failed
-    );
-    if cfg.dry_run {
-        println!("dry run: would queue up to {} of them", cfg.limit.min(before.owed));
-        return Ok(());
-    }
-    if before.owed == 0 {
-        return Ok(());
-    }
-    let queued = api
-        .annotate_backlog(cfg.limit, cfg.kit.as_deref(), cfg.epoch)
-        .map_err(|e| format!("annotate backlog: {e:?}"))?;
-    println!(
-        "queued {} · {} already queued or done · {} still owed",
-        queued.enqueued, queued.skipped, queued.remaining
-    );
-    Ok(())
+    // The QUEUE verb left with the store's job queue (aicore P7): nothing
+    // mints annotate.asset jobs any more. Curation, wipe, verify and
+    // --list-kits are the surviving verbs.
+    Err("pick a verb: --set-kind / --wipe / --verify-nondestructive / --list-kits \
+         (the annotation QUEUE left with the store's job queue)"
+        .to_string())
 }
 
 /// Catalog ids are stored as 16 raw bytes; the pass moves them as hex.

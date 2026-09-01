@@ -192,7 +192,7 @@ fn main() {
     eprintln!("sheet grid gives {max_patches} patches ({} tokens)", max_patches / 4);
 
     let t_load = Instant::now();
-    let mut tower = VisionTower::load(&args.mmproj, max_patches).expect("vision tower");
+    let mut tower = VisionTower::load(&args.mmproj).expect("vision tower");
     let mut session = LlamaSession::load(
         &args.model,
         LlamaSessionConfig {
