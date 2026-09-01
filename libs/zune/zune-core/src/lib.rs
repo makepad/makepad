@@ -44,7 +44,7 @@
 //!  
 //!
 #![cfg_attr(not(feature = "std"), no_std)]
-#![macro_use]
+#[macro_use]
 extern crate alloc;
 extern crate core;
 
