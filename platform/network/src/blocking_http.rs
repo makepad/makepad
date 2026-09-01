@@ -12,6 +12,8 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "windows"))]
@@ -691,41 +693,62 @@ fn apple_tls_connect(
     Ok(Transport::Tls(tls))
 }
 
+/// How many connects — a DNS lookup and a TCP handshake, each on a thread
+/// that cannot be killed if the network hangs — may be in the air at once.
+/// The cap is here to bound those threads, not to serialise the fetching:
+/// one at a time turned a gigabit line into a queue, because every request
+/// closes its connection and so every request pays a fresh connect. Raise it
+/// with `MAKEPAD_HTTP_MAX_CONNECTS` for a crawl that wants the whole pipe.
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-static CONNECT_SLOT: AtomicBool = AtomicBool::new(false);
-#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-static CONNECT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+const CONNECT_SLOTS_DEFAULT: usize = 64;
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-fn acquire_connect_slot(cancel: &CancelToken, deadline: Instant) -> Result<u64, Error> {
+fn connect_slots() -> &'static (Mutex<usize>, Condvar) {
+    static SLOTS: std::sync::OnceLock<(Mutex<usize>, Condvar)> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let n = std::env::var("MAKEPAD_HTTP_MAX_CONNECTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(CONNECT_SLOTS_DEFAULT);
+        (Mutex::new(n), Condvar::new())
+    })
+}
+
+/// One acquired connect permit. The permit goes back exactly once, whether
+/// the connect finished or the caller gave up on it first — whoever gets
+/// there first wins the swap, and the loser's call does nothing.
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct ConnectSlot(Arc<AtomicBool>);
+
+
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
+fn acquire_connect_slot(cancel: &CancelToken, deadline: Instant) -> Result<ConnectSlot, Error> {
+    let (lock, cv) = connect_slots();
+    let mut free = lock.lock().map_err(|_| Error::Io)?;
     loop {
         check_watch(cancel, deadline)?;
-        if CONNECT_SLOT
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return Ok(CONNECT_EPOCH.load(Ordering::Acquire));
+        if *free > 0 {
+            *free -= 1;
+            return Ok(ConnectSlot(Arc::new(AtomicBool::new(false))));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        // Wake on a returned permit; the slice keeps cancel and deadline live.
+        let slice = remaining(deadline)?.min(IO_SLICE);
+        free = cv.wait_timeout(free, slice).map_err(|_| Error::Io)?.0;
     }
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-fn release_connect_slot(epoch: u64) {
-    if CONNECT_EPOCH.load(Ordering::Acquire) == epoch {
-        CONNECT_SLOT.store(false, Ordering::Release);
+fn return_connect_slot(slot: &ConnectSlot) {
+    if slot.0.swap(true, Ordering::AcqRel) {
+        return;
     }
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-fn abandon_connect_slot(epoch: u64) {
-    let _ = CONNECT_EPOCH.compare_exchange(
-        epoch,
-        epoch.wrapping_add(1),
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    );
-    CONNECT_SLOT.store(false, Ordering::Release);
+    let (lock, cv) = connect_slots();
+    if let Ok(mut free) = lock.lock() {
+        *free += 1;
+        cv.notify_one();
+    }
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -755,12 +778,13 @@ fn tcp_connect_plain(
     cancel: &CancelToken,
     deadline: Instant,
 ) -> Result<TcpStream, Error> {
-    let epoch = acquire_connect_slot(cancel, deadline)?;
+    let slot = acquire_connect_slot(cancel, deadline)?;
     let host = url.host.clone();
     let port = url.port;
     let https = url.https;
     let worker_deadline = deadline;
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let worker_slot = slot.clone();
     match std::thread::Builder::new()
         .name("makepad-http-connect".into())
         .spawn(move || {
@@ -777,11 +801,11 @@ fn tcp_connect_plain(
                 try_connect_addrs(addrs, worker_deadline)
             })();
             let _ = tx.send(result);
-            release_connect_slot(epoch);
+            return_connect_slot(&worker_slot);
         }) {
         Ok(_) => {}
         Err(_) => {
-            release_connect_slot(epoch);
+            return_connect_slot(&slot);
             return Err(Error::Io);
         }
     }
@@ -789,14 +813,14 @@ fn tcp_connect_plain(
         match check_watch(cancel, deadline) {
             Ok(()) => {}
             Err(e) => {
-                abandon_connect_slot(epoch);
+                return_connect_slot(&slot);
                 return Err(e);
             }
         }
         let wait = match remaining(deadline) {
             Ok(d) => d.min(IO_SLICE),
             Err(e) => {
-                abandon_connect_slot(epoch);
+                return_connect_slot(&slot);
                 return Err(e);
             }
         };
