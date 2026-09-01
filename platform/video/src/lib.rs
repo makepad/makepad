@@ -45,6 +45,7 @@
 //! interleaved with video or in one block at the end for short clips.
 
 pub mod annex_b;
+pub mod mp4_first_frame;
 pub mod nv12;
 pub mod stream_decoder;
 pub mod stream_encoder;
@@ -180,6 +181,11 @@ use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
 mod apple_decoder;
 #[cfg(target_os = "macos")]
 mod apple_encoder;
+#[cfg(target_os = "macos")]
+mod apple_intra_frame;
+// Pure Rust and portable, but only the macOS still-writer uses it so far.
+#[cfg(target_os = "macos")]
+mod mp4_single_frame;
 #[cfg(target_os = "macos")]
 mod apple_stream_encoder;
 #[cfg(target_os = "macos")]
@@ -403,6 +409,47 @@ impl DecodedVideoFrame {
     }
 }
 
+/// Hardware-decodes the FIRST video frame of an in-memory mp4/mov — no temp
+/// file anywhere. Windows reads the container through a Media Foundation
+/// source reader over an in-RAM byte stream (hardware transforms enabled,
+/// same path as [`VideoFileDecoder::open`]); macOS demuxes the first sample
+/// with [`mp4_first_frame`] and feeds it to the VideoToolbox stream decoder.
+pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, VideoFileError> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut decoder = VideoFileDecoder::open_bytes(bytes)?;
+        return decoder
+            .next_frame()?
+            .ok_or_else(|| VideoFileError::new("first frame decode: container has no frames"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let au = mp4_first_frame::first_access_unit(bytes)?;
+        let mut decoder = VideoStreamDecoder::new(au.codec)?;
+        let mut frames = decoder.push_packet(&au.annex_b, 0)?;
+        if frames.is_empty() {
+            frames = decoder.flush()?;
+        }
+        let frame = frames
+            .into_iter()
+            .next()
+            .ok_or_else(|| VideoFileError::new("first frame decode: decoder produced no frame"))?;
+        return Ok(DecodedVideoFrame {
+            pts_100ns: frame.pts_100ns,
+            width: frame.width,
+            height: frame.height,
+            nv12: frame.nv12,
+        });
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = bytes;
+        Err(VideoFileError::new(
+            "in-memory first frame decode is not implemented on this platform yet",
+        ))
+    }
+}
+
 /// One decoded chunk of interleaved 16-bit PCM audio.
 pub struct DecodedAudioChunk {
     pub pts_100ns: i64,
@@ -443,6 +490,20 @@ impl VideoFileDecoder {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
         }
+    }
+
+    /// Open an in-memory mp4 for decoding, never touching the filesystem.
+    /// Windows only: Media Foundation reads any container from a RAM byte
+    /// stream; the other platforms' demuxers are file-bound, so a single
+    /// frame goes through [`decode_first_frame_from_bytes`] instead.
+    #[cfg(target_os = "windows")]
+    pub fn open_bytes(bytes: &[u8]) -> Result<Self, VideoFileError> {
+        let os = OsVideoFileDecoder::open_bytes(bytes)?;
+        Ok(Self {
+            os,
+            pending_video: None,
+            pending_audio: None,
+        })
     }
 
     pub fn info(&self) -> &VideoFileInfo {
@@ -538,4 +599,36 @@ impl VideoFileDecoder {
             return Err(VideoFileError::new(UNSUPPORTED));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Single still pictures
+// ---------------------------------------------------------------------------
+
+/// Write one intra frame as its own mp4, without standing up a file writer.
+///
+/// A cache that keeps a picture per file pays the container cost on every
+/// picture, and for a single frame that cost dwarfs the encode: measured on an
+/// M3 Max, `AVAssetWriter` wants ~13 ms to open and ~34 ms to finalize around
+/// ~0.2 ms of HEVC. This drives the compression session directly and writes
+/// the boxes itself, so the file is the same single-frame mp4 the writer
+/// produced and the price is the encode.
+///
+/// `nv12` is a tightly packed NV12 buffer: `width * height` luma followed by
+/// interleaved chroma for `ceil(height / 2)` rows.
+#[cfg(target_os = "macos")]
+pub fn encode_intra_frame_mp4(
+    nv12: &[u8],
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_bps: u32,
+    codec: VideoFileCodec,
+) -> Result<Vec<u8>, VideoFileError> {
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err(VideoFileError::new(format!(
+            "invalid frame size {width}x{height} (must be nonzero and even)"
+        )));
+    }
+    apple_intra_frame::encode_intra_frame_mp4(nv12, width, height, fps.max(1), bitrate_bps, codec)
 }
