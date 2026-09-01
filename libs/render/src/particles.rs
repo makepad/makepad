@@ -169,16 +169,27 @@ impl ParticleSystem {
         });
     }
 
-    /// Step every emitter and particle. `entity_pos` resolves entity-anchored
-    /// emitters — the host passes a lookup into the world it is drawing, so
-    /// particles follow objects without the sim carrying particle state.
-    pub fn step(&mut self, dt: f32, entity_pos: &dyn Fn(u64) -> Option<Vec3f>) {
+    /// Step every emitter and particle. `entity_pose` resolves entity-anchored
+    /// emitters to (position, yaw) — the host passes a lookup into the world
+    /// it is drawing, so particles follow objects without the sim carrying
+    /// particle state, and a local-offset anchor turns with its body.
+    pub fn step(&mut self, dt: f32, entity_pose: &dyn Fn(u64) -> Option<(Vec3f, f32)>) {
         // Emit.
         let mut pending: Vec<(Vec3f, ParticleSpec, usize)> = Vec::new();
         for e in self.emitters.iter_mut() {
             let Some(at) = (match e.anchor {
                 EmitterAnchor::Point(p) => Some(p),
-                EmitterAnchor::Entity(id) => entity_pos(id),
+                EmitterAnchor::Entity(id) => entity_pose(id).map(|(p, _)| p),
+                EmitterAnchor::EntityLocal(id, off) => entity_pose(id).map(|(p, yaw)| {
+                    // The sim's heading convention: yaw 0 faces -Z, ccw
+                    // positive. Rotate the local offset into world.
+                    let (sy, cy) = (yaw.sin(), yaw.cos());
+                    vec3f(
+                        p.x + off.x * cy - off.z * sy,
+                        p.y + off.y,
+                        p.z + off.x * sy + off.z * cy,
+                    )
+                }),
             }) else {
                 continue;
             };
@@ -192,7 +203,9 @@ impl ParticleSystem {
         // Entity-anchored emitters whose entity is gone stop emitting; drop
         // them so a long game does not accumulate dead emitters.
         self.emitters.retain(|e| match e.anchor {
-            EmitterAnchor::Entity(id) => entity_pos(id).is_some(),
+            EmitterAnchor::Entity(id) | EmitterAnchor::EntityLocal(id, _) => {
+                entity_pose(id).is_some()
+            }
             EmitterAnchor::Point(_) => true,
         });
         for (at, spec, n) in pending {
@@ -235,7 +248,7 @@ impl ParticleSystem {
 mod tests {
     use super::*;
 
-    fn no_entities(_: u64) -> Option<Vec3f> {
+    fn no_entities(_: u64) -> Option<(Vec3f, f32)> {
         None
     }
 
@@ -318,7 +331,7 @@ mod tests {
             anchor: EmitterAnchor::Entity(42),
             spec: s,
         }]);
-        let at_x10 = |id: u64| (id == 42).then_some(vec3f(10.0, 0.0, 0.0));
+        let at_x10 = |id: u64| (id == 42).then_some((vec3f(10.0, 0.0, 0.0), 0.0));
         ps.step(1.0 / 60.0, &at_x10);
         assert_eq!(ps.live_count(), 1);
         assert!((ps.instances()[0].pos.x - 10.0).abs() < 0.5);
