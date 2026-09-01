@@ -1,4 +1,13 @@
-// mildly stripped down version of native_dialog_rs dialog interface.
+//! Native file and folder dialogs.
+//!
+//! One shape for every OS: an app fills in a [`FileDialog`], hands it to
+//! `Cx`, and the answer arrives later as a [`FileDialogAction`] — because
+//! a modal is answered by a person, long after the call that opened it
+//! returned. Every dialog carries an [`id`](FileDialog::id) which comes
+//! back on the action, so an app with an "import statement" picker and an
+//! "attach receipt" picker can tell the two answers apart.
+
+use crate::makepad_live_id::LiveId;
 use std::path::PathBuf;
 
 /// Represents a set of file extensions and their description.
@@ -16,6 +25,11 @@ pub struct FileDialog {
     pub location: Option<PathBuf>,
     pub filters: Vec<Filter>,
     pub title: Option<String>,
+    /// Let the user choose more than one file. Open dialogs only.
+    pub multiple: bool,
+    /// Echoed back on the action, so an app can tell which of its dialogs
+    /// answered. `LiveId(0)` when the app never set one.
+    pub id: LiveId,
 }
 
 impl FileDialog {
@@ -26,6 +40,8 @@ impl FileDialog {
             location: None,
             filters: vec![],
             title: None,
+            multiple: false,
+            id: LiveId(0),
         }
     }
 
@@ -79,6 +95,18 @@ impl FileDialog {
         self.filters = vec![];
         self
     }
+
+    /// Allow selecting several files at once (open dialogs only).
+    pub fn set_multiple(mut self, multiple: bool) -> Self {
+        self.multiple = multiple;
+        self
+    }
+
+    /// Tag this dialog, so its answer can be told from another's.
+    pub fn set_id(mut self, id: LiveId) -> Self {
+        self.id = id;
+        self
+    }
 }
 
 impl Default for FileDialog {
@@ -96,10 +124,45 @@ impl Default for FileDialog {
 /// import needs to disarm it again.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum FileDialogAction {
+    /// The user chose these files. One path unless the dialog asked for
+    /// [`FileDialog::multiple`]; never empty.
+    FileSelected { id: LiveId, paths: Vec<PathBuf> },
+    /// The user dismissed a file-open dialog without choosing.
+    FileCancelled { id: LiveId },
+    /// The user named this file to save to. The file may or may not exist
+    /// — the OS has already asked about overwriting.
+    SaveFileSelected { id: LiveId, path: PathBuf },
+    SaveFileCancelled { id: LiveId },
     /// The user chose this folder in a folder-select dialog.
+    ///
+    /// The folder variants predate the id and keep their shape: an app has
+    /// one folder picker, and three shipped apps match on them.
     FolderSelected(PathBuf),
     /// The user dismissed a folder-select dialog without choosing.
     FolderCancelled,
     #[default]
     None,
+}
+
+impl FileDialogAction {
+    /// The dialog this answers, for apps that route by id.
+    pub fn id(&self) -> LiveId {
+        match self {
+            FileDialogAction::FileSelected { id, .. }
+            | FileDialogAction::FileCancelled { id }
+            | FileDialogAction::SaveFileSelected { id, .. }
+            | FileDialogAction::SaveFileCancelled { id } => *id,
+            _ => LiveId(0),
+        }
+    }
+
+    /// The single chosen path, for the common one-file case.
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            FileDialogAction::FileSelected { paths, .. } => paths.first(),
+            FileDialogAction::SaveFileSelected { path, .. } => Some(path),
+            FileDialogAction::FolderSelected(path) => Some(path),
+            _ => None,
+        }
+    }
 }

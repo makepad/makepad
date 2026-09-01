@@ -1904,6 +1904,21 @@ impl Cx {
             .push_back(CxOsOp::SelectFileDialog(FileDialog::new()));
     }
 
+    /// Open the platform's native file picker, configured (title, start
+    /// location, type filters, multi-select, id) by `dialog`. The answer
+    /// arrives later as a [`crate::file_dialogs::FileDialogAction`] in the
+    /// actions pass — `FileSelected` with the chosen paths, or
+    /// `FileCancelled`; both carry the dialog's id back.
+    pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
+        self.platform_ops.push_back(CxOsOp::SelectFileDialog(dialog));
+    }
+
+    /// Open the platform's native save panel. The OS asks about
+    /// overwriting before answering `SaveFileSelected`.
+    pub fn open_save_file_dialog(&mut self, dialog: FileDialog) {
+        self.platform_ops.push_back(CxOsOp::SaveFileDialog(dialog));
+    }
+
     pub fn open_system_savefolder_dialog(&mut self) {
         self.platform_ops
             .push_back(CxOsOp::SaveFolderDialog(FileDialog::new()));
