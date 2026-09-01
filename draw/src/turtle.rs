@@ -1749,7 +1749,6 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                         0.0,
                                         false,
                                     );
-                                    turtle = self.turtles.last_mut().unwrap();
                                 }
                             }
 

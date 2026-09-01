@@ -40,7 +40,6 @@ use crate::{
     widget::*,
     widget_tree::{live_id_token, widget_type_names, CxWidgetExt},
 };
-use crate::makepad_platform::remote;
 use crate::makepad_script::script_eval;
 use crate::Animate;
 use crate::ButtonAction;

@@ -1635,10 +1635,13 @@ pub struct MetalCx {
     pass_shaders: RefCell<Vec<LiveId>>,
     /// The last command-buffer seq of each recent repaint, oldest first —
     /// the unit of the frame-level GPU backpressure (`frames_in_flight`).
+    #[allow(dead_code)] // read by the macos present gate
     repaint_tail_seqs: VecDeque<u64>,
     /// Repaints skipped by that backpressure (diagnostics).
+    #[allow(dead_code)] // read by the macos present gate
     pub(crate) backpressure_skips: u64,
     /// Once-per-second cadence for the opt-in staging/command-buffer counters.
+    #[allow(dead_code)] // read by the macos present gate
     memory_trace_at: Instant,
 }
 
@@ -2072,6 +2075,7 @@ impl MetalCx {
     /// Called at the top of every repaint: records the previous repaint's
     /// last command buffer, so `frames_in_flight` counts repaints the GPU
     /// has not finished.
+    #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn begin_repaint(&mut self) {
         if self.cb_seq > 0 && self.repaint_tail_seqs.back() != Some(&self.cb_seq) {
             self.repaint_tail_seqs.push_back(self.cb_seq);
@@ -2082,6 +2086,7 @@ impl MetalCx {
     }
 
     /// Repaints whose command buffers have not all completed.
+    #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn frames_in_flight(&self) -> usize {
         let completed = METAL_CB_COMPLETED.load(Ordering::Acquire);
         self.repaint_tail_seqs
@@ -2093,6 +2098,7 @@ impl MetalCx {
     /// `MAKEPAD_GPU_TRACE=1`: report the allocations whose lifetime follows
     /// command-buffer completion. The pool is bounded, while `used` identifies
     /// work waiting on the GPU; growth there is queue growth, not pool growth.
+    #[allow(dead_code)] // called by the macos present gate
     pub(crate) fn trace_memory_once_per_second(&mut self) {
         if gpu_trace_threshold_ms().is_none() || self.memory_trace_at.elapsed() < Duration::from_secs(1)
         {

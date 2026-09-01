@@ -549,6 +549,7 @@ impl std::fmt::Debug for CxOsOp {
 /// Requeue an OS op that cannot run yet. FIFO: append so remaining already-queued
 /// ops still run first. Returns `true` if the drain should continue (`len() > 1`);
 /// `false` if this is the only op left — break and retry on the next event.
+#[allow(dead_code)] // only drivers that defer ops call this (macos, windows today)
 pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp) -> bool {
     platform_ops.push_back(op);
     platform_ops.len() > 1
@@ -1019,6 +1020,7 @@ impl Cx {
     /// still run first in this drain. Returns `true` if the drain should
     /// continue (`len() > 1`); `false` if this is the only op left — break and
     /// retry on the next event instead of spinning.
+    #[allow(dead_code)] // only drivers that defer ops call this (macos, windows today)
     pub(crate) fn defer_platform_op(&mut self, op: CxOsOp) -> bool {
         defer_platform_op(&mut self.platform_ops, op)
     }

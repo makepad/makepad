@@ -15,7 +15,6 @@
 //! through [`FileDialogAction`].
 
 use crate::cx::Cx;
-use crate::cx_api::CxOsApi;
 use crate::file_dialogs::{FileDialog, FileDialogAction};
 use std::path::PathBuf;
 use std::process::Command;
