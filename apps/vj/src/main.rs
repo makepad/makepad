@@ -1960,6 +1960,13 @@ script_mod! {
                                                 chip_image := PillButton{width: Fill text: "IMAGE"}
                                                 chip_mesh := PillButton{width: Fill text: "MESH"}
                                                 chip_map := PillButton{width: Fill text: "MAP"}
+                                                // The special pages ride the
+                                                // same rail: not content
+                                                // lanes but places — any
+                                                // content chip returns to
+                                                // the grid.
+                                                chip_lights := PillButton{width: Fill text: "LIGHTS"}
+                                                chip_archive := PillButton{width: Fill text: "ARCHIVE"}
                                                 // (IMPORT moved to its dock
                                                 // card in the console band —
                                                 // the rail keeps REMOVE, the
@@ -1968,38 +1975,6 @@ script_mod! {
                                                 // scrollbar + pager already
                                                 // say where you are.)
                                                 View{width: Fill height: Fill}
-                                                // THE PAGE TABS, tiny: a
-                                                // rarely-clicked flip between
-                                                // the grid and the lights
-                                                // desk — housekeeping beside
-                                                // IMPORT/REMOVE, not primary
-                                                // navigation.
-                                                View{
-                                                    width: Fill height: Fit
-                                                    flow: Right spacing: 4
-                                                    align: Align{x: 0.0, y: 0.5}
-                                                    Tip{ text: "Video console"
-                                                        lower_tab_vj := IconButton{
-                                                            width: 24 height: 20
-                                                            icon_walk: Walk{width: 10 height: Fit}
-                                                            draw_icon +: { svg: crate_resource("self:resources/icons/vj.svg") }
-                                                        }
-                                                    }
-                                                    Tip{ text: "Lighting desk"
-                                                        lower_tab_lights := IconButton{
-                                                            width: 24 height: 20
-                                                            icon_walk: Walk{width: 10 height: Fit}
-                                                            draw_icon +: { svg: crate_resource("self:resources/icons/lights.svg") }
-                                                        }
-                                                    }
-                                                    Tip{ text: "Internet Archive"
-                                                        lower_tab_archive := IconButton{
-                                                            width: 24 height: 20
-                                                            icon_walk: Walk{width: 10 height: Fit}
-                                                            draw_icon +: { svg: crate_resource("self:resources/icons/archive.svg") }
-                                                        }
-                                                    }
-                                                }
                                                 // Library housekeeping sits
                                                 // at the FOOT with the pager,
                                                 // not among the type chips:
@@ -6969,9 +6944,7 @@ impl App {
         self.ui
             .page_flip(cx, ids!(lower_pages))
             .set_active_page(cx, tab.page().into());
-        self.paint_icon_button(cx, ids!(lower_tab_vj), tab == LowerTab::Grid);
-        self.paint_icon_button(cx, ids!(lower_tab_lights), tab == LowerTab::Lights);
-        self.paint_icon_button(cx, ids!(lower_tab_archive), tab == LowerTab::Archive);
+        self.sync_lane_chips_ui(cx);
         if tab == LowerTab::Archive {
             self.sync_archive_ui(cx);
         }
@@ -6981,7 +6954,7 @@ impl App {
     // ---- ARCHIVE.ORG panel --------------------------------------------------
 
     fn handle_archive_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(lower_tab_archive)).clicked(actions) {
+        if self.ui.button(cx, ids!(chip_archive)).clicked(actions) {
             self.set_lower_tab(cx, LowerTab::Archive);
             self.save_gen_panel();
         }
@@ -8555,10 +8528,15 @@ p2 {}
     }
 
     /// Paint the ONE radio group of lane chips (and the mode buttons).
+    /// The special pages (LIGHTS, ARCHIVE) are part of the same radio: when
+    /// one of them is up, no content lane reads selected.
     fn sync_lane_chips_ui(&mut self, cx: &mut Cx) {
+        let on_grid = self.lower_tab == LowerTab::Grid;
         for (chip, lane, label) in LANE_CHIPS {
-            self.paint_chip(cx, chip, self.grid_lane == lane, Some(label));
+            self.paint_chip(cx, chip, on_grid && self.grid_lane == lane, Some(label));
         }
+        self.paint_chip(cx, ids!(chip_lights), self.lower_tab == LowerTab::Lights, Some("LIGHTS"));
+        self.paint_chip(cx, ids!(chip_archive), self.lower_tab == LowerTab::Archive, Some("ARCHIVE"));
         for (button, surface) in MODE_BUTTONS {
             self.paint_chip(cx, button, self.apc.surface == surface, None);
         }
@@ -8618,8 +8596,14 @@ p2 {}
     }
 
     /// Radio semantics: a chip click selects that lane alone. One category
-    /// is ALWAYS selected — clicking the selected chip is a no-op.
+    /// is ALWAYS selected — clicking the selected chip is a no-op. From the
+    /// LIGHTS or ARCHIVE page, any content chip is also the way back: it
+    /// flips the lower region to the grid.
     fn lane_chip_clicked(&mut self, cx: &mut Cx, lane: GridLane) {
+        if self.lower_tab != LowerTab::Grid {
+            self.set_lower_tab(cx, LowerTab::Grid);
+            self.save_gen_panel();
+        }
         self.set_lane(cx, lane);
     }
 
@@ -23374,11 +23358,7 @@ impl MatchEvent for App {
         }
 
         // ---- lower-region tabs ----
-        if self.ui.button(cx, ids!(lower_tab_vj)).clicked(actions) {
-            self.set_lower_tab(cx, LowerTab::Grid);
-            self.save_gen_panel();
-        }
-        if self.ui.button(cx, ids!(lower_tab_lights)).clicked(actions) {
+        if self.ui.button(cx, ids!(chip_lights)).clicked(actions) {
             self.set_lower_tab(cx, LowerTab::Lights);
             self.save_gen_panel();
         }
