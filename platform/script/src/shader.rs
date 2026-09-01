@@ -216,6 +216,9 @@ pub struct ShaderFnCompiler {
     pub debug: bool,
     /// Skip the next POP_TO_ME opcode - used when closing an if that had a return
     pub skip_next_pop_to_me: bool,
+    /// Skip the next NEG opcode: the sign of a `/**x*/ -lit` literal was
+    /// folded into the table constant just pushed.
+    pub skip_next_neg: bool,
 }
 
 #[derive(Default)]
@@ -502,8 +505,11 @@ impl ShaderFnCompiler {
                     self.handle_logic_phi(vm, output);
                     self.handle_if_else_phi(vm, output);
                 } else {
-                    // id or immediate value
-                    self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
+                    // id or immediate value — an annotated float literal
+                    // becomes a table constant under const_table mode
+                    if !(output.const_table && self.try_push_table_const(vm, output, opcode)) {
+                        self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
+                    }
                     self.trap.goto_next();
                     self.handle_logic_phi(vm, output);
                     self.handle_if_else_phi(vm, output);
@@ -741,6 +747,7 @@ impl ShaderFnCompiler {
                                 key: id,
                                 shader_name,
                                 ty: pod_ty,
+                                table_const: None,
                             });
                             // Also add to IO list
                             if !output.io.iter().any(|io| {
@@ -1001,6 +1008,181 @@ impl ShaderFnCompiler {
         unique_name
     }
 
+    /// Const-table mode: a float literal whose source token carries a
+    /// `/** name … */` value annotation is lifted into the shader's constant
+    /// table — registered as one more scope uniform (`ct<n>`) and read from
+    /// the scope-uniform buffer — so a runtime patch of that slot changes
+    /// the look with no recompile and no source edit. Returns false (fold as
+    /// usual) for anything else: unannotated literals, and int literals,
+    /// which may be loop bounds or array indices a uniform cannot replace
+    /// (an annotated int is reported once so the annotator learns).
+    fn try_push_table_const(
+        &mut self,
+        vm: &ScriptVm,
+        output: &mut ShaderOutput,
+        value: ScriptValue,
+    ) -> bool {
+        let ip = self.trap.ip;
+        let is_int = value.as_u40().is_some();
+        let Some(v) = value.as_f64() else {
+            if is_int {
+                self.warn_annotated_int(vm, ip);
+            }
+            return false;
+        };
+        let (doc, negated) = {
+            let bodies = vm.bx.code.bodies.borrow();
+            let Some(body) = bodies.get(ip.body as usize) else {
+                return false;
+            };
+            let Some(Some(tok)) = body.parser.source_map.get(ip.index as usize) else {
+                return false;
+            };
+            match crate::docs::value_name_at(&body.tokenizer, *tok) {
+                Some(found) => found,
+                None => return false,
+            }
+        };
+        // `/**x*/ -0.5`: the table holds -0.5 and the NEG that follows the
+        // immediate is dropped, so a patch means what the source shows.
+        let v = if negated { -v } else { v };
+        self.skip_next_neg = negated;
+        let expr = self.register_table_const(vm, output, doc, v, ip);
+        let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+        self.stack.push(self.trap.pass(), ShaderType::Pod(pod_f32), expr);
+        true
+    }
+
+    /// The right-hand operand the parser packed into an arithmetic /
+    /// comparison opcode (a whole-number literal: `x + 6.`, `y * 4.`,
+    /// `n - 10.0`). Its source token is the operator; the literal is the
+    /// next token. Annotated float → a table read; else the number as is.
+    pub(crate) fn packed_operand(
+        &mut self,
+        vm: &ScriptVm,
+        output: &mut ShaderOutput,
+        opargs: OpcodeArgs,
+    ) -> (ShaderType, String) {
+        if output.const_table {
+            let ip = self.trap.ip;
+            // (doc, float value): Some(v) lifts; None with a doc is an
+            // annotated int operand, reported below
+            let found = {
+                let bodies = vm.bx.code.bodies.borrow();
+                bodies.get(ip.body as usize).and_then(|body| {
+                    let op_tok = body.parser.source_map.get(ip.index as usize).copied().flatten()?;
+                    let lit_tok = op_tok + 1;
+                    let (doc, _) = crate::docs::value_name_at(&body.tokenizer, lit_tok)?;
+                    Some((doc, crate::docs::float_literal_at(&body.tokenizer, lit_tok)))
+                })
+            };
+            match found {
+                Some((doc, Some(v))) => {
+                    let expr = self.register_table_const(vm, output, doc, v, ip);
+                    let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+                    return (ShaderType::Pod(pod_f32), expr);
+                }
+                Some((_, None)) => self.warn_annotated_int_at(vm, ip),
+                None => {}
+            }
+        }
+        let mut s = self.stack.new_string();
+        write!(s, "{}", opargs.to_u32()).ok();
+        (ShaderType::AbstractInt, s)
+    }
+
+    /// An annotated int literal stays folded (it may be a loop bound or an
+    /// index no uniform can replace): say so where it sits, once per compile.
+    fn warn_annotated_int(&self, vm: &ScriptVm, ip: ScriptIp) {
+        let annotated = {
+            let bodies = vm.bx.code.bodies.borrow();
+            bodies.get(ip.body as usize).is_some_and(|body| {
+                body.parser
+                    .source_map
+                    .get(ip.index as usize)
+                    .copied()
+                    .flatten()
+                    .and_then(|tok| crate::docs::value_name_at(&body.tokenizer, tok))
+                    .is_some()
+            })
+        };
+        if !annotated {
+            return;
+        }
+        self.warn_annotated_int_at(vm, ip);
+    }
+
+    fn warn_annotated_int_at(&self, vm: &ScriptVm, ip: ScriptIp) {
+        if let Some(loc) = vm.bx.code.ip_to_loc(ip) {
+            log_with_level(
+                &loc.file,
+                loc.line,
+                loc.col,
+                loc.line,
+                loc.col,
+                "shader constant table: an annotated INT literal stays folded (only float literals become hot-patchable constants) — write it as a float (`6.`) if it should be tweakable".to_string(),
+                LogLevel::Warning,
+            );
+        }
+    }
+
+    /// Register one table constant (scope-uniform slot `ct<n>`) and return
+    /// the expression that reads it in the current backend.
+    fn register_table_const(
+        &mut self,
+        vm: &ScriptVm,
+        output: &mut ShaderOutput,
+        doc: String,
+        v: f64,
+        ip: ScriptIp,
+    ) -> String {
+        let index = output.table_consts.len();
+        // `ct<n>` never collides with a scope value's field name in practice;
+        // step past one if it does.
+        let mut n = index;
+        let shader_name = loop {
+            let text = format!("ct{}", n);
+            let name = LiveId::from_str_with_lut(&text).unwrap_or_else(|_| LiveId::from_str(&text));
+            if !output.io.iter().any(|io| io.name == name) {
+                break name;
+            }
+            n += 1000;
+        };
+        let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+        output.table_consts.push(ShaderTableConst {
+            shader_name,
+            doc,
+            value: v,
+            ip,
+        });
+        output.scope_uniforms.push(ScopeUniformSource {
+            source_obj: ScriptObject::ZERO,
+            key: shader_name,
+            shader_name,
+            ty: pod_f32,
+            table_const: Some(index),
+        });
+        output.io.push(ShaderIo {
+            kind: ShaderIoKind::ScopeUniform,
+            name: shader_name,
+            ty: pod_f32,
+            buffer_index: None,
+        });
+        let mut s = self.stack.new_string();
+        let (_, prefix) = output
+            .backend
+            .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
+        match prefix {
+            ShaderIoPrefix::Prefix(prefix) => {
+                let io_name = output.backend.map_io_name(shader_name);
+                write!(s, "{}{}", prefix, io_name).ok()
+            }
+            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
+            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
+        };
+        s
+    }
+
     fn push_immediate(
         &mut self,
         value: ScriptValue,
@@ -1138,6 +1320,10 @@ impl ShaderFnCompiler {
         match opcode {
             // Arithmetic
             Opcode::NOT => self.handle_not(vm, output, opargs),
+            Opcode::NEG if self.skip_next_neg => {
+                // the sign was folded into a table constant just pushed
+                self.skip_next_neg = false;
+            }
             Opcode::NEG => self.handle_neg(vm, output, opargs, "-"),
             Opcode::MUL => self.handle_arithmetic(vm, output, opargs, "*", false),
             Opcode::DIV => self.handle_arithmetic(vm, output, opargs, "/", false),

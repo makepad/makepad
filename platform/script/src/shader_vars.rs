@@ -925,6 +925,7 @@ impl ShaderFnCompiler {
                                 key: field_id,
                                 shader_name,
                                 ty: pod_ty,
+                                table_const: None,
                             });
                             // Also add to IO list
                             if !output.io.iter().any(|io| {
@@ -987,6 +988,7 @@ impl ShaderFnCompiler {
                                 key: field_id,
                                 shader_name,
                                 ty: pod_ty,
+                                table_const: None,
                             });
                             if !output.io.iter().any(|io| {
                                 io.name == shader_name

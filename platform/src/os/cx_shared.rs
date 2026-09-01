@@ -1141,6 +1141,12 @@ impl Cx {
 
         self.call_event_handler(&Event::Draw(draw_event));
         self.in_draw_event = false;
+        if let Some(mut hook) = self.post_draw_hook.take() {
+            hook(self);
+            if self.post_draw_hook.is_none() {
+                self.post_draw_hook = Some(hook);
+            }
+        }
 
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();

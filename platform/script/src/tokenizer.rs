@@ -409,12 +409,15 @@ impl ScriptTokenizer {
     }
 
     fn emit_f64(&mut self) {
+        // Measure before clearing: a float token's position was taken from
+        // an already-emptied `temp`, so it pointed one past its terminator —
+        // a float ending a line resolved to the NEXT line, column 0.
+        let len = self.temp.len();
         let number = if let Ok(v) = self.temp.parse::<f64>() {
             // allow the shader compiler to recognise the difference btween 1 and 1.
             if !(self.temp.contains('.') || self.temp.contains('e') || self.temp.contains('E'))
                 && v <= 0xFF_FFFF_FFFFu64 as f64
             {
-                let len = self.temp.len();
                 self.temp.clear();
                 self.push_tok(self.pos - len, ScriptToken::U40(v as u64));
                 return;
@@ -424,19 +427,18 @@ impl ScriptTokenizer {
         } else {
             0.0
         };
-        let len = self.temp.len();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::F64(number));
     }
 
     fn emit_f32(&mut self) {
+        let len = self.temp.len();
         let number = if let Ok(v) = self.temp.parse::<f32>() {
             self.temp.clear();
             v
         } else {
             0.0
         };
-        let len = self.temp.len();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::F32(number));
     }
@@ -454,25 +456,25 @@ impl ScriptTokenizer {
     }
 
     fn emit_i32(&mut self) {
+        let len = self.temp.len();
         let number = if let Ok(v) = self.temp.parse::<i32>() {
             self.temp.clear();
             v
         } else {
             0
         };
-        let len = self.temp.len();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::I32(number));
     }
 
     fn emit_f16(&mut self) {
+        let len = self.temp.len();
         let number = if let Ok(v) = self.temp.parse::<f32>() {
             self.temp.clear();
             v
         } else {
             0.0
         };
-        let len = self.temp.len();
         self.temp.clear();
         self.push_tok(self.pos - len, ScriptToken::F16(number));
     }
