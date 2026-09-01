@@ -41,6 +41,8 @@
 //! - An `AssetClient` cache root is single-owner too, so each loop gets its
 //!   own child of the work root.
 
+pub mod embed;
+
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRights};
 use makepad_asset_store::{AssetServer, BlobRefPolicy, DiscoveryConfig, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
