@@ -466,4 +466,20 @@ impl DrawSvg {
             None
         }
     }
+
+    /// The box this icon wants for `walk`, loading the document if it has not
+    /// been loaded yet. `None` when there is no SVG, or when the walk leaves
+    /// a side up to a turtle this measurement has no access to.
+    ///
+    /// For a caller that must RESERVE room for an icon in one turtle and
+    /// paint it with [`Self::draw_abs`] somewhere else — a glass button, say,
+    /// whose face is drawn twice over.
+    pub fn measure(&mut self, cx: &mut Cx, walk: Walk) -> Option<DVec2> {
+        self.load_svg(cx);
+        self.svg_doc.as_ref()?;
+        match self.resolve_walk(walk) {
+            Walk { width: Size::Fixed(w), height: Size::Fixed(h), .. } => Some(dvec2(w, h)),
+            _ => None,
+        }
+    }
 }

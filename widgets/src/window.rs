@@ -508,10 +508,12 @@ impl GaussStack {
             DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
         );
         scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        scene_pass.set_live_with_parent(cx, true);
 
         let mut levels = Vec::with_capacity(GAUSS_STACK_LEVELS);
         for index in 0..GAUSS_STACK_LEVELS {
             let pass = DrawPass::new_with_name(cx, &format!("gauss_mip_{index}"));
+            pass.set_live_with_parent(cx, true);
             let draw_list = DrawList2d::new(cx);
             let texture = Self::new_render_texture(cx);
             pass.set_color_texture(
@@ -528,6 +530,7 @@ impl GaussStack {
             for stage in 0..stage_count {
                 let smooth_pass =
                     DrawPass::new_with_name(cx, &format!("gauss_smooth_mip_{index}_{stage}"));
+                smooth_pass.set_live_with_parent(cx, true);
                 let smooth_draw_list = DrawList2d::new(cx);
                 let smooth_texture = Self::new_render_texture(cx);
                 smooth_pass.set_color_texture(
@@ -752,6 +755,7 @@ impl SplodedStack {
             DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
         );
         scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        scene_pass.set_live_with_parent(cx, true);
         Self {
             scene_pass,
             scene_draw_list,
@@ -881,6 +885,7 @@ impl SsaaStack {
             DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
         );
         scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        scene_pass.set_live_with_parent(cx, true);
         Self {
             scene_pass,
             scene_draw_list,

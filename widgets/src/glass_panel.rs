@@ -225,7 +225,10 @@ script_mod! {
         height: 44
         padding: Inset{left: 22, right: 22, top: 0, bottom: 0}
         align: Align{x: 0.5, y: 0.5}
+        spacing: 7
         label_walk: Walk{width: Fit, height: Fit}
+        // No icon unless one is given; then it sizes to its own drawing.
+        icon_walk: Walk{width: Fit, height: Fit}
 
         draw_text +: {
             color: #xffffffff
@@ -1474,6 +1477,14 @@ pub struct GlassButton {
     draw_glass: DrawQuad,
     #[live]
     draw_text: DrawText,
+    /// An optional glyph beside (or instead of) the label. It has to be the
+    /// button's own: the button draws itself into a self-managed overlay, so
+    /// anything a caller stacks on top of it from outside is painted over by
+    /// the glass.
+    #[live]
+    pub draw_icon: DrawSvg,
+    #[live]
+    icon_walk: Walk,
     #[live]
     label_walk: Walk,
     #[live]
@@ -1727,12 +1738,26 @@ impl Widget for GlassButton {
             laid.size_in_lpxs.height as f64 * self.draw_text.font_scale as f64,
         );
 
+        // The icon is measured with the label and reserved with it, so a
+        // Fit-width button sizes to both. With no icon set this is exactly
+        // the label on its own, as it always was.
+        let icon_walk = self.icon_walk;
+        let icon_size = self.draw_icon.measure(cx, icon_walk);
+        let icon_gap = match icon_size {
+            Some(_) if !text.is_empty() => self.layout.spacing,
+            _ => 0.0,
+        };
+        let content = dvec2(
+            icon_size.map(|s| s.x).unwrap_or(0.0) + icon_gap + text_size.x,
+            text_size.y.max(icon_size.map(|s| s.y).unwrap_or(0.0)),
+        );
+
         self.draw_bg.begin(cx, walk, self.layout);
         cx.walk_turtle(Walk {
             abs_pos: None,
             margin: Inset::default(),
-            width: Size::Fixed(text_size.x),
-            height: Size::Fixed(text_size.y),
+            width: Size::Fixed(content.x),
+            height: Size::Fixed(content.y),
             metrics: Metrics::default(),
         });
         self.draw_bg.end(cx);
@@ -1747,10 +1772,22 @@ impl Widget for GlassButton {
         // shift would skip the label and detach it. draw_abs keeps it in the shifted align range.
         let align = self.layout.align;
         let pos = dvec2(
-            rect.pos.x + (rect.size.x - text_size.x) * align.x,
-            rect.pos.y + (rect.size.y - text_size.y) * align.y,
+            rect.pos.x + (rect.size.x - content.x) * align.x,
+            rect.pos.y + (rect.size.y - content.y) * align.y,
         );
-        self.draw_text.draw_abs(cx, pos, text);
+        // Icon first, then the label beside it — both by draw_abs on top of
+        // the glass, for the same reason the label alone always was.
+        if let Some(size) = icon_size {
+            self.draw_icon.draw_abs(
+                cx,
+                Rect { pos: dvec2(pos.x, pos.y + (content.y - size.y) * 0.5), size },
+            );
+        }
+        let text_pos = dvec2(
+            pos.x + icon_size.map(|s| s.x).unwrap_or(0.0) + icon_gap,
+            pos.y + (content.y - text_size.y) * 0.5,
+        );
+        self.draw_text.draw_abs(cx, text_pos, text);
         self.draw_list.as_mut().unwrap().end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
 
