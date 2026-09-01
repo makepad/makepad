@@ -93,6 +93,8 @@ pub struct GenerateParams {
     pub text: String,
     pub voice: String,
     pub speed: f32,
+    /// Speech language hint (`language` on the wire); "" = model default.
+    pub language: String,
     /// 8-slot emotion vector (indextts), validated to length 8 and clamped
     /// per-slot to [0, 1.2]; `None` = neutral.
     pub emotion: Option<[f32; 8]>,
@@ -343,6 +345,7 @@ impl GenerateParams {
 
             text: request.text.clone().unwrap_or_default(),
             voice: request.voice.clone().unwrap_or_default(),
+            language: request.language.clone().unwrap_or_default(),
             speed: if speed.is_finite() && speed > 0.0 {
                 speed.clamp(0.25, 4.0) as f32
             } else {
@@ -1567,6 +1570,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "vision" => cfg!(feature = "llm"),
         "ocr" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
+        "whisper" => cfg!(feature = "stt"),
         "indextts" => cfg!(feature = "indextts"),
         // The `fast` (FastH3) lane rides the H3 pipeline: same feature.
         "h3" | "fast" => cfg!(feature = "video"),
@@ -1828,6 +1832,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "llm"))]
         "ocr" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'llm' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "stt")]
+        "whisper" => Ok(Box::new(crate::whisper_backend::WhisperBackend::new_whisper(
+            &spec.id,
+        ))),
+        #[cfg(not(feature = "stt"))]
+        "whisper" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'stt' cargo feature",
             spec.id
         ))),
         #[cfg(feature = "tts")]

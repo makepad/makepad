@@ -1493,7 +1493,7 @@ fn run_job(
     // The Apple fallback yields to whisper the moment a checkpoint appears
     // (the INSTALL MODELS flow drops one in mid-session): whisper's measured
     // word path is strictly better than the dictation-tuned fallback.
-    if let Some(Transcriber::NativeApple(_)) = backend.as_ref() {
+    if let Some(Transcriber::System) = backend.as_ref() {
         if whisper_model_path().is_some() {
             *backend = None;
         }
@@ -1630,7 +1630,7 @@ fn read_vocals_mono(job: &LyricsJob) -> Result<(Vec<f32>, f64), String> {
 // the transcriber
 // ---------------------------------------------------------------------------
 
-/// Which of `makepad-voice`'s two backends is doing the work.
+/// Which of `makepad-ai-speech`'s two backends is doing the work.
 ///
 /// Whisper is preferred and is what ships: `ggml-large-v3-turbo` transcribes
 /// SUNG speech, returns segment timestamps on a 20 ms grid, and takes a whole
@@ -1639,39 +1639,38 @@ fn read_vocals_mono(job: &LyricsJob) -> Result<(Vec<f32>, f64), String> {
 /// timings are coarser.
 enum Transcriber {
     Whisper {
-        model: Box<makepad_voice::WhisperModel>,
-        state: makepad_voice::WhisperState,
+        model: Box<makepad_ai_speech::whisper::WhisperModel>,
+        state: makepad_ai_speech::whisper::WhisperState,
         path: String,
     },
-    NativeApple(makepad_voice::VoiceTranscriber),
+    /// The OS recognizer (makepad-system-speech): PCM in, coarse timings.
+    System,
 }
 
 impl Transcriber {
     fn open() -> Result<Transcriber, String> {
         if let Some(path) = whisper_model_path() {
             let text = path.to_string_lossy().to_string();
-            let model = makepad_voice::WhisperModel::load_file(&text)
+            let model = makepad_ai_speech::whisper::WhisperModel::load_file(&text)
                 .map_err(|error| format!("whisper model: {error}"))?;
-            let state = makepad_voice::WhisperState::new(&model);
+            let state = makepad_ai_speech::whisper::WhisperState::new(&model);
             return Ok(Transcriber::Whisper {
                 model: Box::new(model),
                 state,
                 path: text,
             });
         }
-        let mut apple =
-            makepad_voice::VoiceTranscriber::new(makepad_voice::VoiceBackendKind::NativeApple);
-        let params = makepad_voice::VoiceTranscribeParams::default();
-        apple
-            .preload(&params)
-            .map_err(|_| "no whisper checkpoint and no native recognizer".to_string())?;
-        Ok(Transcriber::NativeApple(apple))
+        if !makepad_system_speech::stt::capabilities().pcm_input {
+            return Err("no whisper checkpoint and no PCM-input system recognizer".to_string());
+        }
+        let _ = makepad_system_speech::stt::prepare("en");
+        Ok(Transcriber::System)
     }
 
     fn name(&self) -> &'static str {
         match self {
             Transcriber::Whisper { .. } => "whisper",
-            Transcriber::NativeApple(_) => "apple-native",
+            Transcriber::System => makepad_system_speech::stt::engine_name(),
         }
     }
 
@@ -1681,7 +1680,7 @@ impl Transcriber {
                 .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or(WHISPER_MODEL_FILE),
-            Transcriber::NativeApple(_) => "SFSpeechRecognizer",
+            Transcriber::System => "system",
         }
     }
 
@@ -1702,7 +1701,7 @@ impl Transcriber {
     )> {
         match self {
             Transcriber::Whisper { model, state, .. } => {
-                let mut params = makepad_voice::WhisperParams::default();
+                let mut params = makepad_ai_speech::whisper::WhisperParams::default();
                 params.language = language.to_string();
                 params.no_timestamps = false;
                 params.single_segment = false;
@@ -1724,7 +1723,7 @@ impl Transcriber {
                     &config,
                 ))
             }
-            Transcriber::NativeApple(_) => None,
+            Transcriber::System => None,
         }
     }
 
@@ -1733,7 +1732,7 @@ impl Transcriber {
         samples: &[f32],
         language: &str,
     ) -> Result<Vec<(i64, i64, String)>, String> {
-        let mut params = makepad_voice::WhisperParams::default();
+        let mut params = makepad_ai_speech::whisper::WhisperParams::default();
         params.language = language.to_string();
         params.no_timestamps = false;
         params.single_segment = false;
@@ -1741,14 +1740,19 @@ impl Transcriber {
         params.suppress_blank = true;
         let segments = match self {
             Transcriber::Whisper { model, state, .. } => state.transcribe(model, samples, &params),
-            Transcriber::NativeApple(apple) => {
-                let mut voice = makepad_voice::VoiceTranscribeParams::default();
-                voice.language = language.to_string();
-                voice.include_timestamps = true;
-                voice.single_segment = false;
-                apple
-                    .transcribe(samples, &voice)
-                    .map_err(|error| format!("{error:?}"))?
+            Transcriber::System => {
+                let options = makepad_system_speech::SttOptions {
+                    language: language.to_string(),
+                    timestamps: true,
+                    ..Default::default()
+                };
+                let transcript = makepad_system_speech::stt::transcribe(samples, &options)
+                    .map_err(|error| error.to_string())?;
+                return Ok(transcript
+                    .segments
+                    .into_iter()
+                    .map(|segment| (segment.start_ms, segment.end_ms, segment.text))
+                    .collect());
             }
         };
         Ok(segments

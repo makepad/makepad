@@ -1,71 +1,74 @@
-//! Synthesize a sentence and write `tts_test.wav`.
+//! Speak a sentence with the Kokoro engine and write it to a WAV.
 //!
-//!     cargo run --bin tts_test -- "Hi! I make games with you."
+//!     cargo run --release --manifest-path libs/ai/models/speech/Cargo.toml --bin tts_test -- "Hello there" [voice.mkvoice] [out.wav]
+//!
+//! Weights resolve through `MAKEPAD_TTS_MODEL` / the working directory /
+//! next to the executable (`kokoro-v1_0.mktts`, `bm_daniel.mkvoice`).
 
-use std::io::Write;
-
-use makepad_ai_speech::{SpeechAudio, Speaker};
+use makepad_ai_speech::kokoro::{self, KokoroSpeaker};
+use makepad_ai_speech::SpeechAudio;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let text = if args.is_empty() {
-        "Hi! I make games with you.".to_string()
-    } else {
-        args.join(" ")
-    };
+    let text = args.get(0).cloned().unwrap_or_else(|| "Hello from Kokoro.".to_string());
+    let out = args.get(2).cloned().unwrap_or_else(|| "tts_test.wav".to_string());
 
-    let mut speaker = Speaker::from_makepad_env();
-    println!("backend : {:?}", speaker.kind());
-    println!("text    : {text:?}");
+    let Some(model) = kokoro::model_path_if_present() else {
+        eprintln!("kokoro weights not found (set MAKEPAD_TTS_MODEL or put {} in the cwd)", kokoro::DEFAULT_MODEL_PATH);
+        std::process::exit(1);
+    };
+    let voice = match args.get(1) {
+        Some(name) => kokoro::named_voice_path_if_present(name),
+        None => kokoro::voice_path_if_present(),
+    };
+    let Some(voice) = voice else {
+        eprintln!("voice pack not found");
+        std::process::exit(1);
+    };
+    let started = std::time::Instant::now();
+    let mut speaker = match KokoroSpeaker::load_with_voice(&model, &voice) {
+        Ok(speaker) => speaker,
+        Err(err) => {
+            eprintln!("load failed: {err:?}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("loaded {model} + {voice} in {:.2}s", started.elapsed().as_secs_f64());
 
     let started = std::time::Instant::now();
-    match speaker.synthesize(&text) {
-        Ok(audio) => {
-            let elapsed = started.elapsed().as_secs_f32();
-            let peak = audio.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-            println!(
-                "samples : {} @ {} Hz ({:.2}s audio)",
-                audio.samples.len(),
-                audio.sample_rate,
-                audio.duration_secs()
-            );
-            println!("peak    : {peak:.4}");
-            println!(
-                "synth   : {:.0} ms ({:.1}x realtime)",
-                elapsed * 1000.0,
-                audio.duration_secs() / elapsed.max(1e-6)
-            );
-            match write_wav("tts_test.wav", &audio) {
-                Ok(()) => println!("wrote   : tts_test.wav"),
-                Err(err) => println!("wav err : {err}"),
-            }
+    let audio = match speaker.synthesize(&text) {
+        Ok(audio) => audio,
+        Err(err) => {
+            eprintln!("synthesis failed: {err:?}");
+            std::process::exit(1);
         }
-        Err(err) => println!("error   : {err:?}"),
-    }
+    };
+    eprintln!(
+        "rendered {:.2}s of audio in {:.2}s",
+        audio.duration_secs(),
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::write(&out, wav_pcm16(&audio)).expect("write wav");
+    println!("wrote {out}");
 }
 
-/// Minimal 16-bit mono WAV writer.
-fn write_wav(path: &str, audio: &SpeechAudio) -> std::io::Result<()> {
-    let mut file = std::fs::File::create(path)?;
+fn wav_pcm16(audio: &SpeechAudio) -> Vec<u8> {
     let data_len = (audio.samples.len() * 2) as u32;
-    let rate = audio.sample_rate;
-
-    file.write_all(b"RIFF")?;
-    file.write_all(&(36 + data_len).to_le_bytes())?;
-    file.write_all(b"WAVEfmt ")?;
-    file.write_all(&16u32.to_le_bytes())?; // fmt chunk size
-    file.write_all(&1u16.to_le_bytes())?; // PCM
-    file.write_all(&1u16.to_le_bytes())?; // mono
-    file.write_all(&rate.to_le_bytes())?;
-    file.write_all(&(rate * 2).to_le_bytes())?; // byte rate
-    file.write_all(&2u16.to_le_bytes())?; // block align
-    file.write_all(&16u16.to_le_bytes())?; // bits per sample
-    file.write_all(b"data")?;
-    file.write_all(&data_len.to_le_bytes())?;
-
-    for sample in &audio.samples {
-        let clamped = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-        file.write_all(&clamped.to_le_bytes())?;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(audio.sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for &s in &audio.samples {
+        out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
     }
-    Ok(())
+    out
 }

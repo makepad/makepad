@@ -22,7 +22,6 @@ mod layers;
 mod local_agent;
 mod nav;
 mod nav_data;
-mod speech;
 mod testmap;
 mod tools;
 mod trip;
@@ -34,7 +33,7 @@ use history::DriveLog;
 use layers::{LayerState, TerrainUpdate, WindUpdate};
 use nav::{ActiveNav, NavAction, NavTick};
 use nav_data::{NavData, NavLoad, RadarData};
-use speech::Speech;
+use makepad_converse::SpeechOutput;
 use testmap::{Stage as TestMapStage, TestMapBuild};
 use trip::TripModel;
 use voice::{GateResult, VoiceGate};
@@ -918,7 +917,7 @@ pub struct App {
     terrain_rx: ToUIReceiver<TerrainUpdate>,
     /// Kokoro voice output (🔊 button). None until first startup.
     #[rust]
-    speech: Option<Speech>,
+    speech: Option<SpeechOutput>,
     /// Last nav banner instruction spoken, so each maneuver is announced once.
     #[rust]
     last_spoken_banner: String,
@@ -1046,8 +1045,10 @@ impl App {
         self.adopt_map_source(cx);
         nav_data::start_radar_worker(self.radar_rx.sender());
         cx.start_location_updates();
-        let speech = Speech::new();
-        speech.install_audio_output(cx);
+        // Kokoro af_heart when weights are in reach (this process, the machine
+        // node, a LAN box), else the OS voice — the hub decides.
+        let speech = SpeechOutput::new("af_heart");
+        speech.install_audio_output(cx, 0);
         self.speech = Some(speech);
         self.init_agent(cx);
         self.update_ai_status(cx);
@@ -1594,7 +1595,7 @@ impl App {
             if tick.banner != self.last_spoken_banner {
                 self.last_spoken_banner = tick.banner.clone();
                 if let Some(speech) = &self.speech {
-                    speech.say(&tick.banner);
+                    speech.enqueue(&tick.banner);
                 }
             }
         }
@@ -1608,7 +1609,7 @@ impl App {
                 .unwrap_or_default();
             self.push_line(cx, &format!("🏁 arrived at {dest}"));
             if let Some(speech) = &self.speech {
-                speech.say(&format!("You have arrived at {dest}."));
+                speech.enqueue(&format!("You have arrived at {dest}."));
             }
             self.active_nav = None;
             let map = self.ui.map_view(cx, ids!(map));

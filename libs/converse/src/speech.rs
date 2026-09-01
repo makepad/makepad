@@ -1,23 +1,24 @@
-//! Speech output: a synthesis worker plus the playback buffer it fills.
+//! Speech output: a hub TTS session plus the playback buffer it fills.
 //!
-//! `makepad-ai-speech` returns PCM rather than owning a device, so playback goes
+//! The hub hands back PCM rather than owning a device, so playback goes
 //! through `cx.audio_output` like any other audio in Makepad. Muting is then
 //! just "stop feeding the buffer", which also makes it instant.
 //!
 //! Streamed reply text goes in through [`SpeechOutput::feed`]; each finished
-//! sentence is synthesized and spoken while the rest of the reply is still
-//! being generated. Lifted out of the gamemaker example so any app can bolt a
-//! voice onto an agent.
+//! sentence is queued on the session and spoken while the rest of the reply
+//! is still being generated. Which voice speaks — Kokoro in this process, on
+//! the machine node, on a LAN box, or the OS voice — is the hub's decision
+//! ([`makepad_ai_hub::speech`]); this file only plays what comes back.
 
 #[cfg(feature = "tts")]
-use makepad_ai_speech::Speaker;
+use makepad_ai_hub::speech::{TtsConfig, TtsEvent, TtsHandle, TtsSession};
 use makepad_widgets::makepad_draw::audio::AudioBuffer;
 #[cfg(feature = "tts")]
 use makepad_widgets::log;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// The buffer the audio callback plays from. Written by the synthesis worker,
+/// The buffer the audio callback plays from. Written by the pump thread,
 /// read by the audio thread.
 #[derive(Default)]
 pub struct Playback {
@@ -59,19 +60,27 @@ impl Playback {
             self.cursor -= consumed as f64;
         }
     }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.cursor = 0.0;
+    }
 }
 
 /// Don't speak a fragment shorter than this — one-word clips sound like hiccups.
 const MIN_SPOKEN_CHARS: usize = 16;
 
-/// Speech output: a synthesis worker plus the buffer it fills.
+/// Speech output: a hub TTS session plus the buffer it fills.
 pub struct SpeechOutput {
-    say: mpsc::Sender<(u64, String)>,
+    /// Kokoro voice pack name (or any [`makepad_ai_hub::speech::Voice`] id).
+    voice: String,
+    /// Started on the FIRST utterance, not at construction: Kokoro is ~327 MB
+    /// resident and an app that never speaks (text tier, muted, a session
+    /// where nobody triggers a reply) must not pay for it.
+    #[cfg(feature = "tts")]
+    session: OnceLock<TtsHandle>,
     playback: Arc<Mutex<Playback>>,
     muted: Arc<AtomicBool>,
-    /// Bumped on stop. Requests from an older generation are dropped, so a
-    /// sentence that was already being synthesized never plays after a cancel.
-    generation: Arc<AtomicU64>,
     /// Streamed reply text not yet spoken.
     pending: String,
     /// "Shh" latch: swallow the rest of the current reply (see `hush`).
@@ -79,86 +88,15 @@ pub struct SpeechOutput {
 }
 
 impl SpeechOutput {
-    /// Start the synthesis worker with a named voice pack
-    /// (e.g. `"bm_fable.mkvoice"`). Falls back like [`Speaker`] does when the
-    /// pack or model is missing.
+    /// Create the output with a named voice (e.g. `"bm_fable"`; a trailing
+    /// `.mkvoice` is tolerated). Nothing loads until something is said.
     pub fn new(voice: &str) -> Self {
-        let playback = Arc::new(Mutex::new(Playback::default()));
-        let muted = Arc::new(AtomicBool::new(false));
-        let generation = Arc::new(AtomicU64::new(0));
-        let (say, requests) = mpsc::channel::<(u64, String)>();
-
-        let worker_playback = playback.clone();
-        let worker_generation = generation.clone();
-        let voice = voice.to_string();
-        std::thread::spawn(move || {
-            // Built without `tts`: the synthesis stack (Kokoro plus its
-            // embedded pronunciation lexicon) is ~10 MB of binary, so a build
-            // that can never speak does not link it. Drain the queue so senders
-            // never block — every other path (text, muting, generation
-            // cancellation) behaves exactly as it does with speech on.
-            #[cfg(not(feature = "tts"))]
-            {
-                let _ = (&voice, &worker_playback);
-                while let Ok((generation, _text)) = requests.recv() {
-                    let _ = generation.min(worker_generation.load(Ordering::Relaxed));
-                }
-                return;
-            }
-            // Off the main thread on purpose: synthesis blocks until the whole
-            // utterance is rendered.
-            //
-            // The speaker is built on the FIRST request, not here: the Kokoro
-            // model is ~327 MB resident, and an app that never speaks (text
-            // tier, muted, or a session where nobody triggers a reply) should
-            // not pay for it. Construction is still off the main thread, so
-            // the load cost lands on the worker either way.
-            #[cfg(feature = "tts")]
-            let mut speaker: Option<Speaker> = None;
-            #[cfg(feature = "tts")]
-            while let Ok((generation, text)) = requests.recv() {
-                if generation != worker_generation.load(Ordering::Relaxed) {
-                    continue;
-                }
-                let speaker = match speaker {
-                    Some(ref mut speaker) => speaker,
-                    ref mut none => {
-                        let mut fresh = Speaker::from_makepad_env_with_voice(&voice);
-                        log!("tts: backend {:?}", fresh.kind());
-                        // Discarded warm-up: Kokoro's first synthesis
-                        // initializes the Metal context on this thread.
-                        let _ = fresh.synthesize("Hi.");
-                        none.insert(fresh)
-                    }
-                };
-                match speaker.synthesize(&text) {
-                    Ok(audio) if !audio.is_empty() => {
-                        // Re-check: synthesis is slow enough that a cancel can
-                        // land while it runs.
-                        if generation != worker_generation.load(Ordering::Relaxed) {
-                            continue;
-                        }
-                        let mut playback = worker_playback.lock().unwrap();
-                        if playback.source_rate != audio.sample_rate as f64 {
-                            playback.samples.clear();
-                            playback.cursor = 0.0;
-                            playback.source_rate = audio.sample_rate as f64;
-                        }
-                        // Append, don't replace: sentences queue up behind
-                        // each other.
-                        playback.samples.extend_from_slice(&audio.samples);
-                    }
-                    Ok(_) => {}
-                    Err(err) => log!("tts: {err:?}"),
-                }
-            }
-        });
-
         Self {
-            say,
-            playback,
-            muted,
-            generation,
+            voice: voice.strip_suffix(".mkvoice").unwrap_or(voice).to_string(),
+            #[cfg(feature = "tts")]
+            session: OnceLock::new(),
+            playback: Arc::new(Mutex::new(Playback::default())),
+            muted: Arc::new(AtomicBool::new(false)),
             pending: String::new(),
             hushed: false,
         }
@@ -173,6 +111,12 @@ impl SpeechOutput {
     /// The shared mute flag, for audio callbacks that check it directly.
     pub fn muted_flag(&self) -> Arc<AtomicBool> {
         self.muted.clone()
+    }
+
+    /// True while synthesized audio is still queued or playing — apps use it
+    /// to drop mic transcripts of the assistant's own voice.
+    pub fn is_speaking(&self) -> bool {
+        self.playback.lock().map(|p| !p.samples.is_empty()).unwrap_or(false)
     }
 
     /// Convenience for apps with no other audio: install an audio-output
@@ -238,18 +182,74 @@ impl SpeechOutput {
         if text.is_empty() {
             return;
         }
-        let _ = self
-            .say
-            .send((self.generation.load(Ordering::Relaxed), text));
+        #[cfg(feature = "tts")]
+        {
+            let session = self
+                .session
+                .get_or_init(|| Self::start_session(&self.voice, self.playback.clone()));
+            session.say(text);
+        }
+        // Built without `tts`: the synthesis stack is ~10 MB of binary, so a
+        // build that can never speak does not link it. Every other path (text,
+        // muting, cancellation) behaves exactly as it does with speech on.
+        #[cfg(not(feature = "tts"))]
+        let _ = text;
+    }
+
+    /// Start the hub session and the pump thread that moves its audio into
+    /// the playback buffer. The pump blocks on the session's events, so it
+    /// costs nothing while nobody speaks.
+    #[cfg(feature = "tts")]
+    fn start_session(voice: &str, playback: Arc<Mutex<Playback>>) -> TtsHandle {
+        let (handle, events) = TtsSession::start(TtsConfig {
+            voice: Some(voice.to_string()),
+            ..TtsConfig::default()
+        })
+        .split();
+        std::thread::Builder::new()
+            .name("converse-speech-pump".into())
+            .spawn(move || {
+                while let Some(event) = events.recv() {
+                    match event {
+                        TtsEvent::Loading { .. } => {}
+                        TtsEvent::Ready(info) => {
+                            log!("tts: {} via {}{}", info.engine, info.pipe, match &info.remote {
+                                Some(node) => format!(" on {node}"),
+                                None => String::new(),
+                            });
+                        }
+                        TtsEvent::Failed(why) => {
+                            log!("tts: no voice available: {why}");
+                            return;
+                        }
+                        TtsEvent::Audio { audio, .. } => {
+                            let mut playback = playback.lock().unwrap();
+                            if playback.source_rate != audio.sample_rate as f64 {
+                                playback.clear();
+                                playback.source_rate = audio.sample_rate as f64;
+                            }
+                            // Append, don't replace: sentences queue up behind
+                            // each other.
+                            playback.samples.extend_from_slice(&audio.samples);
+                        }
+                        TtsEvent::Error { message, .. } => log!("tts: {message}"),
+                    }
+                }
+            })
+            .expect("spawn speech pump");
+        handle
     }
 
     /// Cancel queued and playing speech immediately.
     pub fn stop(&mut self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "tts")]
+        if let Some(session) = self.session.get() {
+            session.cancel();
+        }
         self.pending.clear();
-        let mut playback = self.playback.lock().unwrap();
-        playback.samples.clear();
-        playback.cursor = 0.0;
+        if let Ok(mut playback) = self.playback.lock() {
+            playback.clear();
+        }
     }
 
     /// "Shh": stop speaking AND stay quiet for the rest of the current reply.
@@ -291,7 +291,7 @@ pub fn spoken_text(markdown: &str) -> String {
         }
         let cleaned: String = line
             .chars()
-            .filter(|c| !matches!(c, '*' | '_' | '`' | '#' | '>' | '|'))
+            .filter(|c| !matches!(c, '*' | '_' | '`' | '#' | '>' | '|' | '→' | '⚙' | '·'))
             .collect();
         let cleaned = cleaned.trim();
         if !cleaned.is_empty() {
@@ -306,48 +306,43 @@ pub fn spoken_text(markdown: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Constructing the output must NOT load the synthesis model: Kokoro is
-    /// ~327 MB resident, and an app that never speaks should not pay for it.
-    /// Model load happens on the first enqueued utterance instead.
-    ///
-    /// Proxy for "did not load": construction returns promptly. A real load
-    /// reads hundreds of MB off disk and warms a Metal context, which cannot
-    /// happen in this budget on any machine we build on.
+    /// Constructing the output must NOT start a session or load a model:
+    /// Kokoro is ~327 MB resident, and an app that never speaks should not
+    /// pay for it. The session starts on the first enqueued utterance.
     #[test]
-    fn constructing_speech_output_does_not_load_the_model() {
+    fn constructing_speech_output_does_not_start_a_session() {
         let start = std::time::Instant::now();
         let speech = SpeechOutput::new("bm_fable.mkvoice");
-        let elapsed = start.elapsed();
-        assert!(
-            speech.playback().lock().unwrap().samples.is_empty(),
-            "nothing should be synthesized before anything is said"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(250),
-            "construction took {elapsed:?} — the model is being loaded eagerly again"
-        );
+        #[cfg(feature = "tts")]
+        assert!(speech.session.get().is_none());
+        assert!(speech.playback().lock().unwrap().samples.is_empty());
+        assert!(!speech.is_speaking());
+        assert!(start.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn spoken_text_drops_code_and_markup() {
+        let text = "Here **you** go:\n```rust\nfn x() {}\n```\nDone → ok.";
+        // The arrow is dropped, not replaced, so its two surrounding spaces remain.
+        assert_eq!(spoken_text(text), "Here you go: Done  ok.");
     }
 
     /// The lazy path must still speak. Ignored by default: it loads the real
-    /// ~327 MB model and takes seconds.
-    ///
-    /// Model paths resolve relative to the CWD, which under `cargo test` is
-    /// the crate dir, not the repo root — so point them at the real files or
-    /// this silently falls back to a different backend and proves nothing:
+    /// ~327 MB model (or falls back to the OS voice) and takes seconds.
     ///
     /// ```text
     /// MAKEPAD_TTS_MODEL=$REPO/kokoro-v1_0.mktts \
     /// MAKEPAD_TTS_VOICE=$REPO/bm_fable.mkvoice \
-    ///   cargo test -p makepad-converse --release lazily_loaded -- --ignored
+    ///   cargo test -p makepad-converse --release lazily -- --ignored
     /// ```
     #[test]
-    #[ignore = "loads the real Kokoro model (~327 MB); needs MAKEPAD_TTS_* paths"]
-    fn lazily_loaded_speaker_still_produces_audio() {
-        let speech = SpeechOutput::new("bm_fable.mkvoice");
+    #[ignore = "starts a real hub TTS session; needs weights or an OS voice"]
+    fn lazily_started_session_still_produces_audio() {
+        let mut speech = SpeechOutput::new("bm_fable.mkvoice");
         speech.enqueue("Testing the lazy speech path.");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {
-            if !speech.playback().lock().unwrap().samples.is_empty() {
+            if speech.is_speaking() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));

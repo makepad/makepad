@@ -624,6 +624,32 @@
    ]
   },
   {
+   "id": "whisper-large-v3-turbo",
+   "domain": "stt",
+   "backend": "whisper",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp",
+    "summary": "OpenAI Whisper large-v3-turbo weights in ggml format as distributed by ggerganov/whisper.cpp (MIT). Permissive use, including commercial.",
+    "restriction": "none"
+   },
+   "vram_gb": 2.0,
+   "note": "Whisper large-v3-turbo speech-to-text via the in-repo pure-Rust port (makepad-ai-speech whisper module; Metal/CUDA/CPU). Request: input_b64 audio/wav (any rate/channels, downmixed + resampled to 16 kHz) + language. Output: one application/json TranscriptJson {text, segments[{start_ms,end_ms,text}]}. The wire side of the stt.whisper pipe; apps reach it through AiHub::start_stt.",
+   "files": [
+    {
+     "repo": "ggerganov/whisper.cpp",
+     "path": "ggml-large-v3-turbo.bin",
+     "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+     "cache_as": "stt/ggml-large-v3-turbo.bin",
+     "size": 1624555275,
+     "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+     "local": false
+    }
+   ]
+  },
+  {
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",

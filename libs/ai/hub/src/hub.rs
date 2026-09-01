@@ -60,6 +60,21 @@ impl AiHub {
         })
     }
 
+    /// Start speech-to-text. The worker picks the engine — Whisper here, on
+    /// the machine node, or on a LAN node, else the OS recognizer — and
+    /// reports it in `Ready`; the app feeds PCM or asks the engine to listen.
+    #[cfg(feature = "speech")]
+    pub fn start_stt(&self, config: crate::speech::SttConfig) -> crate::speech::SttSession {
+        crate::speech::SttSession::start(config)
+    }
+
+    /// Start text-to-speech: Kokoro wherever it is, else the OS voice. Text
+    /// in, PCM out; the app owns playback.
+    #[cfg(feature = "speech")]
+    pub fn start_tts(&self, config: crate::speech::TtsConfig) -> crate::speech::TtsSession {
+        crate::speech::TtsSession::start(config)
+    }
+
     /// The pipe id the in-process local model publishes (machine-local only).
     pub fn local_llm_pipe() -> PipeId {
         PipeId::new("llm.local")

@@ -2,33 +2,82 @@
 name = "makepad-ai-speech"
 version = "0.1.0"
 edition = "2021"
-description = "Speech family: IndexTTS-2.5 + Kokoro (aiarch.md §1)."
+description = "Speech family: IndexTTS-2.5 + Kokoro speech synthesis engines (text in, PCM out). No platform code: OS voices are makepad-system-speech, engine choice is makepad-ai-hub."
 license = "MIT"
 
+[features]
+default = ["whisper", "vad", "kokoro", "indextts"]
+# Whisper speech-to-text (CPU SIMD / Metal / CUDA).
+whisper = []
+# Silero voice-activity detection.
+vad = []
+# Kokoro-82M text-to-speech (+ its G2P).
+kokoro = []
+# IndexTTS-2.5 character-voice text-to-speech.
+indextts = []
+# Precompile the Whisper ggml Metal library at build time (else runtime source compile).
+metal-precompile = []
+
 [dependencies]
+# THE CUDA store (Whisper's CUDA backend). Must NOT be target-specific: cargo
+# drops target-cfg deps when this crate is a path dep of another standalone
+# `[workspace]`, and the `links = "makepad_ai_cuda"` handshake
+# (DEP_MAKEPAD_AI_CUDA_KERNELS, read in build.rs) only arrives for an
+# unconditional dependency. On macOS/iOS the crate compiles to empty stubs.
+makepad-ai-cuda = { path = "../../cuda" }
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ai-sfx = { path = "../sfx" }
 
-[dev-dependencies]
-makepad-voice = { path = "../../../voice" }
-
 [[bin]]
 name = "g2p_test"
 path = "src/bin/g2p_test.rs"
+required-features = ["kokoro"]
 
 [[bin]]
 name = "har_bisect"
 path = "src/bin/har_bisect.rs"
+required-features = ["kokoro"]
 
 [[bin]]
 name = "kokoro_probe"
 path = "src/bin/kokoro_probe.rs"
+required-features = ["kokoro"]
 
 [[bin]]
 name = "parity"
 path = "src/bin/parity.rs"
+required-features = ["kokoro"]
 
 [[bin]]
 name = "tts_test"
 path = "src/bin/tts_test.rs"
+required-features = ["kokoro"]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../../../objc-sys", version = "1.0.0" }
+
+[[bin]]
+name = "whisper-test"
+path = "src/bin/whisper_test.rs"
+required-features = ["whisper"]
+
+[[bin]]
+name = "whisper-parity"
+path = "src/bin/whisper_parity.rs"
+required-features = ["whisper"]
+
+[[bin]]
+name = "vad-test"
+path = "src/bin/vad_test.rs"
+required-features = ["vad"]
+
+[[bin]]
+name = "metal-strip-unused"
+path = "src/bin/metal_strip_unused.rs"
+required-features = ["whisper"]
+
+[[test]]
+name = "silero_vad"
+path = "tests/silero_vad.rs"
+required-features = ["vad"]

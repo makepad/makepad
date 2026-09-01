@@ -829,7 +829,9 @@ fn walk(
 // no torch, network, or checked-in binary is involved.
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// The round trip reads the result back through Kokoro's loader, so these
+// tests need that engine compiled in.
+#[cfg(all(test, feature = "kokoro"))]
 mod tests {
     use super::*;
     use crate::kokoro::weights::Weights;

@@ -1116,6 +1116,7 @@ fn compile_java(
         makepad_java_classes_dir.join("MakepadActivity.java"),
         makepad_java_classes_dir.join("MakepadInputConnection.java"),
         makepad_java_classes_dir.join("MakepadNetwork.java"),
+        makepad_java_classes_dir.join("MakepadSpeech.java"),
         makepad_java_classes_dir.join("MakepadSocketStream.java"),
         makepad_java_classes_dir.join("MakepadWebSocket.java"),
         makepad_java_classes_dir.join("MakepadWebSocketReader.java"),

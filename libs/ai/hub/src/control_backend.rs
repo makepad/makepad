@@ -691,6 +691,7 @@ mod tests {
             variants: 1,
             text: String::new(),
             voice: String::new(),
+            language: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,

@@ -4,7 +4,8 @@ use crate::makepad_draw::{
     thread::SignalToUI,
     Cx, CxMediaApi, Event, NextFrame,
 };
-use makepad_voice::{Segment, SileroVad, VadStream, VoiceTranscribeParams, VoiceTranscriber};
+use makepad_ai_hub::speech::{Segment, SttConfig, SttEvent, SttSession};
+use makepad_ai_speech::vad::{SileroVad, VadStream};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -39,13 +40,19 @@ const VOICE_ENTER_DELAY_SECS: f64 = 0.075;
 
 enum VoiceControlMessage {
     Reset,
-    Preload,
+    /// Capture (re)started: an engine that owns the microphone starts listening.
+    Start,
+    /// Capture stopped: a mic-owning engine stops listening.
+    Stop,
     Shutdown,
 }
 
 pub enum VoiceWaveEvent {
     Append(Vec<f32>),
     Submitted(Vec<f32>),
+    /// Input level 0..1 from an engine that owns the microphone (no samples
+    /// reach us in that mode, so this drives the activity glow instead).
+    Level(f32),
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +73,10 @@ pub struct WindowVoiceInput {
     pending_permission_request: Option<i32>,
     capture_enabled: Arc<AtomicBool>,
     echo_cancellation: bool,
+    /// Set by the worker once the recognizer is known to own the microphone
+    /// itself (Android / Windows system engines): our own capture must then
+    /// stay off — two recorders on one mic is a conflict, not a feature.
+    engine_mic: Arc<AtomicBool>,
     callback_state: Arc<Mutex<CaptureCallbackState>>,
     control_tx: mpsc::Sender<VoiceControlMessage>,
     text_rx: Receiver<String>,
@@ -93,6 +104,7 @@ impl Default for WindowVoiceInput {
             text_signal.clone(),
         )));
         let capture_enabled = Arc::new(AtomicBool::new(false));
+        let engine_mic = Arc::new(AtomicBool::new(false));
 
         Self {
             desired_enabled: false,
@@ -102,6 +114,7 @@ impl Default for WindowVoiceInput {
             default_input: None,
             pending_permission_request: None,
             capture_enabled,
+            engine_mic,
             // Constant AEC while capturing: swapping the unit mid-stream to
             // dodge ducking glitches the assistant's own audio start, and
             // standard+Min ducking is gentle enough to live with.
@@ -144,10 +157,14 @@ impl WindowVoiceInput {
             return;
         }
         if let Some((audio_rx, control_rx, text_tx, wave_tx)) = self.worker_inputs.take() {
-            spawn_voice_worker(audio_rx, control_rx, text_tx, wave_tx, self.text_signal.clone());
-            // Keep the backend warm once per instance lifetime: worker/model/
-            // threadpools stay alive and are not restarted on mic toggles.
-            let _ = self.control_tx.send(VoiceControlMessage::Preload);
+            spawn_voice_worker(
+                audio_rx,
+                control_rx,
+                text_tx,
+                wave_tx,
+                self.text_signal.clone(),
+                self.engine_mic.clone(),
+            );
         }
         let callback_state = self.callback_state.clone();
         let capture_enabled = self.capture_enabled.clone();
@@ -248,13 +265,18 @@ impl WindowVoiceInput {
 
     fn start_capture(&mut self, cx: &mut Cx) {
         self.reset_pipeline();
-        let _ = self.control_tx.send(VoiceControlMessage::Preload);
+        let _ = self.control_tx.send(VoiceControlMessage::Start);
         self.rearm_capture(cx);
     }
 
     /// (Re)apply device + options for the current capture state. Called on
     /// start and whenever the echo-cancellation need flips.
     fn rearm_capture(&mut self, cx: &mut Cx) {
+        if self.engine_mic.load(Ordering::Relaxed) {
+            self.capture_enabled.store(false, Ordering::Relaxed);
+            cx.use_audio_inputs(&[]);
+            return;
+        }
         if let Some(device_id) = self.default_input {
             self.capture_enabled.store(true, Ordering::Relaxed);
             cx.use_audio_inputs_with_options(
@@ -283,6 +305,7 @@ impl WindowVoiceInput {
     }
 
     fn stop_capture_graceful(&mut self, cx: &mut Cx) {
+        let _ = self.control_tx.send(VoiceControlMessage::Stop);
         self.capture_enabled.store(false, Ordering::Relaxed);
         cx.use_audio_inputs(&[]);
         if let Ok(mut callback_state) = self.callback_state.lock() {
@@ -400,6 +423,10 @@ impl WindowVoiceInput {
             return Vec::new();
         }
 
+        if self.engine_mic.load(Ordering::Relaxed) && self.capture_enabled.load(Ordering::Relaxed) {
+            self.rearm_capture(_cx);
+        }
+
         let mut text_count = 0usize;
         while let Ok(text) = self.text_rx.try_recv() {
             self.queue_transcript_parts(text);
@@ -418,6 +445,11 @@ impl WindowVoiceInput {
                 VoiceWaveEvent::Submitted(_chunk) => {
                     self.submit_flash_until = Self::now_secs() + 0.16;
                     self.voice_active_until = 0.0;
+                }
+                VoiceWaveEvent::Level(level) => {
+                    if level > 0.3 {
+                        self.voice_active_until = Self::now_secs() + 0.22;
+                    }
                 }
             }
         }
@@ -623,21 +655,20 @@ fn spawn_voice_worker(
     text_tx: mpsc::Sender<String>,
     wave_tx: SyncSender<VoiceWaveEvent>,
     text_signal: SignalToUI,
+    engine_mic: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        let mut transcriber = VoiceTranscriber::from_makepad_env();
-        let params = VoiceTranscribeParams::for_live_dictation();
-        crate::log!("voice: backend {:?}", transcriber.kind());
-        // Eager weight load: otherwise the whisper model loads on the FIRST
-        // utterance, stalling the first transcription by seconds.
-        let t0 = std::time::Instant::now();
-        match transcriber.preload(&params) {
-            Ok(()) => crate::log!(
-                "voice: model preloaded in {:.1}s",
-                t0.elapsed().as_secs_f64()
-            ),
-            Err(err) => crate::log!("voice: model preload failed: {err:?}"),
-        }
+        // The hub picks the recognizer: Whisper in this process (weights here,
+        // machine election), on the machine node, on a LAN node, else the OS
+        // engine. Loading happens on the session's own thread and reports
+        // through `poll`, so this worker keeps eating audio meanwhile.
+        let session = SttSession::start(SttConfig::live_dictation());
+        // PCM mode (Whisper, Apple): we gate with VAD and hand over utterances.
+        // Engine-mic mode (Android / Windows system recognizers): the engine
+        // owns the microphone; we only relay its results.
+        let mut engine_owns_mic = false;
+        let mut listening_wanted = false;
+        let mut engine_ready = false;
 
         // Learned gate when the Silero weights are present, RMS energy gate
         // otherwise. The VAD stream carries its own 512-sample chunking, so it
@@ -661,6 +692,62 @@ fn spawn_voice_worker(
         let mut idle_timeout_ticks = 0usize;
 
         'worker: loop {
+            for event in session.poll() {
+                match event {
+                    SttEvent::Loading { phase, fraction } => {
+                        if fraction == 0.0 || fraction >= 1.0 {
+                            crate::log!("voice: {phase}");
+                        }
+                    }
+                    SttEvent::Ready(info) => {
+                        crate::log!(
+                            "voice: backend {} via {}{} caps={:?}",
+                            info.engine,
+                            info.pipe,
+                            match &info.remote {
+                                Some(node) => format!(" on {node}"),
+                                None => String::new(),
+                            },
+                            info.capabilities
+                        );
+                        engine_ready = true;
+                        engine_owns_mic = !info.capabilities.pcm_input && info.capabilities.engine_mic;
+                        if engine_owns_mic {
+                            engine_mic.store(true, Ordering::Relaxed);
+                            // Tell the UI side to release its own capture.
+                            text_signal.set();
+                            if listening_wanted {
+                                session.listen();
+                            }
+                        }
+                    }
+                    SttEvent::Failed(why) => {
+                        crate::log!("voice: no speech recognizer available: {why}");
+                    }
+                    SttEvent::Level(level) => {
+                        let _ = wave_tx.try_send(VoiceWaveEvent::Level(level));
+                        text_signal.set();
+                    }
+                    SttEvent::Partial(_) => {}
+                    SttEvent::Final { transcript, secs, .. } => {
+                        let text = normalize_transcript(&transcript.segments);
+                        if !text.is_empty() {
+                            crate::log!("voice: transcript ({secs:.2}s) {text}");
+                            let _ = text_tx.send(text);
+                            text_signal.set();
+                        }
+                    }
+                    SttEvent::Error { message, .. } => crate::log!("voice: {message}"),
+                    SttEvent::ListenEnded => {
+                        // Continuous dictation: the engine ends a session per
+                        // utterance; start the next one while the mic is on.
+                        if listening_wanted && engine_owns_mic {
+                            session.listen();
+                        }
+                    }
+                }
+            }
+
             while let Ok(control) = control_rx.try_recv() {
                 match control {
                     VoiceControlMessage::Reset => {
@@ -672,9 +759,19 @@ fn spawn_voice_worker(
                         if let Some(vad) = vad.as_mut() {
                             vad.reset();
                         }
+                        session.cancel();
                     }
-                    VoiceControlMessage::Preload => {
-                        let _ = transcriber.preload(&params);
+                    VoiceControlMessage::Start => {
+                        listening_wanted = true;
+                        if engine_owns_mic && engine_ready {
+                            session.listen();
+                        }
+                    }
+                    VoiceControlMessage::Stop => {
+                        listening_wanted = false;
+                        if engine_owns_mic {
+                            session.stop_listening();
+                        }
                     }
                     VoiceControlMessage::Shutdown => break 'worker,
                 }
@@ -682,6 +779,10 @@ fn spawn_voice_worker(
 
             match audio_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(audio_chunk) => {
+                    if engine_owns_mic {
+                        // Our capture is being released; nothing to gate.
+                        continue;
+                    }
                     idle_timeout_ticks = 0;
                     // Classify the packet as speech / undecided / pause. Silero
                     // updates its probability every 512 samples, so between
@@ -767,13 +868,11 @@ fn spawn_voice_worker(
                     }
                 }
 
-                if flush_on_pause || flush_on_idle {
-                    trim_trailing_silence(&mut chunk);
-                    silence_packet_run = 0;
-                    saw_speech_since_flush = false;
-                    voiced_samples_since_flush = 0;
-                    idle_timeout_ticks = 0;
-                }
+                trim_trailing_silence(&mut chunk);
+                silence_packet_run = 0;
+                saw_speech_since_flush = false;
+                voiced_samples_since_flush = 0;
+                idle_timeout_ticks = 0;
 
                 if chunk.len() < VOICE_TRANSCRIBE_MIN_SAMPLES {
                     continue;
@@ -793,23 +892,10 @@ fn spawn_voice_worker(
                 let normalized_chunk = normalize_for_whisper(&chunk);
                 let _ = wave_tx.try_send(VoiceWaveEvent::Submitted(normalized_chunk.clone()));
                 text_signal.set();
-
-                let segments = match transcriber.transcribe(&normalized_chunk, &params) {
-                    Ok(segments) => segments,
-                    Err(_) => Vec::new(),
-                };
-                let text = normalize_transcript(&segments);
-                if !text.is_empty() {
-                    crate::log!("voice: transcript {}", text);
-                    let _ = text_tx.send(text);
-                    text_signal.set();
-                }
-
-                // After any submission, wait for fresh voiced audio before next flush.
-                silence_packet_run = 0;
-                saw_speech_since_flush = false;
-                voiced_samples_since_flush = 0;
-                idle_timeout_ticks = 0;
+                // Non-blocking: the session recognizes on its own thread and
+                // the result comes back through `poll` above, so audio keeps
+                // flowing into the gate while Whisper works.
+                session.transcribe(normalized_chunk);
             }
         }
     });

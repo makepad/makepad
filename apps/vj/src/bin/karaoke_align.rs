@@ -28,7 +28,7 @@
 use makepad_audio_lyrics::align as lyrics_align;
 
 use lyrics_align::{OnsetPreset, SegmentWords, TimedLine, VocalAnalysis};
-use makepad_voice::{WhisperModel, WhisperParams, WhisperState};
+use makepad_ai_speech::whisper::{WhisperModel, WhisperParams, WhisperState};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -431,7 +431,7 @@ fn audit_track(
         aligned.len(),
         aligned.iter().map(|segment| segment.words.len()).sum::<usize>(),
         started.elapsed().as_secs_f64(),
-        makepad_voice::accel_backend_name(),
+        makepad_ai_speech::whisper::accel_backend_name(),
     ));
 
     // Stage snapshots.
