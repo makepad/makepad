@@ -53,7 +53,7 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
-                        1.
+                        /** handle edge inset 0..6 step 0.5 */ 1.
                         self.rect_size.y * self.norm_scroll
                         self.size
                         self.rect_size.y * self.norm_handle
@@ -63,7 +63,7 @@ script_mod! {
                 else {
                     sdf.box(
                         self.rect_size.x * self.norm_scroll
-                        1.
+                        /** handle edge inset 0..6 step 0.5 */ 1.
                         self.rect_size.x * self.norm_handle
                         self.size
                         self.border_radius
@@ -156,7 +156,7 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 if self.is_vertical > 0.5 {
                     sdf.box(
-                        1.,
+                        /** handle edge inset 0..6 step 0.5 */ 1.,
                         self.rect_size.y * self.norm_scroll
                         self.size
                         self.rect_size.y * self.norm_handle
@@ -166,7 +166,7 @@ script_mod! {
                 else {
                     sdf.box(
                         self.rect_size.x * self.norm_scroll
-                        1.
+                        /** handle edge inset 0..6 step 0.5 */ 1.
                         self.rect_size.x * self.norm_handle
                         self.size
                         self.border_radius

@@ -336,6 +336,43 @@ pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> 
         .collect()
 }
 
+/// The value-position annotation naming the literal at `token`, if any:
+/// a doc whose next token is that literal, or a `-` directly before it
+/// (`/**x*/ -0.5` names the `0.5`; the bool says so, and the shader
+/// compiler then folds the sign into the table value). The shader compiler
+/// asks this per literal when it lifts annotated literals into its
+/// constant table.
+pub fn value_name_at(tokenizer: &ScriptTokenizer, token: u32) -> Option<(String, bool)> {
+    let toks = &tokenizer.tokens;
+    if !toks.get(token as usize).is_some_and(|tp| is_value_token(&tp.token)) {
+        return None;
+    }
+    tokenizer.docs.iter().find_map(|d| {
+        if d.next_token == token {
+            return Some((clean_block_text(&d.text), false));
+        }
+        if d.next_token + 1 == token
+            && toks.get(d.next_token as usize).is_some_and(|tp| {
+                matches!(tp.token, ScriptToken::Operator(id) if id == id!(-))
+            })
+        {
+            return Some((clean_block_text(&d.text), true));
+        }
+        None
+    })
+}
+
+/// The float value of the literal token at `token` (`6.`, `10.0`, `0.25`),
+/// or None for anything that is not a float literal. Used to recover a
+/// whole-number float the parser packed into an opcode as an integer.
+pub fn float_literal_at(tokenizer: &ScriptTokenizer, token: u32) -> Option<f64> {
+    match tokenizer.tokens.get(token as usize)?.token {
+        ScriptToken::F64(v) => Some(v),
+        ScriptToken::F32(v) => Some(v as f64),
+        _ => None,
+    }
+}
+
 impl ScriptCode {
     /// The `/**name*/` value-position annotations of one body.
     pub fn resolve_body_value_names(&self, body_index: u16) -> Vec<ScriptValueName> {

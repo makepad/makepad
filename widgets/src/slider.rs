@@ -152,7 +152,7 @@ script_mod! {
                     handle_bg_x - handle_sz * 0.5
                     self.offset_y
                     handle_sz
-                    slider_height * 2.
+                    slider_height * /** handle height scale 1..3 step 0.1 */ 2.
                 )
 
                 sdf.fill_keep(
@@ -428,7 +428,7 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let handle_sz = self.handle_size
 
-                let offset_px = vec2(0., 20.)
+                let offset_px = vec2(0., /** label reserve above track 0..40 step 1 */ 20.)
 
                 let offset_uv = vec2(
                     offset_px.x / self.rect_size.x
@@ -476,7 +476,7 @@ script_mod! {
                 let pos_y_adj = self.pos.y - offset_uv.y
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gfx = self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                     let gfy = pos_y_adj * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                     let gradient_fill = vec2(gfx, gfy)
@@ -502,7 +502,7 @@ script_mod! {
                 let mut border_color_2_disabled = self.border_color_disabled
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gbx = self.pos.x * scale_factor_border.x + dither
                     let gby = pos_y_adj * scale_factor_border.y + dither
                     let gradient_border = vec2(gbx, gby)
@@ -532,7 +532,7 @@ script_mod! {
                 let mut handle_stroke_disabled = self.border_color_disabled
 
                 if self.handle_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gfx = self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                     let gfy = pos_y_adj * scale_factor_fill.y - border_sz_uv.y * 2. + dither
                     let gradient_fill = vec2(gfx, gfy)
@@ -545,7 +545,7 @@ script_mod! {
                 }
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gbx = self.pos.x * scale_factor_border.x + dither
                     let gby = pos_y_adj * scale_factor_border.y + dither
                     let gradient_border = vec2(gbx, gby)
@@ -579,7 +579,7 @@ script_mod! {
                 sdf.stroke(stroke, self.border_size)
 
                 // Ridge
-                let offset_sides = self.border_size + 6.
+                let offset_sides = self.border_size + /** track side inset 0..20 step 0.5 */ 6.
                 sdf.rect(
                     self.border_size + offset_sides
                     offset_px.y + (self.rect_size.y - offset_px.y) * 0.5 - self.border_size - 0.5
@@ -627,7 +627,7 @@ script_mod! {
                 // Handle
                 let ctrl_height = self.rect_size.y - offset_px.y
                 let handle_x = self.slide_pos * (self.rect_size.x - handle_sz - offset_sides) - 3
-                let handle_padding = 1.5
+                let handle_padding = /** handle vertical inset 0..6 step 0.5 */ 1.5
                 sdf.box(
                     handle_x + offset_sides + self.border_size
                     offset_px.y + self.border_size + handle_padding
@@ -790,7 +790,7 @@ script_mod! {
 
                 let label_sz_uv = self.label_size / self.rect_size.x
 
-                let handle_size = 4.0
+                let handle_size = /** round handle radius 1..20 step 0.5 */ 4.0
                 let padding = self.val_padding
 
                 let track_length_bg = self.rect_size.x - self.label_size
@@ -806,7 +806,7 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let pos_x_heat = pow(self.pos.x, self.val_heat) - label_sz_uv
                     let gfx = pos_x_heat * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                     let gfy = self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
@@ -827,7 +827,7 @@ script_mod! {
                 let mut color_stroke_disabled = self.border_color_disabled
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gbx = self.pos.x + dither
                     let gby = self.pos.y + dither
                     let gradient_border = vec2(gbx, gby)
@@ -847,7 +847,7 @@ script_mod! {
                 let mut val_fill_disabled = self.val_color_disabled
 
                 if self.val_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let pos_x_heat = pow(self.pos.x, self.val_heat) - label_sz_uv
                     let dir = pos_x_heat * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                     val_fill = mix(self.val_color, self.val_color_2, dir)
@@ -896,7 +896,7 @@ script_mod! {
                     padding + self.border_size
                     val_target_x
                     self.rect_size.y - padding_full - self.border_size * 2.
-                    1.
+                    /** value bar corner radius 0..8 step 0.5 */ 1.
                 )
 
                 sdf.circle(
@@ -1114,11 +1114,11 @@ script_mod! {
                 let outer_end = start + val_length
                 let val_end = start + val_length * self.slide_pos
 
-                let label_offset_px = 20.
+                let label_offset_px = /** label reserve below knob 0..40 step 1 */ 20.
                 let label_offset_uv = self.rect_size.y
-                let scale_px = min(self.rect_size.x, self.rect_size.y - 2. - theme.beveling)
+                let scale_px = min(self.rect_size.x, self.rect_size.y - /** knob fit inset 0..8 step 0.5 */ 2. - theme.beveling)
 
-                let scale_factor = scale_px * 0.02
+                let scale_factor = scale_px * /** knob metric scale per px 0.005..0.05 step 0.002 */ 0.02
 
                 let outer_width = self.val_size * scale_factor
                 let radius_px = (scale_px - outer_width) * 0.5
@@ -1164,17 +1164,17 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 let mut gradient_y = self.pos.y
-                let mut gradient_down = pow(self.pos.y, 2.)
-                let mut gradient_up = pow(self.pos.y, 0.5)
+                let mut gradient_down = pow(self.pos.y, /** bevel shade curve 0.5..4 step 0.1 */ 2.)
+                let mut gradient_up = pow(self.pos.y, /** rim shade curve 0.1..2 step 0.05 */ 0.5)
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let pos_y_adj = self.pos.y - offset_uv.y
                     let gbx = self.pos.x * scale_border.x + dither
                     let gby = pos_y_adj * scale_border.y + dither
                     gradient_y = gby
-                    gradient_down = pow(gby, 2.)
-                    gradient_up = pow(gby, 0.5)
+                    gradient_down = pow(gby, /** bevel shade curve 0.5..4 step 0.1 */ 2.)
+                    gradient_up = pow(gby, /** rim shade curve 0.1..2 step 0.05 */ 0.5)
                     color_fill = mix(self.color, self.color_2, gby)
                     color_fill_hover = mix(self.color_hover, self.color_2_hover, gby)
                     color_fill_focus = mix(self.color_focus, self.color_2_focus, gby)
@@ -1235,7 +1235,7 @@ script_mod! {
                     radius_px
                     start
                     outer_end
-                    border_sz * 4.
+                    border_sz * /** rim shadow width scale 1..8 step 0.5 */ 4.
                 )
 
                 sdf.fill(
@@ -1252,7 +1252,7 @@ script_mod! {
                     radius_px
                     start
                     outer_end
-                    border_sz * 4.
+                    border_sz * /** track ridge width scale 1..8 step 0.5 */ 4.
                 )
 
                 sdf.fill(

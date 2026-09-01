@@ -132,7 +132,7 @@ script_mod! {
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
 
                 let mut color_fill = self.color
                 let mut color_fill_hover = self.color_hover
@@ -147,14 +147,14 @@ script_mod! {
                 let mut color_stroke_disabled = self.border_color_disabled
 
                 // lets draw a little triangle in the corner
-                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 2.5
-                let offset = 1.
-                let offset_x = 2.
+                let c = vec2(self.rect_size.x - /** arrow inset from right 4..24 step 0.5 */ 10.0, self.rect_size.y * 0.5)
+                let sz = /** arrow half size 1..8 step 0.25 */ 2.5
+                let offset = /** arrow vertical nudge -4..4 step 0.5 */ 1.
+                let offset_x = /** arrow horizontal nudge -6..6 step 0.5 */ 2.
 
                 sdf.move_to(c.x - sz - offset_x, c.y - sz + offset)
                 sdf.line_to(c.x + sz - offset_x, c.y - sz + offset)
-                sdf.line_to(c.x - offset_x, c.y + sz * 0.25 + offset)
+                sdf.line_to(c.x - offset_x, c.y + sz * /** arrow apex depth 0..1 step 0.05 */ 0.25 + offset)
                 sdf.close_path()
 
                 sdf.fill_keep(

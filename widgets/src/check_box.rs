@@ -88,7 +88,7 @@ script_mod! {
                             offset_px.y + self.border_size
                             sz_px - self.border_size * 2.
                             sz_px - self.border_size * 2.
-                            self.border_radius * 0.5
+                            self.border_radius * /** mark box corner scale 0..1 step 0.05 */ 0.5
                         )
 
                         let color_fill = self.color
@@ -109,7 +109,7 @@ script_mod! {
                         sdf.stroke(color_stroke, self.border_size)
 
                         // Draw checkmark
-                        let mark_padding = 0.275 * self.size
+                        let mark_padding = /** check inset frac 0.1..0.45 step 0.005 */ 0.275 * self.size
                         sdf.move_to(mark_padding, center_px.y)
                         sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding)
                         sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding)
@@ -119,7 +119,7 @@ script_mod! {
                             .mix(self.mark_color_active, self.active)
                             .mix(self.mark_color_disabled, self.disabled)
 
-                        sdf.stroke(mark_color, self.size * 0.09)
+                        sdf.stroke(mark_color, self.size * /** check stroke frac 0.02..0.2 step 0.005 */ 0.09)
                 //    }
 
                 //    CheckType.None => {
@@ -274,7 +274,7 @@ script_mod! {
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                let sz_px = vec2(self.size * 1.6, self.size)
+                let sz_px = vec2(self.size * /** pill aspect 1..2.5 step 0.05 */ 1.6, self.size)
                 let center_px = vec2(sz_px.x * 0.5, self.rect_size.y * 0.5)
                 let offset_px = vec2(0., center_px.y - sz_px.y * 0.5)
 
@@ -284,7 +284,7 @@ script_mod! {
                     offset_px.y + self.border_size
                     sz_px.x - self.border_size * 2.
                     sz_px.y - self.border_size * 2.
-                    self.border_radius * self.size * 0.1
+                    self.border_radius * self.size * /** pill corner scale 0..0.3 step 0.01 */ 0.1
                 )
 
                 let color_fill = self.color
@@ -305,14 +305,14 @@ script_mod! {
                 sdf.stroke(color_stroke, self.border_size)
 
                 // Draw toggle mark
-                let mark_padding = 1.5
+                let mark_padding = /** knob inset 0..6 step 0.5 */ 1.5
                 let mark_size = sz_px.y * 0.5 - self.border_size - mark_padding
                 let mark_target_y = sz_px.y - sz_px.x + self.border_size + mark_padding
                 let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * self.active
 
                 // Draw ring when off, filled circle when on
                 sdf.circle(mark_pos_y, center_px.y, mark_size)
-                sdf.circle(mark_pos_y, center_px.y, mark_size * 0.45)
+                sdf.circle(mark_pos_y, center_px.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
                 sdf.subtract()
 
                 sdf.circle(mark_pos_y, center_px.y, mark_size)
