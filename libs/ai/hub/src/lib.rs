@@ -32,6 +32,7 @@
 //!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
 pub mod backend;
+pub mod body_backend;
 pub mod chat_wire;
 pub use makepad_base64;
 pub mod client;

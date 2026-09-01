@@ -808,8 +808,9 @@ pub struct LiveStatusJson {
 // increments (see the `stats` message).
 // Server -> client: an output frame; `kind` follows the session's
 // `output_encoding` (`{"type":"control","output_encoding":"png"}` switches
-// it; default is "h264" when the service was built with the `video` cargo
-// feature, "raw" otherwise — see `RealtimeRequestJson::output_encoding`).
+// it; `"none"` sends no output frames while JSON messages continue; default
+// is "h264" when the service was built with the `video` cargo feature,
+// "raw" otherwise - see `RealtimeRequestJson::output_encoding`).
 // `frame_index` is the session's output counter. When a NEW socket
 // connects to an H.264-output session, the encoder is asked for a fresh
 // keyframe (SPS/PPS + IDR) so the new client can start decoding
@@ -846,6 +847,9 @@ pub struct LiveStatusJson {
 // above 0.75 the init is never encoded and every frame is a fresh edit.
 //
 // JSON messages, server -> client:
+//   {"type":"aux", "frame_index":N, "data":<backend JSON>}
+//    (when a backend produces structured per-frame data; sent before that
+//    frame, and still sent when output_encoding is "none")
 //   {"type":"stats", "frame_index":N, "fps":.., "frame_ms":..,
 //    "stage_ms":{"prep":..,"model":..,"text_encode":..,"post":..},
 //    "frames_in":.., "frames_out":.., "dropped":..,
@@ -891,7 +895,9 @@ pub struct RealtimeRequestJson {
     /// "feed" (default): wait for client-pushed input frames. "feedback":
     /// the session's own previous output (camera-warped) is the next init.
     pub loop_mode: Option<String>,
-    /// "raw" | "png" | "h264" — output frame payload format. Default:
+    /// "none" | "raw" | "png" | "h264" - output frame payload format.
+    /// "none" suppresses output frames while stats/aux/error/stopped continue
+    /// and is refused with `loop_mode = "feedback"`. Default:
     /// "h264" when this service was built with the `video` cargo feature
     /// (`makepad-video`'s hardware H.264 codec), "raw" otherwise. Requesting
     /// "h264" on a build without that feature is refused (400).

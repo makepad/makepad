@@ -136,6 +136,11 @@ makepad-live-id = { path = "../../live_id" }
 # internally (behind the crate's own optional/default `video` feature).
 makepad-video = { path = "../../../platform/video" }
 
+[[test]]
+name = "body_worker"
+path = "tests/body_worker.rs"
+harness = false
+
 # The standing "is chat slow right now?" check. Its own code is std-only —
 # no HTTP or JSON crate — so what it measures is the box, not a client
 # library, and it keeps working when the wire grows fields it has never

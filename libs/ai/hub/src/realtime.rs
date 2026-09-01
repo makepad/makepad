@@ -269,8 +269,30 @@ impl RealtimeSession {
     /// Merges a partial `{"type":"control", ...}` update: only the fields
     /// present in `update` change anything (see [`apply_control_to_config`]
     /// for the `LiveConfig` subset; the session-only knobs are merged here).
-    pub fn apply_control(&self, update: &realtime_wire::ControlUpdateJson) {
+    pub fn apply_control(
+        &self,
+        update: &realtime_wire::ControlUpdateJson,
+    ) -> Result<(), AssetAiError> {
         let mut state = self.state.lock().unwrap();
+        let next_loop_mode = update
+            .loop_mode
+            .as_deref()
+            .and_then(|text| LoopMode::parse(text).ok())
+            .unwrap_or(state.loop_mode);
+        let next_output_encoding = update
+            .output_encoding
+            .as_deref()
+            .and_then(|text| OutputEncoding::parse(text).ok())
+            .filter(OutputEncoding::is_supported_in_this_build)
+            .unwrap_or(state.output_encoding);
+        if next_loop_mode == LoopMode::Feedback
+            && next_output_encoding == OutputEncoding::None
+        {
+            return Err(AssetAiError::Params(
+                "realtime: loop_mode \"feedback\" requires output frames; output_encoding \"none\" is not allowed"
+                    .to_string(),
+            ));
+        }
         apply_control_to_config(&mut state.config, update);
         if let Some(mode) = update
             .loop_mode
@@ -314,6 +336,7 @@ impl RealtimeSession {
         if update.reset == Some(true) {
             self.reset_requested.store(true, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     /// `{"type":"reference", "slot":N, ...}`: grows `references` with black
@@ -396,7 +419,7 @@ impl RealtimeSession {
     /// Handles one client -> server text message: control / reference / stop.
     pub fn handle_text(&self, text: &str) -> Result<(), AssetAiError> {
         match realtime_wire::parse_client_message(text)? {
-            ClientMessage::Control(update) => self.apply_control(&update),
+            ClientMessage::Control(update) => self.apply_control(&update)?,
             ClientMessage::Reference(reference) => {
                 let slot = reference.slot.unwrap_or(0) as usize;
                 let png_b64 = reference.png_b64.as_deref().unwrap_or("");
@@ -422,6 +445,7 @@ impl RealtimeSession {
     fn encode_output(&self, image: &RgbImage, frame_index: u32) -> Vec<Vec<u8>> {
         let output_encoding = self.state.lock().unwrap().output_encoding;
         match output_encoding {
+            OutputEncoding::None => Vec::new(),
             OutputEncoding::Raw | OutputEncoding::Png => {
                 vec![encode_output_frame(image, output_encoding, frame_index)]
             }
@@ -572,8 +596,8 @@ fn encode_output_frame(image: &RgbImage, encoding: OutputEncoding, frame_index: 
                 }
             }
         }
-        OutputEncoding::H264 => {
-            eprintln!("realtime: encode_output_frame called with H264 (should route through encode_output) — using raw");
+        OutputEncoding::H264 | OutputEncoding::None => {
+            eprintln!("realtime: encode_output_frame called with non-frame encoding (should route through encode_output) - using raw");
             (FrameKind::Raw, image.data.clone())
         }
     };
@@ -1298,6 +1322,9 @@ pub fn run_live(
             }
         };
 
+        if let Some(aux_json) = out.aux_json.as_deref() {
+            session.push_bytes(realtime_wire::encode_aux_message(frame_index, aux_json));
+        }
         {
             let mut slot = outbound.lock().unwrap();
             if slot.replace((frame_index, out.image.clone())).is_some() {
@@ -1641,6 +1668,33 @@ mod tests {
     }
 
     #[test]
+    fn output_encoding_none_is_feed_only() {
+        use crate::protocol::RealtimeRequestJson;
+
+        let feed = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            loop_mode: Some("feed".to_string()),
+            output_encoding: Some("none".to_string()),
+            ..Default::default()
+        };
+        let params = LiveParams::from_request(&feed).unwrap();
+        assert_eq!(params.output_encoding, OutputEncoding::None);
+
+        let feedback = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            loop_mode: Some("feedback".to_string()),
+            output_encoding: Some("none".to_string()),
+            ..Default::default()
+        };
+        let error = LiveParams::from_request(&feedback)
+            .err()
+            .expect("feedback with no output must be refused");
+        assert!(matches!(error, AssetAiError::Params(_)));
+        assert!(error.to_string().contains("feedback"));
+        assert!(error.to_string().contains("output_encoding \"none\""));
+    }
+
+    #[test]
     fn strength_is_a_five_position_switch_at_four_steps() {
         use crate::backend::img2img_start_step;
         assert_eq!(img2img_start_step(0.0, 4), 4);
@@ -1939,7 +1993,12 @@ mod tests {
             // A frame that changes every step, so frame_diff is non-zero.
             let tint = (frame.frame_index * 40 % 256) as u8;
             let image = solid_image(frame.config.width, frame.config.height, [tint, 20, 30]);
-            Ok(crate::backend::LiveFrameOut { image, model_ms: 0.1, text_encode_ms: 0.0 })
+            Ok(crate::backend::LiveFrameOut {
+                image,
+                aux_json: None,
+                model_ms: 0.1,
+                text_encode_ms: 0.0,
+            })
         }
     }
 
@@ -2186,12 +2245,38 @@ mod tests {
             prompt: Some("hi".to_string()),
             ..Default::default()
         };
-        session.apply_control(&update);
+        session.apply_control(&update).unwrap();
         let (config, loop_mode, output_encoding, max_fps) = session.snapshot();
         assert_eq!(loop_mode, LoopMode::Feedback);
         assert_eq!(output_encoding, OutputEncoding::Png);
         assert_eq!(max_fps, 24.0);
         assert_eq!(config.prompt, "hi");
+    }
+
+    #[test]
+    fn none_control_sends_no_frame_and_refuses_feedback() {
+        let params = LiveParams {
+            model: "testpattern".to_string(),
+            config: LiveConfig::default(),
+            loop_mode: LoopMode::Feed,
+            input_encoding: OutputEncoding::Raw,
+            output_encoding: OutputEncoding::None,
+            max_fps: 0.0,
+            idle_timeout_s: 30,
+        };
+        let session = RealtimeSession::new("job-none".to_string(), &params);
+        assert!(session.encode_output(&RgbImage::blank(16, 16), 0).is_empty());
+
+        let update = ControlUpdateJson {
+            kind: "control".to_string(),
+            loop_mode: Some("feedback".to_string()),
+            ..Default::default()
+        };
+        let error = session.apply_control(&update).unwrap_err();
+        assert!(matches!(error, AssetAiError::Params(_)));
+        let (_, loop_mode, output_encoding, _) = session.snapshot();
+        assert_eq!(loop_mode, LoopMode::Feed);
+        assert_eq!(output_encoding, OutputEncoding::None);
     }
 
     /// The server-loop handshake: open in feed, push the source once, flip
