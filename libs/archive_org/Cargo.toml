@@ -1,0 +1,17 @@
+# Internet Archive (archive.org) content input: search, item metadata, and
+# bounded HTTPS downloads of images and video, on the makepad network layer.
+#
+# UI-free and store-free on purpose. It knows how to FIND and FETCH archive
+# content into a local digest-keyed cache; whoever hosts it (the VJ, the
+# asset UI, a CLI) decides what to show and what to publish where.
+
+[package]
+name = "makepad-archive-org"
+version = "0.1.0"
+edition = "2021"
+description = "archive.org search + download client on the makepad network layer"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-network = { path = "../../platform/network" }
+makepad-micro-serde = { path = "../micro_serde" }

@@ -26,6 +26,8 @@ use crate::local_store::LocalStore;
 use crate::music_import_ui::MusicImporter;
 
 mod apc40;
+mod archive_stream;
+mod archive_ui;
 mod autopilot;
 mod beat_sync;
 mod blend;
@@ -146,7 +148,7 @@ use crate::fx_slot::{
 use crate::midi_learn::{LearnEvent, LearnWrapAction, MidiLearn, VjLearnWrap};
 use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipelines::{PipeDone, PipeReq, Pipelines};
-use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
+use crate::gen::{GenCmd, GenModel, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
@@ -157,13 +159,15 @@ use crate::mixer::{
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
+use crate::archive_ui::{ArchiveChange, ArchivePanel, ImportState, PublishTarget, Swatch};
+use makepad_archive_org::MediaFilter;
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
 use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
-    JobId, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
+    RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
 };
 use makepad_asset_data::{
     Anchor, AssetId, AssetKind, AssetManifest, AssetRevisionId, BlobId, DeviceTier, FileRole,
@@ -1988,6 +1992,13 @@ script_mod! {
                                                             draw_icon +: { svg: crate_resource("self:resources/icons/lights.svg") }
                                                         }
                                                     }
+                                                    Tip{ text: "Internet Archive"
+                                                        lower_tab_archive := IconButton{
+                                                            width: 24 height: 20
+                                                            icon_walk: Walk{width: 10 height: Fit}
+                                                            draw_icon +: { svg: crate_resource("self:resources/icons/archive.svg") }
+                                                        }
+                                                    }
                                                 }
                                                 // Library housekeeping sits
                                                 // at the FOOT with the pager,
@@ -2184,6 +2195,138 @@ script_mod! {
                                                 }
                                             }
                                         }
+                                                }
+                                                archive_lower_page := View{
+                                                    width: Fill
+                                                    height: Fill
+                                                    flow: Down
+                                                    spacing: 4
+                                                    // ---- ARCHIVE.ORG: search the internet archive, audition a
+                                                    // swatch, import on purpose. The grid is the same tile wall the
+                                                    // SFX / MESH explorers use; the well on the right plays the
+                                                    // archive's own small transcode (silent) or shows the still.
+                                                    // Nothing reaches the library until IMPORT.
+                                                    View{
+                                                        width: Fill
+                                                        height: Fit
+                                                        flow: Right
+                                                        spacing: 6
+                                                        align: Align{x: 0.0, y: 0.5}
+                                                        Tick{width: Fit text: "ARCHIVE.ORG"}
+                                                        archive_search := TextInput{
+                                                            width: 240
+                                                            empty_text: "search the internet archive"
+                                                        }
+                                                        archive_go := ChromeButton{width: 70 text: "SEARCH"}
+                                                        archive_chip_all := PillButton{width: 44 text: "ALL"}
+                                                        archive_chip_video := PillButton{width: 56 text: "VIDEO"}
+                                                        archive_chip_images := PillButton{width: 62 text: "IMAGES"}
+                                                        archive_status := Label{
+                                                            width: Fill
+                                                            flow: Flow.Right{wrap: false}
+                                                            max_lines: 1
+                                                            text: "search the internet archive"
+                                                            draw_text.color: #x8e9aa7
+                                                            draw_text.text_style.font_size: 9
+                                                        }
+                                                        archive_prev := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_prev.svg") }}
+                                                        archive_page_lab := Tick{width: Fit text: "1 / 1"}
+                                                        archive_next := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_next.svg") }}
+                                                    }
+                                                    View{
+                                                        width: Fill
+                                                        height: Fill
+                                                        flow: Right
+                                                        spacing: 8
+                                                        archive_grid := VjTileGrid{}
+                                                        // THE SWATCH WELL: what the clicked tile really looks like
+                                                        // in motion, before anything is imported.
+                                                        RoundedView{
+                                                            width: 320
+                                                            height: Fill
+                                                            flow: Down
+                                                            spacing: 4
+                                                            padding: 8
+                                                            draw_bg +: {
+                                                                color: #x181c23
+                                                                border_color: #xffffff12
+                                                                border_size: 1.0
+                                                                border_radius: 5.0
+                                                            }
+                                                            Tick{width: Fit text: "SWATCH"}
+                                                            SolidView{
+                                                                width: Fill
+                                                                height: 150
+                                                                align: Align{x: 0.5, y: 0.5}
+                                                                draw_bg.color: #x000000
+                                                                archive_preview := Image{
+                                                                    width: Fill
+                                                                    height: Fill
+                                                                    fit: ImageFit.Smallest
+                                                                }
+                                                            }
+                                                            // Where the swatch is: a thin scrub bar the frames advance and the
+                                                            // operator can drag — a look at minute eight costs one gesture.
+                                                            archive_scrub := ApcHSlider{height: 12}
+                                                            // The verbs: audition, throw onto a deck (STREAMING — nothing
+                                                            // is imported or downloaded), and — deliberately — import.
+                                                            View{
+                                                                width: Fill
+                                                                height: Fit
+                                                                flow: Right
+                                                                spacing: 6
+                                                                archive_play := ChromeButton{width: 70 text: "PLAY"}
+                                                                archive_cue_a := ChromeButton{width: Fill text: "CUE A"}
+                                                                archive_cue_b := ChromeButton{width: Fill text: "CUE B"}
+                                                            }
+                                                            archive_import := ChromeButton{width: Fill text: "IMPORT"}
+                                                            archive_swatch_lab := Label{
+                                                                width: Fill
+                                                                padding: 0
+                                                                flow: Flow.Right{wrap: false}
+                                                                max_lines: 1
+                                                                text: "click a tile to audition it"
+                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.text_style.font_size: 8
+                                                            }
+                                                            archive_title := Label{
+                                                                width: Fill
+                                                                padding: 0
+                                                                flow: Flow.Right{wrap: false}
+                                                                max_lines: 1
+                                                                text: ""
+                                                                draw_text.color: #xe8eef4
+                                                                draw_text.text_style: theme.font_bold{font_size: 10}
+                                                            }
+                                                            archive_meta := Label{
+                                                                width: Fill
+                                                                padding: 0
+                                                                flow: Flow.Right{wrap: false}
+                                                                max_lines: 1
+                                                                text: ""
+                                                                draw_text.color: #xa6b1bd
+                                                                draw_text.text_style.font_size: 8
+                                                            }
+                                                            archive_license := Label{
+                                                                width: Fill
+                                                                padding: 0
+                                                                flow: Flow.Right{wrap: false}
+                                                                max_lines: 1
+                                                                text: ""
+                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.text_style.font_size: 8
+                                                            }
+                                                            archive_import_lab := Label{
+                                                                width: Fill
+                                                                padding: 0
+                                                                flow: Flow.Right{wrap: false}
+                                                                max_lines: 1
+                                                                text: ""
+                                                                draw_text.color: #x8e9aa7
+                                                                draw_text.text_style.font_size: 8
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -3117,6 +3260,10 @@ enum SlotMedia {
     #[default]
     Empty,
     Video,
+    /// A not-imported archive.org clip playing STRAIGHT OFF the archive by
+    /// byte ranges (archive_stream.rs) — nothing on disk, nothing in the
+    /// store. Picture-only (silent bus, like a splat); loops on its own.
+    Stream,
     Still,
     Mesh,
     /// Gaussian splat scene in the slot's offscreen XrSceneView.
@@ -3126,6 +3273,18 @@ enum SlotMedia {
     /// (fx_slot.rs) — an FX tile clicked with no effect slot armed cues
     /// like any clip, autofade included.
     Effect,
+}
+
+/// One deck's archive stream (SlotMedia::Stream): the player, the title
+/// the strip wears, and whether its failure has been reported (once).
+struct DeckStream {
+    stream: crate::archive_stream::StreamSwatch,
+    title: String,
+    failed: bool,
+    /// An AUTOCUE: walk the crossfader to this deck when the first frame
+    /// lands (fading to a deck that is still black would show the fade
+    /// happening to nothing).
+    fade_when_ready: bool,
 }
 
 /// Slow orbit for a parked splat scene (radians per second).
@@ -3276,6 +3435,14 @@ impl AutoFade {
         Some(next)
     }
 
+    /// Start a fade toward a KNOWN end (0 = A, 1 = B) — the autocue's
+    /// directional cousin of `press`.
+    fn aim(&mut self, target: f32, secs: f32) {
+        self.target = target.clamp(0.0, 1.0);
+        self.rate = 1.0 / secs.max(0.05);
+        self.active = true;
+    }
+
     /// The operator grabbed the fader (or a cue landed): let go silently.
     fn cancel(&mut self) {
         self.active = false;
@@ -3389,6 +3556,34 @@ const LEARNABLES: [(&[LiveId], &str); 23] = [
     (ids!(fx_slot_b_d2_learn), "fx_b_d2"),
     (ids!(fadeout_learn), "fadeout"),
 ];
+
+/// The lower region's page. Persisted as a number, so a settings file
+/// written before the archive page existed (0 / 1) reads unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum LowerTab {
+    #[default]
+    Grid,
+    Lights,
+    Archive,
+}
+
+impl LowerTab {
+    fn from_u8(v: u8) -> LowerTab {
+        match v {
+            1 => LowerTab::Lights,
+            2 => LowerTab::Archive,
+            _ => LowerTab::Grid,
+        }
+    }
+
+    fn page(self) -> LiveId {
+        match self {
+            LowerTab::Grid => id!(grid_lower_page),
+            LowerTab::Lights => id!(lights_lower_page),
+            LowerTab::Archive => id!(archive_lower_page),
+        }
+    }
+}
 
 /// Whose native folder picker is open. The answer arrives in a later
 /// actions pass with nothing in it to say who asked, so the app has to
@@ -3648,10 +3843,6 @@ enum CatPurpose {
     /// then rides the ordinary `Thumb` purpose into the shared thumbnail
     /// cache, so the row costs no second decode path.
     DreamThumb { revision: AssetRevisionId },
-    JobProfiles { domain: &'static str },
-    JobEnqueue { tag: GenTag },
-    JobStatus { job: JobId },
-    JobCancel { job: JobId },
     /// Offering this machine's locally computed stems/lyrics back to the
     /// store. Fire and forget: one line either way, never a dialog.
     SideChannelPublish { asset: AssetId },
@@ -4494,27 +4685,30 @@ fn selftest_nv12(w: usize, h: usize, x0: usize, y0: usize, sq: usize) -> Vec<u8>
 }
 
 /// The NEURAL field producer is DEFAULT ON for the eyeball comparison;
-/// Per-deck frame-tween modes, in the deck dropdown's order.
-const TWEEN_NONE: u8 = 0;
-const TWEEN_FADE: u8 = 1;
-const TWEEN_FLOW: u8 = 2;
+/// Per-deck frame-tween modes, in the deck dropdown's order. The codes are
+/// the library's — one definition, and a persisted `tween 3` line in a clip
+/// profile still means AI1 forever.
+use makepad_frametween::Mode as TweenMode;
+const TWEEN_NONE: u8 = TweenMode::None.code();
+const TWEEN_FADE: u8 = TweenMode::Crossfade.code();
+const TWEEN_FLOW: u8 = TweenMode::Flow.code();
 /// Persisted code 3 is the shipped neural-field tier (now labelled AI1).
-const TWEEN_AI: u8 = 3;
-const TWEEN_AI2: u8 = 4;
+const TWEEN_AI: u8 = TweenMode::Ai1.code();
+const TWEEN_AI2: u8 = TweenMode::Ai2.code();
 /// Persisted AI3 adaptive-subdivision tier. Existing profile codes never move.
-const TWEEN_AI3: u8 = 5;
+const TWEEN_AI3: u8 = TweenMode::Ai3.code();
 /// Pair-cache namespace for the luma cut verdict (separate from producers).
 const TWEEN_CUT_TIER: u8 = u8::MAX;
 /// Per-deck neural ladder budget. Exact pair keys make eviction harmless.
 const TWEEN_RIFE_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const TWEEN_CUT_CACHE_BYTES: usize = 64 * 1024;
 /// Measured sustainable AI production rate, shared by the active AI decks.
-const TWEEN_RIFE_CAPACITY_FPS: f64 = 5.0;
+const TWEEN_RIFE_CAPACITY_FPS: f64 = makepad_frametween::RIFE_CAPACITY_FPS;
 /// Capacity-law GPU duty left to neural production; presentation owns rest.
 const TWEEN_RIFE_GPU_BUDGET: f64 = 0.60;
 
 fn tween_uses_ai(mode: u8) -> bool {
-    mode == TWEEN_AI || mode == TWEEN_AI2 || mode == TWEEN_AI3
+    TweenMode::from_code(mode).uses_ai()
 }
 
 fn parse_tween_mode(value: &str) -> u8 {
@@ -4530,27 +4724,9 @@ fn tween_prefetch_enabled() -> bool {
 
 /// VJ_TWEEN_RIFE=0 is the kill switch for the neural producer — the
 /// per-deck dropdown's AI entry is the opt-in now.
-fn rife_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // Opt-in while the classical tier gets its enhancement pass — the
-    // neural producer's pulse (field handoffs every few pairs) reads
-    *ON.get_or_init(|| std::env::var("VJ_TWEEN_RIFE").map(|v| v != "0").unwrap_or(true))
-}
-
-/// The RIFE checkpoint path: VJ_RIFE_MODEL, or the repo-local default.
-fn rife_model_path() -> std::path::PathBuf {
-    std::env::var_os("VJ_RIFE_MODEL")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("local/ai_models/rife_v4.26.safetensors"))
-}
-
-/// The proxy resolution RIFE sees: 384 wide, aspect-matched height (the
-/// net pads internally; flow upsamples to the video in the warp).
-fn rife_proxy_dims(w: u32, h: u32) -> (usize, usize) {
-    let pw = 384usize;
-    let ph = ((pw as u64 * h as u64) / w.max(1) as u64).clamp(96, 384) as usize;
-    (pw, ph & !1)
-}
+use makepad_frametween::flow_tween::{
+    default_model_path as rife_model_path, rife_enabled, rife_proxy_dims,
+};
 
 /// Realtime frame tweening is DEFAULT ON; VJ_NO_TWEEN=1 switches it off
 /// (the settings row will replace this).
@@ -5374,11 +5550,13 @@ pub struct App {
     fx_prefab: HashMap<String, Texture>,
     #[rust(BrowseModel::visual())]
     video_model: BrowseModel,
-    // The deck explorer lists EVERY audio asset in the store, whatever its
-    // namespace or category: a generated song is as loadable as an imported
-    // one. Only the intermediate-artifact exclusion applies (that is in the
-    // query itself). The sfx surface keeps its own narrower model.
-    #[rust(BrowseModel::new(AssetKind::Audio, ""))]
+    // The deck explorer opens on MUSIC: every publisher of a song — the
+    // music importer and the music-domain generators alike — writes
+    // category "music", so the filter loses nothing a DJ would load, and
+    // without it the store's hundreds of one-shot SFX bury the tracks
+    // (the startup view was a wall of doom effects). The category box is
+    // seeded with the same word; clearing it widens to all audio.
+    #[rust(BrowseModel::new(AssetKind::Audio, "music"))]
     music_model: BrowseModel,
     #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
     sfx_model: BrowseModel,
@@ -5830,9 +6008,22 @@ pub struct App {
     video_loop: bool,
     #[rust]
     video_muted: bool,
-    /// The lower region's tab: false = content grid, true = lights desk.
+    /// The lower region's tab: content grid, lights desk or the archive.
     #[rust]
-    lights_tab: bool,
+    lower_tab: LowerTab,
+    /// The ARCHIVE.ORG panel: search, swatch, import.
+    #[rust]
+    archive: ArchivePanel,
+    /// Frame pump for the swatch player: armed only while one plays.
+    #[rust]
+    archive_pump: NextFrame,
+    /// The operator has the scrub bar: frames stop moving it until the
+    /// drag ends (and seeks).
+    #[rust]
+    archive_scrubbing: bool,
+    /// CUE ▸ A / CUE ▸ B: per-deck archive streams (SlotMedia::Stream).
+    #[rust]
+    archive_deck: [Option<DeckStream>; 2],
     /// Master video FADEOUT 0..1 (post-everything dim to black).
     #[rust]
     fadeout: f32,
@@ -6718,20 +6909,478 @@ impl App {
         self.video_pump = cx.new_next_frame();
     }
 
-    /// The lower region: content grid or the lights desk — one visible at
-    /// a time, chosen by the vertical tab pair (persisted).
-    fn set_lower_tab(&mut self, cx: &mut Cx, lights: bool) {
-        self.lights_tab = lights;
-        let page = if lights {
-            id!(lights_lower_page)
+    /// CUE ▸ A / CUE ▸ B on the archive panel: open a not-imported clip
+    /// into a video deck, playing straight off the archive by byte ranges —
+    /// nothing is downloaded to disk and nothing enters the library.
+    /// Silent (picture-only source, like a splat); loops on its own; the
+    /// operator mixes it like any other deck.
+    fn cue_archive_deck(&mut self, cx: &mut Cx, slot: SlotId, url: String, title: String) {
+        let i = slot.index();
+        // The same clean slate a fresh cue or eject runs.
+        self.unslot_deck(cx, slot);
+        log!(
+            "archive deck {}: streaming “{title}”",
+            if i == 0 { "A" } else { "B" }
+        );
+        self.mixer.open_slot(slot);
+        self.mixer.set_slot_paused(slot, true);
+        self.slot_media[i] = SlotMedia::Stream;
+        self.slot_loop[i] = true;
+        self.slot_video_muted[i] = true;
+        self.slot_aspect[i] = 16.0 / 9.0;
+        self.archive_deck[i] = Some(DeckStream {
+            stream: crate::archive_stream::StreamSwatch::open_as(
+                url,
+                crate::archive_stream::FrameFormat::Nv12,
+            ),
+            title,
+            failed: false,
+            fade_when_ready: false,
+        });
+        self.strip_shape[i] = None;
+        self.sync_slot_controls_ui(cx);
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Double-click on an archive tile: the library grid's own verb — cue
+    /// into the next available deck. An EMPTY deck first (A before B),
+    /// else the standby side of the crossfader; the fade walks over once
+    /// the stream's first frame is up.
+    fn autocue_archive_deck(&mut self, cx: &mut Cx, url: String, title: String) {
+        let slot = if self.slot_media[0] == SlotMedia::Empty {
+            SlotId::A
+        } else if self.slot_media[1] == SlotMedia::Empty {
+            SlotId::B
+        } else if self.program_mix < 0.5 {
+            SlotId::B
         } else {
-            id!(grid_lower_page)
+            SlotId::A
         };
+        self.cue_archive_deck(cx, slot, url, title);
+        if let Some(deck) = self.archive_deck[slot.index()].as_mut() {
+            deck.fade_when_ready = true;
+        }
+    }
+
+    /// The lower region: content grid, the lights desk or the archive
+    /// panel — one visible at a time, chosen by the tab strip (persisted).
+    fn set_lower_tab(&mut self, cx: &mut Cx, tab: LowerTab) {
+        self.lower_tab = tab;
         self.ui
             .page_flip(cx, ids!(lower_pages))
-            .set_active_page(cx, page.into());
-        self.paint_icon_button(cx, ids!(lower_tab_vj), !lights);
-        self.paint_icon_button(cx, ids!(lower_tab_lights), lights);
+            .set_active_page(cx, tab.page().into());
+        self.paint_icon_button(cx, ids!(lower_tab_vj), tab == LowerTab::Grid);
+        self.paint_icon_button(cx, ids!(lower_tab_lights), tab == LowerTab::Lights);
+        self.paint_icon_button(cx, ids!(lower_tab_archive), tab == LowerTab::Archive);
+        if tab == LowerTab::Archive {
+            self.sync_archive_ui(cx);
+        }
+        self.ui.redraw(cx);
+    }
+
+    // ---- ARCHIVE.ORG panel --------------------------------------------------
+
+    fn handle_archive_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(lower_tab_archive)).clicked(actions) {
+            self.set_lower_tab(cx, LowerTab::Archive);
+            self.save_gen_panel();
+        }
+        if let Some((text, _)) = self.ui.text_input(cx, ids!(archive_search)).returned(actions) {
+            self.archive.search(&text);
+            self.rebuild_archive_grid(cx);
+            self.sync_archive_ui(cx);
+        }
+        if self.ui.button(cx, ids!(archive_go)).clicked(actions) {
+            let text = self.ui.text_input(cx, ids!(archive_search)).text();
+            self.archive.search(&text);
+            self.rebuild_archive_grid(cx);
+            self.sync_archive_ui(cx);
+        }
+        for (chip, media) in [
+            (ids!(archive_chip_all), MediaFilter::ImagesAndVideo),
+            (ids!(archive_chip_video), MediaFilter::Video),
+            (ids!(archive_chip_images), MediaFilter::Images),
+        ] {
+            if self.ui.button(cx, chip).clicked(actions) {
+                self.archive.set_media(media);
+                self.rebuild_archive_grid(cx);
+                self.sync_archive_ui(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(archive_prev)).clicked(actions) {
+            self.archive.prev_page();
+            self.rebuild_archive_grid(cx);
+            self.sync_archive_ui(cx);
+        }
+        if self.ui.button(cx, ids!(archive_next)).clicked(actions) {
+            self.archive.next_page();
+            self.rebuild_archive_grid(cx);
+            self.sync_archive_ui(cx);
+        }
+        let (down, _up) = self.grid_hits(cx, actions, ids!(archive_grid));
+        if let Some((key, taps)) = down.first().copied() {
+            self.archive.select(key);
+            self.archive_pump = cx.new_next_frame();
+            self.rebuild_archive_grid(cx);
+            self.sync_archive_ui(cx);
+            // Double-click = the library grid's single-click verb: cue it,
+            // STREAMING, into the next available deck, autofade included.
+            // The item's metadata may still be in flight on the second
+            // tap; the panel then fires AutoCue the moment it lands.
+            if taps >= 2 {
+                match self.archive.deck_candidate() {
+                    Some((url, title, _duration)) => {
+                        self.autocue_archive_deck(cx, url, title);
+                    }
+                    None => self.archive.arm_autocue(),
+                }
+            }
+        }
+        if self.ui.button(cx, ids!(archive_play)).clicked(actions) {
+            self.archive.toggle_play();
+            self.archive_pump = cx.new_next_frame();
+            self.sync_archive_ui(cx);
+        }
+        let scrub = self.ui.slider(cx, ids!(archive_scrub));
+        if scrub.slided(actions).is_some() {
+            self.archive_scrubbing = true;
+        }
+        if let Some(fraction) = scrub.end_slide(actions) {
+            self.archive_scrubbing = false;
+            self.archive.seek_fraction(fraction);
+            self.archive_pump = cx.new_next_frame();
+        }
+        if self.ui.button(cx, ids!(archive_import)).clicked(actions) {
+            self.start_archive_import(cx);
+        }
+        for (button, slot) in
+            [(ids!(archive_cue_a), SlotId::A), (ids!(archive_cue_b), SlotId::B)]
+        {
+            if self.ui.button(cx, button).clicked(actions) {
+                match self.archive.deck_candidate() {
+                    Some((url, title, _duration)) => {
+                        self.cue_archive_deck(cx, slot, url, title);
+                    }
+                    None => {
+                        self.archive.status = "pick a video result first".to_string();
+                        self.sync_archive_ui(cx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// IMPORT: hand the panel the live session and let it fetch + publish.
+    fn start_archive_import(&mut self, cx: &mut Cx) {
+        let target = match self.up.as_ref() {
+            Some(up) => match up.token.clone() {
+                Some(token) => Some(PublishTarget {
+                    endpoints: up.endpoints,
+                    server_id: up.server_id,
+                    token,
+                    cache: service::session_config_from_env().cache_parent,
+                }),
+                None => None,
+            },
+            None => None,
+        };
+        match target {
+            Some(target) => {
+                if let Err(why) = self.archive.import(target) {
+                    self.archive.import = ImportState::Failed(why);
+                }
+            }
+            None => {
+                self.archive.import = ImportState::Failed("no asset server session yet".into());
+            }
+        }
+        self.sync_archive_ui(cx);
+    }
+
+    /// Drain the archive lanes (20 Hz poll, plus the frame pump while a
+    /// swatch plays) and apply what changed.
+    fn pump_archive(&mut self, cx: &mut Cx) {
+        let changes = self.archive.poll();
+        let mut panel = false;
+        let mut results = false;
+        for change in changes {
+            match change {
+                ArchiveChange::Results => results = true,
+                ArchiveChange::Thumb { identifier, pixels } => {
+                    let texture = Texture::new_with_format(
+                        cx,
+                        TextureFormat::VecBGRAu8_32 {
+                            width: pixels.width,
+                            height: pixels.height,
+                            data: Some(pixels.bgra),
+                            updated: TextureUpdated::Full,
+                        },
+                    );
+                    let key = ArchivePanel::tile_key(&identifier);
+                    self.archive.thumb_textures.insert(identifier, texture.clone());
+                    if let Some(mut grid) =
+                        self.ui.widget(cx, ids!(archive_grid)).borrow_mut::<VjTileGrid>()
+                    {
+                        grid.set_thumb(cx, key, texture);
+                    }
+                }
+                ArchiveChange::Panel => panel = true,
+                ArchiveChange::Still(pixels) => {
+                    self.set_archive_picture(cx, pixels);
+                }
+                ArchiveChange::Frame(pixels) => {
+                    self.set_archive_picture(cx, pixels);
+                    if let Some((position, duration)) = self.archive.swatch_time() {
+                        if !self.archive_scrubbing && duration > 0.0 {
+                            self.ui
+                                .slider(cx, ids!(archive_scrub))
+                                .set_value(cx, (position / duration).clamp(0.0, 1.0));
+                        }
+                        let line = self.archive_swatch_line();
+                        self.ui.label(cx, ids!(archive_swatch_lab)).set_text(cx, &line);
+                    }
+                }
+                ArchiveChange::Published => {
+                    // The new row arrives through the catalog-event path;
+                    // nudging the grids makes it appear a beat sooner.
+                    self.grids_dirty = true;
+                    panel = true;
+                }
+                ArchiveChange::AutoCue { url, title } => {
+                    self.autocue_archive_deck(cx, url, title);
+                }
+            }
+        }
+        if results {
+            self.rebuild_archive_grid(cx);
+        }
+        if panel {
+            self.sync_archive_ui(cx);
+        }
+        if self.archive.wants_frames() {
+            self.archive_pump = cx.new_next_frame();
+        }
+    }
+
+    /// A still or a swatch frame into the well's one texture.
+    fn set_archive_picture(&mut self, cx: &mut Cx, pixels: crate::archive_ui::Pixels) {
+        let (w, h) = (pixels.width, pixels.height);
+        match self.archive.swatch_texture.as_ref() {
+            Some(tex) => tex.set_data_u32(cx, w, h, pixels.bgra),
+            None => {
+                let tex = Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width: w,
+                        height: h,
+                        data: Some(pixels.bgra),
+                        updated: TextureUpdated::Full,
+                    },
+                );
+                self.archive.swatch_texture = Some(tex);
+            }
+        }
+        let image = self.ui.image(cx, ids!(archive_preview));
+        image.set_texture(cx, self.archive.swatch_texture.clone());
+        image.redraw(cx);
+    }
+
+    /// The result page as tiles: title, creator · year, the media badge,
+    /// whatever pictures have landed, and the selection ring.
+    fn rebuild_archive_grid(&mut self, cx: &mut Cx) {
+        let selected = self.archive.selected_hit().map(|h| h.identifier.clone());
+        let entries: Vec<GridEntry> = self
+            .archive
+            .hits()
+            .iter()
+            .map(|hit| {
+                let key = ArchivePanel::tile_key(&hit.identifier);
+                let mut sub = hit.creator.trim().to_string();
+                if sub.chars().count() > 28 {
+                    sub = sub.chars().take(27).collect::<String>() + "…";
+                }
+                let year = hit.year();
+                if !year.is_empty() {
+                    if sub.is_empty() {
+                        sub = year.to_string();
+                    } else {
+                        sub = format!("{sub} · {year}");
+                    }
+                }
+                let texture = self.archive.thumb_textures.get(&hit.identifier).cloned();
+                GridEntry {
+                    asset: key,
+                    title: hit.title.clone(),
+                    sub,
+                    state: hit.mediatype.badge().to_string(),
+                    frames: texture.iter().cloned().collect(),
+                    texture,
+                    fps: 0.0,
+                    cells: false,
+                    // No spinner and no red ring on a tile: the well on the
+                    // right is where the swatch's state lives.
+                    loading: false,
+                    failed: false,
+                    active: selected.as_deref() == Some(hit.identifier.as_str()),
+                    live: false,
+                    placeholder: false,
+                    pending: false,
+                    fx: false,
+                }
+            })
+            .collect();
+        if let Some(mut grid) =
+            self.ui.widget(cx, ids!(archive_grid)).borrow_mut::<VjTileGrid>()
+        {
+            grid.set_entries(cx, entries);
+        }
+    }
+
+    /// The one line under the picture: what the swatch is doing, where it
+    /// is, and how much of it has come down.
+    fn archive_swatch_line(&self) -> String {
+        fn pct(loaded: u64, total: Option<u64>) -> String {
+            match total {
+                Some(total) if total > 0 => format!(
+                    "{} / {} ({}%)",
+                    crate::archive_ui::human_bytes(loaded),
+                    crate::archive_ui::human_bytes(total),
+                    (loaded as f64 / total as f64 * 100.0).round() as u64
+                ),
+                _ => crate::archive_ui::human_bytes(loaded),
+            }
+        }
+        match &self.archive.swatch {
+            Swatch::Empty => "click a tile to audition it".to_string(),
+            Swatch::Looking => "reading the item…".to_string(),
+            Swatch::Loading { loaded, total } => format!("loading swatch · {}", pct(*loaded, *total)),
+            Swatch::Video { playing, duration_secs, loading, head, buffering, fetched } => {
+                let position = self.archive.swatch_time().map(|(p, _)| p).unwrap_or(0.0);
+                let mut line = format!(
+                    "{} / {}",
+                    crate::archive_ui::human_secs(position),
+                    crate::archive_ui::human_secs(*duration_secs)
+                );
+                if !*playing {
+                    line.push_str(" · paused");
+                }
+                if *buffering {
+                    line.push_str(" · buffering…");
+                }
+                if let Some((loaded, total)) = loading {
+                    // The file-based fallback: a real download behind the picture.
+                    line.push_str(" · downloading ");
+                    line.push_str(&pct(*loaded, *total));
+                } else if let Some(head) = head {
+                    line.push_str(&format!(" · first {} only", crate::archive_ui::human_bytes(*head)));
+                } else if *fetched > 0 {
+                    line.push_str(&format!(" · streamed {}", crate::archive_ui::human_bytes(*fetched)));
+                }
+                line
+            }
+            Swatch::Still => "still".to_string(),
+            Swatch::Failed(why) => format!("swatch failed: {why}"),
+        }
+    }
+
+    /// Every readout on the archive page from the panel's state.
+    fn sync_archive_ui(&mut self, cx: &mut Cx) {
+        let status = self.archive.status.clone();
+        let page_lab = format!("{} / {}", self.archive.page, self.archive.pages());
+        let media = self.archive.media;
+        let mut title = self.archive.selected_hit().map(|h| h.title.clone()).unwrap_or_default();
+        let (meta, license) = match self.archive.item.as_ref() {
+            Some(item) => {
+                // Creator and date ride on the title line; the meta line
+                // is the import's, and every line is ONE line — the column
+                // has no room to wrap.
+                let mut bits: Vec<String> = Vec::new();
+                if !item.creator.trim().is_empty() {
+                    bits.push(item.creator.trim().to_string());
+                }
+                if !item.date.trim().is_empty() {
+                    bits.push(item.date.get(..4).unwrap_or(&item.date).to_string());
+                }
+                if !bits.is_empty() {
+                    title = format!("{title} — {}", bits.join(" · "));
+                }
+                let take = match self.archive.import_candidate() {
+                    Some(file) => {
+                        let mut f = vec![format!("IMPORT takes {}", file.base_name())];
+                        if let Some((w, h)) = file.dims() {
+                            f.push(format!("{w}×{h}"));
+                        }
+                        if file.size > 0 {
+                            f.push(crate::archive_ui::human_bytes(file.size));
+                        }
+                        if file.length_secs > 0.0 {
+                            f.push(crate::archive_ui::human_secs(file.length_secs));
+                        }
+                        f.join(" · ")
+                    }
+                    None => self
+                        .archive
+                        .import_refusal()
+                        .unwrap_or_else(|| "no importable video or image in this item".to_string()),
+                };
+                let meta = take;
+                let lic = makepad_archive_org::license_from_url(&item.license_url);
+                let license = if lic.url.is_empty() {
+                    "license: unspecified (imports as not redistributable)".to_string()
+                } else if lic.non_commercial {
+                    format!("license: {} · non-commercial", lic.id)
+                } else {
+                    format!("license: {}", lic.id)
+                };
+                (meta, license)
+            }
+            None => (String::new(), String::new()),
+        };
+        let swatch_line = self.archive_swatch_line();
+        let play_text = if self.archive.is_playing() { "PAUSE" } else { "PLAY" };
+        let (import_text, import_line) = match &self.archive.import {
+            ImportState::Idle => (
+                "IMPORT",
+                if self.archive.import_candidate().is_some() {
+                    "imports the best file into the library".to_string()
+                } else {
+                    String::new()
+                },
+            ),
+            ImportState::Downloading { loaded, total } => (
+                "IMPORTING…",
+                match total {
+                    Some(total) if *total > 0 => format!(
+                        "downloading · {} / {} ({}%)",
+                        crate::archive_ui::human_bytes(*loaded),
+                        crate::archive_ui::human_bytes(*total),
+                        (*loaded as f64 / *total as f64 * 100.0).round() as u64
+                    ),
+                    _ => format!("downloading · {}", crate::archive_ui::human_bytes(*loaded)),
+                },
+            ),
+            ImportState::Publishing => ("IMPORTING…", "publishing to the asset server…".to_string()),
+            ImportState::Done(t) => ("IMPORT", format!("imported “{t}” — it is on the VJ grid now")),
+            ImportState::AlreadyPresent => ("IMPORT", "already in the library".to_string()),
+            ImportState::Failed(why) => ("IMPORT", format!("import failed: {why}")),
+        };
+        let clear_picture = self.archive.swatch_texture.is_none();
+
+        self.ui.label(cx, ids!(archive_status)).set_text(cx, &status);
+        self.ui.label(cx, ids!(archive_page_lab)).set_text(cx, &page_lab);
+        self.paint_chip(cx, ids!(archive_chip_all), media == MediaFilter::ImagesAndVideo, None);
+        self.paint_chip(cx, ids!(archive_chip_video), media == MediaFilter::Video, None);
+        self.paint_chip(cx, ids!(archive_chip_images), media == MediaFilter::Images, None);
+        self.ui.label(cx, ids!(archive_title)).set_text(cx, &title);
+        self.ui.label(cx, ids!(archive_meta)).set_text(cx, &meta);
+        self.ui.label(cx, ids!(archive_license)).set_text(cx, &license);
+        self.ui.label(cx, ids!(archive_swatch_lab)).set_text(cx, &swatch_line);
+        self.ui.button(cx, ids!(archive_play)).set_text(cx, play_text);
+        self.ui.button(cx, ids!(archive_import)).set_text(cx, import_text);
+        self.ui.label(cx, ids!(archive_import_lab)).set_text(cx, &import_line);
+        if clear_picture {
+            self.ui.image(cx, ids!(archive_preview)).set_texture(cx, None);
+        }
         self.ui.redraw(cx);
     }
 
@@ -6846,10 +7495,7 @@ impl App {
     ) {
         for (slot, tex) in [(SlotId::A, a), (SlotId::B, b)] {
             let i = slot.index();
-            let (playing, pos, dur) = match self.players[i].as_ref() {
-                Some(p) => (!p.is_paused(), p.position_secs(), p.duration_secs),
-                None => (false, 0.0, 0.0),
-            };
+            let (playing, pos, dur) = self.slot_transport(i);
             let (playing, pos) = if self.flow_active(i) {
                 self.flow_view(cx, slot, |_cx, view| {
                     (view.is_playing(), view.position_secs())
@@ -8663,6 +9309,7 @@ p2 {}
         let i = slot.index();
         self.slot_held[i] = false;
         self.players[i] = None;
+        self.archive_deck[i] = None;
         self.slot_textures[i] = None;
         self.clear_slot_flow(cx, slot);
         self.nv12_view(cx, slot, |cx, view| view.clear(cx));
@@ -8700,11 +9347,30 @@ p2 {}
         self.video_pump = cx.new_next_frame();
     }
 
+    /// One slot's transport trio (playing, position, duration): the archive
+    /// stream when one is on the deck, else the file player, else silence.
+    fn slot_transport(&self, i: usize) -> (bool, f64, f64) {
+        if let Some(deck) = self.archive_deck[i].as_ref() {
+            return (
+                !deck.stream.is_paused(),
+                deck.stream.position_secs(),
+                deck.stream.duration_secs(),
+            );
+        }
+        match self.players[i].as_ref() {
+            Some(p) => (!p.is_paused(), p.position_secs(), p.duration_secs),
+            None => (false, 0.0, 0.0),
+        }
+    }
+
     /// The honest transport state of a slot — the warp clock's while flow
     /// warp drives the picture (the decoder underneath is parked then, and
     /// reading IT made the play toggle a start-only button).
     fn slot_is_playing(&mut self, cx: &mut Cx, slot: SlotId) -> bool {
         let i = slot.index();
+        if let Some(deck) = self.archive_deck[i].as_ref() {
+            return !deck.stream.is_paused();
+        }
         if self.flow_active(i) {
             return self
                 .flow_view(cx, slot, |_cx, view| view.is_playing())
@@ -8717,6 +9383,15 @@ p2 {}
     /// flow warp active, the warp clock is the transport: the decoder stays
     /// parked and play/pause drives the warp position instead.
     fn set_slot_paused(&mut self, cx: &mut Cx, slot: SlotId, paused: bool) {
+        if let Some(deck) = self.archive_deck[slot.index()].as_ref() {
+            deck.stream.set_paused(paused);
+            if paused {
+                self.disarm_hazards(Some(cx));
+            }
+            self.refresh_program_lighting();
+            self.video_pump = cx.new_next_frame();
+            return;
+        }
         if self.flow_active(slot.index()) {
             self.flow_view(cx, slot, |_cx, view| view.set_playing(!paused));
             if paused {
@@ -8914,12 +9589,9 @@ p2 {}
             self.set_deck_busy(cx, slot, busy);
             let media = self.slot_media[i];
             let (tracks, selected) = self.slot_anim_tracks(cx, slot);
-            let is_video = media == SlotMedia::Video;
+            let is_video = matches!(media, SlotMedia::Video | SlotMedia::Stream);
             let is_3d = matches!(media, SlotMedia::Mesh | SlotMedia::Splat);
-            let (playing, pos, dur) = match self.players[i].as_ref() {
-                Some(p) => (!p.is_paused(), p.position_secs(), p.duration_secs),
-                None => (false, 0.0, 0.0),
-            };
+            let (playing, pos, dur) = self.slot_transport(i);
             // With flow warp active the warp clock is the transport the
             // strip must mirror — the decoder underneath is parked.
             let (playing, pos) = if self.flow_active(i) {
@@ -9075,6 +9747,29 @@ p2 {}
                         } else {
                             chip.set_dash(cx, true);
                         }
+                    };
+                }
+                if media == SlotMedia::Stream {
+                    // STREAM deck: play/pause/seek/rewind/eject are real;
+                    // the clip-profile machinery (mode picker, tween
+                    // picker, scratch wheel, beat rate) is not wired to a
+                    // stream — those stay visibly disabled rather than
+                    // silently doing nothing.
+                    self.ui.drop_down(cx, Self::deck_mode_path(slot)).set_disabled(cx, true);
+                    self.ui.drop_down(cx, Self::deck_tween_path(slot)).set_disabled(cx, true);
+                    if let Some(mut wheel) = self
+                        .ui
+                        .widget(cx, Self::deck_wheel_path(slot))
+                        .borrow_mut::<views::VjSlowmoWheel>()
+                    {
+                        wheel.set_inert(cx, true);
+                    };
+                    if let Some(mut chip) = self
+                        .ui
+                        .widget(cx, Self::deck_rate_path(slot))
+                        .borrow_mut::<views::VjBeatsDrop>()
+                    {
+                        chip.set_inert(cx, true);
                     };
                 }
                 if is_3d {
@@ -10747,43 +11442,41 @@ p2 {}
             let Some(up) = self.up.as_mut() else { return };
             for cmd in cmds {
                 match cmd {
+                    // ---- plain generations -------------------------
+                    //
+                    // Off the store's queue entirely (aicore §9): the run
+                    // transport executes them against the fleet and
+                    // publishes the result itself; the store only stores.
                     GenCmd::FetchProfiles { domain } => {
-                        if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobProfiles {
-                            domain: Some(domain.to_string()),
-                        }) {
-                            self.cat_reqs.insert(id, CatPurpose::JobProfiles { domain });
-                        } else {
-                            runtime_down = true;
+                        if !self.pipelines.connected() {
+                            self.pipelines.connect(up.endpoints, up.token.clone());
                         }
+                        self.pipelines.submit(PipeReq::Profiles {
+                            domain: domain.to_string(),
+                        });
                     }
                     GenCmd::Enqueue { tag, namespace, kind, body } => {
-                        match up.catalog.submit(ClientRequest::EnqueueJob { namespace, kind, body }) {
-                            Ok(id) => {
-                                self.cat_reqs.insert(id, CatPurpose::JobEnqueue { tag });
-                            }
-                            Err(_) => {
-                                runtime_down = true;
-                                self.gen.enqueue_failed_at(
-                                    tag,
-                                    "connection lost — reconnecting, press Queue again".to_string(),
-                                    Some(now),
-                                );
-                            }
+                        if !self.pipelines.connected() {
+                            self.pipelines.connect(up.endpoints, up.token.clone());
+                        }
+                        if !self.pipelines.submit(PipeReq::EnqueueJob {
+                            tag,
+                            namespace,
+                            kind,
+                            body,
+                        }) {
+                            self.gen.enqueue_failed_at(
+                                tag,
+                                "run transport unavailable — press Queue again".to_string(),
+                                Some(now),
+                            );
                         }
                     }
                     GenCmd::PollStatus { job } => {
-                        if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobStatus { job }) {
-                            self.cat_reqs.insert(id, CatPurpose::JobStatus { job });
-                        } else {
-                            runtime_down = true;
-                        }
+                        self.pipelines.submit(PipeReq::JobStatus { job });
                     }
                     GenCmd::Cancel { job } => {
-                        if let Ok(id) = up.catalog.submit(ClientRequest::CancelJob { job }) {
-                            self.cat_reqs.insert(id, CatPurpose::JobCancel { job });
-                        } else {
-                            runtime_down = true;
-                        }
+                        self.pipelines.submit(PipeReq::CancelJob { job });
                     }
                     // ---- declared runs ------------------------------
                     //
@@ -10877,7 +11570,7 @@ p2 {}
     /// enqueues a successor or carries a result — the store's dependency
     /// gate and its claim-time splice do that, whether or not this app is
     /// running.
-    fn pump_pipelines(&mut self) {
+    fn pump_pipelines(&mut self, cx: &mut Cx) {
         for done in self.pipelines.drain() {
             match done {
                 PipeDone::Created { tag, result } => match result {
@@ -10946,6 +11639,34 @@ p2 {}
                     Err(error) => {
                         self.gen.pipeline_failed_read(pipeline, error, now_ms());
                     }
+                },
+                PipeDone::JobQueued { tag, result } => match result {
+                    Ok(job) => {
+                        let cmds = self.gen.queued_at(tag, job, Some(now_ms()));
+                        self.run_gen_cmds(cmds);
+                    }
+                    Err(error) => {
+                        self.gen.enqueue_failed_at(tag, error, Some(now_ms()));
+                    }
+                },
+                PipeDone::JobStatus { job, result } => match result {
+                    Ok(status) => self.gen.status_arrived_at(&status, now_ms()),
+                    Err(error) => {
+                        self.gen.status_failed_at(job, error, Some(now_ms()));
+                    }
+                },
+                PipeDone::JobCancelled { job, cancelled } => {
+                    self.gen.cancel_confirmed_at(job, cancelled, Some(now_ms()));
+                }
+                PipeDone::Profiles { domain, result } => match result {
+                    Ok(profiles) => {
+                        // Leaked to 'static: GenCmd::FetchProfiles carries the
+                        // domain as &'static str today.
+                        self.gen.profiles_arrived(domain.leak(), profiles);
+                        self.sync_gen_profiles(cx);
+                        self.sync_gen_pickers(cx);
+                    }
+                    Err(error) => self.gen.profiles_failed(error),
                 },
                 PipeDone::Cancelled { pipeline, result } => match result {
                     Ok(cancelled) => {
@@ -11020,6 +11741,7 @@ p2 {}
                 CueCmd::OpenSlot { slot, gen, item, path } => {
                     self.slot_held[slot.index()] = false;
                     self.players[slot.index()] = None;
+                    self.archive_deck[slot.index()] = None;
                     // HOLD, don't flash: a clip→clip cue keeps the outgoing
                     // PICTURE on the deck until the new decoder's first
                     // frame lands (which overwrites this texture in place —
@@ -11319,6 +12041,7 @@ p2 {}
                     }
                     self.slot_held[slot.index()] = false;
                     self.players[slot.index()] = None; // detached teardown
+                    self.archive_deck[slot.index()] = None;
                     self.awaiting_preroll[slot.index()] = None;
                     self.slot_textures[slot.index()] = None;
                     self.clear_slot_flow(cx, slot);
@@ -11651,6 +12374,7 @@ p2 {}
         // drained on the UI tick rather than blocking anything.
         self.pump_import(cx);
         self.pump_music_import(cx);
+        self.pump_archive(cx);
         // Lazy vjeffect thumbnails: feed the one-at-a-time offscreen
         // renderer and land its finished sheets in the thumb decode lane.
         self.pump_fx_thumbs(cx);
@@ -11707,6 +12431,10 @@ p2 {}
         self.pump_fx_slot_reloads();
         self.pump_side_channel_writeback();
         self.observe_decks();
+        // Fresh playheads in hand, hold the sync group together: the
+        // deck-to-deck lock is a continuous rate servo, not a one-shot.
+        let cmds = self.decks.hold_deck_sync();
+        self.run_deck_cmds(cx, cmds);
         self.pump_autopilot(cx);
         self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
@@ -12239,20 +12967,6 @@ p2 {}
                             self.fx_slot_reloading[slot.index()] = false;
                             log!("fx slot {slot:?}: hot reload failed: {error}");
                         }
-                        CatPurpose::JobProfiles { .. } => {
-                            self.gen.profiles_failed(error.to_string());
-                        }
-                        CatPurpose::JobEnqueue { tag } => {
-                            self.gen.enqueue_failed_at(tag, error.to_string(), Some(now_ms()));
-                        }
-                        CatPurpose::JobStatus { job } => {
-                            self.gen.status_failed_at(
-                                job,
-                                error.to_string(),
-                                Some(now_ms()),
-                            );
-                        }
-                        CatPurpose::JobCancel { .. } => {}
                         CatPurpose::SideChannelPublish { asset } => {
                             // A store that will not take them (no write
                             // capability, an older server) is not an error
@@ -12600,25 +13314,6 @@ p2 {}
                         self.thumb_inflight.insert(revision);
                     }
                 }
-            }
-            (CatPurpose::JobProfiles { domain }, ClientOutput::JobProfiles(profiles)) => {
-                self.gen.profiles_arrived(domain, profiles);
-                self.sync_gen_profiles(cx);
-                // The flux list only exists once the image domain lands.
-                self.sync_gen_pickers(cx);
-            }
-            (CatPurpose::JobEnqueue { tag }, ClientOutput::JobQueued(job)) => {
-                let cmds = self.gen.queued_at(tag, job, Some(now_ms()));
-                self.run_gen_cmds(cmds);
-            }
-            (CatPurpose::JobStatus { .. }, ClientOutput::JobStatus(status)) => {
-                // Single-job rows only. A DREAM run is a pipeline: its
-                // record arrives through `pump_pipelines`, and nothing here
-                // advances a stage any more.
-                self.gen.status_arrived_at(&status, now_ms());
-            }
-            (CatPurpose::JobCancel { job }, ClientOutput::JobCancelled(count)) => {
-                self.gen.cancel_confirmed_at(job, count, Some(now_ms()));
             }
             (CatPurpose::SideChannelPublish { asset }, ClientOutput::SideChannels(outcome)) => {
                 match outcome {
@@ -15215,7 +15910,7 @@ p2 {}
         // A WidgetRef, not a ButtonRef: the same apply through `ui.button`
         // reaches nothing and the mark keeps whatever the SVG drew itself
         // in, which is how four white icons all read as "in force".
-        let mut button = self.ui.widget(cx, path);
+        let button = self.ui.widget(cx, path);
         // GREEN is the console's "this is live" colour — the running loop,
         // the stem mix, the processed ticks — and a mode that is in force is
         // exactly that. The rest sit well back: they are a setting, not a
@@ -16256,7 +16951,7 @@ p2 {}
             u8::from(self.gen_panel_open),
         ) + &format!(
             "{}\n{}\n{}\n{}\n",
-            u8::from(self.lights_tab),
+            self.lower_tab as u8,
             u8::from(self.monitor_audio),
             u8::from(self.import.convert_video),
             // Appended last: a file written before the canvas picker
@@ -16281,9 +16976,9 @@ p2 {}
         if open != self.gen_panel_open {
             self.set_gen_panel_open(cx, open);
         }
-        let lights = lines.next().map(|l| l == "1").unwrap_or(false);
-        if lights != self.lights_tab {
-            self.set_lower_tab(cx, lights);
+        let tab = LowerTab::from_u8(lines.next().and_then(|l| l.parse().ok()).unwrap_or(0));
+        if tab != self.lower_tab {
+            self.set_lower_tab(cx, tab);
         }
         // MONITOR AUDIO comes back on for the operator who left it on
         // (the TCC prompt was answered on the deliberate first flip).
@@ -16587,6 +17282,7 @@ p2 {}
                         loading: false,
                         failed: false,
                         active: false,
+                        live: false,
                         placeholder: true,
                         pending: false,
                         fx: false,
@@ -16699,6 +17395,7 @@ p2 {}
                     loading,
                     failed,
                     active,
+                    live: active,
                     placeholder: false,
                     pending: false,
                     // Geometry-stable paint for every effect tile (see
@@ -16841,6 +17538,7 @@ p2 {}
             loading: false,
             failed: false,
             active: false,
+            live: false,
             placeholder: false,
             pending: true,
             fx: true,
@@ -17076,6 +17774,16 @@ p2 {}
         };
         let (a_role, a_title) = slot_line(SlotId::A);
         let (b_role, b_title) = slot_line(SlotId::B);
+        // A deck playing an archive STREAM lives outside the cue engine —
+        // from up there it reads "—". Say what it really is.
+        let (a_role, a_title) = match self.archive_deck[0].as_ref() {
+            Some(deck) => ("A  STREAM".to_string(), deck.title.clone()),
+            None => (a_role, a_title),
+        };
+        let (b_role, b_title) = match self.archive_deck[1].as_ref() {
+            Some(deck) => ("B  STREAM".to_string(), deck.title.clone()),
+            None => (b_role, b_title),
+        };
         self.sync_slot_controls_ui(cx);
         self.set_status_label(cx, ids!(slot_a_role), &a_role);
         self.set_status_label(cx, ids!(now_label), &a_title);
@@ -18561,6 +19269,9 @@ p2 {}
                     true => format!("EXT {:.0}", self.beat_clock.nominal_bpm()),
                     false => "EXT —".to_string(),
                 },
+                // The reference deck says so — dimly even when it was
+                // pinned by the OTHER deck's press, lit once claimed.
+                _ if self.decks.sync_master() == Some(deck) => "MSTR".to_string(),
                 _ => "SYNC".to_string(),
             };
             if self.label_cache.get(&(base + 9)).map(String::as_str) != Some(sync_text.as_str()) {
@@ -19253,6 +19964,73 @@ p2 {}
                 self.sync_autofade_ui(cx);
             }
         }
+        // ---- ARCHIVE STREAM DECKS: not-imported clips playing straight
+        // off the archive by byte ranges. Same NV12 present lane as the
+        // file players; no audio, no residency; pacing lives in the
+        // stream's own thread, so this only presents the newest frame.
+        for index in 0..2 {
+            if self.archive_deck[index].is_none() {
+                continue;
+            }
+            let frame = self.archive_deck[index].as_ref().and_then(|d| d.stream.take_frame());
+            if let Some(crate::archive_stream::StreamFrame::Nv12(data, width, height)) = frame {
+                let (w, h) = (width as usize, height as usize);
+                let proxy = crate::media::nv12_proxy_bgra(&data, w, h, 160, 90);
+                self.light_samples[index] =
+                    Some(self.light_analyzers[index].push_bgra_frame(&proxy, 160, 90));
+                if width > 0 && height > 0 {
+                    self.slot_aspect[index] = width as f32 / height as f32;
+                }
+                let slot = SlotId::from_index(index);
+                let tex = self
+                    .nv12_view(cx, slot, |cx, view| {
+                        view.set_frame(cx, &data, width, height);
+                        view.output_texture()
+                    })
+                    .flatten();
+                if let Some(tex) = tex {
+                    self.slot_tex_borrowed[index] = false;
+                    self.slot_textures[index] = Some(tex);
+                }
+                // The AUTOCUE fade waits for this exact moment: the first
+                // real frame. Walk the fader at the panel's fade time.
+                let fade = self
+                    .archive_deck[index]
+                    .as_mut()
+                    .map(|deck| std::mem::take(&mut deck.fade_when_ready))
+                    .unwrap_or(false);
+                if fade {
+                    let target = if index == 0 { 0.0 } else { 1.0 };
+                    if (self.program_mix - target).abs() > 0.05 {
+                        let secs = self
+                            .ui
+                            .slider(cx, ids!(video_fade))
+                            .value()
+                            .unwrap_or(1.0) as f32;
+                        self.auto_fade.aim(target, secs);
+                        self.sync_autofade_ui(cx);
+                    }
+                }
+            }
+            // A broken stream holds its last picture and says so ONCE; the
+            // deck stays up (eject or the next cue clears it).
+            let failure = self
+                .archive_deck[index]
+                .as_ref()
+                .filter(|d| !d.failed)
+                .and_then(|d| d.stream.failure());
+            if let Some(failure) = failure {
+                if let Some(deck) = self.archive_deck[index].as_mut() {
+                    deck.failed = true;
+                }
+                log!(
+                    "archive deck {}: stream failed: {}",
+                    if index == 0 { "A" } else { "B" },
+                    failure.message()
+                );
+            }
+            self.video_pump = cx.new_next_frame();
+        }
         for index in 0..2 {
             let Some(player) = self.players[index].as_mut() else { continue };
             let resident = player.resident_frames().is_some();
@@ -19892,7 +20670,7 @@ p2 {}
                                     },
                                     _ => flow_tween::RifeProductKind::Field,
                                 },
-                                frames: cache.clone(),
+                                frames: flow_tween::RifeSource::Frames(cache.clone()),
                                 width: pw,
                                 height: ph,
                                 deadline,
@@ -20097,12 +20875,14 @@ p2 {}
 
     // ---- clicks -------------------------------------------------------------
 
+    /// Presses and releases on a tile grid. Downs carry the platform's
+    /// tap count, so a caller can treat a double-click as its own verb.
     fn grid_hits(
         &mut self,
         cx: &mut Cx,
         actions: &Actions,
         grid: &[LiveId],
-    ) -> (Vec<AssetId>, Vec<AssetId>) {
+    ) -> (Vec<(AssetId, u32)>, Vec<AssetId>) {
         let widget = self.ui.widget(cx, grid);
         let (cols, len) = match widget.borrow::<VjTileGrid>() {
             Some(grid) => (grid.last_cols.max(1), grid.len()),
@@ -20128,11 +20908,11 @@ p2 {}
                     continue;
                 }
                 let cell = item.view(cx, *path);
-                if cell.finger_down(actions).is_some() {
+                if let Some(fe) = cell.finger_down(actions) {
                     if let Some(entry) =
                         widget.borrow::<VjTileGrid>().and_then(|g| g.entry_at(index).cloned())
                     {
-                        down.push(entry.asset);
+                        down.push((entry.asset, fe.tap_count));
                     }
                 }
                 if cell.finger_up(actions).is_some() {
@@ -20488,9 +21268,15 @@ p2 {}
                 let cmds = self.decks.toggle_mute(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.sync.clicked(actions) {
-                // OFF → SYNC (the other deck) → EXT (the room) → OFF.
-                let cmds = self.decks.cycle_sync(deck);
+            if let Some(km) = refs.sync.clicked_modifiers(actions) {
+                // SYNC is a plain toggle: lock to the group's master (or
+                // claim master with nothing to follow), press again to let
+                // go. Alt+click toggles EXT — follow the room's clock.
+                let cmds = if km.alt {
+                    self.decks.toggle_ext_sync(deck)
+                } else {
+                    self.decks.toggle_sync(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
@@ -21609,6 +22395,10 @@ impl MatchEvent for App {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1);
         self.decks.seed_shuffle(seed);
+        // A sync landing is computed from playheads that keep moving while
+        // the seek crosses to the audio thread — place it where the lock
+        // will be true when it arrives (UI pump + one audio block).
+        self.decks.land_lookahead_secs = 0.012;
         self.poll_timer = cx.start_interval(0.05);
         self.refresh_timer = cx.start_interval(1.0);
         self.video_loop = true;
@@ -21652,7 +22442,7 @@ impl MatchEvent for App {
         } else {
             self.paint_tabs(cx, id!(video_page));
         }
-        self.set_lower_tab(cx, self.lights_tab);
+        self.set_lower_tab(cx, self.lower_tab);
         // GEN starts put away unless the operator had it open last time
         // (load_gen_panel may reopen it after the session connects).
         self.set_gen_panel_open(cx, self.gen_panel_open);
@@ -22014,7 +22804,7 @@ impl MatchEvent for App {
         self.handle_deck_sections(cx, actions);
         self.handle_lists_tabs(cx, actions);
         let (sfx_down, sfx_up) = self.grid_hits(cx, actions, ids!(sfx_grid));
-        for asset in sfx_down {
+        for (asset, _taps) in sfx_down {
             self.selected_pad = Some(asset);
             if let Some(pad) = self.pads.pad(&asset) {
                 self.ui.slider(cx, ids!(sfx_gain)).set_value(cx, pad.gain as f64);
@@ -22034,7 +22824,7 @@ impl MatchEvent for App {
             }
         }
         let (mesh_down, _) = self.grid_hits(cx, actions, ids!(mesh_grid));
-        for asset in mesh_down {
+        for (asset, _taps) in mesh_down {
             self.mesh_tile_clicked(cx, asset);
         }
 
@@ -22128,7 +22918,7 @@ impl MatchEvent for App {
         // Tool chips in the chat expand/collapse on click.
         self.ui
             .widget(cx, ids!(chat_list))
-            .borrow_mut::<makepad_asset_chat_ui::AssetChatList>()
+            .borrow_mut::<makepad_chat_ui::AssetChatList>()
             .map(|mut list| list.handle_actions(cx, actions));
         if self.ui.button(cx, ids!(gen_clear)).clicked(actions) {
             // Clearing the queue also disarms the loop: otherwise the next
@@ -22215,7 +23005,9 @@ impl MatchEvent for App {
                     self.set_slot_paused(cx, slot, playing);
                 }
                 VideoAction::Restart => {
-                    if self.flow_active(i) {
+                    if let Some(deck) = self.archive_deck[i].as_ref() {
+                        deck.stream.seek_fraction(0.0);
+                    } else if self.flow_active(i) {
                         self.flow_view(cx, slot, |cx, view| view.seek_fraction(cx, 0.0));
                     } else if let Some(player) = self.players[i].as_mut() {
                         player.seek_fraction(0.0);
@@ -22234,7 +23026,13 @@ impl MatchEvent for App {
                         .borrow::<VideoView>()
                         .map(|mini| mini.is_scrubbing())
                         .unwrap_or(false);
-                    if self.flow_active(i) {
+                    if let Some(deck) = self.archive_deck[i].as_ref() {
+                        // A range stream seeks the same way it plays: one
+                        // request at the nearest keyframe. Mid-drag seeks
+                        // ride the same lane (superseded by the next).
+                        let _ = scrubbing;
+                        deck.stream.seek_fraction(fraction);
+                    } else if self.flow_active(i) {
                         self.flow_view(cx, slot, |cx, view| view.seek_fraction(cx, fraction));
                     } else if let Some(player) = self.players[i].as_mut() {
                         player.set_scrub(scrubbing);
@@ -22243,6 +23041,11 @@ impl MatchEvent for App {
                     self.video_pump = cx.new_next_frame();
                 }
                 VideoAction::ToggleLoop => {
+                    // A stream deck always loops; the host state stays true
+                    // and the next monitor pump pushes it back to the mini.
+                    if self.archive_deck[i].is_some() {
+                        continue;
+                    }
                     let looping = self
                         .ui
                         .widget(cx, Self::deck_source_path(slot))
@@ -22259,6 +23062,11 @@ impl MatchEvent for App {
                     self.video_pump = cx.new_next_frame();
                 }
                 VideoAction::TrimChanged(t_in, t_out) => {
+                    // No trim on a stream deck (the profile machinery is
+                    // not wired to it); the strip keeps the whole clip.
+                    if self.archive_deck[i].is_some() {
+                        continue;
+                    }
                     // Handle RELEASE: tighten the bounds and NOTHING else —
                     // the clip keeps playing exactly where it is ("just
                     // make the space it bounces in smaller"). Playback
@@ -22316,7 +23124,9 @@ impl MatchEvent for App {
                 // Rewind: the IN point (frame 0 untrimmed) — for a
                 // beat-synced loop that IS "start your cycle now".
                 let t_in = self.slot_trim[i].0;
-                if self.flow_active(i) {
+                if let Some(deck) = self.archive_deck[i].as_ref() {
+                    deck.stream.seek_fraction(0.0);
+                } else if self.flow_active(i) {
                     self.flow_view(cx, slot, |cx, view| view.seek_fraction(cx, 0.0));
                 } else if let Some(player) = self.players[i].as_mut() {
                     player.set_scrub(false);
@@ -22562,13 +23372,14 @@ impl MatchEvent for App {
 
         // ---- lower-region tabs ----
         if self.ui.button(cx, ids!(lower_tab_vj)).clicked(actions) {
-            self.set_lower_tab(cx, false);
+            self.set_lower_tab(cx, LowerTab::Grid);
             self.save_gen_panel();
         }
         if self.ui.button(cx, ids!(lower_tab_lights)).clicked(actions) {
-            self.set_lower_tab(cx, true);
+            self.set_lower_tab(cx, LowerTab::Lights);
             self.save_gen_panel();
         }
+        self.handle_archive_actions(cx, actions);
 
         // ---- effect slots (fx_slot.rs) ----
         for kind in FxSlotKind::ALL {
@@ -22944,7 +23755,9 @@ impl MatchEvent for App {
                 FileDialogAction::FolderCancelled => {
                     self.import_picker = ImportPicker::None;
                 }
-                FileDialogAction::None => {}
+                // Import drives folder selection only; the platform's file
+                // and save panels answer elsewhere.
+                _ => {}
             }
         }
 
@@ -22992,7 +23805,7 @@ impl AppMain for App {
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
         makepad_asset_widgets::script_mod(vm);
-        makepad_asset_chat_ui::script_mod(vm);
+        makepad_chat_ui::script_mod(vm);
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::flow_warp::script_mod(vm);
@@ -23252,6 +24065,7 @@ impl AppMain for App {
             if !self.started {
                 self.started = true;
                 self.app_start_instant = Some(Instant::now());
+                self.archive.set_cache_parent(&service::session_config_from_env().cache_parent);
             }
         }
         if self.poll_timer.is_event(event).is_some() {
@@ -23334,7 +24148,7 @@ impl AppMain for App {
             // Bounded generation-status polling.
             let cmds = self.gen.tick(now_ms());
             self.run_gen_cmds(cmds);
-            self.pump_pipelines();
+            self.pump_pipelines(cx);
             self.pump_dream_thumbs();
             let cmds = self.gen.ensure_profiles();
             self.run_gen_cmds(cmds);
@@ -23345,6 +24159,9 @@ impl AppMain for App {
         }
         if let Some(ne) = self.video_pump.is_event(event) {
             self.pump_video(cx, ne.time);
+        }
+        if self.archive_pump.is_event(event).is_some() {
+            self.pump_archive(cx);
         }
         if self.music_pump.is_event(event).is_some() {
             self.pump_music_frame(cx);
@@ -23382,6 +24199,27 @@ mod tween_tier_tests {
         assert_eq!(parse_tween_mode("5"), TWEEN_AI3);
         assert_eq!(parse_tween_mode("255"), TWEEN_AI3);
         assert_eq!(parse_tween_mode("broken"), TWEEN_FLOW);
+    }
+
+    /// The deck chip's faces and its tooltip are typed into the DSL, where
+    /// no test can reach them. Pin the library strings they were copied
+    /// from instead: if the library ever renames a tier, this fails and
+    /// says which two literals in `script_mod!` have to follow.
+    #[test]
+    fn the_deck_chip_still_spells_the_librarys_mode_set() {
+        let faces: Vec<&str> =
+            makepad_frametween::short_modes().iter().map(|(face, _)| *face).collect();
+        assert_eq!(
+            faces,
+            ["OFF", "XF", "FL", "AI1", "AI2", "AI3"],
+            "the tween chip's `labels:` array in script_mod! must match"
+        );
+        assert_eq!(
+            makepad_frametween::tip(),
+            "Frame tween: OFF none, XF crossfade, FL optical flow, AI1 neural fields, \
+             AI2 neural midpoint + optical flow, AI3 adaptive neural subdivision",
+            "the tween chip's Tip text in script_mod! must match"
+        );
     }
 }
 

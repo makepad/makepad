@@ -12,6 +12,7 @@
 //! mode. The beat is the widget's free-running clock (VJFX_BPM, default
 //! 122) so every effect pulses like it would on the VJ's beat bus.
 
+#![allow(dead_code)] // borrows the app's effects modules wholesale and uses a subset
 use makepad_widgets::*;
 
 #[path = "../src/effects/mod.rs"]

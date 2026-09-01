@@ -33,11 +33,12 @@ makepad-asset-client = { path = "../../libs/asset/client" }
 # First-use model install (stem splitter + whisper): the asset-ai service's
 # resumable, sha256-verified downloader. Featureless — the same slice the
 # asset UI links — so none of the model backends come along.
-makepad-asset-ai = { path = "../../libs/asset/ai", default-features = false }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-asset-creator = { path = "../../libs/asset/creator" }  # DREAM runs execute here now
 # The chat pane itself — ONE component, shared with the asset UI and the
 # game sandbox: the session on the server's chat broker, the worker thread,
 # the transcript with tool chips and the rate meter.
-makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
+makepad-chat-ui = { path = "../../libs/chat_ui" }
 # 3D program lane: skinned-GLB playback via the renderer.
 makepad-render = { path = "../../libs/render" }
 makepad-show-control = { path = "../../libs/show_control" }
@@ -56,11 +57,18 @@ makepad-asset-store = { path = "../../libs/asset/store" }
 # Import: real first-frame thumbnails for mp4/mov, spectrogram/waveform
 # pictures for audio, and the dimension probes for stills.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
-# NEURAL frame tweening (flow_tween.rs RIFE producer): the in-house
-# Practical-RIFE v4.26 port, running on the macOS Metal/BLAS device path.
-makepad-ai-rife = { path = "../../libs/ai/models/rife" }
+# REALTIME FRAME TWEENING: the whole in-betweener — the classical GPU
+# optical-flow pass chain, the neural (Practical-RIFE v4.26) producer
+# behind the same warp, the pair cache and the mode set. Extracted from
+# this app; the VJ is still its reference user.
+makepad-frametween = { path = "../../libs/frametween" }
 # VARIABLE-FRAMERATE IMPORT: the `mkfl` payload the player reads, the
 # classical (model-free) optical flow that fills it, and the all-intra
 # re-encode. Shared with the enhance backend, which fills the same box from
 # RIFE — one format, one parser, two producers.
 makepad-video-flow = { path = "../../libs/video_flow" }
+# ARCHIVE.ORG panel: search + swatch download of internet-archive video
+# and stills; the panel imports a chosen file into the asset store.
+makepad-archive-org = { path = "../../libs/archive_org" }
+# The streaming swatch's MP4 index: per-sample byte ranges for range play.
+makepad-mp4-index = { path = "../../libs/mp4_index" }

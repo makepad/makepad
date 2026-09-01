@@ -2021,7 +2021,6 @@ fn drums_stem_regrid() {
 
     let mix_analysis = analyze(&mix);
     let drums_analysis = analyze(&drums);
-    let from_mix = mix_analysis.grid;
     let from_drums = drums_analysis.grid;
     let score_of = |analysis: &super::TrackAnalysis| -> (f64, f64, f64, usize) {
         let beats = trim_to_spans(&analysis.beats(), &reference.spans);
