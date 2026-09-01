@@ -49,6 +49,18 @@ pub const CENTRE_MIN_POINTS: f64 = FLANKS_POINTS / 2.0;
 /// display's own scale; narrower and it shrinks to hold the middle open.
 pub const TARGET_POINTS: f64 = FLANKS_POINTS + CENTRE_MIN_POINTS;
 
+/// The window height, in layout points, at which the console still shows
+/// everything it has: the deck row, the fx band, the transport and a lower
+/// region whose rail runs all the way to its pager. Measured on the running
+/// console the same way as [`FLANKS_POINTS`] — the default 1040-point window
+/// holds it with ~40 points to spare.
+///
+/// Below this the whole console draws smaller, exactly as it does for a
+/// narrow window: a hosted tile 844 points tall used to clip the rail off
+/// mid-chip while every rule said the console fit, because every rule was
+/// keyed on width alone.
+pub const TARGET_HEIGHT_POINTS: f64 = 1000.0;
+
 /// How far the console may shrink, as a fraction of the display's own scale.
 ///
 /// The floor is legibility, and legibility is a property of the TYPE: the
@@ -70,7 +82,7 @@ pub const MIN_SCALE: f64 = 0.75;
 /// Never above native: a wide console is meant to hold MORE console — the
 /// surplus goes to the middle column, which is what wants it — not the same
 /// console with bigger knobs.
-pub fn console_dpi(physical_width: f64, native_dpi: f64) -> f64 {
+pub fn console_dpi(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
     if !physical_width.is_finite()
         || physical_width <= 0.0
         || !native_dpi.is_finite()
@@ -78,13 +90,28 @@ pub fn console_dpi(physical_width: f64, native_dpi: f64) -> f64 {
     {
         return native_dpi.max(f64::MIN_POSITIVE);
     }
-    let wanted = physical_width / TARGET_POINTS;
+    // A height that makes no sense constrains nothing — the width rule
+    // stands alone, which is also what every width-only test feeds in. And a
+    // WIDE, SHORT window is not this rule's either: there the lists move
+    // beside the decks (see [`console_lists_beside`]) and take the room that
+    // actually exists, which uses the surplus width far better than drawing
+    // the whole console smaller would. Judged at NATIVE scale so this stays
+    // a pure function of the physical window, never of its own output.
+    let beside_at_native = physical_height / native_dpi < LISTS_STACK_POINTS
+        && physical_width / native_dpi >= lists_beside_min_points();
+    let by_height = if !physical_height.is_finite() || physical_height <= 0.0 || beside_at_native
+    {
+        f64::INFINITY
+    } else {
+        physical_height / TARGET_HEIGHT_POINTS
+    };
+    let wanted = (physical_width / TARGET_POINTS).min(by_height);
     wanted.clamp(native_dpi * MIN_SCALE, native_dpi)
 }
 
 /// The console's size relative to the display's own, for a readout.
-pub fn console_scale(physical_width: f64, native_dpi: f64) -> f64 {
-    console_dpi(physical_width, native_dpi) / native_dpi
+pub fn console_scale(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
+    console_dpi(physical_width, physical_height, native_dpi) / native_dpi
 }
 
 /// The window width, in layout points, below which the explorer and the
@@ -105,11 +132,11 @@ pub const LISTS_TAB_POINTS: f64 = 880.0;
 /// and the queue's fixed 320 points would eat almost all of that: the
 /// explorer came out 36 points wide before this took the lists' own share
 /// as its input.
-pub fn console_lists_tabbed(physical_width: f64, native_dpi: f64) -> bool {
+pub fn console_lists_tabbed(physical_width: f64, physical_height: f64, native_dpi: f64) -> bool {
     if !physical_width.is_finite() || !native_dpi.is_finite() || native_dpi <= 0.0 {
         return false;
     }
-    physical_width / console_dpi(physical_width, native_dpi) < LISTS_TAB_POINTS
+    physical_width / console_dpi(physical_width, physical_height, native_dpi) < LISTS_TAB_POINTS
 }
 
 /// The physical width the LISTS get: the window, or their share of it once
@@ -118,7 +145,7 @@ pub fn lists_span(physical_width: f64, physical_height: f64, native_dpi: f64) ->
     if !console_lists_beside(physical_width, physical_height, native_dpi) {
         return physical_width;
     }
-    let dpi = console_dpi(physical_width, native_dpi);
+    let dpi = console_dpi(physical_width, physical_height, native_dpi);
     let gap = 6.0 * dpi;
     (lists_width_points((physical_width - gap) / dpi) * dpi).max(1.0)
 }
@@ -219,7 +246,7 @@ pub fn console_lists_beside(
     if !physical_height.is_finite() || physical_height <= 0.0 {
         return false;
     }
-    let dpi = console_dpi(physical_width, native_dpi);
+    let dpi = console_dpi(physical_width, physical_height, native_dpi);
     physical_height / dpi < LISTS_STACK_POINTS
         && physical_width / dpi >= lists_beside_min_points()
 }
@@ -239,7 +266,7 @@ pub fn deck_span(physical_width: f64, physical_height: f64, native_dpi: f64) -> 
     if !console_lists_beside(physical_width, physical_height, native_dpi) {
         return physical_width;
     }
-    let dpi = console_dpi(physical_width, native_dpi);
+    let dpi = console_dpi(physical_width, physical_height, native_dpi);
     let gap = 6.0 * dpi;
     (split_body((physical_width - gap) / dpi).0 * dpi).max(1.0)
 }
@@ -325,7 +352,7 @@ pub fn console_fold(physical_width: f64, physical_height: f64, native_dpi: f64) 
     if !physical_height.is_finite() || physical_height <= 0.0 {
         return ConsoleFold::None;
     }
-    let points = physical_height / console_dpi(physical_width, native_dpi);
+    let points = physical_height / console_dpi(physical_width, physical_height, native_dpi);
     if points < PANEL_SPLIT_POINTS {
         ConsoleFold::Singles
     } else if points < PANEL_FLOOR_POINTS {
@@ -357,8 +384,8 @@ pub enum ConsoleFold {
 /// "does the middle need it?" of the CURRENT layout would engage, free the
 /// room, discover it was no longer needed, disengage, and flip a deck panel
 /// in and out twice a frame. Physical pixels are downstream of nothing.
-pub fn console_tabbed(physical_width: f64, native_dpi: f64) -> bool {
-    console_tabs(physical_width, native_dpi) != TabStage::None
+pub fn console_tabbed(physical_width: f64, physical_height: f64, native_dpi: f64) -> bool {
+    console_tabs(physical_width, physical_height, native_dpi) != TabStage::None
 }
 
 /// What the tabs have to hold.
@@ -387,11 +414,11 @@ pub enum TabStage {
 /// 765.
 ///
 /// Keyed on physical width alone, like everything else in this chain.
-pub fn console_tabs(physical_width: f64, native_dpi: f64) -> TabStage {
+pub fn console_tabs(physical_width: f64, physical_height: f64, native_dpi: f64) -> TabStage {
     if !physical_width.is_finite() || !native_dpi.is_finite() || native_dpi <= 0.0 {
         return TabStage::None;
     }
-    console_tabs_for(physical_width / console_dpi(physical_width, native_dpi))
+    console_tabs_for(physical_width / console_dpi(physical_width, physical_height, native_dpi))
 }
 
 /// The same decision, from the width the decks have in LAYOUT POINTS.
@@ -421,8 +448,8 @@ pub fn console_tabs_for(deck_points: f64) -> TabStage {
 
 /// What the console spends either side of the middle column once the tabs
 /// have had their say: both panels, or the one that is showing.
-pub fn flanks_points(physical_width: f64, native_dpi: f64) -> f64 {
-    if console_tabbed(physical_width, native_dpi) {
+pub fn flanks_points(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
+    if console_tabbed(physical_width, physical_height, native_dpi) {
         FLANKS_POINTS / 2.0
     } else {
         FLANKS_POINTS
@@ -431,14 +458,33 @@ pub fn flanks_points(physical_width: f64, native_dpi: f64) -> f64 {
 
 /// How many layout points the middle column ends up with, which is the whole
 /// point of the exercise.
-pub fn centre_points(physical_width: f64, native_dpi: f64) -> f64 {
-    let layout = physical_width / console_dpi(physical_width, native_dpi);
-    (layout - flanks_points(physical_width, native_dpi)).max(0.0)
+pub fn centre_points(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
+    let layout = physical_width / console_dpi(physical_width, physical_height, native_dpi);
+    (layout - flanks_points(physical_width, physical_height, native_dpi)).max(0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A height that constrains nothing, for the width-only rules.
+    const TALL: f64 = 1.0e9;
+
+    #[test]
+    fn a_short_console_shrinks_to_keep_its_rail() {
+        // The hosted tile that found this: 1376x844 points on a 2x surface.
+        let (w, h, dpi) = (2752.0, 1688.0, 2.0);
+        let scaled = console_dpi(w, h, dpi);
+        assert!(scaled < dpi, "a short console must draw smaller");
+        assert!(
+            h / scaled >= TARGET_HEIGHT_POINTS - 0.5,
+            "the layout must get its full height in points: {}",
+            h / scaled
+        );
+        // Tall enough: untouched, and the width rule is unaffected.
+        assert_eq!(console_dpi(w, TARGET_HEIGHT_POINTS * dpi, dpi), dpi);
+        assert_eq!(console_dpi(w, TALL, dpi), dpi);
+    }
 
     /// Every window width worth having, at the scales displays actually
     /// report.
@@ -454,10 +500,10 @@ mod tests {
         // so the rule runs again on its own result. It has to agree with
         // itself the second time or the console pumps between two sizes.
         for (px, dpi) in widths_and_dpis() {
-            let first = console_dpi(px, dpi);
+            let first = console_dpi(px, TALL, dpi);
             // The window is PHYSICALLY unchanged by the scaling, so the
             // second pass is handed the very same width.
-            let second = console_dpi(px, dpi);
+            let second = console_dpi(px, TALL, dpi);
             assert_eq!(first, second, "{px}px at {dpi}: {first} then {second}");
         }
     }
@@ -468,28 +514,28 @@ mod tests {
             // Wide: the middle keeps everything above the minimum, because a
             // wider console is supposed to mean more room to work in.
             let wide = (TARGET_POINTS + 400.0) * dpi;
-            assert_eq!(console_scale(wide, dpi), 1.0);
+            assert_eq!(console_scale(wide, TALL, dpi), 1.0);
             assert!(
-                (centre_points(wide, dpi) - (CENTRE_MIN_POINTS + 400.0)).abs() < 1e-9,
+                (centre_points(wide, TALL, dpi) - (CENTRE_MIN_POINTS + 400.0)).abs() < 1e-9,
                 "the surplus should go to the middle"
             );
 
             // At the trigger the middle is exactly at its minimum and the
             // console has not started shrinking yet.
             let trigger = TARGET_POINTS * dpi;
-            assert_eq!(console_scale(trigger, dpi), 1.0);
-            assert!((centre_points(trigger, dpi) - CENTRE_MIN_POINTS).abs() < 1e-9);
+            assert_eq!(console_scale(trigger, TALL, dpi), 1.0);
+            assert!((centre_points(trigger, TALL, dpi) - CENTRE_MIN_POINTS).abs() < 1e-9);
 
             // Narrower, all the way to the floor: the console shrinks and the
             // middle column holds its 500 points rather than paying for it.
             let floor = TARGET_POINTS * dpi * MIN_SCALE;
             for px in [trigger - 1.0, trigger * 0.95, floor + 1.0, floor] {
                 assert!(
-                    (centre_points(px, dpi) - CENTRE_MIN_POINTS).abs() < 1e-6,
+                    (centre_points(px, TALL, dpi) - CENTRE_MIN_POINTS).abs() < 1e-6,
                     "{px}px at {dpi}: middle came to {}",
-                    centre_points(px, dpi)
+                    centre_points(px, TALL, dpi)
                 );
-                assert!(console_scale(px, dpi) < 1.000_001);
+                assert!(console_scale(px, TALL, dpi) < 1.000_001);
             }
 
             // Past the floor the shrinking is spent — and the tabs take
@@ -498,8 +544,8 @@ mod tests {
             // It gives only when one panel plus the minimum will not fit.
             let tabbed_floor =
                 (FLANKS_POINTS / 2.0 + CENTRE_MIN_POINTS) * dpi * MIN_SCALE;
-            assert!(centre_points(tabbed_floor * 1.05, dpi) >= CENTRE_MIN_POINTS);
-            assert!(centre_points(tabbed_floor * 0.9, dpi) < CENTRE_MIN_POINTS);
+            assert!(centre_points(tabbed_floor * 1.05, TALL, dpi) >= CENTRE_MIN_POINTS);
+            assert!(centre_points(tabbed_floor * 0.9, TALL, dpi) < CENTRE_MIN_POINTS);
         }
     }
 
@@ -509,23 +555,23 @@ mod tests {
         // scale, whatever that is.
         for dpi in [1.0, 1.5, 2.0] {
             let wide = TARGET_POINTS * dpi + 400.0;
-            assert_eq!(console_dpi(wide, dpi), dpi, "a wide console is untouched");
-            assert_eq!(console_scale(wide, dpi), 1.0);
+            assert_eq!(console_dpi(wide, TALL, dpi), dpi, "a wide console is untouched");
+            assert_eq!(console_scale(wide, TALL, dpi), 1.0);
         }
 
         // Exactly the width it wants: still untouched, and the seam is
         // continuous — a point either side is a hair either side of 1.0.
         let dpi = 1.0;
-        assert_eq!(console_dpi(TARGET_POINTS * dpi, dpi), dpi);
-        let just_under = console_scale(TARGET_POINTS - 1.0, 1.0);
+        assert_eq!(console_dpi(TARGET_POINTS * dpi, TALL, dpi), dpi);
+        let just_under = console_scale(TARGET_POINTS - 1.0, TALL, 1.0);
         assert!(just_under < 1.0 && just_under > 0.999, "seam jumped: {just_under}");
 
         // Narrower: the console gives up exactly the fraction it is short by,
         // so the layout still gets its full width in points.
         let px = TARGET_POINTS * 0.8;
-        let dpi = console_dpi(px, 1.0);
+        let dpi = console_dpi(px, TALL, 1.0);
         assert!((px / dpi - TARGET_POINTS).abs() < 1e-9, "the layout is short");
-        assert!((console_scale(px, 1.0) - 0.8).abs() < 1e-9);
+        assert!((console_scale(px, TALL, 1.0) - 0.8).abs() < 1e-9);
     }
 
     #[test]
@@ -535,50 +581,65 @@ mod tests {
 
             // Above the floor the console shrinks and keeps both panels.
             for px in [floor + 1.0, floor * 1.2, TARGET_POINTS * dpi, 6_000.0] {
-                assert!(!console_tabbed(px, dpi), "{px}px at {dpi} tabbed too early");
+                assert!(!console_tabbed(px, TALL, dpi), "{px}px at {dpi} tabbed too early");
             }
             // At the floor exactly the middle is still at its minimum, so
             // there is nothing to rescue yet; below it the panels go one at
             // a time. No width where both answers have given up, and none
             // where both fire.
-            assert!(!console_tabbed(floor, dpi), "the floor itself still fits");
+            assert!(!console_tabbed(floor, TALL, dpi), "the floor itself still fits");
             for px in [floor - 1.0, floor * 0.8] {
-                assert!(console_tabbed(px, dpi), "{px}px at {dpi} should tab");
+                assert!(console_tabbed(px, TALL, dpi), "{px}px at {dpi} should tab");
                 assert!(
-                    (console_scale(px, dpi) - MIN_SCALE).abs() < 1e-9,
+                    (console_scale(px, TALL, dpi) - MIN_SCALE).abs() < 1e-9,
                     "tabbing before the shrinking is spent"
                 );
             }
 
             // Folding a panel hands the middle back half the flanks, so it
             // is roomier just after the handover than just before it.
-            let before = centre_points(floor + 1.0, dpi);
-            let after = centre_points(floor - 1.0, dpi);
+            let before = centre_points(floor + 1.0, TALL, dpi);
+            let after = centre_points(floor - 1.0, TALL, dpi);
             assert!(after > before, "tabbing bought nothing: {before} then {after}");
 
             // And from there the middle keeps its minimum until the window
             // reaches the flanks-plus-minimum it now needs.
             let narrow_target = (FLANKS_POINTS / 2.0 + CENTRE_MIN_POINTS) * dpi * MIN_SCALE;
-            assert!(centre_points(narrow_target + 1.0, dpi) >= CENTRE_MIN_POINTS);
+            assert!(centre_points(narrow_target + 1.0, TALL, dpi) >= CENTRE_MIN_POINTS);
         }
     }
 
     #[test]
     fn the_panel_folds_in_two_stages_as_the_console_loses_height() {
+        // On a window too narrow for the lists to move beside the decks,
+        // losing height runs the full ladder: the shrink absorbs the first
+        // of it, and once the shrink is spent — MIN_SCALE — the folds take
+        // over, measured in the SHRUNK points.
         for dpi in [1.0, 1.5, 2.0] {
-            let wide = TARGET_POINTS * dpi;
-            let at = |points: f64| console_fold(wide, points * dpi, dpi);
+            let narrow = (lists_beside_min_points() - 40.0) * dpi;
+            let at = |points: f64| console_fold(narrow, points * dpi, dpi);
 
             // Room to spare: every block on screen, no chevrons.
-            assert_eq!(at(PANEL_FLOOR_POINTS + 100.0), ConsoleFold::None);
-            // At the floor the console is still complying, just barely.
+            assert_eq!(at(TARGET_HEIGHT_POINTS + 100.0), ConsoleFold::None);
+            // Short, but within the shrink's reach: still every block.
             assert_eq!(at(PANEL_FLOOR_POINTS), ConsoleFold::None);
-            // Below it the transcript folds away and the knobs pair up.
-            assert_eq!(at(PANEL_FLOOR_POINTS - 1.0), ConsoleFold::Pairs);
-            assert_eq!(at(PANEL_SPLIT_POINTS), ConsoleFold::Pairs);
-            // Below THAT the knobs cannot share a column either.
-            assert_eq!(at(PANEL_SPLIT_POINTS - 1.0), ConsoleFold::Singles);
+            // Past the shrink floor the transcript folds away and the knobs
+            // pair up...
+            assert_eq!(at(PANEL_FLOOR_POINTS * MIN_SCALE - 1.0), ConsoleFold::Pairs);
+            assert_eq!(at(PANEL_SPLIT_POINTS * MIN_SCALE + 1.0), ConsoleFold::Pairs);
+            // ...and below THAT the knobs cannot share a column either.
+            assert_eq!(at(PANEL_SPLIT_POINTS * MIN_SCALE - 1.0), ConsoleFold::Singles);
             assert_eq!(at(200.0), ConsoleFold::Singles);
+        }
+
+        // On a wide window the lists-beside arrangement takes over below
+        // [`LISTS_STACK_POINTS`] instead (the shrink stands down for it),
+        // and what is left of the height goes straight past Pairs.
+        for dpi in [1.0, 2.0] {
+            let wide = (lists_beside_min_points() + 200.0) * dpi;
+            let at = |points: f64| console_fold(wide, points * dpi, dpi);
+            assert_eq!(at(PANEL_FLOOR_POINTS), ConsoleFold::None);
+            assert_eq!(at(LISTS_STACK_POINTS - 1.0), ConsoleFold::Singles);
         }
 
         // The stages are ordered and the boundaries do not overlap.
@@ -603,13 +664,17 @@ mod tests {
 
         // The width matters too, through the scale: the same physical height
         // is worth MORE layout points on a console that has shrunk, so a
-        // narrow window folds later than a wide one of the same height.
+        // narrow window folds later than a wide one of the same height. On
+        // the wide window the lists-beside arrangement holds the scale at
+        // native and the height reads short; the narrow one is already at
+        // the shrink floor and the same pixels buy it a third more points.
         let native = 1.5;
-        let shrunk = TARGET_POINTS * native * MIN_SCALE;
-        let height = PANEL_FLOOR_POINTS * native * 0.9;
-        assert_eq!(console_fold(TARGET_POINTS * native, height, native), ConsoleFold::Pairs);
+        let wide = (lists_beside_min_points() + 200.0) * native;
+        let narrow = (lists_beside_min_points() - 100.0) * native;
+        let height = 690.0 * native;
+        assert_eq!(console_fold(wide, height, native), ConsoleFold::Singles);
         assert_eq!(
-            console_fold(shrunk, height, native),
+            console_fold(narrow, height, native),
             ConsoleFold::None,
             "the shrunken console has the points to spare"
         );
@@ -623,23 +688,23 @@ mod tests {
         for dpi in [1.0, 1.5, 2.0] {
             let deck_stage = px(TARGET_POINTS, dpi);
             // Wide: nothing tabs.
-            assert_eq!(console_tabs(deck_stage + 100.0, dpi), TabStage::None);
+            assert_eq!(console_tabs(deck_stage + 100.0, TALL, dpi), TabStage::None);
             // Narrower: the deck panels take turns, the mixer stays put.
-            assert_eq!(console_tabs(deck_stage - 1.0, dpi), TabStage::Decks);
+            assert_eq!(console_tabs(deck_stage - 1.0, TALL, dpi), TabStage::Decks);
 
             // Narrower still: the middle can no longer hold a fader worth
             // playing, so the mixer takes its turn too.
             let centre_floor =
                 crate::music_view::STRIP_SWEEP_MIN + crate::music_view::STRIP_ROW_SLACK;
             let all_stage = px(FLANKS_POINTS / 2.0 + centre_floor, dpi);
-            assert_eq!(console_tabs(all_stage - 1.0, dpi), TabStage::All);
-            assert_eq!(console_tabs(200.0, dpi), TabStage::All);
+            assert_eq!(console_tabs(all_stage - 1.0, TALL, dpi), TabStage::All);
+            assert_eq!(console_tabs(200.0, TALL, dpi), TabStage::All);
 
             // The stages are ordered and every width has exactly one answer.
             assert!(all_stage < deck_stage, "the mixer joins after the decks");
             assert_eq!(
-                console_tabbed(deck_stage - 1.0, dpi),
-                console_tabs(deck_stage - 1.0, dpi) != TabStage::None
+                console_tabbed(deck_stage - 1.0, TALL, dpi),
+                console_tabs(deck_stage - 1.0, TALL, dpi) != TabStage::None
             );
         }
 
@@ -666,10 +731,10 @@ mod tests {
         let px = |points: f64, native: f64| points * native * MIN_SCALE;
         for dpi in [1.0, 1.5, 2.0] {
             let at = px(LISTS_TAB_POINTS, dpi);
-            assert!(!console_lists_tabbed(at + 1.0, dpi), "room for both");
-            assert!(!console_lists_tabbed(at, dpi), "exactly enough is enough");
-            assert!(console_lists_tabbed(at - 1.0, dpi), "not any more");
-            assert!(console_lists_tabbed(300.0, dpi));
+            assert!(!console_lists_tabbed(at + 1.0, TALL, dpi), "room for both");
+            assert!(!console_lists_tabbed(at, TALL, dpi), "exactly enough is enough");
+            assert!(console_lists_tabbed(at - 1.0, TALL, dpi), "not any more");
+            assert!(console_lists_tabbed(300.0, TALL, dpi));
         }
         // The lists give up side-by-side BEFORE the mixer joins the deck
         // tabs: a console narrow enough to tab its mixer has long since had
@@ -712,7 +777,7 @@ mod tests {
             // scale the console ACTUALLY draws at — `native` is the wrong
             // divisor whenever it has shrunk, which at these widths it has.
             let wide = lists_beside_min_points() * dpi * 1.3;
-            let scale = console_dpi(wide, dpi);
+            let scale = console_dpi(wide, TALL, dpi);
             let short = (LISTS_STACK_POINTS - 1.0) * scale;
             let tall = LISTS_STACK_POINTS * scale;
             assert!(console_lists_beside(wide, short, dpi), "wide and short");
@@ -720,7 +785,7 @@ mod tests {
             // Narrow and short: there is no width to put them in either, so
             // they stay stacked and the tabs deal with it.
             let narrow = lists_beside_min_points() * dpi * 0.5;
-            let short = (LISTS_STACK_POINTS - 1.0) * console_dpi(narrow, dpi);
+            let short = (LISTS_STACK_POINTS - 1.0) * console_dpi(narrow, TALL, dpi);
             assert!(!console_lists_beside(narrow, short, dpi), "no width to spare");
         }
     }
@@ -737,8 +802,8 @@ mod tests {
         assert!(span > wide * 0.6 && span < wide, "the decks' share: {span} of {wide}");
         // The whole window would say "no tabs at all"; the decks' own share
         // says otherwise, which is the point.
-        assert_eq!(console_tabs(wide, native), TabStage::None);
-        let dpi = console_dpi(wide, native);
+        assert_eq!(console_tabs(wide, TALL, native), TabStage::None);
+        let dpi = console_dpi(wide, TALL, native);
         assert_ne!(
             console_tabs_for(span / dpi),
             TabStage::None,
@@ -766,7 +831,7 @@ mod tests {
         assert!(console_lists_beside(w, h, native), "should stand beside");
 
         // Both sides come out usable, which is the whole test.
-        let span = deck_span(w, h, native) / console_dpi(w, native);
+        let span = deck_span(w, h, native) / console_dpi(w, TALL, native);
         assert!(span >= FLANKS_POINTS / 2.0 + CENTRE_MIN_POINTS * 0.5, "decks: {span}");
         let lists = 1077.0 - span;
         assert!(lists >= LISTS_MIN_POINTS, "lists: {lists}");
@@ -783,11 +848,11 @@ mod tests {
         let (w, h) = (1077.0 * native, 490.0 * native);
         assert!(console_lists_beside(w, h, native));
         let span = lists_span(w, h, native);
-        assert!(console_lists_tabbed(span, native), "their share is {span}px");
+        assert!(console_lists_tabbed(span, TALL, native), "their share is {span}px");
         // Stacked, they have the window and the same call says otherwise.
         let tall = 900.0 * native;
         assert_eq!(lists_span(w, tall, native), w);
-        assert!(!console_lists_tabbed(w, native), "the whole window is plenty");
+        assert!(!console_lists_tabbed(w, TALL, native), "the whole window is plenty");
     }
 
     #[test]
@@ -844,9 +909,9 @@ mod tests {
         // needs; the surplus belongs to the decks.
         let native = 1.5;
         let wide = 3000.0 * native;
-        let short = (LISTS_STACK_POINTS - 50.0) * console_dpi(wide, native);
+        let short = (LISTS_STACK_POINTS - 50.0) * console_dpi(wide, TALL, native);
         assert!(console_lists_beside(wide, short, native));
-        let dpi = console_dpi(wide, native);
+        let dpi = console_dpi(wide, TALL, native);
         let lists = lists_span(wide, short, native) / dpi;
         assert!(
             (lists - LISTS_MAX_POINTS).abs() < 1.0,
@@ -864,8 +929,8 @@ mod tests {
         // Scale AND tabs, together: both are functions of a width neither
         // can move, so the console cannot chase its own tail through them.
         for (px, dpi) in widths_and_dpis() {
-            let (dpi1, tab1) = (console_dpi(px, dpi), console_tabbed(px, dpi));
-            let (dpi2, tab2) = (console_dpi(px, dpi), console_tabbed(px, dpi));
+            let (dpi1, tab1) = (console_dpi(px, TALL, dpi), console_tabbed(px, TALL, dpi));
+            let (dpi2, tab2) = (console_dpi(px, TALL, dpi), console_tabbed(px, TALL, dpi));
             assert_eq!((dpi1, tab1), (dpi2, tab2), "{px}px at {dpi} disagreed with itself");
         }
     }
@@ -877,10 +942,10 @@ mod tests {
         // where a narrower ARRANGEMENT has to take over — not a smaller one.
         for dpi in [1.0, 1.5, 2.0] {
             let floor_px = TARGET_POINTS * dpi * MIN_SCALE;
-            assert!((console_scale(floor_px, dpi) - MIN_SCALE).abs() < 1e-9);
+            assert!((console_scale(floor_px, TALL, dpi) - MIN_SCALE).abs() < 1e-9);
             for px in [floor_px - 1.0, floor_px * 0.5, 200.0] {
                 assert!(
-                    (console_scale(px, dpi) - MIN_SCALE).abs() < 1e-9,
+                    (console_scale(px, TALL, dpi) - MIN_SCALE).abs() < 1e-9,
                     "{px}px at {dpi} went past the floor"
                 );
             }
@@ -890,7 +955,7 @@ mod tests {
     #[test]
     fn the_scale_only_ever_shrinks_and_only_ever_moves_one_way() {
         for (px, dpi) in widths_and_dpis() {
-            let scale = console_scale(px, dpi);
+            let scale = console_scale(px, TALL, dpi);
             assert!(scale <= 1.0, "{px}px at {dpi} magnified to {scale}");
             assert!(scale >= MIN_SCALE, "{px}px at {dpi} shrank to {scale}");
         }
@@ -898,7 +963,7 @@ mod tests {
         for dpi in [1.0, 1.5, 2.0] {
             let mut last = 0.0;
             for px in (200..4_000).step_by(3) {
-                let scale = console_scale(px as f64, dpi);
+                let scale = console_scale(px as f64, TALL, dpi);
                 assert!(scale >= last - 1e-12, "{px}px at {dpi} went backwards");
                 last = scale;
             }
@@ -910,8 +975,8 @@ mod tests {
         // A zero or NaN DPI reaches the layout as a divide, so the rule has
         // to hand back something a window can actually be drawn at.
         for bad in [0.0, -2.0, f64::NAN, f64::INFINITY] {
-            assert!(console_dpi(1600.0, bad) > 0.0, "dpi {bad}");
-            assert!(console_dpi(bad, 1.5) > 0.0, "width {bad}");
+            assert!(console_dpi(1600.0, TALL, bad) > 0.0, "dpi {bad}");
+            assert!(console_dpi(bad, TALL, 1.5) > 0.0, "width {bad}");
         }
     }
 }
