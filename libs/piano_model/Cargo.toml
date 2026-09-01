@@ -1,0 +1,11 @@
+[package]
+name = "makepad-piano-model"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Physically modelled piano: nonlinear felt hammer + inharmonic modal strings + coupled unisons + sympathetic resonance + modal soundboard. SIMD accelerated, no dependencies"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "makepad-score-import"
+version = "1.0.0"
+edition = "2021"
+description = "Headless MusicXML and MIDI conversion for the Makepad score model"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-score = { path = "../score", version = "1.0.0" }
+makepad-musicxml = { path = "../musicxml", version = "1.0.0" }
+makepad-midi-file = { path = "../midi_file", version = "1.0.0" }
