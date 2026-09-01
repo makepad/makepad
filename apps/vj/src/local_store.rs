@@ -4,8 +4,9 @@
 //! normally asset-ui's embedded one. That is still the default and still
 //! wins whenever it is actually reachable. What this module adds is the
 //! answer to "and if it is not?": the VJ brings up the SAME server crate
-//! in its own process, on 127.0.0.1 only, rooted in its own state directory,
-//! and points its own client at it.
+//! in its own process, on 127.0.0.1 only, rooted in the user's main library
+//! when one exists on disk (a private seed root only when none does), and
+//! points its own client at it.
 //!
 //! The thin-client law does not bend for this. Hosting changes WHERE the
 //! store runs, never who owns the content: the VJ still browses, publishes
@@ -40,10 +41,11 @@
 //! window appears, because the alternative — starting a second store while
 //! the user's asset-ui is up — would split their library in two.
 
+use makepad_app_asset_server::{Host, HostConfig};
 use makepad_asset_client::{ApiEndpoints, SessionConfig};
-use makepad_asset_store::{AssetServer, BlobRefPolicy, ServerConfig};
+use makepad_asset_store::BlobRefPolicy;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -76,34 +78,29 @@ fn embed_policy() -> EmbedPolicy {
     }
 }
 
-/// The VJ's own store root. Its own directory, never asset-ui's: two servers
-/// over one WAL catalog is exactly what `server.lock` exists to refuse, and
-/// racing the user's daemon for that lock is not a thing to do by default.
+/// The root the VJ hosts over when it hosts.
+///
+/// `VJ_ASSET_ROOT` pins it. Otherwise the user's MAIN library — asset-ui's
+/// store root — whenever it holds a catalog: hosting only happens after the
+/// probe found nobody serving, and `AssetServer::start` takes the same
+/// `server.lock` the daemon would, so losing the race resolves to "attach
+/// instead", never to two servers over one WAL. The private `local/vjassets`
+/// seed is only for a machine with no main library at all — self-hosting a
+/// fresh empty root next to a full library reads as "the VJ lost my videos".
 pub fn default_store_root() -> PathBuf {
     if let Ok(root) = std::env::var("VJ_ASSET_ROOT") {
         return PathBuf::from(root);
     }
-    // `local/vjassets` (moved from `local/vj/asset-server` 2026-08-23): a
-    // fresh default root, so a build with the new store layout simply seeds
-    // a new store here and never has to migrate an old one.
+    let main = main_store_root();
+    if main.join("catalog.sqlite3").exists() {
+        return main;
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vjassets")
 }
 
-/// A locally hosted server binds loopback; reach it there. (Kept for the
-/// case where a future config binds `0.0.0.0` — an unspecified address is
-/// not a thing a client can connect to.)
-fn localized_endpoints(server: &AssetServer) -> ApiEndpoints {
-    let localize = |addr: SocketAddr| {
-        if addr.ip().is_unspecified() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
-        } else {
-            addr
-        }
-    };
-    ApiEndpoints {
-        control: localize(server.control_addr()),
-        data: localize(server.data_addr()),
-    }
+/// Where asset-ui keeps the user's main store.
+fn main_store_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/asset-ui/asset-server")
 }
 
 /// Does something on the other end of `addr` answer `GET /v1/health` like an
@@ -189,8 +186,7 @@ fn external_store_reachable(config: &SessionConfig) -> bool {
 /// True when another process holds the main (asset-ui) store's server
 /// lock — i.e. the user's library is hosted right now, whatever its ports.
 fn main_store_lock_held() -> bool {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/asset-ui/asset-server");
+    let root = main_store_root();
     let Ok(file) = std::fs::OpenOptions::new()
         .write(true)
         .open(root.join("server.lock"))
@@ -208,19 +204,20 @@ fn main_store_lock_held() -> bool {
     }
 }
 
-/// The in-process server, held for as long as the VJ runs.
+/// The in-process host (server + library publisher), held for as long as
+/// the VJ runs.
 ///
-/// Dropping it shuts the store down and joins every thread, so the field
+/// Dropping it stops the publisher first and the server last, so the field
 /// holding this must be declared AFTER anything that talks to the store —
 /// the same drop-order discipline asset-ui's `AssetStore` uses.
 pub struct LocalStore {
-    server: AssetServer,
+    host: Host,
     root: PathBuf,
 }
 
 impl LocalStore {
     pub fn endpoints(&self) -> ApiEndpoints {
-        localized_endpoints(&self.server)
+        self.host.endpoints()
     }
 
     pub fn root(&self) -> &std::path::Path {
@@ -228,11 +225,11 @@ impl LocalStore {
     }
 
     pub fn control_addr(&self) -> SocketAddr {
-        self.server.control_addr()
+        self.host.endpoints().control
     }
 
     pub fn data_addr(&self) -> SocketAddr {
-        self.server.data_addr()
+        self.host.endpoints().data
     }
 }
 
@@ -282,9 +279,14 @@ pub fn resolve(base: SessionConfig) -> Resolved {
         Ok((local, token)) => {
             let mut config = base;
             config.endpoints = Some(local.endpoints());
-            config.server_id = Some(local.server.server_id());
+            config.server_id = Some(local.host.server_id());
             config.token = Some(token);
-            let note = format!("local store on {}", local.control_addr());
+            let note = format!(
+                "local store on {} over {} · library publisher {}",
+                local.control_addr(),
+                root.file_name().and_then(|n| n.to_str()).unwrap_or("store"),
+                if local.host.publisher_running() { "on" } else { "off" }
+            );
             Resolved { config, mode: StoreMode::Hosting, local: Some(local), note }
         }
         Err(error) => {
@@ -301,38 +303,52 @@ pub fn resolve(base: SessionConfig) -> Resolved {
     }
 }
 
-/// Bring up the in-process server on loopback and read back its admin token.
+/// Bring up the in-process host on loopback and read back its admin token.
+///
+/// This is the standalone asset-server's own `Host` — catalog + CAS plus
+/// the ai-content LIBRARY PUBLISHER, so a self-hosted VJ sees the same
+/// `local/ai_content_library` rows asset-ui and the standalone server
+/// publish, not a bare seed store. Two deployment defaults are overridden,
+/// deliberately, and both stay: this store binds LOOPBACK ONLY and runs NO
+/// discovery beacon. A VJ hosting for itself has no business accepting
+/// connections from the network, and announcing the store would invite
+/// other apps onto a private instance of the user's library.
 fn host(root: &std::path::Path) -> Result<(LocalStore, String), String> {
     std::fs::create_dir_all(root).map_err(|e| format!("create store root: {e}"))?;
     let port: u16 = std::env::var("VJ_ASSET_PORT")
         .ok()
         .and_then(|p| p.trim().parse().ok())
         .unwrap_or(0);
-    let mut cfg = ServerConfig::new(root.to_path_buf());
-    // LOOPBACK ONLY. Not a default we inherit — a decision. A VJ hosting for
-    // itself has no business accepting connections from the network, and
-    // the reference-import route below is only safe under exactly this.
+    let mut cfg = HostConfig::new(root.to_path_buf());
     cfg.control_addr = SocketAddr::from(([127, 0, 0, 1], port));
     // The data plane always takes an OS-assigned port: pinning one would
     // only create a second thing to collide.
     cfg.data_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    cfg.bootstrap_admin = true;
-    // No beacon: this store is for this process. Announcing it would invite
-    // other apps onto a library that is not the user's main one.
-    cfg.discovery = None;
+    cfg.beacon = false;
+    // The user's generation library, when this checkout has one: the
+    // publisher keeps turning it into catalog rows exactly as the
+    // standalone server would.
+    let library = library_root();
+    cfg.library = library.join("index.json").exists().then_some(library);
     // Reference imports ON: the whole point of the local mode is pointing
     // the VJ at a directory of video that stays where it is. Loopback-only
     // and no prefix restriction, which is exactly the privilege this
     // process already has over the user's own files.
     cfg.blob_refs = BlobRefPolicy::local_host();
     cfg.log = true;
-    let server = AssetServer::start(cfg).map_err(|e| format!("{e}"))?;
-    let token = std::fs::read_to_string(root.join("admin-token"))
-        .map_err(|e| format!("admin token: {e}"))?
-        .trim()
-        .to_string();
+    let host = Host::start(&cfg).map_err(|e| format!("{e}"))?;
+    if let Some(error) = host.library_error() {
+        crate::makepad_widgets::log!("local store: library publisher: {error}");
+    }
+    let token = host.token().to_string();
     if token.is_empty() {
         return Err("admin token file empty".to_string());
     }
-    Ok((LocalStore { server, root: root.to_path_buf() }, token))
+    Ok((LocalStore { host, root: root.to_path_buf() }, token))
+}
+
+/// The ai-content library this checkout generates into — the same default
+/// the standalone asset-server and asset-ui use.
+fn library_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/ai_content_library")
 }

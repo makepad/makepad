@@ -22381,6 +22381,9 @@ impl MatchEvent for App {
         // `local_store::resolve`. Either way everything above this line is a
         // thin client over HTTP and cannot tell the difference.
         let resolved = local_store::resolve(service::session_config_from_env());
+        // "Which store am I on" is the first question when the grid is
+        // empty, so it goes to the log as well as the status line.
+        log!("store: {}", resolved.note);
         self.status_text = resolved.note.clone();
         self.local_store = resolved.local;
         match SessionConnector::start(resolved.config) {

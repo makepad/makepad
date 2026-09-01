@@ -42,7 +42,7 @@
 //!   own child of the work root.
 
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRights};
-use makepad_asset_store::{AssetServer, DiscoveryConfig, ServerConfig};
+use makepad_asset_store::{AssetServer, BlobRefPolicy, DiscoveryConfig, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +77,9 @@ pub struct HostConfig {
     /// server root's parent, which puts them exactly where the Asset UI's
     /// own hosting mode puts them.
     pub work_root: PathBuf,
+    /// Reference-import policy handed to the server. The deployment default
+    /// (owned blobs only); a loopback-only embedder may open this up.
+    pub blob_refs: BlobRefPolicy,
     /// Log to stderr.
     pub log: bool,
 }
@@ -96,6 +99,7 @@ impl HostConfig {
             library: None,
             namespace: DEFAULT_NAMESPACE.to_string(),
             work_root,
+            blob_refs: BlobRefPolicy::default(),
             log: true,
         }
     }
@@ -145,6 +149,7 @@ impl Host {
         // root the same way it does against an Asset-UI-hosted server.
         cfg.bootstrap_admin = true;
         cfg.discovery = config.beacon.then(DiscoveryConfig::lan_default);
+        cfg.blob_refs = config.blob_refs.clone();
         cfg.log = config.log;
         let server = AssetServer::start(cfg).map_err(|error| format!("asset server: {error}"))?;
 

@@ -16,6 +16,7 @@ edition = "2021"
 default-run = "makepad-vj"
 
 [dependencies]
+makepad-app-asset-server = { path = "../asset-server" }
 makepad-widgets = { path = "../../widgets" }
 makepad-asset-data = { path = "../../libs/asset/data" }
 # Own MP3 / Ogg Vorbis decoders for the music decks and SFX pads.
