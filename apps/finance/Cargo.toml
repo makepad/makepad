@@ -1,0 +1,20 @@
+# Personal finance: a ledger, budgets and reports over a SQLite file, with
+# bank-CSV import. The database is the file format; everything the screens
+# read is an in-memory cache rebuilt from it.
+
+[package]
+name = "makepad-app-finance"
+version = "0.1.0"
+edition = "2021"
+description = "Personal finance: ledger, budgets, reports and CSV import"
+license = "MIT OR Apache-2.0"
+default-run = "finance"
+
+[[bin]]
+name = "finance"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+mp-theme = { path = "../../libs/mp_theme" }
+makepad-sqlite = { path = "../../libs/sqlite_query" }
