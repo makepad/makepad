@@ -14,7 +14,8 @@ use {
         core::{GUID, PCWSTR},
         Win32::Media::MediaFoundation::{
             IMFSample, IMFSourceReader, MFAudioFormat_PCM,
-            MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL,
+            MFCreateAttributes, MFCreateMFByteStreamOnStream, MFCreateMediaType,
+            MFCreateSourceReaderFromByteStream, MFCreateSourceReaderFromURL,
             MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_HEVC,
             MFVideoFormat_NV12, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
             MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE,
@@ -24,8 +25,9 @@ use {
             MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
             MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
             MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-            MF_SOURCE_READER_MEDIASOURCE,
+            MF_SOURCE_READER_MEDIASOURCE, MF_BYTESTREAM_CONTENT_TYPE,
         },
+        Win32::UI::Shell::SHCreateMemStream,
         Win32::System::Com::StructuredStorage::{
             PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
         },
@@ -81,6 +83,42 @@ impl WindowsVideoFileDecoder {
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         ensure_media_foundation()?;
         unsafe {
+            let attributes = Self::reader_attributes()?;
+            let wide_path = to_wide(path);
+            let reader = MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), &attributes)
+                .map_err(|e| hr_err("MFCreateSourceReaderFromURL", e))?;
+            Self::from_reader(reader)
+        }
+    }
+
+    /// Same as [`Self::open`] but over an in-RAM byte stream — the container
+    /// never touches the filesystem. The stream is labeled `video/mp4` so
+    /// source resolution does not depend on a URL extension.
+    pub fn open_bytes(bytes: &[u8]) -> Result<Self, VideoFileError> {
+        ensure_media_foundation()?;
+        unsafe {
+            let attributes = Self::reader_attributes()?;
+            let istream = SHCreateMemStream(Some(bytes))
+                .ok_or_else(|| VideoFileError::new("SHCreateMemStream returned null"))?;
+            let byte_stream = MFCreateMFByteStreamOnStream(&istream)
+                .map_err(|e| hr_err("MFCreateMFByteStreamOnStream", e))?;
+            use windows::core::Interface;
+            if let Ok(stream_attributes) =
+                byte_stream.cast::<windows::Win32::Media::MediaFoundation::IMFAttributes>()
+            {
+                let content_type = to_wide("video/mp4");
+                let _ = stream_attributes
+                    .SetString(&MF_BYTESTREAM_CONTENT_TYPE, PCWSTR(content_type.as_ptr()));
+            }
+            let reader = MFCreateSourceReaderFromByteStream(&byte_stream, &attributes)
+                .map_err(|e| hr_err("MFCreateSourceReaderFromByteStream", e))?;
+            Self::from_reader(reader)
+        }
+    }
+
+    unsafe fn reader_attributes(
+    ) -> Result<windows::Win32::Media::MediaFoundation::IMFAttributes, VideoFileError> {
+        unsafe {
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 2).map_err(|e| hr_err("MFCreateAttributes", e))?;
             let attributes = attributes.unwrap();
@@ -90,11 +128,12 @@ impl WindowsVideoFileDecoder {
             attributes
                 .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
                 .map_err(|e| hr_err("set MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING", e))?;
+            Ok(attributes)
+        }
+    }
 
-            let wide_path = to_wide(path);
-            let reader = MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), &attributes)
-                .map_err(|e| hr_err("MFCreateSourceReaderFromURL", e))?;
-
+    unsafe fn from_reader(reader: IMFSourceReader) -> Result<Self, VideoFileError> {
+        unsafe {
             let video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
             let audio_stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 

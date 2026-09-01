@@ -445,6 +445,16 @@ extern "C" {
         formatDescriptionOut: *mut CMFormatDescriptionRef,
     ) -> OSStatus;
 
+    pub fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        allocator: *const c_void,
+        parameterSetCount: usize,
+        parameterSetPointers: *const *const u8,
+        parameterSetSizes: *const usize,
+        nalUnitHeaderLength: i32,
+        extensions: CFDictionaryRef,
+        formatDescriptionOut: *mut CMFormatDescriptionRef,
+    ) -> OSStatus;
+
     pub fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
         videoDesc: CMFormatDescriptionRef,
         parameterSetIndex: usize,
@@ -455,6 +465,12 @@ extern "C" {
     ) -> OSStatus;
 
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
+    /// The codec's own sample-description extensions — for HEVC this is where
+    /// the ready-made `hvcC` atom lives, which an mp4 needs verbatim.
+    pub fn CMFormatDescriptionGetExtension(
+        desc: CMFormatDescriptionRef,
+        extensionKey: CFStringRef,
+    ) -> *const c_void;
     pub fn CMSampleBufferGetFormatDescription(sbuf: CMSampleBufferRef) -> CMFormatDescriptionRef;
     pub fn CMSampleBufferGetDataBuffer(sbuf: CMSampleBufferRef) -> CMBlockBufferRef;
     pub fn CMSampleBufferDataIsReady(sbuf: CMSampleBufferRef) -> BOOL;
@@ -672,6 +688,11 @@ extern "C" {
     pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
     pub static kVTProfileLevel_H264_Main_AutoLevel: CFStringRef;
     pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
+    pub static kVTProfileLevel_HEVC_Main_AutoLevel: CFStringRef;
+    pub static kVTCompressionPropertyKey_Quality: CFStringRef;
+    /// The dictionary of codec atoms hung off a format description, keyed by
+    /// atom name (`hvcC` for HEVC).
+    pub static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
 
     pub fn VTCompressionSessionCreate(
