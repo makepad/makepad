@@ -6,6 +6,7 @@ use crate::cx::Cx;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+#[allow(dead_code)] // read only by backends with a frame readback (metal today)
 struct Probe {
     x: u32,
     y: u32,
@@ -48,6 +49,7 @@ pub fn take_pixel_probe(id: u64) -> Option<Option<[u8; 4]>> {
 
 /// Called on the readback path with the frame's RGBA. Answers every probe
 /// in `request_ids` and removes those ids so no PNG is made for them.
+#[allow(dead_code)] // called only by backends with a frame readback (metal today)
 pub(crate) fn answer_pixel_probes(request_ids: &mut Vec<u64>, width: usize, height: usize, rgba: &[u8]) {
     let mut map = probes().lock().unwrap();
     request_ids.retain(|id| {

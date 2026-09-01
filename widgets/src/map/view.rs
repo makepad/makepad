@@ -5128,7 +5128,7 @@ impl MapView {
                 // would tilt-compress and orbit the pin under rotation).
                 // Flying-marker labels ride their marker's BAKED stalk
                 // height (dynamic: each pin clears its own building).
-                let mut lift_px = self.lift_screen_px(label.lift_m, view_zoom);
+                let lift_px = self.lift_screen_px(label.lift_m, view_zoom);
                 // Total upward screen shift baked into this path — the glyph
                 // shader camera-deltas the GROUND anchor and re-applies it.
                 let mut baked_lift_px = 0.0f64;

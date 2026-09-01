@@ -89,7 +89,7 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource,
+                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex,
                     IDXGIResource1, IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2,
                     DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FRAME_STATISTICS, DXGI_PRESENT,
