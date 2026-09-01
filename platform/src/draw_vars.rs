@@ -488,6 +488,42 @@ impl DrawVars {
         }
     }
 
+    /// Writes one uniform into EVERY retained draw call of this shader in
+    /// `list`'s draw list, and marks the pass for repaint. A widget whose
+    /// instances batch into many calls (texture changes split them) can move
+    /// its camera between redraws with this: the standing buffers re-present
+    /// under fresh uniforms — nothing is rebuilt.
+    pub fn set_uniform_on_draw_list(&mut self, cx: &mut Cx, list: Area, id: LiveId, value: &[f32]) {
+        let Some(draw_shader_id) = self.draw_shader_id else { return };
+        let Some(draw_list_id) = list.draw_list_id() else { return };
+        let sh = &cx.draw_shaders[draw_shader_id.index];
+        let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) else { return };
+        let slots = input.slots.min(value.len());
+        let offset = input.offset;
+        for i in 0..slots {
+            self.dyn_uniforms[offset + i] = value[i];
+        }
+        let draw_list = &mut cx.draw_lists[draw_list_id];
+        let mut touched = false;
+        for item in 0..draw_list.draw_items.len() {
+            let draw_item = &mut draw_list.draw_items[item];
+            let Some(draw_call) = draw_item.kind.draw_call_mut() else { continue };
+            if draw_call.draw_shader_id != draw_shader_id {
+                continue;
+            }
+            for i in 0..slots {
+                draw_call.dyn_uniforms[offset + i] = value[i];
+            }
+            draw_call.uniforms_dirty = true;
+            touched = true;
+        }
+        if touched {
+            if let Some(pass_id) = draw_list.draw_pass_id {
+                cx.passes[pass_id].paint_dirty = true;
+            }
+        }
+    }
+
     /// Sets an instance value on all instances in the area.
     /// This is used to update instance data after drawing has completed.
     pub fn set_instance_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {

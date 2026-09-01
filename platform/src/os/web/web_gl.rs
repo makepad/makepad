@@ -36,17 +36,16 @@ impl Cx {
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
-                self.render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    if child_resets_zbias {
-                        &mut child_zbias
-                    } else {
-                        zbias
-                    },
-                    zbias_step,
-                );
+                let mut own_zbias = 0.0f32;
+                let child_zbias = if child_resets_zbias {
+                    &mut own_zbias
+                } else {
+                    &mut *zbias
+                };
+                // An overlay list carries a depth floor: this is what makes it
+                // composite above body content that uses `draw_depth`.
+                self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
+                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
