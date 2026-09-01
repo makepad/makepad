@@ -1,0 +1,26 @@
+[package]
+name = "makepad-image-tiles"
+version = "0.1.0"
+edition = "2021"
+description = "Pannable, zoomable wall of image tiles: a small baker CLI downloads pictures into hardware-HEVC tape atlases, and the TileGrid widget draws them as instanced NV12 textures with continuous LOD"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_image_tiles"
+path = "src/lib.rs"
+
+# The baker: reads a manifest of image URLs, downloads and decodes them in
+# RAM, and bakes the tile library a TileGrid widget opens. No window.
+[[bin]]
+name = "image-tiles-bake"
+path = "src/bin/bake.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+# The library index: items and shard bookkeeping in our own SQLite engine.
+makepad-sqlite = { path = "../sqlite_query" }
+# Hardware HEVC intra frames (VideoToolbox) for the on-disk tapes: no JPEGs
+# or PNGs are ever kept, one hardware decode fills a whole atlas level.
+makepad-video = { path = "../../platform/video" }
+# The baker's downloader: the dependency-free blocking HTTP client.
+makepad-network = { path = "../../platform/network" }

@@ -123,6 +123,10 @@ workspace.members = [
     "libs/frametween",
     # === archive.org search + download content input (VJ / asset-ui) ===
     "libs/archive_org",
+    # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
+    # (the engine extracted from the Source Library picture wall) ===
+    "libs/image_tiles",
+    "examples/image_tiles",
     # === mp4 sample index for range-streaming playback ===
     "libs/mp4_index",
     # === necessary tools ===
