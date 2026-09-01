@@ -18,6 +18,14 @@
 //! spare height four ways. The body got a quarter, and anything below it in
 //! its own subtree was laid out with what was left — which could be negative,
 //! in which case it never drew at all.
+//!
+//! The page also carries a `deep_band`: a strip painted at `draw_depth: 12`,
+//! standing in for any widget that spends real depth to order its own ink (a
+//! chart, a dock's dragged tab, an engraved score). A 2D pass has one depth
+//! buffer shared by every draw list, so painting the modal later buys it only
+//! a `zbias_step` of z — the band would win the depth test and punch straight
+//! through the dialog. `DrawList2d::begin_overlay_inner` gives every overlay a
+//! depth floor above that band; `tests/ui.rs` is what holds it to it.
 
 pub use makepad_widgets;
 
@@ -118,6 +126,21 @@ script_mod! {
                                 }
                             }
                             modal_footer := Footer{}
+                        }
+
+                        // ---- a page that spends draw_depth ----
+                        // Absolutely positioned, so it takes nothing from the
+                        // columns' layout; wide enough to run out from under
+                        // the dialog card on both sides, so a test can check
+                        // the covered and the uncovered halves.
+                        deep_band := SolidView{
+                            width: 340
+                            height: 60
+                            abs_pos: vec2(90.0, 160.0)
+                            draw_bg +: {
+                                color: #xcc22cc
+                                draw_depth: 12.0
+                            }
                         }
                     }
                 }

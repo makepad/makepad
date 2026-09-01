@@ -61,13 +61,6 @@ fn header_control_path(index: usize) -> &'static [LiveId] {
     }
 }
 
-fn header_sun_number_path(index: usize) -> &'static [LiveId] {
-    match index {
-        6 => ids!(header.scroller.content.right_cluster.sun_controls.time_control.time_slider),
-        _ => ids!(header.scroller.content.right_cluster.sun_controls.haze_control.haze_slider),
-    }
-}
-
 fn overflow_control_path(index: usize) -> &'static [LiveId] {
     match index {
         0 => ids!(body.overflow_popup_dock.overflow_popup.editor_type),

@@ -353,7 +353,7 @@ pub fn fill_small_holes_ctl(
     const CADENCE: usize = 4096;
     let phase_total = f.max(1);
     let total = 4 * phase_total;
-    let mut report = |phase: usize, i: usize, n: usize, ctl: &mut dyn FnMut(usize, usize) -> bool| -> bool {
+    let report = |phase: usize, i: usize, n: usize, ctl: &mut dyn FnMut(usize, usize) -> bool| -> bool {
         if i % CADENCE != 0 && i + 1 != n {
             return true;
         }

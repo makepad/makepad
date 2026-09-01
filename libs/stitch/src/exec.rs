@@ -196,10 +196,10 @@ pub(crate) fn exec(
 
             // Create a trampoline for the [`WasmFuncEntity`].
             let mut trampoline = [
-                call as InstrSlot,
+                call as *const () as InstrSlot,
                 code.code.as_mut_ptr() as InstrSlot,
                 type_.call_frame_size() * mem::size_of::<StackSlot>(),
-                stop as InstrSlot,
+                stop as *const () as InstrSlot,
             ];
 
             // Create an execution context.

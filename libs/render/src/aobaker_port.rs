@@ -510,6 +510,7 @@ mod tests {
     fn sub(a: Vec3f, b: Vec3f) -> Vec3f {
         v(a.x - b.x, a.y - b.y, a.z - b.z)
     }
+    #[allow(dead_code)] // kept to match the aobaker source
     fn dot(a: Vec3f, b: Vec3f) -> f32 {
         a.x * b.x + a.y * b.y + a.z * b.z
     }

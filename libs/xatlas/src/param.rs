@@ -878,7 +878,7 @@ impl Chart {
         faces: &[u32],
         source_mesh: &Mesh,
     ) -> Self {
-        let mut face_to_source = faces.to_vec();
+        let face_to_source = faces.to_vec();
         let approx_vertex_count = (faces.len() as u32 * 3).min(source_mesh.vertex_count());
         let mut unified_mesh = Mesh::new(
             source_mesh.epsilon(),
@@ -936,7 +936,7 @@ impl Chart {
         } else {
             ChartType::Lscm
         };
-        let mut c = Self {
+        let c = Self {
             basis,
             unified_mesh,
             ty,

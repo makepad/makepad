@@ -70,11 +70,30 @@ pub struct SceneDraws<'a> {
     pub view_model: Option<&'a mut DrawSceneViewModel>,
 }
 
-/// One world-space upright quad. `pos.xyz` is the centre, `pos.w` is yaw
+/// One world-space quad. `pos.xyz` is the centre, `pos.w` is yaw
 /// (camera yaw faces the orbit/walk camera). `size.xy` is width/height in
 /// world units; `size.zw` retains the texture's pixel size for callers that
 /// need the sheet metadata. Pixel-art sampling itself uses the shader's
 /// exact nearest fetch and therefore does not depend on half-texel maths.
+///
+/// The quad stands UPRIGHT (its second axis is world +Y) unless `size.w` is
+/// NEGATIVE, which asks for a FLOOR-ALIGNED card lying flat on the ground
+/// plane — what a top-down tiled map draws, where the artwork already
+/// encodes the oblique view and a standing quad would be seen edge-on. The
+/// magnitude is the sheet's pixel height either way, so a caller that never
+/// heard of floor cards keeps exactly the behaviour it had.
+///
+/// A NEGATIVE `size.z` (the sheet's pixel WIDTH, positive for every other
+/// caller) asks for a GROUND-ANCHORED billboard: `pos.xyz` is the point the
+/// sprite STANDS on rather than its centre, and every fragment of the quad
+/// takes that ground point's depth. The second half is what makes a crowd of
+/// standing sprites sort the way a player reads them — by where each piece
+/// stands, not by how tall it is — while the world still occludes them
+/// normally. Such an instance spends `size.z` on the request instead of the
+/// sheet width: its magnitude is `1 + pad`, `pad` being the transparent
+/// padding under the figure as a share of `size.y`, so the DRAWING touches
+/// down rather than the empty cell it is packed in. The two flags are
+/// independent; a floor card (`size.w < 0`) ignores this one.
 #[derive(Clone)]
 pub struct ScreenInstance {
     pub texture: Texture,
@@ -8048,11 +8067,8 @@ impl Renderer {
             // take the same exact level-0 nearest path. The shared video
             // screen above deliberately keeps ordinary smooth sampling.
             sc.pixelated = 1.0;
-            let mut sprites_drawn = 0usize;
-            let mut sprites_skipped = 0usize;
             for inst in draws.screen_instances {
                 if inst.size.x <= 0.0 || inst.size.y <= 0.0 {
-                    sprites_skipped += 1;
                     continue;
                 }
                 sc.draw_vars.set_texture(0, &inst.texture);
@@ -8064,24 +8080,6 @@ impl Renderer {
                 if sc.draw_vars.can_instance() {
                     let new_area = cx.add_instance(&sc.draw_vars);
                     sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
-                    sprites_drawn += 1;
-                } else {
-                    sprites_skipped += 1;
-                }
-            }
-            // Working-tree probe (not for commit): the sprite pass's own count.
-            {
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static N: AtomicU32 = AtomicU32::new(0);
-                if N.fetch_add(1, Ordering::Relaxed) % 120 == 0
-                    && !draws.screen_instances.is_empty()
-                {
-                    log!(
-                        "SPRITEPASS received {} instances, submitted {} to GPU, skipped {}",
-                        draws.screen_instances.len(),
-                        sprites_drawn,
-                        sprites_skipped
-                    );
                 }
             }
         }

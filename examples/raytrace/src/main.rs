@@ -76,8 +76,6 @@ pub struct App {
     #[rust]
     scale: f64,
     #[rust]
-    pending_save: bool,
-    #[rust]
     out_dir: Option<std::path::PathBuf>,
 }
 

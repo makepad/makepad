@@ -6,6 +6,9 @@
 //! `oracle/gold/` bit-exactly when built with the same flags
 //! (`XA_MULTITHREADED=0`, `XA_DEBUG=0`, `NDEBUG`).
 
+// A bit-exact port keeps upstream's full surface; unused pieces stay to match the C++.
+#![allow(dead_code)]
+
 mod atlas;
 mod math;
 mod mesh;
