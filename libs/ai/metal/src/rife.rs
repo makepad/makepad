@@ -54,6 +54,7 @@ fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
         cols,
         data: RefCell::new(data),
         u32s: RefCell::new(Vec::new()),
+        id: std::cell::Cell::new(crate::gpu_types::fresh_tensor_id()),
     }
 }
 
