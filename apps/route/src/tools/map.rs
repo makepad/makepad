@@ -1,7 +1,7 @@
 //! map.* tools — camera & display, backed by the MapViewRef API.
 
-use makepad_ai::makepad_micro_serde::JsonValue;
-use makepad_ai::ToolDefinition;
+use makepad_widgets::makepad_micro_serde::JsonValue;
+use makepad_converse::agent_seam::ToolDefinition;
 use makepad_widgets::*;
 
 use crate::broker::{arg_array, arg_f64, def, num_f64, MarkerSpec, ToolCtx};

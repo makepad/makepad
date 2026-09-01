@@ -15,6 +15,9 @@ use makepad_map_nav::searchdb::SearchDb;
 use makepad_widgets::*;
 use std::path::Path;
 
+/// The production nav pair (see `examples/map`). When it is absent the app
+/// falls back to whatever test map was baked on this machine — same
+/// formats, one city instead of a province.
 const NAV_DATA_BASENAME: &str = "local/maps/noord-holland";
 const EUROPE_PLACES_PATH: &str = "local/maps/europe-places.search";
 const EUROPE_SEARCHDB_PATH: &str = "local/maps/europe.searchdb";
@@ -40,10 +43,29 @@ pub enum NavLoad {
     Failed { error: String },
 }
 
-pub fn start_nav_load(sender: ToUISender<NavLoad>) {
+/// The nav artifacts to load, production first, test map second. `None`
+/// means this machine has neither and the caller should offer to bake one.
+pub fn nav_basename() -> Option<String> {
+    for basename in [
+        NAV_DATA_BASENAME.to_string(),
+        makepad_map_build::testmap::TestMapPaths::amsterdam()
+            .nav_basename
+            .to_string_lossy()
+            .into_owned(),
+    ] {
+        if Path::new(&format!("{basename}.search")).is_file()
+            && Path::new(&format!("{basename}.graph")).is_file()
+        {
+            return Some(basename);
+        }
+    }
+    None
+}
+
+pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let nh_search = match std::fs::read(format!("{NAV_DATA_BASENAME}.search"))
+        let nh_search = match std::fs::read(format!("{basename}.search"))
             .map_err(|e| e.to_string())
             .and_then(|d| SearchIndex::deserialize(&d).map_err(|e| format!("{e:?}")))
         {
@@ -55,7 +77,7 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>) {
                 return;
             }
         };
-        let nh_graph = match std::fs::read(format!("{NAV_DATA_BASENAME}.graph"))
+        let nh_graph = match std::fs::read(format!("{basename}.graph"))
             .map_err(|e| e.to_string())
             .and_then(|d| RouteGraph::deserialize(&d).map_err(|e| format!("{e:?}")))
         {

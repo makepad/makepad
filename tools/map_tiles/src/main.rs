@@ -2,10 +2,12 @@ mod bridge_bake;
 mod merge;
 mod mkmap;
 mod ocean;
-mod nav_build;
-mod native;
 mod pbf_audit;
-mod versatiles;
+mod testmap_cli;
+
+// The bake passes themselves live in the shared library, so an app can run
+// exactly what this CLI runs (apps/route bakes its own test map in-process).
+use makepad_map_build::{nav_build, native, versatiles};
 
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
@@ -26,15 +28,38 @@ Usage:
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
+  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store]
   makepad-map-tiles nav-build <source.osm.pbf> <basename> [--bbox w,s,e,n] [--skip-addresses]
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
   makepad-map-tiles bridge-bake <detail.mbtiles> <output.mbtiles> --bbox w,s,e,n [--ahn DIR] [--base base.mbtiles] [--zoom 14]
   makepad-map-tiles transmux <source.mbtiles> <output.mkmap> [--shard-cap-bytes N]
   makepad-map-tiles mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
+  makepad-map-tiles mkmap-extract <dir.mkmap> <output.mbtiles> [--bbox w,s,e,n] [--pad-tiles N] [--min-zoom N] [--max-zoom N]
+  makepad-map-tiles weave-manifest <sources.txt> <output.manifest>
+  makepad-map-tiles mbtiles-compare <original.mbtiles> <extracted.mbtiles> [--peer <source.mbtiles>]... [--peer-list <file>]
   makepad-map-tiles verify-mbtiles <archive.mbtiles> [--stride N]
 
+mkmap-extract is the inverse of transmux: it rebuilds an MBTiles archive out
+of a woven .mkmap, copying tile blobs byte-verbatim from the shards and
+carrying the metadata table (compression and shared dictionary included) so
+the result can be fed straight back into transmux. With --bbox it rebuilds
+one bake cell; boundary tiles of neighbouring cells come along, which is
+harmless. A bake buffers its geometry by a fraction of a tile, so a cell
+holds a few tiles just past its own declared bounds: reconstructing one takes
+--pad-tiles 1, which grows the per-zoom tile rectangle by a ring on each
+side. weave-manifest records what each weave source held (bounds, zoom
+range, tile count) so a single cell can be reconstructed after the sources
+are gone; mbtiles-compare proves an extraction really carries a source, with
+the weave's own first-wins and below-z14 merge rules as the only permitted
+explanations for a byte difference.
+
 The legacy form without the 'versatiles' command is also accepted.
+
+testmap downloads one city extract (Amsterdam by default) and bakes the
+archive + nav artifacts an app needs to run with no other map data at all.
+Same passes as pbf-detail/pbf-base/nav-build, chained; ~1 minute after the
+download. apps/route runs this recipe in-process on first launch.
 
 Nav artifacts: nav-build writes <basename>.graph (routing graph) and
 <basename>.search (place/POI/street index) from one PBF scan.
@@ -163,6 +188,55 @@ fn run() -> Result<(), String> {
         }
         return mkmap::verify(&sources, Path::new(&args[dir_index]), stride);
     }
+    // mkmap-extract <dir.mkmap> <out.mbtiles> [--bbox w,s,e,n] [--pad-tiles N] [--min-zoom N] [--max-zoom N]
+    if args.first().is_some_and(|arg| arg == "mkmap-extract") {
+        return mkmap::extract(mkmap::parse_extract_options(&args)?);
+    }
+    // weave-manifest <sources.txt> <output.manifest>
+    if args.first().is_some_and(|arg| arg == "weave-manifest") {
+        if args.len() != 3 {
+            return Err("weave-manifest needs <sources.txt> <output.manifest>".to_string());
+        }
+        return mkmap::write_weave_manifest(Path::new(&args[1]), Path::new(&args[2]));
+    }
+    // mbtiles-compare <original.mbtiles> <extracted.mbtiles> [--peer <src.mbtiles>]...
+    if args.first().is_some_and(|arg| arg == "mbtiles-compare") {
+        if args.len() < 3 {
+            return Err(
+                "mbtiles-compare needs <original.mbtiles> <extracted.mbtiles>".to_string(),
+            );
+        }
+        let mut peers = Vec::new();
+        let mut index = 3;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--peer" => {
+                    let value = args
+                        .get(index + 1)
+                        .ok_or("--peer requires a source archive path")?;
+                    peers.push(PathBuf::from(value));
+                    index += 2;
+                }
+                "--peer-list" => {
+                    let value = args
+                        .get(index + 1)
+                        .ok_or("--peer-list requires a file of source paths")?;
+                    let listing = fs::read_to_string(value)
+                        .map_err(|err| format!("read {value}: {err}"))?;
+                    peers.extend(
+                        listing
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                            .map(PathBuf::from),
+                    );
+                    index += 2;
+                }
+                value => return Err(format!("unknown mbtiles-compare argument '{value}'")),
+            }
+        }
+        return mkmap::compare(Path::new(&args[1]), Path::new(&args[2]), &peers);
+    }
     if args.first().is_some_and(|arg| arg == "bridge-bake") {
         return bridge_bake::bake(bridge_bake::parse_bake_options(&args)?);
     }
@@ -183,6 +257,9 @@ fn run() -> Result<(), String> {
         }
         let output = paths.pop().ok_or("mbtiles-merge needs inputs and an output")?;
         return merge::merge(&paths, &output, zoom);
+    }
+    if args.first().is_some_and(|arg| arg == "testmap") {
+        return testmap_cli::run(&args);
     }
     if args.first().is_some_and(|arg| arg == "nav-build") {
         return nav_build::nav_build(nav_build::parse_nav_build_options(&args)?);

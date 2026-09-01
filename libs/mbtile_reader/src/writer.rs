@@ -785,7 +785,7 @@ fn write_varint(value: u64, output: &mut Vec<u8>) {
 ///
 /// Coordinates are ordered by zoom, then 256×256 block row and column, then
 /// local row and column. This matches the order in a VersaTiles v02 archive.
-pub(crate) fn tile_rowid_xyz(zoom: u8, x: u32, y: u32) -> Option<i64> {
+pub fn tile_rowid_xyz(zoom: u8, x: u32, y: u32) -> Option<i64> {
     if zoom > 31 {
         return None;
     }

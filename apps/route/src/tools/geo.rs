@@ -1,7 +1,7 @@
 //! geo.* tools — search over the nav indexes (SearchIndex + SearchDb).
 
-use makepad_ai::makepad_micro_serde::JsonValue;
-use makepad_ai::ToolDefinition;
+use makepad_widgets::makepad_micro_serde::JsonValue;
+use makepad_converse::agent_seam::ToolDefinition;
 use makepad_map_nav::geo::LonLat;
 
 use crate::broker::{arg_f64, arg_str, arg_usize, def, ToolCtx};
