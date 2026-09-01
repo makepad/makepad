@@ -599,6 +599,89 @@ fn resolve_pick(
     })
 }
 
+/// A TweakPick for a KNOWN widget (the climb's steps), same fields as a
+/// resolved one.
+fn pick_of_widget(
+    cx: &mut Cx,
+    widget: &WidgetRef,
+    abs: Vec2d,
+    window_id: usize,
+) -> Option<TweakPick> {
+    let uid = widget.widget_uid();
+    let rect = widget.area().clipped_rect_union(cx);
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return None;
+    }
+    let level = cx.sploded_depth_of(uid.0).unwrap_or(0);
+    let path_ids = cx.widget_tree().path_to(uid);
+    let path = if path_ids.is_empty() {
+        format!("uid:{}", uid.0)
+    } else {
+        path_ids
+            .iter()
+            .map(|id| live_id_token(*id))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let ty = widget
+        .widget_type_id()
+        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+        .map(live_id_token)
+        .unwrap_or_else(|| "-".to_string());
+    let band = resolve_band(cx, widget, rect, abs);
+    Some(TweakPick { uid: uid.0, path, ty, rect, window_id, band, level })
+}
+
+/// Is `ancestor` on `uid`'s parent chain?
+fn is_ancestor_of(cx: &mut Cx, ancestor: u64, uid: u64) -> bool {
+    let mut cur = cx.widget_tree().parent_of(WidgetUid(uid));
+    for _ in 0..64 {
+        match cur {
+            Some(u) if u.0 == ancestor => return true,
+            Some(u) => cur = cx.widget_tree().parent_of(u),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The pin's next ancestor worth pinning: skips design-transparent views and
+/// zero-rect wrappers; `None` at the top (the caller wraps to the deepest).
+fn ancestor_pick(
+    cx: &mut Cx,
+    pin: &TweakPick,
+    abs: Vec2d,
+    window_id: usize,
+) -> Option<TweakPick> {
+    let mut cur = cx.widget_tree().parent_of(WidgetUid(pin.uid));
+    for _ in 0..64 {
+        let u = cur?;
+        // The window and above are chrome, not content — and the window is
+        // mutably borrowed mid-dispatch, so it must not even be touched
+        // (tree lookups only, no widget borrow, before deciding).
+        let above = cx.widget_tree().parent_of(u)?;
+        if cx.widget_tree().parent_of(above).is_none() {
+            return None;
+        }
+        let widget = cx.widget_tree().widget(u);
+        if widget.is_empty() {
+            return None;
+        }
+        if !is_design_transparent(&widget) {
+            if let Some(pick) = pick_of_widget(cx, &widget, abs, window_id) {
+                // An ancestor whose area misses the click (a splitter whose
+                // rect is only its grab bar) would throw the brackets to a
+                // far-away sliver — climb past it.
+                if pick.rect.contains(abs) {
+                    return Some(pick);
+                }
+            }
+        }
+        cur = cx.widget_tree().parent_of(u);
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // the Window seam — swallow pointer events before ordinary dispatch while
 // the overlay is on, so picking can never activate the app's widgets.
@@ -1010,6 +1093,28 @@ pub fn window_intercept(
                 session().lock().unwrap().live_stroke = Some(stroke);
             } else {
                 let pick = resolve_pick(cx, &body, abs, window_id.id());
+                // CLICK-TO-CLIMB: clicking inside the pinned widget again
+                // walks the pin UP one ancestor per click — the only way a
+                // container fully covered by its children (the pane that
+                // draws the rounded background) can ever be reached. At the
+                // top the climb wraps back to the deepest pick.
+                let pick = {
+                    let pinned = session().lock().unwrap().pinned.clone();
+                    match (pick, pinned) {
+                        (Some(deep), Some(pin))
+                            if pin.window_id == window_id.id()
+                                && pin.rect.contains(abs)
+                                && (deep.uid == pin.uid
+                                    || is_ancestor_of(cx, pin.uid, deep.uid)) =>
+                        {
+                            Some(
+                                ancestor_pick(cx, &pin, abs, window_id.id())
+                                    .unwrap_or(deep),
+                            )
+                        }
+                        (deep, _) => deep,
+                    }
+                };
                 let mut s = session().lock().unwrap();
                 match &pick {
                     Some(pick) => {
