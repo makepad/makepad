@@ -61,6 +61,19 @@ pub fn nal_unit_type(nal: &[u8]) -> u8 {
 
 pub const NAL_TYPE_SPS: u8 = 7;
 pub const NAL_TYPE_PPS: u8 = 8;
+
+/// HEVC NAL unit type: bits 1..6 of the first header byte (H.265 uses a
+/// two-byte NAL header, unlike H.264's one).
+pub fn hevc_nal_unit_type(nal: &[u8]) -> u8 {
+    if nal.is_empty() {
+        return 0;
+    }
+    (nal[0] >> 1) & 0x3f
+}
+
+pub const HEVC_NAL_TYPE_VPS: u8 = 32;
+pub const HEVC_NAL_TYPE_SPS: u8 = 33;
+pub const HEVC_NAL_TYPE_PPS: u8 = 34;
 pub const NAL_TYPE_IDR: u8 = 5;
 
 /// Prepends a 4-byte Annex-B start code to `nal` and appends it to `out`.

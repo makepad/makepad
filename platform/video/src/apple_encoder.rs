@@ -21,7 +21,12 @@ use {
     makepad_apple_sys::*,
     std::ffi::c_void,
     std::ptr::NonNull,
+    std::sync::atomic::{AtomicBool, Ordering},
 };
+
+/// The transform report is a per-process fact; a tape writer opens one encoder
+/// per shard, so print it once.
+static TRANSFORM_REPORTED: AtomicBool = AtomicBool::new(false);
 
 const HNS_PER_SECOND: u128 = 10_000_000;
 const HNS_TIMESCALE: CMTimeScale = 10_000_000;
@@ -339,11 +344,15 @@ impl MacosVideoFileEncoder {
                 probe_hardware_encoder(options.width, options.height, codec_fourcc);
             let name = encoder_id
                 .unwrap_or_else(|| format!("Apple VideoToolbox {} Encoder", codec_name));
-            eprintln!(
-                "video encoder transform: '{}', hardware: {}",
-                name,
-                is_hardware
-            );
+            // One line per process, not one per encoder: a tape writer opens
+            // an encoder per shard and the repeat drowned everything else out.
+            if !TRANSFORM_REPORTED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "video encoder transform: '{}', hardware: {}",
+                    name,
+                    is_hardware
+                );
+            }
             let transform_info = Some(VideoTransformInfo { name, is_hardware });
 
             Ok(Self {
