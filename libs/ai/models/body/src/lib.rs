@@ -30,6 +30,8 @@ pub mod decoder;
 pub mod dino;
 mod heads;
 pub mod mhr;
+pub mod model;
+pub mod packet;
 pub mod pose;
 pub mod preprocess;
 pub mod weights;
