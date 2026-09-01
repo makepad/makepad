@@ -19,6 +19,14 @@ use crate::{
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn texture_slots_neq(a: &Option<Texture>, b: &Option<Texture>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.texture_id() != b.texture_id(),
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 #[derive(Debug)]
 pub struct DrawList(PoolId);
 
@@ -542,6 +550,7 @@ impl CxDrawCall {
     }
 }
 
+
 #[derive(Clone, Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawListUniforms {
@@ -631,6 +640,26 @@ pub struct CxDrawList {
     pub debug_dump_count: u32,
     pub reset_zbias: bool,
 
+    /// Depth floor for this draw list and everything drawn under it, in
+    /// `world.z` units. `0.0` — every ordinary list — costs one compare and
+    /// changes nothing.
+    ///
+    /// A 2D pass has ONE depth buffer shared by every draw list in it, and a
+    /// 2D vertex lands at `world.z = draw_depth + draw_call.zbias`. The
+    /// `zbias` half is the paint-order counter the backend walk accumulates
+    /// (`zbias_step`, 0.001), so "drawn later" only outranks "drawn earlier"
+    /// by a thousandth — nothing at all against a widget that spends whole
+    /// units of `draw_depth` to order its own ink. That is why an overlay,
+    /// which by construction paints after the body, could still be rejected by
+    /// the depth test and disappear behind it.
+    ///
+    /// A list with a floor raises the running counter to it on entry
+    /// (`raise_zbias_to_floor`), so every draw call beneath it — including
+    /// nested plain draw lists, which inherit the same counter — starts above
+    /// the band the body was using. Set by `DrawList2d::begin_overlay_inner`;
+    /// see the constants there for the scheme and its headroom.
+    pub overlay_z_lift: f32,
+
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
@@ -661,6 +690,23 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
+    /// Raise a backend walk's running paint-order depth counter to this
+    /// sub-list's floor, on the way into it. See [`CxDrawList::overlay_z_lift`].
+    ///
+    /// It raises and never lowers, so the counter stays monotone across the
+    /// whole pass: two overlays sharing a floor still order by draw position,
+    /// and a nested overlay's higher floor is not undone by a sibling drawn
+    /// after it. Every backend's `render_view` calls this at exactly one
+    /// place — the sub-list branch, beside the `reset_zbias` check — and for
+    /// an ordinary list (`overlay_z_lift == 0.0`) it is one compare that
+    /// changes nothing.
+    #[inline]
+    pub fn raise_zbias_to_floor(&self, zbias: &mut f32) {
+        if *zbias < self.overlay_z_lift {
+            *zbias = self.overlay_z_lift;
+        }
+    }
+
     fn append_trace_enabled() -> bool {
         false
     }
@@ -805,16 +851,10 @@ impl CxDrawList {
                         }
 
                         for i in 0..sh.mapping.textures.len() {
-                            fn neq(a: &Option<Texture>, b: &Option<Texture>) -> bool {
-                                if let Some(a) = a {
-                                    if let Some(b) = b {
-                                        return a.texture_id() != b.texture_id();
-                                    }
-                                    return true;
-                                }
-                                return false;
-                            }
-                            if neq(&draw_call.texture_slots[i], &draw_vars.texture_slots[i]) {
+                            if texture_slots_neq(
+                                &draw_call.texture_slots[i],
+                                &draw_vars.texture_slots[i],
+                            ) {
                                 diff = true;
                                 break;
                             }
@@ -1069,5 +1109,28 @@ impl Cx {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::texture::CxTexturePool;
+
+    #[test]
+    fn texture_slot_batching_comparison_is_symmetric() {
+        let mut textures = CxTexturePool::default();
+        let none: Option<Texture> = None;
+        let texture_t = Some(textures.alloc(TextureFormat::Unknown));
+        let texture_u = Some(textures.alloc(TextureFormat::Unknown));
+        let merges = |existing: &Option<Texture>, new: &Option<Texture>| {
+            !texture_slots_neq(existing, new)
+        };
+
+        assert!(merges(&none, &none));
+        assert!(merges(&texture_t, &texture_t));
+        assert!(!merges(&none, &texture_t));
+        assert!(!merges(&texture_t, &none));
+        assert!(!merges(&texture_t, &texture_u));
     }
 }
