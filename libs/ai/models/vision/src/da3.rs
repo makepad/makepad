@@ -534,7 +534,7 @@ pub struct Da3MetricLarge {
     generation: u64,
 }
 
-struct Da3WeightFile {
+pub struct Da3WeightFile {
     path: std::path::PathBuf,
     data_offset: u64,
     tensors: std::collections::HashMap<String, (u64, u64)>,

@@ -8,6 +8,7 @@ use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
 use crate::draft_vocab::DraftVocab;
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
+use crate::slots::MROPE_COMPONENTS;
 use crate::runtime::{
     allocate_hybrid_shared_cache_tensors, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
     HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
@@ -739,10 +740,51 @@ impl LlamaSession {
         start: usize,
         tokens: &[i32],
     ) -> Result<Vec<f32>> {
+        // A pure-text lane ropes at its within-slot index, so this is the
+        // no-override case and produces exactly the layout it always did.
+        self.prefill_slot_chunk_at_rope(lane, kv_base, state_row, start, start as i64, tokens)
+    }
+
+    /// [`prefill_slot_chunk`](Self::prefill_slot_chunk) for a lane whose
+    /// M-RoPE cursor has fallen behind its within-slot index.
+    ///
+    /// That happens exactly once a lane has ingested an image span: the page
+    /// occupies thousands of cache rows but advances M-RoPE by only
+    /// `max(tokens_w, tokens_h)`, so the prompt text that FOLLOWS the page
+    /// must rope from the image's `pos0 + n_pos`, not from `start`. Roping it
+    /// at `start` puts the instruction thousands of positions away from the
+    /// page it is an instruction about, and the model answers about neither.
+    ///
+    /// `rope_start == start` is the text-only case and writes no override at
+    /// all, so [`prefill_slot_chunk`](Self::prefill_slot_chunk) stays
+    /// byte-identical by construction rather than by care.
+    pub fn prefill_slot_chunk_at_rope(
+        &mut self,
+        lane: usize,
+        kv_base: usize,
+        state_row: usize,
+        start: usize,
+        rope_start: i64,
+        tokens: &[i32],
+    ) -> Result<Vec<f32>> {
         if tokens.is_empty() {
             return Err(LlamaError::format("a prefill chunk needs at least one token"));
         }
         let batch = tokens.len();
+        let rope_positions = if rope_start == start as i64 {
+            None
+        } else {
+            let mut planes = vec![0i32; batch * MROPE_COMPONENTS];
+            for i in 0..batch {
+                let p = i32::try_from(rope_start + i as i64)
+                    .map_err(|_| LlamaError::format("rope position does not fit in i32"))?;
+                planes[i] = p;
+                planes[batch + i] = p;
+                planes[2 * batch + i] = p;
+                // fourth component stays 0 (unused section)
+            }
+            Some(planes)
+        };
         let positions: Vec<i32> = (start..start + batch)
             .map(|position| {
                 i32::try_from(position)
@@ -820,11 +862,147 @@ impl LlamaSession {
             if compiled.decode().input_hidden_write_rows.is_some() {
                 layout.hidden_write_rows = vec![dump_row; batch];
             }
+            layout.rope_positions = rope_positions;
             compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
         };
         let mut rows = split_run_logits(run, 1)?;
         rows.pop()
             .ok_or_else(|| LlamaError::format("prefill chunk produced no logits"))
+    }
+
+    /// Prefill one slot's region with an image span, from precomputed tower
+    /// embeddings rather than token ids.
+    ///
+    /// The lane counterpart of
+    /// [`append_image_embeddings`](Self::append_image_embeddings), and the
+    /// piece that lets several PAGES be resident in one session at once
+    /// instead of one page at a time. Two things differ from the token
+    /// prefill, and both were already carried by the layout:
+    ///
+    /// * the input is `EmbeddingsF32` against the embeddings graph, which is
+    ///   the same network with a different input node over the same shared
+    ///   caches — so an embedding chunk and a token chunk can address the same
+    ///   slot back to back;
+    /// * the M-RoPE positions are the image grid's, not the linear index:
+    ///   token `(y, x)` of the page ropes at `[pos0, pos0 + y, pos0 + x, 0]`,
+    ///   and the whole grid costs `max(tokens_w, tokens_h)` positions rather
+    ///   than `tokens_w * tokens_h`.
+    ///
+    /// `start` is the within-slot position of the span's first token and
+    /// `rope_pos0` the lane's M-RoPE cursor — for a page that follows a text
+    /// prefix those are both `prefix.len()`, and they part company from here
+    /// on. The caller advances its own bookkeeping by `tokens_w * tokens_h`
+    /// rows and `max(tokens_w, tokens_h)` positions;
+    /// [`SlotTable::advance_image_span`](crate::slots::SlotTable::advance_image_span)
+    /// does exactly that.
+    ///
+    /// Returns the logits of the span's last token.
+    pub fn prefill_slot_image_embeddings(
+        &mut self,
+        lane: usize,
+        kv_base: usize,
+        state_row: usize,
+        start: usize,
+        rope_pos0: i64,
+        embeddings: &[f32],
+        tokens_w: usize,
+        tokens_h: usize,
+    ) -> Result<Vec<f32>> {
+        let n_tokens = tokens_w * tokens_h;
+        if n_tokens == 0 {
+            return Err(LlamaError::format("an image span needs at least one token"));
+        }
+        let hidden = usize::try_from(self.model.embedding_length()?)
+            .map_err(|_| LlamaError::format("embedding length does not fit in usize"))?;
+        if embeddings.len() != n_tokens * hidden {
+            return Err(LlamaError::format(format!(
+                "image embeddings length {} does not match {}x{} tokens x {} hidden",
+                embeddings.len(),
+                tokens_w,
+                tokens_h,
+                hidden
+            )));
+        }
+        let state_row_i32 = i32::try_from(state_row)
+            .map_err(|_| LlamaError::format("slot state row does not fit in i32"))?;
+        let dump_row = self
+            .mtp
+            .map(|mtp| self.carry_dump_row(&mtp, lane))
+            .unwrap_or(0);
+
+        let prefill_batch_size = self.config.prefill_batch_size.max(1);
+        let mut offset = 0usize;
+        let mut last: Option<Vec<f32>> = None;
+        while offset < n_tokens {
+            let batch = (n_tokens - offset).min(prefill_batch_size);
+            let chunk_start = start + offset;
+            let positions: Vec<i32> = (chunk_start..chunk_start + batch)
+                .map(|position| {
+                    i32::try_from(position)
+                        .map_err(|_| LlamaError::format("slot position does not fit in i32"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let write_indices: Vec<i32> = (chunk_start..chunk_start + batch)
+                .map(|position| {
+                    i32::try_from(kv_base + position)
+                        .map_err(|_| LlamaError::format("slot cache row does not fit in i32"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // The same planes the single-stream span writes, from the same
+            // helper, so a lane cannot rope a page differently from the way
+            // the reference path ropes it.
+            let planes = Self::image_rope_planes(rope_pos0, offset, batch, tokens_w)?;
+
+            // Windowed on this slot exactly as the token prefill is: the span
+            // is within-slot, so lane N pays what lane 0 pays for the same
+            // page rather than paying for every row below its base.
+            let key_span = chunk_start + batch;
+            let window = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+                key_span
+            } else {
+                key_span.next_multiple_of(GRAPH_KEY_BUCKET)
+            }
+            .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
+            let mut graph_params = SessionGraphParams::greedy_embeddings(batch, window);
+            graph_params.attention_key_base = kv_base;
+            self.ensure_compiled_graph(graph_params)?;
+
+            let run = {
+                let compiled = self
+                    .graphs
+                    .graph_for_mut(graph_params)
+                    .ok_or_else(|| LlamaError::format("compiled embedding graph was not cached"))?;
+                let output_ids = [i32::try_from(batch - 1)
+                    .map_err(|_| LlamaError::format("slot output id does not fit in i32"))?];
+                let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+                    &positions,
+                    window,
+                    &output_ids,
+                )?;
+                layout.attention_write_indices = write_indices;
+                layout.attention_key_base = kv_base;
+                layout.rope_positions = Some(planes);
+                layout.recurrent_state_rows = vec![state_row_i32];
+                if compiled.decode().input_recurrent_state_rows.is_none() {
+                    layout.recurrent_state_rows.clear();
+                }
+                if compiled.decode().input_hidden_write_rows.is_some() {
+                    layout.hidden_write_rows = vec![dump_row; batch];
+                }
+                compiled.execute_logits_only_with_layout(
+                    LogitsProbeInput::EmbeddingsF32 {
+                        data: &embeddings[offset * hidden..(offset + batch) * hidden],
+                        n_tokens: batch,
+                    },
+                    &layout,
+                )?
+            };
+            let mut rows = split_run_logits(run, 1)?;
+            last = rows.pop();
+            offset += batch;
+        }
+        last.ok_or_else(|| LlamaError::format("image span produced no logits"))
     }
 
     /// Run one multi-slot decode step: one token per active slot, one logit row
@@ -1631,6 +1809,48 @@ impl LlamaSession {
     /// with Qwen-VL 2D positions `[pos0, pos0+y, pos0+x, 0]` per token.
     /// Callers surround this with the `<|vision_start|>` / `<|vision_end|>`
     /// text tokens via `append_tokens`.
+    /// The M-RoPE plane vector for one chunk of an image span.
+    ///
+    /// Section-major over the chunk — every token's `t`, then every token's
+    /// `h`, then every token's `w`, with the fourth section unused — because
+    /// that is the encoding the graph reads, not a preference. Written
+    /// token-major instead, each token ropes at a neighbour's coordinate: the
+    /// page is read in an order it was never laid out in, fluently, with
+    /// nothing in a log to see.
+    ///
+    /// `offset` is the token's index in the WHOLE grid rather than in the
+    /// chunk. A page taller than one prefill batch would otherwise restart its
+    /// rows at every chunk boundary and rope its bottom on top of its top.
+    ///
+    /// Shared by the single-stream span and the lane span so the two cannot
+    /// drift: a lane that roped a page differently from the way the reference
+    /// path ropes it would read the same page differently, and the only
+    /// symptom would be a slightly worse transcript.
+    fn image_rope_planes(
+        pos0: i64,
+        offset: usize,
+        batch: usize,
+        tokens_w: usize,
+    ) -> Result<Vec<i32>> {
+        if tokens_w == 0 {
+            return Err(LlamaError::format("an image span needs a nonzero width"));
+        }
+        let clamp = |v: i64| {
+            i32::try_from(v).map_err(|_| LlamaError::format("rope position does not fit in i32"))
+        };
+        let mut planes = vec![0i32; batch * MROPE_COMPONENTS];
+        for i in 0..batch {
+            let token_index = offset + i;
+            let y = (token_index / tokens_w) as i64;
+            let x = (token_index % tokens_w) as i64;
+            planes[i] = clamp(pos0)?;
+            planes[batch + i] = clamp(pos0 + y)?;
+            planes[2 * batch + i] = clamp(pos0 + x)?;
+            // fourth section stays 0 (unused)
+        }
+        Ok(planes)
+    }
+
     pub fn append_image_embeddings(
         &mut self,
         embeddings: &[f32],
@@ -1669,20 +1889,7 @@ impl LlamaSession {
                 .collect::<Result<Vec<_>>>()?;
             let cache_tokens = start + batch_size;
 
-            let mut planes = vec![0i32; batch_size * 4];
-            for i in 0..batch_size {
-                let token_index = offset + i;
-                let y = (token_index / tokens_w) as i64;
-                let x = (token_index % tokens_w) as i64;
-                let clamp = |v: i64| {
-                    i32::try_from(v)
-                        .map_err(|_| LlamaError::format("rope position does not fit in i32"))
-                };
-                planes[i] = clamp(pos0)?;
-                planes[batch_size + i] = clamp(pos0 + y)?;
-                planes[2 * batch_size + i] = clamp(pos0 + x)?;
-                // fourth component stays 0 (unused section)
-            }
+            let planes = Self::image_rope_planes(pos0, offset, batch_size, tokens_w)?;
 
             let graph_params = SessionGraphParams::greedy_embeddings(batch_size, cache_tokens);
             self.ensure_compiled_graph(graph_params)?;
@@ -4017,7 +4224,7 @@ mod tests {
         argmax_penalized, argmax_token_id, draft_head_fill_after, mtp_carry_ring, penalty_window,
         sample_from, sampling_probabilities, slot_lower_bounds, slot_lower_bounds_per_token,
         speculative_acceptance, speculative_residual, LlamaSamplerState, LlamaSamplingParams,
-        SpecLane, Xorshift64,
+        LlamaSession, SpecLane, Xorshift64,
     };
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
@@ -4213,6 +4420,46 @@ mod tests {
     /// Greedy takes the same answer the penalised row would have given,
     /// including the case that matters: the raw argmax is a token the loop has
     /// been repeating, so the winner has to CHANGE.
+    #[test]
+    fn an_image_span_ropes_section_major_over_its_grid() {
+        // The encoding, pinned. A 3x2 grid at pos0 = 7, taken whole:
+        // t is constant over the page, h is the row, w is the column, and
+        // the fourth section is unused. Section-major over the batch — all
+        // six t's, then all six h's, then all six w's — because that is what
+        // the graph reads. Token-major would rope every token at a
+        // neighbour's coordinate and read the page in an order it was never
+        // laid out in.
+        let planes = LlamaSession::image_rope_planes(7, 0, 6, 3).expect("planes");
+        assert_eq!(
+            planes,
+            vec![
+                7, 7, 7, 7, 7, 7, // t: the span's own position, for every token
+                7, 7, 7, 8, 8, 8, // h: row 0 then row 1
+                7, 8, 9, 7, 8, 9, // w: the column within the row
+                0, 0, 0, 0, 0, 0, // unused section
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chunked_image_span_keeps_its_place_in_the_whole_grid() {
+        // A page wider than one prefill batch arrives in chunks, and the
+        // second chunk's coordinates are its place in the PAGE, not in the
+        // chunk. Restarting per chunk would rope the bottom of the page on
+        // top of the top of it — a transcript of a page read twice from the
+        // middle, which looks like a transcript.
+        let whole = LlamaSession::image_rope_planes(0, 0, 6, 3).expect("whole");
+        let second = LlamaSession::image_rope_planes(0, 3, 3, 3).expect("second chunk");
+        // The chunk's h/w sections are the tail of the whole span's.
+        assert_eq!(&second[3..6], &whole[9..12], "h section");
+        assert_eq!(&second[6..9], &whole[15..18], "w section");
+    }
+
+    #[test]
+    fn an_image_span_of_no_width_is_refused() {
+        assert!(LlamaSession::image_rope_planes(0, 0, 4, 0).is_err());
+    }
+
     #[test]
     fn greedy_argmax_agrees_with_the_penalised_row() {
         let logits = [0.0f32, 1.0, 5.0, 4.0];

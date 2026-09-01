@@ -2,35 +2,9 @@
 //! here; nothing is a global, an env var, or an implicit constant. Embedders
 //! (the Asset Store) construct this directly; the binary maps flags onto it.
 
-use super::json::Value;
 use crate::{Budgets, ServerError, ServerResult};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-
-/// One generation capability this server advertises to clients (the VJ's
-/// model/profile selector, future game tooling). Advertisement only: the
-/// server stays the scheduler/credential authority — clients enqueue jobs
-/// against `kind`/`namespace`, fleet workers claim them through the worker
-/// protocol, and no client ever learns a compute node address.
-#[derive(Clone, Debug)]
-pub struct JobProfile {
-    /// Stable selector id (query-charset safe), e.g. `h3-standard`.
-    pub id: String,
-    /// Capability domain clients filter on: `video`, `audio`, …
-    pub domain: String,
-    /// Human label for pickers.
-    pub label: String,
-    /// Job kind enqueued under this profile (the worker-side contract).
-    pub kind: String,
-    /// Namespace jobs of this profile are routed (and authorized) under.
-    pub namespace: String,
-    /// Default job-body fields; the client merges its prompt on top.
-    pub defaults: Value,
-}
-
-fn text_ok(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
-}
 
 /// Default UDP LAN discovery port. Deliberately distinct from the ai-content
 /// fleet port (41830) and from the HTTP planes.
@@ -188,118 +162,15 @@ pub struct ServerConfig {
     /// Ensure the admin principal + a fresh admin token at startup, writing
     /// the token (once, mode 0600) to `<root>/admin-token`.
     pub bootstrap_admin: bool,
-    /// Generation capabilities advertised on `GET /v1/job-profiles`.
-    /// Deploy-time data, not backend coupling; empty = none advertised.
-    pub job_profiles: Vec<JobProfile>,
     /// UDP LAN discovery beacon; None = off.
     pub discovery: Option<DiscoveryConfig>,
     /// Reference blobs (content catalogued without copying). Off by default;
     /// see [`BlobRefPolicy`] for why turning it on is a privilege decision.
     pub blob_refs: BlobRefPolicy,
-    /// Chat broker: local fleet Qwen and/or external OpenAI/Grok.
-    pub chat: ChatConfig,
     /// Log to stderr. Never logs secrets, headers, or bodies.
     pub log: bool,
 }
 
-/// Server-side chat configuration. Credentials never live here: OpenAI and
-/// Grok keys are read from process env by the provider constructors. Fleet
-/// node URLs are operator-supplied and never appear on the chat wire.
-#[derive(Clone, Debug)]
-pub struct ChatConfig {
-    /// Named fleet this server's chat broker listens for. Empty = the
-    /// process's `MAKEPAD_AI_FLEET` (what the hosting app's own fleet
-    /// panel filters on), else `default`.
-    pub fleet: String,
-    /// Fleet/local Qwen node base URLs (`http://10.0.0.217:8765`).
-    pub fleet_bases: Vec<String>,
-    pub max_sessions: usize,
-    pub max_sessions_per_owner: usize,
-    pub event_cap: usize,
-    pub event_max_wait_ms: u64,
-    /// Tests only. Production is `None` and uses env/fleet constructors.
-    pub script: Option<ChatScript>,
-}
-
-impl Default for ChatConfig {
-    fn default() -> Self {
-        ChatConfig {
-            fleet: String::new(),
-            fleet_bases: Vec::new(),
-            max_sessions: 32,
-            max_sessions_per_owner: 8,
-            event_cap: 256,
-            event_max_wait_ms: 30_000,
-            script: None,
-        }
-    }
-}
-
-/// Scripted providers for in-process tests. Never touches the network.
-#[derive(Clone, Debug, Default)]
-pub struct ChatScript {
-    pub fleet_qwen: ScriptedLane,
-    pub openai: ScriptedLane,
-    pub grok: ScriptedLane,
-    pub claude_cli: ScriptedLane,
-    pub codex_cli: ScriptedLane,
-    pub grok_cli: ScriptedLane,
-    /// Most scripted turns that may run at once across ALL sessions —
-    /// the fixture's stand-in for a serving tier's parallel capacity.
-    /// 0 = unbounded. A concurrency suite needs this to show fairness
-    /// when sessions outnumber slots.
-    pub max_concurrent_turns: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ScriptedLane {
-    pub available: bool,
-    pub model: String,
-    pub turns: Vec<ScriptedTurn>,
-    /// Wall-clock one scripted turn costs before its reply is ready.
-    /// 0 = instant (what every pre-existing test wants). A suite that
-    /// measures real parallelism sets hundreds of milliseconds here.
-    pub turn_delay_ms: u64,
-}
-
-/// One `begin_turn` of a scripted provider.
-#[derive(Clone, Debug)]
-pub enum ScriptedTurn {
-    Text(String),
-    /// Fleet Qwen emits a textual `llm.consult` tool call.
-    Consult { task: String, prompt: String, provider: String, visible: String },
-}
-
-/// The stock advertisement for the current fleet: MiniMax H3 text-to-video
-/// under job kind `video.generate` in the `gen` namespace. Deployments with
-/// a different fleet replace this list at embed time.
-fn default_job_profiles() -> Vec<JobProfile> {
-    use super::json::{obj, s};
-    // `model` is the fleet registry's model id (the worker resolves it on
-    // the box that actually advertises it); frames/steps pairs mirror the
-    // ai-content UI presets so queue times stay honest.
-    let h3 = |id: &str, label: &str, width: i64, height: i64, frames: i64, steps: i64| {
-        JobProfile {
-            id: id.to_string(),
-            domain: "video".to_string(),
-            label: label.to_string(),
-            kind: "video.generate".to_string(),
-            namespace: "gen".to_string(),
-            defaults: obj(vec![
-                ("model", s("minimax-h3")),
-                ("width", Value::Int(width)),
-                ("height", Value::Int(height)),
-                ("frames", Value::Int(frames)),
-                ("steps", Value::Int(steps)),
-            ]),
-        }
-    };
-    vec![
-        h3("h3-standard", "MiniMax H3 · 640×352 · ~2.7s", 640, 352, 65, 30),
-        h3("h3-long", "MiniMax H3 · 640×352 · ~5.4s", 640, 352, 129, 50),
-        h3("h3-wide", "MiniMax H3 · 960×544 · ~2.7s", 960, 544, 65, 30),
-    ]
-}
 
 impl ServerConfig {
     /// Local defaults: loopback planes, discovery off (explicitly opt in),
@@ -336,11 +207,9 @@ impl ServerConfig {
             gc_retain_batch: 64,
             batch_max_items: 32,
             batch_max_bytes: 16 * 1024 * 1024,
-            job_profiles: default_job_profiles(),
             bootstrap_admin: false,
             discovery: None,
             blob_refs: BlobRefPolicy::default(),
-            chat: ChatConfig::default(),
             log: true,
         }
     }
@@ -417,50 +286,6 @@ impl ServerConfig {
         }
         if self.batch_max_bytes == 0 || self.batch_max_bytes > 256 * 1024 * 1024 {
             return Err(ServerError::InvalidInput { what: "config batch max bytes" });
-        }
-        if self.job_profiles.len() > 64 {
-            return Err(ServerError::InvalidInput { what: "config job profiles count" });
-        }
-        for profile in &self.job_profiles {
-            let id_ok = !profile.id.is_empty()
-                && profile.id.len() <= 64
-                && profile.id.bytes().all(|b| {
-                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-                });
-            if !id_ok
-                || !text_ok(&profile.domain, 32)
-                || !text_ok(&profile.label, 128)
-                || !text_ok(&profile.kind, 64)
-                || !text_ok(&profile.namespace, 64)
-                || !matches!(profile.defaults, Value::Obj(_))
-            {
-                return Err(ServerError::InvalidInput { what: "config job profile" });
-            }
-            if self.job_profiles.iter().filter(|p| p.id == profile.id).count() > 1 {
-                return Err(ServerError::InvalidInput { what: "config job profile id dup" });
-            }
-        }
-        if self.chat.max_sessions == 0 || self.chat.max_sessions > 256 {
-            return Err(ServerError::InvalidInput { what: "config chat max sessions" });
-        }
-        if self.chat.max_sessions_per_owner == 0
-            || self.chat.max_sessions_per_owner > self.chat.max_sessions
-        {
-            return Err(ServerError::InvalidInput { what: "config chat max sessions per owner" });
-        }
-        if self.chat.event_cap == 0 || self.chat.event_cap > 4096 {
-            return Err(ServerError::InvalidInput { what: "config chat event cap" });
-        }
-        if self.chat.event_max_wait_ms == 0 || self.chat.event_max_wait_ms > 60_000 {
-            return Err(ServerError::InvalidInput { what: "config chat event max wait" });
-        }
-        if self.chat.fleet_bases.len() > 32 {
-            return Err(ServerError::InvalidInput { what: "config chat fleet bases" });
-        }
-        for base in &self.chat.fleet_bases {
-            if base.is_empty() || base.len() > 256 || base.chars().any(char::is_control) {
-                return Err(ServerError::InvalidInput { what: "config chat fleet base" });
-            }
         }
         // A prefix allowlist that is not absolute cannot be prefix-checked
         // against the absolute paths references store: refuse it at config

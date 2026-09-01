@@ -523,14 +523,6 @@ impl AssetClient {
 
     // ---- jobs + worker protocol (typed passthroughs) -----------------------
 
-    /// Advertised generation capabilities (`domain` filters, e.g. `video`).
-    pub fn job_profiles(
-        &self,
-        domain: Option<&str>,
-    ) -> ClientResult<Vec<crate::dto::JobProfileDto>> {
-        self.api.job_profiles(domain)
-    }
-
     /// Announce/renew what this worker can execute now (see
     /// [`crate::api::Api::announce_job_profiles`]).
     pub fn announce_job_profiles(
@@ -547,25 +539,6 @@ impl AssetClient {
 
     pub fn retract_job_profiles(&self, worker: &str, ns: &str) -> ClientResult<()> {
         self.api.retract_job_profiles(worker, ns)
-    }
-
-    pub fn enqueue_job(
-        &self,
-        ns: &str,
-        kind: &str,
-        body: &crate::json::Value,
-    ) -> ClientResult<crate::dto::JobId> {
-        self.api.enqueue_job(ns, kind, body)
-    }
-
-    pub fn job_status(&self, job: &crate::dto::JobId) -> ClientResult<crate::dto::JobStatusDto> {
-        self.api.job_status(job)
-    }
-
-    /// Complete visible job state (enqueuer, attempts, progress freshness,
-    /// full recorded result) — see [`crate::dto::JobDetailDto`].
-    pub fn job_detail(&self, job: &crate::dto::JobId) -> ClientResult<crate::dto::JobDetailDto> {
-        self.api.job_detail(job)
     }
 
     /// One page of the scoped job listing (`namespace` = capability-gated
@@ -588,63 +561,7 @@ impl AssetClient {
         self.api.thumbnail_alias_bytes(alias)
     }
 
-    pub fn cancel_job(&self, job: &crate::dto::JobId) -> ClientResult<u64> {
-        self.api.cancel_job(job)
-    }
-
     // ---- typed asset operations (the LLM-safe control plane) ----------------
-
-    /// The versioned operation registry with truthful availability.
-    pub fn operation_types(&self) -> ClientResult<Vec<crate::dto::OperationTypeDto>> {
-        self.api.operation_types()
-    }
-
-    /// Create (or idempotently join) a typed operation.
-    pub fn operation_create(
-        &self,
-        request: &crate::api::OperationCreateRequest,
-    ) -> ClientResult<crate::dto::OperationStatusDto> {
-        self.api.operation_create(request)
-    }
-
-    pub fn operation_get(
-        &self,
-        op: &crate::dto::OperationId,
-    ) -> ClientResult<crate::dto::OperationStatusDto> {
-        self.api.operation_get(op)
-    }
-
-    /// One page of the durable operation event log (bounded long-poll).
-    pub fn operation_events(
-        &self,
-        op: &crate::dto::OperationId,
-        after: u64,
-        wait_ms: u64,
-        limit: u32,
-    ) -> ClientResult<crate::dto::OperationEventsPageDto> {
-        self.api.operation_events(op, after, wait_ms, limit)
-    }
-
-    pub fn operation_cancel(&self, op: &crate::dto::OperationId) -> ClientResult<bool> {
-        self.api.operation_cancel(op)
-    }
-
-    pub fn operation_retry(
-        &self,
-        op: &crate::dto::OperationId,
-    ) -> ClientResult<crate::dto::OperationStatusDto> {
-        self.api.operation_retry(op)
-    }
-
-    /// Worker-side: upload typed completion facts for atomic finalization.
-    pub fn operation_finalize(
-        &self,
-        op: &crate::dto::OperationId,
-        request: &crate::api::OperationFinalizeRequest,
-    ) -> ClientResult<(makepad_asset_data::AssetId, makepad_asset_data::AssetRevisionId)>
-    {
-        self.api.operation_finalize(op, request)
-    }
 
     // ---- live game rooms ---------------------------------------------------
     //
@@ -693,80 +610,6 @@ impl AssetClient {
     }
 
     // ---- chat broker -------------------------------------------------------
-
-    pub fn chat_providers(&self) -> ClientResult<Vec<crate::dto::ChatProviderDto>> {
-        self.api.chat_providers()
-    }
-
-    pub fn chat_create(
-        &self,
-        request: &crate::api::ChatCreateRequest,
-    ) -> ClientResult<crate::dto::ChatSessionDto> {
-        self.api.chat_create(request)
-    }
-
-    pub fn chat_get(
-        &self,
-        id: &crate::dto::ChatSessionId,
-    ) -> ClientResult<crate::dto::ChatSessionDto> {
-        self.api.chat_get(id)
-    }
-
-    pub fn chat_send(
-        &self,
-        id: &crate::dto::ChatSessionId,
-        request: &crate::api::ChatSendRequest,
-    ) -> ClientResult<u64> {
-        self.api.chat_send(id, request)
-    }
-
-    pub fn chat_events(
-        &self,
-        id: &crate::dto::ChatSessionId,
-        after: u64,
-        wait_ms: u64,
-        limit: u32,
-    ) -> ClientResult<crate::dto::ChatEventsPageDto> {
-        self.api.chat_events(id, after, wait_ms, limit)
-    }
-
-    pub fn chat_cancel(
-        &self,
-        id: &crate::dto::ChatSessionId,
-    ) -> ClientResult<crate::dto::ChatSessionDto> {
-        self.api.chat_cancel(id)
-    }
-
-    pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {
-        self.api.chat_retire(id)
-    }
-
-    /// The session's durable conversation as rows to render (see
-    /// `Api::chat_transcript`).
-    pub fn chat_transcript(
-        &self,
-        id: &crate::dto::ChatSessionId,
-    ) -> ClientResult<Vec<crate::dto::ChatTranscriptRowDto>> {
-        self.api.chat_transcript(id)
-    }
-
-    /// `chat_transcript` plus provider, turn and the truncation flag.
-    pub fn chat_transcript_full(
-        &self,
-        id: &crate::dto::ChatSessionId,
-    ) -> ClientResult<crate::dto::ChatTranscriptDto> {
-        self.api.chat_transcript_full(id)
-    }
-
-    /// Answer a client-executed tool call (see `Api::chat_tool_result`).
-    pub fn chat_tool_result(
-        &self,
-        id: &crate::dto::ChatSessionId,
-        call_id: &str,
-        outcome: &crate::json::Value,
-    ) -> ClientResult<()> {
-        self.api.chat_tool_result(id, call_id, outcome)
-    }
 
     // ---- import + immutable derived variants -------------------------------
 
@@ -1006,96 +849,7 @@ impl AssetClient {
         self.api.resolve_game_alias(alias)
     }
 
-    /// A narrow control seam for a worker that is busy inside a long
-    /// `&mut self` operation (source fetch, derivation, publication): it can
-    /// renew its job lease with stage progress and observe upstream
-    /// cancellation — nothing else. The API layer underneath is
-    /// connection-per-request and stateless, so the handle stays valid for
-    /// this client's lifetime; the raw typed API itself is not exposed.
-    pub fn job_control(&self) -> JobControl {
-        JobControl { api: self.api.clone() }
-    }
-
-    pub fn worker_claim(
-        &self,
-        lease_ms: u64,
-        suffix: Option<&str>,
-    ) -> ClientResult<Option<crate::dto::ClaimedJobDto>> {
-        self.api.worker_claim(lease_ms, suffix)
-    }
-
-    /// Claim only jobs handled by this worker family. This filter is applied
-    /// atomically by the Asset Server before a lease/attempt is opened.
-    pub fn worker_claim_kinds(
-        &self,
-        lease_ms: u64,
-        suffix: Option<&str>,
-        kinds: &[&str],
-    ) -> ClientResult<Option<crate::dto::ClaimedJobDto>> {
-        self.api.worker_claim_kinds(lease_ms, suffix, kinds)
-    }
-
-    pub fn worker_heartbeat(
-        &self,
-        job: &crate::dto::JobId,
-        extend_ms: u64,
-        suffix: Option<&str>,
-        progress: Option<(u16, &str)>,
-    ) -> ClientResult<u64> {
-        self.api.worker_heartbeat(job, extend_ms, suffix, progress)
-    }
-
-    /// [`AssetClient::worker_heartbeat`], also recording what one stage of
-    /// this job was handed — see [`Api::worker_heartbeat_stage`].
-    pub fn worker_heartbeat_stage(
-        &self,
-        job: &crate::dto::JobId,
-        extend_ms: u64,
-        suffix: Option<&str>,
-        progress: Option<(u16, &str)>,
-        stage: Option<&crate::dto::JobStageInput<'_>>,
-    ) -> ClientResult<u64> {
-        self.api.worker_heartbeat_stage(job, extend_ms, suffix, progress, stage)
-    }
-
-    pub fn worker_succeed(
-        &self,
-        job: &crate::dto::JobId,
-        suffix: Option<&str>,
-        result: Option<&crate::json::Value>,
-    ) -> ClientResult<crate::dto::JobStateDto> {
-        self.api.worker_succeed(job, suffix, result)
-    }
-
-    pub fn worker_fail(
-        &self,
-        job: &crate::dto::JobId,
-        suffix: Option<&str>,
-        retry_delay_ms: u64,
-        error: Option<&crate::json::Value>,
-    ) -> ClientResult<crate::dto::JobStateDto> {
-        self.api.worker_fail(job, suffix, retry_delay_ms, error)
-    }
-
     // ---- the vision-annotation queue ---------------------------------------
-
-    /// Counts behind the annotation bar; `category` narrows to one kit.
-    pub fn annotate_summary(
-        &self,
-        category: Option<&str>,
-    ) -> ClientResult<crate::dto::AnnotateSummaryDto> {
-        self.api.annotate_summary(category)
-    }
-
-    /// Queue what the vision pass still owes — one request, whole library.
-    pub fn annotate_backlog(
-        &self,
-        limit: u64,
-        category: Option<&str>,
-        epoch: u64,
-    ) -> ClientResult<crate::dto::AnnotateBacklogDto> {
-        self.api.annotate_backlog(limit, category, epoch)
-    }
 
     /// The annotation record as it stands, for a pass that owns only part
     /// of it and must carry the rest through.
@@ -1636,35 +1390,5 @@ impl AssetClient {
     /// single-owner).
     pub fn cache_root(&self) -> &Path {
         &self.cache_root
-    }
-}
-
-/// The narrow worker control seam from [`AssetClient::job_control`]: lease
-/// heartbeats with progress, and job-state observation for cancellation
-/// propagation. Deliberately NOT the full API — a worker mid-operation gets
-/// exactly the two capabilities that must stay live while its client handle
-/// is mutably busy, and cannot be tempted into raw route access.
-#[derive(Clone)]
-pub struct JobControl {
-    api: Api,
-}
-
-impl JobControl {
-    /// Renew the claim lease; optionally report `(permille, note)` stage
-    /// progress. Returns the new lease expiry.
-    pub fn heartbeat(
-        &self,
-        job: &crate::dto::JobId,
-        extend_ms: u64,
-        suffix: Option<&str>,
-        progress: Option<(u16, &str)>,
-    ) -> ClientResult<u64> {
-        self.api.worker_heartbeat(job, extend_ms, suffix, progress)
-    }
-
-    /// The job's current lifecycle state (the cancellation observation
-    /// point: [`crate::dto::JobStateDto::Cancelled`] means stop working).
-    pub fn job_state(&self, job: &crate::dto::JobId) -> ClientResult<crate::dto::JobStateDto> {
-        self.api.job_status(job).map(|status| status.state)
     }
 }

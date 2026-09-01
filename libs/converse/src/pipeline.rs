@@ -14,7 +14,7 @@
 
 use crate::filter::{FilterDecision, FilterJob, FilterWorker, TranscriptFilter};
 use crate::speech::SpeechOutput;
-use makepad_ai::agent::{Agent, AgentEvent, PromptId, SessionConfig, SessionId};
+use crate::agent_seam::{Agent, AgentEvent, PromptId, SessionConfig, SessionId};
 use makepad_widgets::{Cx, Event};
 use std::collections::VecDeque;
 

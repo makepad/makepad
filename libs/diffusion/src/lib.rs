@@ -29,14 +29,15 @@ pub use makepad_ai_motion::{
     hy_motion_transformer, hy_motion_weights,
 };
 pub use makepad_ai_sfx::{
-    moss, moss_dac, moss_dit, moss_pipeline, moss_text, sa3, sa3_ae, sa3_pipeline, sa3_text,
+    moss, moss_dac, moss_dit, moss_pipeline, moss_text, sa3, sa3_ae, sa3_bake, sa3_pipeline,
+    sa3_text,
     sa3_tokenizer, sa3_transformer, woosh, woosh_ae, woosh_dit, woosh_pipeline, woosh_text,
     woosh_tokenizer,
 };
 pub use makepad_ai_music::{
     ace, ace_dit, ace_pipeline, ace_text, ace_vae, music3, music3_ar, music3_dit, music3_gguf,
-    music3_gguf_gen, music3_lm, music3_pipeline, music3_quant, music3_rvq, music3_vocoder,
-    music3_weights,
+    music3_gguf_gen, music3_lm, music3_pipeline, music3_quant, music3_reference, music3_rvq,
+    music3_vocoder, music3_weights,
 };
 pub use makepad_ai_speech::{
     indextts, indextts_bigvgan, indextts_campplus, indextts_codec, indextts_gpt, indextts_mel,

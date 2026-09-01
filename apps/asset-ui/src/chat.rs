@@ -2,7 +2,7 @@
 //!
 //! The mechanics — the session, the worker thread on a channel, the
 //! transcript with its tool chips and rate meter, cancel and clear — are the
-//! shared component in [`makepad_asset_chat_ui`], the same one the game
+//! shared component in [`makepad_chat_ui`], the same one the game
 //! sandbox runs. This file is what makes it the ASSET UI's chat:
 //!
 //! - it opens the session as `("gen", "gen")`, so the broker assembles the
@@ -22,11 +22,11 @@ use crate::pipeline::{
     IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
-use makepad_asset_ai::fleet::BoxSnapshot;
+use makepad_ai_hub::fleet::BoxSnapshot;
 use makepad_asset_chat::tools::{ContentToolCall, GenerateThen};
 use makepad_asset_chat::wire::ToolOutcome;
-use makepad_asset_chat_ui::feed::{default_call_title, default_outcome_summary, ellipsis};
-use makepad_asset_chat_ui::{ChatFeed, ClientTools, FeedConfig};
+use makepad_chat_ui::feed::{default_call_title, default_outcome_summary, ellipsis};
+use makepad_chat_ui::{ChatFeed, ClientTools, FeedConfig};
 use makepad_asset_client::dto::ChatToolOutcomeDto;
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
@@ -36,10 +36,10 @@ use std::sync::{Arc, Mutex};
 
 /// The transcript and its rate meter are the shared component's; this app
 /// only reads them.
-pub use makepad_asset_chat_ui::{ChatData, ChatRole};
+pub use makepad_chat_ui::{ChatData, ChatRole};
 // Test-only: the module tests below read the shared transcript directly.
 #[cfg(test)]
-use makepad_asset_chat_ui::CHAT;
+use makepad_chat_ui::CHAT;
 
 // ---------------------------------------------------------------------------
 // mutable generation defaults
@@ -934,12 +934,12 @@ impl ClientTools for AppTools {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_asset_ai::protocol::{HealthJson, ModelInfoJson};
+    use makepad_ai_hub::protocol::{HealthJson, ModelInfoJson};
 
     fn snap(url: &str, domain: &str, id: &str, state: &str) -> BoxSnapshot {
         BoxSnapshot {
             base_url: url.into(),
-            health: Some(HealthJson {
+            health: Some(HealthJson { realtime: None,
                 service: "makepad-asset-ai".into(),
                 version: "t".into(),
                 gpu: Some("RTX".into()),

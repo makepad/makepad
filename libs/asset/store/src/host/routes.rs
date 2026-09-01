@@ -44,18 +44,6 @@ pub struct RouteCtx {
     pub server_id: [u8; 16],
     /// Committed-catalog event journal + long-poll wakeups.
     pub events: std::sync::Arc<super::events::EventHub>,
-    /// Live operation-event long-poll waiters. Parked waiters hold their
-    /// control-plane connection thread, so they get a budget far below the
-    /// connection cap — over budget answers immediately instead of parking,
-    /// and worker heartbeats/claims/finalize can never be starved out.
-    pub op_event_waiters: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Chat broker actor. None only if the broker failed to spawn; routes
-    /// then refuse with 503 rather than inventing a session.
-    pub chat: Option<super::chat::ChatHandle>,
-    pub chat_event_waiters: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Live worker announcements of what the GPU fleet can execute NOW,
-    /// merged over `cfg.job_profiles` by `GET /v1/job-profiles`.
-    pub profiles: std::sync::Arc<super::profiles::ProfileRegistry>,
     /// Live game rooms — who is playing what, right now, and how to reach
     /// them. In memory and leased: a room is a process on somebody's desk,
     /// not a catalog entry.

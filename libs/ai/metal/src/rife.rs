@@ -90,53 +90,6 @@ fn par_bands<T: Send>(out: &mut [T], row_len: usize, work: impl Fn(usize, &mut [
     });
 }
 
-/// Apple BLAS: `C[m,n] = A[m,k] * B[n,k]^T` in one call — hundreds of
-/// GFLOP/s with no dispatch latency, which for RIFE's fifty small convs
-/// per pair beats both a per-op Metal round trip and any scalar loop.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn matmul_nt_blas(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    extern "C" {
-        fn cblas_sgemm(
-            order: i32,
-            trans_a: i32,
-            trans_b: i32,
-            m: i32,
-            n: i32,
-            k: i32,
-            alpha: f32,
-            a: *const f32,
-            lda: i32,
-            b: *const f32,
-            ldb: i32,
-            beta: f32,
-            c: *mut f32,
-            ldc: i32,
-        );
-    }
-    const ROW_MAJOR: i32 = 101;
-    const NO_TRANS: i32 = 111;
-    const TRANS: i32 = 112;
-    let mut out = vec![0.0f32; m * n];
-    unsafe {
-        cblas_sgemm(
-            ROW_MAJOR,
-            NO_TRANS,
-            TRANS,
-            m as i32,
-            n as i32,
-            k as i32,
-            1.0,
-            a.as_ptr(),
-            k as i32,
-            bt.as_ptr(),
-            k as i32,
-            0.0,
-            out.as_mut_ptr(),
-            n as i32,
-        );
-    }
-    out
-}
 
 /// `C[m,n] = A[m,k] * B[k,n]` (both row-major, no transpose) — the shape
 /// the K-major im2col produces.
@@ -306,7 +259,6 @@ pub fn conv2d_planar_strided(
             }
         }
     });
-    drop(xd);
     prof_add(0, prof_t0);
     let prof_t0 = std::time::Instant::now();
     #[cfg(any(target_os = "macos", target_os = "ios"))]

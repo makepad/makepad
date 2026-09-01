@@ -27,6 +27,14 @@ use crate::runtime::HybridDecodeBatchLayout;
 /// solo client always gets the solo graph.
 pub const BATCH_WIDTHS: [usize; 3] = [1, 2, 4];
 
+/// Sections in an M-RoPE position vector: `[t][h][w][unused]`.
+///
+/// The pre-expanded layout the graph reads is section-major over the whole
+/// batch — all tokens' `t`, then all tokens' `h`, and so on — not
+/// token-major. Getting that transposed ropes every token at its neighbour's
+/// offset, which reads as fluent text about the wrong part of the page.
+pub(crate) const MROPE_COMPONENTS: usize = 4;
+
 /// The most columns the cheap quantised mat-vec path serves in one pass.
 ///
 /// `MMVQ_MAX_BATCH_SIZE` in `mmvq.cuh`, mirrored by `MMV_MAX_COLUMNS` in the
@@ -828,8 +836,20 @@ pub struct SlotStep {
     /// First absolute row it may attend to. Feeds
     /// `HybridDecodeBatchLayout::attention_key_lower_bounds`.
     pub key_lower_bound: usize,
-    /// Within-slot position, for RoPE.
+    /// Within-slot position. Drives the cache write row and the mask, and —
+    /// when it equals `rope_pos` — RoPE as well.
     pub position: usize,
+    /// M-RoPE position of this token, which is NOT always `position`.
+    ///
+    /// An image span occupies `tokens_w * tokens_h` cache rows but advances
+    /// M-RoPE by only `max(tokens_w, tokens_h)`, so every token a lane decodes
+    /// after a page sits at a rope position far below its within-slot index.
+    /// Feeding `position` there ropes the whole answer at the wrong offset —
+    /// fluent text that drifts off the page it was supposed to be reading.
+    ///
+    /// For a pure-text lane the two are equal and the layout carries no
+    /// override at all, which is what keeps the chat lanes byte-identical.
+    pub rope_pos: i64,
     /// Recurrent row this slot reads and writes this step.
     pub state_row: usize,
 }
@@ -911,13 +931,54 @@ impl StepPlan {
                 .collect::<Result<Vec<_>>>()?
         };
 
+        // M-RoPE override, and only when a lane actually needs one.
+        //
+        // A lane that has ingested an image span ropes below its within-slot
+        // index for the rest of its life, and lanes in one batch diverge by
+        // different amounts — lane 0 may be four thousand rows into a page
+        // while lane 1 is still on pure text. The override is per token, so
+        // one batch carries both without either lane knowing about the other.
+        //
+        // Emitted only when some lane diverges. When none does (every chat
+        // lane, always) the field stays `None` and the graph broadcasts
+        // `positions` exactly as it did before this existed — which is what
+        // keeps the text-only batched path byte-identical rather than merely
+        // equivalent. It also keeps a non-M-RoPE model out of the four-plane
+        // encoding it has no components for: such a model can never ingest an
+        // image span, so it can never diverge.
+        let rope_positions = if self
+            .slots
+            .iter()
+            .any(|step| step.rope_pos != step.position as i64)
+        {
+            let width = self.slots.len();
+            let mut planes = vec![0i32; width * MROPE_COMPONENTS];
+            for (index, step) in self.slots.iter().enumerate() {
+                let pos = i32::try_from(step.rope_pos).map_err(|_| {
+                    LlamaError::format(format!(
+                        "slot rope position {} does not fit in i32",
+                        step.rope_pos
+                    ))
+                })?;
+                // Text ropes isotropically: the t/h/w sections all take the
+                // same scalar and the fourth section is unused. That is what
+                // the single-stream path writes for text after an image.
+                planes[index] = pos;
+                planes[width + index] = pos;
+                planes[2 * width + index] = pos;
+            }
+            Some(planes)
+        } else {
+            None
+        };
+
         let layout = HybridDecodeBatchLayout {
             positions,
             attention_write_indices,
             attention_key_count: self.attention_key_count,
             recurrent_state_rows,
             output_ids,
-            rope_positions: None,
+            rope_positions,
             hidden_read_rows: Vec::new(),
             hidden_write_rows: Vec::new(),
             attention_key_lower_bounds,
@@ -1128,6 +1189,29 @@ impl SlotTable {
         Ok(())
     }
 
+    /// Record that a slot ingested an image span: `tokens` cache rows that
+    /// advance M-RoPE by only `n_pos`.
+    ///
+    /// The split is the whole reason [`Slot::rope_pos_next`] exists separately
+    /// from [`Slot::fill`]. A page is `tokens_w * tokens_h` rows — thousands —
+    /// but Qwen's M-RoPE gives the whole grid `max(tokens_w, tokens_h)`
+    /// positions, so the text that follows resumes a few dozen positions after
+    /// the image started rather than thousands. `advance` would move both
+    /// counters together and rope the entire answer off the end of the page.
+    pub fn advance_image_span(&mut self, index: usize, tokens: usize, n_pos: usize) -> Result<()> {
+        let per_slot_context = self.per_slot_context;
+        let slot = self.require_mut(index)?;
+        let fill = slot.fill + tokens;
+        if fill > per_slot_context {
+            return Err(LlamaError::format(format!(
+                "slot {index} would hold {fill} tokens, past its {per_slot_context}-token capacity"
+            )));
+        }
+        slot.fill = fill;
+        slot.rope_pos_next += n_pos as i64;
+        Ok(())
+    }
+
     /// Take over a slot's speculative bookkeeping from a path that advanced it
     /// outside this table.
     ///
@@ -1211,6 +1295,7 @@ impl SlotTable {
                 write_row: slot.next_write_row(),
                 key_lower_bound: slot.kv_base,
                 position: slot.fill,
+                rope_pos: slot.rope_pos_next,
                 state_row: slot.live_state_row(),
             })
             .collect();
@@ -1982,6 +2067,7 @@ mod tests {
                 write_row: 10,
                 key_lower_bound: 0,
                 position: 10,
+                rope_pos: 10,
                 state_row: 0,
             }]
         );
@@ -2042,6 +2128,7 @@ mod tests {
                     write_row: 5,
                     key_lower_bound: 0,
                     position: 5,
+                    rope_pos: 5,
                     state_row: 0,
                 },
                 SlotStep {
@@ -2049,6 +2136,7 @@ mod tests {
                     write_row: 130,
                     key_lower_bound: 100,
                     position: 30,
+                    rope_pos: 30,
                     state_row: 1,
                 },
             ]
@@ -2166,6 +2254,91 @@ mod tests {
     }
 
     #[test]
+    fn a_text_only_batch_carries_no_rope_override() {
+        // The property the chat lanes rest on: with nothing but text in the
+        // table the layout must be the one that existed before image spans
+        // did, override field and all. `None` here is not a nicety — the
+        // graph broadcasts `positions` in that case, and a four-plane vector
+        // is a DIFFERENT encoding, so emitting one unconditionally would
+        // change every chat lane's bytes for no reason.
+        let mut table = table();
+        for _ in 0..2 {
+            table.admit().expect("admit");
+        }
+        table.advance(0, 5).expect("advance");
+        table.advance(1, 30).expect("advance");
+        table.begin_decoding(0).expect("decode");
+        table.begin_decoding(1).expect("decode");
+        let layout = table
+            .plan_step()
+            .expect("plan")
+            .to_batch_layout()
+            .expect("layout");
+        assert!(
+            layout.rope_positions.is_none(),
+            "a text-only batch must rope from `positions`"
+        );
+    }
+
+    #[test]
+    fn an_image_span_parts_the_rope_cursor_from_the_fill() {
+        // A page is thousands of cache rows and a few dozen rope positions.
+        // Both counters have to move, by different amounts, or the answer
+        // ropes off the end of the page it is reading.
+        let mut table = table();
+        table.admit().expect("admit");
+        table.advance(0, 7).expect("prefix");
+        // An 8x9 grid: 72 rows, 9 positions.
+        table.advance_image_span(0, 8 * 9, 9).expect("image");
+        table.advance(0, 4).expect("suffix");
+        let slot = table.slot(0).expect("slot");
+        assert_eq!(slot.fill(), 7 + 72 + 4);
+        assert_eq!(slot.rope_pos_next(), 7 + 9 + 4);
+    }
+
+    #[test]
+    fn a_lane_that_read_an_image_ropes_below_its_fill_and_its_neighbour_does_not() {
+        // The batch's whole job: two lanes at different rope offsets in one
+        // step. Lane 0 has read a page and ropes far below its within-slot
+        // index; lane 1 is pure text and ropes at it. One override vector
+        // carries both, section-major over the batch.
+        let mut table = table();
+        for _ in 0..2 {
+            table.admit().expect("admit");
+        }
+        table.advance(0, 3).expect("prefix");
+        table.advance_image_span(0, 40, 8).expect("image");
+        table.advance(1, 6).expect("text lane");
+        table.begin_decoding(0).expect("decode");
+        table.begin_decoding(1).expect("decode");
+
+        let plan = table.plan_step().expect("plan");
+        assert_eq!(plan.slots[0].position, 43, "lane 0 writes row 43 of its slot");
+        assert_eq!(plan.slots[0].rope_pos, 11, "but ropes at 3 + 8");
+        assert_eq!(plan.slots[1].position, 6);
+        assert_eq!(plan.slots[1].rope_pos, 6, "the text lane is unchanged");
+
+        let layout = plan.to_batch_layout().expect("layout");
+        // Cache writes and the mask still follow `positions`; only rope moves.
+        assert_eq!(layout.positions, vec![43, 6]);
+        assert_eq!(layout.attention_write_indices, vec![43, 106]);
+        let planes = layout.rope_positions.expect("an image lane needs an override");
+        assert_eq!(planes.len(), 2 * MROPE_COMPONENTS);
+        // Section-major: [t0 t1][h0 h1][w0 w1][unused].
+        assert_eq!(planes, vec![11, 6, 11, 6, 11, 6, 0, 0]);
+    }
+
+    #[test]
+    fn an_image_span_cannot_overrun_a_slot() {
+        let mut table = table();
+        table.admit().expect("admit");
+        assert!(
+            table.advance_image_span(0, 1000, 8).is_err(),
+            "a page that does not fit the lane must be refused, not truncated"
+        );
+    }
+
+    #[test]
     fn a_plan_that_outruns_its_key_span_is_refused() {
         // A layout whose write row sits outside the mask would attend to
         // nothing, which reads as a plausible-looking zero rather than an
@@ -2176,6 +2349,7 @@ mod tests {
                 write_row: 40,
                 key_lower_bound: 0,
                 position: 40,
+            rope_pos: 40,
             state_row: 0,
             }],
             width: 1,

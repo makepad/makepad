@@ -9,14 +9,14 @@
 //! - every fetched artifact also routes to the matching viewer.
 //!
 //! Box choice per stage = the fleet affinity scheduler
-//! (`makepad_asset_ai::fleet`): loaded > ready > downloading > absent,
+//! (`makepad_ai_hub::fleet`): loaded > ready > downloading > absent,
 //! tiebreak queue depth, evaluated at stage START (a chain's later stages
 //! see fresh snapshots). Text expansion has one deliberate policy layer:
 //! a ready Qwen3.8-27B outranks the smaller fallback, but an absent or still
 //! downloading 3.8 never displaces the already-ready qwen3.5-9b lane.
 
-use makepad_asset_ai::fleet::{self, BoxSnapshot};
-use makepad_asset_ai::protocol::{
+use makepad_ai_hub::fleet::{self, BoxSnapshot};
+use makepad_ai_hub::protocol::{
     ArtifactRefJson, GenerateRequestJson, GenerateResponseJson, JobStatusJson, NamedInputJson, LoraRefJson};
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_widgets::*;
@@ -26,50 +26,12 @@ use std::collections::{HashMap, HashSet};
 // Presets
 // ---------------------------------------------------------------------------
 
-/// Image canvas presets; entry 0 is the chain default. Flux wants /16 dims.
-/// What a run says when its expander could not deliver. The run itself
-/// carries on with the prompt the person typed — an expansion is a
-/// courtesy, never a precondition.
-pub const EXPAND_FALLBACK_NOTE: &str = "expand failed, used raw prompt";
-
-/// Poll cadence per active job.
-pub const IMAGE_SIZES: &[(u32, u32)] = &[
-    (512, 512),
-    (768, 768),
-    (1024, 1024),
-    (768, 512),
-    (512, 768),
-    (1024, 576),
-];
-/// Image step presets; the dropdown's extra first entry means "model
-/// default" (schnell 4, dev-class ~20).
-pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
-/// img2img strength choices for edit chains: 1.0 = a full instruction edit
-/// (reference tokens only); lower = the sampler starts from the VAE-encoded
-/// input at sigma index floor((1-strength)*steps), keeping more of it.
-pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
-/// LoRA strength choices for the image stage.
-pub const LORA_STRENGTHS: &[f32] = &[1.0, 0.8, 0.6, 0.4, 1.2];
-/// RIFE interpolation factors offered for video (1 = off).
-pub const VIDEO_INTERPOLATE: &[u32] = &[1, 2, 4];
-/// Enhance-stage factor choices, shared by the uprez and tween pickers.
-pub const ENHANCE_FACTORS: &[u32] = &[1, 2, 4];
-/// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
-/// larger atlases trade bake time and device memory for sharper materials.
-pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
-/// QEM face-count presets. Index 0 is Auto (12k objects / 20k characters).
-pub const MESH_FACE_COUNTS: &[u32] = &[0, 12_000, 20_000, 40_000, 80_000, 160_000];
-/// Video canvas presets; entry 0 is the small default.
-pub const VIDEO_SIZES: &[(u32, u32)] = &[(640, 352), (864, 480), (960, 544)];
-/// Video (frames, steps) presets at 16 fps; entry 0 is the default.
-pub const VIDEO_LENGTHS: &[(u32, u32)] = &[(39, 30), (65, 30), (97, 40), (129, 50)];
-/// Full-song targets offered by the UI. Music3 accepts any duration from
-/// five seconds through five minutes; these minute-aligned presets keep the
-/// common choice legible and make a three-minute song the honest default.
-pub const MUSIC_LENGTHS: &[u32] = &[60, 120, 180, 240, 300];
-pub const MUSIC_DEFAULT_SECONDS: u32 = 180;
-pub const MUSIC_MIN_SECONDS: u32 = 5;
-pub const MUSIC_MAX_SECONDS: u32 = 300;
+pub use makepad_asset_creator::presets::{
+    EDIT_STRENGTHS, ENHANCE_FACTORS, EXPAND_FALLBACK_NOTE, IMAGE_SIZES, IMAGE_STEPS,
+    LORA_STRENGTHS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS,
+    MUSIC_LENGTHS, MUSIC_MAX_SECONDS, MUSIC_MIN_SECONDS, VIDEO_INTERPOLATE, VIDEO_LENGTHS,
+    VIDEO_SIZES,
+};
 
 /// Human-facing clock label used by the duration picker and run details.
 pub fn format_music_duration(seconds: u32) -> String {
@@ -154,6 +116,12 @@ pub struct GenParams {
     /// Enhance stage: append the motion-vector `mkfl` box for
     /// arbitrary-rate GPU playback.
     pub enhance_flow: bool,
+    /// Video stage: send the keyframe as BOTH the first frame (`input_b64`)
+    /// and the H3 wire's `last_frame` named input, so the FL2VA conditioning
+    /// lands the clip back on its opening image — a seamless loop (verified
+    /// on fasth3-4step: endpoint delta ≈ adjacent-frame noise). Derived from
+    /// the preset row at dispatch, never persisted in saved specs.
+    pub video_loop: bool,
 }
 
 impl Default for GenParams {
@@ -176,6 +144,7 @@ impl Default for GenParams {
             enhance_upscale: 2,
             enhance_interpolate: 2,
             enhance_flow: true,
+            video_loop: false,
         }
     }
 }
@@ -191,6 +160,9 @@ pub struct Preset {
     /// fan-out followed by an explicit human choice gate. The chosen
     /// artifact is the only output promoted into the linear chain.
     pub fan_out_stage: Option<usize>,
+    /// The video stage of this chain loops: its keyframe rides as first AND
+    /// last frame (see [`GenParams::video_loop`]).
+    pub video_loop: bool,
 }
 
 impl Preset {
@@ -204,6 +176,22 @@ impl Preset {
             domains,
             pins,
             fan_out_stage: None,
+            video_loop: false,
+        }
+    }
+
+    /// A linear chain whose video stage is a seamless loop.
+    const fn looped(
+        name: &'static str,
+        domains: &'static [&'static str],
+        pins: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        Self {
+            name,
+            domains,
+            pins,
+            fan_out_stage: None,
+            video_loop: true,
         }
     }
 
@@ -218,6 +206,7 @@ impl Preset {
             domains,
             pins,
             fan_out_stage: Some(stage),
+            video_loop: false,
         }
     }
 }
@@ -241,6 +230,18 @@ const CHARACTER_RIG_MODEL: &str = "skintokens";
 const CHARACTER_MOTION_MODEL: &str = "hy-motion";
 /// Instruction image editing (reference image + "change …" prompt).
 const EDIT_MODEL: &str = "flux2-klein-4b";
+/// Sprite enhancement runs on the 32B dev DiT, NOT the 4-step distilled
+/// klein that `EDIT_MODEL` pins for interactive edits. Measured on the Doom
+/// imp hero frame (2026-08-31): klein 4-step renders a smoothed version of
+/// the original; dev at 20-30 steps redraws it with real anatomy, claws and
+/// teeth. The distillation, not the prompt, was the ceiling.
+///
+/// `flux2-dev-q4-24g` is the same DiT quantized for the 24GB class. It is a
+/// DIFFERENT numerics class ("expect its own look at the same seed"), so a
+/// single asset must be enhanced entirely on one tier or its cells will not
+/// match each other.
+const SPRITE_ENHANCE_MODEL: &str = "flux2-dev";
+pub const SPRITE_ENHANCE_MODEL_24G: &str = "flux2-dev-q4-24g";
 /// General image 4x upscaling (RealESRGAN x4plus). Pinned — the domain has
 /// exactly one model, so no dropdown.
 const UPSCALE_MODEL: &str = "realesrgan-x4plus";
@@ -316,8 +317,8 @@ fn pick_ready_model_target(
                     model.available
                         && matches!(
                             model.state.as_str(),
-                            makepad_asset_ai::protocol::MODEL_STATE_READY
-                                | makepad_asset_ai::protocol::MODEL_STATE_LOADED
+                            makepad_ai_hub::protocol::MODEL_STATE_READY
+                                | makepad_ai_hub::protocol::MODEL_STATE_LOADED
                         )
                 })
         })
@@ -498,6 +499,14 @@ pub const PRESETS: &[Preset] = &[
         &[("enhance", "video-enhance")],
     ),
     Preset::linear("edit selected image (instruction)", &["edit"], &[("edit", EDIT_MODEL)]),
+    // Classic sprite enhancement: re-render an old game's artwork at modern
+    // quality. Pinned to the 32B dev tier because the distilled klein only
+    // smooths (see SPRITE_ENHANCE_MODEL).
+    Preset::linear(
+        "sprite → enhance (hi-res)",
+        &["edit"],
+        &[("edit", SPRITE_ENHANCE_MODEL)],
+    ),
     // Native RealESRGAN x4plus: select a picture, get it back at 4x
     // resolution. Consumer-only like `edit` — no prompt-only mode, refused
     // without a selected image.
@@ -595,6 +604,8 @@ pub const PRESETS: &[Preset] = &[
             ("motion", CHARACTER_MOTION_MODEL),
         ],
     ),
+    Preset::looped("image → video loop", &["image", "video"], &[]),
+    Preset::looped("expand → image → video loop", &["text", "image", "video"], &[]),
 ];
 
 /// Which upstream payload class a stage's request relays as its binary
@@ -1593,7 +1604,7 @@ impl Pipeline {
             // Music3 can stop earlier when it emits its end-of-audio token.
             "music" => {
                 let (description, lyrics) =
-                    makepad_asset_ai::music3_backend::split_music_prompt(&prompt);
+                    makepad_ai_hub::music3_backend::split_music_prompt(&prompt);
                 // An expansion stage promises the template's `Lyrics:`
                 // section (instrumental requests still carry it, holding
                 // only [Instrumental]). Its absence means the expander
@@ -1693,6 +1704,20 @@ impl Pipeline {
         if let Some((b64, content_type)) = self.input_for_stage(stage) {
             request.input_b64 = Some(b64);
             request.input_content_type = Some(content_type);
+        }
+        // Loop chains: the SAME keyframe rides as both the first frame
+        // (input_b64, above) and the H3 wire's `last_frame` named input, so
+        // the clip ends where it began. No keyframe = a hard error, never a
+        // silent non-looping clip.
+        if domain == "video" && self.gen.video_loop {
+            let (b64, content_type) = self.input_for_stage(stage).ok_or_else(|| {
+                "video loop needs a keyframe image from an earlier stage or seed".to_string()
+            })?;
+            request.inputs = Some(vec![NamedInputJson {
+                name: "last_frame".to_string(),
+                content_type,
+                data_b64: b64,
+            }]);
         }
         if domain == "inpaint" {
             let (b64, content_type) = self
@@ -3369,7 +3394,7 @@ impl Pipeline {
                     );
                 };
                 if let Err(error) =
-                    makepad_asset_ai::client::verify_artifact_bytes(&bytes, &artifact)
+                    makepad_ai_hub::client::verify_artifact_bytes(&bytes, &artifact)
                 {
                     return self.candidate_failed(
                         cx,
@@ -3922,10 +3947,10 @@ mod tests {
     }
 
     fn image_snapshot(url: &str, node_key: &str) -> BoxSnapshot {
-        use makepad_asset_ai::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
+        use makepad_ai_hub::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson {
+            health: Some(HealthJson { realtime: None,
                 service: "test".to_string(),
                 version: "1".to_string(),
                 gpu: Some("GPU".to_string()),
@@ -3967,10 +3992,10 @@ mod tests {
     }
 
     fn text_snapshot(url: &str, models: &[(&str, &str)]) -> BoxSnapshot {
-        use makepad_asset_ai::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
+        use makepad_ai_hub::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson {
+            health: Some(HealthJson { realtime: None,
                 service: "test".to_string(),
                 version: "1".to_string(),
                 gpu: Some("24 GB GPU".to_string()),
@@ -4024,7 +4049,7 @@ mod tests {
 
     #[test]
     fn qwen38_expand_preference_is_ready_gated_and_falls_back() {
-        use makepad_asset_ai::protocol::{
+        use makepad_ai_hub::protocol::{
             MODEL_STATE_ABSENT, MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED, MODEL_STATE_READY,
         };
 
@@ -4875,13 +4900,13 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             .contains("dropped identity anchor"));
     }
 
-    fn registry() -> makepad_asset_ai::registry::Registry {
+    fn registry() -> makepad_ai_hub::registry::Registry {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../libs/asset/ai/registry.json"
+            "/../../libs/ai/hub/registry.json"
         ))
             .expect("registry.json readable");
-        makepad_asset_ai::registry::Registry::parse(&text).expect("registry parses")
+        makepad_ai_hub::registry::Registry::parse(&text).expect("registry parses")
     }
 
     #[test]
@@ -4960,6 +4985,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("text", "qwen3.8-27b"),
             ("upscale", "realesrgan-x4plus"),
             ("vision", "qwen3.8-27b-vision"),
+            ("video", "fasth3-4step"),
+            ("video", "fasth3-4step-q4-24g"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),

@@ -4,10 +4,10 @@
 
 mod common;
 use common::*;
+use makepad_asset_store::variants::JobId;
 use makepad_asset_store::*;
 use makepad_asset_data::*;
 
-const LEASE: u64 = 60_000;
 
 fn tool() -> ToolClosure {
     ToolClosure {
@@ -105,30 +105,12 @@ fn arm_and_claim(
 ) -> (DerivationKey, JobId) {
     let recipe_bytes = recipe.to_canonical_bytes().unwrap();
     let outcome = core.variants().begin_derivation(base, &recipe_bytes, now).unwrap();
-    let DerivationOutcome::NeedsJob { dkey, job_id, kind, .. } = outcome else {
+    let DerivationOutcome::NeedsJob { dkey, job_id, .. } = outcome else {
         panic!("expected NeedsJob, got {outcome:?}");
     };
-    core.jobs()
-        .enqueue(
-            &NewJob {
-                job_id,
-                parent: None,
-                kind,
-                payload: b"{}",
-                priority: 0,
-                max_attempts: 1,
-                not_before_ms: 0,
-                deps: &[],
-            },
-            now,
-        )
-        .unwrap();
-    let claimed = core
-        .jobs()
-        .claim_allowed(worker, now, LEASE, &[kind])
-        .unwrap()
-        .expect("armed job is claimable");
-    assert_eq!(claimed.job_id, job_id);
+    // Client-driven (aicore P7): the NeedsJob answer IS the deriver's claim —
+    // the deterministic id it must report under.
+    let _ = worker;
     (dkey, job_id)
 }
 
@@ -170,7 +152,6 @@ fn single_flight_derivation_and_cache_hit() {
         .complete_derivation(&dkey, &job, "w-1", &result, NOW + 2)
         .unwrap();
     // Ready: the job succeeded atomically with publication.
-    assert_eq!(core.jobs().state(&job).unwrap(), Some(JobState::Succeeded));
     let status = core.variants().derivation_status(&dkey).unwrap().unwrap();
     assert_eq!((status.state, status.variant), ("ready", Some(variant)));
 
@@ -287,10 +268,6 @@ fn terminal_failure_rearms_with_a_fresh_deterministic_job() {
     let (dkey, job0) = arm_and_claim(&core, &base, &lod_recipe(), "w-1", NOW);
 
     // max_attempts=1: one failure is terminal.
-    assert_eq!(
-        core.jobs().fail(&job0, "w-1", NOW + 1, 0).unwrap(),
-        JobState::Failed
-    );
     // Status reads failed by joining the job state.
     let status = core.variants().derivation_status(&dkey).unwrap().unwrap();
     assert_eq!(status.state, "failed");
@@ -300,29 +277,10 @@ fn terminal_failure_rearms_with_a_fresh_deterministic_job() {
         .variants()
         .begin_derivation(&base, &recipe_bytes, NOW + 2)
         .unwrap();
-    let DerivationOutcome::NeedsJob { job_id: job1, kind, .. } = outcome else {
+    let DerivationOutcome::NeedsJob { job_id: job1, .. } = outcome else {
         panic!("expected NeedsJob, got {outcome:?}");
     };
     assert_ne!(job0, job1);
-    core.jobs()
-        .enqueue(
-            &NewJob {
-                job_id: job1,
-                parent: None,
-                kind,
-                payload: b"{}",
-                priority: 0,
-                max_attempts: 1,
-                not_before_ms: 0,
-                deps: &[],
-            },
-            NOW + 2,
-        )
-        .unwrap();
-    core.jobs()
-        .claim_allowed("w-1", NOW + 2, LEASE, &[kind])
-        .unwrap()
-        .expect("re-armed job claimable");
     // A late completion on the SUPERSEDED job refuses.
     let result = lod_result(&core, NOW + 2);
     assert!(matches!(

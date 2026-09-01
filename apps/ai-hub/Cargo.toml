@@ -1,0 +1,35 @@
+[package]
+name = "makepad-app-ai-hub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "makepad-ai-hub"
+path = "src/main.rs"
+
+[dependencies]
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+
+# Feature passthrough: the headless node exposes exactly the library's
+# feature set, so box launch scripts keep their --features flags working.
+[features]
+default = ["flux", "paint", "paint-cuda", "llm", "tts", "indextts", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "upscale-native", "motion-native", "rig-native", "splat-native"]
+python-backends = ["makepad-ai-hub/python-backends"]
+flux = ["makepad-ai-hub/flux"]
+paint = ["makepad-ai-hub/paint"]
+paint-cuda = ["makepad-ai-hub/paint-cuda"]
+llm = ["makepad-ai-hub/llm"]
+tts = ["makepad-ai-hub/tts"]
+indextts = ["makepad-ai-hub/indextts"]
+video = ["makepad-ai-hub/video"]
+interpolate = ["makepad-ai-hub/interpolate"]
+audio = ["makepad-ai-hub/audio"]
+mesh = ["makepad-ai-hub/mesh"]
+matte-native = ["makepad-ai-hub/matte-native"]
+depth-native = ["makepad-ai-hub/depth-native"]
+segment-native = ["makepad-ai-hub/segment-native"]
+upscale-native = ["makepad-ai-hub/upscale-native"]
+motion-native = ["makepad-ai-hub/motion-native"]
+splat-native = ["makepad-ai-hub/splat-native"]
+rig-native = ["makepad-ai-hub/rig-native"]

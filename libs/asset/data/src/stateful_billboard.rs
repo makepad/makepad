@@ -17,6 +17,7 @@
 //! with `flip` when the PNG itself is the mirrored pair (Doom `A2A8`).
 
 use crate::actor_def::{ActorDef, ResourceKind, WeaponDef};
+use crate::unit_def::UnitDef;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -29,12 +30,21 @@ pub const MANIFEST_VERSION: u32 = 2;
 pub const MAGIC: &str = "stateful-billboard";
 pub const CONTENT_TYPE: &str = "text/x-stateful-billboard";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpriteRole {
+    #[default]
     Character,
     Weapon,
     Item,
     Effect,
+    /// A tiled-strategy piece that moves and takes orders.
+    Unit,
+    /// A tiled-strategy building: immobile, with a cell footprint.
+    Structure,
+    /// Immobile decoration that blocks its cells.
+    Scenery,
+    /// A harvestable patch whose frames are richness stages.
+    Resource,
 }
 
 impl SpriteRole {
@@ -44,6 +54,10 @@ impl SpriteRole {
             Self::Weapon => "weapon",
             Self::Item => "item",
             Self::Effect => "effect",
+            Self::Unit => "unit",
+            Self::Structure => "structure",
+            Self::Scenery => "scenery",
+            Self::Resource => "resource",
         }
     }
 
@@ -52,8 +66,18 @@ impl SpriteRole {
             "weapon" => Self::Weapon,
             "item" => Self::Item,
             "effect" => Self::Effect,
+            "unit" => Self::Unit,
+            "structure" => Self::Structure,
+            "scenery" => Self::Scenery,
+            "resource" => Self::Resource,
             _ => Self::Character,
         }
+    }
+
+    /// Roles whose artwork lies FLAT on the ground of a tiled map rather
+    /// than standing up to face the camera.
+    pub fn is_floor_piece(self) -> bool {
+        matches!(self, Self::Unit | Self::Structure | Self::Scenery | Self::Resource)
     }
 }
 
@@ -144,6 +168,42 @@ pub struct StatefulBillboard {
     /// scale. Declared by the writer so a reader never has to calibrate
     /// pixels against a walker; `0` on manifests written before it existed.
     pub metres_per_pixel: f32,
+    /// What this piece IS on a tiled strategy map — cost, hit points,
+    /// armour, speed, weapons. Absent on artwork that carries no `unit`
+    /// line, which is scenery. See [`unit_def`](crate::unit_def).
+    pub unit: Option<UnitDef>,
+    /// The neutral owner-colour ramp, in ramp order, as sRGB bytes. A
+    /// runtime re-tints exactly these sheet colours to the owning house's
+    /// colour; empty means the artwork has no owner colours.
+    ///
+    /// ```text
+    /// remap e8c040 d4ac38 c09830 ...
+    /// ```
+    pub remap: Vec<[u8; 3]>,
+    /// Cells this piece occupies on a tiled map (`footprint <w> <h>`).
+    /// `None` = one cell.
+    pub footprint: Option<(u32, u32)>,
+}
+
+impl Default for StatefulBillboard {
+    fn default() -> Self {
+        Self {
+            prefix: String::new(),
+            role: SpriteRole::Character,
+            preview: String::new(),
+            facings: 0,
+            mirrors: 0,
+            states: Vec::new(),
+            frames: Vec::new(),
+            sheet: None,
+            actor: None,
+            weapon: None,
+            metres_per_pixel: 0.0,
+            unit: None,
+            remap: Vec::new(),
+            footprint: None,
+        }
+    }
 }
 
 impl StatefulBillboard {
@@ -166,6 +226,16 @@ impl StatefulBillboard {
                 "sheet {} {} {}\n",
                 sheet.cols, sheet.cell_w, sheet.cell_h
             ));
+        }
+        if let Some((w, h)) = self.footprint {
+            out.push_str(&format!("footprint {w} {h}\n"));
+        }
+        if !self.remap.is_empty() {
+            out.push_str("remap");
+            for c in &self.remap {
+                out.push_str(&format!(" {:02x}{:02x}{:02x}", c[0], c[1], c[2]));
+            }
+            out.push('\n');
         }
         for s in &self.states {
             out.push_str(&format!(
@@ -202,6 +272,11 @@ impl StatefulBillboard {
         if let Some(weapon) = &self.weapon {
             out.push_str(&weapon.to_manifest(&verbatim));
         }
+        // A strategy definition owns its own `sound` and `weapon` lines, so
+        // it is written instead of (never alongside) the shooter pair above.
+        if let Some(unit) = &self.unit {
+            out.push_str(&unit.to_manifest());
+        }
         out
     }
 
@@ -223,6 +298,14 @@ impl StatefulBillboard {
         let mut def_lines: Vec<(String, String)> = Vec::new();
         let mut weapon = None;
         let mut metres_per_pixel = 0.0f32;
+        // Strategy definitions ride on the same manifest and share the
+        // `sound`/`weapon` tags with the shooter definition above, so the
+        // lines are collected raw and claimed at the end by whichever
+        // definition the manifest actually declared.
+        let mut unit_lines: Vec<(String, String)> = Vec::new();
+        let mut saw_unit = false;
+        let mut remap: Vec<[u8; 3]> = Vec::new();
+        let mut footprint: Option<(u32, u32)> = None;
         for line in lines {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -232,8 +315,32 @@ impl StatefulBillboard {
             match parts.next() {
                 Some(tag @ ("actor" | "attack" | "sound" | "give" | "explode" | "projectile")) => {
                     def_lines.push((tag.to_string(), line[tag.len()..].trim().to_string()));
+                    if tag == "sound" {
+                        unit_lines.push((tag.to_string(), line[tag.len()..].trim().to_string()));
+                    }
                 }
-                Some("weapon") => weapon = WeaponDef::from_manifest(line["weapon".len()..].trim()),
+                Some("unit") => {
+                    saw_unit = true;
+                    unit_lines.push(("unit".to_string(), line["unit".len()..].trim().to_string()));
+                }
+                Some("footprint") => {
+                    let mut num = || parts.next().and_then(|s| s.parse::<u32>().ok());
+                    if let (Some(w), Some(h)) = (num(), num()) {
+                        if w > 0 && h > 0 {
+                            footprint = Some((w, h));
+                        }
+                    }
+                }
+                Some("remap") => {
+                    remap = parts
+                        .filter_map(crate::world_place::parse_hex_rgb)
+                        .collect();
+                }
+                Some("weapon") => {
+                    let rest = line["weapon".len()..].trim().to_string();
+                    weapon = WeaponDef::from_manifest(&rest);
+                    unit_lines.push(("weapon".to_string(), rest));
+                }
                 Some("prefix") => prefix = parts.next().unwrap_or("").to_ascii_lowercase(),
                 Some("role") => role = SpriteRole::parse(parts.next().unwrap_or("")),
                 Some("preview") => preview = parts.next().unwrap_or("").to_string(),
@@ -350,6 +457,19 @@ impl StatefulBillboard {
         }
         let refs: Vec<(&str, &str)> = def_lines.iter().map(|(t, r)| (t.as_str(), r.as_str())).collect();
         let actor = ActorDef::from_manifest(&refs);
+        let unit = if saw_unit {
+            let refs: Vec<(&str, &str)> =
+                unit_lines.iter().map(|(t, r)| (t.as_str(), r.as_str())).collect();
+            UnitDef::from_manifest(&refs)
+        } else {
+            None
+        };
+        // A strategy sheet's `weapon` lines belong to its unit definition,
+        // not to a first-person view weapon; claiming both would write the
+        // line twice on the way back out.
+        if unit.is_some() {
+            weapon = None;
+        }
         Ok(Self {
             prefix,
             role,
@@ -362,6 +482,9 @@ impl StatefulBillboard {
             actor,
             weapon,
             metres_per_pixel,
+            unit,
+            remap,
+            footprint,
         })
     }
 
@@ -427,9 +550,10 @@ impl StatefulBillboard {
             .unwrap_or(0..self.frames.len())
     }
 
-    /// Animation steps for `name` at `facing` (one frame per letter).
-    /// Missing 6/7/8 use the stored 4/3/2 drawing with `flip` when
-    /// [`Self::mirrors`] is 8.
+    /// Animation steps for `name` at `facing`: one frame per letter, and —
+    /// for a sheet that packs a whole run under a single letter — one frame
+    /// per step of that run. Missing 6/7/8 use the stored 4/3/2 drawing with
+    /// `flip` when [`Self::mirrors`] is 8.
     pub fn frames_for_state_facing(&self, name: &str, facing: u8) -> Vec<FacedFrame<'_>> {
         let src: Vec<&SpriteFrame> = self
             .state_frame_range(name)
@@ -454,11 +578,37 @@ impl StatefulBillboard {
         let mut out = Vec::new();
         for letter in letters {
             let pool: Vec<&SpriteFrame> = src.iter().copied().filter(|f| f.letter == letter).collect();
-            if let Some((frame, via_mirror)) = pick_facing_frame(&pool, facing) {
-                out.push(FacedFrame {
-                    frame,
-                    flip: frame.flip ^ (via_mirror && self.mirrors >= 8),
-                });
+            // Two conventions share this table. The shooters spell an
+            // animation with LETTERS (A, B, C…) and give each letter one
+            // drawing per facing. The strategy sheets spell it the other way
+            // round: one letter for the whole clip, and each facing carries
+            // the WHOLE run of frames back to back (8 facings x 6 walk
+            // frames, every one of them letter `A`). Grouping by letter alone
+            // therefore collapsed a six-frame walk to its first frame and
+            // nothing ever animated. Group by facing as well, and step
+            // through the depth the busiest facing actually has: a sheet with
+            // one frame per facing is depth 1 and behaves exactly as before.
+            let mut groups: Vec<(u8, Vec<&SpriteFrame>)> = Vec::new();
+            for f in &pool {
+                match groups.iter_mut().find(|(rot, _)| *rot == f.rot) {
+                    Some((_, run)) => run.push(f),
+                    None => groups.push((f.rot, vec![f])),
+                }
+            }
+            let depth = groups.iter().map(|(_, run)| run.len()).max().unwrap_or(1);
+            for step in 0..depth {
+                // A facing with a shorter run holds its last drawing rather
+                // than dropping out of the clip half way through.
+                let sub: Vec<&SpriteFrame> = groups
+                    .iter()
+                    .filter_map(|(_, run)| run.get(step).or_else(|| run.last()).copied())
+                    .collect();
+                if let Some((frame, via_mirror)) = pick_facing_frame(&sub, facing) {
+                    out.push(FacedFrame {
+                        frame,
+                        flip: frame.flip ^ (via_mirror && self.mirrors >= 8),
+                    });
+                }
             }
         }
         if out.is_empty() {
@@ -915,6 +1065,7 @@ pub fn assemble(
         actor: None,
         weapon: None,
         metres_per_pixel: 0.0,
+        ..Default::default()
     })
 }
 
@@ -1271,6 +1422,7 @@ pub fn sequential_idle(prefix: &str, frames: Vec<SpriteFrame>, role: SpriteRole)
         actor: None,
         weapon: None,
         metres_per_pixel: 0.0,
+        ..Default::default()
     }
 }
 
@@ -1318,6 +1470,42 @@ fn pick_facing_frame<'a>(pool: &[&'a SpriteFrame], facing: u8) -> Option<(&'a Sp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strategy convention: one letter for the whole clip, each facing
+    /// carrying its own run of frames. A walk that reads back as one frame
+    /// per facing is a unit that slides across the map without moving its
+    /// legs — which is exactly what the C&C infantry did.
+    #[test]
+    fn a_facing_major_run_under_one_letter_keeps_every_step() {
+        let mut text = String::from(
+            "stateful-billboard 2\nprefix e1\nrole unit\npreview idle\nfacings 8\n\
+             metres_per_pixel 0.25\nsheet 8 50 39\n\
+             state idle 0 8 1 8\nstate walk 8 56 1 10\n",
+        );
+        for i in 0..8 {
+            text.push_str(&format!("frame {i} A {} 50 39 e1.png cell {i}\n", i + 1));
+        }
+        for i in 8..56 {
+            let rot = (i - 8) / 6 + 1;
+            text.push_str(&format!("frame {i} A {rot} 50 39 e1.png cell {i}\n"));
+        }
+        let bb = StatefulBillboard::parse(&text).expect("a well-formed manifest");
+        // Standing is one drawing per facing, as it always was.
+        assert_eq!(bb.frames_for_state_facing("idle", 3).len(), 1);
+        // Walking is the six frames THAT facing owns, in file order.
+        let walk: Vec<u32> = bb
+            .frames_for_state_facing("walk", 3)
+            .iter()
+            .map(|f| f.frame.cell.unwrap_or(0))
+            .collect();
+        assert_eq!(walk, vec![20, 21, 22, 23, 24, 25]);
+        let north: Vec<u32> = bb
+            .frames_for_state_facing("walk", 1)
+            .iter()
+            .map(|f| f.frame.cell.unwrap_or(0))
+            .collect();
+        assert_eq!(north, vec![8, 9, 10, 11, 12, 13]);
+    }
 
     #[test]
     fn parses_mirrored_doom_name() {

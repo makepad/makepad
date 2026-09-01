@@ -143,7 +143,7 @@ pub fn definitions() -> Vec<ToolDef> {
             description: "Generate a new video from a text prompt (text-to-video). \
                           Use this when the user asks for a clip, animation, or movie. \
                           For image-to-video, call image.generate with then=video instead.",
-            args_doc: r#"{"prompt": "motion description", "model": "minimax-h3", "width": 640, "height": 352, "frames": 39, "steps": 30}"#,
+            args_doc: r#"{"prompt": "motion description", "model": "fasth3-4step", "width": 640, "height": 352, "frames": 39, "steps": 4}"#,
             parameters: schema_object(
                 vec![
                     (
@@ -152,7 +152,7 @@ pub fn definitions() -> Vec<ToolDef> {
                     ),
                     (
                         "model",
-                        schema_string_len("video model id; omit for fleet affinity", 1, 64),
+                        schema_string_len("video model id; omit for fleet affinity (defaults to the fast FastH3 lane, fasth3-4step; minimax-h3 = the 30/50-step base)", 1, 64),
                     ),
                     ("width", schema_integer_range("pixels; omit for default 640", 64, 1920)),
                     ("height", schema_integer_range("pixels; omit for default 352", 64, 1080)),

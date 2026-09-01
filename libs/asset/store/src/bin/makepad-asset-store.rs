@@ -19,8 +19,6 @@ Options:
   --discovery-port <port>  Enable beacons on a specific UDP port
   --discovery-ip <ip>      Beacon destination IP (default 255.255.255.255)
   --quiet                  No stderr logging
-  --chat-fleet <url>       Local Qwen fleet node (repeatable)
-  --fleet <name>           Only talk to asset-ai boxes in this fleet (default default)
   --help                   This text
 ";
 
@@ -63,8 +61,6 @@ fn parse_config() -> ServerConfig {
     let mut discovery_port: Option<u16> = None;
     let mut discovery_ip: Option<IpAddr> = None;
     let mut quiet = false;
-    let mut chat_fleet: Vec<String> = Vec::new();
-    let mut fleet = String::new();
 
     let value_of = |name: &str, args: &mut dyn Iterator<Item = String>| -> String {
         match args.next() {
@@ -97,16 +93,6 @@ fn parse_config() -> ServerConfig {
                 discovery_ip = Some(v.parse().unwrap_or_else(|_| fail("malformed --discovery-ip")));
             }
             "--quiet" => quiet = true,
-            "--chat-fleet" => {
-                let v = value_of("--chat-fleet", &mut args);
-                if v.is_empty() {
-                    fail("malformed --chat-fleet");
-                }
-                chat_fleet.push(v);
-            }
-            "--fleet" => {
-                fleet = value_of("--fleet", &mut args);
-            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -125,8 +111,6 @@ fn parse_config() -> ServerConfig {
     }
     cfg.bootstrap_admin = bootstrap_admin;
     cfg.log = !quiet;
-    cfg.chat.fleet_bases = chat_fleet;
-    cfg.chat.fleet = fleet;
     if discovery {
         let mut d = DiscoveryConfig::lan_default();
         if let Some(p) = discovery_port {

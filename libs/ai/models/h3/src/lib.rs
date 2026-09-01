@@ -17,6 +17,7 @@ pub mod h3_audio_vae;
 pub mod h3_image;
 pub mod h3_pipeline;
 pub mod h3_quant;
+pub mod h3_quant_writer;
 pub mod h3_text;
 pub mod h3_tokenizer;
 pub mod h3_transformer;

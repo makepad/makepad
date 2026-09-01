@@ -772,7 +772,7 @@ pub fn studio_equirect_png() -> Vec<u8> {
             rgba[i + 3] = 255;
         }
     }
-    makepad_asset_ai::testpattern::encode_png_rgba(&rgba, W, H).expect("studio equirect encodes")
+    makepad_ai_hub::testpattern::encode_png_rgba(&rgba, W, H).expect("studio equirect encodes")
 }
 
 #[cfg(test)]

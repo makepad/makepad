@@ -20,7 +20,7 @@ use crate::flux2_transformer::{
     flux2_dit_clear_pool, flux2_euler_step, flux2_transformer_forward, Flux2TransformerWeights,
 };
 use crate::flux2_vae::{
-    flux2_image_from_rgb_u8, flux2_image_to_rgb_u8, flux2_vae_decode, flux2_vae_encode, Flux2VaeImage,
+    flux2_image_to_rgb_u8, flux2_vae_decode, flux2_vae_encode, Flux2VaeImage,
     Flux2VaeWeights,
 };
 use crate::flux_pipeline::encode_png_rgb;

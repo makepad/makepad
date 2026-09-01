@@ -11,7 +11,7 @@
 use makepad_asset_store::{AssetServer, ServerConfig};
 use makepad_asset_client::{
     ApiEndpoints, AssetClient, CatalogQuery, CatalogSubscriberConfig, CatalogSubscriptionEvent,
-    ClientConfig, ClientError, JobStateDto, PublishFile, PublishRequest, PublishThumbnail,
+    ClientConfig, ClientError, PublishFile, PublishRequest, PublishThumbnail,
     RoomClaimDto,
 };
 use makepad_asset_data::{
@@ -230,164 +230,9 @@ fn real_client_full_stack_roundtrip() {
     assert!(saw_publish, "asset_published event must reach the subscriber");
     subscriber.shutdown();
 
-    // ---- jobs + worker protocol over the same connection pair ----
-    let profiles = client.job_profiles(Some("video")).expect("profiles");
-    assert!(!profiles.is_empty(), "server must advertise video profiles");
-    let profile = &profiles[0];
-    assert_eq!(profile.kind, "video.generate");
-    assert_eq!(profile.namespace, "gen");
-
-    // Body = profile defaults + prompt (the VJ's merge convention).
-    let body = {
-        use makepad_asset_client::json::{s, Value};
-        let Value::Obj(mut pairs) = profile.defaults.clone() else { panic!("defaults obj") };
-        pairs.push(("prompt".to_string(), s("a looping neon tunnel")));
-        Value::Obj(pairs)
-    };
-    let foreign_job = client
-        .enqueue_job(&profile.namespace, "music.generate", &body)
-        .expect("enqueue foreign worker kind");
-    let job = client
-        .enqueue_job(&profile.namespace, &profile.kind, &body)
-        .expect("enqueue via admin token");
-    let status = client.job_status(&job).expect("status");
-    assert_eq!(status.state, JobStateDto::Pending);
-    assert_eq!(status.kind, "video.generate");
-
-    // A worker claims it (root bypass covers the claim gate), reports
-    // progress, then succeeds with the publish-convention result document.
-    let claimed = client
-        .worker_claim_kinds(30_000, Some("e2e"), &["video.generate"])
-        .expect("claim call")
-        .expect("a job to claim");
-    assert_eq!(claimed.job, job);
-    assert_eq!(claimed.kind, "video.generate");
-    assert_eq!(
-        client.job_status(&foreign_job).expect("foreign status").state,
-        JobStateDto::Pending,
-        "video worker must not consume the music queue"
-    );
-    assert_eq!(
-        claimed.body.get("prompt").and_then(|v| v.as_str()),
-        Some("a looping neon tunnel")
-    );
-    client
-        .worker_heartbeat(&job, 30_000, Some("e2e"), Some((500, "rendering")))
-        .expect("heartbeat");
-    let status = client.job_status(&job).expect("status running");
-    assert_eq!(status.state, JobStateDto::Running);
-    assert_eq!(status.progress, Some((500, "rendering".to_string())));
-
-    // WHAT THIS STAGE WAS GIVEN, kept in full. A run is inspectable only if
-    // the prompt comes back exactly as the model got it — line breaks and
-    // all, because a music prompt carries its lyrics that way.
-    let lyric_prompt = "warm analog house, 120 bpm\n\n[verse]\nthe city hums\n[chorus]\nall night";
-    let stage = makepad_asset_client::JobStageInput {
-        name: "music.generate",
-        model: "minimax-music3",
-        at: ".165",
-        prompt: lyric_prompt,
-        params: "model=minimax-music3\nseconds=60\nseed=77",
-        output: "",
-    };
-    client
-        .worker_heartbeat_stage(&job, 30_000, Some("e2e"), None, Some(&stage))
-        .expect("stage heartbeat");
-    let status = client.job_status(&job).expect("status with stages");
-    assert_eq!(status.stages.len(), 1);
-    assert_eq!(status.stages[0].name, "music.generate");
-    assert_eq!(status.stages[0].prompt, lyric_prompt, "kept whole, newlines included");
-    assert_eq!(status.stages[0].model, "minimax-music3");
-    assert_eq!(status.stages[0].at, ".165");
-    assert!(status.stages[0].params.contains("seconds=60"));
-
-    // The same stage recorded again REPLACES it: a stage that moved to
-    // another box has one true record, not two contradicting ones.
-    let moved = makepad_asset_client::JobStageInput {
-        at: ".203",
-        output: "done",
-        ..stage
-    };
-    client
-        .worker_heartbeat_stage(&job, 30_000, Some("e2e"), None, Some(&moved))
-        .expect("stage rewrite");
-    let status = client.job_status(&job).expect("status with rewritten stage");
-    assert_eq!(status.stages.len(), 1, "one record per stage name");
-    assert_eq!(status.stages[0].at, ".203");
-    assert_eq!(status.stages[0].output, "done");
-
-    // A second stage keeps its own record, in the order the stages ran.
-    let expand = makepad_asset_client::JobStageInput {
-        name: "text.expand",
-        model: "qwen3.8-27b",
-        at: ".217",
-        prompt: "a warm house track",
-        params: "target_domain=music",
-        output: "warm analog house, 120 bpm",
-    };
-    client
-        .worker_heartbeat_stage(&job, 30_000, Some("e2e"), None, Some(&expand))
-        .expect("second stage");
-    let status = client.job_status(&job).expect("status with two stages");
-    let names: Vec<&str> = status.stages.iter().map(|st| st.name.as_str()).collect();
-    assert_eq!(names, vec!["music.generate", "text.expand"]);
-
-    // A name that is not a name never reaches the wire, and a record full
-    // of control characters is cleaned rather than refused.
-    assert!(client
-        .worker_heartbeat_stage(
-            &job,
-            30_000,
-            Some("e2e"),
-            None,
-            Some(&makepad_asset_client::JobStageInput { name: "Not A Name", ..stage })
-        )
-        .is_err());
-    client
-        .worker_heartbeat_stage(
-            &job,
-            30_000,
-            Some("e2e"),
-            None,
-            Some(&makepad_asset_client::JobStageInput {
-                name: "vision.describe",
-                prompt: "what is\u{7}this?",
-                ..stage
-            }),
-        )
-        .expect("control characters are stripped, not refused");
-    let status = client.job_status(&job).expect("status");
-    let described = status
-        .stages
-        .iter()
-        .find(|st| st.name == "vision.describe")
-        .expect("the cleaned stage landed");
-    assert_eq!(described.prompt, "what isthis?");
-
-    let result = {
-        use makepad_asset_client::json::{obj, s};
-        obj(vec![
-            ("asset_id", s(published.asset_id.to_string())),
-            ("revision", s(published.revision.to_string())),
-        ])
-    };
-    let state = client
-        .worker_succeed(&job, Some("e2e"), Some(&result))
-        .expect("succeed");
-    assert_eq!(state, JobStateDto::Succeeded);
-    let status = client.job_status(&job).expect("status done");
-    assert_eq!(status.state, JobStateDto::Succeeded);
-    assert_eq!(status.result_asset, Some(published.asset_id));
-    assert_eq!(status.result_revision, Some(published.revision));
-
-    // Cancel path on a second job.
-    let job2 = client
-        .enqueue_job(&profile.namespace, &profile.kind, &body)
-        .expect("enqueue 2");
-    assert_eq!(client.cancel_job(&job2).expect("cancel"), 1);
-    assert_eq!(client.job_status(&job2).expect("status cancelled").state, JobStateDto::Cancelled);
-    assert_eq!(client.cancel_job(&job2).expect("cancel again"), 0, "terminal cancel is 0");
-    assert_eq!(client.cancel_job(&foreign_job).expect("cancel foreign"), 1);
+    // The jobs + worker protocol left the store (aicore P7): generation is
+    // client-driven now. Catalog, publish, events and downloads above are the
+    // whole remaining surface.
 
     drop(server);
 }

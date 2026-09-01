@@ -202,6 +202,8 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         enhance_upscale: saved.enhance_upscale.unwrap_or(2),
         enhance_interpolate: saved.enhance_interpolate.unwrap_or(2),
         enhance_flow: saved.enhance_flow.unwrap_or(true),
+        // Loop-ness derives from the preset row at dispatch, never a spec.
+        video_loop: false,
     }
 }
 

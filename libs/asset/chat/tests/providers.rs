@@ -116,6 +116,92 @@ fn qwen_availability_is_honest_per_node() {
     assert!(!p.availability().is_available());
 }
 
+/// The scan must leave a lane-less box for one that advertises decode
+/// lanes: lanes mean a resident model and per-conversation KV, and the
+/// sticky last-good behaviour once kept every turn on a box that reloaded
+/// and re-prefilled the whole context per visit.
+#[test]
+fn qwen_prefers_a_lane_advertising_chat_home() {
+    let mut t = ScriptedFleet::default();
+    // n1 answers first and is perfectly usable — but has no lanes.
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    // n2 is the designated home: same model, lanes advertised.
+    let mut home = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut home {
+        pairs.push((
+            "lanes".into(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(4)),
+                ("lanes_active", Value::Int(0)),
+            ]),
+        ));
+    }
+    t.on_get("http://n2:8765/health", Ok(home));
+    t.on_get(
+        "http://n2:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into(), "http://n2:8765".into()]);
+    match p.availability() {
+        ProviderAvailability::Available { model, detail } => {
+            assert_eq!(model, "qwen3.8-27b");
+            assert!(detail.contains("n2:8765"), "the lane home must win the scan: {detail}");
+        }
+        other => panic!("expected available: {other:?}"),
+    }
+}
+
+/// A home whose every lane is mid-generation queues the turn behind
+/// whatever those lanes are doing; one with a free slot serves now.
+#[test]
+fn qwen_prefers_a_home_with_a_free_lane_over_a_full_one() {
+    let mut t = ScriptedFleet::default();
+    let mut full = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut full {
+        pairs.push((
+            "lanes".into(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(1)),
+                ("lanes_active", Value::Int(1)),
+            ]),
+        ));
+    }
+    t.on_get("http://busy:8765/health", Ok(full));
+    t.on_get(
+        "http://busy:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let mut free = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut free {
+        pairs.push((
+            "lanes".into(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(4)),
+                ("lanes_active", Value::Int(1)),
+            ]),
+        ));
+    }
+    t.on_get("http://calm:8765/health", Ok(free));
+    t.on_get(
+        "http://calm:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://busy:8765".into(), "http://calm:8765".into()]);
+    match p.availability() {
+        ProviderAvailability::Available { detail, .. } => {
+            assert!(detail.contains("calm:8765"), "the free lane must win: {detail}");
+        }
+        other => panic!("expected available: {other:?}"),
+    }
+}
+
 #[test]
 fn qwen_prefers_qwen38_and_reports_the_model() {
     let mut t = ScriptedFleet::default();
@@ -476,7 +562,17 @@ fn qwen_ignores_cached_download_and_token_stages() {
         .unwrap();
     assert!(p.poll().is_empty(), "cached download 100% must stay silent");
     assert!(p.poll().is_empty(), "load 0% must stay silent");
-    assert!(p.poll().is_empty(), "prefill must stay silent");
+    // Prefill SPEAKS now — the user asked for the preload percentage: the
+    // conversation being read back in was the one wait the meter could not
+    // explain, and it read as a hang.
+    let events = p.poll();
+    match events.as_slice() {
+        [ProviderEvent::Status { note, permille }] => {
+            assert_eq!(note, "preloading the conversation 2%");
+            assert_eq!(*permille, 20);
+        }
+        other => panic!("expected one preloading status: {other:?}"),
+    }
 }
 
 #[test]
@@ -488,9 +584,12 @@ fn qwen_probe_caches_and_skips_dead_nodes() {
         "http://n1:8765/models",
         Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
     );
+    // `later` IS probed on the first scan now: a usable box without lanes
+    // is only the fallback, and the scan keeps looking for a lane home
+    // before settling on it.
     t.on_get(
         "http://later:8765/health",
-        Err("should not be probed after a live pick".into()),
+        Err("no lane home here either".into()),
     );
     let seen = t.seen_gets.clone();
     let mut p = FleetQwenChatProvider::new(
@@ -512,6 +611,11 @@ fn qwen_probe_caches_and_skips_dead_nodes() {
             "http://dead:8765/health".to_string(),
             "http://n1:8765/health".to_string(),
             "http://n1:8765/models".to_string(),
+            // n1 is usable but laneless, so the scan looks past it for a
+            // lane home (and retries later's flaky GET once) before falling
+            // back to n1.
+            "http://later:8765/health".to_string(),
+            "http://later:8765/health".to_string(),
         ]
     );
     // Second send must not wait on the dead box again.

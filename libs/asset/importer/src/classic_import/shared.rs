@@ -92,6 +92,13 @@ pub const QUAKE_GITHUB: &str = "https://github.com/id-Software/Quake";
 pub const QUAKE_TERMS_TEXT: &[u8] =
     b"Quake shareware pak0.pak is id Software shareware. Not LibreQuake. Not retail pak1.";
 
+const EA_CNC_HOME: &str = "https://www.ea.com/games/command-and-conquer";
+const EA_CNC_LICENSE: &str = "EA freeware — local use, not redistributable";
+const EA_CNC_CREDITS: &str =
+    "Electronic Arts Command & Conquer freeware release — https://www.ea.com/games/command-and-conquer";
+const EA_CNC_TERMS_TEXT: &[u8] =
+    b"Electronic Arts Command & Conquer freeware data; local use only, not redistributable";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassicSource {
     Freedoom,
@@ -102,9 +109,31 @@ pub enum ClassicSource {
     Quake2,
     Quake3,
     DarkMod,
+    Cnc,
+    RedAlert,
+    TiberianSun,
+    Dune2000,
 }
 
 impl ClassicSource {
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id.trim().to_ascii_lowercase().as_str() {
+            "doom" => Self::Doom,
+            "freedoom" => Self::Freedoom,
+            "quake" => Self::Quake,
+            "librequake" => Self::LibreQuake,
+            "quake2" => Self::Quake2,
+            "quake3" => Self::Quake3,
+            "duke3d" => Self::Duke3d,
+            "darkmod" => Self::DarkMod,
+            "cnc" => Self::Cnc,
+            "ra" => Self::RedAlert,
+            "ts" => Self::TiberianSun,
+            "d2k" => Self::Dune2000,
+            _ => return None,
+        })
+    }
+
     pub fn id(self) -> &'static str {
         match self {
             Self::Freedoom => FREEDOOM_SOURCE_ID,
@@ -115,6 +144,10 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_SOURCE_ID,
             Self::Quake3 => QUAKE3_SOURCE_ID,
             Self::DarkMod => DARKMOD_SOURCE_ID,
+            Self::Cnc => "cnc",
+            Self::RedAlert => "ra",
+            Self::TiberianSun => "ts",
+            Self::Dune2000 => "d2k",
         }
     }
 
@@ -128,6 +161,10 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_SOURCE_TITLE,
             Self::Quake3 => QUAKE3_SOURCE_TITLE,
             Self::DarkMod => DARKMOD_SOURCE_TITLE,
+            Self::Cnc => "Command & Conquer (Tiberian Dawn)",
+            Self::RedAlert => "Command & Conquer: Red Alert",
+            Self::TiberianSun => "Command & Conquer: Tiberian Sun",
+            Self::Dune2000 => "Dune 2000",
         }
     }
 
@@ -141,6 +178,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_LICENSE,
             Self::Quake3 => QUAKE3_LICENSE,
             Self::DarkMod => DARKMOD_LICENSE,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_LICENSE,
         }
     }
 
@@ -154,6 +192,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_TERMS_URL,
             Self::Quake3 => QUAKE3_TERMS_URL,
             Self::DarkMod => DARKMOD_TERMS_URL,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_HOME,
         }
     }
 
@@ -167,6 +206,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_CREDITS,
             Self::Quake3 => QUAKE3_CREDITS,
             Self::DarkMod => DARKMOD_CREDITS,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_CREDITS,
         }
     }
 
@@ -180,6 +220,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_HOME,
             Self::Quake3 => QUAKE3_HOME,
             Self::DarkMod => DARKMOD_HOME,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_HOME,
         }
     }
 
@@ -193,6 +234,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_GITHUB,
             Self::Quake3 => QUAKE3_GITHUB,
             Self::DarkMod => DARKMOD_GITHUB,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_HOME,
         }
     }
 
@@ -206,6 +248,7 @@ impl ClassicSource {
             Self::Quake2 => QUAKE2_TERMS_TEXT,
             Self::Quake3 => QUAKE3_TERMS_TEXT,
             Self::DarkMod => DARKMOD_TERMS_TEXT,
+            Self::Cnc | Self::RedAlert | Self::TiberianSun | Self::Dune2000 => EA_CNC_TERMS_TEXT,
         }
     }
 
@@ -225,6 +268,10 @@ impl ClassicSource {
             Self::Quake2 => "QUAKE2_PACK_ROOT",
             Self::Quake3 => "QUAKE3_PACK_ROOT",
             Self::DarkMod => "DARKMOD_PACK_ROOT",
+            Self::Cnc => "CNC_PACK_ROOT",
+            Self::RedAlert => "RA_PACK_ROOT",
+            Self::TiberianSun => "TS_PACK_ROOT",
+            Self::Dune2000 => "D2K_PACK_ROOT",
         }
     }
 
@@ -249,14 +296,30 @@ impl ClassicSource {
             source_archive: None,
             redistribution: Some(match self {
                 Self::Freedoom | Self::LibreQuake => "attribution-required",
-                Self::Doom | Self::Quake | Self::Duke3d | Self::Quake2 | Self::Quake3 => {
+                Self::Doom
+                | Self::Quake
+                | Self::Duke3d
+                | Self::Quake2
+                | Self::Quake3
+                | Self::Cnc
+                | Self::RedAlert
+                | Self::TiberianSun
+                | Self::Dune2000 => {
                     "user-owned-local"
                 }
                 Self::DarkMod => "non-commercial-sharealike",
             }.into()),
             derivatives: Some(match self {
                 Self::Freedoom | Self::LibreQuake => "allowed",
-                Self::Doom | Self::Quake | Self::Duke3d | Self::Quake2 | Self::Quake3 => {
+                Self::Doom
+                | Self::Quake
+                | Self::Duke3d
+                | Self::Quake2
+                | Self::Quake3
+                | Self::Cnc
+                | Self::RedAlert
+                | Self::TiberianSun
+                | Self::Dune2000 => {
                     "local-preview-only"
                 }
                 Self::DarkMod => "share-alike",

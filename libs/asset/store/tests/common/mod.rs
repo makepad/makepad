@@ -3,6 +3,7 @@
 //! references, so fixtures upload what they reference).
 #![allow(dead_code)]
 
+use makepad_asset_store::variants::JobId;
 use makepad_asset_store::*;
 use makepad_asset_data::*;
 use std::path::PathBuf;

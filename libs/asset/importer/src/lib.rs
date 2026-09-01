@@ -2,9 +2,10 @@
 //! Library surface for the Asset Worker: the licensed pack compiler and the
 //! media-inspection helpers the binary modes share.
 //!
-//! The networked coordinators stay in the binary. This crate exists so the
-//! Asset UI Import page can compile a local Kenney (or later OSS) pack
-//! through the same fail-closed path as `--import-pack`.
+//! This crate exists so the Asset UI Import page can compile a local
+//! Kenney (or later OSS) pack through the same fail-closed path as
+//! `--import-pack`, and so every creator surface shares one product-shaping
+//! path for directly-generated artifacts (`gen_publish`).
 
 pub mod anim_icon;
 pub mod ao_bake;
@@ -12,6 +13,7 @@ pub mod billboard_sheet;
 pub mod vertex_skin;
 pub mod classic_fetch;
 pub mod classic_import;
+pub mod cnc_import;
 pub mod iso9660;
 pub mod tdm_zipsync;
 pub mod doom3_import;
@@ -37,13 +39,12 @@ pub mod skybox;
 // embedded Asset Server.
 pub mod import;
 pub mod watch;
-pub mod coordinator;
+pub mod gen_publish;
 // The wired generation kinds (job kind <-> fleet domain <-> catalog shape)
 // and the profile advertisement built from a live fleet snapshot.
 pub mod gen_kinds;
 pub mod gen_profiles;
 // The per-box claim fan-out + profile announcer both hosts run.
-pub mod gen_service;
 // Splash game folders -> `AssetKind::Game` assets (the sandbox's Games list).
 pub mod games_import;
 // A music directory tree -> `AssetKind::Audio` assets, tagged by folder name

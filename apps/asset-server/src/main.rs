@@ -3,8 +3,8 @@
 //! Parse flags into a [`HostConfig`], start the host, and wait for
 //! SIGINT/SIGTERM to shut it down cleanly. With no flags at all it serves the
 //! checkout's standard store root on ephemeral ports, announces itself on the
-//! LAN, publishes the ai-content library, and coordinates fleet jobs — i.e.
-//! everything the Asset UI's embedded mode does, minus the window.
+//! LAN, and publishes the ai-content library — i.e. everything the Asset
+//! UI's embedded mode does, minus the window.
 //!
 //! See `README.md` beside this file for the deployment runbook.
 
@@ -17,10 +17,11 @@ use std::time::Duration;
 const USAGE: &str = "\
 makepad-asset-server [options]
 
-The standalone, multiplayer-first Asset Server: catalog + CAS, chat broker,
-events hub, job queue, LAN beacon, plus the ai-content library publisher and
-the GPU-fleet job coordinator. Clients (asset-ui, vj, sandbox, workers)
-attach to it and may come and go without ever taking the store down.
+The standalone, multiplayer-first Asset Server: catalog + CAS, events hub,
+game rooms, LAN beacon, plus the ai-content library publisher. Clients
+(asset-ui, vj, sandbox) attach to it and may come and go without ever
+taking the store down. Generation runs in the creating apps over their own
+fleet connections — the store stores.
 
 Options:
   --root <dir>            Server root. Default: $AI_CONTENT_ASSET_ROOT, else
@@ -32,21 +33,9 @@ Options:
   --library <dir>         ai-content library to publish continuously.
                           Default: <checkout>/local/ai_content_library
   --no-library            Do not run the library publisher
-  --no-jobs               Do not run the fleet job coordinator
-  --no-announce           Coordinate jobs, but do not advertise the fleet's
-                          executable profiles on GET /v1/job-profiles
-  --fleet <path>          GPU-box URL list (default: LAN discovery)
   --namespace <ns>        Namespace for published rows (default gen)
   --work <dir>            Parent for the loops' client caches
                           (default: the server root's parent)
-  --chat-fleet <url>      Local Qwen fleet node for the chat broker
-                          (repeatable; default: LAN fleet discovery)
-  --chat-fleet-name <n>   Named fleet the chat broker talks to
-  --chat-max-sessions <n> Live chat sessions this server holds at once
-                          (default 32)
-  --chat-max-sessions-per-owner <n>
-                          Live chat sessions one principal may hold
-                          (default 8)
   --quiet                 No stderr logging
   --help                  This text
 ";
@@ -105,15 +94,8 @@ fn parse_config() -> HostConfig {
     let mut beacon = true;
     let mut library: Option<PathBuf> = None;
     let mut no_library = false;
-    let mut jobs = true;
-    let mut announce = true;
-    let mut fleet_file: Option<PathBuf> = None;
     let mut namespace: Option<String> = None;
     let mut work: Option<PathBuf> = None;
-    let mut chat_fleet_bases: Vec<String> = Vec::new();
-    let mut chat_fleet = String::new();
-    let mut chat_max_sessions = 0usize;
-    let mut chat_max_sessions_per_owner = 0usize;
     let mut log = true;
 
     let value_of = |name: &str, args: &mut dyn Iterator<Item = String>| -> String {
@@ -136,37 +118,8 @@ fn parse_config() -> HostConfig {
             "--no-beacon" => beacon = false,
             "--library" => library = Some(PathBuf::from(value_of("--library", &mut args))),
             "--no-library" => no_library = true,
-            "--no-jobs" => jobs = false,
-            "--no-announce" => announce = false,
-            "--fleet" => fleet_file = Some(PathBuf::from(value_of("--fleet", &mut args))),
             "--namespace" => namespace = Some(value_of("--namespace", &mut args)),
             "--work" => work = Some(PathBuf::from(value_of("--work", &mut args))),
-            "--chat-fleet" => {
-                let value = value_of("--chat-fleet", &mut args);
-                if value.is_empty() {
-                    fail("malformed --chat-fleet");
-                }
-                chat_fleet_bases.push(value);
-            }
-            "--chat-fleet-name" => chat_fleet = value_of("--chat-fleet-name", &mut args),
-            "--chat-max-sessions" => {
-                let value = value_of("--chat-max-sessions", &mut args);
-                chat_max_sessions = value
-                    .parse()
-                    .unwrap_or_else(|_| fail("malformed --chat-max-sessions"));
-                if chat_max_sessions == 0 {
-                    fail("--chat-max-sessions must be at least 1");
-                }
-            }
-            "--chat-max-sessions-per-owner" => {
-                let value = value_of("--chat-max-sessions-per-owner", &mut args);
-                chat_max_sessions_per_owner = value
-                    .parse()
-                    .unwrap_or_else(|_| fail("malformed --chat-max-sessions-per-owner"));
-                if chat_max_sessions_per_owner == 0 {
-                    fail("--chat-max-sessions-per-owner must be at least 1");
-                }
-            }
             "--quiet" => log = false,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -192,9 +145,6 @@ fn parse_config() -> HostConfig {
     } else {
         Some(library.unwrap_or_else(|| checkout_root().join("local/ai_content_library")))
     };
-    config.jobs = jobs;
-    config.announce = announce;
-    config.fleet_file = fleet_file;
     if let Some(namespace) = namespace {
         if namespace.is_empty() {
             fail("--namespace needs a value");
@@ -204,10 +154,6 @@ fn parse_config() -> HostConfig {
     if let Some(work) = work {
         config.work_root = work;
     }
-    config.chat_fleet_bases = chat_fleet_bases;
-    config.chat_fleet = chat_fleet;
-    config.chat_max_sessions = chat_max_sessions;
-    config.chat_max_sessions_per_owner = chat_max_sessions_per_owner;
     config.log = log;
     config
 }
