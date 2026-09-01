@@ -117,8 +117,11 @@ impl VoxelMode {
     }
 }
 
-/// An editable region + its look. Ops apply only to sites inside a volume;
-/// everything outside stays pure heightfield forever.
+/// A declared style region: chunks whose centre falls inside pick this
+/// volume's mesher ([`VoxelField::chunk_mode`]). Historically ops applied
+/// ONLY inside declared volumes; the world is now implicitly editable
+/// everywhere (one unified destructible ground), so volumes are about LOOK
+/// (smooth vs blocky), not permission.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelVolume {
     pub min: Vec3f,
@@ -184,6 +187,22 @@ pub enum VoxelOp {
     },
     /// `material` 0 = remove the block.
     SetBlock { x: i32, y: i32, z: i32, material: u8 },
+    /// Carve a straight capsule from `from` to `to` (a tunnel through a
+    /// hill). Materializes only chunks the capsule actually passes through,
+    /// never the whole segment AABB.
+    Tunnel { from: Vec3f, to: Vec3f, r: f32 },
+    /// Foundation-press composition: open air above the plane `y` inside the
+    /// x/z rectangle `min..max`, up to `max.y`. Emitted when a structure pad
+    /// lies under materialized chunks — the voxel twin of the heightfield
+    /// press. Never materializes new chunks (untouched ground already obeys
+    /// the pressed heightfield implicitly).
+    Press { min: Vec3f, max: Vec3f, y: f32 },
+    /// Macro landform (mountain / valley / crater / ...): the heightfield
+    /// part is applied by [`crate::landform`]; the voxel part composes into
+    /// already-materialized chunks. `pos.y` is the captured base height,
+    /// `kind` is [`crate::landform::LandKind::to_u8`]. Never dispatched
+    /// through [`VoxelField::apply_op`] — the world-level appliers own it.
+    Landform { pos: Vec3f, kind: u8, r: f32, height: f32, seed: u32 },
 }
 
 /// One remeshed chunk, in the renderer's 16-float PbrVertex layout
@@ -238,6 +257,12 @@ pub struct VoxelField {
     /// a different cell keep the field's (logged by the verb).
     pub cell: f32,
     pub palette: Vec<Vec4f>,
+    /// Material the top ~2.5 cells of base ground materialize as (the rest
+    /// is [`BASE_MATERIAL`] dirt). Defaults to dirt — byte-identical to the
+    /// original behavior; the implicit whole-world field sets it to the
+    /// grass slot so an untouched materialized surface reads as the map,
+    /// and digging exposes dirt beneath.
+    pub surface_material: u8,
     pub volumes: Vec<VoxelVolume>,
     /// Bumped when volumes / palette / cell change — the session layer
     /// rebroadcasts the structure snapshot when it moves.
@@ -255,6 +280,23 @@ pub struct VoxelField {
     /// Chunks materialized since the session last drained — late-join /
     /// first-sight chunk snapshots ride these.
     pub fresh_chunks: Vec<ChunkKey>,
+    /// Macro landform ops applied to this world, in order (heightfield-scale
+    /// terrain surgery — see [`crate::landform`]). Kept across script
+    /// re-evals so the mountains an AI raised REPLAY onto the freshly
+    /// rebuilt heightfield; ride the structure snapshot on the wire so late
+    /// joiners and reloading clients replay the same list.
+    pub land_ops: Vec<VoxelOp>,
+    /// Set when `land_ops` must re-apply (after a re-eval rebuilt the
+    /// terrain, or a structure snapshot delivered the list). Drained by
+    /// [`crate::landform::replay_land_ops`] once a terrain exists.
+    pub land_replay_pending: bool,
+    /// Ops since the last persistence flush — drained by the host app's
+    /// DEBOUNCED terrain saver (parallel to `pending_ops`, which the session
+    /// drains every tick for the wire). Only the authority records here.
+    pub persist_ops: Vec<VoxelOp>,
+    /// The persist queue hit its cap and was cleared — the saver must cut a
+    /// full snapshot instead of appending a tail.
+    pub persist_overflow: bool,
     /// Terrain revision the heightfield hole-punch was last applied against.
     pub punch_rev: Option<u64>,
     /// Monotonic mesh revision source.
@@ -268,6 +310,7 @@ impl VoxelField {
         Self {
             cell: if cell.is_finite() { cell.clamp(0.1, 4.0) } else { 0.5 },
             palette: default_palette(),
+            surface_material: BASE_MATERIAL,
             volumes: Vec::new(),
             structure_rev: 1,
             chunks: BTreeMap::new(),
@@ -275,6 +318,10 @@ impl VoxelField {
             dirty: Vec::new(),
             pending_ops: Vec::new(),
             fresh_chunks: Vec::new(),
+            land_ops: Vec::new(),
+            land_replay_pending: false,
+            persist_ops: Vec::new(),
+            persist_overflow: false,
             punch_rev: None,
             mesh_rev: 0,
             cap_logged: false,
@@ -511,6 +558,32 @@ impl VoxelField {
         best
     }
 
+    /// THE surface-seam query (world-surface composition): the voxel layer's
+    /// surface height at (x, z) IF it owns the surface there, else `None`
+    /// (the heightfield's business). Ownership is the punch rule: the base
+    /// surface crossing at `base_h` — its air site AND the solid site below —
+    /// must both be materialized. A deep tunnel chunk under an untouched
+    /// ridge owns nothing; a pit carved at the surface, or a mound filled on
+    /// top of it, owns the column and answers with the topmost air→solid
+    /// crossing in materialized data. `None` also when the column was carved
+    /// clean through everything materialized (the caller falls back to the
+    /// heightfield, which is what the base layer below would say).
+    pub fn surface_at(&self, x: f32, z: f32, base_h: f32) -> Option<f32> {
+        if self.chunks.is_empty() {
+            return None;
+        }
+        let air = self.world_site(vec3f(x, base_h, z));
+        let solid = [air[0], air[1] - 1, air[2]];
+        if !self.chunks.contains_key(&ChunkKey::of_site(air))
+            || !self.chunks.contains_key(&ChunkKey::of_site(solid))
+        {
+            return None;
+        }
+        // Scan from above every materialized chunk: floor_probe clamps its
+        // start into the column's own top.
+        self.floor_probe(x, z, 1.0e9)
+    }
+
     // ── ops ─────────────────────────────────────────────────────────────
 
     /// Site AABB an op can touch (inclusive), for chunk materialization and
@@ -532,11 +605,70 @@ impl VoxelField {
                 )
             }
             VoxelOp::SetBlock { x, y, z, .. } => ([x, y, z], [x + 1, y + 1, z + 1]),
+            VoxelOp::Tunnel { from, to, r } => {
+                let r = r.abs();
+                let lo = vec3f(
+                    from.x.min(to.x) - r,
+                    from.y.min(to.y) - r,
+                    from.z.min(to.z) - r,
+                );
+                let hi = vec3f(
+                    from.x.max(to.x) + r,
+                    from.y.max(to.y) + r,
+                    from.z.max(to.z) + r,
+                );
+                (
+                    self.world_site(lo),
+                    [
+                        (hi.x / self.cell).ceil() as i32,
+                        (hi.y / self.cell).ceil() as i32,
+                        (hi.z / self.cell).ceil() as i32,
+                    ],
+                )
+            }
+            VoxelOp::Press { min, max, y } => (
+                self.world_site(vec3f(min.x, y - self.cell, min.z)),
+                [
+                    (max.x / self.cell).ceil() as i32,
+                    (max.y / self.cell).ceil() as i32,
+                    (max.z / self.cell).ceil() as i32,
+                ],
+            ),
+            // Landform never reaches the generic path (the world-level
+            // appliers in `crate::landform` own it); bounds are its region.
+            VoxelOp::Landform { pos, r, height, .. } => {
+                let reach = r.abs() * 2.1;
+                let h = height.abs() * 1.2 + 2.0 * self.cell;
+                (
+                    self.world_site(vec3f(pos.x - reach, pos.y - h, pos.z - reach)),
+                    {
+                        let hi = vec3f(pos.x + reach, pos.y + h, pos.z + reach);
+                        [
+                            (hi.x / self.cell).ceil() as i32,
+                            (hi.y / self.cell).ceil() as i32,
+                            (hi.z / self.cell).ceil() as i32,
+                        ]
+                    },
+                )
+            }
         }
     }
 
-    fn site_in_volumes(&self, w: Vec3f) -> bool {
-        self.volumes.iter().any(|v| v.contains(w))
+    /// Squared distance from a point to the segment `a..b` — the Tunnel
+    /// capsule test, and the chunk filter that keeps a long tunnel from
+    /// materializing its whole AABB.
+    fn seg_dist_sq(p: Vec3f, a: Vec3f, b: Vec3f) -> f32 {
+        let ab = b - a;
+        let len_sq = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+        let t = if len_sq > 1.0e-8 {
+            let ap = p - a;
+            ((ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / len_sq).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let c = vec3f(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+        let d = p - c;
+        d.x * d.x + d.y * d.y + d.z * d.z
     }
 
     /// Materialize the chunk containing `s` from the base layer, if the cap
@@ -568,7 +700,13 @@ impl VoxelField {
                     let d = Self::quantize((y - h) / self.cell);
                     let at = site_index(lx, ly, lz);
                     density[at] = d;
-                    material[at] = if d < 0 { BASE_MATERIAL } else { 0 };
+                    material[at] = if d < 0 {
+                        // Topsoil band: the untouched surface keeps the
+                        // map's look; digging exposes dirt beneath.
+                        if h - y < self.cell * 2.5 { self.surface_material } else { BASE_MATERIAL }
+                    } else {
+                        0
+                    };
                 }
             }
         }
@@ -608,53 +746,69 @@ impl VoxelField {
         log: &mut Vec<String>,
     ) {
         let (lo, hi) = self.op_site_bounds(&op);
-        // Materialize every chunk the op's bounds touch and that intersects
-        // a volume. Sorted chunk-key order (x, then y, then z loops).
-        if materialize {
+        // Materialize every chunk the op's bounds touch — the WHOLE world is
+        // implicitly editable; lazy materialization is what keeps that free
+        // until an edit lands. Sorted chunk-key order (x, then y, then z).
+        // Press never materializes (it only removes solid that exists), and
+        // Tunnel materializes only chunks its capsule actually passes near —
+        // a long diagonal tunnel must not swallow its whole AABB.
+        let wants_chunks = !matches!(op, VoxelOp::Press { .. });
+        if materialize && wants_chunks {
             let k0 = ChunkKey::of_site(lo);
             let k1 = ChunkKey::of_site(hi);
             for kx in k0.x..=k1.x {
                 for ky in k0.y..=k1.y {
                     for kz in k0.z..=k1.z {
                         let key = ChunkKey { x: kx, y: ky, z: kz };
-                        // Only chunks whose region intersects a volume.
-                        let cmin = self.site_world(key.base());
-                        let cmax = self.site_world([
-                            key.base()[0] + CHUNK,
-                            key.base()[1] + CHUNK,
-                            key.base()[2] + CHUNK,
-                        ]);
-                        let hit = self.volumes.iter().any(|v| {
-                            cmin.x <= v.max.x
-                                && cmax.x >= v.min.x
-                                && cmin.y <= v.max.y
-                                && cmax.y >= v.min.y
-                                && cmin.z <= v.max.z
-                                && cmax.z >= v.min.z
-                        });
-                        if hit {
-                            self.materialize(key, base, log);
+                        if let VoxelOp::Tunnel { from, to, r } = op {
+                            let cmin = self.site_world(key.base());
+                            let half = CHUNK as f32 * self.cell * 0.5;
+                            let center = vec3f(cmin.x + half, cmin.y + half, cmin.z + half);
+                            // Conservative: chunk half-diagonal as slack.
+                            let slack = r.abs() + half * 1.7321 + self.cell;
+                            if Self::seg_dist_sq(center, from, to) > slack * slack {
+                                continue;
+                            }
                         }
+                        self.materialize(key, base, log);
                     }
                 }
             }
         }
 
-        // The edit itself, site by site, existing chunks only.
+        // The edit itself — chunk-major over materialized chunks whose site
+        // range intersects the op bounds (a per-site map lookup over a long
+        // tunnel's AABB would be millions of misses; the chunk set is ≤
+        // MAX_CHUNKS by construction).
         let mut changed_any = false;
-        for sz in lo[2]..=hi[2] {
-            for sy in lo[1]..=hi[1] {
-                for sx in lo[0]..=hi[0] {
+        let cell = self.cell;
+        let keys: Vec<ChunkKey> = self
+            .chunks
+            .keys()
+            .filter(|k| {
+                let b = k.base();
+                b[0] <= hi[0]
+                    && b[0] + CHUNK > lo[0]
+                    && b[1] <= hi[1]
+                    && b[1] + CHUNK > lo[1]
+                    && b[2] <= hi[2]
+                    && b[2] + CHUNK > lo[2]
+            })
+            .copied()
+            .collect();
+        for key in keys {
+            let b = key.base();
+            let (x0, x1) = (lo[0].max(b[0]), hi[0].min(b[0] + CHUNK - 1));
+            let (y0, y1) = (lo[1].max(b[1]), hi[1].min(b[1] + CHUNK - 1));
+            let (z0, z1) = (lo[2].max(b[2]), hi[2].min(b[2] + CHUNK - 1));
+            let Some(chunk) = self.chunks.get_mut(&key) else {
+                continue;
+            };
+            for sz in z0..=z1 {
+                for sy in y0..=y1 {
+                    for sx in x0..=x1 {
                     let s = [sx, sy, sz];
-                    let w = self.site_world(s);
-                    if !self.site_in_volumes(w) {
-                        continue;
-                    }
-                    let key = ChunkKey::of_site(s);
-                    let Some(chunk) = self.chunks.get_mut(&key) else {
-                        continue;
-                    };
-                    let b = key.base();
+                    let w = vec3f(s[0] as f32 * cell, s[1] as f32 * cell, s[2] as f32 * cell);
                     let at = site_index(sx - b[0], sy - b[1], sz - b[2]);
                     let old_d = chunk.density[at];
                     let old_m = chunk.material[at];
@@ -665,13 +819,13 @@ impl VoxelField {
                             match mode {
                                 DigMode::Carve => {
                                     // SDF subtract: d = max(d, -(sphere sdf)).
-                                    let q = Self::quantize((r - dist) / self.cell);
+                                    let q = Self::quantize((r - dist) / cell);
                                     let nd = old_d.max(q);
                                     (nd, if nd >= 0 { 0 } else { old_m })
                                 }
                                 DigMode::Fill => {
                                     // SDF union: d = min(d, sphere sdf).
-                                    let q = Self::quantize((dist - r) / self.cell);
+                                    let q = Self::quantize((dist - r) / cell);
                                     let nd = old_d.min(q);
                                     let nm = if dist < r && nd < 0 {
                                         material.max(1)
@@ -682,7 +836,7 @@ impl VoxelField {
                                 }
                                 DigMode::Flatten => {
                                     if dist < r {
-                                        let nd = Self::quantize((w.y - pos.y) / self.cell);
+                                        let nd = Self::quantize((w.y - pos.y) / cell);
                                         let nm = if nd < 0 {
                                             if old_d < 0 { old_m } else { material.max(1) }
                                         } else {
@@ -706,12 +860,34 @@ impl VoxelField {
                                 (old_d, old_m)
                             }
                         }
+                        VoxelOp::Tunnel { from, to, r } => {
+                            // Capsule subtract: air within r of the segment.
+                            let dist = Self::seg_dist_sq(w, from, to).sqrt();
+                            let q = Self::quantize((r - dist) / cell);
+                            let nd = old_d.max(q);
+                            (nd, if nd >= 0 { 0 } else { old_m })
+                        }
+                        VoxelOp::Press { min, max, y } => {
+                            // Open air above the pad plane inside the box —
+                            // the voxel twin of the heightfield press.
+                            if w.x >= min.x && w.x <= max.x && w.z >= min.z && w.z <= max.z {
+                                let q = Self::quantize((w.y - y) / cell);
+                                let nd = old_d.max(q);
+                                (nd, if nd >= 0 { 0 } else { old_m })
+                            } else {
+                                (old_d, old_m)
+                            }
+                        }
+                        // World-level appliers own it (crate::landform);
+                        // reaching here is a routing bug, kept harmless.
+                        VoxelOp::Landform { .. } => (old_d, old_m),
                     };
                     if new_d != old_d || new_m != old_m {
                         chunk.density[at] = new_d;
                         chunk.material[at] = new_m;
                         changed_any = true;
                         chunk.rev += 1;
+                    }
                     }
                 }
             }
@@ -739,6 +915,135 @@ impl VoxelField {
             if self.pending_ops.len() < 65536 {
                 self.pending_ops.push(op);
             }
+            // The persistence tail (drained by the app's debounced saver).
+            if self.persist_ops.len() < 8192 {
+                self.persist_ops.push(op);
+            } else {
+                self.persist_overflow = true;
+                self.persist_ops.clear();
+            }
+        }
+    }
+
+    /// Landform composition over the voxel layer ([`crate::landform`]):
+    /// apply a per-column surface-target shape to every materialized chunk
+    /// inside the x/z region, first materializing — in columns that ALREADY
+    /// hold chunks, never spreading to untouched ones — the chunks covering
+    /// the `y_lo..y_hi` target band, so a mountain raised over a dug-open
+    /// pit owns its new surface. `target(x, z)` returns `(raise_to,
+    /// lower_to)`: raise unions solid below its height (min), lower carves
+    /// air above its height (max) — both idempotent; both `Some` assigns.
+    pub fn compose_surface_targets(
+        &mut self,
+        min_x: f32,
+        max_x: f32,
+        min_z: f32,
+        max_z: f32,
+        y_lo: f32,
+        y_hi: f32,
+        base: Option<&Terrain>,
+        log: &mut Vec<String>,
+        target: &mut dyn FnMut(f32, f32) -> (Option<f32>, Option<f32>),
+    ) {
+        if self.chunks.is_empty() {
+            return;
+        }
+        let cell = self.cell;
+        let span = CHUNK as f32 * cell;
+        let cols: std::collections::BTreeSet<(i32, i32)> = self
+            .chunks
+            .keys()
+            .filter(|k| {
+                let x0 = k.x as f32 * span;
+                let z0 = k.z as f32 * span;
+                x0 <= max_x && x0 + span >= min_x && z0 <= max_z && z0 + span >= min_z
+            })
+            .map(|k| (k.x, k.z))
+            .collect();
+        if cols.is_empty() {
+            return;
+        }
+        let ky0 = (y_lo / span).floor() as i32;
+        let ky1 = (y_hi / span).floor() as i32;
+        for &(kx, kz) in &cols {
+            for ky in ky0..=ky1 {
+                self.materialize(ChunkKey { x: kx, y: ky, z: kz }, base, log);
+            }
+        }
+        let keys: Vec<ChunkKey> = self
+            .chunks
+            .keys()
+            .filter(|k| cols.contains(&(k.x, k.z)))
+            .copied()
+            .collect();
+        let mut changed_keys: Vec<ChunkKey> = Vec::new();
+        for key in keys {
+            let b = key.base();
+            let Some(chunk) = self.chunks.get_mut(&key) else {
+                continue;
+            };
+            let mut changed = false;
+            for lz in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    let x = (b[0] + lx) as f32 * cell;
+                    let z = (b[2] + lz) as f32 * cell;
+                    if x < min_x || x > max_x || z < min_z || z > max_z {
+                        continue;
+                    }
+                    let (raise, lower) = target(x, z);
+                    if raise.is_none() && lower.is_none() {
+                        continue;
+                    }
+                    for ly in 0..CHUNK {
+                        let y = (b[1] + ly) as f32 * cell;
+                        let at = site_index(lx, ly, lz);
+                        let old_d = chunk.density[at];
+                        let old_m = chunk.material[at];
+                        let mut nd = old_d;
+                        let mut nm = old_m;
+                        if let Some(t) = raise {
+                            let q = Self::quantize((y - t) / cell);
+                            if q < nd {
+                                nd = q;
+                            }
+                            if nd < 0 && old_d >= 0 {
+                                nm = BASE_MATERIAL;
+                            }
+                        }
+                        if let Some(t) = lower {
+                            let q = Self::quantize((y - t) / cell);
+                            if q > nd {
+                                nd = q;
+                            }
+                            if nd >= 0 {
+                                nm = 0;
+                            }
+                        }
+                        if nd != old_d || nm != old_m {
+                            chunk.density[at] = nd;
+                            chunk.material[at] = nm;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                chunk.rev += 1;
+                changed_keys.push(key);
+            }
+        }
+        for key in changed_keys {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let k = ChunkKey { x: key.x + dx, y: key.y + dy, z: key.z + dz };
+                        if self.chunks.contains_key(&k) {
+                            self.mark_dirty(k);
+                        }
+                    }
+                }
+            }
+            self.punch_rev = None;
         }
     }
 
@@ -864,6 +1169,9 @@ impl VoxelField {
         self.punch_rev = None;
         self.pending_ops.clear();
         self.fresh_chunks.clear();
+        // Landforms are player state like the chunks: the re-eval rebuilds
+        // the authored heightfield, then the list replays onto it.
+        self.land_replay_pending = !self.land_ops.is_empty();
     }
 
     // ── meshing (T2/T3/T7) ──────────────────────────────────────────────
@@ -940,8 +1248,22 @@ impl VoxelField {
                         }
                         None => match base {
                             BaseSample::World(terrain) => {
-                                let d = self.base_density(s, terrain);
-                                (d, if d < 0 { BASE_MATERIAL } else { 0 })
+                                let w = self.site_world(s);
+                                let h = terrain
+                                    .and_then(|t| t.height_at(w.x, w.z))
+                                    .unwrap_or(0.0);
+                                let d = Self::quantize((w.y - h) / self.cell);
+                                let m = if d < 0 {
+                                    // Same topsoil rule as materialize().
+                                    if h - w.y < self.cell * 2.5 {
+                                        self.surface_material
+                                    } else {
+                                        BASE_MATERIAL
+                                    }
+                                } else {
+                                    0
+                                };
+                                (d, m)
                             }
                             BaseSample::Clamp => {
                                 // Clamp into this chunk's own site range.
@@ -1518,6 +1840,10 @@ fn punch_chunk(
 /// so implicit samples clamp) — both sides derive meshes locally; only field
 /// data crosses the wire. A world without a field returns immediately.
 pub fn update_world_voxel(world: &mut crate::world::GameWorld, authority: bool) {
+    // Landform replay: after a re-eval rebuilt the heightfield (or a
+    // structure snapshot delivered the list), re-apply the recorded macro
+    // landforms — heightfield only; the chunks already carry their history.
+    crate::landform::replay_land_ops(world);
     if world.terrain.is_some() {
         let needs_punch = match (&world.voxel, &world.terrain) {
             (Some(v), Some(t)) => v.punch_rev != Some(t.revision),
@@ -1641,10 +1967,65 @@ mod tests {
     }
 
     #[test]
-    fn edits_outside_volumes_are_rejected() {
-        let mut f = field_with_volume(VoxelMode::Smooth);
+    fn the_whole_world_is_implicitly_editable() {
+        // No declared volume at all: the main ground is one world-spanning
+        // editable volume. An edit far from anywhere materializes exactly
+        // the chunks under the brush and nothing else.
+        let mut f = VoxelField::new(0.5);
+        assert_eq!(f.chunk_count(), 0, "unedited field must store nothing");
         dig(&mut f, vec3f(500.0, 0.0, 0.0), 3.0, DigMode::Carve);
-        assert_eq!(f.chunk_count(), 0, "edit outside every volume materialized");
+        assert!(f.chunk_count() > 0, "dig without a volume did not materialize");
+        assert!(
+            f.chunk_count() <= 27,
+            "dig materialized far beyond the brush: {}",
+            f.chunk_count()
+        );
+        assert!(f.is_carved_air(vec3f(500.0, -1.0, 0.0)), "carve did not open air");
+    }
+
+    #[test]
+    fn tunnel_materializes_the_capsule_not_the_aabb() {
+        let mut f = VoxelField::new(0.5);
+        let mut log = Vec::new();
+        // A long diagonal tunnel: the AABB covers ~13×13 chunk columns, the
+        // capsule itself passes through only a corridor of them.
+        f.apply_op(
+            VoxelOp::Tunnel {
+                from: vec3f(-90.0, -3.0, -90.0),
+                to: vec3f(90.0, -3.0, 90.0),
+                r: 2.5,
+            },
+            None,
+            true,
+            true,
+            &mut log,
+        );
+        assert!(log.is_empty(), "{log:?}");
+        let n = f.chunk_count();
+        assert!(n > 0, "tunnel materialized nothing");
+        assert!(n < 200, "tunnel swallowed its AABB: {n} chunks");
+        // The bore is open along the segment, closed off to the side.
+        assert!(f.is_carved_air(vec3f(0.0, -3.0, 0.0)), "bore not open");
+        assert!(!f.is_carved_air(vec3f(0.0, -3.0, 40.0)), "carved far off axis");
+    }
+
+    #[test]
+    fn surface_seam_reports_pits_and_mounds_but_not_deep_tunnels() {
+        let mut f = VoxelField::new(0.5);
+        // Base = ground plane y 0. A pit at the surface owns its column.
+        dig(&mut f, vec3f(0.0, 0.0, 0.0), 3.0, DigMode::Carve);
+        let pit = f.surface_at(0.0, 0.0, 0.0).expect("pit does not own surface");
+        assert!(pit < -1.0, "pit surface {pit} not below ground");
+        // A mound filled on top of the surface answers with its top.
+        dig(&mut f, vec3f(20.0, 1.0, 0.0), 3.0, DigMode::Fill);
+        let mound = f.surface_at(20.0, 0.0, 0.0).expect("mound does not own surface");
+        assert!(mound > 1.0, "mound surface {mound} not above ground");
+        // A deep tunnel far below leaves the surface to the heightfield.
+        dig(&mut f, vec3f(-40.0, -30.0, 0.0), 3.0, DigMode::Carve);
+        assert!(
+            f.surface_at(-40.0, 0.0, 0.0).is_none(),
+            "deep tunnel stole surface ownership"
+        );
     }
 
     #[test]

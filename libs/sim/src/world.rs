@@ -219,12 +219,32 @@ impl GameWorld {
     /// grounded on the terrain today grounds on a map's floor tomorrow
     /// without learning what a map is.
     pub fn ground_height_at(&self, x: f32, z: f32, near_y: f32) -> Option<f32> {
-        if let Some(t) = self.terrain.as_ref() {
-            if let Some(h) = t.height_at(x, z) {
-                return Some(h);
-            }
+        if let Some(h) = self.surface_height_at(x, z) {
+            return Some(h);
         }
         self.level.as_ref().and_then(|level| level.ground_under(x, z, near_y))
+    }
+
+    /// THE world-surface seam: composed ground height at (x, z) —
+    /// heightfield where no voxel chunk owns the surface, voxel surface
+    /// where one does (a dug pit answers with its floor, a filled mound or
+    /// a landform raised over carved ground with its top; a deep tunnel
+    /// under an untouched ridge changes nothing). Everything that grounds
+    /// gameplay on "the terrain" — spawns, draping, scatter, AI ground
+    /// probes — samples through here so terrain edits compose everywhere
+    /// at once. `None` outside the heightfield (and outside any voxel
+    /// ownership): flat/streamed worlds keep their own floor rules.
+    pub fn surface_height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let base = self.terrain.as_ref().and_then(|t| t.height_at(x, z));
+        if let Some(v) = self.voxel.as_deref() {
+            if v.chunk_count() > 0 {
+                // No terrain = the voxel base layer's y=0 ground plane.
+                if let Some(h) = v.surface_at(x, z, base.unwrap_or(0.0)) {
+                    return Some(h);
+                }
+            }
+        }
+        base
     }
 
     /// A world with the canonical starting camera (the values the gamemaker
@@ -537,18 +557,25 @@ impl GameWorld {
     /// Apply one voxel edit op with full authority: materialize chunks from
     /// the base heightfield under the brush, mutate, queue for replication.
     /// The verb layer and the host both come through here, in tick order —
-    /// which IS the determinism story (mix.md D5: edits are ops). No-op
-    /// without a field (declare a `terrain_volume` first).
+    /// which IS the determinism story (mix.md D5: edits are ops). The whole
+    /// world is implicitly editable: a first edit on a world without a
+    /// field creates one (default lattice; `game.terrain_volume` still
+    /// pre-creates with finer cells/palette). Landform ops route to
+    /// [`crate::landform`], which owns their heightfield/voxel composition.
     pub fn apply_voxel_op(&mut self, op: crate::voxel::VoxelOp) {
+        if let crate::voxel::VoxelOp::Landform { .. } = op {
+            crate::landform::host_apply_landform(self, op);
+            return;
+        }
         let GameWorld {
             voxel,
             terrain,
             log_pending,
             ..
         } = self;
-        if let Some(field) = voxel.as_mut() {
-            field.apply_op(op, terrain.as_ref(), true, true, log_pending);
-        }
+        let field = voxel
+            .get_or_insert_with(|| Box::new(crate::voxel::VoxelField::new(0.5)));
+        field.apply_op(op, terrain.as_ref(), true, true, log_pending);
     }
 }
 

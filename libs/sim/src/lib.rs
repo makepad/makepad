@@ -20,6 +20,7 @@ pub mod dynamics;
 pub mod entity;
 pub mod heading;
 pub mod hud;
+pub mod landform;
 pub mod level_solid;
 pub mod nav;
 pub mod particles;
@@ -46,6 +47,7 @@ pub use hud::{
     layout as hud_layout, Crosshair, CrosshairStyle, HudAlign, HudDoc, HudElement, HudKind,
     HudLine, HudPlaced, HudPulse, HudStack, HudValue,
 };
+pub use landform::LandKind;
 pub use nav::{FlowField, NavAgent, NavMap};
 pub use particles::*;
 pub use player::*;

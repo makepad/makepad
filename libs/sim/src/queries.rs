@@ -205,7 +205,13 @@ pub fn camera_path_limit(
         let p = origin + dir * t;
         if let Some(terrain) = &world.terrain {
             if let Some(h) = terrain.height_at(p.x, p.z) {
-                if p.y < h + 0.2 {
+                // Inside carved-open voxel air (a tunnel under this ground)
+                // the heightfield is not a wall — the camera may boom there.
+                let carved = world
+                    .voxel
+                    .as_deref()
+                    .map_or(false, |v| v.is_carved_air(p));
+                if p.y < h + 0.2 && !carved {
                     return (t - clearance).max(minimum).min(distance);
                 }
             }

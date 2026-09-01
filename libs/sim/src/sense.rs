@@ -102,10 +102,9 @@ pub fn ground_ahead(
     }
     let probe = vec3f(pos.x + dir.x / len * ahead, pos.y, pos.z + dir.z / len * ahead);
     let feet = pos.y - half.y;
-    let mut ground = world
-        .terrain
-        .as_ref()
-        .and_then(|t| t.height_at(probe.x, probe.z));
+    // Composed world surface: an NPC at a dug pit's edge sees the pit floor,
+    // not the pre-dig heightfield it would happily walk out onto.
+    let mut ground = world.surface_height_at(probe.x, probe.z);
     for e in &world.entities {
         if !blocks_movement(e) {
             continue;
