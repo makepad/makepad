@@ -1219,6 +1219,7 @@ pub fn validate_loras_for_backend(
 
 /// One generated output. `content_type` drives the `/artifact` response;
 /// `ext` names the file on disk.
+#[derive(Clone, Debug)]
 pub struct ArtifactData {
     pub content_type: &'static str,
     pub ext: &'static str,
@@ -1562,13 +1563,13 @@ pub fn backend_live_supported(spec: &ModelSpec) -> bool {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
-        "body" => true,
         "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         // The vision domain rides the same llama session + the mmproj tower,
         // so it is compiled in exactly when the LLM is.
         "vision" => cfg!(feature = "llm"),
         "ocr" => cfg!(feature = "llm"),
+        "notes" => cfg!(feature = "notes-native"),
         "kokoro" => cfg!(feature = "tts"),
         "whisper" => cfg!(feature = "stt"),
         "indextts" => cfg!(feature = "indextts"),
@@ -1578,6 +1579,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "moss" => cfg!(feature = "audio"),
         "woosh" => cfg!(feature = "audio"),
         "ace" => cfg!(feature = "audio"),
+        "beats" => cfg!(feature = "beats-native"),
         "trellis" => cfg!(feature = "mesh"),
         "paint" | "paint-test" => cfg!(feature = "paint"),
         "matte-native" => cfg!(feature = "matte-native"),
@@ -1640,9 +1642,6 @@ pub fn backend_provisioned(name: &str) -> bool {
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),
         "ocr" => crate::vision_backend::vision_provisioned(),
-        "body" => {
-            crate::body_backend::body_provisioned() || cfg!(feature = "body-native")
-        }
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "body-native" => cfg!(feature = "body-native"),
@@ -1770,12 +1769,18 @@ pub fn model_availability(
 
 pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, AssetAiError> {
     match spec.backend.as_str() {
+        #[cfg(feature = "notes-native")]
+        "notes" => Ok(Box::new(crate::notes_backend::NotesBackend::new(&spec.id))),
+        #[cfg(not(feature = "notes-native"))]
+        "notes" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'notes-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "paint")]
         "paint" | "paint-test" => Ok(Box::new(crate::paint_backend::PaintBackend::new(spec))),
         "testpattern" => Ok(Box::new(crate::testpattern::TestPatternBackend::new(
             &spec.id,
         ))),
-        "body" => Ok(Box::new(crate::body_backend::BodyBackend::new(&spec.id))),
         #[cfg(feature = "body-native")]
         "body-native" => Ok(Box::new(
             crate::body_native_backend::BodyNativeBackend::new_native(&spec.id),
@@ -1885,6 +1890,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(feature = "audio")]
         "ace" => Ok(Box::new(crate::ace_backend::AceBackend::new_ace(&spec.id))),
+        #[cfg(feature = "beats-native")]
+        "beats" => Ok(Box::new(crate::beats_backend::BeatsBackend::new(&spec.id))),
+        #[cfg(not(feature = "beats-native"))]
+        "beats" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'beats-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(not(feature = "audio"))]
         "moss" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'audio' cargo feature",
@@ -2084,11 +2096,6 @@ mod tests {
         // Development machines without a VRAM probe retain the previous
         // behavior: absence of evidence is not a fabricated hard limit.
         assert!(model_availability(&model, &GpuInfo::default(), 2 * 1024).is_ok());
-    }
-
-    #[test]
-    fn body_backend_is_compiled() {
-        assert!(backend_compiled("body"));
     }
 
     #[test]
