@@ -1,0 +1,10 @@
+[package]
+name = "makepad-score-pdf"
+version = "1.0.0"
+edition = "2021"
+description = "Lossless PDF score display lists, semantic recovery, and reversible local splicing"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-pdf-parse = { path = "../pdf_parse", version = "1.0.0" }
+makepad-score = { path = "../score", version = "1.0.0" }

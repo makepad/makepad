@@ -1,0 +1,21 @@
+[package]
+name = "makepad-score-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Professional progressively-disclosed music notation UI for Makepad"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "score_ui"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-score = { path = "../score", version = "1.0.0" }
+makepad-score-layout = { path = "../score_layout", version = "0.1.0" }
+makepad-score-render = { path = "../score_render", version = "0.1.0" }
+makepad-score-play = { path = "../score_play", version = "0.1.0" }
+makepad-soundfont = { path = "../soundfont", version = "0.1.0" }
+makepad-piano-model = { path = "../piano_model", version = "0.1.0" }
+makepad-score-import = { path = "../score_import", version = "1.0.0" }
+ttf-parser = { path = "../ttf-parser" }
+

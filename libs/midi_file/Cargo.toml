@@ -1,0 +1,8 @@
+[package]
+name = "makepad-midi-file"
+version = "1.0.0"
+edition = "2021"
+description = "Dependency-free Standard MIDI File parser and writer"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

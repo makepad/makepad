@@ -1,0 +1,8 @@
+[package]
+name = "makepad-score-play"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic, audio-clock-master playback core for Makepad Score"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
