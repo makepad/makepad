@@ -102,17 +102,38 @@ pub fn crop_normalized(
     let mut output = vec![0.0; 3 * crop * crop];
     let k = geo.affine[0];
     let plane = crop * crop;
-    for v in 0..crop {
-        let src_y = (v as f32 - geo.affine[5]) / k;
-        for u in 0..crop {
-            let src_x = (u as f32 - geo.affine[2]) / k;
-            for c in 0..3 {
-                let pixel = bilinear_zero_border(rgb, w, h, src_x, src_y, c) / 255.0;
-                output[c * plane + v * crop + u] =
-                    (pixel - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
-            }
+    // Row bands across the machine's cores: the warp is 0.8M samples of
+    // scalar bilinear work, 3 ms on one core.
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 16);
+    let band = crop.div_ceil(threads);
+    let (r, g, b) = {
+        let (r, rest) = output.split_at_mut(plane);
+        let (g, b) = rest.split_at_mut(plane);
+        (r, g, b)
+    };
+    std::thread::scope(|scope| {
+        for (((r_band, g_band), b_band), band_index) in r
+            .chunks_mut(band * crop)
+            .zip(g.chunks_mut(band * crop))
+            .zip(b.chunks_mut(band * crop))
+            .zip(0..)
+        {
+            scope.spawn(move || {
+                let planes = [r_band, g_band, b_band];
+                let v0 = band_index * band;
+                for (row, v) in (v0..).enumerate().take(planes[0].len() / crop) {
+                    let src_y = (v as f32 - geo.affine[5]) / k;
+                    for u in 0..crop {
+                        let src_x = (u as f32 - geo.affine[2]) / k;
+                        for c in 0..3 {
+                            let pixel = bilinear_zero_border(rgb, w, h, src_x, src_y, c) / 255.0;
+                            planes[c][row * crop + u] = (pixel - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
     output
 }
 
