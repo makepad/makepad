@@ -393,7 +393,7 @@ fn cond_gqa_attn_dev(
 ) -> Result<Vec<f32>> {
     use makepad_ai_sfx::sa3::dev_err;
     use makepad_ai_common::backend::cuda::{
-        gpu_attention_packed, gpu_download, gpu_gather_cols, gpu_rms_norm_mul, gpu_rope_half,
+        gpu_attention_packed, gpu_download, gpu_rms_norm_mul, gpu_rope_half,
         gpu_upload,
     };
     let qdim = q_heads * hd;
@@ -702,9 +702,8 @@ impl AceConditionEncoder {
     ) -> Result<AceConditioning> {
         use makepad_ai_sfx::sa3::dev_err;
         use makepad_ai_common::backend::cuda::{
-            gpu_add, gpu_attention_packed_composite_bf16, gpu_attention_packed_sliding_bf16,
-            gpu_bf16_round, gpu_download, gpu_linear_nt_cached_bf16_bias_epilogue,
-            gpu_linear_nt_cached_bf16_mm, gpu_mul, gpu_rope_half, gpu_silu, gpu_upload,
+            gpu_download, gpu_linear_nt_cached_bf16_bias_epilogue,
+            gpu_linear_nt_cached_bf16_mm, gpu_upload,
         };
         let h = ACE_COND_DIM;
         let q_heads = ACE_COND_HEADS;
@@ -1773,14 +1772,9 @@ impl AceDit {
     ) -> Result<Vec<f32>> {
         use makepad_ai_sfx::sa3::dev_err;
         use makepad_ai_common::backend::cuda::{
-            gpu_add, gpu_add_bf16, gpu_attention_packed_composite_bf16,
-            gpu_attention_packed_cross_composite_bf16, gpu_attention_packed_f32,
-            gpu_attention_packed_fa2_bf16, gpu_attention_packed_sliding,
-            gpu_attention_packed_sliding_bf16, gpu_bf16_round,
-            gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_gated_residual,
-            gpu_gated_residual_mod, gpu_gated_residual_round_add_bf16, gpu_slice_rows,
-            gpu_linear_nt_cached_bf16_bias_epilogue, gpu_linear_nt_cached_bf16_mm, gpu_mul,
-            gpu_rms_norm_mod_indexed, gpu_rms_norm_mul_bf16, gpu_rope_half,
+            gpu_add, gpu_add_bf16, gpu_bf16_round,
+            gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_gated_residual_mod, gpu_gated_residual_round_add_bf16, gpu_linear_nt_cached_bf16_bias_epilogue, gpu_linear_nt_cached_bf16_mm, gpu_mul,
+            gpu_rms_norm_mod_indexed, gpu_rope_half,
             gpu_rope_half_round_bf16, gpu_silu, gpu_silu_round_mul_round_bf16,
             gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32,
         };

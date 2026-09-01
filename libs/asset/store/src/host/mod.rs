@@ -29,29 +29,24 @@ pub mod config;
 pub mod discovery;
 pub mod http;
 pub mod json;
-pub mod profiles;
 pub mod rooms;
 pub mod server;
 pub mod util;
 
-pub mod annotate;
+pub mod assets_query;
 
 pub(crate) mod appdb;
-pub(crate) mod chat;
-pub(crate) mod chat_store;
 pub(crate) mod events;
 pub(crate) mod routes;
 pub(crate) mod routes_control;
 pub(crate) mod routes_data;
-pub(crate) mod routes_chat;
 pub(crate) mod routes_rooms;
 pub(crate) mod derive_recipes;
 pub(crate) mod routes_import;
-pub(crate) mod routes_operations;
 pub(crate) mod state;
 
 pub use config::{
-    BlobRefPolicy, ChatConfig, ChatScript, DiscoveryConfig, ScriptedLane, ScriptedTurn,
+    BlobRefPolicy, DiscoveryConfig,
     ServerConfig, DEFAULT_DISCOVERY_PORT,
 };
 pub use server::{AssetServer, LISTEN_FILE};

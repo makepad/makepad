@@ -23,7 +23,22 @@
 use crate::budget::Budgets;
 use crate::catalog::{fixed16, fixed32, CandidateState, Catalog};
 use crate::error::{ServerError, ServerResult};
-use crate::jobs::{JobId, JobState, Jobs};
+// The queue is gone (aicore P7): derivation is client-driven now. The
+// deterministic 16-byte job identity SURVIVES — it is what makes a retry
+// re-arm the same derivation instead of minting strays — as a local type
+// with the same wire and row shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobId(pub [u8; 16]);
+
+impl std::fmt::Display for JobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "job_")?;
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
 use crate::sqlite::Db;
 use makepad_asset_data::sha256::Sha256;
 use makepad_asset_data::{
@@ -105,7 +120,7 @@ pub struct DerivationStatus {
     pub state: &'static str,
     pub round: u32,
     pub job_id: JobId,
-    pub job_state: Option<JobState>,
+
     pub variant: Option<DerivedVariantId>,
 }
 
@@ -135,12 +150,6 @@ struct DerivationRow {
 impl<'a> Variants<'a> {
     fn catalog(&self) -> Catalog<'a> {
         Catalog {
-            db: self.db,
-            budgets: self.budgets,
-        }
-    }
-    fn jobs(&self) -> Jobs<'a> {
-        Jobs {
             db: self.db,
             budgets: self.budgets,
         }
@@ -181,18 +190,20 @@ impl<'a> Variants<'a> {
                         })?;
                         return Ok(DerivationOutcome::Ready { dkey, variant });
                     }
-                    "pending" | "failed" => {
-                        let job_state = self.jobs().state(&row.job_id)?;
-                        match job_state {
-                            Some(state) if !state.is_terminal() => {
-                                return Ok(DerivationOutcome::InFlight {
-                                    dkey,
-                                    job_id: row.job_id,
-                                })
-                            }
-                            Some(_) => {
-                                // Terminal job: re-arm the next round with a
-                                // fresh deterministic job id.
+                    // Client-driven now: a pending row IS the in-flight
+                    // marker — its deriver holds the deterministic id and
+                    // completes or abandons it.
+                    "pending" => {
+                        return Ok(DerivationOutcome::InFlight {
+                            dkey,
+                            job_id: row.job_id,
+                        })
+                    }
+                    "failed" => {
+                        {
+                            {
+                                // Re-arm the next round with a fresh
+                                // deterministic job id.
                                 let round = row.round.checked_add(1).ok_or(
                                     ServerError::InvalidState {
                                         what: "derivation round",
@@ -219,16 +230,6 @@ impl<'a> Variants<'a> {
                                 return Ok(DerivationOutcome::NeedsJob {
                                     dkey,
                                     job_id,
-                                    kind: recipe.kind().job_kind(),
-                                    recipe_digest,
-                                });
-                            }
-                            None => {
-                                // Crash between arming and enqueue: offer the
-                                // SAME job id again.
-                                return Ok(DerivationOutcome::NeedsJob {
-                                    dkey,
-                                    job_id: row.job_id,
                                     kind: recipe.kind().job_kind(),
                                     recipe_digest,
                                 });
@@ -392,15 +393,12 @@ impl<'a> Variants<'a> {
         let Some(row) = self.derivation_row(dkey)? else {
             return Ok(None);
         };
-        let job_state = self.jobs().state(&row.job_id)?;
         let state = match row.state.as_str() {
             "ready" => "ready",
-            // A pending row whose job died terminally reads as failed; the
-            // next begin_derivation re-arms it.
-            "pending" => match job_state {
-                Some(s) if s.is_terminal() && s != JobState::Succeeded => "failed",
-                _ => "pending",
-            },
+            // Client-driven now: a pending row stays pending until its
+            // deriver completes it (or a fresh begin re-offers the same
+            // deterministic id — the crash-repair path unchanged).
+            "pending" => "pending",
             _ => "failed",
         };
         Ok(Some(DerivationStatus {
@@ -410,7 +408,6 @@ impl<'a> Variants<'a> {
             state,
             round: row.round,
             job_id: row.job_id,
-            job_state,
             variant: row.variant,
         }))
     }
@@ -448,7 +445,6 @@ impl<'a> Variants<'a> {
         result: &DerivedResult,
         now_ms: u64,
     ) -> ServerResult<DerivedVariantId> {
-        let jobs = self.jobs();
         let catalog = self.catalog();
         self.db.tx(|db| {
             let dkey = *dkey;
@@ -513,9 +509,10 @@ impl<'a> Variants<'a> {
                     _ => Err(ServerError::Conflict { what: "late duplicate derivation" }),
                 };
             }
-            // The reporting worker must hold the live lease; success lands in
-            // this same transaction.
-            let attempt = jobs.require_live_lease(job_id, worker, now_ms)?;
+            // Client-driven now: identity replaces the lease — the report
+            // must carry the exact armed job id (checked above) and names
+            // its worker for the record.
+            let _ = worker;
 
             let mut s = db.prepare(
                 "insert derived variant",
@@ -548,7 +545,6 @@ impl<'a> Variants<'a> {
             s.bind_u64(3, now_ms)?;
             s.run()?;
             drop(s);
-            jobs.finish(db, job_id, attempt, "succeeded", "succeeded", now_ms)?;
             Ok(variant)
         })
     }

@@ -1219,7 +1219,15 @@ pub fn infer_import_tags(
 
 fn push_prompt_source_tag(tags: &mut Vec<String>, prompt: &str) {
     let p = prompt.to_ascii_lowercase();
-    let source = if p.starts_with("the dark mod") {
+    let source = if p == "cnc" || p.starts_with("cnc ") || p.starts_with("cnc:") {
+        "cnc"
+    } else if p == "ra" || p.starts_with("ra ") || p.starts_with("ra:") {
+        "ra"
+    } else if p == "ts" || p.starts_with("ts ") || p.starts_with("ts:") {
+        "ts"
+    } else if p == "d2k" || p.starts_with("d2k ") || p.starts_with("d2k:") {
+        "d2k"
+    } else if p.starts_with("the dark mod") {
         "darkmod"
     } else if p.starts_with("freedoom") {
         "freedoom"
@@ -2409,7 +2417,7 @@ frame 1 A 2 64 64 trooper_a2.png
         let dir = TestDir::new("audio-provenance");
         let mut library = Library::open(&dir.0);
         let samples: Vec<f32> = (0..64).map(|i| (i as f32 / 8.0).sin() * 0.5).collect();
-        let wav_bytes = makepad_asset_ai::wav::encode_wav_pcm16_mono(&samples, 24_000);
+        let wav_bytes = makepad_ai_hub::wav::encode_wav_pcm16_mono(&samples, 24_000);
 
         // A poisoned caller thumbnail (e.g. the upstream pipeline image) is
         // DISCARDED; the sidecar is the payload's own waveform strip.

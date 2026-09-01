@@ -22,6 +22,10 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-asset-data = { path = "../data" }
+# The tiled-RTS map generator. The two procedural converters (TS, D2K)
+# generate their worlds through it, and so does the sandbox at runtime, so a
+# generated map is the same map wherever it is made.
+makepad-rtsmap = { path = "../../rtsmap" }
 makepad-asset-client = { path = "../client" }
 # GLB inspection (measured metrics) for the importer.
 makepad-render = { path = "../../render" }
@@ -42,7 +46,7 @@ makepad-splat = { path = "../../splat" }
 # Thumbnail encoding (vendored, no_std-friendly).
 jpeg-encoder = { path = "../../jpeg-encoder" }
 # Fleet dispatch client (default features = [] — the light client side only).
-makepad-asset-ai = { path = "../ai", default-features = false }
+makepad-ai-hub = { path = "../../ai/hub", default-features = false }
 # The annotation pass's knowledge: the prompts, the sheet framing, the reply
 # parser and the record planner. The coordinator EXECUTES `annotate.asset`
 # on a vision box; what an answer means stays in that crate, so a CLI and a

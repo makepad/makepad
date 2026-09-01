@@ -221,7 +221,7 @@ impl MaskPaint {
             return None;
         }
         let rgba = bgra_to_rgba8(&self.canvas);
-        makepad_asset_ai::testpattern::encode_png_rgba(&rgba, self.width, self.height).ok()
+        makepad_ai_hub::testpattern::encode_png_rgba(&rgba, self.width, self.height).ok()
     }
 
     /// The mask as an opaque gray PNG (white = repaint).
@@ -233,7 +233,7 @@ impl MaskPaint {
         for &m in &self.mask {
             rgba.extend_from_slice(&[m, m, m, 255]);
         }
-        makepad_asset_ai::testpattern::encode_png_rgba(&rgba, self.width, self.height).ok()
+        makepad_ai_hub::testpattern::encode_png_rgba(&rgba, self.width, self.height).ok()
     }
 
     fn ensure_textures(&mut self, cx: &mut Cx) {

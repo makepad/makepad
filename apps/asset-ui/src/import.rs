@@ -7,6 +7,7 @@
 //! not-provisioned cards until they get the same local-folder path.
 
 use makepad_asset_importer::ao_bake;
+use makepad_asset_importer::classic_import::ClassicSource;
 use makepad_asset_importer::pack_import::{
     self, kenney_pack, kenney_spec, KenneyPack, IMPORT_MANIFEST_FILE, KENNEY_ASSETS_HOME,
     KENNEY_CREDITS, KENNEY_GITHUB, KENNEY_HOME, KENNEY_LICENSE, KENNEY_PACKS, KENNEY_SOURCE_ID,
@@ -54,6 +55,10 @@ pub enum ImportJob {
     Duke3d {
         path: String,
     },
+    EaClassic {
+        source: ClassicSource,
+        path: String,
+    },
     Quake2 {
         path: String,
     },
@@ -82,6 +87,7 @@ impl ImportJob {
             ImportJob::Doom { .. } => "Doom shareware".into(),
             ImportJob::Quake { .. } => "Quake shareware".into(),
             ImportJob::Duke3d { .. } => "Duke3D shareware".into(),
+            ImportJob::EaClassic { source, .. } => source.title().into(),
             ImportJob::Quake2 { .. } => "Quake II shareware".into(),
             ImportJob::Quake3 { .. } => "Quake III demo".into(),
             ImportJob::DarkMod { .. } => "The Dark Mod".into(),
@@ -100,6 +106,10 @@ impl ImportJob {
     pub fn conflicts(&self, other: &ImportJob) -> bool {
         match (self, other) {
             (ImportJob::Kenney { pack: a, .. }, ImportJob::Kenney { pack: b, .. }) => a == b,
+            (
+                ImportJob::EaClassic { source: a, .. },
+                ImportJob::EaClassic { source: b, .. },
+            ) => a == b,
             (ImportJob::KenneyAll, ImportJob::KenneyAll)
             | (ImportJob::KenneyAll, ImportJob::Kenney { .. })
             | (ImportJob::Kenney { .. }, ImportJob::KenneyAll)

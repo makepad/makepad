@@ -47,6 +47,7 @@ fn connect() -> AssetClient {
 }
 
 /// The head source of one game, with enough identity to compare.
+#[allow(dead_code)] // identity carried for the comparison prints
 struct Head {
     asset: makepad_asset_data::AssetId,
     title: String,

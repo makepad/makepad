@@ -37,11 +37,10 @@
 use crate::api::{CatalogQuery, SourceCollectionRegistered};
 use crate::client::{AssetClient, AssetsPage, CatalogPage, PageCursor};
 use crate::dto::{
-    AliasDto, AssetDetailDto, GameAliasDto, ImportReportDto, ImportStatusDto, JobDetailDto, JobId,
-    JobProfileDto, JobRowDto, JobStatusDto, SourceCollectionRowDto,
+    AliasDto, AssetDetailDto, GameAliasDto, ImportReportDto, ImportStatusDto,
+    SourceCollectionRowDto,
 };
 use crate::error::{ClientError, ClientResult};
-use crate::json::Value;
 use crate::publish::{PublishBundle, PublishRequest, PublishStage, Published, PublishedBundle};
 use crate::resolver::{ResolvedFile, ResolvedThumbnail, TierPreference};
 use crate::side_channels::{SideChannelFile, SideChannelOutcome};
@@ -111,32 +110,6 @@ pub enum ClientRequest {
     /// it. Idempotent at the client: a concurrent winner reports
     /// [`SideChannelOutcome::AlreadyPresent`].
     PublishSideChannels { asset: AssetId, files: Arc<Vec<SideChannelFile>> },
-    /// Advertised generation capabilities, optionally domain-filtered.
-    FetchJobProfiles { domain: Option<String> },
-    /// Enqueue a generation job; the server schedules the compute.
-    EnqueueJob { namespace: String, kind: String, body: Value },
-    FetchJobStatus { job: JobId },
-    /// Complete visible job state (enqueuer, attempts, freshness, result).
-    FetchJobDetail { job: JobId },
-    /// Scoped job listing (`namespace` = capability-gated view; `None` =
-    /// the caller's own jobs).
-    FetchJobs { namespace: Option<String>, limit: u64 },
-    CancelJob { job: JobId },
-    /// The versioned operation registry with truthful availability.
-    FetchOperationTypes,
-    /// Create (or idempotently join) a typed asset operation.
-    CreateOperation { request: Box<crate::api::OperationCreateRequest> },
-    FetchOperation { op: crate::dto::OperationId },
-    /// One page of the durable operation event log (bounded long-poll).
-    FetchOperationEvents {
-        op: crate::dto::OperationId,
-        after: u64,
-        wait_ms: u64,
-        limit: u32,
-    },
-    CancelOperation { op: crate::dto::OperationId },
-    RetryOperation { op: crate::dto::OperationId },
-    /// Register an approved source collection from canonical bytes.
     RegisterSourceCollection { bytes: Vec<u8> },
     /// List approved source collections (projection).
     ListSourceCollections,
@@ -178,18 +151,6 @@ pub enum ClientOutput {
     /// Whether the side-channel attach wrote a revision or found the roles
     /// already there.
     SideChannels(SideChannelOutcome),
-    JobProfiles(Vec<JobProfileDto>),
-    JobQueued(JobId),
-    JobStatus(JobStatusDto),
-    JobDetail(JobDetailDto),
-    Jobs(Vec<JobRowDto>),
-    /// How many jobs the cancel reached (0 = already terminal).
-    JobCancelled(u64),
-    OperationTypes(Vec<crate::dto::OperationTypeDto>),
-    Operation(crate::dto::OperationStatusDto),
-    OperationEvents(crate::dto::OperationEventsPageDto),
-    /// Whether the cancel changed anything (false = already terminal).
-    OperationCancelled(bool),
     SourceCollectionRegistered(SourceCollectionRegistered),
     SourceCollections(Vec<SourceCollectionRowDto>),
     ImportReport(ImportReportDto),
@@ -684,9 +645,6 @@ fn classify(request: &ClientRequest, fast_blob_max_bytes: u64) -> Lane {
         | ClientRequest::PublishSideChannels { .. }
         | ClientRequest::RunImport { .. }
         | ClientRequest::RegisterSourceCollection { .. } => Lane::Bulk,
-        // A long-poll parks a worker for its whole wait; it must never do
-        // that in the lane the UI needs for icons.
-        ClientRequest::FetchOperationEvents { .. } => Lane::Bulk,
         // Everything else is a small control-plane call.
         _ => Lane::Fast,
     }
@@ -961,42 +919,6 @@ fn run_one(
             Ok(ClientOutput::SideChannels(
                 client.publish_side_channel_files(&asset, files)?,
             ))
-        }
-        ClientRequest::FetchJobProfiles { domain } => Ok(ClientOutput::JobProfiles(
-            client.api().job_profiles(domain.as_deref())?,
-        )),
-        ClientRequest::EnqueueJob { namespace, kind, body } => Ok(ClientOutput::JobQueued(
-            client.api().enqueue_job(&namespace, &kind, &body)?,
-        )),
-        ClientRequest::FetchJobStatus { job } => {
-            Ok(ClientOutput::JobStatus(client.api().job_status(&job)?))
-        }
-        ClientRequest::FetchJobDetail { job } => {
-            Ok(ClientOutput::JobDetail(client.job_detail(&job)?))
-        }
-        ClientRequest::FetchJobs { namespace, limit } => Ok(ClientOutput::Jobs(
-            client.list_jobs(namespace.as_deref(), None, None, limit)?,
-        )),
-        ClientRequest::CancelJob { job } => {
-            Ok(ClientOutput::JobCancelled(client.api().cancel_job(&job)?))
-        }
-        ClientRequest::FetchOperationTypes => {
-            Ok(ClientOutput::OperationTypes(client.operation_types()?))
-        }
-        ClientRequest::CreateOperation { request } => {
-            Ok(ClientOutput::Operation(client.operation_create(&request)?))
-        }
-        ClientRequest::FetchOperation { op } => {
-            Ok(ClientOutput::Operation(client.operation_get(&op)?))
-        }
-        ClientRequest::FetchOperationEvents { op, after, wait_ms, limit } => Ok(
-            ClientOutput::OperationEvents(client.operation_events(&op, after, wait_ms, limit)?),
-        ),
-        ClientRequest::CancelOperation { op } => {
-            Ok(ClientOutput::OperationCancelled(client.operation_cancel(&op)?))
-        }
-        ClientRequest::RetryOperation { op } => {
-            Ok(ClientOutput::Operation(client.operation_retry(&op)?))
         }
         ClientRequest::RegisterSourceCollection { bytes } => Ok(
             ClientOutput::SourceCollectionRegistered(client.register_source_collection(&bytes)?),

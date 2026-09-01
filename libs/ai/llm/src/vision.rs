@@ -23,7 +23,7 @@
 // they differ only in `clip.vision.projection_dim` (4096 vs 5120), which is
 // read from the GGUF.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::metal_compiled::{prepare_graph, MetalGraphSession, MetalGraphTensorWrite};
 use crate::{
@@ -375,51 +375,53 @@ pub struct VisionTower {
     pub config: VisionConfig,
     weights: LoadedGgufWeights,
     runtime: VisionRuntime,
+    /// One compiled graph per patch grid seen, oldest first in
+    /// `graph_order`; bounded by `graph_cache_cap` because a graph session
+    /// holds its own device mirror of the weights on CUDA.
     graphs: BTreeMap<(usize, usize), VisionGraph>,
-    /// Kept so the context can be rebuilt when a new image shape does not fit
-    /// the arena — see `encode`.
-    path: String,
-    /// Largest patch count the current arena was sized for.
-    arena_patches: usize,
+    graph_order: VecDeque<(usize, usize)>,
+    graph_cache_cap: usize,
+}
+
+/// Compiled graphs kept per tower: `MAKEPAD_VISION_GRAPH_CACHE`, default 2
+/// (a batch alternating between two page shapes compiles each once).
+fn graph_cache_cap() -> usize {
+    std::env::var("MAKEPAD_VISION_GRAPH_CACHE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2)
+        .max(1)
 }
 
 impl VisionTower {
-    /// Load the mmproj GGUF. `max_patches` bounds the activation arena that is
-    /// reserved up front (patches = output tokens * 4).
+    /// Load the mmproj GGUF.
+    ///
+    /// The weights fill the context arena; the context is then switched to
+    /// `no_alloc`, so every tensor a graph builds afterwards — inputs and
+    /// activations — carries no arena offset and is storage-planned by the
+    /// graph session with liveness reuse, the same planner the language
+    /// session runs on. A page-sized grid (25k patches) then costs a few
+    /// hundred MB of live activations instead of the tens of GB a bump
+    /// arena holding every node would.
     ///
     /// Backend: CUDA when a usable device is present, else Metal.
     /// `MAKEPAD_VISION_BACKEND=cuda|metal` pins it (and turns a missing backend
     /// into an error rather than a silent fallback).
-    pub fn load(path: &str, max_patches: usize) -> Result<Self> {
+    pub fn load(path: &str) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
         let config = VisionConfig::from_gguf(&gguf)?;
         let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
-        let extra = Self::activation_bytes_estimate(&config, max_patches);
-        let weights = layout.allocate_and_load_with_extra(&gguf, extra)?;
+        let mut weights = layout.allocate_and_load(&gguf)?;
+        weights.ctx.set_no_alloc(true);
         let runtime = Self::select_runtime()?;
         Ok(Self {
             config,
             weights,
             runtime,
             graphs: BTreeMap::new(),
-            path: path.to_string(),
-            arena_patches: max_patches,
+            graph_order: VecDeque::new(),
+            graph_cache_cap: graph_cache_cap(),
         })
-    }
-
-    /// Re-open the mmproj into a fresh context sized for `max_patches`,
-    /// dropping every cached graph. The ggml context is a bump arena: caching
-    /// a graph per image shape grows it monotonically and nothing can be
-    /// handed back, so a batch of mixed-size images eventually runs it dry.
-    /// Rather than make callers pre-declare every shape, reset and re-reserve.
-    fn rebuild_context(&mut self, max_patches: usize) -> Result<()> {
-        let gguf = GgufFile::open(&self.path)?;
-        let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
-        let extra = Self::activation_bytes_estimate(&self.config, max_patches);
-        self.graphs.clear();
-        self.weights = layout.allocate_and_load_with_extra(&gguf, extra)?;
-        self.arena_patches = max_patches;
-        Ok(())
     }
 
     fn select_runtime() -> Result<VisionRuntime> {
@@ -457,42 +459,28 @@ impl VisionTower {
         }
     }
 
-    fn activation_bytes_estimate(config: &VisionConfig, max_patches: usize) -> usize {
-        // per patch per layer: ~18 full-width f32 nodes + 3 ffn-width nodes
-        // + 2 f16 casts; generous 1.5x headroom on top
-        let full = 4 * config.n_embd;
-        let ffn = 4 * config.n_ffn;
-        let per_patch_layer = 18 * full + 3 * ffn + config.n_embd;
-        let per_patch = per_patch_layer * config.n_layers + 16 * full + 8 * config.proj_dim;
-        (max_patches * per_patch) * 3 / 2 + (64 << 20)
-    }
-
     fn tensor(&self, name: &str) -> Result<TensorId> {
         self.weights.require_tensor_id(name)
     }
 
     /// Encode a preprocessed image; returns [n_tokens * proj_dim] f32.
     ///
-    /// Images of any size may be interleaved: each distinct patch grid gets its
-    /// own compiled graph, and if adding one exhausts the context arena the
-    /// tower rebuilds itself (sized for the largest shape seen) and retries
-    /// once. Feeding one size is still cheapest — a rebuild reloads the mmproj.
+    /// Images of any size may be interleaved: each distinct patch grid gets
+    /// its own compiled graph, kept in a small cache (`graph_cache_cap`) —
+    /// a session is a device mirror of the weights plus its planned
+    /// activations, so the cache bounds memory, and a batch sorted by shape
+    /// compiles each grid once.
     pub fn encode(&mut self, image: &PreparedImage) -> Result<Vec<f32>> {
         let key = (image.grid_w, image.grid_h);
         if !self.graphs.contains_key(&key) {
-            match self.build_graph(image.grid_w, image.grid_h) {
-                Ok(graph) => {
-                    self.graphs.insert(key, graph);
-                }
-                Err(first) => {
-                    // Out of arena: reset and re-reserve for the biggest shape
-                    // we have been asked for, then build this graph alone.
-                    let want = self.arena_patches.max(image.n_patches());
-                    self.rebuild_context(want).map_err(|_| first)?;
-                    let graph = self.build_graph(image.grid_w, image.grid_h)?;
-                    self.graphs.insert(key, graph);
+            let graph = self.build_graph(image.grid_w, image.grid_h)?;
+            while self.graph_order.len() >= self.graph_cache_cap {
+                if let Some(old) = self.graph_order.pop_front() {
+                    self.graphs.remove(&old);
                 }
             }
+            self.graphs.insert(key, graph);
+            self.graph_order.push_back(key);
         }
         let graph = self.graphs.get(&key).unwrap();
 

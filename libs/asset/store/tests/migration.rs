@@ -6,10 +6,88 @@
 //! tests/common (the test-side twin of src/sqlite.rs) so the legacy layouts
 //! are byte-real, not simulated through current-code hooks.
 
+/// The job queue left the store (aicore P7); migration tests still build
+/// faithful HISTORICAL roots, so its DDL is pinned here as data.
+const HISTORICAL_JOBS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS jobs(
+    job_id BLOB PRIMARY KEY,
+    parent_job BLOB,
+    kind TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','running','succeeded','failed','cancelled')),
+    attempts_used INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    not_before_ms INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs(state, not_before_ms);
+CREATE INDEX IF NOT EXISTS jobs_by_parent ON jobs(parent_job);
+CREATE TABLE IF NOT EXISTS job_deps(
+    job_id BLOB NOT NULL,
+    depends_on BLOB NOT NULL,
+    PRIMARY KEY(job_id, depends_on)
+);
+CREATE TABLE IF NOT EXISTS job_attempts(
+    job_id BLOB NOT NULL,
+    attempt INTEGER NOT NULL,
+    worker TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    outcome TEXT NOT NULL DEFAULT 'running',
+    PRIMARY KEY(job_id, attempt)
+);
+CREATE TABLE IF NOT EXISTS job_leases(
+    job_id BLOB PRIMARY KEY,
+    worker TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    heartbeat_ms INTEGER NOT NULL
+);
+";
+
+const HISTORICAL_OPERATIONS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS operations(
+    operation_id BLOB PRIMARY KEY,
+    owner BLOB NOT NULL,
+    namespace TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    def_revision INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    spec_digest BLOB NOT NULL,
+    spec BLOB NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','succeeded','failed','cancelled')),
+    round INTEGER NOT NULL DEFAULT 0,
+    job_id BLOB NOT NULL,
+    error TEXT,
+    result_asset BLOB,
+    result_revision BLOB,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS operations_idem
+    ON operations(owner, namespace, idempotency_key);
+CREATE INDEX IF NOT EXISTS operations_by_job ON operations(job_id);
+CREATE TABLE IF NOT EXISTS operation_events(
+    operation_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    PRIMARY KEY(operation_id, seq)
+);
+CREATE TABLE IF NOT EXISTS operation_worker_seen(
+    kind TEXT PRIMARY KEY,
+    last_seen_ms INTEGER NOT NULL
+);
+";
+
+
 mod common;
 use common::*;
 use makepad_asset_store::{
-    auth::AUTH_SCHEMA, catalog::CATALOG_SCHEMA, jobs::JOBS_SCHEMA, AssetAnnotation,
+    auth::AUTH_SCHEMA, catalog::CATALOG_SCHEMA, AssetAnnotation,
     AssetServerCore, Budgets, SearchFilters, SearchQuery, SearchViewer, ServerError, ViewerScope,
     Visibility, SERVER_SCHEMA_VERSION,
 };
@@ -117,7 +195,7 @@ fn presearch_v1_root_migrates_to_current() {
     let (root, db) = fixture_root(
         "presearch_v1",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              PRAGMA user_version=1;"
         ),
@@ -141,7 +219,7 @@ fn legacy_search_v1_root_is_retrofitted_with_data_intact() {
     let (root, db) = fixture_root(
         "legacy_search_v1",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V1}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V1}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              INSERT INTO search_annotations(asset_id, namespace, visibility, owner,\
                 title, description, creator, generator, backend, model,\
@@ -237,7 +315,7 @@ fn v2_root_gains_alias_index_with_data_backfilled() {
     let (root, db) = fixture_root(
         "search_v2",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V2}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V2}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              INSERT INTO asset_aliases(alias, asset_id, head_revision, updated_ms)\
               VALUES('rik2/props/lamp',{ID1_HEX},X'{rev}',1);\
@@ -299,7 +377,7 @@ fn v3_root_gains_import_and_variant_tables() {
     let (root, db) = fixture_root(
         "import_v3",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{search}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{search}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              PRAGMA user_version=3;",
             search = makepad_asset_store::search::SEARCH_SCHEMA,
@@ -333,7 +411,7 @@ fn v4_root_gains_operation_tables() {
     let (root, db) = fixture_root(
         "operations_v4",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{search}{import}{variant}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{search}{import}{variant}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              PRAGMA user_version=4;",
             search = makepad_asset_store::search::SEARCH_SCHEMA,
@@ -342,8 +420,8 @@ fn v4_root_gains_operation_tables() {
         ),
     );
     let core = AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
-    // The migrated root serves the operations subsystem and kept its data.
-    assert!(!core.operations().capabilities(1).unwrap().is_empty());
+    // The queue subsystems are gone (aicore P7); the migrated root still
+    // opens and its CATALOG data survived — the only promise that remains.
     assert_eq!(
         core.catalog().asset_namespace(&asset_id_n(1)).unwrap().as_deref(),
         Some("rik2")
@@ -368,7 +446,7 @@ fn v7_root_gains_scale_indices_and_a_sharded_cas() {
     let (root, db) = fixture_root(
         "scale_v7",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{search}{import}{variant}{operations}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{search}{import}{variant}{operations}\
              DROP INDEX IF EXISTS asset_aliases_by_asset;\
              DROP INDEX IF EXISTS game_aliases_by_game;\
              DROP INDEX IF EXISTS search_annotations_by_canon;\
@@ -377,7 +455,7 @@ fn v7_root_gains_scale_indices_and_a_sharded_cas() {
             search = makepad_asset_store::search::SEARCH_SCHEMA,
             import = makepad_asset_store::imports::IMPORT_SCHEMA,
             variant = makepad_asset_store::variants::VARIANT_SCHEMA,
-            operations = makepad_asset_store::operations::OPERATIONS_SCHEMA,
+            operations = HISTORICAL_OPERATIONS_SCHEMA,
         ),
     );
     let payload = b"blob written by a v7 server".to_vec();
@@ -479,7 +557,7 @@ fn v11_root_migrates_kind_check_to_appended_kinds_with_rows_intact() {
     let (root, db) = fixture_root(
         "data_kind_v11",
         &format!(
-            "{CATALOG_SCHEMA}{JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V11_ANNOTATIONS}\
+            "{CATALOG_SCHEMA}{HISTORICAL_JOBS_SCHEMA}{AUTH_SCHEMA}{LEGACY_SEARCH_V11_ANNOTATIONS}\
              INSERT INTO assets(asset_id, namespace, created_ms) VALUES({ID1_HEX},'rik2',1);\
              INSERT INTO search_annotations(asset_id, namespace, kind, visibility, owner,\
                 title, description, creator, generator, backend, model, prompt, provenance,\

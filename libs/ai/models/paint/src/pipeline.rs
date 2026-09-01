@@ -20,7 +20,7 @@ use crate::camera::{candidate_views, default_orthographic, model_view_matrix, Ma
 use crate::contract::{pack_orm, ChannelSlot, ColorSpace, PbrMap, PbrMaterialSet, PbrMeta, PixelFormat};
 use crate::hunyuan;
 use crate::mesh::TriMesh;
-use crate::raster::{normal_map_rgb8, normal_map_rgb8_negated, position_map_rgb8, render_gbuffer};
+use crate::raster::{normal_map_rgb8_negated, position_map_rgb8, render_gbuffer};
 use crate::test_backend::{PbrError, PbrProgress, PbrStage};
 use crate::view_select::bake_view_selection;
 

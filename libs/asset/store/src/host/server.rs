@@ -47,7 +47,6 @@ pub struct AssetServer {
     state: Option<StateHandle>,
     state_join: Option<JoinHandle<()>>,
     events: Arc<super::events::EventHub>,
-    chat: Option<(super::chat::ChatHandle, JoinHandle<()>)>,
     /// Held for the server's whole life; the OS releases it on process death.
     _root_lock: File,
     log_enabled: bool,
@@ -89,22 +88,6 @@ impl AssetServer {
             cfg.event_journal_cap,
             cfg.event_max_waiters,
         ));
-        let endpoints = makepad_asset_client::ApiEndpoints {
-            control: control_addr,
-            data: data_addr,
-        };
-        let (chat_handle, chat_join) = super::chat::spawn_broker(
-            endpoints,
-            cfg.chat.clone(),
-            // The broker's `assets.query` reads this server's OWN catalog
-            // file (read-only WAL snapshots) — same process, same root.
-            Some(cfg.root.join("catalog.sqlite3")),
-            // Keyed (per client, per game) transcripts live under
-            // `<root>/chat/` and outlive workers and restarts.
-            &cfg.root,
-            cfg.log,
-            stop.clone(),
-        )?;
         let requests: [Arc<std::sync::atomic::AtomicU64>; 2] = [
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -115,10 +98,6 @@ impl AssetServer {
             cfg: cfg.clone(),
             server_id,
             events: events.clone(),
-            op_event_waiters: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            chat: Some(chat_handle.clone()),
-            chat_event_waiters: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            profiles: std::sync::Arc::new(super::profiles::ProfileRegistry::new()),
             rooms: std::sync::Arc::new(super::rooms::RoomRegistry::new()),
             cas: std::sync::Arc::new(crate::cas::Cas::open(
                 &cfg.root.join("cas"),
@@ -157,9 +136,7 @@ impl AssetServer {
             );
         }
 
-        let janitor = Some(spawn_janitor(
-            state.clone(),
-            events.clone(),
+        let janitor = Some(spawn_janitor(state.clone(),
             cfg.janitor_interval_ms,
             cfg.gc_janitor_steps,
         )?);
@@ -206,7 +183,6 @@ impl AssetServer {
             state: Some(state),
             state_join: Some(state_join),
             events,
-            chat: Some((chat_handle, chat_join)),
             _root_lock: root_lock,
             log_enabled: cfg.log,
         })
@@ -266,10 +242,6 @@ impl AssetServer {
         if let Some((tx, j)) = self.beacon.take() {
             let _ = tx.send(());
             let _ = j.join();
-        }
-        if let Some((handle, join)) = self.chat.take() {
-            handle.shutdown();
-            let _ = join.join();
         }
         // Workers are gone, so this drop releases the last handle clones and
         // the state thread's task channel closes.
@@ -460,7 +432,6 @@ fn serve_conn(stream: TcpStream, rc: &RouteCtx, plane: Plane, stop: &AtomicBool)
 
 fn spawn_janitor(
     state: StateHandle,
-    events: Arc<super::events::EventHub>,
     interval_ms: u64,
     gc_steps: u32,
 ) -> ServerResult<(mpsc::Sender<()>, JoinHandle<()>)> {
@@ -474,25 +445,6 @@ fn spawn_janitor(
                     let now = now_ms();
                     // Poisoned state returns None; keep ticking, health
                     // reports the outage.
-                    let _ = state.call(move |ctx| ctx.core.jobs().expire_leases(now));
-                    // Pipelines whose finish nobody has announced. Most
-                    // finishes are announced by the route that caused them;
-                    // this catches the one that has no route — a pending
-                    // stage doomed inside another job's claim, because its
-                    // dependency failed — and the lease expiry just above,
-                    // which is a terminal transition with no request behind
-                    // it either. Bounded per tick; a READ of a pipeline
-                    // always reports the truthful derived state regardless,
-                    // so the sweep only ever owes the EVENT.
-                    let hub = events.clone();
-                    let _ = state.call(move |ctx| -> crate::ServerResult<()> {
-                        for pipeline in
-                            ctx.pipelines_unannounced(super::routes_control::PIPELINE_SWEEP)?
-                        {
-                            super::routes_control::pipeline_settle(ctx, &hub, &pipeline, now)?;
-                        }
-                        Ok(())
-                    });
                     // A GC run finishes even if nobody polls it: a bounded
                     // number of steps per tick, each one transaction over
                     // one batch, interleaved with every other state call.

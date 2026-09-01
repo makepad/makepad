@@ -1,9 +1,21 @@
 pub use makepad_code_editor;
 pub use makepad_widgets;
 
-use makepad_ai::*;
+use makepad_ai_hub::{
+    chat_wire::{
+        ChatMessage as HubChatMessage, ChatRole as HubChatRole, ProviderAvailability,
+        ProviderKind,
+    },
+    providers::{
+        claude_api::ClaudeApiChatProvider,
+        provider::{ChatProvider, ProviderEvent, TurnInput},
+    },
+};
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
+use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
 app_main!(App);
 
@@ -489,9 +501,6 @@ Here is the complete Splash scripting manual. Follow it exactly:
     )
 }
 
-const LOCAL_OPENAI_URL: &str = "http://10.0.0.168:8080/v1/chat/completions";
-const LOCAL_OPENAI_MODEL: &str = "Gemma4Unlim-31B-ModelOptFullAttn-FullCal128.gguf";
-
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum BackendType {
     #[default]
@@ -521,66 +530,131 @@ impl BackendType {
     }
 }
 
+enum AiWorkerCommand {
+    Send(TurnInput),
+    Cancel,
+}
+
+enum AiWorkerEvent {
+    Availability(ProviderAvailability),
+    Delta(String),
+    Done(String),
+    Error(String),
+}
+
+struct AiWorker {
+    command_tx: Sender<AiWorkerCommand>,
+    event_rx: Receiver<AiWorkerEvent>,
+}
+
+impl AiWorker {
+    fn new(cx: &mut Cx) -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        cx.spawn_thread(move || ai_worker_loop(command_rx, event_tx));
+        Self {
+            command_tx,
+            event_rx,
+        }
+    }
+
+    fn send(&self, input: TurnInput) -> Result<(), String> {
+        self.command_tx
+            .send(AiWorkerCommand::Send(input))
+            .map_err(|_| "AI provider worker ended".to_string())
+    }
+
+    fn cancel(&self) {
+        let _ = self.command_tx.send(AiWorkerCommand::Cancel);
+    }
+
+    fn poll(&self) -> Vec<AiWorkerEvent> {
+        self.event_rx.try_iter().collect()
+    }
+}
+
+fn emit_ai_worker_event(event_tx: &Sender<AiWorkerEvent>, event: AiWorkerEvent) -> bool {
+    if event_tx.send(event).is_err() {
+        return false;
+    }
+    SignalToUI::set_ui_signal();
+    true
+}
+
+fn ai_worker_loop(command_rx: Receiver<AiWorkerCommand>, event_tx: Sender<AiWorkerEvent>) {
+    let mut provider =
+        ClaudeApiChatProvider::from_env(ProviderKind::ClaudeCli, None);
+    if !emit_ai_worker_event(
+        &event_tx,
+        AiWorkerEvent::Availability(provider.availability()),
+    ) {
+        return;
+    }
+
+    loop {
+        match command_rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(AiWorkerCommand::Send(input)) => {
+                if let Err(error) = provider.begin_turn(&input) {
+                    if !emit_ai_worker_event(&event_tx, AiWorkerEvent::Error(error)) {
+                        return;
+                    }
+                }
+            }
+            Ok(AiWorkerCommand::Cancel) => provider.cancel(),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                provider.cancel();
+                return;
+            }
+        }
+
+        for event in provider.poll() {
+            let event = match event {
+                ProviderEvent::Delta(text) => Some(AiWorkerEvent::Delta(text)),
+                ProviderEvent::Done { text } => Some(AiWorkerEvent::Done(text)),
+                ProviderEvent::Error(error) => Some(AiWorkerEvent::Error(error)),
+                ProviderEvent::FunctionCall { .. } => Some(AiWorkerEvent::Error(
+                    "AI provider requested an unsupported function".to_string(),
+                )),
+                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => None,
+            };
+            if let Some(event) = event {
+                if !emit_ai_worker_event(&event_tx, event) {
+                    provider.cancel();
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
-    agent: Option<Box<dyn Agent>>,
-    #[rust]
-    session_id: Option<SessionId>,
-    #[rust]
-    current_prompt: Option<PromptId>,
+    ai_worker: Option<AiWorker>,
+    #[rust(false)]
+    current_prompt: bool,
     #[rust]
     active_backend: BackendType,
     #[rust]
     backend_available: bool,
     #[rust]
-    history_injected: bool,
+    backend_unavailable_reason: String,
 }
 
 impl App {
     fn create_backend_session(&mut self, cx: &mut Cx, backend: BackendType) {
-        self.agent = None;
-        self.session_id = None;
-        self.current_prompt = None;
-        self.active_backend = backend;
-        self.history_injected = false;
-
-        let agent = match backend {
-            BackendType::ClaudeSplash => {
-                self.backend_available = ClaudeCodeAgent::is_available();
-                self.backend_available
-                    .then(|| Box::new(ClaudeCodeAgent::new()) as Box<dyn Agent>)
-            }
-            BackendType::LocalOpenAi => {
-                self.backend_available = true;
-                Some(
-                    Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
-                        BackendConfig::OpenAI {
-                            api_key: String::new(),
-                            model: LOCAL_OPENAI_MODEL.to_string(),
-                            base_url: Some(LOCAL_OPENAI_URL.to_string()),
-                            reasoning_effort: None,
-                        },
-                    )))) as Box<dyn Agent>,
-                )
-            }
-        };
-
-        let Some(agent) = agent else {
-            self.update_status(cx);
-            return;
-        };
-
-        let config = SessionConfig {
-            system_prompt: Some(claude_splash_system_prompt()),
-            ..Default::default()
-        };
-        self.agent = Some(agent);
-        if let Some(agent) = &mut self.agent {
-            self.session_id = Some(agent.create_session(cx, config));
+        if let Some(worker) = &self.ai_worker {
+            worker.cancel();
         }
+        self.ai_worker = None;
+        self.current_prompt = false;
+        self.active_backend = backend;
+        self.backend_available = false;
+        self.backend_unavailable_reason.clear();
+        self.ai_worker = Some(AiWorker::new(cx));
         self.update_status(cx);
     }
 
@@ -606,12 +680,15 @@ impl App {
             return;
         }
 
-        let (agent, session_id) = match (&mut self.agent, self.session_id) {
-            (Some(agent), Some(session_id)) => (agent, session_id),
-            _ => return,
+        let Some(worker) = &self.ai_worker else {
+            return;
         };
+        if !self.backend_available {
+            self.update_status(cx);
+            return;
+        }
 
-        let items_len = {
+        let (items_len, messages) = {
             let mut data = CHAT_DATA.write().unwrap();
             data.messages.push(ChatMessage {
                 role: ChatRole::User,
@@ -619,27 +696,32 @@ impl App {
             });
             data.streaming_text.clear();
             data.is_streaming = true;
-            data.messages.len() + 1
+            let messages = data
+                .messages
+                .iter()
+                .map(|message| {
+                    HubChatMessage::new(
+                        match message.role {
+                            ChatRole::User => HubChatRole::User,
+                            ChatRole::Assistant => HubChatRole::Assistant,
+                        },
+                        message.text.clone(),
+                    )
+                })
+                .collect();
+            (data.messages.len() + 1, messages)
         };
         input.set_text(cx, "");
 
-        if !self.history_injected && agent.is_stateless() {
-            let data = CHAT_DATA.read().unwrap();
-            let history: Vec<Message> = data.messages[..data.messages.len() - 1]
-                .iter()
-                .map(|message| match message.role {
-                    ChatRole::User => Message::user(&message.text),
-                    ChatRole::Assistant => Message::assistant(&message.text),
-                })
-                .collect();
-            drop(data);
-            if !history.is_empty() {
-                agent.inject_history(session_id, history);
-            }
-            self.history_injected = true;
+        let turn = TurnInput::new(claude_splash_system_prompt(), messages);
+        if let Err(error) = worker.send(turn) {
+            CHAT_DATA.write().unwrap().is_streaming = false;
+            self.ui
+                .label(cx, ids!(status_label))
+                .set_text(cx, &format!("Error: {}", error));
+            return;
         }
-
-        self.current_prompt = Some(agent.send_prompt(cx, session_id, &text));
+        self.current_prompt = true;
         self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
@@ -650,8 +732,11 @@ impl App {
     }
 
     fn cancel_request(&mut self, cx: &mut Cx) {
-        if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
-            agent.cancel_prompt(cx, prompt_id);
+        if self.current_prompt {
+            if let Some(worker) = &self.ai_worker {
+                worker.cancel();
+            }
+            self.current_prompt = false;
 
             let mut data = CHAT_DATA.write().unwrap();
             let text = std::mem::take(&mut data.streaming_text);
@@ -671,16 +756,15 @@ impl App {
 
     fn update_status(&self, cx: &mut Cx) {
         let status = if self.backend_available {
-            self.active_backend.status_label()
+            self.active_backend.status_label().to_string()
+        } else if self.backend_unavailable_reason.is_empty() {
+            "Checking AI provider availability...".to_string()
         } else {
-            match self.active_backend {
-                BackendType::ClaudeSplash => {
-                    "Claude Code not found. Set CLAUDE_CODE_PATH or install claude."
-                }
-                BackendType::LocalOpenAi => "Local OpenAI backend unavailable",
-            }
+            format!("Unavailable: {}", self.backend_unavailable_reason)
         };
-        self.ui.label(cx, ids!(status_label)).set_text(cx, status);
+        self.ui
+            .label(cx, ids!(status_label))
+            .set_text(cx, &status);
     }
 }
 
@@ -754,25 +838,27 @@ impl AppMain for App {
     fn after_new_from_script(_vm: &mut ScriptVm, app: &mut Self) {
         CHAT_DATA.write().unwrap().messages = ChatData::load_from_disk();
         app.active_backend = BackendType::ClaudeSplash;
-        app.backend_available = ClaudeCodeAgent::is_available();
+        app.backend_available = false;
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        if let Some(agent) = &mut self.agent {
-            for event in agent.handle_event(cx, event) {
+        if let Some(worker) = &self.ai_worker {
+            for event in worker.poll() {
                 match event {
-                    AgentEvent::SessionReady { .. } => {
+                    AiWorkerEvent::Availability(ProviderAvailability::Available { .. }) => {
+                        self.backend_available = true;
+                        self.backend_unavailable_reason.clear();
                         self.update_status(cx);
                     }
-                    AgentEvent::SessionError { error, .. } => {
-                        self.ui
-                            .label(cx, ids!(status_label))
-                            .set_text(cx, &format!("Error: {}", error));
+                    AiWorkerEvent::Availability(ProviderAvailability::Unavailable { reason }) => {
+                        self.backend_available = false;
+                        self.backend_unavailable_reason = reason;
+                        self.update_status(cx);
                     }
-                    AgentEvent::TextDelta { text, .. } => {
+                    AiWorkerEvent::Delta(text) => {
                         let item_id = {
                             let mut data = CHAT_DATA.write().unwrap();
                             data.streaming_text.push_str(&text);
@@ -785,8 +871,11 @@ impl AppMain for App {
                         }
                         cx.redraw_all();
                     }
-                    AgentEvent::TurnComplete { .. } => {
+                    AiWorkerEvent::Done(full_text) => {
                         let mut data = CHAT_DATA.write().unwrap();
+                        if data.streaming_text.is_empty() {
+                            data.streaming_text = full_text;
+                        }
                         let text = std::mem::take(&mut data.streaming_text);
                         if !text.is_empty() {
                             data.messages.push(ChatMessage {
@@ -798,20 +887,19 @@ impl AppMain for App {
                         data.save_to_disk();
                         drop(data);
 
-                        self.current_prompt = None;
+                        self.current_prompt = false;
                         self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         cx.redraw_all();
                     }
-                    AgentEvent::PromptError { error, .. } => {
+                    AiWorkerEvent::Error(error) => {
                         CHAT_DATA.write().unwrap().is_streaming = false;
-                        self.current_prompt = None;
+                        self.current_prompt = false;
                         self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.ui
                             .label(cx, ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));
                         cx.redraw_all();
                     }
-                    AgentEvent::ToolRequest { .. } => {}
                 }
             }
         }

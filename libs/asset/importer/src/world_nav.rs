@@ -228,19 +228,34 @@ impl WorldNav {
     /// primary start, so worlds converted before this existed still publish
     /// where their player spawns.
     pub fn parse(text: &str) -> Option<Self> {
-        let mut lines = text.lines();
-        if !lines.next()?.trim().starts_with(MAGIC) {
+        let mut rest = text.lines();
+        if !rest.next()?.trim().starts_with(MAGIC) {
             return None;
         }
-        let mut xyz = lines.next()?.split_whitespace();
-        let pos = [
-            xyz.next()?.parse().ok()?,
-            xyz.next()?.parse().ok()?,
-            xyz.next()?.parse().ok()?,
-        ];
-        let mut yp = lines.next()?.split_whitespace();
-        let yaw = yp.next()?.parse().ok()?;
-        let pitch = yp.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        // Lines 2-3 are the ORIGINAL first-person form: a position and a
+        // yaw/pitch. A level with no single player start — a multiplayer
+        // strategy map, whose houses each have their own `start_N` — writes
+        // the tagged lines straight after the header instead. Reading those
+        // three numbers as mandatory threw the WHOLE sidecar away, so every
+        // such map published with no anchors at all and its houses had
+        // nowhere to begin.
+        let mut lines = rest.clone();
+        let mut head = || -> Option<([f32; 3], f32, f32)> {
+            let mut xyz = lines.next()?.split_whitespace();
+            let pos = [
+                xyz.next()?.parse().ok()?,
+                xyz.next()?.parse().ok()?,
+                xyz.next()?.parse().ok()?,
+            ];
+            let mut yp = lines.next()?.split_whitespace();
+            let yaw = yp.next()?.parse().ok()?;
+            let pitch = yp.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            Some((pos, yaw, pitch))
+        };
+        let (pos, yaw, pitch, lines) = match head() {
+            Some((pos, yaw, pitch)) => (pos, yaw, pitch, lines),
+            None => ([0.0; 3], 0.0, 0.0, rest),
+        };
         let mut nav = Self::default();
         for line in lines {
             let mut parts = line.split_whitespace();
@@ -560,6 +575,30 @@ pub fn deathmatch_name(index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A multiplayer map has no single player start: its `start_N` lines
+    /// follow the header directly. Demanding the first-person position and
+    /// yaw threw the whole sidecar away, and every such world published with
+    /// no anchors — which left its houses with nowhere to begin.
+    #[test]
+    fn a_sidecar_with_only_named_starts_still_parses() {
+        let nav = WorldNav::parse(
+            "world-spawn 1\n\
+             start start_0 15.0000 0.0000 51.0000 0.00000 -1.45000\n\
+             start start_1 93.0000 0.0000 9.0000 0.00000 -1.45000\n\
+             floor 0\nstep 0.5\neye 60\n",
+        )
+        .expect("a strategy map's spawn sidecar parses");
+        assert_eq!(nav.starts.len(), 2);
+        assert_eq!(nav.starts[0].name, "start_0");
+        assert_eq!(nav.starts[0].pos, [15.0, 0.0, 51.0]);
+        assert_eq!(nav.starts[1].pos, [93.0, 0.0, 9.0]);
+        assert_eq!(nav.eye_height, Some(60.0));
+        let anchors = nav.anchors();
+        let names: Vec<&str> = anchors.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"start_0"), "the houses reach the manifest: {names:?}");
+        assert!(names.contains(&"start_1"), "{names:?}");
+    }
 
     #[test]
     fn old_three_line_sidecars_still_yield_the_primary_start() {

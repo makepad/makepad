@@ -606,7 +606,7 @@ impl T2SparseDec {
         latent: &[f32],
         coords: Vec<[i32; 3]>,
         guide_subs: Option<&[Vec<[bool; 8]>]>,
-        cancel: &(dyn Fn() -> bool),
+        cancel: &dyn Fn() -> bool,
         on_stage: &mut dyn FnMut(usize, usize),
     ) -> Result<(Vec<f32>, Vec<[i32; 3]>, Vec<Vec<[bool; 8]>>)> {
         let mut ctx = SparseStageCtx::new(coords)?;

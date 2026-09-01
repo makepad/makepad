@@ -623,7 +623,7 @@ fn runtime_linear_type(source_type: u32, name: &str) -> Result<u32> {
     }
 }
 
-fn dit_prefix_and_tail(source_name: &str) -> Option<(String, &str)> {
+pub(crate) fn dit_prefix_and_tail(source_name: &str) -> Option<(String, &str)> {
     if let Some(rest) = source_name.strip_prefix("blocks.") {
         let (layer, tail) = rest.split_once('.')?;
         if layer.parse::<usize>().ok()? >= crate::h3::H3_DEPTH {
@@ -641,7 +641,7 @@ fn dit_prefix_and_tail(source_name: &str) -> Option<(String, &str)> {
     None
 }
 
-fn map_dit_tail(prefix: &str, tail: &str) -> String {
+pub(crate) fn map_dit_tail(prefix: &str, tail: &str) -> String {
     let tail = tail
         .replace("attn.q_norm", "attn.norm_q")
         .replace("attn.k_norm", "attn.norm_k")
@@ -651,7 +651,7 @@ fn map_dit_tail(prefix: &str, tail: &str) -> String {
     format!("{prefix}.{tail}")
 }
 
-fn top_level_dit_name(name: &str) -> Option<String> {
+pub(crate) fn top_level_dit_name(name: &str) -> Option<String> {
     let replacements = [
         ("video_patch_proj.", "proj_in."),
         ("audio_patch_proj.", "audio_proj_in."),
@@ -735,7 +735,7 @@ fn swap_row_halves(bytes: Vec<u8>, canonical: &str) -> Result<Vec<u8>> {
 /// on the way in. This is the SAME convention gap as the video VAE's
 /// `ff.w1` (see `video_vae_repack_aliases`), and it is invisible to every
 /// name and shape check — it only shows up as a wrong picture.
-fn gated_ffn_proj(tail: &str) -> bool {
+pub(crate) fn gated_ffn_proj(tail: &str) -> bool {
     tail == "mlp.fc1.weight" || tail == "mlp.fc1.bias"
 }
 

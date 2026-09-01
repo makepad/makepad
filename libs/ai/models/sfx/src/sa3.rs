@@ -454,7 +454,19 @@ impl F16Weight {
 
 /// True when the CUDA device path should be used (device present and not
 /// disabled with SA3_DEVICE=0).
+///
+/// Never on macOS: `gpu_device_available()` reports the Metal gpu_tensor
+/// shim there, but the SA3 device modules need ops the shim does not
+/// implement (`gpu_rms_norm_mul`, `gpu_dyt`, `gpu_geglu_tanh_value_gate`,
+/// `gpu_attention_packed_softcap`, ...), so a device run fails on the first
+/// TE norm. The macOS GPU path is the `metal_accel` offload inside the CPU
+/// modules — the GEMMs and attention run on the ggml Metal kernels (6.4x
+/// over pure CPU on an M-series box); the device path rides CUDA only until
+/// those shim ops exist.
 pub fn sa3_device_enabled() -> bool {
+    if cfg!(target_os = "macos") {
+        return false;
+    }
     if std::env::var("SA3_DEVICE").map(|v| v == "0").unwrap_or(false) {
         return false;
     }

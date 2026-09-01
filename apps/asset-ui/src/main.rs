@@ -5,7 +5,7 @@
 //!
 //! - FLEET: GPU boxes announce themselves on the LAN UDP beacon; the app
 //!   joins whatever is live. Capabilities come from /health + /models, jobs
-//!   are routed by the model-affinity scheduler in `makepad_asset_ai::fleet`
+//!   are routed by the model-affinity scheduler in `makepad_ai_hub::fleet`
 //!   — observable (per-stage "affinity: loaded") and overridable (pin a
 //!   model and/or a box from the dropdowns).
 //! - PIPELINE: one-click preset chains (prompt → expand → image → mesh,
@@ -23,7 +23,7 @@
 //!   introspection, plus catalog ops when the Asset Server is up),
 //!   LIBRARY (searchable Local/Server asset browser with kind/category/tag
 //!   filters, thumbnail grid and a revision/provenance/publish detail rail),
-//!   IMPORT (hardcoded OSS pack modules — Kenney first, local-folder only),
+//!   IMPORT (hardcoded licensed pack modules — Kenney first),
 //!   RUNS + WORKERS (local pipeline + LAN fleet, cancellable),
 //!   and ADMIN + AUDIT. The left generator column
 //!   stays on all of them. Server
@@ -41,7 +41,6 @@
 pub use makepad_widgets;
 
 mod analysis;
-mod annotate_queue;
 mod artifact_io;
 mod asset_store_state;
 mod audio;
@@ -72,10 +71,10 @@ use crate::artifact_io::{
     ViewerOpenGate,
 };
 use crate::fleet_poll::FleetPoll;
-use crate::annotate_queue::AnnotateQueue;
 use crate::runs_chip::RunsChip;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
+use makepad_asset_importer::classic_import::ClassicSource;
 use crate::music_page::MusicImportPage;
 use crate::library::{Library, ThumbnailBackfillJob};
 use crate::billboard_view::BillboardView;
@@ -251,7 +250,7 @@ use makepad_micro_serde::SerJson;
 use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
 use std::collections::{HashMap, HashSet, VecDeque};
-use makepad_asset_ai::fleet::BoxSnapshot;
+use makepad_ai_hub::fleet::BoxSnapshot;
 use std::path::{Path, PathBuf};
 
 app_main!(App);
@@ -2431,17 +2430,6 @@ script_mod! {
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
-                            // How much of the catalog an AI can actually
-                            // find by asking for it. Visible from every
-                            // surface, because it is a property of the
-                            // store, not of whichever page is open.
-                            annotation_chip := Label{
-                                text: ""
-                                draw_text +: {
-                                    color: #x6a7178
-                                    text_style: theme.font_bold{font_size: 7}
-                                }
-                            }
                             // Everything this app has in flight, whoever is
                             // running it: store pipelines, standalone store
                             // jobs and this app's own engine, counted once
@@ -3168,12 +3156,8 @@ script_mod! {
                                             HintLabel{ text: "CC BY 4.0 · attribution required" }
                                             LinkLabel{ text: "Terms" url: "https://creativecommons.org/licenses/by/4.0/" }
                                             kenney_pack_drop := FieldDrop2{ width: 180 }
-                                            kenney_annotate_btn := GhostButton{ text: "Annotate" }
-                                            kenney_annotate_all_btn := GhostButton{ text: "Annotate all" }
-                                            kenney_annotate_pause_btn := GhostButton{ text: "Pause" }
                                         }
                                         HintLabel{ text: "© Kenney (kenney.nl). Attribution required on every copy and derivative. Not CC0. Local kits only — this card does not download Kenney." }
-                                        HintLabel{ text: "Annotate queues this kit's turntable sheets for the vision model, which writes the descriptions catalog search hits. A publish queues its own — these buttons are for what is already in. Pause cancels what is still queued and lets the boxes finish what they are on; Resume queues exactly those assets again." }
                                     }
 
                                     freedoom_card := ImportRow{
@@ -3239,6 +3223,32 @@ script_mod! {
                                             LinkLabel{ text: "Terms" url: "https://wiki.eduke32.com/wiki/Frequently_Asked_Questions" }
                                         }
                                         HintLabel{ text: "Official Duke Nukem 3D shareware. Local preview in this app only. Not a redistributable grant. Not retail Atomic Edition. Optional HRP stays under the Duke4 HRP license." }
+                                    }
+
+                                    ea_card := ImportRow{
+                                        flow: Down spacing: 4
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            ea_import_btn := PrimaryButton{ text: "Load" }
+                                            BrightLabel{ text: "Command & Conquer classics (EA freeware)" width: 280 }
+                                            ea_license_label := HintLabel{ text: "EA freeware · local preview only" }
+                                            LinkLabel{ text: "Terms" url: "https://www.ea.com/games/command-and-conquer" }
+                                        }
+                                        DropField{
+                                            FieldCaption{ text: "Pack" }
+                                            ea_pack_drop := FieldDrop{}
+                                        }
+                                        ea_blurb_label := HintLabel{
+                                            text: "EA's 1995 RTS, freeware since 2007 — terrain, units, structures, sounds and every campaign and multiplayer map convert into RTS maps for the sandbox."
+                                        }
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            ea_status_label := HintLabel{ width: Fill text: "" }
+                                            ea_cancel_btn := DangerButton{ text: "Cancel" visible: false }
+                                        }
+                                        ea_progress := ProgressBar{ width: Fill height: 5 }
                                     }
 
                                     quake2_card := ImportRow{
@@ -3920,7 +3930,7 @@ const VOICES: &[&str] = &[
 ];
 
 /// Right-pane surface behind the nav tabs. Create keeps the viewer +
-/// History strip; Import is the OSS pack catalog; the others are Asset
+/// History strip; Import is the licensed pack catalog; the others are Asset
 /// Store views.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Surface {
@@ -3947,7 +3957,7 @@ struct AutoRun {
     /// AI_CONTENT_SURFACE="library"|"import"|"runs"|"admin": start on that
     /// surface (headless captures of the Asset Store / Import views).
     surface: Option<String>,
-    /// ASSET_UI_IMPORT="duke3d": queue that classic Import card once the UI is up.
+    /// ASSET_UI_IMPORT: queue named Import cards once the UI is up.
     import: Option<String>,
     capture: Option<PathBuf>,
     /// AI_CONTENT_CAPTURE_AT_S: capture at a fixed time after startup
@@ -4000,7 +4010,7 @@ pub struct App {
     fleet_timer: Timer,
     /// LAN beacon listener; polled on the fleet timer.
     #[rust]
-    discovered: Option<makepad_asset_ai::discovery::Discovered>,
+    discovered: Option<makepad_ai_hub::discovery::Discovered>,
     #[rust]
     job_timer: Timer,
     #[rust]
@@ -4216,7 +4226,6 @@ pub struct App {
     /// draws its progress. An asset published without a description is
     /// invisible to every text search the AI level builder makes.
     #[rust]
-    annotate_queue: AnnotateQueue,
     /// Landings waiting to be written a few at a time so the UI stays live.
     #[rust]
     import_landings: Vec<crate::import::LibraryLanding>,
@@ -4335,7 +4344,7 @@ impl App {
         }
         log!(
             "fleet: listening for '{}' beacons (MAKEPAD_AI_FLEET)",
-            makepad_asset_ai::discovery::wanted_fleet()
+            makepad_ai_hub::discovery::wanted_fleet()
         );
         // The store hosts the embedded Asset Server; hand it the library it
         // must publish. Library::open ran above, so the product backfill is
@@ -4354,7 +4363,7 @@ impl App {
         // empty library changes nothing.
         self.refresh_gallery(cx, true);
 
-        self.discovered = Some(makepad_asset_ai::discovery::start_listener());
+        self.discovered = Some(makepad_ai_hub::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
         self.maybe_connect_chat(cx);
         self.fleet_timer = cx.start_interval(3.0);
@@ -4371,6 +4380,16 @@ impl App {
         self.ui
             .combo_box(cx, ids!(preset_drop))
             .set_labels(cx, labels);
+        self.ui.combo_box(cx, ids!(ea_pack_drop)).set_labels(
+            cx,
+            crate::import_classic::EA_PACK_LABELS
+                .iter()
+                .map(|label| (*label).to_string())
+                .collect(),
+        );
+        self.ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .set_selected_item(cx, 0);
         self.ui
             .combo_box(cx, ids!(box_drop))
             .set_labels(cx, vec!["auto (affinity)".to_string()]);
@@ -4758,7 +4777,7 @@ impl App {
                 };
             }
         }
-        if let Some(license) = makepad_asset_ai::registry::license_for_model(model_id) {
+        if let Some(license) = makepad_ai_hub::registry::license_for_model(model_id) {
             let identity = license.identity();
             return LicensePrompt {
                 model_id: model_id.to_string(),
@@ -4986,7 +5005,17 @@ impl App {
             if let Some(job) = running {
                 let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
                 let what = job.model.clone().unwrap_or_else(|| "job".to_string());
-                let stage = job.stage.clone().unwrap_or_else(|| job.state.clone());
+                let mut stage = job.stage.clone().unwrap_or_else(|| job.state.clone());
+                // A chat turn asks for "unlimited tokens" (u32::MAX) and the
+                // box's stage echoes it — "decode 48/4294967295" is noise.
+                // Show the count alone when the cap is plainly boundless.
+                if let Some(rest) = stage.strip_prefix("decode ") {
+                    if let Some((k, n)) = rest.split_once('/') {
+                        if n.trim().parse::<u64>().map_or(false, |n| n > 100_000_000) {
+                            stage = format!("decode {} tok", k.trim());
+                        }
+                    }
+                }
                 let more = pending.saturating_sub(1);
                 let tail = if more > 0 { format!(" +{more} queued") } else { String::new() };
                 return (format!("{what} · {stage} {pct}%{tail}"), BUSY);
@@ -5072,7 +5101,7 @@ impl App {
         };
         self.ui.label(cx, ids!(fleet_box_status)).set_text(cx, &status);
         // Live jobs (running first, then queued) — other clients' included.
-        let jobs: Vec<makepad_asset_ai::protocol::JobStatusJson> = self
+        let jobs: Vec<makepad_ai_hub::protocol::JobStatusJson> = self
             .fleet
             .as_ref()
             .and_then(|fleet| {
@@ -5594,6 +5623,7 @@ impl App {
                 .selected_item()
                 .min(ENHANCE_FACTORS.len() - 1)],
             enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
+            video_loop: false,
         }
     }
 
@@ -5841,7 +5871,7 @@ impl App {
             return;
         };
         let first_domain = PRESETS[preset_index].domains[0];
-        if makepad_asset_ai::fleet::pick_for_domain(&self.routing_snapshots(), first_domain).is_none() {
+        if makepad_ai_hub::fleet::pick_for_domain(&self.routing_snapshots(), first_domain).is_none() {
             return; // wait for discovery
         }
         self.auto.fired = true;
@@ -6113,6 +6143,7 @@ impl App {
                     .selected_item()
                     .min(ENHANCE_FACTORS.len() - 1)],
                 enhance_flow: self.ui.check_box(cx, ids!(enh_flow_toggle)).active(cx),
+                video_loop: false,
             },
             input,
         })
@@ -6145,7 +6176,7 @@ impl App {
             self.open_license_modal(cx, prompt);
             return;
         }
-        let request = makepad_asset_ai::protocol::GenerateRequestJson {
+        let request = makepad_ai_hub::protocol::GenerateRequestJson {
             model: model.clone(),
             pull_only: Some(true),
             queue_policy: Some("queue".to_string()),
@@ -6303,8 +6334,8 @@ impl App {
                 // A big-enough occupied GPU remains a capable queue target;
                 // a physically undersized GPU does not.
                 let admission = match &pinned_model {
-                    Some(model) => makepad_asset_ai::fleet::model_admission(snapshot, model),
-                    None => makepad_asset_ai::fleet::domain_admission(snapshot, &domain),
+                    Some(model) => makepad_ai_hub::fleet::model_admission(snapshot, model),
+                    None => makepad_ai_hub::fleet::domain_admission(snapshot, &domain),
                 };
                 let capable = admission.is_some_and(|state| state.is_hardware_compatible());
                 let vram_waiting = admission.is_some_and(|state| state.is_waiting());
@@ -6469,6 +6500,11 @@ impl App {
             PRESETS[run.preset].name,
             truncate(run.prompt.trim(), 160)
         );
+        // Loop-ness lives on the preset row, not the stored spec — a saved
+        // spec pointing at a loop preset loops, and can never carry a stale
+        // flag the other way.
+        let mut gen = run.gen.clone();
+        gen.video_loop = PRESETS[run.preset].video_loop;
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
@@ -6476,7 +6512,7 @@ impl App {
             run.model_overrides.clone(),
             run.box_override.clone(),
             run.voice.clone(),
-            run.gen.clone(),
+            gen,
         );
         let skip = run.input.as_ref().map_or(0, |seed| seed.skip);
         if let Some(seed) = &run.input {
@@ -6691,18 +6727,7 @@ impl App {
         self.ui
             .button(cx, ids!(runs_cancel_all))
             .set_visible(cx, active > 0);
-        // The annotation backlog has its own chip beside this one; naming it
-        // here and listing it would make this panel a second, worse copy.
-        let mut note = String::new();
-        if self.runs_chip.annotate_pending > 0 {
-            note = format!(
-                "{} annotation jobs queued — that backlog is the SEARCHABLE chip's.",
-                self.runs_chip.annotate_pending
-            );
-        }
-        if let Some(error) = &self.runs_chip.error {
-            note = format!("the store did not answer: {error}");
-        }
+        let note = String::new();
         let note_label = self.ui.label(cx, ids!(runs_panel_note));
         note_label.set_visible(cx, !note.is_empty());
         note_label.set_text(cx, &note);
@@ -6770,12 +6795,6 @@ impl App {
         match key {
             crate::runs_chip::CardKey::Local(run_id) => self.cancel_run(cx, *run_id),
             crate::runs_chip::CardKey::LocalQueued(index) => self.cancel_row(cx, *index),
-            key => {
-                if !self.runs_chip.cancel(key) {
-                    log!("runs: nothing to cancel for {}", key.as_text());
-                }
-                self.refresh_run_ui(cx);
-            }
         }
     }
 
@@ -8251,7 +8270,7 @@ impl App {
             return;
         };
         let rgba = webcam::bgra_to_rgba8(&frame.bgra);
-        let Ok(png) = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, frame.width, frame.height)
+        let Ok(png) = makepad_ai_hub::testpattern::encode_png_rgba(&rgba, frame.width, frame.height)
         else {
             self.set_webcam_status(cx, "snapshot PNG encode failed");
             return;
@@ -8354,7 +8373,7 @@ impl App {
                         (px >> 24) as u8,
                     ]);
                 }
-                makepad_asset_ai::testpattern::encode_png_rgba(&rgba, image.width, image.height)
+                makepad_ai_hub::testpattern::encode_png_rgba(&rgba, image.width, image.height)
                     .ok()
             }) {
                 Some(png) => png,
@@ -8698,7 +8717,7 @@ impl App {
                     .count();
                 if differing * 200 > width * height {
                     if let Ok(png) =
-                        makepad_asset_ai::testpattern::encode_png_rgba(&bgra, width, height)
+                        makepad_ai_hub::testpattern::encode_png_rgba(&bgra, width, height)
                     {
                         match self
                             .library
@@ -11432,6 +11451,12 @@ impl App {
         }
     }
 
+    fn selected_ea_source(&self, cx: &mut Cx) -> ClassicSource {
+        crate::import_classic::ea_source_for_index(
+            self.ui.combo_box(cx, ids!(ea_pack_drop)).selected_item(),
+        )
+    }
+
     fn refresh_import_ui(&mut self, cx: &mut Cx) {
         let _modules = crate::import_classic::PACK_MODULES_WITH_CLASSIC;
         let labels = crate::import::kenney_pack_labels();
@@ -11451,14 +11476,6 @@ impl App {
         self.ui
             .button(cx, ids!(queue_clear_btn))
             .set_visible(cx, !self.import_queue.pending.is_empty() || self.import_busy());
-        // The Pause/Resume button says which of the two it will do, and is
-        // only worth showing while the catalog still owes descriptions.
-        let pause_btn = self.ui.button(cx, ids!(kenney_annotate_pause_btn));
-        pause_btn.set_visible(cx, self.annotate_queue.has_work());
-        pause_btn.set_text(
-            cx,
-            if self.annotate_queue.paused { "Resume" } else { "Pause" },
-        );
         let kenney_job = ImportJob::Kenney {
             pack: self.import_page.selected_pack_id().0,
             pack_index: self.import_page.kenney_pack_index,
@@ -11551,6 +11568,43 @@ impl App {
                 "Load"
             },
         );
+        let ea_index = self
+            .ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .selected_item()
+            .min(crate::import_classic::EA_MODULES.len() - 1);
+        let ea_source = crate::import_classic::ea_source_for_index(ea_index);
+        let ea_module = &crate::import_classic::EA_MODULES[ea_index];
+        let ea_card = self.classic_import_page.card(ea_source);
+        let ea_job = ImportJob::EaClassic {
+            source: ea_source,
+            path: String::new(),
+        };
+        self.ui.button(cx, ids!(ea_import_btn)).set_text(
+            cx,
+            if self.import_queue.is_active(&ea_job) && ea_card.compiling() {
+                "Loading…"
+            } else if self.import_queue.has_job(&ea_job) {
+                "Waiting"
+            } else {
+                "Load"
+            },
+        );
+        self.ui
+            .label(cx, ids!(ea_blurb_label))
+            .set_text(cx, ea_module.blurb);
+        self.ui
+            .label(cx, ids!(ea_license_label))
+            .set_text(cx, ea_module.license);
+        self.ui
+            .label(cx, ids!(ea_status_label))
+            .set_text(cx, &ea_card.status_line(self.store.connected()));
+        self.ui
+            .view(cx, ids!(ea_progress))
+            .set_uniform(cx, live_id!(progress), &[ea_card.progress_fraction()]);
+        self.ui
+            .button(cx, ids!(ea_cancel_btn))
+            .set_visible(cx, self.import_queue.has_job(&ea_job));
         let q2_job = ImportJob::Quake2 { path: String::new() };
         self.ui.button(cx, ids!(quake2_import_btn)).set_text(
             cx,
@@ -11726,6 +11780,15 @@ impl App {
                         crate::import::ImportPhase::Failed { .. }
                     ),
                 ),
+                ImportJob::EaClassic { source, .. } => {
+                    let card = self.classic_import_page.card(*source);
+                    (
+                        active.job.title(),
+                        card.status_line(self.store.connected()),
+                        card.progress_fraction(),
+                        matches!(card.phase, crate::import::ImportPhase::Failed { .. }),
+                    )
+                }
                 ImportJob::Quake2 { .. } => (
                     active.job.title(),
                     self.classic_import_page
@@ -11788,22 +11851,6 @@ impl App {
             rows.push(StoreRow::Queued {
                 title: format!("waiting · {}", item.job.title()),
                 cancel: RowAction::RemoveQueuedImport(item.id),
-            });
-        }
-        // The annotation queue is the store's, not this window's: it gets
-        // its own row for the same reason the analysis bake below does —
-        // the work outlives the import that queued it, and an operator
-        // watching a load wants to see the descriptions arriving too.
-        if self.annotate_queue.has_work() {
-            rows.push(StoreRow::Stage {
-                title: "Annotation".into(),
-                meta: self.annotate_queue.status_line(),
-                progress: self.annotate_queue.progress_fraction(),
-                failed: self.annotate_queue.error.is_some(),
-                cancel: None,
-                detail: String::new(),
-                expand: None,
-                copy: None,
             });
         }
         // The analysis bake is its own lane beside the imports: it outlives
@@ -11957,6 +12004,10 @@ impl App {
                 .classic_import_page
                 .duke3d
                 .start_import(cx, path.clone(), server),
+            ImportJob::EaClassic { source, path } => self
+                .classic_import_page
+                .card_mut(*source)
+                .start_import(cx, path.clone(), server),
             ImportJob::Quake2 { path } => self
                 .classic_import_page
                 .quake2
@@ -12012,6 +12063,9 @@ impl App {
             }
             Some(ImportJob::Duke3d { .. }) => {
                 self.classic_import_page.duke3d.request_stop(cx);
+            }
+            Some(ImportJob::EaClassic { source, .. }) => {
+                self.classic_import_page.card_mut(*source).request_stop(cx);
             }
             Some(ImportJob::Quake2 { .. }) => {
                 self.classic_import_page.quake2.request_stop(cx);
@@ -12093,46 +12147,6 @@ impl App {
         }
     }
 
-    /// Host the annotation worker as soon as there is a server to talk to.
-    ///
-    /// The same shape as the generation job loop: this process runs the
-    /// store, so this process drains the store's queues. A deployment that
-    /// wants the vision work elsewhere runs
-    /// `makepad-asset-annotate --worker` on that box instead — same loop,
-    /// same claim, and this one simply finds an empty queue.
-    fn maybe_start_annotate_queue(&mut self) {
-        if self.annotate_queue.running() {
-            return;
-        }
-        let Some(session) = self.import_server_session() else {
-            return;
-        };
-        // Scratch and client cache beside THIS instance's store root, never
-        // at a fixed repo path: a second instance on an isolated root must
-        // not write its sheets into the operator's.
-        let home = crate::asset_store_state::default_asset_server_root()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(crate::asset_store_state::asset_ui_home);
-        self.annotate_queue.start(
-            session.endpoints,
-            Some(session.server_id),
-            session.token,
-            home,
-        );
-    }
-
-    /// Start reading everything in flight from the server this process is
-    /// talking to. Idempotent; a no-op until there is a session.
-    fn maybe_start_runs_chip(&mut self) {
-        if self.runs_chip.running() {
-            return;
-        }
-        let Some(session) = self.import_server_session() else {
-            return;
-        };
-        self.runs_chip.start(session.endpoints, session.token);
-    }
 
     fn import_server_session(&self) -> Option<crate::import::ServerSession> {
         let from_session = (|| {
@@ -13089,6 +13103,15 @@ impl MatchEvent for App {
                 self.refresh_import_ui(cx);
             }
         }
+        if self
+            .ui
+            .combo_box(cx, ids!(ea_pack_drop))
+            .changed(actions)
+            .is_some()
+            && self.surface == Surface::Import
+        {
+            self.refresh_import_ui(cx);
+        }
         if self.ui.button(cx, ids!(kenney_import_btn)).clicked(actions) {
             let (pack, _) = self.import_page.selected_pack_id();
             self.open_kenney_donate_modal(
@@ -13102,32 +13125,6 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(kenney_import_all_btn)).clicked(actions) {
             self.open_kenney_donate_modal(cx, ImportJob::KenneyAll);
-        }
-        // No donate prompt on these two: they load nothing from Kenney,
-        // they ask the SERVER to queue descriptions for what is already in
-        // the catalog. One request each — the queue outlives this window.
-        if self.ui.button(cx, ids!(kenney_annotate_btn)).clicked(actions) {
-            let (kit, _) = self.import_page.selected_pack_id();
-            log!("annotate: sweeping {kit} into the queue");
-            self.annotate_queue.sweep(Some(kit));
-            self.refresh_import_ui(cx);
-        }
-        if self.ui.button(cx, ids!(kenney_annotate_all_btn)).clicked(actions) {
-            log!("annotate: sweeping the whole catalog into the queue");
-            self.annotate_queue.sweep(None);
-            self.refresh_import_ui(cx);
-        }
-        // One button, two states: an operator either wants the backlog to
-        // stop or to carry on, and both are the same place on screen.
-        if self.ui.button(cx, ids!(kenney_annotate_pause_btn)).clicked(actions) {
-            if self.annotate_queue.paused {
-                log!("annotate: resuming the backlog");
-                self.annotate_queue.resume();
-            } else {
-                log!("annotate: pausing the backlog");
-                self.annotate_queue.pause();
-            }
-            self.refresh_import_ui(cx);
         }
         let donate_modal = self.ui.modal(cx, ids!(kenney_donate_modal));
         if self.ui.button(cx, ids!(kenney_donate_ok)).clicked(actions) {
@@ -13202,6 +13199,36 @@ impl MatchEvent for App {
                     path: String::new(),
                 },
             );
+        }
+        if self.ui.button(cx, ids!(ea_import_btn)).clicked(actions) {
+            let source = self.selected_ea_source(cx);
+            log!("import: queue {}", source.title());
+            self.enqueue_import(
+                cx,
+                ImportJob::EaClassic {
+                    source,
+                    path: String::new(),
+                },
+            );
+        }
+        if self.ui.button(cx, ids!(ea_cancel_btn)).clicked(actions) {
+            let source = self.selected_ea_source(cx);
+            let job = ImportJob::EaClassic {
+                source,
+                path: String::new(),
+            };
+            if self.import_queue.is_active(&job) {
+                self.stop_active_import(cx);
+            } else if let Some(id) = self
+                .import_queue
+                .pending
+                .iter()
+                .find(|item| item.job.conflicts(&job))
+                .map(|item| item.id)
+            {
+                self.import_queue.remove(id);
+                self.refresh_import_ui(cx);
+            }
         }
         if self.ui.button(cx, ids!(quake2_import_btn)).clicked(actions) {
             log!("import: queue Quake II shareware");
@@ -13295,7 +13322,9 @@ impl MatchEvent for App {
                 FileDialogAction::FolderCancelled => {
                     self.music_import_page.picking = false;
                 }
-                FileDialogAction::None => {}
+                // This screen drives folder selection only; the platform's
+                // file and save panels answer elsewhere.
+                _ => {}
             }
             if self.surface == Surface::Import {
                 self.refresh_import_ui(cx);
@@ -13351,7 +13380,7 @@ impl MatchEvent for App {
         // Tool chips in the chat expand/collapse on click.
         self.ui
             .widget(cx, ids!(chat_list))
-            .borrow_mut::<makepad_asset_chat_ui::AssetChatList>()
+            .borrow_mut::<makepad_chat_ui::AssetChatList>()
             .map(|mut list| list.handle_actions(cx, actions));
         // Library filters re-run on every keystroke / dropdown pick and go
         // straight onto the server query.
@@ -14417,7 +14446,7 @@ impl AppMain for App {
         crate::thumbnail_renderer::script_mod(vm);
         // The shared chat pane (also the sandbox's): transcript list,
         // tool chips, think dots.
-        makepad_asset_chat_ui::script_mod(vm);
+        makepad_chat_ui::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -14533,30 +14562,7 @@ impl AppMain for App {
             // per-asset and coincidental, and a failed run publishes
             // nothing at all — so the card settles on the event rather
             // than on the next tick of a poll clock.
-            let finished = self.store.take_finished_pipelines();
-            if !finished.is_empty() {
-                for pipeline in &finished {
-                    log!("runs: {pipeline} finished");
-                }
-                self.runs_chip.wake();
-            }
             self.maybe_open_gc_confirm(cx);
-            self.maybe_start_annotate_queue();
-            self.maybe_start_runs_chip();
-            // The RUNS chip and its panel: the poll thread's picture landing
-            // is the only thing that can change a store run on screen.
-            if self.runs_chip.poll() {
-                self.refresh_run_ui(cx);
-            }
-            let annotate_poll = self.annotate_queue.poll();
-            if annotate_poll {
-                self.ui
-                    .label(cx, ids!(annotation_chip))
-                    .set_text(cx, &self.annotate_queue.chip());
-                if self.surface == Surface::Import {
-                    self.refresh_import_ui(cx);
-                }
-            }
             let kenney_poll = self.import_page.poll();
             let classic_poll = self.classic_import_page.poll();
             let music_poll = self.music_import_page.poll();
@@ -14629,7 +14635,7 @@ impl AppMain for App {
                 }
                 if classic_poll {
                     log!(
-                        "import classic: freedoom={} librequake={} duke3d={} quake2={} quake3={}",
+                        "import classic: freedoom={} librequake={} duke3d={} cnc={} ra={} ts={} d2k={} quake2={} quake3={}",
                         self.classic_import_page
                             .freedoom
                             .status_line(self.store.connected()),
@@ -14639,6 +14645,10 @@ impl AppMain for App {
                         self.classic_import_page
                             .duke3d
                             .status_line(self.store.connected()),
+                        self.classic_import_page.cnc.status_line(self.store.connected()),
+                        self.classic_import_page.ra.status_line(self.store.connected()),
+                        self.classic_import_page.ts.status_line(self.store.connected()),
+                        self.classic_import_page.d2k.status_line(self.store.connected()),
                         self.classic_import_page
                             .quake2
                             .status_line(self.store.connected()),
@@ -14822,12 +14832,29 @@ impl AppMain for App {
                     }
                     let job = match lower.as_str() {
                         "duke3d" | "duke" => Some(ImportJob::Duke3d { path: empty() }),
+                        "cnc" | "tiberian" | "td" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::Cnc,
+                            path: empty(),
+                        }),
+                        "ra" | "redalert" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::RedAlert,
+                            path: empty(),
+                        }),
+                        "ts" | "tiberiansun" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::TiberianSun,
+                            path: empty(),
+                        }),
+                        "d2k" | "dune" => Some(ImportJob::EaClassic {
+                            source: ClassicSource::Dune2000,
+                            path: empty(),
+                        }),
                         "quake3" | "quakeiii" | "q3" => Some(ImportJob::Quake3 { path: empty() }),
                         "quake2" | "q2" => Some(ImportJob::Quake2 { path: empty() }),
                         "quake" | "q1" => Some(ImportJob::Quake { path: empty() }),
                         "doom" => Some(ImportJob::Doom { path: empty() }),
                         "freedoom" => Some(ImportJob::Freedoom { path: empty() }),
                         "librequake" => Some(ImportJob::LibreQuake { path: empty() }),
+                        "darkmod" => Some(ImportJob::DarkMod { path: empty() }),
                         "kenney" | "kenney-all" => Some(ImportJob::KenneyAll),
                         _ => None,
                     };
@@ -15653,7 +15680,6 @@ mod search_box_tests {
 #[cfg(test)]
 mod library_view_tests {
     use super::*;
-    use makepad_asset_client::FacetKind;
 
     /// A changed filter is a changed RESULT SET, and both Library bodies go
     /// back to the top when it changes — a narrowed filter must not leave

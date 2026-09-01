@@ -136,3 +136,115 @@ fn legacy_unpaged_source_list_refuses_above_its_existing_client_ceiling() {
     assert_eq!(page.get("sources").unwrap().as_arr().unwrap().len(), 500);
     assert_eq!(page.get("cursor").unwrap().as_str(), Some("source0499"));
 }
+
+/// The client-driven derivation protocol end to end over real HTTP (aicore
+/// P7): POST /v1/derivations answers the CALLER with the deterministic job
+/// identity, the caller runs the kernel, uploads the output blob, and posts
+/// the completion under that identity — no queue, no worker claim loop
+/// anywhere. This is the one generation-era protocol the store kept, so it
+/// gets a route-level proof, not just the core-seam one in variants.rs.
+#[test]
+fn client_driven_derivation_completes_over_http() {
+    use common::{jobj, jstr, publish_prop_http, PACK_PREVIEW};
+    use makepad_asset_data::{
+        sha256, BlobId, ProcessingRecipe, RecipeSettings, ThumbnailMedia, ToolClosure,
+        OUTPUT_SCHEMA_V1,
+    };
+
+    let ts = start_server("derive_http");
+    let token = ts.admin_token();
+    let mut control = ts.control(Some(&token));
+    let mut data = ts.data(Some(&token));
+
+    let (asset_id, revision) =
+        publish_prop_http(&mut control, &mut data, "gen", "gen/derive-base", PACK_GLB, PACK_PREVIEW);
+
+    let recipe = ProcessingRecipe {
+        settings: RecipeSettings::MeshThumbnail {
+            width: 512,
+            height: 512,
+            media: ThumbnailMedia::Png,
+        },
+        tool: ToolClosure {
+            processor: "mp_derive".into(),
+            version: "1.0".into(),
+            build: "deadbeef".into(),
+            deterministic: true,
+        },
+        output_schema: OUTPUT_SCHEMA_V1,
+    };
+    let recipe_hex: String = recipe
+        .to_canonical_bytes()
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    // Request: the answer is "pending" with OUR job identity — the store
+    // armed nothing, and a second request joins the same in-flight row.
+    let r = control.post_json(
+        "/v1/derivations",
+        &jobj(vec![
+            ("base_asset", jstr(asset_id.clone())),
+            ("base_revision", jstr(revision.clone())),
+            ("recipe", jstr(recipe_hex.clone())),
+        ]),
+    );
+    assert_eq!(r.status, 202, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.str_field("status"), "pending");
+    let dkey = r.str_field("dkey");
+    let job = r.str_field("job");
+    let r2 = control.post_json(
+        "/v1/derivations",
+        &jobj(vec![
+            ("base_asset", jstr(asset_id.clone())),
+            ("base_revision", jstr(revision.clone())),
+            ("recipe", jstr(recipe_hex)),
+        ]),
+    );
+    assert_eq!(r2.status, 202);
+    assert_eq!(r2.str_field("job"), job, "one in-flight identity, joined");
+
+    // The caller runs the kernel and uploads the product bytes itself.
+    let mut thumb = b"THUMB-512:".to_vec();
+    thumb.extend_from_slice(&sha256(PACK_GLB));
+    let r = data.post_bytes("/v1/blobs?ns=gen", &thumb);
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+
+    // Completion under the answered job identity publishes the variant.
+    let r = control.post_json(
+        &format!("/v1/derivations/{dkey}/complete"),
+        &jobj(vec![
+            ("job", jstr(job)),
+            (
+                "thumbnail",
+                jobj(vec![
+                    ("blob", jstr(BlobId::hash_of(&thumb).to_string())),
+                    ("media", jstr("png")),
+                    ("width", makepad_asset_store::json::Value::Int(512)),
+                    ("height", makepad_asset_store::json::Value::Int(512)),
+                    (
+                        "byte_len",
+                        makepad_asset_store::json::Value::Int(thumb.len() as i64),
+                    ),
+                ]),
+            ),
+            (
+                "metrics",
+                jobj(vec![(
+                    "total_bytes",
+                    makepad_asset_store::json::Value::Int(thumb.len() as i64),
+                )]),
+            ),
+        ]),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let variant = r.str_field("variant");
+    assert!(!variant.is_empty());
+
+    // The derivation row is READY and names the same variant.
+    let r = control.get(&format!("/v1/derivations/{dkey}"));
+    assert_eq!(r.status, 200);
+    assert_eq!(r.str_field("state"), "ready");
+    assert_eq!(r.str_field("variant"), variant);
+}

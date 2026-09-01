@@ -18,7 +18,6 @@ local-llm = ["dep:makepad-ai-llm"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-makepad-ai = { path = "../makepad_ai" }
 makepad-ai-speech = { path = "../ai/models/speech", optional = true }
 makepad-ai-llm = { path = "../ai/llm", optional = true }
 
