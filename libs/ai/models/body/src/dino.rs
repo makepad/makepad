@@ -5,7 +5,8 @@
 //! LayerScale is folded into the output projection rows and biases at load.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed_cross, gpu_concat_rows_many, gpu_download,
+    gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
+    gpu_download,
     gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_f32acc, gpu_mul, gpu_rope_half,
     gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
 };
@@ -161,6 +162,21 @@ fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
         bytes.extend_from_slice(&rounded.to_le_bytes());
     }
     bytes
+}
+
+/// Head-dim-64 attention: the FA2 flash kernel (f16 operands, f32 softmax
+/// and accumulation — the reference's own precision class) where the
+/// backend has it, else the composite f32 path.
+pub(crate) fn attention_d64(
+    q: &GpuTensor,
+    k: &GpuTensor,
+    v: &GpuTensor,
+    heads: usize,
+) -> Result<GpuTensor> {
+    match gpu_attention_packed_flash2_d64(q, k, v, heads, 0.125) {
+        Ok(out) => Ok(out),
+        Err(_) => gpu_attention_packed_cross(q, k, v, heads, 0.125).map_err(DiffusionError::model),
+    }
 }
 
 impl BodyDino {
@@ -336,8 +352,7 @@ impl BodyDino {
                 .map_err(DiffusionError::model)?;
             let k = gpu_rope_half(&k, DINO_HEADS, ROPE_HALF, &cos, &sin)
                 .map_err(DiffusionError::model)?;
-            let attention = gpu_attention_packed_cross(&q, &k, &v, DINO_HEADS, 0.125)
-                .map_err(DiffusionError::model)?;
+            let attention = attention_d64(&q, &k, &v, DINO_HEADS)?;
             let attention = layer.out.forward(&attention)?;
             hidden = gpu_add(&hidden, &attention).map_err(DiffusionError::model)?;
 

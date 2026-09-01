@@ -1,7 +1,7 @@
 //! Promptable body-pose decoder and its six-step refinement loop.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed_cross, gpu_download, gpu_gelu_erf,
+    gpu_add, gpu_download, gpu_gelu_erf,
     gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_slice_rows, gpu_upload, GpuTensor,
 };
 use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
@@ -14,7 +14,6 @@ use crate::{
 pub const TOKEN_ROWS: usize = 5 + 2 * NUM_KEYPOINTS;
 const KEYPOINT_ROW: usize = 5;
 const KEYPOINT3D_ROW: usize = KEYPOINT_ROW + NUM_KEYPOINTS;
-const ATTN_SCALE: f32 = 0.125;
 
 #[derive(Clone)]
 struct NormWeights {
@@ -248,14 +247,7 @@ impl GpuAttention {
         let query = self.q.forward(query)?;
         let key = self.k.forward(key)?;
         let value = self.v.forward(value)?;
-        let attended = gpu_attention_packed_cross(
-            &query,
-            &key,
-            &value,
-            DEC_HEADS,
-            ATTN_SCALE,
-        )
-        .map_err(DiffusionError::model)?;
+        let attended = crate::dino::attention_d64(&query, &key, &value, DEC_HEADS)?;
         self.out.forward(&attended)
     }
 }
