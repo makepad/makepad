@@ -37,7 +37,23 @@ pub trait CxMediaApi {
         self.audio_input_box(index, Box::new(f))
     }
 
-    fn audio_output_box(&mut self, index: usize, f: AudioOutputFn);
+    /// Install the app's output callback, wrapped so every buffer it fills
+    /// is also offered to the audio-output taps (see
+    /// [`crate::audio_output_tap`]) — one seam, so a recorder does not have
+    /// to be re-plumbed into each backend's realtime callback.
+    fn audio_output_box(&mut self, index: usize, mut f: AudioOutputFn) {
+        self.audio_output_box_os(
+            index,
+            Box::new(move |info, buffer| {
+                f(info, buffer);
+                crate::audio_output_tap::feed_audio_output_tap(info, buffer);
+            }),
+        )
+    }
+
+    /// Backend-implemented half of [`Self::audio_output_box`]. Apps call the
+    /// wrapper; only the OS media layers implement this.
+    fn audio_output_box_os(&mut self, index: usize, f: AudioOutputFn);
     fn audio_input_box(&mut self, index: usize, f: AudioInputFn);
 
     fn video_input<F>(&mut self, index: usize, f: F)
