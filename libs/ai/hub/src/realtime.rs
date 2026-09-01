@@ -1210,6 +1210,15 @@ pub fn run_live(
                     if let Some(frame) = session.take_mailbox_frame() {
                         break frame;
                     }
+                    if session.socket_count() == 0 {
+                        // Nobody listening and nobody feeding: a client that
+                        // died without `stop` would otherwise park this
+                        // branch forever and hold the GPU slot. Go back
+                        // through the top, where the idle timeout counts a
+                        // socketless session down and ends it.
+                        session.wait_for_mailbox(Duration::from_millis(250));
+                        continue 'session;
+                    }
                     if session.loop_mode() != LoopMode::Feed {
                         // A control update flipped the session to feedback
                         // while this branch sat waiting for input. Re-enter
@@ -2052,6 +2061,48 @@ mod tests {
             max_fps: 200.0,
             idle_timeout_s: 0,
         }
+    }
+
+    /// A feed-mode client that vanishes without `stop` (a crash, a kill)
+    /// must not hold the box's live slot forever: once its socket is gone
+    /// the idle timeout ends the session even though no frame ever arrives
+    /// again.
+    #[test]
+    fn run_live_feed_mode_ends_when_the_last_socket_leaves_past_the_idle_timeout() {
+        let mut params = recording_params(LoopMode::Feed);
+        params.idle_timeout_s = 1;
+        let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        let (socket_tx, socket_rx) = mpsc::channel();
+        session.add_socket(1, socket_tx);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let source = gradient_image(32, 32);
+        let worker = {
+            let session = session.clone();
+            let seen = seen.clone();
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let mut backend = RecordingBackend { seen, source };
+                let cancel = CancelToken::new();
+                run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
+            })
+        };
+        session.push_input_frame(source);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the first frame never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The client is gone: socket closed, no stop, no more frames.
+        session.remove_socket(1);
+        drop(socket_rx);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(8);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline, "a socketless feed session must end on the idle timeout");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker.join().unwrap().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(900), "ended before the idle timeout");
     }
 
     #[test]
