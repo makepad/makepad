@@ -248,7 +248,14 @@ struct AppExec {
 
 impl ToolExecutor for AppExec {
     fn capability_doc(&mut self) -> String {
-        self.inner.capability_doc()
+        // The profile brief (context::assemble) was orphaned when the
+        // session moved in-process (aicore P8) — the broker used to
+        // prepend it, so no in-app executor did. It rides in front of the
+        // live capability text, profile-matched.
+        let mut doc = makepad_asset_chat::context::assemble(self.profile, "");
+        doc.push('\n');
+        doc.push_str(&self.inner.capability_doc());
+        doc
     }
 
     fn tool_definitions(&mut self) -> Vec<ToolDef> {
