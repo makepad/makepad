@@ -7,6 +7,55 @@
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
+/// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
+/// a ggml dtype, its output width and its bias (empty for none).
+#[derive(Clone, Copy)]
+pub struct GpuVitLinear<'a> {
+    pub w_bytes: &'a [u8],
+    pub w_ggml_type: u32,
+    pub n: usize,
+    pub bias: &'a [f32],
+}
+
+/// One pre-norm ViT layer with rotary attention and a SwiGLU feed-forward:
+/// `x += out(attn(rope(q(n1)), rope(k(n1)), v(n1)))`, then
+/// `x += down(silu(gate(n2)) * up(n2))`; LayerNorm affines on both norms,
+/// layer scales folded into `out`/`down`.
+#[derive(Clone, Copy)]
+pub struct GpuVitLayer<'a> {
+    pub norm1_w: &'a [f32],
+    pub norm1_b: &'a [f32],
+    pub q: GpuVitLinear<'a>,
+    pub k: GpuVitLinear<'a>,
+    pub v: GpuVitLinear<'a>,
+    pub out: GpuVitLinear<'a>,
+    pub norm2_w: &'a [f32],
+    pub norm2_b: &'a [f32],
+    pub gate: GpuVitLinear<'a>,
+    pub up: GpuVitLinear<'a>,
+    pub down: GpuVitLinear<'a>,
+}
+
+/// A whole ViT stack in one backend call (see `GpuVitLayer`): the Metal
+/// tensor backend runs it device-resident in one command buffer; CUDA
+/// declines (its per-op `gpu_*` path is already resident) and the caller
+/// keeps its per-op path.
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_vit_backbone_resident(
+    _x: &GpuTensor,
+    _n_head: usize,
+    _rot_half: usize,
+    _cos: &GpuTensor,
+    _sin: &GpuTensor,
+    _layers: &[GpuVitLayer<'_>],
+    _final_norm_w: &[f32],
+    _final_norm_b: &[f32],
+    _eps: f32,
+) -> Result<GpuTensor, String> {
+    Err("gpu_vit_backbone_resident: CUDA runs the per-op path".to_string())
+}
+
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
     use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
@@ -3217,6 +3266,63 @@ mod imp {
         #[cfg(target_os = "macos")]
         {
             return makepad_ai_metal::gpu_tensor::gelu(_x);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_vit_backbone_resident(
+        _x: &GpuTensor,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &GpuTensor,
+        _sin: &GpuTensor,
+        _layers: &[super::GpuVitLayer<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Result<GpuTensor, String> {
+        #[cfg(target_os = "macos")]
+        {
+            use makepad_ai_metal::gpu_tensor::{VitLayerRef, VitLinearRef};
+            fn lin<'a>(l: &super::GpuVitLinear<'a>) -> VitLinearRef<'a> {
+                VitLinearRef {
+                    w_bytes: l.w_bytes,
+                    w_ggml_type: l.w_ggml_type,
+                    n: l.n,
+                    bias: l.bias,
+                }
+            }
+            let layers: Vec<VitLayerRef<'_>> = _layers
+                .iter()
+                .map(|l| VitLayerRef {
+                    norm1_w: l.norm1_w,
+                    norm1_b: l.norm1_b,
+                    q: lin(&l.q),
+                    k: lin(&l.k),
+                    v: lin(&l.v),
+                    out: lin(&l.out),
+                    norm2_w: l.norm2_w,
+                    norm2_b: l.norm2_b,
+                    gate: lin(&l.gate),
+                    up: lin(&l.up),
+                    down: lin(&l.down),
+                })
+                .collect();
+            return makepad_ai_metal::gpu_tensor::vit_backbone_resident(
+                _x,
+                _n_head,
+                _rot_half,
+                _cos,
+                _sin,
+                &layers,
+                _final_norm_w,
+                _final_norm_b,
+                _eps,
+            );
         }
         #[cfg(not(target_os = "macos"))]
         {

@@ -8,7 +8,8 @@ use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
     gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
     gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_linear_nt_cached_f8_mm,
-    gpu_add_cols_broadcast, gpu_mul, gpu_rope_half,
+    gpu_add_cols_broadcast, gpu_mul, gpu_rope_half, gpu_vit_backbone_resident, GpuVitLayer,
+    GpuVitLinear,
     gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
 };
 use crate::weights::BodyWeights;
@@ -208,6 +209,38 @@ pub struct BodyDino {
     layers: Vec<DinoLayer>,
     final_norm_w: Vec<f32>,
     final_norm_b: Vec<f32>,
+    /// Set once the backend declined the whole-stack resident call; the
+    /// per-op path is used from then on.
+    resident_refused: std::cell::Cell<bool>,
+}
+
+impl Bf16Linear {
+    fn vit_ref(&self) -> GpuVitLinear<'_> {
+        GpuVitLinear {
+            w_bytes: &self.bytes,
+            w_ggml_type: GGML_TYPE_BF16,
+            n: self.out,
+            bias: &self.bias,
+        }
+    }
+}
+
+impl DinoLayer {
+    fn vit_ref(&self) -> GpuVitLayer<'_> {
+        GpuVitLayer {
+            norm1_w: &self.norm1_w,
+            norm1_b: &self.norm1_b,
+            q: self.q.vit_ref(),
+            k: self.k.vit_ref(),
+            v: self.v.vit_ref(),
+            out: self.out.vit_ref(),
+            norm2_w: &self.norm2_w,
+            norm2_b: &self.norm2_b,
+            gate: self.gate.vit_ref(),
+            up: self.up.vit_ref(),
+            down: self.down.vit_ref(),
+        }
+    }
 }
 
 /// Bias add broadcast over rows: `out[r] = x[r] + bias`.
@@ -374,6 +407,7 @@ impl BodyDino {
             layers,
             final_norm_w: weights.f32_shaped("backbone.norm.weight", &[DINO_DIM])?,
             final_norm_b: weights.f32_shaped("backbone.norm.bias", &[DINO_DIM])?,
+            resident_refused: std::cell::Cell::new(false),
         })
     }
 
@@ -450,6 +484,29 @@ impl BodyDino {
         let (cos, sin) = self.rope_tables(side);
         let cos = gpu_upload(&cos, rows, ROPE_HALF).map_err(DiffusionError::model)?;
         let sin = gpu_upload(&sin, rows, ROPE_HALF).map_err(DiffusionError::model)?;
+
+        // The whole stack in one backend call when the backend offers it
+        // (Metal: one command buffer, no host round trips between ops).
+        if !self.resident_refused.get() {
+            let layers: Vec<GpuVitLayer<'_>> = self.layers.iter().map(DinoLayer::vit_ref).collect();
+            match gpu_vit_backbone_resident(
+                &hidden,
+                DINO_HEADS,
+                ROPE_HALF,
+                &cos,
+                &sin,
+                &layers,
+                &self.final_norm_w,
+                &self.final_norm_b,
+                DINO_NORM_EPS,
+            ) {
+                Ok(normalized) => {
+                    return gpu_slice_rows(&normalized, DINO_PREFIX_TOKENS, num_patches)
+                        .map_err(DiffusionError::model);
+                }
+                Err(_) => self.resident_refused.set(true),
+            }
+        }
 
         for layer in &self.layers {
             let normed = gpu_layer_norm_mul_add(

@@ -4,10 +4,11 @@
 //! goal is a working Metal path we can then keep cutting copies.
 
 use crate::gpu_types::{GpuLinearPart, GpuTensor};
+pub use crate::shim::{VitLayerRef, VitLinearRef};
 use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_group_norm_planar_f32, try_layer_norm_mul_add_f32, try_matmul_nt_f32, try_mul_f32,
-    try_silu_f32,
+    try_silu_f32, try_vit_backbone_resident_f32,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -746,6 +747,41 @@ pub fn rope_half(
 
 /// Per-row layer norm with an affine: `(x - mean) / sqrt(var + eps) * mul + add`
 /// (biased variance), `mul`/`add` one value per column.
+/// A whole pre-norm ViT stack device-resident (see `shim::VitLayerRef`):
+/// `x` `[seq, dim]` goes up once, every layer encodes into one command
+/// buffer, and the final layer-normed activations come back.
+#[allow(clippy::too_many_arguments)]
+pub fn vit_backbone_resident(
+    x: &GpuTensor,
+    n_head: usize,
+    rot_half: usize,
+    cos: &GpuTensor,
+    sin: &GpuTensor,
+    layers: &[VitLayerRef<'_>],
+    final_norm_w: &[f32],
+    final_norm_b: &[f32],
+    eps: f32,
+) -> Result<GpuTensor, String> {
+    let xd = data(x)?;
+    let cd = data(cos)?;
+    let sd = data(sin)?;
+    let out = try_vit_backbone_resident_f32(
+        &xd,
+        x.rows,
+        x.cols,
+        n_head,
+        rot_half,
+        &cd,
+        &sd,
+        layers,
+        final_norm_w,
+        final_norm_b,
+        eps,
+    )
+    .ok_or_else(|| "metal resident vit backbone failed".to_string())?;
+    Ok(tensor(x.rows, x.cols, out))
+}
+
 pub fn layer_norm_mul_add(
     x: &GpuTensor,
     mul: &[f32],
