@@ -33,9 +33,9 @@
 //! actually reports (see [`tier_for_free_vram`]) and logged — a request never
 //! silently gets a different tier than the one the box was sized for.
 
-use crate::backend::{
-    ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
-};
+use crate::backend::GenerateParams;
+#[cfg(feature = "llm")]
+use crate::backend::{ArtifactData, BackendCtx, CancelToken, ContentBackend, ProgressSink};
 use crate::error::AssetAiError;
 
 /// Largest request image payload accepted, in decoded bytes. A turntable
