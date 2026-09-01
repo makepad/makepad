@@ -764,6 +764,19 @@ impl DropTogglesRef {
         }
     }
 
+    /// Drop the chip word, or hand it back. Emptying it is how a chip that
+    /// has run out of room goes icon-only: chip_text falls through to the
+    /// count alone when the word is gone, so a filter that is in force is
+    /// still readable on a chip too narrow to spell FILTER.
+    pub fn set_text(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.text != text {
+                inner.text = text.to_string();
+                inner.redraw_all(cx);
+            }
+        }
+    }
+
     pub fn set_active(&self, cx: &mut Cx, index: usize, on: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, index, on);
