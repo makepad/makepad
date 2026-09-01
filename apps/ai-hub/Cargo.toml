@@ -14,7 +14,7 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 # Feature passthrough: the headless node exposes exactly the library's
 # feature set, so box launch scripts keep their --features flags working.
 [features]
-default = ["flux", "paint", "paint-cuda", "llm", "tts", "indextts", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native"]
+default = ["flux", "paint", "paint-cuda", "llm", "tts", "indextts", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "upscale-native", "motion-native", "rig-native", "splat-native"]
 python-backends = ["makepad-ai-hub/python-backends"]
 flux = ["makepad-ai-hub/flux"]
 paint = ["makepad-ai-hub/paint"]
@@ -29,7 +29,6 @@ mesh = ["makepad-ai-hub/mesh"]
 matte-native = ["makepad-ai-hub/matte-native"]
 depth-native = ["makepad-ai-hub/depth-native"]
 segment-native = ["makepad-ai-hub/segment-native"]
-body-native = ["makepad-ai-hub/body-native"]
 upscale-native = ["makepad-ai-hub/upscale-native"]
 motion-native = ["makepad-ai-hub/motion-native"]
 splat-native = ["makepad-ai-hub/splat-native"]

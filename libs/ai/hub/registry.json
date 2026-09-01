@@ -624,32 +624,6 @@
    ]
   },
   {
-   "id": "whisper-large-v3-turbo",
-   "domain": "stt",
-   "backend": "whisper",
-   "available": true,
-   "gated": false,
-   "license": {
-    "name": "MIT License",
-    "url": "https://huggingface.co/ggerganov/whisper.cpp",
-    "summary": "OpenAI Whisper large-v3-turbo weights in ggml format as distributed by ggerganov/whisper.cpp (MIT). Permissive use, including commercial.",
-    "restriction": "none"
-   },
-   "vram_gb": 2.0,
-   "note": "Whisper large-v3-turbo speech-to-text via the in-repo pure-Rust port (makepad-ai-speech whisper module; Metal/CUDA/CPU). Request: input_b64 audio/wav (any rate/channels, downmixed + resampled to 16 kHz) + language. Output: one application/json TranscriptJson {text, segments[{start_ms,end_ms,text}]}. The wire side of the stt.whisper pipe; apps reach it through AiHub::start_stt.",
-   "files": [
-    {
-     "repo": "ggerganov/whisper.cpp",
-     "path": "ggml-large-v3-turbo.bin",
-     "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
-     "cache_as": "stt/ggml-large-v3-turbo.bin",
-     "size": 1624555275,
-     "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
-     "local": false
-    }
-   ]
-  },
-  {
    "id": "kokoro",
    "domain": "speech",
    "backend": "kokoro",
@@ -1764,32 +1738,6 @@
      "cache_as": "depth/da3-metric-large/model.safetensors",
      "size": 1336734448,
      "sha256": "bbea5b0b3ee389849cffa7ddae89de064a90abd2b055fc5aa99aac68db324776"
-    }
-   ]
-  },
-  {
-   "id": "sam3dbody",
-   "domain": "body",
-   "backend": "body-native",
-   "available": true,
-   "gated": false,
-   "license": {
-    "name": "SAM License",
-    "url": "https://huggingface.co/Comfy-Org/sam-3d-body",
-    "summary": "SAM 3D Body is under the SAM License / Meta acceptable-use terms published with the checkpoint. Review the model card before production use. This stack never downloads facebook/* checkpoints.",
-    "restriction": "community"
-   },
-   "vram_gb": 4.5,
-   "note": "SAM 3D Body (Comfy-Org/sam-3d-body, SAM License) RGB image -> application/json human pose packet. Native Rust inference; no Python, Torch, subprocess, or silent fallback. facebook/* checkpoints are never fetched. The checkpoint is pinned to an immutable revision, byte size, and SHA-256.",
-   "files": [
-    {
-     "role": "native-body",
-     "repo": "Comfy-Org/sam-3d-body",
-     "path": "detection/sam_3d_body_dinov3_bf16.safetensors",
-     "revision": "60476aced0b8de0a0e82a318c79a85061cc97434",
-     "cache_as": "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors",
-     "size": 2830737652,
-     "sha256": "59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf"
     }
    ]
   },
