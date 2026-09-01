@@ -386,10 +386,20 @@ impl MpRunView {
         draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
+        // Linux's software fallback is copied row-for-row from a top-left
+        // framebuffer and needs the historical shader flip. A GPU-shared
+        // DMA-BUF texture already has the orientation expected by the GL
+        // sampler; flipping that path turns every hosted app upside down.
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[1.0f32]);
+        draw_app.draw_vars.set_dyn_instance(
+            cx,
+            id!(y_flip),
+            &[if drawn.software_buffer.is_some() {
+                1.0f32
+            } else {
+                0.0f32
+            }],
+        );
         #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
         draw_app
             .draw_vars

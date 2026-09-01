@@ -1,4 +1,5 @@
 use crate::document::PdfDocument;
+use crate::font_program::{self, FontProgram, FontProgramKind};
 use crate::lexer::*;
 use crate::object::*;
 
@@ -36,6 +37,10 @@ pub struct FontResource {
     /// width); `default_width` carries `DW` (1000 when absent). Simple
     /// fonts leave this `None` and use `widths`.
     pub cid_widths: Option<std::collections::HashMap<u32, f64>>,
+    /// Name/cmap metadata recovered from an embedded CFF or sfnt program.
+    /// Parsing failures deliberately degrade to `None`; PDF decoding and
+    /// rendering remain independent of this additive metadata.
+    pub font_program: Option<FontProgram>,
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +306,7 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
     };
 
     let mut default_width = dict.get_f64("MissingWidth").unwrap_or(600.0);
+    let mut font_descriptor = dict.get("FontDescriptor").cloned();
 
     // Type0 (composite) fonts carry their widths on the descendant CID
     // font: `W` (CID → width runs) and `DW` (the default, 1000 if absent).
@@ -322,6 +328,7 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
             if let Some(first) = first {
                 let cid_font = doc.resolve(&first)?;
                 if let Some(cid_dict) = cid_font.as_dict() {
+                    font_descriptor = cid_dict.get("FontDescriptor").cloned();
                     if let Some(dw) = cid_dict.get_f64("DW") {
                         default_width = dw;
                     }
@@ -346,6 +353,10 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
         None
     };
 
+    let font_program = font_descriptor
+        .as_ref()
+        .and_then(|descriptor| parse_embedded_font_program(doc, descriptor));
+
     Ok(FontResource {
         subtype,
         base_font,
@@ -356,7 +367,34 @@ fn parse_font_resource(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<FontRes
         to_unicode,
         default_width,
         cid_widths,
+        font_program,
     })
+}
+
+fn parse_embedded_font_program(
+    doc: &mut PdfDocument,
+    descriptor_obj: &PdfObj,
+) -> Option<FontProgram> {
+    let descriptor = doc.resolve(descriptor_obj).ok()?;
+    let descriptor = descriptor.as_dict()?;
+
+    if let Some(font_file) = descriptor.get("FontFile2") {
+        let resolved = doc.resolve(font_file).ok()?;
+        let stream = resolved.as_stream()?;
+        let data = doc.decode_stream(stream).ok()?;
+        return font_program::parse_sfnt(&data, FontProgramKind::TrueType).ok();
+    }
+
+    let font_file = descriptor.get("FontFile3")?;
+    let resolved = doc.resolve(font_file).ok()?;
+    let stream = resolved.as_stream()?;
+    let subtype = stream.dict.get_name("Subtype").unwrap_or("");
+    let data = doc.decode_stream(stream).ok()?;
+    match subtype {
+        "Type1C" | "CIDFontType0C" => font_program::parse_cff(&data).ok(),
+        "OpenType" => font_program::parse_sfnt(&data, FontProgramKind::OpenType).ok(),
+        _ => None,
+    }
 }
 
 /// An Encoding value: a name, or a dict with /BaseEncoding + /Differences.

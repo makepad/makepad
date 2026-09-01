@@ -28,6 +28,9 @@ use std::{
 };
 
 mod bookmarks;
+mod chat_agent;
+mod chat_panel;
+mod chat_tools;
 mod contents;
 mod demo;
 mod menu;
@@ -35,6 +38,7 @@ mod model;
 mod ops;
 mod preview;
 mod rename;
+mod sizecache;
 mod theme;
 mod thumbs;
 mod treemap;
@@ -43,13 +47,17 @@ mod vfs;
 
 use crate::{
     bookmarks::Bookmarks,
+    chat_agent::{ChatAgent, ChatEvent},
+    chat_panel::{ChatState, ChatVoice},
+    chat_tools::{ToolJob, ToolRunner},
     contents::{FileContents, FileContentsAction, ViewMode, DEFAULT_ZOOM, ZOOM_LEVELS},
     model::{display_name, trash_dir, FileEntry},
     menu::{MenuAction, MenuRow},
-    ops::{Journal, OpKind, OpRequest, OpUpdate, Ops},
+    ops::{Journal, OpKind, OpRequest, OpUpdate, Ops, Undo},
     preview::{Preview, PreviewHost},
     rename::BatchMode,
     theme::Palette,
+    treemap_view::MapProjection,
     vfs::vfs,
 };
 
@@ -194,6 +202,54 @@ script_mod! {
             draw_text +: {
                 color: mod.mpf.fg
                 text_style: theme.font_regular{font_size: 10.0}
+            }
+        }
+    }
+
+    /** One row of the filter popup's legend: swatch, kind, live bytes.
+     * Clicking it IS the filter toggle for that kind. */
+    let LegendRow = SolidView{
+        width: Fill
+        height: 22
+        flow: Right
+        spacing: 8
+        padding: Inset{left: 8 right: 8}
+        align: Align{y: 0.5}
+        cursor: MouseCursor.Hand
+        draw_bg +: {color: #00000000}
+        lg_swatch := SolidView{
+            width: 10
+            height: 10
+            draw_bg +: {color: #x565f89}
+        }
+        lg_name := Label{
+            width: Fill
+            draw_text +: {
+                color: mod.mpf.fg
+                text_style: theme.font_regular{font_size: 9.5}
+            }
+        }
+        lg_bytes := Label{
+            draw_text +: {
+                color: mod.mpf.fg_dim
+                text_style: theme.font_regular{font_size: 9.5}
+            }
+        }
+    }
+
+    /** One "modified within" choice. The box is the text plus the same
+     * padding on every side, so the highlight is centred by construction —
+     * a fixed height had the label riding low in it. */
+    let AgeChip = SolidView{
+        width: Fit
+        height: Fit
+        padding: Inset{left: 5 right: 5 top: 3 bottom: 3}
+        cursor: MouseCursor.Hand
+        draw_bg +: {color: #00000000}
+        chip_label := Label{
+            draw_text +: {
+                color: mod.mpf.fg_dim
+                text_style: theme.font_regular{font_size: 9.0}
             }
         }
     }
@@ -579,6 +635,15 @@ script_mod! {
                                     }
                                 }
                             }
+                            chat_button := ToolButton{
+                                Icon{
+                                    icon_walk: Walk{width: 15 height: 15}
+                                    draw_icon +: {
+                                        svg: crate_resource("self://resources/icons/chat.svg")
+                                        color: mod.mpf.fg
+                                    }
+                                }
+                            }
                             menu_button := ToolButton{
                                 Icon{
                                     icon_walk: Walk{width: 15 height: 15}
@@ -753,7 +818,199 @@ script_mod! {
                                         text_style: theme.font_regular{font_size: 10.0}
                                     }
                                 }
-                                contents := mod.widgets.FileContents{}
+
+                                // The map's own tool strip. It only exists in
+                                // the Treemap view, and everything on it acts
+                                // on the rectangle that is picked — which is
+                                // what a right-click used to be for.
+                                map_tools := SolidView{
+                                    visible: false
+                                    width: Fill
+                                    height: 30
+                                    flow: Right
+                                    spacing: 2
+                                    padding: Inset{left: 16 right: 16}
+                                    align: Align{y: 0.5}
+                                    draw_bg +: {color: mod.mpf.bg_dark}
+                                    // The render-mode switch: one block view,
+                                    // three ways of looking at it.
+                                    proj_flat := ToolButton{
+                                        Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/treemap.svg")
+                                                color: mod.mpf.fg
+                                            }
+                                        }
+                                    }
+                                    proj_ortho := ToolButton{
+                                        Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/treemap25.svg")
+                                                color: mod.mpf.fg
+                                            }
+                                        }
+                                    }
+                                    proj_persp := ToolButton{
+                                        Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/treemap3d.svg")
+                                                color: mod.mpf.fg
+                                            }
+                                        }
+                                    }
+                                    View{width: 10 height: 1}
+                                    map_rescan := ToolButton{
+                                        map_rescan_icon := Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/reload.svg")
+                                                color: mod.mpf.fg
+                                            }
+                                        }
+                                    }
+                                    View{width: 10 height: 1}
+                                    map_trash := ToolButton{
+                                        map_trash_icon := Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/trash.svg")
+                                                color: mod.mpf.muted
+                                            }
+                                        }
+                                    }
+                                    map_erase := ToolButton{
+                                        map_erase_icon := Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/delete-forever.svg")
+                                                color: mod.mpf.muted
+                                            }
+                                        }
+                                    }
+                                    View{width: 10 height: 1}
+                                    map_filter := ToolButton{
+                                        map_filter_icon := Icon{
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self://resources/icons/filter.svg")
+                                                color: mod.mpf.fg
+                                            }
+                                        }
+                                    }
+                                    map_tools_hint := Label{
+                                        width: Fill
+                                        max_lines: 1
+                                        margin: Inset{left: 8}
+                                        text_overflow: TextOverflow.Ellipsis
+                                        text: "Click a rectangle to pick it"
+                                        draw_text +: {
+                                            color: mod.mpf.fg_dim
+                                            text_style: theme.font_regular{font_size: 8.5}
+                                        }
+                                    }
+                                    map_scan_all := CheckBox{
+                                        text: "ignore system"
+                                    }
+                                }
+                                map_row := View{
+                                    width: Fill
+                                    height: Fill
+                                    flow: Right
+                                    contents := mod.widgets.FileContents{}
+                                    // The filter, docked: everything in it
+                                    // applies live, and the map tweens right
+                                    // beside it while you fiddle.
+                                    map_side := SolidView{
+                                        visible: false
+                                        width: 258
+                                        height: Fill
+                                        draw_bg +: {color: mod.mpf.bg_dark}
+                                        ScrollYView{
+                                            width: Fill
+                                            height: Fill
+                                            flow: Down
+                                            spacing: 6
+                                            padding: Inset{left: 10 right: 10 top: 10 bottom: 10}
+                                            Label{
+                                                text: "FILTER"
+                                                draw_text +: {
+                                                    color: mod.mpf.fg_dim
+                                                    text_style: theme.font_bold{font_size: 8.0}
+                                                }
+                                            }
+                                            filter_query := MpfInput{
+                                                width: Fill
+                                                height: 26
+                                                empty_text: "name, .ext, >100mb, <7d"
+                                            }
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{y: 0.5}
+                                                filter_size_label := Label{
+                                                    width: 96
+                                                    text: "any size"
+                                                    draw_text +: {
+                                                        color: mod.mpf.fg_dim
+                                                        text_style: theme.font_regular{font_size: 9.0}
+                                                    }
+                                                }
+                                                filter_size := Slider{
+                                                    width: Fill
+                                                    height: 18
+                                                    text: ""
+                                                }
+                                            }
+                                            filter_age_row := View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 2
+                                                align: Align{y: 0.5}
+                                                filter_age_hint := Label{
+                                                    margin: Inset{right: 4}
+                                                    text: "new:"
+                                                    draw_text +: {
+                                                        color: mod.mpf.fg_dim
+                                                        text_style: theme.font_regular{font_size: 9.0}
+                                                    }
+                                                }
+                                                filter_age0 := AgeChip{chip_label +: {text: "any"}}
+                                                filter_age1 := AgeChip{chip_label +: {text: "1d"}}
+                                                filter_age2 := AgeChip{chip_label +: {text: "3d"}}
+                                                filter_age3 := AgeChip{chip_label +: {text: "1w"}}
+                                                filter_age4 := AgeChip{chip_label +: {text: "1mo"}}
+                                                filter_age5 := AgeChip{chip_label +: {text: "1y"}}
+                                            }
+                                            Hr{}
+                                            filter_kind0 := LegendRow{}
+                                            filter_kind1 := LegendRow{}
+                                            filter_kind2 := LegendRow{}
+                                            filter_kind3 := LegendRow{}
+                                            filter_kind4 := LegendRow{}
+                                            filter_kind5 := LegendRow{}
+                                            filter_kind6 := LegendRow{}
+                                            filter_clear := View{
+                                                width: Fill
+                                                height: 20
+                                                align: Align{x: 1.0 y: 0.5}
+                                                cursor: MouseCursor.Hand
+                                                clear_label := Label{
+                                                    text: "clear all"
+                                                    draw_text +: {
+                                                        color: mod.mpf.accent
+                                                        text_style: theme.font_regular{font_size: 9.0}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 progress_row := SolidView{
                                     visible: false
@@ -874,6 +1131,8 @@ script_mod! {
                                     prop_opens := PropRow{prop_key +: {text: "OPEN WITH"}}
                                 }
                             }
+
+                            chat_panel := mod.widgets.MpfChatPanel{}
                         }
                     }
 
@@ -1190,6 +1449,8 @@ enum FocusTarget {
     Path,
     Search,
     Batch,
+    Chat,
+    Filter,
 }
 
 /// A finished recursive size measurement for the properties panel.
@@ -1228,6 +1489,14 @@ const MODE_BUTTONS: [(&[LiveId], ViewMode); 4] = [
     (ids!(list_button), ViewMode::List),
     (ids!(compact_button), ViewMode::Compact),
     (ids!(treemap_button), ViewMode::Treemap),
+];
+
+/// The projection switch on the map's own strip: how the block view renders,
+/// not which view is open.
+const PROJ_BUTTONS: [(&[LiveId], MapProjection); 3] = [
+    (ids!(proj_flat), MapProjection::Flat),
+    (ids!(proj_ortho), MapProjection::Ortho),
+    (ids!(proj_persp), MapProjection::Persp),
 ];
 
 /// The tab strip's slots. More tabs than this and the strip would be a
@@ -1374,6 +1643,24 @@ pub struct App {
     quick_look_open: bool,
     #[rust]
     column_menu_open: bool,
+    /// The filter sidebar, docked to the right of the map. The name kept its
+    /// popup days; the state is the same choice.
+    #[rust]
+    filter_popup_open: bool,
+    /// How the block view renders — flat, extruded, perspective. A property
+    /// of the view, not a view of its own; saved across launches.
+    #[rust]
+    projection: MapProjection,
+    /// The "modified within" choice: an index into [`AGE_MINUTES`].
+    #[rust]
+    filter_age: usize,
+    /// Which legend kinds are toggled into the filter.
+    #[rust]
+    filter_kinds: [bool; 7],
+    /// Which kind class each legend row currently shows (rows are sorted by
+    /// bytes, so the mapping moves).
+    #[rust]
+    legend_rows: [usize; 7],
     #[rust]
     props_open: bool,
     #[rust]
@@ -1402,6 +1689,13 @@ pub struct App {
     /// The job the progress row is showing, so Cancel knows what to stop.
     #[rust]
     active_op: Option<u64>,
+    /// What each running job will mean for the size map once it lands. The
+    /// map is expensive to build and cheap to correct, so every operation the
+    /// app performs itself is folded straight into it — a scan of a full home
+    /// directory is minutes, and moving one file to the Trash should not cost
+    /// them.
+    #[rust]
+    map_jobs: Vec<MapJob>,
     /// A file to select, and maybe rename, once the folder is re-listed.
     #[rust]
     pending_select: Vec<PathBuf>,
@@ -1439,6 +1733,49 @@ pub struct App {
     /// Warm-pool dormancy — see `Dormancy`.
     #[rust]
     dormancy: Dormancy,
+
+    // ---------------------------------------------------------------- chat
+    /// The ask-about-these-files panel. Everything below it stays `None` until
+    /// the panel is opened for the first time: a file browser must not load
+    /// nine billion parameters for a panel nobody asked for.
+    #[rust]
+    chat_open: bool,
+    #[rust]
+    chat: ChatState,
+    #[rust]
+    agent: Option<ChatAgent>,
+    #[rust]
+    tool_runner: Option<ToolRunner>,
+    /// True between sending a question and the answer being finished.
+    #[rust]
+    chat_busy: bool,
+    #[rust]
+    chat_ready: bool,
+    /// How many tool results the model is still owed for this turn, and the
+    /// ones that have come back so far — they go over in call order, together.
+    #[rust]
+    chat_awaiting_tools: usize,
+    #[rust]
+    chat_tool_replies: Vec<ToolReply>,
+    /// Tool rounds spent on the current question, so a model that decides to
+    /// keep looking forever is stopped rather than left running.
+    #[rust]
+    chat_tool_rounds: usize,
+    /// The status line under the panel header.
+    #[rust]
+    chat_status: String,
+    /// The last "about:" chip and map-strip hint that were pushed into the UI,
+    /// so the per-signal refresh only touches a widget when something changed.
+    #[rust]
+    chat_about: String,
+    #[rust]
+    map_tools_note: String,
+}
+
+/// One finished tool call, waiting for its turn-mates.
+pub struct ToolReply {
+    text: String,
+    is_error: bool,
 }
 
 /// One row of the Open With submenu: the app's id (empty = the desktop's own
@@ -1550,6 +1887,8 @@ impl App {
                 .ui
                 .view(cx, ids!(batch_find))
                 .text_input(cx, ids!(field_input)),
+            FocusTarget::Chat => self.ui.text_input(cx, ids!(chat_input)),
+            FocusTarget::Filter => self.ui.text_input(cx, ids!(filter_query)),
         };
         // `take_key_focus` focuses the field's *area*, and a field that has
         // not been drawn since it was revealed has none — focusing it would
@@ -1634,7 +1973,7 @@ impl App {
         let display = path.display().to_string();
         self.status(cx, &format!("Loading {}…", display));
         // The treemap is of a folder, so a new folder means a new map.
-        if self.tabs[self.tab].mode == ViewMode::Treemap {
+        if self.tabs[self.tab].mode.is_treemap() {
             let map = self.with_contents(cx, |contents, cx| contents.treemap(cx));
             if let Some(map) = map {
                 map.set_root(cx, &path);
@@ -1749,8 +2088,11 @@ impl App {
 
     /// The status line's resting state: where we are and how it is sorted.
     fn report(&mut self, cx: &mut Cx) {
+        // Whatever changed, the chat's "about:" chip and the map strip are
+        // about the same selection this line is — so they follow it here.
+        self.refresh_chat(cx);
         let mode = self.tabs[self.tab].mode;
-        if mode == ViewMode::Treemap {
+        if mode.is_treemap() {
             let text = self
                 .with_contents(cx, |contents, cx| contents.treemap(cx).status())
                 .unwrap_or_default();
@@ -1846,15 +2188,17 @@ impl App {
     /// Push a mode into the body and the toolbar without touching history.
     fn apply_mode(&mut self, cx: &mut Cx, mode: ViewMode) {
         let dir = self.current_dir();
+        let projection = self.projection;
         self.with_contents(cx, |contents, cx| {
             contents.set_mode(cx, mode);
             let map = contents.treemap(cx);
             // Scanning a tree is expensive: it only runs while the map is the
             // thing on screen.
-            if mode == ViewMode::Treemap {
+            if mode.is_treemap() {
                 if map.root() != dir {
                     map.set_root(cx, &dir);
                 }
+                map.set_projection(cx, projection);
             } else {
                 map.stop(cx);
             }
@@ -1864,6 +2208,52 @@ impl App {
                 .widget(cx, id)
                 .widget(cx, ids!(btn_sel))
                 .set_visible(cx, button_mode == mode);
+        }
+        self.style_projection_buttons(cx);
+        // The map's tool strip and the filter sidebar belong to the map. The
+        // pick it acts on lives in the treemap widget and survives this, so
+        // coming back to the map finds the same rectangle still ringed.
+        self.ui
+            .widget(cx, ids!(map_tools))
+            .set_visible(cx, mode.is_treemap());
+        self.ui
+            .widget(cx, ids!(map_side))
+            .set_visible(cx, mode.is_treemap() && self.filter_popup_open);
+        if mode.is_treemap() && self.filter_popup_open {
+            // Entering the map with the sidebar already open (a pref, or a
+            // mode round-trip): the legend fills now, not on the next toggle.
+            self.refresh_filter_popup(cx);
+        }
+        self.map_tools_note.clear();
+        self.refresh_chat(cx);
+    }
+
+    /// Choose how the block view renders, remember it, and light the right
+    /// button. Never changes which view is open.
+    fn set_projection_choice(&mut self, cx: &mut Cx, projection: MapProjection) {
+        self.projection = projection;
+        model::pref_set(
+            "projection",
+            match projection {
+                MapProjection::Flat => "flat",
+                MapProjection::Ortho => "ortho",
+                MapProjection::Persp => "persp",
+            },
+        );
+        self.with_contents(cx, |contents, cx| {
+            contents.treemap(cx).set_projection(cx, projection);
+        });
+        self.style_projection_buttons(cx);
+        self.report(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn style_projection_buttons(&mut self, cx: &mut Cx) {
+        for (id, projection) in PROJ_BUTTONS {
+            self.ui
+                .widget(cx, id)
+                .widget(cx, ids!(btn_sel))
+                .set_visible(cx, projection == self.projection);
         }
     }
 
@@ -2390,12 +2780,7 @@ impl App {
     /// Copy the selection into the folder it is already in — which the
     /// collision rule turns into "name (2)".
     fn duplicate(&mut self, cx: &mut Cx) {
-        let paths: Vec<PathBuf> = self
-            .with_contents(cx, |contents, _| contents.selected_entries())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let paths = self.target_paths(cx);
         if paths.is_empty() {
             self.status(cx, "Nothing selected to duplicate");
             return;
@@ -2403,10 +2788,24 @@ impl App {
         self.submit(cx, OpKind::Copy, paths, None);
     }
 
+    /// Measure the folder again and replace the map that was read back from
+    /// the cache. The one thing that makes a remembered map safe: it is never
+    /// more than a keystroke from being made true.
+    fn rescan_map(&mut self, cx: &mut Cx) {
+        if !self.tabs[self.tab].mode.is_treemap() {
+            self.status(cx, "Rescanning is for the map — Cmd+4 shows it");
+            return;
+        }
+        self.with_contents(cx, |contents, cx| contents.treemap(cx).rescan(cx));
+        self.report(cx);
+    }
+
     /// Show the entry on the map. The map is of the folder we are in, so this
     /// is a view change plus a highlight — not a search.
     fn reveal_in_treemap(&mut self, cx: &mut Cx, entry: Option<FileEntry>) {
-        self.set_mode(cx, ViewMode::Treemap);
+        if !self.tabs[self.tab].mode.is_treemap() {
+            self.set_mode(cx, ViewMode::Treemap);
+        }
         let Some(entry) = entry else {
             return;
         };
@@ -2422,12 +2821,7 @@ impl App {
     /// the second press: there is no undo for this, so a single slip must not
     /// be enough.
     fn delete_forever(&mut self, cx: &mut Cx) {
-        let paths: Vec<PathBuf> = self
-            .with_contents(cx, |contents, _| contents.selected_entries())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let paths = self.target_paths(cx);
         if paths.is_empty() {
             self.status(cx, "Nothing selected to delete");
             return;
@@ -2665,6 +3059,11 @@ impl App {
 
     fn submit(&mut self, cx: &mut Cx, kind: OpKind, sources: Vec<PathBuf>, new_name: Option<String>) {
         let id = self.next_op_id();
+        // Remembered now, applied when the job reports back: the size map can
+        // be corrected by arithmetic instead of another walk of the disk, but
+        // only if it knows what went where, and `OpUpdate::Done` says only
+        // where things landed.
+        self.remember_for_map(id, MapEffect::of(kind), sources.clone());
         let request = OpRequest {
             id,
             kind,
@@ -2773,6 +3172,7 @@ impl App {
                         self.active_op = None;
                     }
                     self.finish_op(cx);
+                    self.map_absorb(cx, id, &touched);
                     // What a job left behind is worth selecting only when it
                     // landed *here*: a trashed file's `touched` path is inside
                     // the Trash, and selecting it would select nothing.
@@ -2784,6 +3184,8 @@ impl App {
                     self.request_directory(cx);
                 }
                 OpUpdate::Failed { id, kind, message } => {
+                    // Nothing happened, so the map is still right.
+                    self.map_jobs.retain(|job| job.id != id);
                     if self.active_op == Some(id) {
                         self.active_op = None;
                     }
@@ -2798,12 +3200,7 @@ impl App {
     }
 
     fn copy_selection(&mut self, cx: &mut Cx, cut: bool) {
-        let paths: Vec<PathBuf> = self
-            .with_contents(cx, |contents, _| contents.selected_entries())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let paths = self.target_paths(cx);
         if paths.is_empty() {
             self.status(cx, "Nothing selected to copy");
             return;
@@ -2842,13 +3239,31 @@ impl App {
         self.submit(cx, kind, sources, None);
     }
 
-    fn trash_selection(&mut self, cx: &mut Cx) {
+    /// The paths a file operation starts from.
+    ///
+    /// Normally that is the listing's selection. On the treemap it usually
+    /// cannot be: nearly everything the map draws lives below the folder being
+    /// listed, so the map's own pick is the answer instead. Telling somebody
+    /// mid-cleanup that nothing is selected while a 6 GB rectangle sits
+    /// outlined in front of them would be a lie.
+    fn target_paths(&mut self, cx: &mut Cx) -> Vec<PathBuf> {
         let paths: Vec<PathBuf> = self
             .with_contents(cx, |contents, _| contents.selected_entries())
             .unwrap_or_default()
             .into_iter()
             .map(|e| e.path)
             .collect();
+        if !paths.is_empty() || !self.tabs[self.tab].mode.is_treemap() {
+            return paths;
+        }
+        self.with_contents(cx, |contents, cx| contents.treemap(cx).selection())
+            .flatten()
+            .map(|path| vec![path])
+            .unwrap_or_default()
+    }
+
+    fn trash_selection(&mut self, cx: &mut Cx) {
+        let paths = self.target_paths(cx);
         if paths.is_empty() {
             self.status(cx, "Nothing selected to move to the Trash");
             return;
@@ -2871,6 +3286,17 @@ impl App {
             return;
         };
         let id = self.next_op_id();
+        // An undo is a move backwards or a removal, and both sides of it are
+        // already known — so the map follows it without a rescan too.
+        match &undo {
+            Undo::Moved { pairs } => {
+                let sources: Vec<PathBuf> = pairs.iter().map(|(_, to)| to.clone()).collect();
+                self.remember_for_map(id, MapEffect::Move, sources);
+            }
+            Undo::Created { paths } => {
+                self.remember_for_map(id, MapEffect::Remove, paths.clone());
+            }
+        }
         let home = self.home.clone();
         let description = undo.describe();
         if vfs().is_instant() {
@@ -2918,7 +3344,7 @@ impl App {
             0 => self.status(cx, "Select a file first — F2 renames it"),
             1 => {
                 let path = picked[0].path.clone();
-                if self.tabs[self.tab].mode == ViewMode::Treemap {
+                if self.tabs[self.tab].mode.is_treemap() {
                     self.status(cx, "Renaming needs a list view — Cmd+1, 2 or 3");
                     return;
                 }
@@ -3070,6 +3496,9 @@ impl App {
     }
 
     fn describe(&mut self, cx: &mut Cx, entry: &FileEntry) {
+        // The listing's selection is what "this" means outside the map, so the
+        // ask panel's chip follows it here the same way it follows the pick.
+        self.refresh_chat(cx);
         let picked = self
             .with_contents(cx, |contents, _| contents.selection_count())
             .unwrap_or(1);
@@ -3106,8 +3535,34 @@ impl App {
 
         // Escape unwinds whatever is on top, innermost first.
         if event.key_code == KeyCode::Escape {
+            // The caret in the filter's query field first: Escape clears what
+            // is typed there, and only an already-empty field lets Escape
+            // mean anything bigger. The sidebar itself is the funnel's to
+            // close, never Escape's — a surprise-closing panel loses work.
+            if self.filter_popup_open && self.filter_is_typing(cx) {
+                let field = self.ui.text_input(cx, ids!(filter_query));
+                if !field.text().is_empty() {
+                    field.set_text(cx, "");
+                    self.rebuild_filter(cx);
+                    return;
+                }
+            }
             if self.menu_open {
                 return self.close_menu(cx);
+            }
+            // Only while the caret is actually in the ask field: Escape on the
+            // map still means "zoom back out", panel or no panel.
+            if self.chat_open && self.chat_is_typing(cx) {
+                return self.toggle_chat(cx);
+            }
+            // A zoomed treemap is one of the things Escape is on top of: it
+            // steps back out one folder before Escape means anything else.
+            if self.tabs[self.tab].mode.is_treemap()
+                && self
+                    .with_contents(cx, |contents, cx| contents.treemap(cx).zoom_out(cx))
+                    .unwrap_or(false)
+            {
+                return self.report(cx);
             }
             if !self.pending_delete.is_empty() {
                 self.pending_delete.clear();
@@ -3143,16 +3598,25 @@ impl App {
         }
 
         // Every text field in this window keeps key focus while it is hidden,
-        // so what is *open* decides whether a key is text or navigation.
+        // so what is *open* decides whether a key is text or navigation. The
+        // chat's field is the exception: the panel stays open while the user
+        // reads, so it is the keyboard that says whether they are typing in it.
+        // The filter's query field counts too: without it, typing a word into
+        // the filter let Backspace fall through to "go up" — which navigated
+        // away and started a whole new scan mid-keystroke — and q/e spun the
+        // camera under the caret.
         let editing = self.batch_open
             || self.path_edit_open
             || self.search_visible
+            || self.chat_is_typing(cx)
+            || self.filter_is_typing(cx)
             || self
                 .with_contents(cx, |contents, _| contents.is_renaming())
                 .unwrap_or(false);
 
         if command {
             match event.key_code {
+                KeyCode::KeyK => return self.toggle_chat(cx),
                 KeyCode::KeyT if !shift => return self.new_tab(cx),
                 KeyCode::KeyW => return self.close_tab(cx),
                 KeyCode::LBracket if shift => return self.switch_tab(cx, -1),
@@ -3181,10 +3645,25 @@ impl App {
                     self.set_search(cx, !self.search_visible);
                     return;
                 }
+                KeyCode::KeyR if !editing => return self.rescan_map(cx),
                 KeyCode::Key1 => return self.set_mode(cx, ViewMode::Icons),
                 KeyCode::Key2 => return self.set_mode(cx, ViewMode::List),
                 KeyCode::Key3 => return self.set_mode(cx, ViewMode::Compact),
-                KeyCode::Key4 => return self.set_mode(cx, ViewMode::Treemap),
+                // The block view and its three renderings: Cmd+4 the flat
+                // map, Cmd+5 the extrusion, Cmd+6 the perspective — each
+                // enters the view if it is not already open.
+                KeyCode::Key4 => {
+                    self.set_projection_choice(cx, MapProjection::Flat);
+                    return self.set_mode(cx, ViewMode::Treemap);
+                }
+                KeyCode::Key5 => {
+                    self.set_projection_choice(cx, MapProjection::Ortho);
+                    return self.set_mode(cx, ViewMode::Treemap);
+                }
+                KeyCode::Key6 => {
+                    self.set_projection_choice(cx, MapProjection::Persp);
+                    return self.set_mode(cx, ViewMode::Treemap);
+                }
                 _ => {}
             }
         }
@@ -3194,6 +3673,9 @@ impl App {
         }
         if event.key_code == KeyCode::F2 && !editing {
             return self.begin_rename(cx);
+        }
+        if event.key_code == KeyCode::F5 && !editing {
+            return self.rescan_map(cx);
         }
         if event.key_code == KeyCode::Delete && !editing {
             if shift {
@@ -3208,6 +3690,46 @@ impl App {
         }
         if editing {
             return;
+        }
+        // On the map, Enter zooms into the picked folder and Backspace steps
+        // back out of one — the same pair the list view uses for open and go
+        // up, meaning the same two things one level in.
+        if self.tabs[self.tab].mode.is_treemap() {
+            match event.key_code {
+                KeyCode::ReturnKey | KeyCode::NumpadEnter => {
+                    if self
+                        .with_contents(cx, |contents, cx| {
+                            contents.treemap(cx).zoom_into_selection(cx)
+                        })
+                        .unwrap_or(false)
+                    {
+                        return self.report(cx);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if self
+                        .with_contents(cx, |contents, cx| contents.treemap(cx).zoom_out(cx))
+                        .unwrap_or(false)
+                    {
+                        return self.report(cx);
+                    }
+                }
+                // Q and E step the orbit, the keyboard's version of the
+                // left-drag. A no-op on the flat map.
+                KeyCode::KeyQ => {
+                    self.with_contents(cx, |contents, cx| {
+                        contents.treemap(cx).orbit_by(cx, -0.26, 0.0);
+                    });
+                    return;
+                }
+                KeyCode::KeyE => {
+                    self.with_contents(cx, |contents, cx| {
+                        contents.treemap(cx).orbit_by(cx, 0.26, 0.0);
+                    });
+                    return;
+                }
+                _ => {}
+            }
         }
         match event.key_code {
             KeyCode::Space => self.toggle_preview(cx),
@@ -3261,28 +3783,116 @@ impl App {
         }
     }
 
+    /// Note what a job will do to the size map, so its completion can be
+    /// folded in rather than triggering a rescan. Bounded: a job that never
+    /// reports back must not leave a record here forever.
+    fn remember_for_map(&mut self, id: u64, effect: MapEffect, sources: Vec<PathBuf>) {
+        if matches!(effect, MapEffect::Nothing) || sources.is_empty() {
+            return;
+        }
+        if self.map_jobs.len() >= 32 {
+            self.map_jobs.remove(0);
+        }
+        self.map_jobs.push(MapJob {
+            id,
+            effect,
+            sources,
+        });
+    }
+
+    /// Correct the size map for a job that just finished. `touched` is where
+    /// things ended up, in the same order as the sources that produced them.
+    fn map_absorb(&mut self, cx: &mut Cx, id: u64, touched: &[PathBuf]) {
+        let Some(index) = self.map_jobs.iter().position(|job| job.id == id) else {
+            return;
+        };
+        let job = self.map_jobs.remove(index);
+        let map = self.with_contents(cx, |contents, cx| contents.treemap(cx));
+        let Some(map) = map else { return };
+        match job.effect {
+            MapEffect::Nothing => {}
+            MapEffect::Remove => {
+                let moves: Vec<(PathBuf, Option<PathBuf>)> =
+                    job.sources.into_iter().map(|from| (from, None)).collect();
+                map.absorb_moves(cx, &moves);
+            }
+            MapEffect::Move => {
+                // A job that reported fewer destinations than sources did not
+                // move all of them; the ones it cannot account for are treated
+                // as gone from where they were, which is the one thing that is
+                // certainly true.
+                let moves: Vec<(PathBuf, Option<PathBuf>)> = job
+                    .sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, from)| (from, touched.get(i).cloned()))
+                    .collect();
+                map.absorb_moves(cx, &moves);
+            }
+            MapEffect::Copy => {
+                let copies: Vec<(PathBuf, PathBuf)> = job
+                    .sources
+                    .into_iter()
+                    .zip(touched.iter().cloned())
+                    .collect();
+                map.absorb_copies(cx, &copies);
+            }
+        }
+    }
+
     fn handle_contents_action(&mut self, cx: &mut Cx, action: FileContentsAction) {
         match action {
             FileContentsAction::Open(entry) => self.open_entry(cx, entry),
-            FileContentsAction::Selected(entry) => self.describe(cx, &entry),
-            FileContentsAction::Sorted => self.report(cx),
+            // On the map the status line belongs to the map: it says what is
+            // on screen and what was picked, which is more than one entry's
+            // description and never goes stale behind it.
+            FileContentsAction::Selected(entry) => {
+                if self.tabs[self.tab].mode.is_treemap() {
+                    self.report(cx)
+                } else {
+                    self.describe(cx, &entry)
+                }
+            }
+            FileContentsAction::Sorted | FileContentsAction::Restated => self.report(cx),
+            FileContentsAction::MapFilterCleared => self.reset_filter_controls(cx),
             FileContentsAction::Renamed(path, name) => self.commit_rename(cx, path, name),
             FileContentsAction::RenameCancelled => self.report(cx),
             FileContentsAction::Dropped(paths, at) => self.handle_drop(cx, paths, at),
             FileContentsAction::NeedChildren(folder) => self.request_children(cx, folder),
             FileContentsAction::Context { at, entry } => self.open_menu(cx, at, entry),
-            FileContentsAction::Drill(path) => {
-                let folder = if vfs().is_dir(&path) {
-                    path
-                } else {
-                    path.parent().map(Path::to_path_buf).unwrap_or_default()
-                };
-                if vfs().is_dir(&folder) {
-                    self.navigate(cx, folder, true);
-                }
-            }
         }
     }
+}
+
+/// What a finished operation does to the size map.
+#[derive(Clone, Copy, PartialEq)]
+enum MapEffect {
+    /// The sources stop existing anywhere the map can see.
+    Remove,
+    /// The sources end up somewhere else, which may or may not be on the map.
+    Move,
+    /// The sources stay and are duplicated.
+    Copy,
+    /// Nothing worth correcting: a new empty folder is no bytes.
+    Nothing,
+}
+
+impl MapEffect {
+    fn of(kind: OpKind) -> MapEffect {
+        match kind {
+            OpKind::Delete => MapEffect::Remove,
+            OpKind::Trash | OpKind::Move | OpKind::Rename => MapEffect::Move,
+            OpKind::Copy => MapEffect::Copy,
+            OpKind::NewFolder => MapEffect::Nothing,
+        }
+    }
+}
+
+/// One submitted job, remembered until it reports back.
+struct MapJob {
+    id: u64,
+    effect: MapEffect,
+    sources: Vec<PathBuf>,
 }
 
 /// The mode as `755`, next to the `rwx` letters the listing already shows.
@@ -3373,13 +3983,769 @@ impl App {
             self.enter_tab(cx);
         }
     }
+
+    // ------------------------------------------------------------------ chat
+
+    /// Open or close the ask panel. Opening it for the first time is what
+    /// starts the model loading — until then this app has no idea a language
+    /// model exists, which is the only way a file browser is allowed to have
+    /// one. Cmd+K, or the speech-bubble button in the toolbar.
+    fn toggle_chat(&mut self, cx: &mut Cx) {
+        let open = !self.chat_open;
+        self.chat_open = open;
+        self.ui.widget(cx, ids!(chat_panel)).set_visible(cx, open);
+        if !open {
+            return;
+        }
+        if self.agent.is_none() {
+            self.start_chat(cx);
+        }
+        self.refresh_chat(cx);
+        self.focus_soon(cx, FocusTarget::Chat);
+    }
+
+    /// Load the model, once. A machine without the weights on it says so and
+    /// carries on being a file browser.
+    fn start_chat(&mut self, cx: &mut Cx) {
+        let Some(model) = chat_agent::model_path() else {
+            self.chat.push(
+                ChatVoice::Info,
+                format!(
+                    "No local model on this machine. Put a Qwen GGUF at {} (or point {} at one) and reopen this panel.",
+                    chat_agent::MODEL_FILE,
+                    chat_agent::MODEL_ENV,
+                ),
+            );
+            self.set_chat_status(cx, "no model — the rest of the app is unaffected");
+            self.redraw_chat(cx);
+            return;
+        };
+        self.agent = Some(ChatAgent::start(
+            model.clone(),
+            CHAT_SYSTEM_PROMPT.to_string(),
+            chat_tools::tools(),
+        ));
+        self.tool_runner = Some(ToolRunner::new());
+        self.chat.push(
+            ChatVoice::Info,
+            format!("Loading {}…", display_name(&model)),
+        );
+        self.set_chat_status(cx, "loading the model…");
+        self.redraw_chat(cx);
+    }
+
+    fn set_chat_status(&mut self, cx: &mut Cx, text: &str) {
+        if self.chat_status == text {
+            return;
+        }
+        self.chat_status = text.to_string();
+        self.ui.label(cx, ids!(chat_status)).set_text(cx, text);
+    }
+
+    fn redraw_chat(&mut self, cx: &mut Cx) {
+        let list = self.ui.portal_list(cx, ids!(chat_list));
+        list.set_tail_range(true);
+        list.redraw(cx);
+    }
+
+    /// Where the user is, as the model reads it: the folder, the view, and
+    /// what is picked. This rides in front of every question and never appears
+    /// in the transcript — "what is this?" is the whole of what was asked.
+    fn chat_where(&mut self, cx: &mut Cx) -> String {
+        let mode = self.tabs[self.tab].mode;
+        let dir = self.current_dir();
+        let mut out = format!(
+            "[where the user is]\nhome: {}\nfolder: {}\nview: {}\n",
+            self.home.display(),
+            dir.display(),
+            mode.label(),
+        );
+        if mode.is_treemap() {
+            let map = self.with_contents(cx, |contents, cx| {
+                let map = contents.treemap(cx);
+                (map.selection(), map.status())
+            });
+            let (picked, status) = map.unwrap_or_default();
+            out.push_str(&format!("map: {status}\n"));
+            match picked {
+                Some(path) => out.push_str(&format!("selected: {}\n", describe_path(&path))),
+                None => out.push_str("selected: nothing on the map is picked\n"),
+            }
+            return out;
+        }
+        let selected = self
+            .with_contents(cx, |contents, _| contents.selected_entries())
+            .unwrap_or_default();
+        if selected.is_empty() {
+            out.push_str("selected: nothing — the question is about the folder itself\n");
+            return out;
+        }
+        out.push_str(&format!("selected: {} item(s)\n", selected.len()));
+        for entry in selected.iter().take(12) {
+            out.push_str(&format!(
+                "  {} — {}, {}\n",
+                entry.path.display(),
+                entry.kind_text(),
+                entry.size_text(),
+            ));
+        }
+        if selected.len() > 12 {
+            out.push_str(&format!("  …and {} more\n", selected.len() - 12));
+        }
+        out
+    }
+
+    /// The one-line "about:" chip over the input, and the map strip's hint and
+    /// button states. Called from `report`, so it follows every selection
+    /// change — and only touches a widget when its text actually changed.
+    fn refresh_chat(&mut self, cx: &mut Cx) {
+        let mode = self.tabs[self.tab].mode;
+        let picked = self.chat_subject(cx);
+        if self.chat_open {
+            let about = match &picked {
+                Some(path) => format!("about: {}", describe_path(path)),
+                None => format!("about: {} (this folder)", self.current_dir().display()),
+            };
+            if about != self.chat_about {
+                self.chat_about = about.clone();
+                self.ui
+                    .label(cx, ids!(chat_about_label))
+                    .set_text(cx, &about);
+            }
+        }
+        if !mode.is_treemap() {
+            return;
+        }
+        let note = match &picked {
+            Some(path) => format!("Rescan · act on {}", display_name(path)),
+            None => "Rescan · click a rectangle to pick what to delete".to_string(),
+        };
+        if note == self.map_tools_note {
+            return;
+        }
+        self.map_tools_note = note.clone();
+        self.ui
+            .label(cx, ids!(map_tools_hint))
+            .set_text(cx, &note);
+        // The two delete buttons go out when there is nothing under them: a
+        // button that looks live and does nothing is worse than a dim one.
+        let palette = Palette::shared();
+        let live = Palette::vec4(&palette.fg);
+        let danger = Palette::vec4(&palette.danger);
+        let dead = Palette::vec4(&palette.muted);
+        let has_pick = picked.is_some();
+        for (id, lit) in [
+            (ids!(map_trash_icon), if has_pick { live } else { dead }),
+            (ids!(map_erase_icon), if has_pick { danger } else { dead }),
+        ] {
+            let mut icon = self.ui.widget(cx, id);
+            script_apply_eval!(cx, icon, {
+                draw_icon +: {color: #(lit)}
+            });
+        }
+    }
+
+    /// Is the caret in the ask field? The panel stays open while its answer is
+    /// read, so "open" cannot be what decides whether a key is text.
+    fn chat_is_typing(&mut self, cx: &mut Cx) -> bool {
+        if !self.chat_open {
+            return false;
+        }
+        let area = self.ui.text_input(cx, ids!(chat_input)).area();
+        !area.is_empty() && cx.has_key_focus(area)
+    }
+
+    /// Whether the caret is in the filter sidebar's query field.
+    fn filter_is_typing(&mut self, cx: &mut Cx) -> bool {
+        let area = self.ui.text_input(cx, ids!(filter_query)).area();
+        !area.is_empty() && cx.has_key_focus(area)
+    }
+
+    /// What "this" means right now: the map's pick on the map, the listing's
+    /// selection anywhere else.
+    fn chat_subject(&mut self, cx: &mut Cx) -> Option<PathBuf> {
+        if self.tabs[self.tab].mode.is_treemap() {
+            return self
+                .with_contents(cx, |contents, cx| contents.treemap(cx).selection())
+                .flatten();
+        }
+        self.with_contents(cx, |contents, _| contents.selected_entry())
+            .flatten()
+            .map(|entry| entry.path)
+    }
+
+    fn send_chat(&mut self, cx: &mut Cx) {
+        let field = self.ui.text_input(cx, ids!(chat_input));
+        let text = field.text().trim().to_string();
+        drop(field);
+        if text.is_empty() {
+            return;
+        }
+        if self.agent.is_none() {
+            self.start_chat(cx);
+            if self.agent.is_none() {
+                return;
+            }
+        }
+        if !self.chat_ready {
+            self.chat
+                .push(ChatVoice::Info, "The model is still loading — one moment.");
+            self.redraw_chat(cx);
+            return;
+        }
+        if self.chat_busy {
+            // A second question while the first is running is an override, not
+            // a queue: stop the old one and ask the new one.
+            self.stop_chat(cx);
+        }
+        self.ui.text_input(cx, ids!(chat_input)).set_text(cx, "");
+        self.chat.push(ChatVoice::User, text.clone());
+        let prompt = format!("{}\n[question]\n{text}", self.chat_where(cx));
+        if let Some(agent) = &self.agent {
+            agent.send_user_turn(prompt);
+        }
+        self.chat_busy = true;
+        self.chat_tool_rounds = 0;
+        self.chat_awaiting_tools = 0;
+        self.chat_tool_replies.clear();
+        self.set_chat_status(cx, "thinking…");
+        self.set_chat_running(cx, true);
+        self.redraw_chat(cx);
+    }
+
+    fn stop_chat(&mut self, cx: &mut Cx) {
+        if !self.chat_busy {
+            return;
+        }
+        if let Some(agent) = &self.agent {
+            agent.cancel();
+        }
+        self.chat.commit_pending();
+        self.chat.push(ChatVoice::Info, "stopped");
+        self.chat_busy = false;
+        self.chat_awaiting_tools = 0;
+        self.chat_tool_replies.clear();
+        self.set_chat_status(cx, "ready");
+        self.set_chat_running(cx, false);
+        self.redraw_chat(cx);
+    }
+
+    /// Swap the Ask button for Stop while a turn is running.
+    fn set_chat_running(&mut self, cx: &mut Cx, running: bool) {
+        self.ui
+            .widget(cx, ids!(chat_send))
+            .set_visible(cx, !running);
+        self.ui.widget(cx, ids!(chat_stop)).set_visible(cx, running);
+    }
+
+    /// Everything the model and the tool worker have said since the last frame.
+    fn drain_chat(&mut self, cx: &mut Cx) {
+        let events = match &self.agent {
+            Some(agent) => agent.poll(),
+            None => Vec::new(),
+        };
+        for event in events {
+            self.on_chat_event(cx, event);
+        }
+        let replies = match &self.tool_runner {
+            Some(runner) => runner.drain(),
+            None => Vec::new(),
+        };
+        for reply in replies {
+            self.chat.push(
+                ChatVoice::Tool,
+                if reply.is_error {
+                    format!("⚠ {}", reply.note)
+                } else {
+                    reply.note.clone()
+                },
+            );
+            self.chat_tool_replies.push(ToolReply {
+                text: reply.text,
+                is_error: reply.is_error,
+            });
+            if self.chat_tool_replies.len() >= self.chat_awaiting_tools.max(1) {
+                let results: Vec<(String, bool)> = self
+                    .chat_tool_replies
+                    .drain(..)
+                    .map(|reply| (reply.text, reply.is_error))
+                    .collect();
+                self.chat_awaiting_tools = 0;
+                if let Some(agent) = &self.agent {
+                    agent.send_tool_results(results);
+                }
+                self.set_chat_status(cx, "reading…");
+            }
+            self.redraw_chat(cx);
+        }
+    }
+
+    fn on_chat_event(&mut self, cx: &mut Cx, event: ChatEvent) {
+        match event {
+            ChatEvent::Loading { phase, fraction } => {
+                let text = format!("loading — {phase} {:.0}%", fraction * 100.0);
+                self.set_chat_status(cx, &text);
+            }
+            ChatEvent::Ready {
+                prefill_tokens,
+                secs,
+            } => {
+                self.chat_ready = true;
+                self.chat.push(
+                    ChatVoice::Info,
+                    format!("Ready — {prefill_tokens} tokens of prompt in {secs:.1}s."),
+                );
+                self.set_chat_status(cx, "ready — ask about the folder or the selection");
+                self.redraw_chat(cx);
+            }
+            ChatEvent::Failed(error) => {
+                self.chat_ready = false;
+                self.chat_busy = false;
+                self.agent = None;
+                self.chat.push(ChatVoice::Info, format!("⚠ {error}"));
+                self.set_chat_status(cx, "the model could not be loaded");
+                self.set_chat_running(cx, false);
+                self.redraw_chat(cx);
+            }
+            ChatEvent::Delta(text) => {
+                self.chat.pending.push_str(&text);
+                self.redraw_chat(cx);
+            }
+            ChatEvent::ToolCall { name, args } => {
+                self.chat.commit_pending();
+                self.chat_awaiting_tools += 1;
+                let job = ToolJob {
+                    name,
+                    args,
+                    cwd: self.current_dir(),
+                    home: self.home.clone(),
+                };
+                match (&self.tool_runner, self.chat_tool_rounds < MAX_TOOL_ROUNDS) {
+                    (Some(runner), true) => runner.submit(job),
+                    // Enough. The turn ends with the truth rather than with
+                    // another lap of the same three folders.
+                    _ => {
+                        self.chat_awaiting_tools = self.chat_awaiting_tools.saturating_sub(1);
+                        if let Some(agent) = &self.agent {
+                            agent.send_tool_results(vec![(
+                                "that is enough looking around — answer from what you already have"
+                                    .to_string(),
+                                true,
+                            )]);
+                        }
+                    }
+                }
+                self.redraw_chat(cx);
+            }
+            ChatEvent::TurnDone {
+                tool_calls,
+                tokens,
+                secs,
+                context_used,
+                context_max,
+            } => {
+                if tool_calls > 0 {
+                    // The tools drive the next round; the turn is not over.
+                    self.chat_tool_rounds += 1;
+                    self.set_chat_status(cx, "looking…");
+                    return;
+                }
+                self.chat.commit_pending();
+                self.chat_busy = false;
+                self.set_chat_running(cx, false);
+                let rate = tokens as f64 / secs.max(0.001);
+                self.set_chat_status(
+                    cx,
+                    &format!(
+                        "{tokens} tokens in {secs:.1}s ({rate:.1} tok/s) · context {context_used}/{context_max}"
+                    ),
+                );
+                self.redraw_chat(cx);
+            }
+            ChatEvent::ContextFull => {
+                self.chat.commit_pending();
+                self.chat_busy = false;
+                self.set_chat_running(cx, false);
+                self.chat.push(
+                    ChatVoice::Info,
+                    "⚠ this conversation has filled the model's context — reopen the app to start a fresh one",
+                );
+                self.set_chat_status(cx, "context full");
+                self.redraw_chat(cx);
+            }
+        }
+    }
+
+    // ------------------------------------------------------- the map's tools
+
+    /// The map strip's buttons. They act on the picked rectangle through
+    /// exactly the paths the keyboard and the context menu already use — the
+    /// permanent delete included, which still asks once and acts on the second
+    /// press.
+    fn handle_map_tool_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if !self.tabs[self.tab].mode.is_treemap() {
+            return;
+        }
+        for (id, projection) in PROJ_BUTTONS {
+            if self.ui.view(cx, id).finger_down(actions).is_some() {
+                return self.set_projection_choice(cx, projection);
+            }
+        }
+        if self.ui.view(cx, ids!(map_rescan)).finger_down(actions).is_some() {
+            return self.rescan_map(cx);
+        }
+        if self.ui.view(cx, ids!(map_filter)).finger_down(actions).is_some() {
+            let open = !self.filter_popup_open;
+            return self.set_filter_popup(cx, open);
+        }
+        if let Some(ignore) = self.ui.check_box(cx, ids!(map_scan_all)).changed(actions) {
+            // Checked means today's behaviour: leave the system folders out.
+            crate::model::set_scan_all(!ignore);
+            self.status(
+                cx,
+                if ignore {
+                    "System folders excluded again — rescanning"
+                } else {
+                    "Measuring system folders too — macOS will ask permission per folder"
+                },
+            );
+            self.with_contents(cx, |contents, cx| contents.treemap(cx).remap(cx));
+            return;
+        }
+        let trash = self.ui.view(cx, ids!(map_trash)).finger_down(actions).is_some();
+        let erase = self.ui.view(cx, ids!(map_erase)).finger_down(actions).is_some();
+        if !trash && !erase {
+            return;
+        }
+        if self.chat_subject(cx).is_none() {
+            self.status(cx, "Click a rectangle on the map first");
+            return;
+        }
+        if trash {
+            self.trash_selection(cx);
+        } else {
+            self.delete_forever(cx);
+        }
+    }
+
+    // ------------------------------------------------------- the map filter
+
+    fn set_filter_popup(&mut self, cx: &mut Cx, open: bool) {
+        self.filter_popup_open = open;
+        model::pref_set("filter_side", if open { "1" } else { "0" });
+        self.ui.widget(cx, ids!(map_side)).set_visible(
+            cx,
+            open && self.tabs[self.tab].mode.is_treemap(),
+        );
+        if open {
+            self.refresh_filter_popup(cx);
+            // The field has no area until the sidebar's first frame; focus
+            // lands on the frame that gives it one.
+            self.focus_soon(cx, FocusTarget::Filter);
+        }
+        self.ui.redraw(cx);
+    }
+
+    /// The legend half of the popup: swatches in the map's own hues, live
+    /// byte totals per kind, heaviest first, zero kinds dimmed but present —
+    /// it doubles as the map's colour key.
+    fn refresh_filter_popup(&mut self, cx: &mut Cx) {
+        let totals = self
+            .with_contents(cx, |contents, cx| contents.treemap(cx).kind_totals(cx))
+            .unwrap_or([0; 16]);
+        let mut classes: Vec<(usize, u64)> = (0..7)
+            .map(|class| {
+                let bytes = class_kind_values(class)
+                    .iter()
+                    .map(|&kind| totals[kind as usize])
+                    .sum();
+                (class, bytes)
+            })
+            .collect();
+        classes.sort_by(|a, b| b.1.cmp(&a.1));
+        let palette = Palette::shared();
+        for (row, &(class, bytes)) in classes.iter().enumerate() {
+            self.legend_rows[row] = class;
+            let mut widget = self.ui.widget(cx, FILTER_KIND_IDS[row]);
+            let selected = self.filter_kinds[class];
+            let swatch = palette.kind_color(class);
+            let row_bg = if selected {
+                let mut tint = Palette::vec4(&palette.accent);
+                tint.w = 0.22;
+                tint
+            } else {
+                Vec4f::default()
+            };
+            let ink = if bytes == 0 && !selected {
+                Palette::vec4(&palette.fg_dim)
+            } else {
+                Palette::vec4(&palette.fg)
+            };
+            script_apply_eval!(cx, widget, {
+                draw_bg +: { color: #(row_bg) }
+            });
+            let mut swatch_view = widget.widget(cx, ids!(lg_swatch));
+            script_apply_eval!(cx, swatch_view, {
+                draw_bg +: { color: #(swatch) }
+            });
+            let mut name = widget.label(cx, ids!(lg_name));
+            name.set_text(cx, CLASS_NAMES[class]);
+            script_apply_eval!(cx, name, {
+                draw_text +: { color: #(ink) }
+            });
+            widget
+                .label(cx, ids!(lg_bytes))
+                .set_text(cx, &treemap::format_bytes(bytes));
+        }
+        self.style_filter_age(cx);
+    }
+
+    fn style_filter_age(&mut self, cx: &mut Cx) {
+        let palette = Palette::shared();
+        for (index, id) in FILTER_AGE_IDS.iter().enumerate() {
+            let mut widget = self.ui.widget(cx, id);
+            let on = index == self.filter_age;
+            let bg = if on {
+                let mut tint = Palette::vec4(&palette.accent);
+                tint.w = 0.22;
+                tint
+            } else {
+                Vec4f::default()
+            };
+            let ink = if on {
+                Palette::vec4(&palette.fg_bright)
+            } else {
+                Palette::vec4(&palette.fg_dim)
+            };
+            script_apply_eval!(cx, widget, {
+                draw_bg +: { color: #(bg) }
+            });
+            let mut label = widget.label(cx, ids!(chip_label));
+            script_apply_eval!(cx, label, {
+                draw_text +: { color: #(ink) }
+            });
+        }
+    }
+
+    /// Everything the popup says, folded into one query and applied live.
+    fn rebuild_filter(&mut self, cx: &mut Cx) {
+        let text = self.ui.text_input(cx, ids!(filter_query)).text();
+        let now_min = now_minutes();
+        let mut query = treemap::Query::parse(&text, now_min);
+        let slid = self.ui.slider(cx, ids!(filter_size)).value().unwrap_or(0.0);
+        match slider_bytes(slid) {
+            Some(bytes) => {
+                query.min_size = Some(query.min_size.map_or(bytes, |q| q.max(bytes)));
+                self.ui.label(cx, ids!(filter_size_label)).set_text(
+                    cx,
+                    &format!("bigger than {}", treemap::format_bytes(bytes)),
+                );
+            }
+            None => {
+                self.ui
+                    .label(cx, ids!(filter_size_label))
+                    .set_text(cx, "any size");
+            }
+        }
+        if self.filter_age > 0 {
+            let cutoff = now_min.saturating_sub(AGE_MINUTES[self.filter_age]);
+            query.newer_than = Some(query.newer_than.map_or(cutoff, |q| q.max(cutoff)));
+        }
+        if self.filter_kinds.iter().any(|&on| on) {
+            let mask = (0..7)
+                .filter(|&class| self.filter_kinds[class])
+                .fold(0u16, |mask, class| mask | class_kinds_mask(class));
+            query.kinds = Some(mask);
+        }
+        self.with_contents(cx, |contents, cx| {
+            contents.treemap(cx).set_filter(cx, Some(query));
+        });
+    }
+
+    /// Show every control cleared — the map itself is already unfiltered.
+    fn reset_filter_controls(&mut self, cx: &mut Cx) {
+        self.filter_age = 0;
+        self.filter_kinds = [false; 7];
+        self.ui.text_input(cx, ids!(filter_query)).set_text(cx, "");
+        self.ui.slider(cx, ids!(filter_size)).set_value(cx, 0.0);
+        self.ui
+            .label(cx, ids!(filter_size_label))
+            .set_text(cx, "any size");
+        if self.filter_popup_open {
+            self.refresh_filter_popup(cx);
+        }
+    }
+
+    fn handle_filter_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if !self.filter_popup_open {
+            return;
+        }
+        let mut dirty = false;
+        if self
+            .ui
+            .text_input(cx, ids!(filter_query))
+            .changed(actions)
+            .is_some()
+        {
+            dirty = true;
+        }
+        if self.ui.slider(cx, ids!(filter_size)).slided(actions).is_some() {
+            dirty = true;
+        }
+        for (index, id) in FILTER_AGE_IDS.iter().enumerate() {
+            if self.ui.view(cx, id).finger_down(actions).is_some() {
+                self.filter_age = index;
+                self.style_filter_age(cx);
+                dirty = true;
+            }
+        }
+        for row in 0..FILTER_KIND_IDS.len() {
+            if self
+                .ui
+                .view(cx, FILTER_KIND_IDS[row])
+                .finger_down(actions)
+                .is_some()
+            {
+                let class = self.legend_rows[row];
+                self.filter_kinds[class] = !self.filter_kinds[class];
+                self.refresh_filter_popup(cx);
+                dirty = true;
+            }
+        }
+        if self.ui.view(cx, ids!(filter_clear)).finger_down(actions).is_some() {
+            self.reset_filter_controls(cx);
+            self.with_contents(cx, |contents, cx| {
+                contents.treemap(cx).set_filter(cx, None);
+            });
+            return;
+        }
+        if dirty {
+            self.rebuild_filter(cx);
+        }
+    }
 }
+
+/// The filter popup's row slots.
+const FILTER_AGE_IDS: [&[LiveId]; 6] = [
+    ids!(filter_age0),
+    ids!(filter_age1),
+    ids!(filter_age2),
+    ids!(filter_age3),
+    ids!(filter_age4),
+    ids!(filter_age5),
+];
+const FILTER_KIND_IDS: [&[LiveId]; 7] = [
+    ids!(filter_kind0),
+    ids!(filter_kind1),
+    ids!(filter_kind2),
+    ids!(filter_kind3),
+    ids!(filter_kind4),
+    ids!(filter_kind5),
+    ids!(filter_kind6),
+];
+/// "modified within", in minutes; index 0 is "any age".
+const AGE_MINUTES: [u32; 6] = [0, 1_440, 4_320, 10_080, 43_200, 525_600];
+const CLASS_NAMES: [&str; 7] =
+    ["Video", "Images", "Audio", "Code", "Docs", "Archives", "Other"];
+
+/// The `FileKind`s behind one legend class — the exact inverse of
+/// `treemap_view::kind_class`, asserted so in a test below.
+fn class_kind_values(class: usize) -> &'static [crate::model::FileKind] {
+    use crate::model::FileKind::*;
+    match class {
+        0 => &[Video],
+        1 => &[Image],
+        2 => &[Audio],
+        3 => &[Code],
+        4 => &[Text, Pdf],
+        5 => &[Archive],
+        _ => &[Generic, Folder],
+    }
+}
+
+fn class_kinds_mask(class: usize) -> u16 {
+    class_kind_values(class)
+        .iter()
+        .fold(0u16, |mask, &kind| mask | 1 << (kind as u16))
+}
+
+/// The size slider's sweep: off at the left edge, then a logarithmic run
+/// from 1 KB to 10 GB — the range disk questions actually live in.
+fn slider_bytes(value: f64) -> Option<u64> {
+    if value <= 0.02 {
+        return None;
+    }
+    let t = ((value - 0.02) / 0.98).clamp(0.0, 1.0);
+    Some((1_000.0 * 10f64.powf(7.0 * t)) as u64)
+}
+
+/// Now, in whole minutes since the epoch — the clock the age filter runs on.
+fn now_minutes() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 60).min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
+/// How many times the model may go round the look-then-think loop for one
+/// question before it has to answer with what it has.
+const MAX_TOOL_ROUNDS: usize = 6;
+
+/// One path, as a sentence: what it is and how big. Reads off the disk, so it
+/// is the truth at the moment it is asked rather than whatever a listing
+/// remembered.
+fn describe_path(path: &Path) -> String {
+    match model::entry_at(path) {
+        Some(entry) => format!(
+            "{} — {}, {}",
+            path.display(),
+            entry.kind_text(),
+            entry.size_text()
+        ),
+        None => path.display().to_string(),
+    }
+}
+
+/// What the model is told it is, once, in front of everything else.
+const CHAT_SYSTEM_PROMPT: &str = "\
+You are the assistant inside mpfiles, a file browser. You answer questions \
+about the files the person is looking at right now.
+
+Every question arrives behind a [where the user is] block: the folder they \
+have open and what they have selected. \"this\", \"it\", \"here\" and \"that\" \
+mean whatever is selected — and the folder itself when nothing is.
+
+You can only look. list_dir, read_file, stat and treemap_summary are all you \
+have. There is nothing that writes, moves, renames or deletes, so if you are \
+asked to change something, say plainly that you cannot and tell them what to \
+click instead.
+
+Look before you answer. Never guess what a folder holds or how big it is: \
+call a tool and say what it said. One or two calls is usually enough, and \
+treemap_summary is the one that answers \"what is taking up the space\".
+
+Answer in a couple of short sentences, or a short list. Sizes in human units. \
+No markdown headings and no preamble — say the thing.";
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // Checked once: a warm-pool instance stays dormant until
         // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
         self.dormancy = Dormancy::start(mp_wm_api::warm_start());
+        // The scan-scope checkbox shows the saved choice from the first
+        // frame; checked means the system folders stay out.
+        self.ui
+            .check_box(cx, ids!(map_scan_all))
+            .set_active(cx, !crate::model::scan_all(), Animate::No);
+        // The block view's saved rendering and whether its filter sidebar
+        // was left open — both come back exactly as they were left.
+        self.projection = match model::pref_get("projection").as_deref() {
+            Some("ortho") => MapProjection::Ortho,
+            Some("persp") => MapProjection::Persp,
+            _ => MapProjection::Flat,
+        };
+        self.filter_popup_open = model::pref_get("filter_side").as_deref() == Some("1");
+        self.style_projection_buttons(cx);
         // `--demo` browses a home that does not exist, so a screen recording
         // can show every feature of this app without showing anybody's disk.
         // It is chosen before anything reads a path, and never afterwards.
@@ -3482,6 +4848,30 @@ impl MatchEvent for App {
         if self.ui.view(cx, ids!(props_close)).finger_down(actions).is_some() {
             self.set_props(cx, false);
         }
+
+        // ---- the ask panel
+        if self.ui.view(cx, ids!(chat_button)).finger_down(actions).is_some() {
+            self.toggle_chat(cx);
+        }
+        if self.chat_open {
+            if self.ui.view(cx, ids!(chat_close)).finger_down(actions).is_some() {
+                self.toggle_chat(cx);
+                return;
+            }
+            if self.ui.view(cx, ids!(chat_stop)).finger_down(actions).is_some() {
+                self.stop_chat(cx);
+                return;
+            }
+            let field = self.ui.text_input(cx, ids!(chat_input));
+            let returned = field.returned(actions).is_some();
+            drop(field);
+            if returned || self.ui.view(cx, ids!(chat_send)).finger_down(actions).is_some() {
+                self.send_chat(cx);
+                return;
+            }
+        }
+        self.handle_map_tool_actions(cx, actions);
+        self.handle_filter_actions(cx, actions);
         for (id, mode) in MODE_BUTTONS {
             if self.ui.view(cx, id).finger_down(actions).is_some() {
                 self.set_mode(cx, mode);
@@ -3689,6 +5079,7 @@ impl AppMain for App {
         crate::thumbs::script_mod(vm);
         crate::treemap_view::script_mod(vm);
         crate::contents::script_mod(vm);
+        crate::chat_panel::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -3699,17 +5090,42 @@ impl AppMain for App {
         if self.dormancy.is_dormant() && is_wake_input(event) {
             self.wake(cx);
         }
+        // A press anywhere outside the context menu's cards closes it. The
+        // raw event, on purpose: the widgets underneath swallow presses
+        // differently in every view, and the full-window overlay the menu
+        // sits in has no background of its own, so it never hits — waiting
+        // for a bubbled press is how the menu got stuck open.
+        if let Event::MouseDown(press) = event {
+            if self.menu_open {
+                let card = self.ui.view(cx, ids!(ctx_panel)).area().rect(cx);
+                let sub = self.ui.view(cx, ids!(ctx_sub_panel)).area().rect(cx);
+                let inside = card.contains(press.abs)
+                    || (self.submenu_open && sub.contains(press.abs));
+                if !inside {
+                    self.close_menu(cx);
+                }
+            }
+        }
         if let Event::Signal = event {
             self.drain_directory_results(cx);
             self.drain_ops(cx);
             self.drain_sizes(cx);
-            self.with_contents(cx, |contents, cx| {
-                contents.drain_thumbs(cx);
-                contents.treemap(cx).drain(cx)
-            });
-            if self.tabs.get(self.tab).map(|t| t.mode) == Some(ViewMode::Treemap) {
+            let map_moved = self
+                .with_contents(cx, |contents, cx| {
+                    contents.drain_thumbs(cx);
+                    contents.treemap(cx).drain(cx)
+                })
+                .unwrap_or(false);
+            if self.tabs.get(self.tab).is_some_and(|t| t.mode.is_treemap()) {
                 self.report(cx);
+                // The legend's byte totals follow the scan in — this is also
+                // what fills a sidebar that came back open from the prefs,
+                // which otherwise sat as bare swatches until the first toggle.
+                if map_moved && self.filter_popup_open {
+                    self.refresh_filter_popup(cx);
+                }
             }
+            self.drain_chat(cx);
             self.preview.poll();
         }
         if let Event::Custom(json) = event {
@@ -3723,7 +5139,10 @@ impl AppMain for App {
         if let Event::KeyDown(key) = event {
             self.handle_key(cx, key);
         }
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        // The transcript draws from the chat state, so it rides down the tree
+        // as the scope — every other widget in this window ignores it.
+        self.ui
+            .handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
     }
 }
 
@@ -3783,5 +5202,31 @@ mod dormancy_tests {
         assert!(is_wake_input(&Event::KeyDown(KeyEvent::default())));
         assert!(dormancy.wake());
         assert!(!dormancy.is_dormant());
+    }
+
+    // The legend's classes and the map's kind_class must be exact inverses,
+    // or a chip would tint tiles it cannot filter.
+    #[test]
+    fn every_kind_belongs_to_the_class_that_claims_it() {
+        use crate::model::FileKind;
+        for kind in [
+            FileKind::Folder,
+            FileKind::Image,
+            FileKind::Text,
+            FileKind::Code,
+            FileKind::Audio,
+            FileKind::Video,
+            FileKind::Archive,
+            FileKind::Pdf,
+            FileKind::Generic,
+        ] {
+            let class = crate::treemap_view::kind_class(kind) as usize;
+            assert!(
+                class_kind_values(class).contains(&kind),
+                "{kind:?} paints as class {class} but the legend chip for it filters {:?}",
+                class_kind_values(class),
+            );
+            assert!(class_kinds_mask(class) & (1 << (kind as u16)) != 0);
+        }
     }
 }

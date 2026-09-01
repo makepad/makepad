@@ -393,6 +393,158 @@ pub fn sort_indices(entries: &[FileEntry], order: &mut [usize], sort: SortSpec) 
     });
 }
 
+/// Folder names directly under the user's home that the size map never
+/// enters.
+///
+/// This is not a taste decision, it is what makes the map usable on macOS at
+/// all. `~/Library` is Apple's, not the user's: it is where Containers, Group
+/// Containers, Mail, Messages, Safari, CloudStorage and Mobile Documents live,
+/// and every one of them is behind a separate TCC grant — walking it means a
+/// permission dialog per protected folder, over and over, for bytes the user
+/// cannot delete by hand anyway. `~/.Trash` is not the user's files either;
+/// it is what they already threw away, and counting it would double every
+/// number the moment they trashed something.
+///
+/// `MPFILES_SCAN_ALL=1` turns the whole rule off for anyone who wants the
+/// literal truth about their home directory and does not mind the dialogs.
+const HOME_SKIP: [&str; 2] = ["Library", ".Trash"];
+
+/// Whether the size map measures the system folders too. Off by default —
+/// the map skips ~/Library and ~/.Trash so macOS never storms the user with
+/// permission dialogs — and flipped by the "ignore system" checkbox on the
+/// map's tool strip. `MPFILES_SCAN_ALL=1` or a saved preference turns it on
+/// at startup; every change is written back so the choice survives launches.
+pub fn scan_all() -> bool {
+    *scan_all_flag().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Change the scope and remember it. The caller owns triggering the rescan.
+pub fn set_scan_all(on: bool) {
+    *scan_all_flag().lock().unwrap_or_else(|e| e.into_inner()) = on;
+    pref_set("scan_all", if on { "1" } else { "0" });
+}
+
+fn scan_all_flag() -> &'static std::sync::Mutex<bool> {
+    static FLAG: std::sync::OnceLock<std::sync::Mutex<bool>> = std::sync::OnceLock::new();
+    FLAG.get_or_init(|| {
+        if std::env::var_os("MPFILES_SCAN_ALL").is_some_and(|v| v != "0") {
+            return std::sync::Mutex::new(true);
+        }
+        std::sync::Mutex::new(pref_get("scan_all").as_deref() == Some("1"))
+    })
+}
+
+/// Where the little `key=value` preference file lives.
+fn prefs_path() -> PathBuf {
+    home_dir().join(".config").join("mpfiles").join("prefs")
+}
+
+/// One saved preference, by key. The file is `key=value` lines, nothing
+/// more; a missing file is simply no preferences.
+pub fn pref_get(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(prefs_path()).ok()?;
+    pref_find(&text, key)
+}
+
+/// Save one preference, leaving every other key exactly as it was — the
+/// file is shared by whatever small choices the app remembers.
+pub fn pref_set(key: &str, value: &str) {
+    let path = prefs_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::write(&path, pref_replace(&old, key, value));
+}
+
+fn pref_find(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (k, v) = line.trim().split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
+fn pref_replace(old: &str, key: &str, value: &str) -> String {
+    let mut out = String::new();
+    let mut written = false;
+    for line in old.lines() {
+        match line.trim().split_once('=') {
+            Some((k, _)) if k == key => {
+                if !written {
+                    out.push_str(&format!("{key}={value}\n"));
+                    written = true;
+                }
+            }
+            _ if !line.trim().is_empty() => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    if !written {
+        out.push_str(&format!("{key}={value}\n"));
+    }
+    out
+}
+
+/// True for a folder the size map must not enter.
+///
+/// Only ever consulted for directories, and only for the ones directly under
+/// the user's home — a `Library` folder inside a project is a project's
+/// library and gets measured like anything else.
+pub fn skip_for_scan(path: &Path) -> bool {
+    if scan_all() {
+        return false;
+    }
+    let home = home_dir();
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if parent != home {
+        return false;
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| HOME_SKIP.contains(&name))
+}
+
+/// What scope the map's numbers were measured under — always said, in both
+/// states, so nobody misreads a total.
+pub fn scan_exclusions() -> Option<String> {
+    if scan_all() {
+        return Some("including system folders".to_string());
+    }
+    Some("excluding Library and Trash".to_string())
+}
+
+/// One entry, read straight off the disk by path rather than found in a
+/// listing. The treemap needs this: nearly everything it draws lives below the
+/// folder the browser is listing, and a context menu on a file three folders
+/// down has to describe that file, not fail to find a row for it.
+///
+/// `None` when there is nothing there, or when the browser is on the demo
+/// filesystem — a virtual path has no `std::fs` entry to read, and inventing
+/// one would let an operation run against a file that does not exist.
+pub fn entry_at(path: &Path) -> Option<FileEntry> {
+    if crate::vfs::is_demo() {
+        return None;
+    }
+    let metadata = fs::metadata(path).ok()?;
+    let is_dir = metadata.is_dir();
+    Some(FileEntry {
+        name: display_name(path),
+        kind: kind_for(path, is_dir),
+        is_dir,
+        size: if is_dir { 0 } else { metadata.len() },
+        modified_secs: epoch_secs(metadata.modified().ok()),
+        created_secs: epoch_secs(metadata.created().ok()),
+        permissions: permissions_text(&metadata),
+        child_count: is_dir.then(|| count_children(path)).flatten(),
+        path: path.to_path_buf(),
+    })
+}
+
 /// Read one directory. Runs on a worker thread — never the UI thread.
 pub fn read_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
     let read_dir = fs::read_dir(path)
@@ -653,6 +805,42 @@ pub fn display_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The preference file is shared by every small choice the app keeps, so
+    // writing one key must never eat the others.
+    #[test]
+    fn setting_one_preference_keeps_the_rest() {
+        let text = "scan_all=1\nprojection=ortho\n";
+        assert_eq!(pref_find(text, "projection").as_deref(), Some("ortho"));
+        assert_eq!(pref_find(text, "missing"), None);
+        let replaced = pref_replace(text, "projection", "persp");
+        assert_eq!(pref_find(&replaced, "projection").as_deref(), Some("persp"));
+        assert_eq!(pref_find(&replaced, "scan_all").as_deref(), Some("1"));
+        // A new key appends; nothing else moves.
+        let grown = pref_replace(&replaced, "filter_side", "1");
+        assert_eq!(pref_find(&grown, "filter_side").as_deref(), Some("1"));
+        assert_eq!(pref_find(&grown, "scan_all").as_deref(), Some("1"));
+        assert_eq!(grown.lines().count(), 3);
+    }
+
+    // The rule that keeps macOS from throwing a permission dialog per
+    // protected folder: those folders are never entered at all.
+    #[test]
+    fn the_map_leaves_apples_folders_alone_and_touches_nothing_else() {
+        let home = home_dir();
+        assert!(skip_for_scan(&home.join("Library")));
+        assert!(skip_for_scan(&home.join(".Trash")));
+        // The user's own files, which is the entire point.
+        assert!(!skip_for_scan(&home.join("Documents")));
+        assert!(!skip_for_scan(&home.join("Pictures")));
+        assert!(!skip_for_scan(&home.join("Downloads")));
+        // Only *directly* under home. A project's own `Library` folder is the
+        // project's, and gets measured like anything else in it.
+        assert!(!skip_for_scan(&home.join("code/thing/Library")));
+        assert!(!skip_for_scan(Path::new("/tmp/Library")));
+        // Whatever it leaves out, it says so.
+        assert!(scan_exclusions().is_some());
+    }
 
     fn entry(name: &str, is_dir: bool, size: u64, modified: u64) -> FileEntry {
         let path = PathBuf::from("/x").join(name);

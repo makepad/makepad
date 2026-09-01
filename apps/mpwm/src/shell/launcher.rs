@@ -73,7 +73,7 @@ fn icon_for(id: &str) -> Option<Ico> {
 /// alphabetical provider). The live filter never reorders.
 pub fn apps() -> Vec<MenuItem> {
     let hides = hides();
-    let mut items: Vec<MenuItem> = clients::registry()
+    let items: Vec<MenuItem> = clients::registry()
         .iter()
         .filter(|app| app.is_available())
         .filter(|app| !is_hidden(&app.id, &hides))
