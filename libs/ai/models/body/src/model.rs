@@ -7,13 +7,14 @@
 //! parameters come from the body decoder, the hand crops of the reference's
 //! "full" mode are a later phase.
 
+use crate::backend::GpuTensor;
 use crate::condition::{apply_mask_prompt, dense_pe_at, ray_features, RayCond};
 use crate::decoder::{Decoder, LoopTiming, StepFeedback, StepInput};
 use crate::dino::BodyDino;
 use crate::hands::{hand_crops, BodyImage, FusionReport, HandBranch, HandOutput};
 use crate::mask::{warp_mask, MaskEmbed};
 use crate::mhr::MhrRig;
-use crate::packet::{BodyPacket, BodyPerson};
+use crate::packet::{BodyPacket, BodyPerson, PersonHands};
 use crate::pose::{camera_translation, model_params, project, unpack_pose};
 use crate::preprocess::{
     condition_info, crop_geometry_at, crop_normalized, full_to_crop, patch_rays, CropGeometry,
@@ -59,6 +60,43 @@ pub struct FullOutput {
     pub body: BodyOutput,
     pub hands: [HandOutput; 2],
     pub report: FusionReport,
+}
+
+impl BodyOutput {
+    /// The transport subset of this output (spec section 9).
+    pub fn into_person(self) -> BodyPerson {
+        BodyPerson {
+            mhr: self.mhr_model_params,
+            global_rot: self.global_rot,
+            cam_t: self.pred_cam_t,
+            shape: self.shape,
+            expr: self.face,
+            focal: self.focal_length,
+            bbox: self.bbox,
+            kp3d: self.pred_keypoints_3d,
+            kp2d: self.pred_keypoints_2d,
+            joints: Some(self.pred_joint_coords),
+            rots: None,
+            hands: None,
+        }
+    }
+}
+
+impl FullOutput {
+    /// The transport packet of a full-mode pass: the fused body plus which
+    /// hands were trusted and where they were.
+    pub fn into_packet(self, ms: f32) -> BodyPacket {
+        let boxes = [self.hands[0].bbox, self.hands[1].bbox];
+        let mut person = self.body.into_person();
+        person.hands = Some(PersonHands {
+            fused: self.report.fused,
+            boxes,
+        });
+        BodyPacket {
+            people: vec![person],
+            ms,
+        }
+    }
 }
 
 /// Rich model output used by the body, hand, re-prompt, and fusion passes.
@@ -193,6 +231,29 @@ impl BodyModel {
         bbox: Option<[f32; 4]>,
         mask: Option<(&[u8], f32)>,
     ) -> Result<BodyPacket> {
+        let total = Instant::now();
+        let (last, _geo, _context) = self.body_pass(rgb, width, height, bbox, mask)?;
+        let person = last.into_person();
+        let t_packet = total.elapsed();
+        self.last_stage_ms[4] = t_packet.as_secs_f32() * 1000.0 - self.last_stage_ms[..4].iter().sum::<f32>();
+        Ok(BodyPacket {
+            people: vec![person],
+            ms: t_packet.as_secs_f32() * 1000.0,
+        })
+    }
+
+    /// The body pass every entry point shares: crop (with the optional
+    /// mask prompt), backbone, conditioning and the decoder loop. Returns
+    /// the last step's output carrying the hand boxes, the crop geometry
+    /// and the conditioned context (the hands pass re-prompts against it).
+    fn body_pass(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        bbox: Option<[f32; 4]>,
+        mask: Option<(&[u8], f32)>,
+    ) -> Result<(BodyOutput, CropGeometry, GpuTensor)> {
         let (w, h) = (width as usize, height as usize);
         if rgb.len() != w * h * 3 {
             return Err(DiffusionError::workflow(format!(
@@ -267,42 +328,27 @@ impl BodyModel {
         last.hand_box = output.hand_boxes;
         last.hand_logits = output.hand_logits;
         last.bbox = bbox;
-        let person = BodyPerson {
-            mhr: last.mhr_model_params,
-            global_rot: last.global_rot,
-            cam_t: last.pred_cam_t,
-            shape: last.shape,
-            expr: last.face,
-            focal: geo.focal,
-            bbox,
-            kp3d: last.pred_keypoints_3d,
-            kp2d: last.pred_keypoints_2d,
-            joints: Some(last.pred_joint_coords),
-            rots: None,
-        };
-        let t_packet = total.elapsed();
         self.last_stage_ms = [
             t_crop.as_secs_f32() * 1000.0,
             (t_backbone - t_crop).as_secs_f32() * 1000.0,
             (t_context - t_backbone).as_secs_f32() * 1000.0,
             (t_decoder - t_context).as_secs_f32() * 1000.0,
-            (t_packet - t_decoder).as_secs_f32() * 1000.0,
+            0.0,
         ];
-        Ok(BodyPacket {
-            people: vec![person],
-            ms: t_packet.as_secs_f32() * 1000.0,
-        })
+        Ok((last, geo, context))
     }
 
     /// Full body + two hand crops + wrist fusion. Unlike [`Self::infer`],
     /// this returns the rich fused result, the two hand passes and the
-    /// fusion report (which hands were trusted and why).
+    /// fusion report (which hands were trusted and why). `mask` is the
+    /// optional segmentation-mask prompt of the body pass (spec 13.2).
     pub fn infer_full(
         &mut self,
         rgb: &[u8],
         width: u32,
         height: u32,
         bbox: Option<[f32; 4]>,
+        mask: Option<(&[u8], f32)>,
     ) -> Result<FullOutput> {
         if self.crop_size != IMAGE_SIZE {
             return Err(DiffusionError::workflow(format!(
@@ -311,45 +357,7 @@ impl BodyModel {
             )));
         }
         let (w, h) = (width as usize, height as usize);
-        if rgb.len() != w * h * 3 {
-            return Err(DiffusionError::workflow(format!(
-                "body infer_full: {} bytes for {width}x{height} rgb, expected {}",
-                rgb.len(),
-                w * h * 3,
-            )));
-        }
-        let bbox = bbox.unwrap_or([0.0, 0.0, width as f32, height as f32]);
-        let geo = crop_geometry_at(bbox, w, h, None, IMAGE_SIZE, 1.25);
-        let crop = crop_normalized(rgb, w, h, &geo);
-        let embeddings = self.dino.forward_normalized(&crop)?;
-        let features = ray_features(&patch_rays(&geo));
-        let context = self
-            .ray_cond
-            .apply(&embeddings, &self.no_mask_embed, &features)?;
-        let tokens = self.decoder.build_tokens(condition_info(&geo));
-        let mut last = None;
-        let decoded = self.decoder.run(
-            tokens,
-            &context,
-            &self.dense_pe[&IMAGE_SIZE],
-            |step| {
-                let correctives = self.correctives_every_step
-                    || step.layer + 1 == crate::DEC_DEPTH;
-                let result = close_the_loop(&self.rig, &geo, &step, correctives);
-                let feedback = StepFeedback {
-                    kp2d_cropped: result.pred_keypoints_2d_cropped.clone(),
-                    depth: result.pred_keypoints_2d_depth.clone(),
-                    kp3d: result.pred_keypoints_3d.clone(),
-                };
-                last = Some(result);
-                feedback
-            },
-        )?;
-        let mut body = last.ok_or_else(|| DiffusionError::model("body decoder ran no steps"))?;
-        body.hand_box = decoded.hand_boxes;
-        body.hand_logits = decoded.hand_logits;
-        body.bbox = bbox;
-
+        let (mut body, geo, context) = self.body_pass(rgb, width, height, bbox, mask)?;
         if self.hands.is_none() {
             self.hands = Some(HandBranch::load(&self.weights)?);
         }
@@ -579,7 +587,7 @@ mod tests {
         let rgb: Vec<u8> = image.into_iter().map(|value| value as u8).collect();
         let mut model = BodyModel::load(&weights_path).expect("load full body model");
         model.correctives_every_step = true;
-        let full = model.infer_full(&rgb, w, h, None).expect("full inference");
+        let full = model.infer_full(&rgb, w, h, None, None).expect("full inference");
         let field = |name: &str| fixture::load_from(root, name).unwrap().1;
         eprintln!("{label}: fusion report {:?}", full.report);
         let output = &full.body;

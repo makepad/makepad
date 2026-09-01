@@ -9,10 +9,76 @@ use crate::subproc_img::png_header;
 #[cfg(feature = "body-native")]
 use makepad_ai_body::model::BodyModel;
 #[cfg(feature = "body-native")]
+use makepad_ai_body::packet::BodyPacket;
+#[cfg(feature = "body-native")]
 use makepad_ai_common::DiffusionError;
+#[cfg(all(feature = "body-native", feature = "segment-native"))]
+use makepad_ai_vision::sam3::{Sam3, Sam3Image, Sam3Weights};
 #[cfg(feature = "body-native")]
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// Per-request options of the body domain, parsed from the request's
+/// free-text prompt (`prompt` on `/generate`, `LiveConfig.prompt` on a
+/// realtime session): whitespace- or comma-separated words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyOptions {
+    /// Run the hand crops, the hand decoder and the wrist fusion.
+    pub hands: bool,
+    /// Find persons with SAM 3.1 (`person:N`) and run one pass per person
+    /// with its box and mask; otherwise the frame (or the request's box)
+    /// is one person.
+    pub detect: bool,
+    /// Upper bound on detected persons.
+    pub persons: usize,
+}
+
+impl Default for BodyOptions {
+    fn default() -> Self {
+        Self {
+            hands: false,
+            detect: false,
+            persons: 1,
+        }
+    }
+}
+
+impl BodyOptions {
+    pub const MAX_PERSONS: usize = 8;
+
+    pub fn parse(prompt: &str) -> Result<Self, AssetAiError> {
+        let mut options = Self::default();
+        for word in prompt
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|word| !word.is_empty())
+        {
+            match word {
+                "hands" => options.hands = true,
+                "detect" => options.detect = true,
+                _ if word.starts_with("persons=") => {
+                    let count = word["persons=".len()..].parse::<usize>().ok();
+                    match count {
+                        Some(count) if (1..=Self::MAX_PERSONS).contains(&count) => {
+                            options.persons = count
+                        }
+                        _ => {
+                            return Err(AssetAiError::Params(format!(
+                                "sam3dbody: persons must be 1..={} (got {word:?})",
+                                Self::MAX_PERSONS
+                            )))
+                        }
+                    }
+                }
+                other => {
+                    return Err(AssetAiError::Params(format!(
+                        "sam3dbody: unknown option {other:?} (hands, detect, persons=N)"
+                    )))
+                }
+            }
+        }
+        Ok(options)
+    }
+}
 
 /// Pluggable inference for CPU-only backend tests.
 pub type BodyFn = Box<
@@ -32,6 +98,12 @@ pub struct BodyNativeBackend {
     model_path: Option<PathBuf>,
     #[cfg(feature = "body-native")]
     model: Option<BodyModel>,
+    /// The optional detector weights (role `native-segment`), when the
+    /// registry could fetch them; loaded on the first `detect` request.
+    #[cfg(all(feature = "body-native", feature = "segment-native"))]
+    segment_path: Option<PathBuf>,
+    #[cfg(all(feature = "body-native", feature = "segment-native"))]
+    segment: Option<Sam3>,
 }
 
 impl BodyNativeBackend {
@@ -43,6 +115,10 @@ impl BodyNativeBackend {
             model_path: None,
             #[cfg(feature = "body-native")]
             model: None,
+            #[cfg(all(feature = "body-native", feature = "segment-native"))]
+            segment_path: None,
+            #[cfg(all(feature = "body-native", feature = "segment-native"))]
+            segment: None,
         }
     }
 
@@ -53,6 +129,10 @@ impl BodyNativeBackend {
             gen: Gen::Native,
             model_path: None,
             model: None,
+            #[cfg(feature = "segment-native")]
+            segment_path: None,
+            #[cfg(feature = "segment-native")]
+            segment: None,
         }
     }
 
@@ -62,26 +142,115 @@ impl BodyNativeBackend {
         width: u32,
         height: u32,
         bbox: Option<[f32; 4]>,
+        options: BodyOptions,
     ) -> Result<String, AssetAiError> {
         let packet = match &mut self.gen {
             Gen::Stub(gen) => gen(rgb, width, height, bbox)?,
             #[cfg(feature = "body-native")]
             Gen::Native => {
-                let model = self.model.as_mut().ok_or_else(|| {
-                    AssetAiError::Backend(
-                        "native body used before ensure_loaded".to_string(),
-                    )
-                })?;
                 let start = Instant::now();
-                let mut packet = model
-                    .infer(rgb, width, height, bbox)
-                    .map_err(diffusion_err)?;
+                let mut packet = if options.detect {
+                    self.infer_detected(rgb, width, height, options)?
+                } else {
+                    let model = self.model.as_mut().ok_or_else(|| {
+                        AssetAiError::Backend(
+                            "native body used before ensure_loaded".to_string(),
+                        )
+                    })?;
+                    if options.hands {
+                        model
+                            .infer_full(rgb, width, height, bbox, None)
+                            .map_err(diffusion_err)?
+                            .into_packet(0.0)
+                    } else {
+                        model.infer(rgb, width, height, bbox).map_err(diffusion_err)?
+                    }
+                };
                 packet.ms = start.elapsed().as_secs_f32() * 1000.0;
                 packet.to_json()
             }
         };
         crate::body_backend::validate_pose_packet(&packet)?;
         Ok(packet)
+    }
+
+    /// `detect`: SAM 3.1 finds up to `options.persons` persons, then every
+    /// person gets a body pass on its own box with its mask (spec 13.3).
+    #[cfg(all(feature = "body-native", feature = "segment-native"))]
+    fn infer_detected(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        options: BodyOptions,
+    ) -> Result<BodyPacket, AssetAiError> {
+        if self.segment.is_none() {
+            let path = self.segment_path.clone().ok_or_else(|| {
+                AssetAiError::Unavailable(
+                    "sam3dbody detect: the person detector weights (optional role native-segment) are not available on this node"
+                        .to_string(),
+                )
+            })?;
+            let weights = Sam3Weights::load(&path).map_err(diffusion_err)?;
+            self.segment = Some(Sam3::prepare(&weights).map_err(diffusion_err)?);
+        }
+        let segment = self.segment.as_ref().unwrap();
+        let model = self.model.as_mut().ok_or_else(|| {
+            AssetAiError::Backend("native body used before ensure_loaded".to_string())
+        })?;
+        let (w, h) = (width as usize, height as usize);
+        let image = Sam3Image::rgb8(rgb, w, h).map_err(diffusion_err)?;
+        let found = segment
+            .segment(image, &format!("person:{}", options.persons), None)
+            .map_err(diffusion_err)?;
+        let mut people = Vec::new();
+        for (bbox, &score) in found
+            .boxes_xyxy
+            .iter()
+            .zip(&found.scores)
+            .take(options.persons)
+        {
+            // The detector returns one instance-union alpha: the person's
+            // mask is that alpha inside the person's box, at the 0.5 level.
+            let mut mask = vec![0u8; w * h];
+            let x0 = bbox[0].floor().max(0.0) as usize;
+            let y0 = bbox[1].floor().max(0.0) as usize;
+            let x1 = (bbox[2].ceil().max(0.0) as usize).min(w);
+            let y1 = (bbox[3].ceil().max(0.0) as usize).min(h);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if found.alpha[y * w + x] >= 0.5 {
+                        mask[y * w + x] = 1;
+                    }
+                }
+            }
+            let bbox = [bbox[0], bbox[1], bbox[2], bbox[3]];
+            let mut person_packet = if options.hands {
+                model
+                    .infer_full(rgb, width, height, Some(bbox), Some((&mask, score)))
+                    .map_err(diffusion_err)?
+                    .into_packet(0.0)
+            } else {
+                model
+                    .infer_masked(rgb, width, height, bbox, Some((&mask, score)))
+                    .map_err(diffusion_err)?
+            };
+            people.append(&mut person_packet.people);
+        }
+        Ok(BodyPacket { people, ms: 0.0 })
+    }
+
+    #[cfg(all(feature = "body-native", not(feature = "segment-native")))]
+    fn infer_detected(
+        &mut self,
+        _rgb: &[u8],
+        _width: u32,
+        _height: u32,
+        _options: BodyOptions,
+    ) -> Result<BodyPacket, AssetAiError> {
+        Err(AssetAiError::Unavailable(
+            "sam3dbody detect needs a build with the 'segment-native' cargo feature".to_string(),
+        ))
     }
 }
 
@@ -112,6 +281,11 @@ impl ContentBackend for BodyNativeBackend {
                 let model = BodyModel::load(&path).map_err(diffusion_err)?;
                 self.model_path = Some(path);
                 self.model = Some(model);
+                #[cfg(feature = "segment-native")]
+                {
+                    self.segment = None;
+                    self.segment_path = ctx.path_by_role("native-segment").ok();
+                }
                 Ok(())
             }
         }
@@ -131,6 +305,11 @@ impl ContentBackend for BodyNativeBackend {
         {
             self.model = None;
             self.model_path = None;
+        }
+        #[cfg(all(feature = "body-native", feature = "segment-native"))]
+        {
+            self.segment = None;
+            self.segment_path = None;
         }
         Ok(())
     }
@@ -155,7 +334,8 @@ impl ContentBackend for BodyNativeBackend {
         cancel.check()?;
         progress("body: infer", 0.05);
         let (rgb, width, height) = crate::testpattern::decode_png_rgb8(&params.input_bytes)?;
-        let packet = self.infer_rgb(&rgb, width, height, None)?;
+        let options = BodyOptions::parse(&params.prompt)?;
+        let packet = self.infer_rgb(&rgb, width, height, None, options)?;
         cancel.check()?;
         progress("done", 1.0);
         Ok(vec![ArtifactData {
@@ -179,7 +359,8 @@ impl ContentBackend for BodyNativeBackend {
         let init = frame.init.ok_or_else(|| {
             AssetAiError::Params("sam3dbody live step requires an input frame".to_string())
         })?;
-        let packet = self.infer_rgb(&init.data, init.width, init.height, None)?;
+        let options = BodyOptions::parse(&frame.config.prompt)?;
+        let packet = self.infer_rgb(&init.data, init.width, init.height, None, options)?;
         cancel.check()?;
         Ok(LiveFrameOut {
             image: init.clone(),
@@ -210,6 +391,27 @@ mod tests {
 
     fn input_png() -> Vec<u8> {
         crate::testpattern::encode_png_rgb8(&vec![128u8; 8 * 4 * 3], 8, 4).unwrap()
+    }
+
+    #[test]
+    fn options_parse_the_prompt_words() {
+        assert_eq!(BodyOptions::parse("").unwrap(), BodyOptions::default());
+        assert_eq!(
+            BodyOptions::parse("hands, detect persons=3").unwrap(),
+            BodyOptions {
+                hands: true,
+                detect: true,
+                persons: 3
+            }
+        );
+        assert!(matches!(
+            BodyOptions::parse("persons=0"),
+            Err(AssetAiError::Params(_))
+        ));
+        assert!(matches!(
+            BodyOptions::parse("feet"),
+            Err(AssetAiError::Params(_))
+        ));
     }
 
     #[test]
@@ -270,6 +472,7 @@ mod tests {
                 kp2d: vec![0.0; 70 * 2],
                 joints: None,
                 rots: None,
+                hands: None,
             }],
             ms: 4.56789,
         };

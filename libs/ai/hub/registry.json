@@ -1,6 +1,65 @@
 {
  "models": [
   {
+   "id": "beat-this",
+   "domain": "beats",
+   "backend": "beats",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://github.com/CPJKU/beat_this",
+    "summary": "Beat This! beat and downbeat tracker (Foscarin, Schl\u00fcter, Widmer 2024), code and released weights MIT; training data partly copyrighted \u2014 weights are unrestricted.",
+    "restriction": "none"
+   },
+   "vram_gb": 0.5,
+   "note": "Contract: input_b64 is a WAV, MP3, FLAC or Ogg Vorbis file at any sample rate/channel count; the backend downmixes and resamples to 22050 Hz. Output is one application/json artifact: {bpm, confidence, beats:[seconds], downbeats:[seconds], frame_rate:50}.",
+   "files": [
+    {
+     "role": "weights",
+     "repo": "CPJKU/beat_this",
+     "path": "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt",
+     "cache_as": "beats/beat_this_final0.ckpt",
+     "size": 81058141,
+     "sha256": "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
+    },
+    {
+     "role": "weights-small",
+     "repo": "CPJKU/beat_this",
+     "path": "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/small0.ckpt",
+     "cache_as": "beats/beat_this_small0.ckpt",
+     "size": 8451101,
+     "sha256": "6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b",
+     "optional": true
+    }
+   ]
+  },
+  {
+   "id": "basic-pitch",
+   "domain": "notes",
+   "backend": "notes",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://github.com/spotify/basic-pitch",
+    "summary": "Spotify Basic Pitch instrument-agnostic polyphonic note transcription model (ICASSP 2022), Apache-2.0 code and weights; permissive incl. commercial.",
+    "restriction": "none"
+   },
+   "vram_gb": 0.1,
+   "note": "Request: domain notes with input_b64 containing a PCM WAV (16/24/32-bit integer or f32, any sample rate/channels). Response artifacts: application/json {frame_rate,notes:[{start_secs,end_secs,midi,amplitude,bends:[semitones_per_frame]}]} and audio/midi .mid bytes with per-note pitch bends in the standard +/-2-semitone range.",
+   "files": [
+    {
+     "role": "model",
+     "repo": "spotify/basic-pitch",
+     "path": "https://github.com/spotify/basic-pitch/raw/main/basic_pitch/saved_models/icassp_2022/nmp.onnx",
+     "cache_as": "notes/basic_pitch_nmp.onnx",
+     "size": 230444,
+     "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec"
+    }
+   ]
+  },
+  {
    "id": "hunyuan3d-paint-2.1",
    "domain": "paint",
    "backend": "paint",
@@ -1780,7 +1839,7 @@
     "restriction": "community"
    },
    "vram_gb": 4.5,
-   "note": "SAM 3D Body (Comfy-Org/sam-3d-body, SAM License) RGB image -> application/json human pose packet. Native Rust inference; no Python, Torch, subprocess, or silent fallback. facebook/* checkpoints are never fetched. The checkpoint is pinned to an immutable revision, byte size, and SHA-256.",
+   "note": "SAM 3D Body (Comfy-Org/sam-3d-body, SAM License) RGB image -> application/json human pose packet. Native Rust inference; no Python, Torch, subprocess, or silent fallback. facebook/* checkpoints are never fetched. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Options ride the prompt string: `hands` (both hand crops, wrist fusion), `detect` (SAM 3.1 person detection, needs the optional native-segment weights), `persons=N` (max persons for detect).",
    "files": [
     {
      "role": "native-body",
@@ -1790,6 +1849,16 @@
      "cache_as": "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors",
      "size": 2830737652,
      "sha256": "59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf"
+    },
+    {
+     "role": "native-segment",
+     "repo": "Comfy-Org/sam3.1",
+     "path": "checkpoints/sam3.1_multiplex_fp16.safetensors",
+     "revision": "f38cd62b71494b53ac2b56ca36e24f3c8d565581",
+     "cache_as": "segment/sam3-1-multiplex/sam3.1_multiplex_fp16.safetensors",
+     "size": 1745546848,
+     "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03",
+     "optional": true
     }
    ]
   },
