@@ -33,11 +33,13 @@
 //! 24 GB card because the tower's activations are liveness-planned (see
 //! `VisionTower::load`), not arena-resident.
 
-use crate::backend::{
-    ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
-};
+use crate::backend::GenerateParams;
+#[cfg(feature = "llm")]
+use crate::backend::{ArtifactData, BackendCtx, CancelToken, ContentBackend, ProgressSink};
 use crate::error::AssetAiError;
-use crate::vision_backend::{decode_image_rgb8_within, image_kind};
+use crate::vision_backend::image_kind;
+#[cfg(feature = "llm")]
+use crate::vision_backend::decode_image_rgb8_within;
 
 /// Largest request payload accepted, in bytes. A full-resolution page PNG
 /// runs 5-20 MB; this is the "somebody posted a video" guard.
@@ -501,6 +503,7 @@ pub struct OcrPage {
 /// What the lane driver should do about its supply of encoded pages before it
 /// fills a free lane. See `lane_refill_wait`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "llm")]
 enum RefillWait {
     /// A page is already staged, or the batch has none left to come: fill the
     /// lane from what is in hand and never touch the queue.
@@ -525,6 +528,7 @@ enum RefillWait {
 ///
 /// Kept at module top level, free of the `llm` feature gate and every OCR
 /// type, so the tests below exercise it directly.
+#[cfg(feature = "llm")]
 fn lane_refill_wait(resident: usize, staged: usize, received: usize, total: usize) -> RefillWait {
     if staged > 0 || received >= total {
         RefillWait::None
@@ -549,6 +553,7 @@ fn lane_refill_wait(resident: usize, staged: usize, received: usize, total: usiz
 /// `submit`/`collect` actually do — deliberately kept free of the `llm`
 /// feature gate and every OCR/GPU type, so its ordering can be exercised
 /// directly by the tests below with no worker, tower or GPU involved.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))] // production caller lives behind llm
 fn pipeline_submit_collect<T, R>(
     lookahead: usize,
     items: impl IntoIterator<Item = T>,
