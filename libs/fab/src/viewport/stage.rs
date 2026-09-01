@@ -58,7 +58,6 @@ pub fn stage_world(state: &AppState, camera: &Camera) -> GameWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_math::{vec3, Vec3f};
 
     #[test]
     fn the_noaa_sun_turns_with_the_world() {

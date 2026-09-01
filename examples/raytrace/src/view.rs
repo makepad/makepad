@@ -316,7 +316,6 @@ pub struct Harness {
     gpu_seed: u32,
     step: usize,
     phase: Phase,
-    started: bool,
     captures: Vec<Capture>,
     waiting: usize,
     lines: Vec<String>,
@@ -582,8 +581,8 @@ impl PtView {
         let scene = self.harness.scene_cache.clone().unwrap();
         let set = self.harness.current_settings.clone();
         let (_, _, _, _, sky) = Self::selftest_scene(step);
-        let mut pass = true;
-        let mut line = String::new();
+        let pass: bool;
+        let mut line: String;
         match step {
             0 => {
                 let mut worst = 0.0f32;

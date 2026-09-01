@@ -419,7 +419,7 @@ macro_rules! impl_reinterpret {
     ($T:ty, $U:ty) => {
         impl Reinterpret<$T> for $U {
             fn reinterpret(val: $T) -> Result<Self, Trap> {
-                Ok(unsafe { mem::transmute(val) })
+                Ok(<$U>::from_ne_bytes(val.to_ne_bytes()))
             }
         }
     };

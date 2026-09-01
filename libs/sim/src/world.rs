@@ -53,6 +53,12 @@ pub struct GameWorld {
     pub next_id: u64,
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
+    /// Per-commandable-unit decision hook. Called once per unit per tick,
+    /// BEFORE the kit steers, with that unit's own situation — the seam a
+    /// script needs to give one unit behaviour of its own rather than tuning
+    /// the whole kit. Pair it with `unit(id, {control: "script"})` when the
+    /// script means to drive the body itself.
+    pub on_unit: Option<CallbackSlot>,
     pub on_touch: Option<CallbackSlot>,
     /// Fired when a player joins or leaves the room (M2). The session layer
     /// raises the events; the host resolves the slot and calls the closure.
@@ -75,6 +81,12 @@ pub struct GameWorld {
     pub cam_distance: f32,
     pub cam_follow: u64,
     pub cam_side: bool,
+    /// Top-down strategy camera: the view looks straight down at
+    /// `cam_target` from `cam_distance` metres, panned and zoomed by the
+    /// player rather than following a body. A tiled strategy level turns it
+    /// on the way an `fps` map turns on first person — the presentation is
+    /// part of what the level IS, not a thing every script must remember.
+    pub cam_top_down: bool,
     /// Third-person rig: pivot entity (0 = off), pivot height, boom length.
     pub cam_third: u64,
     pub cam_height: f32,
@@ -388,6 +400,7 @@ impl GameWorld {
         self.cam_distance = 18.0;
         self.cam_follow = 0;
         self.cam_side = false;
+        self.cam_top_down = false;
         self.cam_third = 0;
         self.cam_height = 1.6;
         self.cam_boom = 10.0;

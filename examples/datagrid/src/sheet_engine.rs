@@ -23,10 +23,7 @@ impl CellValue {
         }
     }
 
-    pub fn is_num(&self) -> bool {
-        matches!(self, CellValue::Num(_))
-    }
-
+    #[cfg(test)]
     pub fn is_err(&self) -> bool {
         matches!(self, CellValue::Err(_))
     }
