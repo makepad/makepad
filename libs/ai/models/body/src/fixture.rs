@@ -1,7 +1,6 @@
 //! Optional oracle fixture reader used only by tests.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use crate::mhr::MhrRig;
 use crate::weights::BodyWeights;
@@ -50,26 +49,24 @@ pub fn weights_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-pub fn rig() -> Option<&'static MhrRig> {
-    static RIG: OnceLock<Option<MhrRig>> = OnceLock::new();
-    RIG.get_or_init(|| {
-        let path = weights_path()?;
-        let weights = match BodyWeights::load(path) {
-            Ok(weights) => weights,
-            Err(err) => {
-                eprintln!("fixture rig: weights failed to load: {err:?}");
-                return None;
-            }
-        };
-        match MhrRig::load(&weights) {
-            Ok(rig) => Some(rig),
-            Err(err) => {
-                eprintln!("fixture rig: MHR rig failed to load: {err:?}");
-                None
-            }
+/// The rig loaded from the weights (a fresh load each call: the rig holds
+/// GPU tensors, which cannot sit in a static).
+pub fn rig() -> Option<MhrRig> {
+    let path = weights_path()?;
+    let weights = match BodyWeights::load(path) {
+        Ok(weights) => weights,
+        Err(err) => {
+            eprintln!("fixture rig: weights failed to load: {err:?}");
+            return None;
         }
-    })
-    .as_ref()
+    };
+    match MhrRig::load(&weights) {
+        Ok(rig) => Some(rig),
+        Err(err) => {
+            eprintln!("fixture rig: MHR rig failed to load: {err:?}");
+            None
+        }
+    }
 }
 
 /// The GPU tests need a device AND the layer-norm op family; a build without

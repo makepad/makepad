@@ -1,7 +1,12 @@
-//! Host-side decoder heads and refinement embeddings.
+//! Decoder heads and refinement embeddings: host copies (tests, token
+//! assembly) and GPU-resident copies for the per-step work, where the
+//! 70-row FFNs are the whole cost of a refinement step on the host.
 
+use crate::backend::{
+    gpu_birefnet_relu, gpu_download, gpu_linear_f32_resident, gpu_upload, GpuTensor,
+};
 use crate::weights::BodyWeights;
-use crate::{DEC_DIM, DINO_DIM, NCAM, NPOSE, Result};
+use crate::{DiffusionError, DEC_DIM, DINO_DIM, NCAM, NPOSE, Result};
 
 #[derive(Clone)]
 pub(crate) struct HostLinear {
@@ -201,6 +206,105 @@ impl DecoderHeads {
     pub(crate) fn hand_logits(&self, input: &[f32]) -> [f32; 2] {
         let output = self.hand_cls.forward_row(input);
         [output[0], output[1]]
+    }
+}
+
+/// A linear layer resident on the GPU, applied to host rows.
+pub(crate) struct GpuLinearRows {
+    weight: GpuTensor,
+    bias: GpuTensor,
+    input: usize,
+    output: usize,
+}
+
+impl GpuLinearRows {
+    pub(crate) fn upload(linear: &HostLinear) -> Result<Self> {
+        Ok(Self {
+            weight: gpu_upload(&linear.weight, linear.output, linear.input)
+                .map_err(DiffusionError::model)?,
+            bias: gpu_upload(&linear.bias, 1, linear.output).map_err(DiffusionError::model)?,
+            input: linear.input,
+            output: linear.output,
+        })
+    }
+
+    pub(crate) fn forward(&self, input: &GpuTensor) -> Result<GpuTensor> {
+        gpu_linear_f32_resident(input, &self.weight, Some(&self.bias)).map_err(DiffusionError::model)
+    }
+
+    pub(crate) fn forward_rows(&self, input: &[f32]) -> Result<Vec<f32>> {
+        debug_assert_eq!(input.len() % self.input, 0);
+        let rows = input.len() / self.input;
+        let x = gpu_upload(input, rows, self.input).map_err(DiffusionError::model)?;
+        let y = self.forward(&x)?;
+        debug_assert_eq!(y.cols(), self.output);
+        gpu_download(&y).map_err(DiffusionError::model)
+    }
+}
+
+pub(crate) struct GpuReluFfn {
+    first: GpuLinearRows,
+    second: GpuLinearRows,
+}
+
+impl GpuReluFfn {
+    pub(crate) fn upload(ffn: &ReluFfn) -> Result<Self> {
+        Ok(Self {
+            first: GpuLinearRows::upload(&ffn.first)?,
+            second: GpuLinearRows::upload(&ffn.second)?,
+        })
+    }
+
+    pub(crate) fn forward_rows(&self, input: &[f32]) -> Result<Vec<f32>> {
+        debug_assert_eq!(input.len() % self.first.input, 0);
+        let rows = input.len() / self.first.input;
+        let x = gpu_upload(input, rows, self.first.input).map_err(DiffusionError::model)?;
+        let h = self.first.forward(&x)?;
+        let h = gpu_birefnet_relu(&h).map_err(DiffusionError::model)?;
+        let y = self.second.forward(&h)?;
+        gpu_download(&y).map_err(DiffusionError::model)
+    }
+}
+
+/// The per-step heads on the GPU: pose and camera on the normalised pose
+/// token, and the three refinement embeddings over the 70 keypoint rows.
+pub(crate) struct GpuStepHeads {
+    pose: GpuReluFfn,
+    camera: GpuReluFfn,
+    keypoint_posemb: GpuReluFfn,
+    keypoint3d_posemb: GpuReluFfn,
+    keypoint_feat: GpuLinearRows,
+}
+
+impl GpuStepHeads {
+    pub(crate) fn upload(heads: &DecoderHeads) -> Result<Self> {
+        Ok(Self {
+            pose: GpuReluFfn::upload(&heads.pose)?,
+            camera: GpuReluFfn::upload(&heads.camera)?,
+            keypoint_posemb: GpuReluFfn::upload(&heads.keypoint_posemb)?,
+            keypoint3d_posemb: GpuReluFfn::upload(&heads.keypoint3d_posemb)?,
+            keypoint_feat: GpuLinearRows::upload(&heads.keypoint_feat)?,
+        })
+    }
+
+    pub(crate) fn pose(&self, input: &[f32]) -> Result<Vec<f32>> {
+        self.pose.forward_rows(input)
+    }
+
+    pub(crate) fn camera(&self, input: &[f32]) -> Result<Vec<f32>> {
+        self.camera.forward_rows(input)
+    }
+
+    pub(crate) fn keypoint_posemb(&self, input: &[f32]) -> Result<Vec<f32>> {
+        self.keypoint_posemb.forward_rows(input)
+    }
+
+    pub(crate) fn keypoint3d_posemb(&self, input: &[f32]) -> Result<Vec<f32>> {
+        self.keypoint3d_posemb.forward_rows(input)
+    }
+
+    pub(crate) fn keypoint_features(&self, input: &[f32]) -> Result<Vec<f32>> {
+        self.keypoint_feat.forward_rows(input)
     }
 }
 

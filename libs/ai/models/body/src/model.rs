@@ -61,7 +61,8 @@ impl BodyModel {
         let mut no_mask_embed = [0.0f32; DINO_DIM];
         no_mask_embed.copy_from_slice(&no_mask);
         let decoder = Decoder::load(&weights)?;
-        let rig = MhrRig::load(&weights)?;
+        let mut rig = MhrRig::load(&weights)?;
+        rig.prepare_gpu()?;
         Ok(Self {
             weights,
             dino,
