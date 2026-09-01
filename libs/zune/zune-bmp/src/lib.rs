@@ -71,7 +71,6 @@
 //! benchmark just in case you think it's slowing you down in any way.
 //!
 #![no_std]
-#![macro_use]
 extern crate alloc;
 
 extern crate core;

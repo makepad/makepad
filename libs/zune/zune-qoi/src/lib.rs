@@ -18,7 +18,6 @@
 //! You can use `no_std` with alloc feature to compile for `no_std` endpoints
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![macro_use]
 extern crate alloc;
 extern crate core;
 
