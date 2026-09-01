@@ -72,7 +72,12 @@ pub struct FoldHeader {
     /// open or first draw) — the only draw whose used height is the truth.
     #[rust]
     measure_body: bool,
-    #[rust]
+    /// The fold's full outer rect (header + body), captured when the outer
+    /// turtle ends. Marked `#[area]` so `Widget::area()` reports the whole
+    /// fold, not the first `#[redraw]` child (the header strip) — rect-driven
+    /// tools (snap, the tweaker's pick) need the real extent.
+    #[redraw]
+    #[area]
     area: Area,
     #[find]
     #[redraw]
@@ -136,12 +141,39 @@ impl Widget for FoldHeader {
             // so a Fill body keeps tracking the window and we can measure its
             // unconstrained height. While folding/unfolding, clamp the body to
             // `opened * rect_size` and scroll the hidden part away.
+            // The eased `opened` scalar is only meaningful while its animation
+            // is actually running. Settled, the animator STATE is the truth:
+            // an ExpDecay ease can end shy of its keyframe, a deferred cut
+            // applies with no redraw, and a redraw lost mid-animation freezes
+            // whatever fraction was painted last — every one of those left the
+            // body permanently clamped and the pane's bottom row clipped under
+            // its edge. Snapping a settled fold to its state's endpoint makes
+            // any such frame heal itself on the next draw, whatever caused it.
+            if !self.animator.is_track_animating(live_id!(active))
+                && self.animator.groups.get(&live_id!(active)).is_some()
+            {
+                self.opened = if self.animator_in_state(cx, ids!(active.on)) {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
             let unconstrained = self.rect_size == 0.0 || self.opened >= 1.0;
             let (body_walk, scroll_y) = if unconstrained {
                 (self.body_walk, 0.0)
             } else {
+                // `rect_size` was measured at the last unconstrained draw; the
+                // pane may have shrunk since (splitter drag, status bar, a
+                // window resize). Never let the clamped body paint past the
+                // space the pane actually has left, or its bottom rows sit
+                // under the pane's edge for as long as the stale state lasts.
+                let mut height = self.rect_size * self.opened;
+                let avail = cx.turtle().unused_inner_height();
+                if avail.is_finite() {
+                    height = height.min(avail.max(0.0));
+                }
                 let body_walk = Walk {
-                    height: Size::Fixed(self.rect_size * self.opened),
+                    height: Size::Fixed(height),
                     ..self.body_walk
                 };
                 let scroll_y = self.rect_size * (1.0 - self.opened);

@@ -262,6 +262,12 @@ impl DrawPass {
         &cxpass.debug_name
     }
 
+    /// This pass re-encodes whenever its consumer repaints (see
+    /// `CxDrawPass::live_with_parent`).
+    pub fn set_live_with_parent(&self, cx: &mut Cx, on: bool) {
+        cx.passes[self.draw_pass_id()].live_with_parent = on;
+    }
+
     pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2d) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0 {
@@ -513,6 +519,11 @@ pub struct CxDrawPass {
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxDrawPassParent,
     pub paint_dirty: bool,
+    /// Opt-in liveness: when this pass's CONSUMER (its parent) repaints,
+    /// this pass re-encodes too. The gauss blur chain lives on it — glass
+    /// blurs the world in realtime instead of holding the last rebuild —
+    /// while texture caches, which exist to NOT re-render, stay untouched.
+    pub live_with_parent: bool,
     pub pass_rect: Option<CxDrawPassRect>,
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
@@ -546,6 +557,7 @@ impl Default for CxDrawPass {
             view_scale: dvec2(1.0, 1.0),
             parent: CxDrawPassParent::None,
             paint_dirty: false,
+            live_with_parent: false,
             pass_rect: None,
             os: CxOsPass::default(),
             gpu_time_query: None,
