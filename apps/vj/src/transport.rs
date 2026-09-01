@@ -1100,7 +1100,7 @@ mod tests {
             let mut now = 0.0;
             t.advance(now, None);
             let mut prev: Option<Step> = None;
-            let mut prev_q = t.q();
+            let mut prev_q;
             for _ in 0..4000 {
                 frames += 1;
                 // Churn.
