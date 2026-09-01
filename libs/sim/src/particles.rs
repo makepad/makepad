@@ -48,6 +48,10 @@ impl ParticleKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EmitterAnchor {
     Entity(u64),
+    /// An entity plus an offset in ITS OWN frame — the offset yaws with the
+    /// body, so a locomotive's chimney smoke stays over the chimney through
+    /// every corner.
+    EntityLocal(u64, Vec3f),
     Point(Vec3f),
 }
 
