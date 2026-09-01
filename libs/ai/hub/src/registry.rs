@@ -198,14 +198,6 @@ pub enum Domain {
     /// Speech audio -> timed transcript (Whisper). The `stt.whisper` pipe;
     /// `Speech` stays text-to-speech, so the two never share affinity.
     Stt,
-    /// Audio -> beat and downbeat tracking JSON.
-    Beats,
-    /// Audio -> polyphonic note transcription JSON/MIDI.
-    Notes,
-    /// Audio -> music-structure sections.
-    Sections,
-    /// Image -> sewing-pattern JSON.
-    Garment,
 }
 
 impl Domain {
@@ -235,10 +227,6 @@ impl Domain {
             "vision" => Some(Domain::Vision),
             "ocr" => Some(Domain::Ocr),
             "stt" => Some(Domain::Stt),
-            "beats" => Some(Domain::Beats),
-            "notes" => Some(Domain::Notes),
-            "sections" => Some(Domain::Sections),
-            "garment" => Some(Domain::Garment),
             _ => None,
         }
     }
@@ -269,10 +257,6 @@ impl Domain {
             Domain::Vision => "vision",
             Domain::Ocr => "ocr",
             Domain::Stt => "stt",
-            Domain::Beats => "beats",
-            Domain::Notes => "notes",
-            Domain::Sections => "sections",
-            Domain::Garment => "garment",
         }
     }
 }
@@ -394,14 +378,11 @@ pub struct ModelLicense {
 
 impl ModelLicense {
     /// Stable identity of the *text* the user accepted: sha256 when pinned,
-    /// otherwise a hash of the licence name and canonical URL. A registry
-    /// correction to either value therefore prompts again.
+    /// otherwise the canonical URL.
     pub fn identity(&self) -> String {
         self.sha256
             .clone()
-            .unwrap_or_else(|| {
-                crate::sha256::sha256_hex(format!("{}\0{}", self.name, self.url).as_bytes())
-            })
+            .unwrap_or_else(|| self.url.clone())
     }
 }
 
@@ -475,7 +456,7 @@ impl Registry {
         for model in wire.models {
             let domain = Domain::parse(&model.domain).ok_or_else(|| {
                 AssetAiError::Registry(format!(
-                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion|music|paint|edit|upscale|control|inpaint|enhance|splat|vision|ocr|beats|notes|sections|garment)",
+                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion)",
                     model.id, model.domain
                 ))
             })?;
@@ -896,19 +877,6 @@ mod tests {
             registry.find("pbr-testpattern").is_none(),
             "deterministic paint-test is crate-internal and must not advertise"
         );
-        let beats = registry.find("beat-this").unwrap();
-        assert_eq!(beats.domain, Domain::Beats);
-        assert_eq!(beats.backend, "beats");
-        assert_eq!(beats.vram_gb, Some(0.5));
-        assert_eq!(beats.files.len(), 2);
-        let final_weights = beats.file_by_role("weights").unwrap();
-        assert_eq!(final_weights.size, Some(81_058_141));
-        assert_eq!(
-            final_weights.sha256.as_deref(),
-            Some("8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331")
-        );
-        assert!(final_weights.path.starts_with("https://cloud.cp.jku.at/"));
-        assert!(beats.file_by_role("weights-small").unwrap().optional);
         let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
         assert_eq!(hunyuan.domain, Domain::Paint);
         assert_eq!(hunyuan.backend, "paint");
@@ -1841,18 +1809,5 @@ mod tests {
         let json = r#"{"models":[{"id":"x","domain":"image","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"license":{"name":"X","url":"https://example.com/l","summary":"s","restriction":"copyleft"},"files":[]}]}"#;
         let message = Registry::parse(json).unwrap_err().to_string();
         assert!(message.contains("unknown license restriction"), "{message}");
-    }
-
-    #[test]
-    fn local_app_domains_round_trip() {
-        for (text, domain) in [
-            ("beats", Domain::Beats),
-            ("notes", Domain::Notes),
-            ("sections", Domain::Sections),
-            ("garment", Domain::Garment),
-        ] {
-            assert_eq!(Domain::parse(text), Some(domain));
-            assert_eq!(domain.as_str(), text);
-        }
     }
 }
