@@ -9,9 +9,11 @@ use crate::{
         runtime::{nil, Class, ObjcId, Sel, BOOL, YES},
         sel, sel_impl,
     },
-    os::apple::{apple_sys::*, apple_util::cfstring_ref_to_string},
+    os::apple::apple_sys::*,
 };
 
+#[cfg(target_os = "macos")]
+use crate::os::apple::apple_util::cfstring_ref_to_string;
 #[cfg(target_os = "macos")]
 use std::{
     ptr,
@@ -721,20 +723,6 @@ unsafe extern "C" fn raw_hid_report_callback(
     }
     let bytes = std::slice::from_raw_parts(report, report_length as usize);
     AppleRawHidInput::handle_report(context, sender, report_id, bytes);
-}
-
-#[cfg(not(target_os = "macos"))]
-struct AppleRawHidInput;
-
-#[cfg(not(target_os = "macos"))]
-impl AppleRawHidInput {
-    fn new() -> Self {
-        Self
-    }
-
-    fn snapshot(&self) -> Vec<(GameInputInfo, GameInputState)> {
-        Vec::new()
-    }
 }
 
 impl CxGameInputApi for Cx {

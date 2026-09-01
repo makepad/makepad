@@ -409,6 +409,7 @@ mod imp {
     /// Only macOS downshifts, so this is unused on the other backends — they
     /// poll the control channel at a fixed rate anyway.
     #[allow(dead_code)]
+    #[allow(dead_code)] // only the macos paint clock asks
     pub(crate) fn needs_ticks() -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
@@ -2130,6 +2131,7 @@ mod imp {
     pub fn is_active() -> bool {
         false
     }
+    #[allow(dead_code)] // only the macos paint clock asks
     pub(crate) fn needs_ticks() -> bool {
         false
     }
