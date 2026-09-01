@@ -15375,7 +15375,8 @@ p2 {}
         }
         let native = cx.windows[main_id].native_dpi_factor();
         let physical_width = ev.new_geom.inner_size.x * ev.new_geom.dpi_factor;
-        let wanted = console_scale::console_dpi(physical_width, native);
+        let physical_height = ev.new_geom.inner_size.y * ev.new_geom.dpi_factor;
+        let wanted = console_scale::console_dpi(physical_width, physical_height, native);
         if (cx.windows[main_id].effective_dpi_factor() - wanted).abs() < 1e-9 {
             return;
         }
@@ -15421,7 +15422,7 @@ p2 {}
         // take the rest. A weight cannot say this: the two are not sharing,
         // they are being served in an order, and the mixer is served first.
         let width = if beside {
-            let dpi = console_scale::console_dpi(physical.x, native);
+            let dpi = console_scale::console_dpi(physical.x, physical.y, native);
             let gap = 6.0;
             Size::Fixed(console_scale::lists_width_points(physical.x / dpi - gap))
         } else {
@@ -15510,7 +15511,7 @@ p2 {}
         // The width the LISTS get, which is a third of the window once they
         // stand beside the decks.
         let span = console_scale::lists_span(physical.x, physical.y, native);
-        let tabbed = console_scale::console_lists_tabbed(span, native);
+        let tabbed = console_scale::console_lists_tabbed(span, physical.y, native);
         if tabbed == self.lists_tabbed {
             return;
         }
@@ -15709,7 +15710,7 @@ p2 {}
         // soon as they would squeeze the middle under its minimum, whether it
         // was a narrow window that took the room or the lists moving
         // alongside them.
-        let dpi = console_scale::console_dpi(physical.x, native);
+        let dpi = console_scale::console_dpi(physical.x, physical.y, native);
         let stage = console_scale::console_tabs_for(physical_width / dpi);
         if stage == self.tab_stage {
             return;
