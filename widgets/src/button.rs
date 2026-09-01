@@ -18,13 +18,18 @@ script_mod! {
     /** The flat button: the standard face with no outset gradient; the
      * other button variants inherit from it. */
     mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
+        /** the label text */
         text: "Button"
         width: Fit
         height: Fit
+        /** gap between icon and label 0..24 step 1 */
         spacing: theme.space_2
         align: Center
+        /** inner face padding around icon and label */
         padding: theme.mspace_1{left: theme.space_2, right: theme.space_2}
+        /** outer gap to neighbouring widgets */
         margin: theme.mspace_v_1
+        /** the label's box inside the face */
         label_walk: Walk{width: Fit, height: Fit}
 
         /** The button label ink, state-mixed with the face. */
@@ -40,17 +45,26 @@ script_mod! {
 
             // A button face is a box with one line of text in it: center the
             // ink, not the line box, or the label reads as sitting high.
+            /** center the ink, not the line box */
             ink_centered: true
 
+            /** label ink at rest */
             color: theme.color_label_inner
+            /** label ink under the pointer */
             color_hover: theme.color_label_inner_hover
+            /** label ink while held */
             color_down: uniform(theme.color_label_inner_down)
+            /** label ink when key-focused */
             color_focus: uniform(theme.color_label_inner_focus)
+            /** label ink when disabled */
             color_disabled: uniform(theme.color_label_inner_disabled)
 
+            /** the label typeface */
             text_style: theme.font_regular{
+                /** label type size in points 6..32 step 0.5 */
                 font_size: theme.font_size_p
             }
+            /** ink mix order: focus, hover, down, disabled */
             get_color: fn() {
                 return self.color
                     .mix(self.color_focus, self.focus)
@@ -60,7 +74,8 @@ script_mod! {
             }
         }
 
-        icon_walk: Walk{width: 22.0, height: Fit}
+        /** the icon's box inside the face; draw_icon paints the SVG into it */
+        icon_walk: Walk{/** icon width in pixels 8..64 step 1 */ width: 22.0, height: Fit}
 
         /** The button face material: an SDF box with a bevel stroke and an
          * optional two-stop gradient fill, state-mixed by the animator's
@@ -87,32 +102,51 @@ script_mod! {
             /** fill gradient axis: 0 vertical, 1 horizontal 0..1 step 1 */
             gradient_fill_horizontal: uniform(0.0)
 
+            /** face fill at rest */
             color: uniform(theme.color_outset)
+            /** face fill under the pointer */
             color_hover: uniform(theme.color_outset_hover)
+            /** face fill while held */
             color_down: uniform(theme.color_outset_down)
+            /** face fill when key-focused */
             color_focus: uniform(theme.color_outset_focus)
+            /** face fill when disabled */
             color_disabled: uniform(theme.color_outset_disabled)
 
             /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            /** fill end stop under the pointer */
             color_2_hover: uniform(theme.color_outset_2_hover)
+            /** fill end stop while held */
             color_2_down: uniform(theme.color_outset_2_down)
+            /** fill end stop when key-focused */
             color_2_focus: uniform(theme.color_outset_2_focus)
+            /** fill end stop when disabled */
             color_2_disabled: uniform(theme.color_outset_2_disabled)
 
+            /** bevel stroke at rest */
             border_color: uniform(theme.color_bevel)
+            /** bevel stroke under the pointer */
             border_color_hover: uniform(theme.color_bevel_hover)
+            /** bevel stroke while held */
             border_color_down: uniform(theme.color_bevel_down)
+            /** bevel stroke when key-focused */
             border_color_focus: uniform(theme.color_bevel_focus)
+            /** bevel stroke when disabled */
             border_color_disabled: uniform(theme.color_bevel_disabled)
 
             /** bevel gradient end stop; negative alpha means flat stroke */
             border_color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            /** bevel end stop under the pointer */
             border_color_2_hover: uniform(theme.color_bevel_outset_2_hover)
+            /** bevel end stop while held */
             border_color_2_down: uniform(theme.color_bevel_outset_2_down)
+            /** bevel end stop when key-focused */
             border_color_2_focus: uniform(theme.color_bevel_outset_2_focus)
+            /** bevel end stop when disabled */
             border_color_2_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
+            /** the face: rounded SDF box, gradient fill, bevel stroke */
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -146,7 +180,7 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_fill = vec2(
                         self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                         self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
@@ -166,7 +200,7 @@ script_mod! {
                 let mut color_stroke_disabled = self.border_color_disabled
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_border = vec2(
                         self.pos.x + dither
                         self.pos.y + dither
@@ -197,9 +231,12 @@ script_mod! {
             }
         }
 
+        /** the state machine driving the face and label mixes */
         animator: Animator{
+            /** enabled/disabled track: drives the disabled mix on face and label */
             disabled: {
                 default: @off
+                /** enabled: face and label at full strength, cut instantly */
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
@@ -207,6 +244,7 @@ script_mod! {
                         draw_text: {disabled: 0.0}
                     }
                 }
+                /** disabled: 0.2s fade of face and label to the disabled colors */
                 on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -215,13 +253,16 @@ script_mod! {
                     }
                 }
             }
+            /** free-running clock track for animated faces */
             time: {
                 default: @off
+                /** clock stopped: nothing applied */
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                     }
                 }
+                /** clock running: ramps draw_bg.anim_time 0..1 once per second, forever */
                 on: AnimatorState{
                     from: {all: Loop {duration: 1.0, end: 1000000000.0}}
                     apply: {
@@ -229,8 +270,10 @@ script_mod! {
                     }
                 }
             }
+            /** pointer track: drives both the hover and down mixes */
             hover: {
                 default: @off
+                /** pointer away: 0.1s fade of hover and down back to 0 */
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
@@ -239,6 +282,7 @@ script_mod! {
                     }
                 }
 
+                /** pointer over: hover snaps to 1, down releases in 0.01s */
                 on: AnimatorState{
                     from: {
                         all: Forward {duration: 0.1}
@@ -250,6 +294,7 @@ script_mod! {
                     }
                 }
 
+                /** held down: down snaps to 1 with hover held on under it */
                 down: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -258,8 +303,10 @@ script_mod! {
                     }
                 }
             }
+            /** keyboard-focus track: drives the focus mix on face and label */
             focus: {
                 default: @off
+                /** focus lost: 0.2s fade of the focus mix back to 0 */
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
@@ -267,6 +314,7 @@ script_mod! {
                         draw_text: {focus: 0.0}
                     }
                 }
+                /** focused: focus mix on immediately, arrow cursor */
                 on: AnimatorState{
                     cursor: MouseCursor.Arrow
                     from: {all: Forward {duration: 0.0}}
@@ -285,6 +333,7 @@ script_mod! {
             color: theme.color_u_hidden
             color_hover: theme.color_u_hidden
             color_down: theme.color_u_hidden
+            /** the one state that paints a face: disabled */
             color_disabled: theme.color_outset_disabled
 
             border_color: theme.color_u_hidden
@@ -305,6 +354,7 @@ script_mod! {
             border_color_focus: theme.color_bevel_outset_1_focus
             border_color_disabled: theme.color_bevel_outset_1_disabled
 
+            /** second bevel stop: turns the flat stroke into a gradient */
             border_color_2: theme.color_bevel_outset_2
             border_color_2_hover: theme.color_bevel_outset_2_hover
             border_color_2_down: theme.color_bevel_outset_2_down
@@ -313,45 +363,69 @@ script_mod! {
         }
     }
 
+    /** The gradient button: the standard face filled with a two-stop
+     * vertical gradient instead of a flat color. */
     mod.widgets.ButtonGradientX = mod.widgets.Button{
         draw_bg +: {
+            /** gradient start stop at rest */
             color: theme.color_outset_1
+            /** gradient start stop under the pointer */
             color_hover: theme.color_outset_1_hover
+            /** gradient start stop while held */
             color_down: theme.color_outset_1_down
+            /** gradient start stop when key-focused */
             color_focus: theme.color_outset_1_focus
+            /** gradient start stop when disabled */
             color_disabled: theme.color_outset_1_disabled
 
+            /** second fill stop: a positive alpha here switches the fill to a gradient */
             color_2: theme.color_outset_2
         }
     }
 
+    /** The gradient button turned sideways: the same fill run left to right. */
     mod.widgets.ButtonGradientY = mod.widgets.ButtonGradientX{
-        draw_bg.gradient_fill_horizontal: 1.0
+        draw_bg.gradient_fill_horizontal: /** fill gradient axis: 1 horizontal 0..1 step 1 */ 1.0
     }
 
+    /** The standard button carrying only an icon: no label, no gap. */
     mod.widgets.ButtonIcon = mod.widgets.Button{
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
         spacing: 0.
+        /** icon only: the label is empty */
         text: ""
     }
 
+    /** The vertical-gradient button carrying only an icon. */
     mod.widgets.ButtonGradientXIcon = mod.widgets.ButtonGradientX{
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
         spacing: 0.
+        /** icon only: the label is empty */
         text: ""
     }
 
+    /** The horizontal-gradient button carrying only an icon. */
     mod.widgets.ButtonGradientYIcon = mod.widgets.ButtonGradientY{
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
         spacing: 0.
+        /** icon only: the label is empty */
         text: ""
     }
 
+    /** The flat button carrying only an icon. */
     mod.widgets.ButtonFlatIcon = mod.widgets.ButtonFlat{
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
         spacing: 0.
+        /** icon only: the label is empty */
         text: ""
     }
 
+    /** The borderless button carrying only an icon: a bare clickable mark. */
     mod.widgets.ButtonFlatterIcon = mod.widgets.ButtonFlatter{
         draw_bg.color_focus: theme.color_u_hidden
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
         spacing: 0.
+        /** icon only: the label is empty */
         text: ""
     }
 }

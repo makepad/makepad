@@ -2313,6 +2313,7 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Metal;
             output.use_vulkan = false;
+            output.const_table = vm.host.cx().shader_const_table_mode();
 
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);

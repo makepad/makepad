@@ -477,6 +477,14 @@ pub struct FileTree {
     dragging_node_id: Option<LiveId>,
     #[rust]
     selected_node_id: Option<LiveId>,
+    /// A programmatic selection wants this node scrolled into view on its
+    /// next draw (the tweaker's pin → tree sync).
+    #[rust]
+    scroll_to_pending: Option<LiveId>,
+    #[rust]
+    reveal_node: Option<LiveId>,
+    #[rust]
+    reveal_y: Option<f64>,
     #[rust]
     open_nodes: HashSet<LiveId>,
 
@@ -791,6 +799,10 @@ impl FileTree {
         name: &str,
         status_kind: GitStatusDotKind,
     ) -> Result<(), ()> {
+        if self.reveal_node == Some(node_id) {
+            self.reveal_node = None;
+            self.reveal_y = Some(cx.turtle().pos().y);
+        }
         let scale = self.stack.last().cloned().unwrap_or(1.0);
 
         if scale > 0.2 {
@@ -849,6 +861,10 @@ impl FileTree {
         name: &str,
         status_kind: GitStatusDotKind,
     ) {
+        if self.reveal_node == Some(node_id) {
+            self.reveal_node = None;
+            self.reveal_y = Some(cx.turtle().pos().y);
+        }
         let scale = self.stack.last().cloned().unwrap_or(1.0);
 
         if scale > 0.2 {
@@ -868,6 +884,13 @@ impl FileTree {
                 });
             }
             tree_node.draw_all(cx, &mut Scope::empty());
+            if self.scroll_to_pending == Some(node_id) {
+                self.scroll_to_pending = None;
+                let rect = tree_node.area().rect(cx);
+                if rect.size.y > 0.0 {
+                    self.scroll_bars.scroll_into_view(cx, rect);
+                }
+            }
         }
     }
 
@@ -886,6 +909,7 @@ impl FileTree {
             self.file_node.clone()
         };
         let tree_uid = self.uid;
+        let selected = self.selected_node_id == Some(node_id);
         self.tree_nodes
             .get_or_insert(cx, node_id, |cx| {
                 let tree_node =
@@ -895,10 +919,90 @@ impl FileTree {
                         node.set_folder_is_open(cx, true, Animate::No);
                     }
                 }
+                if selected {
+                    // A programmatic selection can land before the node has
+                    // ever drawn: the widget is created selected (and
+                    // focussed — the selected bg is gated by the focus mix).
+                    if let Some(mut node) = tree_node.borrow_mut::<FileTreeNode>() {
+                        node.set_is_selected(cx, true, Animate::No);
+                        node.set_is_focussed(cx, true, Animate::No);
+                    }
+                }
                 cx.widget_tree_insert_child(tree_uid, node_id, tree_node.clone());
                 tree_node
             })
             .clone()
+    }
+
+    /// The current scroll offset (the tweaker's retrying scroll-to needs it).
+    pub fn scroll_pos(&self) -> Vec2d {
+        self.scroll_bars.get_scroll_pos()
+    }
+
+    /// Ask the next draw to report where `node_id`'s row lands on screen
+    /// (culled rows report too — their space is walked). The caller reads
+    /// `take_reveal_y` after driving the draw and corrects the scroll by
+    /// the measured error; a couple of frames converge exactly, whatever
+    /// the content height or clamping did.
+    pub fn begin_reveal(&mut self, node_id: LiveId) {
+        self.reveal_node = Some(node_id);
+        self.reveal_y = None;
+    }
+
+    pub fn take_reveal_y(&mut self) -> Option<f64> {
+        self.reveal_y.take()
+    }
+
+    pub fn scroll_by(&mut self, cx: &mut Cx, dy: f64) {
+        let now = self.scroll_bars.get_scroll_pos();
+        self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(now.x, (now.y + dy).max(0.0)));
+    }
+
+    /// Whether a folder node is currently open (the fold state lives here;
+    /// the tweaker's scroll-to-selection math needs it).
+    pub fn is_folder_open(&self, node_id: LiveId) -> bool {
+        self.open_nodes.contains(&node_id)
+    }
+
+    /// One row's height in the tree's layout.
+    pub fn row_height(&self) -> f64 {
+        self.node_height
+    }
+
+    /// Scroll the viewport so content at `y` (content coords) is on
+    /// screen — the tree virtualises rows, so a draw-driven scroll never
+    /// fires for a node that has not drawn.
+    pub fn scroll_to_y(&mut self, cx: &mut Cx, y: f64) {
+        // no_clip: on the tree's FIRST draw the content height is not yet
+        // measured and a clipped set would clamp the target back to zero.
+        self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(0.0, y.max(0.0)));
+    }
+
+    /// Select a node programmatically and reveal it (the click path stays
+    /// the authority for user selection).
+    pub fn select_node(&mut self, cx: &mut Cx, node_id: LiveId) {
+        if self.selected_node_id == Some(node_id) {
+            return;
+        }
+        if let Some(last) = self.selected_node_id {
+            if let Some(node) = self.tree_nodes.get_mut(&last) {
+                if let Some(mut node) = node.borrow_mut::<FileTreeNode>() {
+                    node.set_is_selected(cx, false, Animate::No);
+                    node.set_is_focussed(cx, false, Animate::No);
+                }
+            }
+        }
+        self.selected_node_id = Some(node_id);
+        if let Some(node) = self.tree_nodes.get_mut(&node_id) {
+            if let Some(mut node) = node.borrow_mut::<FileTreeNode>() {
+                node.set_is_selected(cx, true, Animate::No);
+                // Present as focussed: the selected bg is gated by the
+                // focus mix and reads near-invisible without it.
+                node.set_is_focussed(cx, true, Animate::No);
+            }
+        }
+        self.scroll_to_pending = Some(node_id);
+        self.scroll_bars.redraw(cx);
     }
 
     pub fn file(&mut self, cx: &mut Cx2d, node_id: LiveId, name: &str) {

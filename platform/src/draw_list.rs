@@ -319,6 +319,19 @@ impl CxDrawListPool {
         DrawList(self.0.alloc())
     }
 
+    /// Every live draw list id (the tweaker's colour pulse walks all
+    /// draw calls in place).
+    pub fn id_iter(&self) -> impl Iterator<Item = DrawListId> + '_ {
+        self.0.pool.iter().enumerate().filter_map(|(i, d)| {
+            let id = DrawListId(i, d.generation);
+            if self.is_id_freed(id) {
+                None
+            } else {
+                Some(id)
+            }
+        })
+    }
+
     pub fn checked_index(&self, index: DrawListId) -> Option<&CxDrawList> {
         let d = &self.0.pool[index.0];
         if d.generation != index.1 {
