@@ -138,7 +138,14 @@ script_mod! {
             lensing_strength: uniform(12.0)
             lensing_width: uniform(22.0)
             press_flatten: uniform(0.0)
-            ripple_start: uniform(-1000.0)
+            // PERF LAW: the click ripple's clock is fed by the widget, NOT by
+            // `draw_pass.time`. Any shader that reads `draw_pass.time` is flagged
+            // `uses_time` (platform/src/draw_shader.rs) and arms `demo_time_repaint`
+            // every frame it draws, which pins the whole window at display rate for
+            // as long as the glass is on screen. `ripple_age` is elapsed seconds since
+            // the press, pushed from Rust on a NextFrame chain that only runs while a
+            // ripple is live (~1.1s). Default 1000.0 = no ripple.
+            ripple_age: uniform(1000.0)
             ripple_strength: uniform(0.0)
             corner_radius: instance(14.0)
             tint_color: instance(#b8b8b8)
@@ -351,11 +358,11 @@ script_mod! {
                 let edge_uv = abs(self.pos * 2.0 - 1.0)
                 let edge_gradient = clamp((edge_uv.x + edge_uv.y) * 0.5, 0.0, 1.0)
                 let highlight = self.specular_strength * (0.55 * edge_gradient + 0.45 * (1.0 - self.pos.y))
-                let noise = (
-                    Math.random_2d(
-                        screen_pos + vec2(self.draw_pass.time * 31.0, self.draw_pass.time * 17.0)
-                    ) - 0.5
-                ) * self.noise_strength
+                // Static banding dither, hashed from screen position only. It must NOT
+                // depend on `draw_pass.time`: that flags the shader `uses_time` and pins
+                // the window at display rate forever (see the ripple_age note above).
+                // The grain is a de-banding device, not an animation - frozen looks the same.
+                let noise = (Math.random_2d(screen_pos) - 0.5) * self.noise_strength
                 let fill = vec4(material + highlight + noise, self.surface_alpha)
 
                 sdf.fill_keep(fill)
@@ -405,7 +412,7 @@ script_mod! {
 
                 let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
                 let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
-                let ripple_age = max(self.draw_pass.time - self.ripple_start, 0.0)
+                let ripple_age = max(self.ripple_age, 0.0)
                 let ripple_life = clamp(1.0 - ripple_age / 1.05, 0.0, 1.0)
                 let lens_pos = self.pos * 2.0 - 1.0
                 let ripple_dist = length(lens_pos)
@@ -449,11 +456,8 @@ script_mod! {
                 let ripple_highlight = ripple_wave * 0.11
                 let sparkle = edge * self.diffraction_strength * 0.004 * (1.0 - flatten * 0.45)
                 let highlight = self.specular_strength * (0.45 * edge_gradient + 0.55 * edge + 0.30 * (1.0 - self.pos.y)) * (1.0 - flatten * 0.28) + ripple_highlight
-                let noise = (
-                    Math.random_2d(
-                        screen_pos + vec2(self.draw_pass.time * 31.0, self.draw_pass.time * 17.0)
-                    ) - 0.5
-                ) * self.noise_strength
+                // Static banding dither - see the note in GaussRoundedView's pixel().
+                let noise = (Math.random_2d(screen_pos) - 0.5) * self.noise_strength
                 let fill_alpha = mix(self.surface_alpha, 1.0, self.has_gauss)
                 let fill = vec4(material + highlight + sparkle + noise, fill_alpha)
 
@@ -615,11 +619,16 @@ impl GaussRoundedView {
         self.set_shader_uniform(cx, live_id!(lensing_effect), lensing_effect.clamp(0.0, 1.0));
     }
 
+    /// Drive the press/ripple response. `ripple_age` is elapsed seconds since the
+    /// press started (1000.0 = no ripple). The caller owns the clock and must only
+    /// keep ticking (NextFrame) while the ripple is live - the shader deliberately
+    /// does not read `draw_pass.time`, because that would pin the window at display
+    /// rate for as long as the glass is visible.
     pub fn set_press_response(
         &mut self,
         cx: &mut Cx,
         flatten: f32,
-        ripple_start: f32,
+        ripple_age: f32,
         ripple_strength: f32,
     ) {
         self.view.draw_bg.draw_vars.set_uniform(
@@ -630,7 +639,7 @@ impl GaussRoundedView {
         self.view
             .draw_bg
             .draw_vars
-            .set_uniform(cx, live_id!(ripple_start), &[ripple_start]);
+            .set_uniform(cx, live_id!(ripple_age), &[ripple_age]);
         self.view.draw_bg.draw_vars.set_uniform(
             cx,
             live_id!(ripple_strength),
@@ -641,11 +650,10 @@ impl GaussRoundedView {
             live_id!(press_flatten),
             &[flatten.clamp(-1.0, 1.0)],
         );
-        self.view.draw_bg.draw_vars.set_uniform_on_area(
-            cx,
-            live_id!(ripple_start),
-            &[ripple_start],
-        );
+        self.view
+            .draw_bg
+            .draw_vars
+            .set_uniform_on_area(cx, live_id!(ripple_age), &[ripple_age]);
         self.view.draw_bg.draw_vars.set_uniform_on_area(
             cx,
             live_id!(ripple_strength),
@@ -687,11 +695,11 @@ impl GaussRoundedViewRef {
         &self,
         cx: &mut Cx,
         flatten: f32,
-        ripple_start: f32,
+        ripple_age: f32,
         ripple_strength: f32,
     ) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_press_response(cx, flatten, ripple_start, ripple_strength);
+            inner.set_press_response(cx, flatten, ripple_age, ripple_strength);
         }
     }
 }

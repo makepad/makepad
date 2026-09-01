@@ -142,6 +142,20 @@ impl Cx {
                     }
                 }
             }
+            // Liveness runs the OTHER way: a pass that declared itself
+            // live-with-parent re-encodes whenever its consumer repaints.
+            // The gauss chain rides this — realtime glass — while texture
+            // caches, which exist to NOT re-render, never opt in.
+            for draw_pass_id in self.passes.id_iter() {
+                if self.passes[draw_pass_id].live_with_parent && !self.passes[draw_pass_id].paint_dirty {
+                    if let CxDrawPassParent::DrawPass(parent_pass_id) = self.passes[draw_pass_id].parent {
+                        if self.passes[parent_pass_id].paint_dirty {
+                            self.passes[draw_pass_id].paint_dirty = true;
+                            altered = true;
+                        }
+                    }
+                }
+            }
             if !altered {
                 break;
             }
