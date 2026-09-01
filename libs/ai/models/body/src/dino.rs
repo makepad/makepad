@@ -7,7 +7,8 @@
 use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
     gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
-    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_mul, gpu_rope_half,
+    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_linear_nt_cached_f8_mm,
+    gpu_mul, gpu_rope_half,
     gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
 };
 use crate::weights::BodyWeights;
@@ -16,7 +17,7 @@ use crate::{
     DINO_HEADS, DINO_HEAD_DIM, DINO_NORM_EPS, DINO_PREFIX_TOKENS, DINO_ROPE_BASE, PATCH,
     ROPE_HALF,
 };
-use makepad_ai_common::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
 use makepad_ai_loader::MlxDType;
 
 const PATCH_DIM: usize = 3 * PATCH * PATCH;
@@ -27,6 +28,25 @@ struct Bf16Linear {
     key: String,
     out: usize,
     bias: Vec<f32>,
+    /// The same weight as FP8 E4M3 with one per-tensor scale, when the
+    /// FP8 mode is on; `None` after a backend refused it.
+    f8: std::cell::RefCell<Option<(Vec<u8>, f32)>>,
+}
+
+/// Quantise a bf16-packed weight to E4M3 with a per-tensor absmax scale
+/// (`w = scale * q`, q saturating at 448).
+fn quantize_f8(bf16_bytes: &[u8]) -> (Vec<u8>, f32) {
+    let values: Vec<f32> = bf16_bytes
+        .chunks_exact(2)
+        .map(|c| f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16))
+        .collect();
+    let absmax = values.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let scale = if absmax > 0.0 { absmax / 448.0 } else { 1.0 };
+    let bytes = values
+        .iter()
+        .map(|v| makepad_ai_flux::flux_lora::f32_to_f8_e4m3(v / scale))
+        .collect();
+    (bytes, scale)
 }
 
 impl Bf16Linear {
@@ -48,6 +68,7 @@ impl Bf16Linear {
             key: name.to_string(),
             out,
             bias,
+            f8: std::cell::RefCell::new(None),
         })
     }
 
@@ -72,6 +93,7 @@ impl Bf16Linear {
             key: format!("{name}.layerscale_folded"),
             out,
             bias,
+            f8: std::cell::RefCell::new(None),
         })
     }
 
@@ -86,6 +108,7 @@ impl Bf16Linear {
             key: name.to_string(),
             out: DINO_DIM,
             bias: weights.f32_shaped(&format!("{name}.bias"), &[DINO_DIM])?,
+            f8: std::cell::RefCell::new(None),
         })
     }
 
@@ -95,6 +118,39 @@ impl Bf16Linear {
     /// accumulation; the fast paths round the output to bf16, which is the
     /// reference's own precision.
     fn forward(&self, input: &GpuTensor) -> Result<GpuTensor> {
+        // FP8 first when quantised: the bias rides a broadcast add after
+        // the bias-free f8 mm. A backend without FP8 turns the mode off for
+        // this layer on its first refusal.
+        let f8_result = {
+            let f8 = self.f8.borrow();
+            f8.as_ref().map(|(bytes, scale)| {
+                gpu_linear_nt_cached_f8_mm(
+                    input,
+                    CACHE_NAMESPACE,
+                    &[GpuLinearPart {
+                        bt_ggml_type: GGML_TYPE_F8_E4M3,
+                        n: self.out,
+                        cache_key: &format!("{}.f8", self.key),
+                        bytes,
+                    }],
+                    *scale,
+                    None,
+                )
+            })
+        };
+        match f8_result {
+            Some(Ok(out)) => {
+                if self.bias.is_empty() {
+                    return Ok(out);
+                }
+                let bias = gpu_upload(&self.bias, 1, self.out).map_err(DiffusionError::model)?;
+                return gpu_add_rows_broadcast_cols(&out, &bias);
+            }
+            Some(Err(_)) => {
+                *self.f8.borrow_mut() = None;
+            }
+            None => {}
+        }
         let part = GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n: self.out,
@@ -144,6 +200,21 @@ pub struct BodyDino {
     layers: Vec<DinoLayer>,
     final_norm_w: Vec<f32>,
     final_norm_b: Vec<f32>,
+}
+
+/// Bias add broadcast over rows: `out[r] = x[r] + bias`. The stack's
+/// `gpu_add` wants equal shapes, so the bias is tiled to the row count
+/// once per call (a 1280-wide vector; cheap next to the GEMM it follows).
+fn gpu_add_rows_broadcast_cols(x: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor> {
+    let cols = x.cols();
+    let rows = x.rows();
+    let bias_host = gpu_download(bias).map_err(DiffusionError::model)?;
+    let mut tiled = Vec::with_capacity(rows * cols);
+    for _ in 0..rows {
+        tiled.extend_from_slice(&bias_host[..cols]);
+    }
+    let tiled = gpu_upload(&tiled, rows, cols).map_err(DiffusionError::model)?;
+    gpu_add(x, &tiled).map_err(DiffusionError::model)
 }
 
 fn bf16_bytes_shaped(
@@ -337,6 +408,18 @@ impl BodyDino {
     /// `pixels` is a normalised CHW crop of any square side that is a
     /// multiple of the patch (512 is the trained size); the output has
     /// `(side / 16)^2` rows.
+    /// Quantise every backbone weight to FP8 E4M3 (per-tensor scale) for the
+    /// tensor-core FP8 GEMM; `false` restores bf16. Backends without FP8 fall
+    /// back layer by layer.
+    pub fn set_fp8(&self, on: bool) {
+        let all = std::iter::once(&self.patch).chain(self.layers.iter().flat_map(|l| {
+            [&l.q, &l.k, &l.v, &l.out, &l.gate, &l.up, &l.down]
+        }));
+        for linear in all {
+            *linear.f8.borrow_mut() = if on { Some(quantize_f8(&linear.bytes)) } else { None };
+        }
+    }
+
     pub fn forward_normalized(&self, pixels: &[f32]) -> Result<GpuTensor> {
         let size = crop_side(pixels.len())?;
         let side = size / PATCH;
