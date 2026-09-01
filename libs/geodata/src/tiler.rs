@@ -12,7 +12,6 @@ use crate::wkb::Geometry;
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::MbtilesWriter;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
 use std::path::Path;
 
 /// Clip buffer around each tile, in MVT units (64 = 1.5% of the extent).

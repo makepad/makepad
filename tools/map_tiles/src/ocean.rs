@@ -12,8 +12,8 @@
 //! dilation keeps exact full-square tiles next to every coast so the
 //! simplified fallback can never wobble a phantom shoreline into view.
 
-use crate::native::geom::{MVT_EXTENT, TILE_BUFFER};
-use crate::native::mvt::{encode_tile, GeometryType, Layer, OsmType, TileFeature, TilePoint};
+use makepad_map_build::native::geom::{MVT_EXTENT, TILE_BUFFER};
+use makepad_map_build::native::mvt::{encode_tile, GeometryType, Layer, OsmType, TileFeature, TilePoint};
 use makepad_mbtile_reader::{
     compress_tile, compression_metadata_rows, MbtilesWriter, TileCompression,
 };

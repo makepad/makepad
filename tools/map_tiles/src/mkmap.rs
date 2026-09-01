@@ -21,8 +21,19 @@
 //! ambiguous MB/MiB semantics, so the cap sits safely under both readings.
 //! The writer asserts the cap per shard and the built-in verification pass
 //! stats every produced file again and fails loudly on violation.
+//!
+//! The weave is reversible: `extract` walks the leaf directories back out and
+//! rebuilds an MBTiles archive (optionally clipped to a bbox — one bake cell),
+//! copying blobs verbatim and carrying the metadata table, so the sources a
+//! weave consumed need not be kept. `write_weave_manifest` records what each
+//! source held so a single one can be picked out again, and `compare` proves
+//! an extraction really carries a source, tile for tile.
 
-use makepad_mbtile_reader::{MbtilesReader, TileCompression};
+use makepad_map_build::versatiles::{GeoBounds, TileBounds};
+use makepad_mbtile_reader::{
+    compression_metadata_rows, tile_rowid_xyz, MbtilesReader, MbtilesWriter, MkmapReader,
+    MkmapTileRef, TileCodec, TileCompression, COMPRESSION_DICT_METADATA_KEY,
+};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -720,7 +731,7 @@ fn free_disk_bytes(path: &Path) -> Option<u64> {
 // Verification reader
 // ---------------------------------------------------------------------------
 
-struct MkmapReader {
+struct VerifyReader {
     dir: PathBuf,
     root: Vec<RootRecord>,
     shard_cap: u64,
@@ -731,7 +742,7 @@ struct MkmapReader {
     shard_files: HashMap<u32, File>,
 }
 
-impl MkmapReader {
+impl VerifyReader {
     fn open(dir: &Path) -> Result<Self, String> {
         let index_path = dir.join("root.mkidx");
         let bytes = fs::read(&index_path)
@@ -852,7 +863,7 @@ fn decode_brotli_section(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// Verify an mkmap directory against its source archive: every shard under
 /// the cap, the index resolving every tile, and sampled tiles byte-identical.
 pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(), String> {
-    let mut container = MkmapReader::open(mkmap)?;
+    let mut container = VerifyReader::open(mkmap)?;
     // Shard cap re-check straight from the filesystem.
     for shard in 0..container.shard_count {
         let path = shard_path(mkmap, shard);
@@ -952,6 +963,572 @@ pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Extraction — the inverse of the weave
+// ---------------------------------------------------------------------------
+
+/// Beyond this many tiles in a zoom's bbox rectangle it is cheaper to walk
+/// the zoom's whole id band than to enumerate the rectangle for its extent.
+const RECT_SCAN_LIMIT: u64 = 4_000_000;
+
+pub struct ExtractOptions {
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub bounds: Option<GeoBounds>,
+    pub min_zoom: Option<u8>,
+    pub max_zoom: Option<u8>,
+    /// Rings of extra tiles around the bbox rectangle, per zoom. A bake
+    /// buffers its geometry by a fraction of a tile, so a cell holds tiles
+    /// just outside its own declared bounds; reconstructing one wants
+    /// `--pad-tiles 1` to catch them.
+    pub pad_tiles: u32,
+}
+
+pub fn parse_extract_options(args: &[String]) -> Result<ExtractOptions, String> {
+    if args.len() < 3 {
+        return Err("mkmap-extract needs <dir.mkmap> <output.mbtiles>".to_string());
+    }
+    let mut options = ExtractOptions {
+        source: PathBuf::from(&args[1]),
+        output: PathBuf::from(&args[2]),
+        bounds: None,
+        min_zoom: None,
+        max_zoom: None,
+        pad_tiles: 0,
+    };
+    let mut index = 3;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pad-tiles" => {
+                let value = args.get(index + 1).ok_or("--pad-tiles requires a number")?;
+                options.pad_tiles = value
+                    .parse::<u32>()
+                    .map_err(|err| format!("invalid --pad-tiles '{value}': {err}"))?;
+                index += 2;
+            }
+            "--bbox" => {
+                let value = args.get(index + 1).ok_or("--bbox requires w,s,e,n")?;
+                options.bounds = Some(GeoBounds::parse(value)?);
+                index += 2;
+            }
+            "--min-zoom" => {
+                let value = args.get(index + 1).ok_or("--min-zoom requires a number")?;
+                options.min_zoom = Some(parse_zoom(value)?);
+                index += 2;
+            }
+            "--max-zoom" => {
+                let value = args.get(index + 1).ok_or("--max-zoom requires a number")?;
+                options.max_zoom = Some(parse_zoom(value)?);
+                index += 2;
+            }
+            value => return Err(format!("unknown mkmap-extract argument '{value}'")),
+        }
+    }
+    Ok(options)
+}
+
+fn parse_zoom(value: &str) -> Result<u8, String> {
+    let zoom: u8 = value
+        .parse()
+        .map_err(|err| format!("invalid zoom '{value}': {err}"))?;
+    if zoom > 30 {
+        return Err(format!("zoom {zoom} is out of range"));
+    }
+    Ok(zoom)
+}
+
+/// One tile picked for extraction, keyed by the rowid the MBTiles writer
+/// demands input to be sorted by. ~48 bytes each, so even a whole-world
+/// extraction's selection list stays well inside memory.
+struct Selection {
+    rowid: i64,
+    tile: MkmapTileRef,
+}
+
+/// The bbox rectangle at one zoom, grown by `pad` rings of tiles and clamped
+/// to the pyramid — the same clamp (no antimeridian wrap) the bake used when
+/// it decided which tiles a feature touches.
+fn padded_rect(bounds: GeoBounds, zoom: u8, pad: u32) -> TileBounds {
+    let last = (1_u32 << zoom) - 1;
+    let rect = bounds.tile_bounds(zoom);
+    TileBounds {
+        x_min: rect.x_min.saturating_sub(pad),
+        y_min: rect.y_min.saturating_sub(pad),
+        x_max: rect.x_max.saturating_add(pad).min(last),
+        y_max: rect.y_max.saturating_add(pad).min(last),
+    }
+}
+
+/// Per-zoom tile-id windows covering the requested area: the bbox rectangle
+/// where enumerating it is cheap, the zoom's whole band otherwise.
+fn selection_windows(
+    min_zoom: u8,
+    max_zoom: u8,
+    bounds: Option<GeoBounds>,
+    pad_tiles: u32,
+) -> Vec<(u8, u64, u64)> {
+    let mut windows = Vec::new();
+    for zoom in min_zoom..=max_zoom {
+        let band = (zoom_base_id(zoom), zoom_base_id(zoom + 1) - 1);
+        let window = match bounds {
+            Some(bounds) => {
+                let rect = padded_rect(bounds, zoom, pad_tiles);
+                let width = u64::from(rect.x_max - rect.x_min) + 1;
+                let height = u64::from(rect.y_max - rect.y_min) + 1;
+                if width * height <= RECT_SCAN_LIMIT {
+                    let mut lowest = u64::MAX;
+                    let mut highest = 0_u64;
+                    for y in rect.y_min..=rect.y_max {
+                        for x in rect.x_min..=rect.x_max {
+                            let id = tile_id(zoom, x, y);
+                            lowest = lowest.min(id);
+                            highest = highest.max(id);
+                        }
+                    }
+                    (lowest, highest)
+                } else {
+                    band
+                }
+            }
+            None => band,
+        };
+        windows.push((zoom, window.0, window.1));
+    }
+    windows
+}
+
+/// Rebuild an MBTiles archive out of a woven `.mkmap`: tile blobs are copied
+/// byte-verbatim out of the shards and the metadata table (compression and
+/// shared dictionary included) is carried over, so the result feeds straight
+/// back into `transmux`. With `--bbox` this reconstructs one bake cell; the
+/// extraction may pick up neighbouring tiles that share the boundary, which
+/// is harmless for both re-weaving and serving. A cell holds a few tiles just
+/// outside its declared bounds (the bake buffers geometry by a fraction of a
+/// tile before deciding which tiles it touches), so reconstructing one takes
+/// `--pad-tiles 1`.
+pub fn extract(options: ExtractOptions) -> Result<(), String> {
+    let started = Instant::now();
+    if options.output.exists() {
+        return Err(format!(
+            "{} already exists; refusing to overwrite it",
+            options.output.display()
+        ));
+    }
+    let mut reader = MkmapReader::open(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    let metadata = reader
+        .get_metadata()
+        .map_err(|err| format!("read mkmap metadata: {err}"))?;
+    let (archive_min, archive_max) = reader.zoom_range();
+    let min_zoom = options
+        .min_zoom
+        .map_or(archive_min as u8, |zoom| zoom.max(archive_min as u8));
+    let max_zoom = options
+        .max_zoom
+        .map_or(archive_max as u8, |zoom| zoom.min(archive_max as u8));
+    if min_zoom > max_zoom {
+        return Err(format!(
+            "requested zoom range is empty (archive holds z{archive_min}..z{archive_max})"
+        ));
+    }
+    println!(
+        "mkmap-extract: {} ({} shards, {} tiles, z{archive_min}..z{archive_max})",
+        options.source.display(),
+        reader.shard_count(),
+        reader.tile_count()
+    );
+
+    // Pass 1: pick the tiles, in whatever order the container yields them.
+    let mut selected: Vec<Selection> = Vec::new();
+    for (zoom, start_id, end_id) in
+        selection_windows(min_zoom, max_zoom, options.bounds, options.pad_tiles)
+    {
+        let rect = options
+            .bounds
+            .map(|bounds| padded_rect(bounds, zoom, options.pad_tiles));
+        let mut rejected = Ok(());
+        reader
+            .for_each_tile_ref_in_range(start_id, end_id, |tile| {
+                if tile.zoom != zoom {
+                    return;
+                }
+                if let Some(rect) = rect {
+                    if !rect.contains(tile.x, tile.y) {
+                        return;
+                    }
+                }
+                match tile_rowid_xyz(tile.zoom, tile.x, tile.y) {
+                    Some(rowid) => selected.push(Selection { rowid, tile }),
+                    None => {
+                        rejected = Err(format!(
+                            "tile z{}/{}/{} has no MBTiles rowid",
+                            tile.zoom, tile.x, tile.y
+                        ))
+                    }
+                }
+            })
+            .map_err(|err| format!("walk z{zoom} directory: {err}"))?;
+        rejected?;
+    }
+    if selected.is_empty() {
+        return Err("selection is empty — nothing to extract".to_string());
+    }
+    // MBTiles rows are written in ascending rowid order; the container hands
+    // tiles out in Hilbert order, so sort once before streaming.
+    selected.sort_unstable_by_key(|entry| entry.rowid);
+    let observed_min = selected.iter().map(|entry| entry.tile.zoom).min().unwrap();
+    let observed_max = selected.iter().map(|entry| entry.tile.zoom).max().unwrap();
+    println!(
+        "  selected {} tiles, z{observed_min}..z{observed_max}",
+        selected.len()
+    );
+
+    // Pass 2: metadata table first (the codec has to be declared before the
+    // verbatim blobs mean anything), then the blobs themselves.
+    let mut writer = MbtilesWriter::create(&options.output)
+        .map_err(|err| format!("create {}: {err}", options.output.display()))?;
+    for (key, value) in &metadata {
+        writer.set_metadata(key.clone(), value.clone());
+    }
+    match (reader.dict(), reader.shared_dict()) {
+        (Some(declared), Some(raw)) if declared != raw => {
+            return Err(
+                "mkmap dictionary section disagrees with its compression_dict metadata row"
+                    .to_string(),
+            )
+        }
+        // A container whose metadata row went missing still carries the raw
+        // dictionary; re-declare it so the extraction decodes.
+        (None, Some(raw)) => {
+            for (key, value) in
+                compression_metadata_rows(&TileCompression::Brotli { quality: 11 }, Some(raw))
+            {
+                writer.set_metadata(key, value);
+            }
+            eprintln!(
+                "mkmap-extract: NOTE metadata carried no {COMPRESSION_DICT_METADATA_KEY}; \
+                 restored it from the index dictionary section"
+            );
+        }
+        _ => {}
+    }
+    writer.set_metadata("minzoom", observed_min.to_string());
+    writer.set_metadata("maxzoom", observed_max.to_string());
+    if let Some(bounds) = options.bounds {
+        writer.set_metadata("bounds", bounds.as_csv());
+        let (longitude, latitude) = bounds.center();
+        let center_zoom = metadata
+            .get("center")
+            .and_then(|value| value.split(',').nth(2).map(str::to_string))
+            .unwrap_or_else(|| observed_max.to_string());
+        writer.set_metadata(
+            "center",
+            format!("{longitude:.7},{latitude:.7},{center_zoom}"),
+        );
+    }
+
+    let mut written_bytes = 0_u64;
+    let mut last_progress = Instant::now();
+    for (index, entry) in selected.iter().enumerate() {
+        let tile = &entry.tile;
+        let blob = reader
+            .read_tile_ref(tile)
+            .map_err(|err| format!("read z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
+        written_bytes += blob.len() as u64;
+        writer
+            .write_tile_xyz(tile.zoom, tile.x, tile.y, &blob)
+            .map_err(|err| format!("write z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
+        if last_progress.elapsed().as_secs() >= 2 {
+            println!(
+                "  {}/{} tiles | {:.2} GiB",
+                index + 1,
+                selected.len(),
+                written_bytes as f64 / 1_073_741_824.0
+            );
+            last_progress = Instant::now();
+        }
+    }
+    let stats = writer
+        .finish()
+        .map_err(|err| format!("finalize {}: {err}", options.output.display()))?;
+    println!(
+        "mkmap-extract: wrote {} ({} tiles, {:.2} GiB tile bytes, {:.2} GiB file) in {:.1}s",
+        options.output.display(),
+        stats.tile_count,
+        stats.tile_bytes as f64 / 1_073_741_824.0,
+        stats.file_bytes as f64 / 1_073_741_824.0,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Weave manifest — what each source contributed, so a single cell can be
+// reconstructed on demand once the sources themselves are gone
+// ---------------------------------------------------------------------------
+
+/// Read a weave source list (one path per line, `#` comments allowed) and
+/// write a manifest row per source: bounds, zoom range and tile count taken
+/// from the archive itself, in weave order.
+pub fn write_weave_manifest(sources: &Path, output: &Path) -> Result<(), String> {
+    let started = Instant::now();
+    let listing = fs::read_to_string(sources)
+        .map_err(|err| format!("read {}: {err}", sources.display()))?;
+    let paths: Vec<&str> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if paths.is_empty() {
+        return Err(format!("{} lists no sources", sources.display()));
+    }
+    println!("mkmap: manifest over {} sources", paths.len());
+    let mut rows = String::new();
+    rows.push_str("# makepad weave manifest v1 — one row per source, in weave order\n");
+    rows.push_str(&format!("# sources: {}\n", sources.display()));
+    rows.push_str("# index\tsource\tbounds(w,s,e,n)\tminzoom\tmaxzoom\ttiles\tbytes\n");
+    let mut total_tiles = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut unreadable = 0_usize;
+    let mut last_progress = Instant::now();
+    for (index, path) in paths.iter().enumerate() {
+        let path = Path::new(path);
+        let bytes = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let mut reader = match MbtilesReader::open(path) {
+            Ok(reader) => reader,
+            Err(err) => {
+                eprintln!("mkmap: WARNING unreadable source {}: {err}", path.display());
+                unreadable += 1;
+                rows.push_str(&format!(
+                    "{}\t{}\tUNREADABLE\t-\t-\t-\t{bytes}\n",
+                    index + 1,
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let bounds = reader
+            .get_metadata()
+            .ok()
+            .and_then(|metadata| metadata.get("bounds").cloned())
+            .unwrap_or_else(|| "-".to_string());
+        // Zoom range and tile count come from the tiles table, not the
+        // metadata rows: the bakes declare a nominal minzoom the archive
+        // does not actually hold.
+        let summary = match reader.tile_summary() {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("mkmap: WARNING corrupt source {}: {err}", path.display());
+                unreadable += 1;
+                rows.push_str(&format!(
+                    "{}\t{}\t{bounds}\tCORRUPT\t-\t-\t{bytes}\n",
+                    index + 1,
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let tiles: u64 = summary.iter().map(|&(_, count)| count as u64).sum();
+        let min_zoom = summary.first().map_or(-1, |&(zoom, _)| zoom);
+        let max_zoom = summary.last().map_or(-1, |&(zoom, _)| zoom);
+        total_tiles += tiles;
+        total_bytes += bytes;
+        rows.push_str(&format!(
+            "{}\t{}\t{bounds}\t{min_zoom}\t{max_zoom}\t{tiles}\t{bytes}\n",
+            index + 1,
+            path.display()
+        ));
+        if last_progress.elapsed().as_secs() >= 5 {
+            println!(
+                "  {}/{} sources | {total_tiles} tiles | {:.1} GiB scanned",
+                index + 1,
+                paths.len(),
+                total_bytes as f64 / 1_073_741_824.0
+            );
+            last_progress = Instant::now();
+        }
+    }
+    rows.push_str(&format!(
+        "# totals: {} sources ({unreadable} unreadable), {total_tiles} tiles, {total_bytes} bytes\n",
+        paths.len()
+    ));
+    fs::write(output, rows).map_err(|err| format!("write {}: {err}", output.display()))?;
+    println!(
+        "mkmap: wrote {} — {} sources, {total_tiles} tiles, {:.1} GiB in {:.1}s",
+        output.display(),
+        paths.len(),
+        total_bytes as f64 / 1_073_741_824.0,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Containment check — does an extraction really carry a source archive?
+// ---------------------------------------------------------------------------
+
+fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let first = needle[0];
+    (0..=haystack.len() - needle.len())
+        .any(|start| haystack[start] == first && &haystack[start..start + needle.len()] == needle)
+}
+
+/// Every tile of `original` must be present in `extracted`. Bytes usually
+/// match verbatim; where they do not, the weave itself explains it and the
+/// check demands that explanation rather than waving the tile through:
+///
+/// - FIRST-WINS (z14 and above): a duplicate id was supplied by an earlier
+///   weave source, so the extracted blob must equal that peer's blob.
+/// - MERGED (below z14): the weave unions the layer payloads of every source
+///   holding the id, so the extracted payload must *contain* this source's
+///   payload (with the per-cell baked-faces field stripped, as the weave
+///   strips it).
+///
+/// Anything else is unexplained and fails the check. Extra tiles in
+/// `extracted` are fine — a bbox extraction pulls in boundary neighbours.
+pub fn compare(original: &Path, extracted: &Path, peers: &[PathBuf]) -> Result<(), String> {
+    let started = Instant::now();
+    let mut source = MbtilesReader::open(original)
+        .map_err(|err| format!("open {}: {err}", original.display()))?;
+    let source_codec = TileCodec::from_metadata(
+        &source
+            .get_metadata()
+            .map_err(|err| format!("read {} metadata: {err}", original.display()))?,
+    )
+    .map_err(|err| format!("{}: {err}", original.display()))?;
+    let mut restored = MbtilesReader::open(extracted)
+        .map_err(|err| format!("open {}: {err}", extracted.display()))?;
+    let restored_codec = TileCodec::from_metadata(
+        &restored
+            .get_metadata()
+            .map_err(|err| format!("read {} metadata: {err}", extracted.display()))?,
+    )
+    .map_err(|err| format!("{}: {err}", extracted.display()))?;
+    let restored_tiles: u64 = restored
+        .tile_summary()
+        .map_err(|err| format!("scan {}: {err}", extracted.display()))?
+        .iter()
+        .map(|&(_, count)| count as u64)
+        .sum();
+    let mut peer_readers: Vec<(PathBuf, MbtilesReader, u64)> = Vec::with_capacity(peers.len());
+    for path in peers {
+        peer_readers.push((
+            path.clone(),
+            MbtilesReader::open(path).map_err(|err| format!("open {}: {err}", path.display()))?,
+            0,
+        ));
+    }
+
+    let mut total = 0_u64;
+    let mut identical = 0_u64;
+    let mut first_wins = 0_u64;
+    let mut merged = 0_u64;
+    let mut missing = 0_u64;
+    let mut unexplained = 0_u64;
+    let mut complaints: Vec<String> = Vec::new();
+    let note = |complaints: &mut Vec<String>, text: String| {
+        if complaints.len() < 10 {
+            complaints.push(text);
+        }
+    };
+    source
+        .for_each_tile(|tile| {
+            total += 1;
+            let (zoom, column, row) = (tile.zoom_level, tile.tile_column, tile.tile_row);
+            let restored_blob = match restored.get_tile(zoom, column, row) {
+                Ok(Some(blob)) => blob,
+                Ok(None) => {
+                    missing += 1;
+                    unexplained += 1;
+                    note(
+                        &mut complaints,
+                        format!("z{zoom}/{column}/{row} (tms) missing from the extraction"),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    unexplained += 1;
+                    note(
+                        &mut complaints,
+                        format!("z{zoom}/{column}/{row} (tms) read failed: {err}"),
+                    );
+                    return;
+                }
+            };
+            if restored_blob == tile.tile_data {
+                identical += 1;
+                return;
+            }
+            // First-wins: an earlier source in the weave order supplied this
+            // id, and its bytes are what the container stored.
+            for (_, peer, wins) in peer_readers.iter_mut() {
+                if let Ok(Some(peer_blob)) = peer.get_tile(zoom, column, row) {
+                    if peer_blob == restored_blob {
+                        first_wins += 1;
+                        *wins += 1;
+                        return;
+                    }
+                }
+            }
+            // Merged below z14: the union payload must still contain ours.
+            if zoom < 14 {
+                let ours = source_codec
+                    .decode(&tile.tile_data)
+                    .map(strip_baked_field)
+                    .unwrap_or_default();
+                let theirs = restored_codec.decode(&restored_blob).unwrap_or_default();
+                if !ours.is_empty() && contains_slice(&theirs, &ours) {
+                    merged += 1;
+                    return;
+                }
+            }
+            unexplained += 1;
+            note(
+                &mut complaints,
+                format!(
+                    "z{zoom}/{column}/{row} (tms) differs: {} source bytes vs {} extracted bytes",
+                    tile.tile_data.len(),
+                    restored_blob.len()
+                ),
+            );
+        })
+        .map_err(|err| format!("scan {}: {err}", original.display()))?;
+
+    println!(
+        "mbtiles-compare: {} -> {}",
+        original.display(),
+        extracted.display()
+    );
+    println!("  original tiles:    {total}");
+    println!("  extraction tiles:  {restored_tiles}");
+    println!("  identical:         {identical}");
+    println!("  first-wins:        {first_wins} (an earlier weave source owned the id)");
+    for (path, _, wins) in &peer_readers {
+        if *wins > 0 {
+            println!("    {wins} won by {}", path.display());
+        }
+    }
+    println!("  merged:            {merged} (below z14; extracted payload contains ours)");
+    println!("  missing:           {missing}");
+    println!("  unexplained:       {unexplained}");
+    for complaint in &complaints {
+        println!("    {complaint}");
+    }
+    println!("  {:.1}s", started.elapsed().as_secs_f64());
+    if unexplained > 0 {
+        return Err(format!(
+            "COMPARE FAILED: {unexplained} of {total} tiles unexplained"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,6 +1599,180 @@ mod tests {
             assert_eq!(a.blob.offset, b.blob.offset);
             assert_eq!(a.blob.len, b.blob.len);
         }
+    }
+
+    /// A protobuf LEN field, the shape `strip_baked_field` walks.
+    fn pbf_field(field: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_varint((field << 3) | 2, &mut out);
+        write_varint(payload.len() as u64, &mut out);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "makepad-mkmap-{tag}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn stored_tile(path: &Path, zoom: u8, x: u32, y: u32) -> Vec<u8> {
+        let axis = 1_i64 << zoom;
+        MbtilesReader::open(path)
+            .unwrap()
+            .get_tile(i64::from(zoom), i64::from(x), axis - 1 - i64::from(y))
+            .unwrap()
+            .unwrap_or_else(|| panic!("{} has no z{zoom}/{x}/{y}", path.display()))
+    }
+
+    /// Weave two tiny archives, extract the result, and hold the extraction
+    /// to the three promises the weave makes: blobs come back byte-verbatim,
+    /// a duplicate id at z14 keeps the FIRST source's bytes, and the codec
+    /// (brotli + shared dictionary) survives the round trip.
+    #[test]
+    fn extract_restores_sources_from_a_weave() {
+        let scratch = scratch_dir("extract");
+        let dict = b"streets water_polygons buildings landuse".to_vec();
+        let compression = TileCompression::Brotli { quality: 9 };
+
+        // Below z14 the weave unions payloads, so give the shared z10 tile a
+        // per-cell baked-faces field (101) that the union has to strip.
+        let mut alpha_z10 = pbf_field(1, b"alpha-streets");
+        alpha_z10.extend_from_slice(&pbf_field(101, b"per-cell-bake"));
+        let beta_z10 = pbf_field(1, b"beta-streets");
+
+        let first = scratch.join("first.mbtiles");
+        let mut writer = MbtilesWriter::create(&first).unwrap();
+        writer.set_tile_compression(compression, Some(dict.clone()));
+        writer.set_metadata("name", "first");
+        writer.set_metadata("bounds", "-180.0000000,-85.0511,180.0000000,85.0511");
+        writer.set_metadata("center", "0.0000000,0.0000000,7");
+        writer.write_tile_encoded(10, 6, 12, &alpha_z10).unwrap();
+        writer.write_tile_encoded(14, 100, 200, b"first-only-tile").unwrap();
+        writer.write_tile_encoded(14, 101, 200, b"first-copy-of-shared").unwrap();
+        writer.finish().unwrap();
+
+        let second = scratch.join("second.mbtiles");
+        let mut writer = MbtilesWriter::create(&second).unwrap();
+        writer.set_tile_compression(compression, Some(dict.clone()));
+        writer.set_metadata("name", "second");
+        writer.write_tile_encoded(10, 6, 12, &beta_z10).unwrap();
+        writer.write_tile_encoded(14, 101, 200, b"second-copy-of-shared").unwrap();
+        writer.write_tile_encoded(14, 102, 200, b"second-only-tile").unwrap();
+        writer.finish().unwrap();
+
+        let woven = scratch.join("woven.mkmap");
+        transmux(TransmuxOptions {
+            source: first.clone(),
+            extra_sources: vec![second.clone()],
+            output: woven.clone(),
+            shard_cap: SHARD_HARD_CAP,
+            sample_stride: 1,
+        })
+        .unwrap();
+
+        let restored = scratch.join("restored.mbtiles");
+        extract(ExtractOptions {
+            source: woven.clone(),
+            output: restored.clone(),
+            bounds: None,
+            min_zoom: None,
+            max_zoom: None,
+            pad_tiles: 0,
+        })
+        .unwrap();
+
+        // The codec and its dictionary survive, so the extraction decodes and
+        // can be woven again without re-encoding a single tile.
+        let mut reader = MbtilesReader::open(&restored).unwrap();
+        let metadata = reader.get_metadata().unwrap();
+        assert_eq!(metadata.get("compression").map(String::as_str), Some("br:dict-v1"));
+        let codec = TileCodec::from_metadata(&metadata).unwrap();
+        assert_eq!(codec.dict(), Some(dict.as_slice()));
+        assert_eq!(metadata.get("name").map(String::as_str), Some("first"));
+        assert_eq!(metadata.get("minzoom").map(String::as_str), Some("10"));
+        assert_eq!(metadata.get("maxzoom").map(String::as_str), Some("14"));
+        assert_eq!(
+            reader
+                .tile_summary()
+                .unwrap()
+                .iter()
+                .map(|&(_, count)| count)
+                .sum::<usize>(),
+            4
+        );
+
+        // Verbatim: tiles only one source held come back bit for bit.
+        assert_eq!(
+            stored_tile(&restored, 14, 100, 200),
+            stored_tile(&first, 14, 100, 200)
+        );
+        assert_eq!(
+            stored_tile(&restored, 14, 102, 200),
+            stored_tile(&second, 14, 102, 200)
+        );
+        // First-wins: the shared z14 id keeps the FIRST source's bytes.
+        assert_eq!(
+            stored_tile(&restored, 14, 101, 200),
+            stored_tile(&first, 14, 101, 200)
+        );
+        assert_ne!(
+            stored_tile(&restored, 14, 101, 200),
+            stored_tile(&second, 14, 101, 200)
+        );
+        // Merged: below z14 the shared id is the union of both payloads, with
+        // the per-cell baked-faces field stripped out.
+        let mut expected = pbf_field(1, b"alpha-streets");
+        expected.extend_from_slice(&pbf_field(1, b"beta-streets"));
+        let merged = codec.decode(&stored_tile(&restored, 10, 6, 12)).unwrap();
+        assert_eq!(merged, expected);
+        assert!(contains_slice(&merged, &strip_baked_field(alpha_z10)));
+        assert!(contains_slice(&merged, &beta_z10));
+
+        // A bbox narrows the extraction to the tiles it covers.
+        let clipped = scratch.join("clipped.mbtiles");
+        // A longitude slice one z14 column wide: only x=100 survives it.
+        let bounds = GeoBounds::parse("-177.80,84.0,-177.79,85.0").unwrap();
+        extract(ExtractOptions {
+            source: woven,
+            output: clipped.clone(),
+            bounds: Some(bounds),
+            min_zoom: Some(14),
+            max_zoom: Some(14),
+            pad_tiles: 0,
+        })
+        .unwrap();
+        let clipped_tiles: usize = MbtilesReader::open(&clipped)
+            .unwrap()
+            .tile_summary()
+            .unwrap()
+            .iter()
+            .map(|&(_, count)| count)
+            .sum();
+        assert_eq!(clipped_tiles, 1);
+
+        // Containment holds against the originals, with the weave's own rules
+        // as the only permitted explanation for a byte difference.
+        compare(&first, &restored, &[]).unwrap();
+        compare(&second, &restored, &[first.clone()]).unwrap();
+
+        fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    #[test]
+    fn contains_slice_finds_merged_payloads() {
+        assert!(contains_slice(b"abcdef", b"cde"));
+        assert!(contains_slice(b"abcdef", b"abcdef"));
+        assert!(contains_slice(b"abcdef", b""));
+        assert!(!contains_slice(b"abcdef", b"cdf"));
+        assert!(!contains_slice(b"abc", b"abcd"));
     }
 
     #[test]

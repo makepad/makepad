@@ -27,7 +27,7 @@ use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::native::mvt::{
+use makepad_map_build::native::mvt::{
     encode_tile, read_protobuf_bytes, read_protobuf_key, read_varint, skip_protobuf_value,
     GeometryType, Layer, OsmType, TileFeature, TilePoint,
 };
