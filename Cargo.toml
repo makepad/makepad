@@ -137,6 +137,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "libs/system_speech",
     # === tests ===
     "platform/script/test",
 ]
@@ -155,7 +156,6 @@ workspace.exclude = [
     "libs/diffusion",
     # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
     "libs/ai",
-    "libs/voice",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",

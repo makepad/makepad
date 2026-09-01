@@ -24,7 +24,8 @@ makepad-audio-decode = { path = "../../libs/audio_decode" }
 # Four-stem source separation for the music decks' stem mix.
 makepad-ai-stems = { path = "../../libs/ai/models/stems" }
 # Whisper transcription of the separated vocals stem: karaoke subtitles.
-makepad-voice = { path = "../../libs/voice" }
+makepad-ai-speech = { path = "../../libs/ai/models/speech", default-features = false, features = ["whisper"] } # whisper for lyrics alignment
+makepad-system-speech = { path = "../../libs/system_speech" } # OS recognizer fallback for lyrics alignment
 makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
 # Stems + lyrics as server-stored side-channels: the encode/role/publish
 # implementation shared with the asset-ui bake.

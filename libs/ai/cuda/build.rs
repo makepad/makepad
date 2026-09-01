@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 // Because this crate sets `links = "makepad_ai_cuda"`, the answer travels to
 // its immediate dependents as `DEP_MAKEPAD_AI_CUDA_KERNELS` (=1) and
 // `DEP_MAKEPAD_AI_CUDA_ARCH`. makepad-ai-llm, makepad-ai-metal,
-// makepad-ai-common and makepad-voice gate their CUDA code on exactly that
+// makepad-ai-common and makepad-ai-speech (whisper) gate their CUDA code on exactly that
 // and MUST NOT probe for a toolkit themselves: "nvcc exists on this machine"
 // and "kernels were built and will link" are different questions, and a
 // dependent that answers the first one locally is how a machine WITH the

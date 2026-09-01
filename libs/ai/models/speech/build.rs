@@ -2,121 +2,109 @@ use std::env;
 use std::fs;
 use std::process::Command;
 
-const IOS_DEPLOYMENT_TARGET_DEFAULT: &str = "26.0";
-
 fn main() {
-    println!("cargo:rerun-if-changed=swift/tts_bridge.swift");
-    println!("cargo:rustc-check-cfg=cfg(no_apple_tts)");
-
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let is_apple_host = env::var("HOST").unwrap_or_default().contains("apple");
-    let is_apple_target = target_os == "macos" || target_os == "ios";
+    // `makepad-ai-cuda` sets `links = "makepad_ai_cuda"` and emits
+    // `cargo:kernels=1` only when nvcc actually built and archived its .cu
+    // objects. Cargo forwards that to us as DEP_MAKEPAD_AI_CUDA_KERNELS, which
+    // is the only honest signal that `src/cuda/backend.rs` can link against a
+    // CUDA runtime. Without it the CUDA backend compiles to stubs and
+    // `src/accel.rs` falls back to Metal (Apple) or the CPU.
+    println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
+    if env::var("DEP_MAKEPAD_AI_CUDA_KERNELS").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=makepad_ai_cuda_kernels");
+    }
+    println!("cargo:rerun-if-env-changed=MAKEPAD_VOICE_METAL_PRECOMPILE");
 
-    // No Swift toolchain, or not an Apple target: the crate degrades to a no-op
-    // rather than failing the build.
-    if !(is_apple_host && is_apple_target) || !build_tts_bridge(&target_os) {
-        println!("cargo:rustc-cfg=no_apple_tts");
+    if target_os == "macos" {
+        build_whisper_metallib();
     }
 }
 
-/// Compile `swift/tts_bridge.swift` into a static library and link it.
-///
-/// Unlike the speech (STT) bridge, nothing here is `async`, so Swift Concurrency
-/// is never linked and the `@rpath/libswift_Concurrency.dylib` install-name
-/// workaround that `makepad-voice` needs does not apply.
-fn build_tts_bridge(target_os: &str) -> bool {
+fn build_whisper_metallib() {
+    let precompile_default = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some();
+    let precompile_enabled = env::var("MAKEPAD_VOICE_METAL_PRECOMPILE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(precompile_default);
+
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let swift_src = format!("{manifest_dir}/swift/tts_bridge.swift");
-    let module_cache = format!("{out_dir}/swift_module_cache");
-    let _ = fs::create_dir_all(&module_cache);
 
-    let mut args = vec![
-        "-emit-library".to_string(),
-        "-static".to_string(),
-        "-parse-as-library".to_string(),
-        "-module-name".to_string(),
-        "tts_bridge".to_string(),
-        "-module-cache-path".to_string(),
-        module_cache,
-        "-O".to_string(),
-    ];
-    if target_os == "ios" {
-        if let Some((target, sdk)) = ios_target_and_sdk() {
-            args.push("-target".to_string());
-            args.push(target);
-            args.push("-sdk".to_string());
-            args.push(sdk);
-        }
-    }
-    args.push("-o".to_string());
-    args.push(format!("{out_dir}/libtts_bridge.a"));
-    args.push(swift_src);
+    let ggml_src_dir = format!("{}/src/whisper/metal/ggml", manifest_dir);
+    let ggml_metal_dir = format!("{}/src/whisper/metal/ggml", manifest_dir);
 
-    match Command::new("swiftc").args(&args).status() {
-        Ok(status) if status.success() => {}
-        Ok(_) => {
-            println!("cargo:warning=swiftc failed for tts bridge; speech is disabled");
-            return false;
-        }
-        Err(err) => {
-            println!("cargo:warning=swiftc unavailable ({err}); speech is disabled");
-            return false;
-        }
+    let metal_src = format!("{}/ggml-metal.metal", ggml_metal_dir);
+    let common_h = format!("{}/ggml-common.h", ggml_src_dir);
+    let impl_h = format!("{}/ggml-metal-impl.h", ggml_metal_dir);
+
+    println!("cargo:rerun-if-changed={}", metal_src);
+    println!("cargo:rerun-if-changed={}", common_h);
+    println!("cargo:rerun-if-changed={}", impl_h);
+
+    let _ = fs::create_dir_all(&out_dir);
+    let air_path = format!("{}/ggml-metal.air", out_dir);
+    let metallib_path = format!("{}/ggml-default.metallib", out_dir);
+
+    if !precompile_enabled {
+        let _ = fs::write(&metallib_path, []);
+        println!(
+            "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+            metallib_path
+        );
+        return;
     }
 
-    println!("cargo:rustc-link-search=native={out_dir}");
-    println!("cargo:rustc-link-lib=static=tts_bridge");
-    println!("cargo:rustc-link-lib=framework=Foundation");
-    println!("cargo:rustc-link-lib=framework=AVFoundation");
+    let metal_status = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "metal",
+            "-O3",
+            "-c",
+            &metal_src,
+            "-I",
+            &ggml_src_dir,
+            "-I",
+            &ggml_metal_dir,
+            "-o",
+            &air_path,
+        ])
+        .status();
 
-    // Let the linker resolve the Swift runtime symbols the bridge pulls in.
-    if let Ok(output) = Command::new("swiftc").args(["-print-target-info"]).output() {
-        if output.status.success() {
-            let info = String::from_utf8_lossy(&output.stdout);
-            for line in info.lines() {
-                let path = line.trim().trim_matches('"').trim_end_matches(',');
-                if path.starts_with('/') && path.contains("lib/swift") {
-                    println!("cargo:rustc-link-search=native={path}");
-                }
-            }
-        }
+    let ok = metal_status.as_ref().is_ok_and(|s| s.success());
+    if !ok {
+        println!("cargo:warning=failed to compile ggml-metal.metal to AIR; runtime source compile will be used");
+        let _ = fs::write(&metallib_path, []);
+        println!(
+            "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+            metallib_path
+        );
+        return;
     }
 
-    true
-}
+    let metallib_status = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "metallib",
+            &air_path,
+            "-o",
+            &metallib_path,
+        ])
+        .status();
 
-fn ios_target_and_sdk() -> Option<(String, String)> {
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").ok()?;
-    let abi = env::var("CARGO_CFG_TARGET_ABI").unwrap_or_default();
-    let is_simulator = abi == "sim" || arch == "x86_64";
-    let swift_arch = match arch.as_str() {
-        "aarch64" => "arm64",
-        "x86_64" => "x86_64",
-        _ => return None,
-    };
-    let deployment_key = if is_simulator {
-        "IPHONESIMULATOR_DEPLOYMENT_TARGET"
-    } else {
-        "IPHONEOS_DEPLOYMENT_TARGET"
-    };
-    let deployment =
-        env::var(deployment_key).unwrap_or_else(|_| IOS_DEPLOYMENT_TARGET_DEFAULT.to_string());
-    let swift_target = if is_simulator {
-        format!("{swift_arch}-apple-ios{deployment}-simulator")
-    } else {
-        format!("{swift_arch}-apple-ios{deployment}")
-    };
-    let sdk_name = if is_simulator {
-        "iphonesimulator"
-    } else {
-        "iphoneos"
-    };
-    let sdk_path = Command::new("xcrun")
-        .args(["--sdk", sdk_name, "--show-sdk-path"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())?;
-    Some((swift_target, sdk_path))
+    let ok = metallib_status.as_ref().is_ok_and(|s| s.success());
+    if !ok {
+        println!("cargo:warning=failed to build ggml default metallib; runtime source compile will be used");
+        let _ = fs::write(&metallib_path, []);
+    }
+
+    println!(
+        "cargo:rustc-env=MAKEPAD_VOICE_GGML_METALLIB={}",
+        metallib_path
+    );
 }

@@ -195,6 +195,9 @@ pub enum Domain {
     Vision,
     /// Scanned page -> HTML transcription (Chandra 2 on the vision tower).
     Ocr,
+    /// Speech audio -> timed transcript (Whisper). The `stt.whisper` pipe;
+    /// `Speech` stays text-to-speech, so the two never share affinity.
+    Stt,
 }
 
 impl Domain {
@@ -223,6 +226,7 @@ impl Domain {
             "splat" => Some(Domain::Splat),
             "vision" => Some(Domain::Vision),
             "ocr" => Some(Domain::Ocr),
+            "stt" => Some(Domain::Stt),
             _ => None,
         }
     }
@@ -252,6 +256,7 @@ impl Domain {
             Domain::Splat => "splat",
             Domain::Vision => "vision",
             Domain::Ocr => "ocr",
+            Domain::Stt => "stt",
         }
     }
 }

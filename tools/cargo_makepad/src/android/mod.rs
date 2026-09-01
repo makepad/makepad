@@ -129,6 +129,11 @@ impl AndroidVariant {
                 <intent>
                 <action android:name="android.intent.action.MAIN" />
                 </intent>
+                <!-- Android 11+ package visibility: without this the app cannot
+                bind the system speech recognizer service. -->
+                <intent>
+                <action android:name="android.speech.RecognitionService" />
+                </intent>
                 </queries>
                 </manifest>
                 "#
@@ -226,6 +231,11 @@ impl AndroidVariant {
                 </intent>
                 <intent>
                 <action android:name="android.intent.action.MAIN" />
+                </intent>
+                <!-- Android 11+ package visibility: without this the app cannot
+                bind the system speech recognizer service. -->
+                <intent>
+                <action android:name="android.speech.RecognitionService" />
                 </intent>
                 </queries>
 

@@ -513,6 +513,10 @@ pub struct GenerateRequestJson {
     pub voice: Option<String>,
     /// Speaking-rate multiplier, 0.25..=4.0. Default 1.0.
     pub speed: Option<f64>,
+    /// Language for speech models: ISO 639-1 (`"en"`) or a BCP-47 tag.
+    /// STT (`whisper`): the spoken language; TTS: the voice language when
+    /// `voice` is unset. Absent = the model default (English).
+    pub language: Option<String>,
     /// Emotion vector for emotion-controllable TTS (indextts): exactly 8
     /// floats in [0,1.2], order [happy, angry, sad, afraid, disgusted,
     /// melancholic, surprised, calm]. Omitted = neutral (the reference
@@ -1260,4 +1264,25 @@ pub struct ByeRequestJson {
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ByeResponseJson {
     pub cancelled: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Speech-to-text (stt domain) artifact
+// ---------------------------------------------------------------------------
+
+/// One timed span of a transcript.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct TranscriptSegmentJson {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+}
+
+/// The `application/json` artifact an `stt` job produces: the segments with
+/// millisecond timing plus the joined text, so a client that only wants the
+/// words never has to walk the segments.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct TranscriptJson {
+    pub text: String,
+    pub segments: Vec<TranscriptSegmentJson>,
 }

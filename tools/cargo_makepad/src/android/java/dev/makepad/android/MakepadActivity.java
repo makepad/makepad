@@ -1415,6 +1415,9 @@ public class MakepadActivity
         }
         clearLatestSurfaceSnapshot();
         mSurfaceSnapshotCopyInFlight = false;
+        if (mSpeech != null) {
+            mSpeech.shutdown();
+        }
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
         if (!mIsSwitchingActivity) {
@@ -2764,6 +2767,47 @@ public class MakepadActivity
             }
             mLocationListener = null;
         });
+    }
+
+    // The OS speech engines (makepad-system-speech). Everything real lives in
+    // MakepadSpeech; these are just the names the JNI side resolves on the
+    // activity, because a natively attached thread's class loader cannot find
+    // app classes with FindClass.
+    private MakepadSpeech mSpeech;
+
+    private synchronized MakepadSpeech speech() {
+        if (mSpeech == null) {
+            mSpeech = new MakepadSpeech(this);
+        }
+        return mSpeech;
+    }
+
+    public boolean speechSttAvailable() {
+        return speech().sttAvailable();
+    }
+
+    public void speechSttStart(long session, String languageTag, boolean partial, boolean preferOffline) {
+        speech().sttStart(session, languageTag, partial, preferOffline);
+    }
+
+    public void speechSttStop(long session) {
+        speech().sttStop(session);
+    }
+
+    public boolean speechTtsAvailable() {
+        return speech().ttsAvailable();
+    }
+
+    public String[] speechTtsVoices() {
+        return speech().ttsVoices();
+    }
+
+    public byte[] speechTtsSynthesize(String text, String voiceName, String languageTag, float rate, float pitch) {
+        return speech().ttsSynthesize(text, voiceName, languageTag, rate, pitch);
+    }
+
+    public String speechTtsLastError() {
+        return speech().ttsLastError();
     }
 
     public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {
