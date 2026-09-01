@@ -997,9 +997,11 @@ pub fn dream_stages(
             ("loop_closure", s("end_frame_if_available")),
         ]),
     )
-    // Deliberately NO `model` pin: the stock video profiles default to the
-    // un-suffixed `minimax-h3`, which pins to the ONE box advertising that
-    // exact id. Six boxes can serve this queue; domain affinity picks.
+    // Deliberately NO `model` pin: the stock video profiles default to
+    // `fasth3-4step` (the fast FastH3 lane), which pins to the ONE box
+    // advertising that exact id. Six boxes can serve this queue; domain
+    // affinity picks — and prefers the fast backend wherever its weights
+    // are on disk.
     //
     // Both earlier stages: the prompt comes from `expand`, the still from
     // `image`, and a splice may only read a stage this one waited for.

@@ -488,8 +488,11 @@ pub enum SyncMode {
     /// Free: the deck runs at its own tempo (or the operator's pitch).
     #[default]
     Off,
-    /// Held against the OTHER deck — the classic DJ sync.
+    /// Held against the sync master — the classic DJ sync.
     Deck,
+    /// This deck IS the group's tempo reference: never corrected, its moves
+    /// carry every follower.
+    Master,
     /// Held against the room: the VJ's published beat clock, so a deck can
     /// be played over another DJ or a live source.
     External,
@@ -788,6 +791,17 @@ pub struct DeckEngine {
     /// The deck an autopilot fade is retiring: auto sync must not re-seek
     /// it when the fader crosses the middle and leadership flips.
     auto_fade_hold: Option<DeckId>,
+    /// The deck the sync group follows, PINNED at the first successful lock
+    /// so corrections never change direction mid-mix. The crossfader
+    /// heuristic only elects; once elected, the master stands until it is
+    /// ejected, replaced by handover, or the group dissolves.
+    sync_master: Option<DeckId>,
+    /// How long a SeekSeconds takes to reach the audio (UI pump + command
+    /// delivery + the next block). A phase landing is computed from
+    /// positions that are this stale, so the follower is placed where the
+    /// lock will be true when the seek LANDS, not where it was true when it
+    /// was computed. 0 = uncompensated (the tests' frame of reference).
+    pub land_lookahead_secs: f64,
 }
 
 impl Default for DeckEngine {
@@ -808,6 +822,8 @@ impl Default for DeckEngine {
             shuffle_rng: 1,
             last_requeued: None,
             auto_fade_hold: None,
+            sync_master: None,
+            land_lookahead_secs: 0.0,
         }
     }
 }
@@ -1516,6 +1532,16 @@ impl DeckEngine {
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
+        // An ejected master hands the pin to the remaining group member
+        // (or the group ends with it).
+        if self.sync_master == Some(deck) {
+            let other = deck.other();
+            let state = self.deck(other);
+            self.sync_master = (state.synced
+                && state.is_loaded()
+                && state.sync_view().is_some())
+            .then_some(other);
+        }
         vec![DeckCmd::UnloadTrack { deck }]
     }
 
@@ -1595,10 +1621,33 @@ impl DeckEngine {
 
     // ---- tempo, sync, scratch ----------------------------------------------
 
-    /// The deck the other one should follow: whichever is audibly leading.
-    /// A playing deck beats a stopped one; when both play, the side the
-    /// crossfader favours leads.
+    /// The deck the other one should follow. A pinned master stands first:
+    /// once a lock has engaged, corrections must keep the same direction
+    /// however the crossfader moves. Only with no master does the audible
+    /// heuristic elect one.
     pub fn sync_leader(&self) -> Option<DeckId> {
+        self.sync_master_valid().or_else(|| self.heuristic_leader())
+    }
+
+    /// The pinned master, only while it can actually lead (loaded, with a
+    /// grid). Playing is deliberately not required here: a paused master
+    /// still owns the group's tempo — the pump's handover is what moves the
+    /// pin onto a playing deck.
+    fn sync_master_valid(&self) -> Option<DeckId> {
+        self.sync_master.filter(|id| {
+            let state = self.deck(*id);
+            state.is_loaded() && state.sync_view().is_some()
+        })
+    }
+
+    /// The deck the group's master is, as the UI reads it.
+    pub fn sync_master(&self) -> Option<DeckId> {
+        self.sync_master_valid()
+    }
+
+    /// Whichever deck is audibly leading: a playing deck beats a stopped
+    /// one; when both play, the side the crossfader favours.
+    fn heuristic_leader(&self) -> Option<DeckId> {
         let a = self.deck(DeckId::A);
         let b = self.deck(DeckId::B);
         let ready = |state: &DeckState| state.is_loaded() && state.sync_view().is_some();
@@ -1616,6 +1665,34 @@ impl DeckEngine {
         } else {
             // Dead centre: the deck that has been playing keeps the grid.
             self.last_loaded.map(DeckId::other)
+        }
+    }
+
+    /// Keep the pin honest: drop a master that can no longer lead, and hand
+    /// the pin to a playing group member when the master has stopped — a
+    /// paused playhead is a frozen phase, and a servo chasing it would drag
+    /// a live deck backwards. Called once per pump and from the events that
+    /// change who could lead.
+    fn refresh_sync_master(&mut self) {
+        let Some(master) = self.sync_master else { return };
+        let valid = {
+            let state = self.deck(master);
+            state.is_loaded() && state.sync_view().is_some()
+        };
+        let successor = |engine: &DeckEngine| {
+            let other = master.other();
+            let state = engine.deck(other);
+            (state.synced && state.is_loaded() && state.sync_view().is_some())
+                .then_some(other)
+        };
+        if !valid {
+            self.sync_master = successor(self);
+            return;
+        }
+        if !self.deck(master).playing {
+            if let Some(next) = successor(self).filter(|id| self.deck(*id).playing) {
+                self.sync_master = Some(next);
+            }
         }
     }
 
@@ -1659,6 +1736,18 @@ impl DeckEngine {
         let Some(plan) = sync_plan(&lead, &follow, quantize) else {
             return Vec::new();
         };
+        // The first successful lock PINS the master: from here the group has
+        // one fixed reference, and the crossfader stops re-deciding who
+        // corrects whom at every event.
+        if self.sync_master_valid().is_none() {
+            self.sync_master = Some(leader);
+        }
+        // A paused leader is a frozen phase: match the tempo so the decks
+        // run together when it starts, but never jump a playhead to align
+        // with a playhead that is not moving. The play() re-lock lands the
+        // phase when the leader actually runs.
+        let leader_playing = self.deck(leader).playing;
+        let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
         state.synced = true;
@@ -1669,7 +1758,19 @@ impl DeckEngine {
             cmds.push(DeckCmd::SetRate { deck: follower, rate: plan.rate });
         }
         // A hand on the record owns the playhead; the phase lock waits.
-        if !state.scratching {
+        if !state.scratching && leader_playing && state.playing {
+            if let Some(secs) = plan.seek_secs {
+                // Land where the lock is true when the seek ARRIVES: both
+                // decks keep moving while the command crosses to the audio
+                // thread, so an uncompensated landing is late by exactly
+                // that much, every time.
+                let secs = secs + plan.rate * lookahead;
+                state.position_secs = secs;
+                cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
+            }
+        } else if !state.scratching && !state.playing {
+            // A stopped follower can be placed freely — no lookahead: it is
+            // not moving, so the landing cannot go stale.
             if let Some(secs) = plan.seek_secs {
                 state.position_secs = secs;
                 cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
@@ -1711,13 +1812,19 @@ impl DeckEngine {
 
     // ---- external sync (the room is the leader) -----------------------------
 
-    /// What the deck's SYNC control currently reads.
+    /// What the deck's SYNC control currently reads. Master outranks Deck:
+    /// a synced deck holding the pin is the reference, not a follower.
     pub fn sync_mode(&self, deck: DeckId) -> SyncMode {
         let state = self.deck(deck);
-        match (state.ext_sync, state.synced) {
-            (true, _) => SyncMode::External,
-            (false, true) => SyncMode::Deck,
-            (false, false) => SyncMode::Off,
+        if state.ext_sync {
+            return SyncMode::External;
+        }
+        if !state.synced {
+            return SyncMode::Off;
+        }
+        match self.sync_master_valid() == Some(deck) {
+            true => SyncMode::Master,
+            false => SyncMode::Deck,
         }
     }
 
@@ -1727,24 +1834,66 @@ impl DeckEngine {
         self.decks.iter().any(|state| state.ext_sync)
     }
 
-    /// The SYNC control cycles OFF → SYNC → EXT → OFF.
-    pub fn cycle_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
-        match self.sync_mode(deck) {
-            SyncMode::Off => self.sync(deck, true),
-            SyncMode::Deck => {
-                let state = self.deck_mut(deck);
-                state.synced = false;
-                state.ext_sync = true;
-                // Nothing to do until the next external target arrives.
-                Vec::new()
+    /// The SYNC control is a plain toggle: join the sync group, leave it.
+    /// (EXT is its own toggle — `toggle_ext_sync` — not a hidden third
+    /// position that a "make sure it's on" second press falls into.)
+    ///
+    /// Joining with another deck to follow locks to it; joining with
+    /// nothing to follow pins THIS deck as the waiting master, so the
+    /// press on the leading deck is never a dead button: it claims the
+    /// reference the next deck will lock to. Leaving hands the pin to the
+    /// remaining group member and opts the deck out of the standing auto
+    /// sync — off means off until asked again.
+    pub fn toggle_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.deck(deck).ext_sync {
+            let state = self.deck_mut(deck);
+            state.ext_sync = false;
+            state.auto_opt_out = true;
+            return Vec::new();
+        }
+        if self.deck(deck).synced {
+            // Leave the group.
+            let state = self.deck_mut(deck);
+            state.synced = false;
+            state.auto_opt_out = true;
+            if self.sync_master == Some(deck) {
+                let other = deck.other();
+                let state = self.deck(other);
+                self.sync_master = (state.synced
+                    && state.is_loaded()
+                    && state.sync_view().is_some())
+                .then_some(other);
+            } else if !self.deck(deck.other()).synced {
+                // The last follower left: the group is dissolved.
+                self.sync_master = None;
             }
-            SyncMode::External => {
-                let state = self.deck_mut(deck);
-                state.ext_sync = false;
-                state.auto_opt_out = true;
+            return Vec::new();
+        }
+        // Join. A deck that cannot hold a grid cannot be in the group.
+        if !self.deck(deck).is_loaded() || self.deck(deck).sync_view().is_none() {
+            return Vec::new();
+        }
+        self.deck_mut(deck).auto_opt_out = false;
+        match self.sync_leader().filter(|id| *id != deck) {
+            Some(_) => self.sync(deck, true),
+            None => {
+                // Nothing to follow: this deck IS the reference.
+                self.sync_master = Some(deck);
+                self.deck_mut(deck).synced = true;
                 Vec::new()
             }
         }
+    }
+
+    /// EXT on/off: hold this deck against the room's published clock
+    /// instead of the other deck.
+    pub fn toggle_ext_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let on = !self.deck(deck).ext_sync;
+        self.set_ext_sync(deck, on);
+        if !on {
+            self.deck_mut(deck).auto_opt_out = true;
+        }
+        Vec::new()
     }
 
     pub fn set_ext_sync(&mut self, deck: DeckId, on: bool) {
@@ -1768,19 +1917,65 @@ impl DeckEngine {
             if !state.ext_sync || !state.playing || state.scratching {
                 continue;
             }
-            let Some(view) = state.sync_view() else { continue };
-            let envelope = state.pitch_range.fraction();
-            let Some(follow) = external_follow(external, &view, envelope) else { continue };
-            let state = self.deck_mut(deck);
-            if (state.rate - follow.rate).abs() > 1e-4 {
-                state.rate = follow.rate;
-                state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
-                cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
+            cmds.extend(self.follow_view(deck, external));
+        }
+        cmds
+    }
+
+    /// Hold every synced follower against the pinned master, once per pump.
+    ///
+    /// This is what makes deck SYNC a LOCK instead of a one-shot: the
+    /// event-time landing puts the decks together, and this servo keeps
+    /// them there with the same bounded rate trim the EXT path uses — an
+    /// analysed grid is never exactly the record, so without a held
+    /// correction two "synced" decks walk apart and the next event snaps
+    /// them back with an audible jump.
+    pub fn hold_deck_sync(&mut self) -> Vec<DeckCmd> {
+        self.refresh_sync_master();
+        let Some(master) = self.sync_master_valid() else { return Vec::new() };
+        // A paused master is a frozen phase — the followers free-run at the
+        // matched tempo until it plays (or the pin hands over).
+        if !self.deck(master).playing {
+            return Vec::new();
+        }
+        let Some(view) = self.deck(master).sync_view() else { return Vec::new() };
+        let mut cmds = Vec::new();
+        for deck in [DeckId::A, DeckId::B] {
+            if deck == master || self.auto_fade_hold == Some(deck) {
+                continue;
             }
-            if let Some(secs) = follow.reseek_secs {
-                state.position_secs = secs;
-                cmds.push(DeckCmd::SeekSeconds { deck, secs });
+            let state = self.deck(deck);
+            if !state.synced || state.ext_sync || !state.playing || state.scratching {
+                continue;
             }
+            cmds.extend(self.follow_view(deck, &view));
+        }
+        cmds
+    }
+
+    /// One deck held against one continuous reference: the bounded rate
+    /// trim, and a landing only when the deck was moved out from under the
+    /// lock (that landing takes the same lookahead as an event lock — the
+    /// reference keeps moving while the seek crosses to the audio thread).
+    fn follow_view(&mut self, deck: DeckId, reference: &SyncView) -> Vec<DeckCmd> {
+        let state = self.deck(deck);
+        let Some(view) = state.sync_view() else { return Vec::new() };
+        let envelope = state.pitch_range.fraction();
+        let Some(follow) = external_follow(reference, &view, envelope) else {
+            return Vec::new();
+        };
+        let lookahead = self.land_lookahead_secs;
+        let mut cmds = Vec::new();
+        let state = self.deck_mut(deck);
+        if (state.rate - follow.rate).abs() > 1e-4 {
+            state.rate = follow.rate;
+            state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
+            cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
+        }
+        if let Some(secs) = follow.reseek_secs {
+            let secs = secs + follow.rate * lookahead;
+            state.position_secs = secs;
+            cmds.push(DeckCmd::SeekSeconds { deck, secs });
         }
         cmds
     }
@@ -1797,6 +1992,8 @@ impl DeckEngine {
             for index in 0..2 {
                 self.decks[index].synced = false;
             }
+            // No group without members: the pin goes with them.
+            self.sync_master = None;
             return Vec::new();
         }
         // Turning it back on forgives every opt-out.
@@ -1812,11 +2009,17 @@ impl DeckEngine {
         let range = self.deck(deck).pitch_range.fraction();
         let pitch = (fraction.clamp(-1.0, 1.0)) * range;
         let rate = (1.0 + pitch).clamp(RATE_MIN, RATE_MAX);
+        // Moving the MASTER's pitch is how the group is driven — it stays
+        // in the group. Moving a FOLLOWER's pitch is a deliberate override:
+        // that deck leaves the lock until asked back.
+        let is_master = self.sync_master_valid() == Some(deck);
         let state = self.deck_mut(deck);
         state.pitch = pitch;
         state.rate = rate;
-        state.synced = false;
-        state.auto_opt_out = true;
+        if !is_master {
+            state.synced = false;
+            state.auto_opt_out = true;
+        }
         let mut cmds = vec![DeckCmd::SetRate { deck, rate }];
         // A tempo move on the LEADER propagates: the follower keeps up.
         if self.sync_leader() == Some(deck) {
@@ -3779,23 +3982,173 @@ mod tests {
     }
 
     #[test]
-    fn the_sync_control_cycles_off_deck_ext_off() {
+    fn the_sync_control_is_a_toggle_and_ext_is_its_own() {
         let mut e = DeckEngine::new();
         let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
         e.track_ready(deck, gen, 120.0);
+        e.deck_mut(DeckId::A).grid = Some(grid(120.0, 0.0));
         assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
         assert!(!e.any_external_sync());
-        // With nothing to sync to, the first press still moves the control on
-        // to EXT on the next click — the mode is the operator's, not the
-        // other deck's.
-        e.deck_mut(DeckId::A).synced = true;
-        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Deck);
-        e.cycle_sync(DeckId::A);
+        // With nothing to follow, SYNC claims this deck as the group's
+        // reference — the press on the leading deck is never dead.
+        e.toggle_sync(DeckId::A);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Master);
+        assert_eq!(e.sync_master(), Some(DeckId::A));
+        // Again: let go. The group ends with its only member.
+        e.toggle_sync(DeckId::A);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
+        assert_eq!(e.sync_master(), None);
+        // EXT is its own toggle, not a hidden third press.
+        e.toggle_ext_sync(DeckId::A);
         assert_eq!(e.sync_mode(DeckId::A), SyncMode::External);
         assert!(e.any_external_sync(), "the detector must stay awake for this");
-        e.cycle_sync(DeckId::A);
+        e.toggle_ext_sync(DeckId::A);
         assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
         assert!(!e.any_external_sync());
+        // A plain SYNC press while EXT also releases it (the control is
+        // one surface).
+        e.toggle_ext_sync(DeckId::A);
+        e.toggle_sync(DeckId::A);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
+    }
+
+    /// The lock is a LOCK: a follower drifting against the master (an
+    /// analysed grid is never exactly the record) is pulled back with a
+    /// bounded rate trim, never a seek — the correction the EXT path has
+    /// always had, now held deck-to-deck.
+    #[test]
+    fn hold_deck_sync_trims_the_rate_and_never_seeks_a_drifting_follower() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 32.0, true);
+        engine.observe(DeckId::B, 16.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+        assert!(engine.hold_deck_sync().is_empty(), "in phase, nothing to do");
+
+        // B creeps 0.02 beats ahead (10 ms at 120 BPM): inaudible, exactly
+        // the drift a wrong-by-a-hair BPM produces over a phrase.
+        let ahead = engine.deck(DeckId::B).position_secs + 0.01;
+        engine.observe(DeckId::A, 32.0, true);
+        engine.observe(DeckId::B, ahead, true);
+        let cmds = engine.hold_deck_sync();
+        let rate = rate_of(&cmds, DeckId::B).expect("a trim, not silence: {cmds:?}");
+        assert!(
+            rate < 1.0 && rate > 1.0 - EXT_PHASE_TRIM - 1e-9,
+            "an ahead deck is slowed within the trim bound, got {rate}"
+        );
+        assert!(
+            seek_of(&cmds, DeckId::B).is_none(),
+            "drift is trimmed, never seeked: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|cmd| matches!(
+                cmd,
+                DeckCmd::SetRate { deck: DeckId::A, .. }
+                    | DeckCmd::SeekSeconds { deck: DeckId::A, .. }
+            )),
+            "the master is never touched"
+        );
+    }
+
+    /// A paused master is a frozen phase: the pin hands over to the playing
+    /// group member instead of dragging a live deck backwards toward it.
+    #[test]
+    fn a_stopped_master_hands_the_pin_to_the_playing_follower() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 126.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 130.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 60.0, true);
+        engine.observe(DeckId::B, 10.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 61.0, false);
+        engine.hold_deck_sync();
+        assert_eq!(
+            engine.sync_master(),
+            Some(DeckId::B),
+            "the playing group member takes the pin"
+        );
+        // And the new master is not corrected by its own servo.
+        assert!(engine.hold_deck_sync().is_empty());
+    }
+
+    /// A phase landing is placed where the lock will be true when the seek
+    /// ARRIVES: with a landing latency declared, the follower leads the
+    /// computed point by exactly rate × lookahead.
+    #[test]
+    fn a_sync_landing_leads_by_the_declared_lookahead() {
+        let bare = {
+            let mut engine = DeckEngine::new();
+            load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
+            load_analysed(&mut engine, DeckId::B, 2, 124.0, 0.05);
+            engine.play_pause(DeckId::A);
+            engine.play_pause(DeckId::B);
+            engine.observe(DeckId::A, 30.0, true);
+            engine.observe(DeckId::B, 20.0, true);
+            engine.apply_auto_sync();
+            engine.deck(DeckId::B).position_secs
+        };
+        let mut engine = DeckEngine::new();
+        engine.land_lookahead_secs = 0.02;
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
+        load_analysed(&mut engine, DeckId::B, 2, 124.0, 0.05);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 20.0, true);
+        engine.apply_auto_sync();
+        let landed = engine.deck(DeckId::B).position_secs;
+        let rate = engine.deck(DeckId::B).rate;
+        assert!(
+            (landed - (bare + rate * 0.02)).abs() < 1e-9,
+            "landed {landed}, uncompensated {bare}, rate {rate}"
+        );
+    }
+
+    /// The press ladder with both decks lit: the follower's press locks it,
+    /// the leader's press claims the master role instead of doing nothing.
+    /// (Auto sync off: the standing auto lock would have joined B already,
+    /// making the first press a release — the manual ladder is what is
+    /// under test.)
+    #[test]
+    fn sync_on_the_leading_deck_claims_master_instead_of_dying() {
+        let mut engine = DeckEngine::new();
+        engine.set_auto_sync(false);
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 12.0, true);
+
+        // B joins: locks to A, which becomes the (unclaimed) master.
+        engine.toggle_sync(DeckId::B);
+        assert_eq!(engine.sync_mode(DeckId::B), SyncMode::Deck);
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+        assert_eq!(engine.sync_mode(DeckId::A), SyncMode::Off, "pinned, not yet claimed");
+
+        // A's press claims the role — the old dead button.
+        engine.toggle_sync(DeckId::A);
+        assert_eq!(engine.sync_mode(DeckId::A), SyncMode::Master);
+
+        // A lets go: the pin hands to B, which keeps its tempo untouched.
+        let rate_before = engine.deck(DeckId::B).rate;
+        engine.toggle_sync(DeckId::A);
+        assert_eq!(engine.sync_master(), Some(DeckId::B));
+        assert_eq!(engine.sync_mode(DeckId::B), SyncMode::Master);
+        assert_eq!(engine.deck(DeckId::B).rate, rate_before);
+
+        // B off: the group is gone.
+        engine.toggle_sync(DeckId::B);
+        assert_eq!(engine.sync_master(), None);
+        assert!(engine.deck(DeckId::B).auto_opt_out, "off means off");
+        assert!(engine.apply_auto_sync().is_empty());
     }
 
     #[test]
@@ -3975,26 +4328,44 @@ mod tests {
     }
 
     #[test]
-    fn the_auto_fade_hold_keeps_auto_sync_off_the_outgoing_deck() {
+    fn a_pinned_master_survives_the_fader_and_the_hold_guards_the_servo() {
         let mut engine = DeckEngine::new();
-        // Both playing, fader on B: B leads, A is the follower auto sync
-        // would re-seek.
+        // A starts alone and the first lock pins it as master.
         load_analysed(&mut engine, DeckId::A, 1, 126.0, 0.0);
         engine.play_pause(DeckId::A);
         engine.observe(DeckId::A, 60.0, true);
         load_analysed(&mut engine, DeckId::B, 2, 130.0, 0.0);
         engine.play_pause(DeckId::B);
         engine.observe(DeckId::B, 10.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+
+        // The fader crossing to B used to flip leadership and yank A.
+        // Pinned, the master stands and corrections keep their direction.
         engine.set_crossfader(1.0);
-        engine.begin_auto_fade(DeckId::A);
+        assert_eq!(engine.sync_leader(), Some(DeckId::A));
+        let cmds = engine.apply_auto_sync();
         assert!(
-            engine.apply_auto_sync().is_empty(),
-            "the held outgoing deck is never re-seeked mid-fade"
+            !cmds.iter().any(|cmd| matches!(
+                cmd,
+                DeckCmd::SeekSeconds { deck: DeckId::A, .. }
+                    | DeckCmd::SetRate { deck: DeckId::A, .. }
+            )),
+            "the master is never the one corrected: {cmds:?}"
+        );
+
+        // An autopilot fade retiring B holds the servo off it even after
+        // its playhead is dragged out of phase.
+        engine.begin_auto_fade(DeckId::B);
+        engine.observe(DeckId::B, 17.3, true);
+        assert!(
+            engine.hold_deck_sync().is_empty(),
+            "the held outgoing deck is never corrected mid-fade"
         );
         engine.end_auto_fade();
         assert!(
-            !engine.apply_auto_sync().is_empty(),
-            "released, the standing auto sync takes over again"
+            !engine.hold_deck_sync().is_empty(),
+            "released, the standing lock takes over again"
         );
     }
 

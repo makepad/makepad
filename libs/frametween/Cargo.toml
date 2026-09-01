@@ -1,0 +1,19 @@
+# Makepad frame tweening — the VJ's realtime in-betweener, made reusable.
+#
+# Two pictures and a fraction in, the motion-true in-between out, entirely
+# on the GPU: classical pyramidal optical flow as fragment passes, plus the
+# in-house Practical-RIFE neural producer behind the same warp. The whole
+# mode set (none / crossfade / flow / three neural tiers) is enumerable, so
+# a host builds its menu from the library rather than hand-typing one.
+
+[package]
+name = "makepad-frametween"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+# The NEURAL producer: the in-house Practical-RIFE v4.26 port, running on
+# the macOS Metal/BLAS device path. Optional — without it the classical
+# flow, crossfade and hold tiers are all still there.
+makepad-ai-rife = { path = "../ai/models/rife" }

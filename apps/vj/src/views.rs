@@ -588,7 +588,15 @@ script_mod! {
             selected: instance(0.0)
             border_size: 1.0
             border_radius: 7.0
+            // SINGLE-FILL LAW (the pad wall's): with a thumbnail bound the
+            // IMAGE shader draws the whole tile — picture, rounded corners
+            // AND outline — in one pass, so the card paints nothing under
+            // it and a square picture can never clip through the corners.
+            has_thumb: instance(0.0)
             pixel: fn() {
+                if self.has_thumb > 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.border_radius)
                 sdf.fill_keep(self.color)
@@ -604,9 +612,18 @@ script_mod! {
             View{
                 width: Fill
                 height: Fill
-                padding: 3
+                // FULL-BLEED: the shader's own rounding replaces the inset.
                 align: Align{x: 0.5 y: 0.5}
-                grid_thumb := SpriteTileImage{}
+                grid_thumb := SpriteTileImage{
+                    draw_bg +: {
+                        // Sdf2d.box draws 2x its radius: the card's 7.0 is
+                        // this shader's 14.0.
+                        radius: 14.0
+                        border_size: 1.0
+                        border_color: #xffffff2a
+                        border_color_selected: #xff5c39
+                    }
+                }
             }
             View{
                 width: Fill
@@ -1948,6 +1965,11 @@ pub struct GridEntry {
     /// The one marked tile: on the clip grid the last one CLICKED (green
     /// ring, nothing else), on the SFX bank a pad with voices playing.
     pub active: bool,
+    /// The badge wears the LIVE prefix: the tile is on the program (or a
+    /// pad is sounding). Separate from `active` because a ring does not
+    /// always mean that — the archive explorer rings a SELECTION, and
+    /// calling a swatch LIVE would lie about what the room is seeing.
+    pub live: bool,
     /// A reserved-but-empty cell of the PENDING head column. It draws as
     /// the quiet grey placeholder and cannot be clicked — the column keeps
     /// its full height from the moment it opens so that filling it never
@@ -2120,6 +2142,7 @@ mod tile_fit_tests {
         assert!(step > 0.0 && step < 0.2, "one frame of spin: {step}");
         // A tile that is loading has to keep redrawing; a still one need not.
         let mut entry = GridEntry {
+            live: false,
             asset: AssetId::from_bytes([0; 16]),
             title: String::new(),
             sub: String::new(),
@@ -3424,7 +3447,20 @@ impl Widget for VjTileGrid {
         if self.entries.iter().any(entry_animates) {
             self.anim_frame = cx.new_next_frame();
         }
-        let width = self.view.area().rect(cx).size.x;
+        // The width this grid is about to be laid out at, PEEKED from the
+        // turtle. Reading it back from last frame's area does not work on a
+        // page that redraws in the same pass (the rect list is reset before
+        // this runs, so the area reads empty and the column count never
+        // left one — the archive page drew a single column of tiles); the
+        // area stays as the fallback for a host that walks with no width.
+        let width = {
+            let peeked = cx.peek_walk_turtle(walk).size.x;
+            if peeked > CARD_W {
+                peeked
+            } else {
+                self.view.area().rect(cx).size.x
+            }
+        };
         if width > CARD_W {
             self.last_cols = (((width + CARD_SPACING) / (CARD_W + CARD_SPACING)) as usize)
                 .clamp(1, GRID_SLOTS);
@@ -3477,7 +3513,7 @@ impl Widget for VjTileGrid {
                     let mut cell = item.view(cx, *path);
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
                     cell.label(cx, ids!(grid_sub)).set_text(cx, &entry.sub);
-                    let state = if entry.active {
+                    let state = if entry.live {
                         format!("LIVE {}", entry.state)
                     } else {
                         entry.state.clone()
@@ -3488,10 +3524,16 @@ impl Widget for VjTileGrid {
                     let frame = entry_frame(entry, now, index);
                     let aspect = thumb_aspect(cx, frame.as_ref());
                     let fill = thumb_fill(entry);
+                    // No thumbnail yet = no image at all (an empty Image
+                    // paints a black square); with one, the image shader
+                    // owns the tile and the card skips its own paint.
+                    let has_thumb = f32::from(u8::from(frame.is_some()));
+                    let selected = f32::from(u8::from(entry.active));
                     let mut thumb = cell.image(cx, ids!(grid_thumb));
+                    thumb.set_visible(cx, frame.is_some());
                     thumb.set_texture(cx, frame);
                     script_apply_eval!(cx, thumb, {
-                        draw_bg +: { fill: #(fill) img_aspect: #(aspect) }
+                        draw_bg +: { fill: #(fill) img_aspect: #(aspect) selected: #(selected) }
                     });
                     // The click's own feedback: spinner while the cue loads,
                     // a still red ring if it failed — and an effect tile
@@ -3506,9 +3548,8 @@ impl Widget for VjTileGrid {
                             draw_bg +: { spin: #(spin) failed: #(failed) }
                         });
                     }
-                    let selected = f32::from(u8::from(entry.active));
                     script_apply_eval!(cx, cell, {
-                        draw_bg +: { selected: #(selected) }
+                        draw_bg +: { selected: #(selected) has_thumb: #(has_thumb) }
                     });
                 }
                 item.draw_all(cx, &mut Scope::empty());
