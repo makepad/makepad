@@ -1,7 +1,7 @@
 //! Dense image positional encoding and ray-conditioned decoder context.
 
 use crate::backend::{
-    gpu_download, gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_upload, GpuTensor,
+    gpu_add, gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_upload, GpuTensor,
 };
 use crate::weights::BodyWeights;
 use crate::{DiffusionError, Result, DEC_NORM_EPS, DINO_DIM, NUM_PATCHES, PATCHES_SIDE};
@@ -47,8 +47,15 @@ pub fn ray_features(rays: &[f32]) -> Vec<f32> {
     output
 }
 
+/// The 1x1 conv over `[E + no_mask | ray features]` split into its two
+/// column blocks, `W_e` (1280 wide) and `W_f` (99 wide), so the context is
+/// `W_e E + (W_f feats + W_e no_mask)`: two resident linears and an add,
+/// no host round trip of the 1024 x 1280 embedding. The `W_e no_mask` term
+/// is a constant and lives in the second linear's bias.
 pub struct RayCond {
-    pub conv_w: GpuTensor,
+    image_w: GpuTensor,
+    ray_w: GpuTensor,
+    image_w_host: Vec<f32>,
     pub norm_w: Vec<f32>,
     pub norm_b: Vec<f32>,
 }
@@ -59,9 +66,19 @@ impl RayCond {
             "ray_cond_emb.conv.weight",
             &[DINO_DIM, DINO_DIM + RAY_FEATURES, 1, 1],
         )?;
+        let cols = DINO_DIM + RAY_FEATURES;
+        let mut image_w = vec![0.0f32; DINO_DIM * DINO_DIM];
+        let mut ray_w = vec![0.0f32; DINO_DIM * RAY_FEATURES];
+        for out in 0..DINO_DIM {
+            image_w[out * DINO_DIM..(out + 1) * DINO_DIM]
+                .copy_from_slice(&conv[out * cols..out * cols + DINO_DIM]);
+            ray_w[out * RAY_FEATURES..(out + 1) * RAY_FEATURES]
+                .copy_from_slice(&conv[out * cols + DINO_DIM..(out + 1) * cols]);
+        }
         Ok(Self {
-            conv_w: gpu_upload(&conv, DINO_DIM, DINO_DIM + RAY_FEATURES)
-                .map_err(DiffusionError::model)?,
+            image_w: gpu_upload(&image_w, DINO_DIM, DINO_DIM).map_err(DiffusionError::model)?,
+            ray_w: gpu_upload(&ray_w, DINO_DIM, RAY_FEATURES).map_err(DiffusionError::model)?,
+            image_w_host: image_w,
             norm_w: weights.f32_shaped("ray_cond_emb.norm.weight", &[DINO_DIM])?,
             norm_b: weights.f32_shaped("ray_cond_emb.norm.bias", &[DINO_DIM])?,
         })
@@ -87,24 +104,18 @@ impl RayCond {
                 NUM_PATCHES * RAY_FEATURES
             )));
         }
-
-        // Host assembly avoids requiring a device-specific broadcast/concat
-        // path; the convolution and normalization remain device-resident.
-        let image = gpu_download(e).map_err(DiffusionError::model)?;
-        let cols = DINO_DIM + RAY_FEATURES;
-        let mut joined = vec![0.0f32; NUM_PATCHES * cols];
-        for row in 0..NUM_PATCHES {
-            let dst = &mut joined[row * cols..(row + 1) * cols];
-            for c in 0..DINO_DIM {
-                dst[c] = image[row * DINO_DIM + c] + no_mask_embed[c];
-            }
-            dst[DINO_DIM..].copy_from_slice(
-                &feats[row * RAY_FEATURES..(row + 1) * RAY_FEATURES],
-            );
+        // W_e no_mask: 1.6M multiply-adds on the host, once per frame.
+        let mut bias = vec![0.0f32; DINO_DIM];
+        for (out, value) in bias.iter_mut().enumerate() {
+            let row = &self.image_w_host[out * DINO_DIM..(out + 1) * DINO_DIM];
+            *value = row.iter().zip(no_mask_embed).map(|(w, m)| w * m).sum();
         }
-        let joined = gpu_upload(&joined, NUM_PATCHES, cols).map_err(DiffusionError::model)?;
-        let projected = gpu_linear_f32_resident(&joined, &self.conv_w, None)
-            .map_err(DiffusionError::model)?;
+        let bias = gpu_upload(&bias, 1, DINO_DIM).map_err(DiffusionError::model)?;
+        let feats = gpu_upload(feats, NUM_PATCHES, RAY_FEATURES).map_err(DiffusionError::model)?;
+        let from_image = gpu_linear_f32_resident(e, &self.image_w, None).map_err(DiffusionError::model)?;
+        let from_rays =
+            gpu_linear_f32_resident(&feats, &self.ray_w, Some(&bias)).map_err(DiffusionError::model)?;
+        let projected = gpu_add(&from_image, &from_rays).map_err(DiffusionError::model)?;
         gpu_layer_norm_mul_add(&projected, &self.norm_w, &self.norm_b, DEC_NORM_EPS)
             .map_err(DiffusionError::model)
     }

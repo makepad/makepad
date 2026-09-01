@@ -2,7 +2,7 @@
 
 use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_download, gpu_gelu_erf,
-    gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_upload, GpuTensor,
+    gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_slice_rows, gpu_upload, GpuTensor,
 };
 use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
 use crate::weights::BodyWeights;
@@ -418,11 +418,21 @@ impl Decoder {
             hidden = gpu_add(&hidden, &ffn).map_err(DiffusionError::model)?;
 
             let normed = layer_norm_gpu(&hidden, &self.norm_final)?;
-            final_normed = gpu_download(&normed).map_err(DiffusionError::model)?;
+            // Only the pose token leaves the GPU mid-loop; the whole block
+            // is downloaded once at the end (the hand-box rows and the
+            // output) or when a trace wants every layer.
+            let last_layer = layer_index + 1 == DEC_DEPTH;
+            let pose_row = if last_layer || trace.is_some() {
+                final_normed = gpu_download(&normed).map_err(DiffusionError::model)?;
+                final_normed[..DEC_DIM].to_vec()
+            } else {
+                let row = gpu_slice_rows(&normed, 0, 1).map_err(DiffusionError::model)?;
+                gpu_download(&row).map_err(DiffusionError::model)?
+            };
             if let Some(callback) = &mut trace {
                 (**callback)(layer_index, &hidden, &final_normed)?;
             }
-            let pose_token = &final_normed[..DEC_DIM];
+            let pose_token = &pose_row[..DEC_DIM];
             last_pose = self.step_heads.pose(pose_token)?;
             add_in_place(&mut last_pose, &self.init_pose);
             last_camera = self.step_heads.camera(pose_token)?;
