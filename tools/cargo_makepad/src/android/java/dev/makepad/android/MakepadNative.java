@@ -63,6 +63,10 @@ public class MakepadNative {
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     
+    // file and folder dialogs (Storage Access Framework).
+    // An empty uris array means the user cancelled.
+    public native static void onFileDialogResult(int requestCode, String[] uris);
+
     // permissions
     public native static void onPermissionResult(String permission, int requestId, int status);
 

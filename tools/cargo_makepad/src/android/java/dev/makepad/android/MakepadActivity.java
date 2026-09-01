@@ -33,6 +33,7 @@ import android.media.MediaFormat;
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -79,6 +80,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -1028,6 +1030,11 @@ public class MakepadActivity
     // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
     private boolean mSystemBarDarkIcons = false;
 
+    // File/folder dialogs (Storage Access Framework). Request codes we handed
+    // out and are still waiting on; anything else arriving in onActivityResult
+    // belongs to somebody else and must be left alone.
+    private final HashSet<Integer> mFileDialogRequests = new HashSet<>();
+
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
     private boolean mHasSelection = false;
@@ -1469,6 +1476,10 @@ public class MakepadActivity
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (mFileDialogRequests.remove(requestCode)) {
+            handleFileDialogResult(requestCode, resultCode, data);
+            return;
+        }
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
     }
 
@@ -1527,6 +1538,108 @@ public class MakepadActivity
         } else {
             // Permissions are granted at install time on older Android versions
             MakepadNative.onPermissionResult(permission, requestId, 1); // 1 = Granted
+        }
+    }
+
+    // Storage Access Framework picker. Called from Rust on the render thread,
+    // from inside the platform-op drain that holds the Cx borrow, so the Intent
+    // is built and started on the looper: Activity methods are main-thread only,
+    // and startActivityForResult must not run under that borrow.
+    //
+    // kind: 0 = ACTION_OPEN_DOCUMENT, 1 = ACTION_CREATE_DOCUMENT,
+    //       2 = ACTION_OPEN_DOCUMENT_TREE.
+    public void openFileDialog(
+        final int requestCode,
+        final int kind,
+        final String mimeType,
+        final String[] mimeTypes,
+        final boolean allowMultiple,
+        final String fileName
+    ) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent intent;
+                    if (kind == 2) {
+                        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    } else if (kind == 1) {
+                        intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType(mimeType);
+                        if (fileName != null && !fileName.isEmpty()) {
+                            intent.putExtra(Intent.EXTRA_TITLE, fileName);
+                        }
+                    } else {
+                        intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType(mimeType);
+                        if (allowMultiple) {
+                            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                        }
+                    }
+                    if (kind != 2 && mimeTypes != null && mimeTypes.length > 0) {
+                        intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+                    }
+                    // Ask for a grant that outlives this process, so a URI handed
+                    // to Rust is still openable after the app is killed and
+                    // relaunched (see takePersistableUriPermission below).
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    if (kind != 0) {
+                        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    }
+                    mFileDialogRequests.add(requestCode);
+                    startActivityForResult(intent, requestCode);
+                } catch (Throwable e) {
+                    // No document provider on the device, or the activity is
+                    // gone. Cancelling is the honest answer: the user gets no
+                    // picker, and Rust must not be left waiting forever.
+                    Log.e(LOG_TAG, "openFileDialog failed", e);
+                    mFileDialogRequests.remove(requestCode);
+                    MakepadNative.onFileDialogResult(requestCode, new String[0]);
+                }
+            }
+        });
+    }
+
+    // An empty URI array means cancelled, which is a normal outcome.
+    private void handleFileDialogResult(int requestCode, int resultCode, Intent data) {
+        ArrayList<String> uris = new ArrayList<>();
+        if (resultCode == RESULT_OK && data != null) {
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                // Multi-select answers through ClipData; single-select through
+                // getData(). A picker set to allow multiple still uses getData()
+                // when the user picked exactly one.
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri uri = clip.getItemAt(i).getUri();
+                    if (uri != null) {
+                        takePersistableUriPermission(uri, data.getFlags());
+                        uris.add(uri.toString());
+                    }
+                }
+            } else if (data.getData() != null) {
+                Uri uri = data.getData();
+                takePersistableUriPermission(uri, data.getFlags());
+                uris.add(uri.toString());
+            }
+        }
+        MakepadNative.onFileDialogResult(requestCode, uris.toArray(new String[0]));
+    }
+
+    private void takePersistableUriPermission(Uri uri, int intentFlags) {
+        int grant = intentFlags
+            & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (grant == 0) {
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(uri, grant);
+        } catch (Throwable e) {
+            // Not every provider offers a persistable grant. The URI is still
+            // usable for this run, which is all most callers need.
+            Log.w(LOG_TAG, "takePersistableUriPermission failed: " + e);
         }
     }
 

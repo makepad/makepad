@@ -1205,6 +1205,26 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionResu
     });
 }
 
+/// The answer to a file/folder dialog, from `MakepadActivity.onActivityResult`.
+///
+/// An empty `uris` array is a cancel — which is a normal outcome, not an
+/// error. Answering straight from here rather than through
+/// `FromJavaMessage` is deliberate: `Cx::post_action` is the platform-wide
+/// contract for a dialog answer and is already cross-thread safe, so a hop
+/// through the render-thread queue would buy nothing.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResult(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    request_code: jni_sys::jint,
+    uris: jni_sys::jobjectArray,
+) {
+    super::android_file_dialog::on_result(
+        request_code as i32,
+        java_string_array_to_vec(env, uris),
+    );
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onLocationUpdate(
     _: *mut jni_sys::JNIEnv,
@@ -2156,6 +2176,71 @@ pub unsafe fn to_java_check_permission(permission: &str) -> i32 {
 
     (**env).DeleteLocalRef.unwrap()(env, permission_jstr);
     result
+}
+
+/// Ask the activity to start a Storage Access Framework picker.
+///
+/// The activity hops onto its own looper before it touches the Intent (see
+/// `MakepadActivity.openFileDialog`): `startActivityForResult` is an
+/// Activity call, and this runs on the render thread from inside the
+/// platform-op drain, which holds the `Cx` borrow.
+pub unsafe fn to_java_open_file_dialog(
+    request_code: i32,
+    kind: i32,
+    mime_type: &str,
+    mime_types: &[String],
+    allow_multiple: bool,
+    file_name: &str,
+) {
+    let env = attach_jni_env();
+    let mime_jstr = new_java_string(env, mime_type);
+    let mime_types_array = new_java_string_array(env, mime_types);
+    let file_name_jstr = new_java_string(env, file_name);
+
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "openFileDialog",
+        "(IILjava/lang/String;[Ljava/lang/String;ZLjava/lang/String;)V",
+        request_code as jni_sys::jint,
+        kind as jni_sys::jint,
+        mime_jstr,
+        mime_types_array,
+        allow_multiple as std::os::raw::c_int,
+        file_name_jstr
+    );
+
+    (**env).DeleteLocalRef.unwrap()(env, file_name_jstr);
+    (**env).DeleteLocalRef.unwrap()(env, mime_types_array);
+    (**env).DeleteLocalRef.unwrap()(env, mime_jstr);
+}
+
+unsafe fn new_java_string(env: *mut jni_sys::JNIEnv, value: &str) -> jni_sys::jstring {
+    // An interior NUL cannot reach Java through the modified-UTF8 API at
+    // all; an empty string is the harmless reading of a filename or MIME
+    // type that malformed.
+    let value = CString::new(value).unwrap_or_default();
+    ((**env).NewStringUTF.unwrap())(env, value.as_ptr())
+}
+
+unsafe fn new_java_string_array(
+    env: *mut jni_sys::JNIEnv,
+    values: &[String],
+) -> jni_sys::jobjectArray {
+    let class = ((**env).FindClass.unwrap())(env, b"java/lang/String\0".as_ptr() as _);
+    let array = ((**env).NewObjectArray.unwrap())(
+        env,
+        values.len() as jni_sys::jsize,
+        class,
+        std::ptr::null_mut(),
+    );
+    for (index, value) in values.iter().enumerate() {
+        let value = new_java_string(env, value);
+        ((**env).SetObjectArrayElement.unwrap())(env, array, index as jni_sys::jsize, value);
+        (**env).DeleteLocalRef.unwrap()(env, value);
+    }
+    (**env).DeleteLocalRef.unwrap()(env, class);
+    array
 }
 
 pub unsafe fn to_java_start_location_updates(min_interval_ms: i64, min_distance_m: f32) {
