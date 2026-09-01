@@ -1492,8 +1492,35 @@ mod tests {
         // The licensing guard lives in the note: the x.1 refreshes are NC.
         assert!(depth.note.as_deref().unwrap().contains("Apache-2.0"));
 
-        // Body domain: externally provisioned persistent worker, no hub-side
-        // model artifact download.
+        // Body domain: pinned native artifact and externally provisioned
+        // reference worker.
+        let native_body = registry.find("sam3dbody").unwrap();
+        assert_eq!(native_body.domain, Domain::Body);
+        assert_eq!(native_body.backend, "body-native");
+        assert!(native_body.available && !native_body.gated);
+        assert_eq!(native_body.vram_gb, Some(4.5));
+        assert_eq!(native_body.files.len(), 1);
+        let body_weights = native_body.file_by_role("native-body").unwrap();
+        assert_eq!(body_weights.repo, "Comfy-Org/sam-3d-body");
+        assert_eq!(
+            body_weights.path,
+            "detection/sam_3d_body_dinov3_bf16.safetensors"
+        );
+        assert_eq!(
+            body_weights.revision.as_deref(),
+            Some("60476aced0b8de0a0e82a318c79a85061cc97434")
+        );
+        assert_eq!(body_weights.size, Some(2_830_737_652));
+        assert_eq!(
+            body_weights.sha256.as_deref(),
+            Some("59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf")
+        );
+        assert_eq!(
+            body_weights.cache_as,
+            "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors"
+        );
+        assert!(!body_weights.repo.starts_with("facebook/"));
+
         let body = registry.find("sam3dbody-ref").unwrap();
         assert_eq!(body.domain, Domain::Body);
         assert_eq!(body.backend, "body");

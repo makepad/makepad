@@ -27,6 +27,7 @@ default = [
     "matte-native",
     "depth-native",
     "segment-native",
+    "body-native",
     "upscale-native",
     "motion-native",
     "rig-native",
@@ -73,6 +74,8 @@ matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
 segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# Native SAM 3D Body pose estimation.
+body-native = ["dep:makepad-ai-body", "dep:makepad-ai-common"]
 # Native RealESRGAN x4plus general-image upscaling. Independent of `mesh`.
 upscale-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native HY-Motion decode -> rig retarget -> animated GLB.
@@ -107,6 +110,7 @@ makepad-ai-flux = { path = "../../ai/models/flux", optional = true }
 makepad-ai-h3 = { path = "../../ai/models/h3", optional = true }
 makepad-ai-rife = { path = "../../ai/models/rife", optional = true }
 makepad-ai-vision = { path = "../../ai/models/vision", optional = true }
+makepad-ai-body = { path = "../models/body", optional = true }
 makepad-ai-rig = { path = "../../ai/models/rig", optional = true }
 makepad-ai-motion = { path = "../../ai/models/motion", optional = true }
 makepad-ai-sfx = { path = "../../ai/models/sfx", optional = true }

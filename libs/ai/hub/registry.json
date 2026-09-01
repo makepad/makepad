@@ -1742,6 +1742,32 @@
    ]
   },
   {
+   "id": "sam3dbody",
+   "domain": "body",
+   "backend": "body-native",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "SAM License",
+    "url": "https://huggingface.co/Comfy-Org/sam-3d-body",
+    "summary": "SAM 3D Body is under the SAM License / Meta acceptable-use terms published with the checkpoint. Review the model card before production use. This stack never downloads facebook/* checkpoints.",
+    "restriction": "community"
+   },
+   "vram_gb": 4.5,
+   "note": "SAM 3D Body (Comfy-Org/sam-3d-body, SAM License) RGB image -> application/json human pose packet. Native Rust inference; no Python, Torch, subprocess, or silent fallback. facebook/* checkpoints are never fetched. The checkpoint is pinned to an immutable revision, byte size, and SHA-256.",
+   "files": [
+    {
+     "role": "native-body",
+     "repo": "Comfy-Org/sam-3d-body",
+     "path": "detection/sam_3d_body_dinov3_bf16.safetensors",
+     "revision": "60476aced0b8de0a0e82a318c79a85061cc97434",
+     "cache_as": "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors",
+     "size": 2830737652,
+     "sha256": "59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf"
+    }
+   ]
+  },
+  {
    "id": "sam3dbody-ref",
    "domain": "body",
    "backend": "body",

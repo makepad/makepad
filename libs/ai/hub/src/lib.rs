@@ -33,6 +33,7 @@
 
 pub mod backend;
 pub mod body_backend;
+pub mod body_native_backend;
 pub mod chat_wire;
 pub use makepad_base64;
 pub mod client;
