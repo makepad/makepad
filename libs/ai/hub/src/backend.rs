@@ -1579,6 +1579,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "matte-native" => cfg!(feature = "matte-native"),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
         "video-enhance" => {
             cfg!(feature = "upscale-native")
@@ -1635,9 +1636,12 @@ pub fn backend_provisioned(name: &str) -> bool {
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),
         "ocr" => crate::vision_backend::vision_provisioned(),
-        "body" => crate::body_backend::body_provisioned(),
+        "body" => {
+            crate::body_backend::body_provisioned() || cfg!(feature = "body-native")
+        }
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
         "video-enhance" => {
             cfg!(feature = "upscale-native")
@@ -1768,6 +1772,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
             &spec.id,
         ))),
         "body" => Ok(Box::new(crate::body_backend::BodyBackend::new(&spec.id))),
+        #[cfg(feature = "body-native")]
+        "body-native" => Ok(Box::new(
+            crate::body_native_backend::BodyNativeBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(feature = "body-native"))]
+        "body-native" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'body-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "flux")]
         "flux" => Ok(Box::new(crate::flux_backend::FluxBackend::new(&spec.id))),
         #[cfg(not(feature = "flux"))]
