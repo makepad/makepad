@@ -114,6 +114,12 @@ impl BodyModel {
         self.crop_size
     }
 
+    /// FP8 backbone (E4M3 weights, tensor-core FP8 GEMM): about half the
+    /// backbone time on Ada, at a measured accuracy cost (see the oracle test).
+    pub fn set_backbone_fp8(&self, on: bool) {
+        self.dino.set_fp8(on);
+    }
+
     /// `rgb` is `width * height * 3` bytes; `bbox` is the person box in
     /// full-image pixels (xyxy), the whole image when `None`.
     pub fn infer(
@@ -301,6 +307,17 @@ mod tests {
             lean.ms, model.last_stage_ms[3]
         );
         assert!(lean3 < 5.0e-3, "lean rig mode drifted: {lean3} m");
+        // FP8 backbone: the tensor-core lever, measured.
+        model.set_backbone_fp8(true);
+        let _ = model.infer(&rgb, w, h, None).expect("infer fp8");
+        let fp8 = model.infer(&rgb, w, h, None).expect("infer fp8");
+        let (fp8_3, _) = max_abs(&fp8.people[0].kp3d, &fixture::load("final_pred_keypoints_3d").unwrap().1);
+        let (fp8_2, _) = max_abs(&fp8.people[0].kp2d, &fixture::load("final_pred_keypoints_2d").unwrap().1);
+        eprintln!(
+            "body fp8 backbone: warm {:.1} ms (backbone {:.1}, loop {:.1}); kp3d max {fp8_3:.4} m, kp2d max {fp8_2:.2} px vs reference",
+            fp8.ms, model.last_stage_ms[1], model.last_stage_ms[3]
+        );
+        model.set_backbone_fp8(false);
         // The same image through smaller crops: the speed/accuracy knob,
         // reported against the reference at 512 (not asserted tightly: these
         // sizes were never trained).

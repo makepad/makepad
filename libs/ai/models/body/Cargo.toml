@@ -8,3 +8,5 @@ license = "MIT"
 [dependencies]
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
+# Only for its FP8 E4M3 encoder (the optional FP8 backbone mode).
+makepad-ai-flux = { path = "../flux" }
