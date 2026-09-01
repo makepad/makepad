@@ -3,12 +3,13 @@
 //! Metal try_* kernels. Small addressing ops stay on the host. No oracle;
 //! goal is a working Metal path we can then keep cutting copies.
 
-use crate::gpu_types::{GpuLinearPart, GpuTensor};
+use crate::gpu_types::{fresh_tensor_id, GpuLinearPart, GpuTensor};
+use makepad_ai_cuda::quant::GGML_TYPE_F32;
 pub use crate::shim::{VitLayerRef, VitLinearRef};
 use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_group_norm_planar_f32, try_layer_norm_mul_add_f32, try_matmul_nt_f32, try_mul_f32,
-    try_silu_f32, try_vit_backbone_resident_f32,
+    try_matmul_nt_ggml_bytes_keyed, try_silu_f32, try_vit_backbone_resident_f32,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
         cols,
         data: RefCell::new(data),
         u32s: RefCell::new(Vec::new()),
+        id: std::cell::Cell::new(fresh_tensor_id()),
     }
 }
 
@@ -134,6 +136,7 @@ pub fn upload_u32(values: &[u32]) -> Result<GpuTensor, String> {
         cols: 1,
         data: RefCell::new(Vec::new()),
         u32s: RefCell::new(values.to_vec()),
+        id: std::cell::Cell::new(fresh_tensor_id()),
     })
 }
 
@@ -152,6 +155,7 @@ pub fn upload_into(t: &GpuTensor, values: &[f32]) -> Result<(), String> {
         }
     }
     *slot = values.to_vec();
+    t.id.set(fresh_tensor_id());
     Ok(())
 }
 
@@ -162,6 +166,7 @@ pub fn copy_into(src: &GpuTensor, dst: &GpuTensor) -> Result<(), String> {
         .try_borrow_mut()
         .map_err(|_| "metal copy_into borrow".to_string())?;
     *dst_data = src_data;
+    dst.id.set(fresh_tensor_id());
     Ok(())
 }
 
@@ -403,17 +408,42 @@ pub fn linear_nt(
     Ok(tensor(x.rows, n, out))
 }
 
+/// Linear against a long-lived f32 weight: the weight goes to the device
+/// once, cached under the tensor's content identity (the CUDA contract keeps
+/// the weight resident too), so a per-frame call pays for the GEMM only.
 pub fn linear_f32_resident(
     x: &GpuTensor,
     w: &GpuTensor,
     bias: Option<&GpuTensor>,
 ) -> Result<GpuTensor, String> {
     let xd = data(x)?;
-    let wd = data(w)?;
     let n = w.rows;
     let k = w.cols;
-    let mut out = try_matmul_nt_f32(&xd, &wd, x.rows, k, n)
-        .ok_or_else(|| "metal resident matmul failed".to_string())?;
+    if x.cols != k {
+        return Err(format!(
+            "metal resident linear k mismatch: x {}x{}, w {}x{}",
+            x.rows, x.cols, w.rows, w.cols
+        ));
+    }
+    let cache_key = format!("t{}", w.id.get());
+    let mut out = try_matmul_nt_ggml_bytes_keyed(
+        &xd,
+        GGML_TYPE_F32,
+        x.rows,
+        k,
+        n,
+        "resident_f32",
+        &cache_key,
+        || {
+            let wd = data(w)?;
+            let mut bytes = Vec::with_capacity(wd.len() * 4);
+            for value in wd.iter() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(bytes)
+        },
+    )
+    .ok_or_else(|| "metal resident matmul failed".to_string())?;
     if let Some(bias) = bias {
         let bd = data(bias)?;
         for r in 0..x.rows {
