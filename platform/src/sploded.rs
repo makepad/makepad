@@ -477,6 +477,7 @@ impl Cx {
     /// After a panic was contained at a platform callback boundary the mode
     /// is the first suspect: leave it, so a mode-specific fault cannot
     /// wound every following frame, and let the flat app draw again.
+    #[allow(dead_code)] // wired where panics are contained at the callback boundary (macos today)
     pub(crate) fn sploded_recover_after_panic(&mut self) {
         if self.sploded.active {
             crate::log!("sploded view OFF — a panic was contained while it was up");

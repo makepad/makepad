@@ -183,6 +183,7 @@ pub fn fit_window_rect_to_screens(screens: &[ScreenGeom], window: Rect) -> Rect 
 ///
 /// An empty `screens` returns the point unchanged, for the same reason
 /// [`fit_window_rect_to_screens`] does.
+#[allow(dead_code)] // not every window driver clamps yet
 pub fn clamp_point_to_screens(screens: &[ScreenGeom], point: Vec2d) -> Vec2d {
     fit_window_rect_to_screens(
         screens,
@@ -214,6 +215,7 @@ pub const MAX_WINDOW_SIZE: Vec2d = Vec2d { x: 16384.0, y: 16384.0 };
 /// [`DEFAULT_WINDOW_SIZE`]; a resize has an existing, working window to leave alone, so a request
 /// that says nothing is refused outright rather than turned into a size the caller never asked
 /// for. `None` means "keep the window as it is, and say why".
+#[allow(dead_code)] // not every window driver sanitizes resizes yet
 pub fn sanitize_resize(size: Vec2d) -> Option<Vec2d> {
     if !(size.x.is_finite() && size.y.is_finite() && size.x >= 1.0 && size.y >= 1.0) {
         return None;
