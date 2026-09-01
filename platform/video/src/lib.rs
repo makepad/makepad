@@ -633,24 +633,101 @@ pub fn encode_intra_frame_mp4(
     apple_intra_frame::encode_intra_frame_mp4(nv12, width, height, fps.max(1), bitrate_bps, codec)
 }
 
-/// Only the Apple compression session is driven directly today; every other
-/// platform answers with an error so a caller (the image-tiles tape baker)
-/// can fall back or report, instead of the crate failing to build there.
+/// The same single-frame mp4 on the other platforms, through the platform
+/// file encoder (Media Foundation sink writer on Windows, GStreamer on
+/// Linux): one keyframe-only stream, one frame, written to a scratch file
+/// and read back. It pays the container machinery the Apple path avoids,
+/// but the bytes mean the same thing to every decoder, which is what a
+/// tile tape needs — the tape format is not a platform's.
 #[cfg(not(target_os = "macos"))]
 pub fn encode_intra_frame_mp4(
-    _nv12: &[u8],
+    nv12: &[u8],
     width: u32,
     height: u32,
-    _fps: u32,
-    _bitrate_bps: u32,
-    _codec: VideoFileCodec,
+    fps: u32,
+    bitrate_bps: u32,
+    codec: VideoFileCodec,
 ) -> Result<Vec<u8>, VideoFileError> {
     if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
         return Err(VideoFileError::new(format!(
             "invalid frame size {width}x{height} (must be nonzero and even)"
         )));
     }
-    Err(VideoFileError::new(
-        "single-frame mp4 encode is only implemented on macOS",
-    ))
+    let options = VideoFileEncoderOptions {
+        codec,
+        width,
+        height,
+        fps_num: fps.max(1),
+        fps_den: 1,
+        video_bitrate_bps: bitrate_bps,
+        audio: None,
+        keyframe_only: true,
+    };
+    // A scratch path of our own: the sink writers want a file name, and the
+    // caller wants bytes. Unique per process + call so parallel bakers never
+    // share one.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "makepad-intra-{}-{seq}.mp4",
+        std::process::id()
+    ));
+    let text = path.to_string_lossy().to_string();
+    let result = (|| {
+        let mut encoder = VideoFileEncoder::new(&text, options)?;
+        encoder.push_frame_nv12(nv12, Some(0))?;
+        encoder.finish()?;
+        std::fs::read(&path).map_err(|e| VideoFileError::new(format!("read {text}: {e}")))
+    })();
+    let _ = std::fs::remove_file(&path);
+    let bytes = result?;
+    if bytes.is_empty() {
+        return Err(VideoFileError::new(format!("{text}: encoder wrote no bytes")));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod intra_frame_tests {
+    use super::*;
+
+    /// One frame in, one decodable frame of the same size out — on whichever
+    /// platform runs the test (the Apple session path or the file-encoder
+    /// path), so a tape baked on one machine reads on another.
+    #[test]
+    fn single_frame_round_trips_through_the_platform_decoder() {
+        let (w, h) = (64u32, 48u32);
+        let mut nv12 = vec![0u8; nv12::nv12_frame_size(w, h)];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                nv12[y * w as usize + x] = ((x * 255) / (w as usize - 1)) as u8;
+            }
+        }
+        for v in &mut nv12[(w * h) as usize..] {
+            *v = 128;
+        }
+        let bytes = match encode_intra_frame_mp4(&nv12, w, h, 30, 2_000_000, VideoFileCodec::H265) {
+            Ok(bytes) => bytes,
+            Err(e) if e.context.contains("not implemented") => return,
+            Err(e) => panic!("encode: {e:?}"),
+        };
+        assert!(bytes.len() > 64, "{} bytes", bytes.len());
+        assert!(
+            bytes.windows(4).any(|b| b == b"ftyp") && bytes.windows(4).any(|b| b == b"moov"),
+            "not an mp4 container"
+        );
+        let path = std::env::temp_dir().join(format!("makepad-intra-test-{}.mp4", std::process::id()));
+        std::fs::write(&path, &bytes).expect("write");
+        let text = path.to_string_lossy().to_string();
+        let decoded = (|| {
+            let mut dec = VideoFileDecoder::open(&text)?;
+            let frame = dec.next_frame()?.ok_or_else(|| VideoFileError::new("no frame"))?;
+            let second = dec.next_frame()?;
+            Ok::<_, VideoFileError>(((frame.width, frame.height), second.is_none()))
+        })();
+        let _ = std::fs::remove_file(&path);
+        let (size, single) = decoded.expect("decode");
+        assert_eq!(size, (w, h));
+        assert!(single, "exactly one frame");
+    }
 }
