@@ -1,0 +1,22 @@
+The MIDI performances in this folder are not ours.
+
+    Performer and sequencer : Bernd Krueger
+    Source                  : http://www.piano-midi.de
+    Licence                 : Creative Commons Attribution-ShareAlike 3.0
+                              Germany (CC BY-SA 3.0 DE)
+                              https://creativecommons.org/licenses/by-sa/3.0/de/
+
+They are real performances — played dynamics, pedalling and rubato — which is
+why they are here: an engraving says which notes, a performance says how they
+were struck, and only the second one tells you whether an instrument sounds
+like an instrument.
+
+They are distributed UNMODIFIED, as a collection alongside this application.
+The ShareAlike term binds adaptations of these files; it does not reach the
+application's own source, which stays under the repository's licence. Anyone
+redistributing them must keep this notice, and anyone publishing an ADAPTATION
+of one of them (an edited MIDI, say) must license that adaptation under
+CC BY-SA 3.0 as well.
+
+The application credits Bernd Krueger and piano-midi.de in its About dialog and
+on the status line whenever one of these pieces is opened.
