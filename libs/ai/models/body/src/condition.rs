@@ -4,7 +4,7 @@ use crate::backend::{
     gpu_add, gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_upload, GpuTensor,
 };
 use crate::weights::BodyWeights;
-use crate::{DiffusionError, Result, DEC_NORM_EPS, DINO_DIM, NUM_PATCHES, PATCHES_SIDE};
+use crate::{DiffusionError, Result, DEC_NORM_EPS, DINO_DIM, PATCHES_SIDE};
 
 const PE_HALF: usize = DINO_DIM / 2;
 const RAY_FEATURES: usize = 99;
@@ -132,6 +132,7 @@ impl RayCond {
 mod tests {
     use super::*;
     use crate::backend::{gpu_device_available, gpu_download, gpu_upload};
+    use crate::NUM_PATCHES;
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
