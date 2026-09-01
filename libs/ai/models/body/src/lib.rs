@@ -29,6 +29,7 @@ pub mod condition;
 pub mod decoder;
 pub mod dino;
 pub mod hands;
+pub mod mask;
 mod heads;
 pub mod mhr;
 pub mod model;

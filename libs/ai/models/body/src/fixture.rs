@@ -10,6 +10,7 @@ pub enum OracleRoot {
     Body,
     Full,
     Hands,
+    Mask,
 }
 
 impl OracleRoot {
@@ -18,6 +19,7 @@ impl OracleRoot {
             Self::Body => "oracle",
             Self::Full => "oracle_full",
             Self::Hands => "oracle_hands",
+            Self::Mask => "oracle_mask",
         }
     }
 }
