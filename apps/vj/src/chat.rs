@@ -2,7 +2,7 @@
 //!
 //! The mechanics — the session, the worker thread on a channel, the
 //! transcript with its tool chips and rate meter, cancel and clear — are the
-//! shared component in [`makepad_asset_chat_ui`], the exact flow the asset
+//! shared component in [`makepad_chat_ui`], the exact flow the asset
 //! UI and the game sandbox run. This file is what makes it the VJ's chat:
 //!
 //! - it opens the session as `("gen", "vj")` — the generation namespace this
@@ -16,13 +16,13 @@
 //! executes catalog and operation tools with its own credentials, and
 //! streams the turn back over `/v1/chat/sessions/*`.
 
-use makepad_asset_chat_ui::{ChatFeed, FeedConfig, NoClientTools};
+use makepad_chat_ui::{ChatFeed, FeedConfig, NoClientTools};
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
 use std::path::PathBuf;
 
 /// The transcript and its rate meter are the shared component's; this app
 /// only reads them.
-pub use makepad_asset_chat_ui::{ChatData, ChatRole};
+pub use makepad_chat_ui::{ChatData, ChatRole};
 
 /// The VJ's handle on the chat: the shared feed once the asset server
 /// session is up. No app-owned tool state — the vj profile has none.
@@ -110,7 +110,7 @@ mod tests {
         assert!(!bridge.is_linked());
         ChatData::clear();
         bridge.send("play something darker".into(), Vec::new());
-        let data = makepad_asset_chat_ui::CHAT.read().unwrap();
+        let data = makepad_chat_ui::CHAT.read().unwrap();
         let users: Vec<&str> = data
             .messages
             .iter()
