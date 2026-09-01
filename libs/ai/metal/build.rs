@@ -124,6 +124,10 @@ fn build_metallib() {
             "metal",
             "-O3",
             "-fno-fast-math",
+            // The runtime source compile defines this on bfloat-capable
+            // devices; the precompiled library must carry the same kernels
+            // (the shader drops the define itself below Metal 3.1).
+            "-DGGML_METAL_HAS_BF16=1",
             "-c",
             &metal_src,
             "-I",

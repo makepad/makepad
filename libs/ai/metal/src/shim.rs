@@ -345,6 +345,58 @@ pub fn clear_decoder_kv_cache() {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
+/// a ggml dtype, its output width and its bias (empty for none).
+#[derive(Clone, Copy)]
+pub struct VitLinearRef<'a> {
+    pub w_bytes: &'a [u8],
+    pub w_ggml_type: u32,
+    pub n: usize,
+    pub bias: &'a [f32],
+}
+
+/// One pre-norm ViT layer with rotary attention and a SwiGLU feed-forward
+/// (the DINOv3 block): `x += out(attn(rope(q(n1)), rope(k(n1)), v(n1)))`,
+/// then `x += down(silu(gate(n2)) * up(n2))`, both norms LayerNorm with an
+/// affine. Layer scales are expected folded into `out` and `down`.
+#[derive(Clone, Copy)]
+pub struct VitLayerRef<'a> {
+    pub norm1_w: &'a [f32],
+    pub norm1_b: &'a [f32],
+    pub q: VitLinearRef<'a>,
+    pub k: VitLinearRef<'a>,
+    pub v: VitLinearRef<'a>,
+    pub out: VitLinearRef<'a>,
+    pub norm2_w: &'a [f32],
+    pub norm2_b: &'a [f32],
+    pub gate: VitLinearRef<'a>,
+    pub up: VitLinearRef<'a>,
+    pub down: VitLinearRef<'a>,
+}
+
+/// Runs a whole ViT stack device-resident: `x` (`[seq_len, n_state]`) goes
+/// up once, every layer encodes into one command buffer against cached
+/// weights, and only the final normalised activations come back.
+/// `cos`/`sin` are `[seq_len, rot_half]` rotate-half tables.
+#[allow(clippy::too_many_arguments)]
+pub fn try_vit_backbone_resident_f32(
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    n_head: usize,
+    rot_half: usize,
+    cos: &[f32],
+    sin: &[f32],
+    layers: &[VitLayerRef<'_>],
+    final_norm_w: &[f32],
+    final_norm_b: &[f32],
+    eps: f32,
+) -> Option<Vec<f32>> {
+    imp::try_vit_backbone_resident_f32(
+        x, seq_len, n_state, n_head, rot_half, cos, sin, layers, final_norm_w, final_norm_b, eps,
+    )
+}
+
 pub fn try_flash_attn_f32_self_kv_cache(
     layer: usize,
     q: &[f32],
@@ -1042,6 +1094,23 @@ mod imp {
     pub(super) fn clear_decoder_kv_cache() {}
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &[f32],
+        _sin: &[f32],
+        _layers: &[super::VitLayerRef<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1596,6 +1665,23 @@ mod imp {
 
     pub(super) fn clear_decoder_kv_cache() {}
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &[f32],
+        _sin: &[f32],
+        _layers: &[super::VitLayerRef<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1790,6 +1876,9 @@ mod imp {
     const OP_FLASH_ATTN_EXT_VEC_NCPSG: i32 = 32;
     const OP_UNARY_NUM_GELU: i16 = 103;
     const OP_UNARY_NUM_SILU: i16 = 106;
+    /// Persistent-scratch tag range `[VIT_TAG_BASE, VIT_TAG_BASE + 20)` of the
+    /// resident ViT stack (`vit_layer_from_buffer_f32`).
+    const VIT_TAG_BASE: u8 = 200;
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
@@ -2105,6 +2194,15 @@ mod imp {
     #[derive(Copy, Clone)]
     struct KArgsFlashAttnExtVecReduce {
         nrows: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsRopeHalfTables {
+        token_count: i32,
+        head_count: i32,
+        head_dim: i32,
+        rot_half: i32,
     }
 
     #[repr(C)]
@@ -4387,6 +4485,290 @@ mod imp {
             }
 
             self.end_command_encoder(encoder_handles)
+        }
+
+        /// Rotate-half rope from per-token cos/sin tables on a row-major
+        /// `[token_count, head_count * head_dim]` f32 buffer; `dst_id` may be
+        /// `x_id` (each thread owns both halves of its pair).
+        #[allow(clippy::too_many_arguments)]
+        fn dispatch_rope_half_tables_f32(
+            &mut self,
+            x_id: ObjcId,
+            cos_id: ObjcId,
+            sin_id: ObjcId,
+            dst_id: ObjcId,
+            token_count: usize,
+            head_count: usize,
+            head_dim: usize,
+            rot_half: usize,
+        ) -> Result<(), String> {
+            if token_count == 0 || head_count == 0 {
+                return Ok(());
+            }
+            if rot_half * 2 > head_dim {
+                return Err(format!(
+                    "rope_half_tables: rot_half {} exceeds half of head_dim {}",
+                    rot_half, head_dim
+                ));
+            }
+            let name = "kernel_makepad_rope_half_tables_f32";
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(name.to_string(), name, &[], 0, 0, 0, 0)?;
+            let args = KArgsRopeHalfTables {
+                token_count: i32::try_from(token_count)
+                    .map_err(|_| format!("rope token_count too large: {}", token_count))?,
+                head_count: i32::try_from(head_count)
+                    .map_err(|_| format!("rope head_count too large: {}", head_count))?,
+                head_dim: i32::try_from(head_dim)
+                    .map_err(|_| format!("rope head_dim too large: {}", head_dim))?,
+                rot_half: i32::try_from(rot_half)
+                    .map_err(|_| format!("rope rot_half too large: {}", rot_half))?,
+            };
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsRopeHalfTables as *const c_void
+                    length: std::mem::size_of::<KArgsRopeHalfTables>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: x_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: cos_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: sin_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
+                let nth_max = Self::pipeline_max_threads(pipeline).max(1u64);
+                let nth = (rot_half.max(1) as u64).min(nth_max).min(256);
+                let tgs = MTLSize {
+                    width: token_count as u64,
+                    height: head_count as u64,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: nth,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn vit_linear_from_buffer(
+            &mut self,
+            src_id: ObjcId,
+            m: usize,
+            k: usize,
+            lin: &super::VitLinearRef<'_>,
+            weight_tag: u8,
+            bias_tag: u8,
+        ) -> Result<StrongId, String> {
+            let bias = if lin.bias.is_empty() {
+                None
+            } else {
+                Some(lin.bias)
+            };
+            self.linear_from_src_buffer(
+                src_id,
+                m,
+                k,
+                lin.w_bytes,
+                lin.w_ggml_type,
+                lin.n,
+                bias,
+                weight_tag,
+                bias_tag,
+            )
+        }
+
+        /// One resident ViT layer (see `VitLayerRef`), updating `x_id` in
+        /// place. The seven GEMM outputs use `tag_base + {2,4,6,8,12,14,16}`
+        /// as their persistent scratch tags; a stack reuses one `tag_base`
+        /// because layers execute sequentially inside the batch.
+        #[allow(clippy::too_many_arguments)]
+        fn vit_layer_from_buffer_f32(
+            &mut self,
+            x_id: ObjcId,
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            rot_half: usize,
+            cos_id: ObjcId,
+            sin_id: ObjcId,
+            layer: &super::VitLayerRef<'_>,
+            eps: f32,
+            tag_base: u8,
+        ) -> Result<(), String> {
+            let head_dim = n_state / n_head;
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let norm_bytes = x_shape
+                .numel
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing vit norm buffer bytes".to_string())?;
+
+            // Attention: n1 = LN(x); x += out(attn(rope(q), rope(k), v)).
+            let n1_w = self.get_or_create_cached_f32_buffer(layer.norm1_w, tag_base)?;
+            let n1_b = self.get_or_create_cached_f32_buffer(layer.norm1_b, tag_base + 1)?;
+            let norm0_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM0, norm_bytes)?;
+            self.dispatch_norm_f32(
+                x_id, n1_w, n1_b, norm0_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            let q = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.q, tag_base + 2, tag_base + 3,
+            )?;
+            let k = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.k, tag_base + 4, tag_base + 5,
+            )?;
+            let v = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.v, tag_base + 6, tag_base + 7,
+            )?;
+            if rot_half > 0 {
+                self.dispatch_rope_half_tables_f32(
+                    q.as_id(), cos_id, sin_id, q.as_id(), seq_len, n_head, head_dim, rot_half,
+                )?;
+                self.dispatch_rope_half_tables_f32(
+                    k.as_id(), cos_id, sin_id, k.as_id(), seq_len, n_head, head_dim, rot_half,
+                )?;
+            }
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let attn = self.flash_attn_f32_from_buffers(
+                q.as_id(), k.as_id(), v.as_id(), seq_len, seq_len, n_head, head_dim, scale,
+            )?;
+            let out = self.vit_linear_from_buffer(
+                attn.as_id(), seq_len, n_state, &layer.out, tag_base + 8, tag_base + 9,
+            )?;
+            self.dispatch_bin_f32(0, x_id, out.as_id(), x_id, &x_shape, &x_shape)?;
+
+            // Feed-forward: n2 = LN(x); x += down(silu(gate(n2)) * up(n2)).
+            let n2_w = self.get_or_create_cached_f32_buffer(layer.norm2_w, tag_base + 10)?;
+            let n2_b = self.get_or_create_cached_f32_buffer(layer.norm2_b, tag_base + 11)?;
+            let norm1_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM1, norm_bytes)?;
+            self.dispatch_norm_f32(
+                x_id, n2_w, n2_b, norm1_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            let gate = self.vit_linear_from_buffer(
+                norm1_id, seq_len, n_state, &layer.gate, tag_base + 12, tag_base + 13,
+            )?;
+            let up = self.vit_linear_from_buffer(
+                norm1_id, seq_len, n_state, &layer.up, tag_base + 14, tag_base + 15,
+            )?;
+            let ff_shape = shape4_from_row_major(&[seq_len, layer.gate.n], 4)?;
+            self.dispatch_unary_f32(OP_UNARY_NUM_SILU, gate.as_id(), gate.as_id(), &ff_shape)?;
+            self.dispatch_bin_f32(2, gate.as_id(), up.as_id(), gate.as_id(), &ff_shape, &ff_shape)?;
+            let down = self.vit_linear_from_buffer(
+                gate.as_id(), seq_len, layer.gate.n, &layer.down, tag_base + 16, tag_base + 17,
+            )?;
+            self.dispatch_bin_f32(0, x_id, down.as_id(), x_id, &x_shape, &x_shape)?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn vit_backbone_resident_f32(
+            &mut self,
+            x: &[f32],
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            rot_half: usize,
+            cos: &[f32],
+            sin: &[f32],
+            layers: &[super::VitLayerRef<'_>],
+            final_norm_w: &[f32],
+            final_norm_b: &[f32],
+            eps: f32,
+        ) -> Result<Vec<f32>, String> {
+            if seq_len == 0 || n_state == 0 || n_head == 0 || n_state % n_head != 0 {
+                return Err(format!(
+                    "invalid vit dimensions: seq_len={}, n_state={}, n_head={}",
+                    seq_len, n_state, n_head
+                ));
+            }
+            let head_dim = n_state / n_head;
+            if rot_half * 2 > head_dim {
+                return Err(format!(
+                    "vit rot_half {} exceeds half of head_dim {}",
+                    rot_half, head_dim
+                ));
+            }
+            let x_need = seq_len
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing vit x size".to_string())?;
+            if x.len() != x_need {
+                return Err(format!("vit x len mismatch: got {}, expected {}", x.len(), x_need));
+            }
+            let table_need = seq_len * rot_half;
+            if cos.len() != table_need || sin.len() != table_need {
+                return Err(format!(
+                    "vit rope table len mismatch: cos {} sin {} expected {}",
+                    cos.len(),
+                    sin.len(),
+                    table_need
+                ));
+            }
+            if final_norm_w.len() != n_state || final_norm_b.len() != n_state {
+                return Err("vit final layernorm affine size mismatch".to_string());
+            }
+            for (index, layer) in layers.iter().enumerate() {
+                let lin_ok = |lin: &super::VitLinearRef<'_>, n: usize| {
+                    lin.n == n && (lin.bias.is_empty() || lin.bias.len() == n)
+                };
+                if layer.norm1_w.len() != n_state
+                    || layer.norm1_b.len() != n_state
+                    || layer.norm2_w.len() != n_state
+                    || layer.norm2_b.len() != n_state
+                    || !lin_ok(&layer.q, n_state)
+                    || !lin_ok(&layer.k, n_state)
+                    || !lin_ok(&layer.v, n_state)
+                    || !lin_ok(&layer.out, n_state)
+                    || layer.gate.n == 0
+                    || !lin_ok(&layer.gate, layer.gate.n)
+                    || !lin_ok(&layer.up, layer.gate.n)
+                    || !lin_ok(&layer.down, n_state)
+                {
+                    return Err(format!("vit layer {} has mismatched shapes", index));
+                }
+            }
+
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+            let (cos_buf, sin_buf) = if rot_half > 0 {
+                (
+                    Some(self.new_buffer_with_bytes(f32_slice_as_bytes(cos))?),
+                    Some(self.new_buffer_with_bytes(f32_slice_as_bytes(sin))?),
+                )
+            } else {
+                (None, None)
+            };
+            let out_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            let cos_id = cos_buf.as_ref().map(|b| b.as_id()).unwrap_or(x_buf.as_id());
+            let sin_id = sin_buf.as_ref().map(|b| b.as_id()).unwrap_or(x_buf.as_id());
+            let x_id = x_buf.as_id();
+            let out_id = out_buf.as_id();
+            self.with_batch(|ctx| {
+                for layer in layers {
+                    ctx.vit_layer_from_buffer_f32(
+                        x_id, seq_len, n_state, n_head, rot_half, cos_id, sin_id, layer, eps,
+                        VIT_TAG_BASE,
+                    )?;
+                }
+                let fw = ctx.get_or_create_cached_f32_buffer(final_norm_w, VIT_TAG_BASE + 18)?;
+                let fb = ctx.get_or_create_cached_f32_buffer(final_norm_b, VIT_TAG_BASE + 19)?;
+                ctx.dispatch_norm_f32(
+                    x_id, fw, fb, out_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+                )
+            })?;
+            let out = self.read_f32_buffer(out_id, x_need)?;
+            drop(cos_buf);
+            drop(sin_buf);
+            drop(x_buf);
+            drop(out_buf);
+            Ok(out)
         }
 
         fn dispatch_cpy_f32_to_f16(
@@ -8874,6 +9256,28 @@ mod imp {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        n_head: usize,
+        rot_half: usize,
+        cos: &[f32],
+        sin: &[f32],
+        layers: &[super::VitLayerRef<'_>],
+        final_norm_w: &[f32],
+        final_norm_b: &[f32],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.vit_backbone_resident_f32(
+                x, seq_len, n_state, n_head, rot_half, cos, sin, layers, final_norm_w,
+                final_norm_b, eps,
+            )
+        })
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         layer: usize,
         q: &[f32],
