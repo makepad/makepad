@@ -22,8 +22,10 @@ pub use codec::{
     compress_tile, compression_metadata_rows, TileCodec, TileCompression,
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
-pub use mkmap::{mkmap_tile_id, MkmapReader, TileArchiveReader};
-pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
+pub use mkmap::{
+    mkmap_tile_id, mkmap_zxy_from_tile_id, MkmapReader, MkmapTileRef, TileArchiveReader,
+};
+pub use writer::{tile_rowid_xyz, MbtilesWriter, MbtilesWriterStats, WriterValue};
 
 use makepad_sqlite::btree::{IndexCursor, TableCursor};
 use makepad_sqlite::schema::{read_objects, SchemaObject};

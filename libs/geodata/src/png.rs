@@ -139,7 +139,6 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng, String> {
     })
 }
 
-use std::io::Read;
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let (a, b, c) = (i16::from(a), i16::from(b), i16::from(c));

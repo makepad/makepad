@@ -218,7 +218,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     let skip_addresses = options.skip_addresses;
 
     // --- Pass 1: node coordinates (bbox-filtered) + node-anchored docs ---
-    eprintln!("nav-build: pass 1/2 (nodes) over {}", options.source.display());
+    crate::step!("nav", "nav-build: pass 1/2 (nodes) over {}", options.source.display());
     let pass1_start = Instant::now();
     let reader = ElementReader::from_path(&options.source)
         .map_err(|err| format!("open {}: {err}", options.source.display()))?;
@@ -260,7 +260,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
         .iter()
         .map(|&(id, lon, lat)| (id, (lon, lat)))
         .collect();
-    eprintln!(
+    crate::tick!("nav", 0.25,
         "nav-build: pass 1 done in {:.1}s — {} nodes in region, {} tagged docs",
         pass1_start.elapsed().as_secs_f64(),
         node_map.len(),
@@ -268,7 +268,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     );
 
     // --- Pass 2: routable ways, named/categorized ways, restrictions ---
-    eprintln!("nav-build: pass 2/2 (ways + relations)");
+    crate::step!("nav", "nav-build: pass 2/2 (ways + relations)");
     let pass2_start = Instant::now();
     let reader = ElementReader::from_path(&options.source)
         .map_err(|err| format!("open {}: {err}", options.source.display()))?;
@@ -369,7 +369,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
             WayPass::merge,
         )
         .map_err(|err| format!("pbf way pass: {err}"))?;
-    eprintln!(
+    crate::tick!("nav", 0.55,
         "nav-build: pass 2 done in {:.1}s — {} routable ways, {} way docs, {} restrictions",
         pass2_start.elapsed().as_secs_f64(),
         way_pass.ways.len(),
@@ -390,7 +390,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
         graph_builder.add_restriction(r);
     }
     let graph = graph_builder.build();
-    eprintln!(
+    crate::tick!("nav", 0.75,
         "nav-build: graph built in {:.1}s — {} vertices, {} directed edges, {} restricted vias",
         build_start.elapsed().as_secs_f64(),
         graph.vertices.len(),
@@ -434,7 +434,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     }
     let raw_docs = search_builder.len();
     let index = search_builder.build();
-    eprintln!(
+    crate::tick!("nav", 0.95,
         "nav-build: search index built in {:.1}s — {} docs ({} before dedup)",
         search_start.elapsed().as_secs_f64(),
         index.doc_count(),
@@ -450,7 +450,7 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     let search_bytes = index.serialize();
     std::fs::write(&search_path, &search_bytes)
         .map_err(|err| format!("write {}: {err}", search_path.display()))?;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build: done in {:.1}s\n  {} ({:.1} MB)\n  {} ({:.1} MB)",
         total_start.elapsed().as_secs_f64(),
         graph_path.display(),
@@ -487,7 +487,7 @@ fn is_major_road(tags: &HashMap<String, String>) -> bool {
 fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
     let total_start = Instant::now();
     let bbox = options.bbox;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --major-roads: pass 1/2 (ways) over {}",
         options.source.display()
     );
@@ -565,7 +565,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
         .iter()
         .flat_map(|(_, refs, _)| refs.iter().copied())
         .collect();
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --major-roads: pass 1 done in {:.1}s — {} major ways, {} nodes needed, {} restrictions",
         pass1_start.elapsed().as_secs_f64(),
         way_pass.ways.len(),
@@ -573,7 +573,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
         way_pass.restrictions.len()
     );
 
-    eprintln!("nav-build --major-roads: pass 2/2 (nodes)");
+    crate::note!("nav", "nav-build --major-roads: pass 2/2 (nodes)");
     let pass2_start = Instant::now();
     let needed_ref = &needed;
     let reader = ElementReader::from_path(&options.source)
@@ -605,7 +605,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
             },
         )
         .map_err(|err| format!("pbf node pass: {err}"))?;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --major-roads: pass 2 done in {:.1}s — {} nodes kept",
         pass2_start.elapsed().as_secs_f64(),
         nodes.len()
@@ -625,7 +625,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
         }
     }
     let graph = graph_builder.build();
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --major-roads: graph built in {:.1}s — {} vertices, {} directed edges",
         build_start.elapsed().as_secs_f64(),
         graph.vertices.len(),
@@ -635,7 +635,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
     let graph_bytes = graph.serialize();
     std::fs::write(&graph_path, &graph_bytes)
         .map_err(|err| format!("write {}: {err}", graph_path.display()))?;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --major-roads: done in {:.1}s\n  {} ({:.1} MB)",
         total_start.elapsed().as_secs_f64(),
         graph_path.display(),
@@ -649,7 +649,7 @@ fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
 fn build_places_index(options: &NavBuildOptions) -> Result<(), String> {
     let start = Instant::now();
     let bbox = options.bbox;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --places-only: scanning {}",
         options.source.display()
     );
@@ -727,7 +727,7 @@ fn build_places_index(options: &NavBuildOptions) -> Result<(), String> {
     let path = options.output_basename.with_extension("search");
     let bytes = index.serialize();
     std::fs::write(&path, &bytes).map_err(|err| format!("write {}: {err}", path.display()))?;
-    eprintln!(
+    crate::note!("nav", 
         "nav-build --places-only: {} places ({} raw) in {:.1}s → {} ({:.1} MB)",
         index.doc_count(),
         raw,
@@ -747,7 +747,7 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
     let start = Instant::now();
     let bbox = options.bbox;
 
-    eprintln!("searchdb: pass A (way anchors) over {}", options.source.display());
+    crate::note!("nav", "searchdb: pass A (way anchors) over {}", options.source.display());
     let reader = ElementReader::from_path(&options.source)
         .map_err(|err| format!("open {}: {err}", options.source.display()))?;
     let way_doc_matters = |tags: &HashMap<String, String>| -> bool {
@@ -781,14 +781,14 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
     anchor_ids.sort_unstable();
     anchor_ids.dedup();
     let mut anchor_coords = vec![(f32::NAN, f32::NAN); anchor_ids.len()];
-    eprintln!(
+    crate::note!("nav", 
         "searchdb: pass A done in {:.0}s — {} way anchors",
         start.elapsed().as_secs_f64(),
         anchor_ids.len()
     );
 
     // Pass B: parallel extraction, sequential builder consumer.
-    eprintln!("searchdb: pass B (streaming docs)");
+    crate::note!("nav", "searchdb: pass B (streaming docs)");
     let out_path = options.output_basename.with_extension("searchdb");
     let mut builder = SearchDbBuilder::create(&out_path)?;
     let (doc_tx, doc_rx) =
@@ -828,7 +828,7 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
             )
             .map_err(|err| format!("pass B nodes: {err}"))?;
     }
-    eprintln!(
+    crate::note!("nav", 
         "searchdb: anchors resolved in {:.0}s",
         start.elapsed().as_secs_f64()
     );
@@ -845,7 +845,7 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
             )?;
             received += 1;
             if received % 20_000_000 == 0 {
-                eprintln!("searchdb: {}M docs ingested", received / 1_000_000);
+                crate::note!("nav", "searchdb: {}M docs ingested", received / 1_000_000);
             }
         }
         Ok((builder, received))
@@ -918,7 +918,7 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
     let (builder, received) = consumer
         .join()
         .map_err(|_| "searchdb consumer panicked".to_string())??;
-    eprintln!(
+    crate::note!("nav", 
         "searchdb: {} docs ingested in {:.0}s; building index…",
         received,
         start.elapsed().as_secs_f64()
@@ -926,7 +926,7 @@ fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
     drop(anchor_coords);
     drop(anchor_ids);
     let stats = builder.finish()?;
-    eprintln!(
+    crate::note!("nav", 
         "searchdb: DONE — {} docs, {} tokens, {:.2} GB at {} in {:.0}s",
         stats.docs,
         stats.tokens,
@@ -993,7 +993,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
             let query_start = Instant::now();
             let results = index.query(&query, near, 10);
             let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
-            println!(
+            crate::note!("nav", 
                 "index: {} docs, loaded in {:.0}ms; query {:?} in {:.2}ms — {} results",
                 index.doc_count(),
                 load_ms,
@@ -1011,7 +1011,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
                 } else {
                     format!(" — {}", r.secondary)
                 };
-                println!(
+                crate::note!("nav", 
                     "  {:>6.1}  {} ({}){}{}  @ {:.5},{:.5}",
                     r.score,
                     r.name,
@@ -1044,7 +1044,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
             let query_start = Instant::now();
             let results = db.query(&query, near, 10)?;
             let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
-            println!(
+            crate::note!("nav", 
                 "searchdb: {} docs, opened in {:.2}ms; query {:?} in {:.2}ms \u{2014} {} results",
                 db.doc_count(),
                 load_ms,
@@ -1062,7 +1062,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
                 } else {
                     format!(" \u{2014} {}", r.secondary)
                 };
-                println!(
+                crate::note!("nav", 
                     "  {:>6.1}  {} ({}){}{}  @ {:.5},{:.5}",
                     r.score,
                     r.name,
@@ -1098,7 +1098,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
             let route_start = Instant::now();
             let route = graph.route(from, to, mode);
             let route_ms = route_start.elapsed().as_secs_f64() * 1000.0;
-            println!(
+            crate::note!("nav", 
                 "graph: {} vertices / {} edges, loaded in {:.0}ms; {} routed in {:.1}ms",
                 graph.vertices.len(),
                 graph.edges.len(),
@@ -1108,7 +1108,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
             );
             match route {
                 Some(route) => {
-                    println!(
+                    crate::note!("nav", 
                         "route: {:.2} km, {:.0} min, {} points, {} maneuvers",
                         route.length_m / 1000.0,
                         route.duration_s / 60.0,
@@ -1116,7 +1116,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
                         route.maneuvers.len()
                     );
                     for m in &route.maneuvers {
-                        println!(
+                        crate::note!("nav", 
                             "  {:>6.2} km  {}  {}",
                             m.dist_m / 1000.0,
                             m.kind.arrow(),
@@ -1124,7 +1124,7 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
                         );
                     }
                 }
-                None => println!("route: NOT FOUND"),
+                None => crate::note!("nav", "route: NOT FOUND"),
             }
         }
         other => return Err(format!("unknown nav-probe action {:?}", other)),

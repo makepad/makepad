@@ -5,5 +5,5 @@ edition = "2021"
 description = "Offline painter-cascade face baker: appends payload v2-faces-1 (field 101) to map archives by replaying the renderer's own road-union pipeline"
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", features = ["maps"] }
-makepad-mbtile-reader = { path = "../../libs/mbtile_reader" }
+# The pass lives in the shared bake library; this crate is its CLI.
+makepad-map-build = { path = "../../libs/map_build", features = ["faces"] }
