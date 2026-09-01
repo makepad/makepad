@@ -1078,6 +1078,15 @@ impl Cx {
                     // FileDialogAction, same contract as macOS.
                     super::file_dialog::open_select_folder_dialog(settings);
                 }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    super::file_dialog::open_save_folder_dialog(settings);
+                }
+                CxOsOp::SelectFileDialog(settings) => {
+                    super::file_dialog::open_select_file_dialog(settings);
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    super::file_dialog::open_save_file_dialog(settings);
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
