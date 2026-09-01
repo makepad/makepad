@@ -83,7 +83,11 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
             .add(",")
             .string("/")
             .add("),");
-        tb.add("    line:line!() as usize,");
+        // The line of the script's FIRST token, not `line!()` (the macro's own
+        // line): the reconstructed code's row 0 is that first token's line,
+        // and `ip_to_loc` reports `row + line` — with `line!()` every
+        // location in a `script_mod!` body came out one line early.
+        tb.add("    line:").unsuf_usize(span.start().line()).add(",");
         tb.add("    column:column!() as usize,");
 
         tb.add("    code:").string(&s).add(".to_string(),");

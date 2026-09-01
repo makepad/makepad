@@ -50,6 +50,9 @@ impl DrawVars {
             // function signatures, bodies, struct defs, and type names.
             output.backend = ShaderBackend::Rust;
             output.use_vulkan = false;
+            // The headless renderer folds annotated literals like any other:
+            // it is a reference rasterizer, not a tweaking surface.
+            output.const_table = false;
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 

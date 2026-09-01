@@ -67,6 +67,7 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
+            output.const_table = vm.host.cx().shader_const_table_mode();
             output.use_vulkan = cfg!(use_vulkan);
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -415,6 +416,7 @@ impl Cx {
                 }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 shp.ensure_gl_shader_sources(self.os.gl(), &self.os_type);
+                shp.refresh_scope_uniforms(self.os.gl(), &sh.mapping);
 
                 let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
@@ -1205,6 +1207,9 @@ pub struct GlShaderUniforms {
     pub live_uniforms_binding: OpenglUniformBlockBinding,
     pub const_table_uniform: OpenglUniform,
     pub live_uniforms: OpenglBuffer,
+    /// `CxDrawShaderMapping::scope_uniforms_gen` the `live_uniforms`
+    /// buffer was last uploaded from.
+    pub scope_uniforms_gen: u64,
 }
 
 pub enum GlShaderState {
@@ -1291,6 +1296,7 @@ impl GlShaderUniforms {
             ),
             const_table_uniform: GlShader::opengl_get_uniform(gl, program, "const_table"),
             live_uniforms,
+            scope_uniforms_gen: mapping.scope_uniforms_gen,
         }
     }
 }
@@ -1983,6 +1989,25 @@ impl GlShader {
 }
 
 impl CxOsDrawShader {
+    /// A hot-patched table constant moved the mapping's scope-uniform
+    /// buffer: re-upload every compiled variant's copy once per generation.
+    fn refresh_scope_uniforms(&mut self, gl: &LibGl, mapping: &CxDrawShaderMapping) {
+        if mapping.scope_uniforms_buf.is_empty() {
+            return;
+        }
+        for state in self.gl_shader.iter_mut().flatten() {
+            if let GlShaderState::Ready(shader) = state {
+                if shader.uniforms.scope_uniforms_gen != mapping.scope_uniforms_gen {
+                    shader
+                        .uniforms
+                        .live_uniforms
+                        .update_uniform_buffer(gl, mapping.scope_uniforms_buf.as_ref());
+                    shader.uniforms.scope_uniforms_gen = mapping.scope_uniforms_gen;
+                }
+            }
+        }
+    }
+
     fn ensure_gl_shader_sources(&mut self, gl: &LibGl, os_type: &OsType) {
         let has_gl_sources = self.vertex.iter().all(|source| !source.is_empty())
             && self.pixel.iter().all(|source| !source.is_empty());

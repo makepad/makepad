@@ -139,7 +139,7 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_fill = vec2(
                         self.pos.x * scale_factor_fill.x - border_sz_uv.x * 2. + dither
                         self.pos.y * scale_factor_fill.y - border_sz_uv.y * 2. + dither
@@ -161,7 +161,7 @@ script_mod! {
                 let mut color_stroke_disabled = self.border_color_disabled
 
                 if self.border_color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let gradient_border = vec2(
                         self.pos.x + dither
                         self.pos.y + dither
@@ -289,7 +289,7 @@ script_mod! {
                 let mut color_fill_disabled = self.color_disabled
 
                 if self.color_2.x > -0.5 {
-                    let dither = Math.random_2d(self.pos.xy) * 0.04 * self.color_dither
+                    let dither = Math.random_2d(self.pos.xy) * /** dither grain 0..0.5 step 0.01 */ 0.04 * self.color_dither
                     let dir = if self.gradient_fill_horizontal > 0.5 self.pos.x + dither else self.pos.y + dither
                     color_fill = mix(self.color, self.color_2, dir)
                     color_fill_hover = mix(self.color_hover, self.color_2_hover, dir)
@@ -2337,7 +2337,14 @@ impl Widget for TextInput {
 
         // Self-detect focus loss from taps outside our area
         // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
-        if cx.has_key_focus(self.draw_bg.area())
+        // And only from a LIVE area: an input not drawn in its list's current
+        // redraw holds a stale area (or Empty) that can compare equal to the
+        // focus another widget just took — every such input then cleared
+        // the global focus on the same click, so a FabValueInput's editor
+        // committed the old value before a keystroke could reach it.
+        if !self.draw_bg.area().is_empty()
+            && self.draw_bg.area().is_valid(cx)
+            && cx.has_key_focus(self.draw_bg.area())
             && !cx.fingers.is_area_captured(self.draw_bg.area())
         {
             let rect = self.draw_bg.area().rect(cx);

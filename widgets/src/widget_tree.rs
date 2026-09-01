@@ -258,21 +258,75 @@ impl WidgetTree {
         }
     }
 
+    /// A change AT `start_uid`: created, removed, renamed, reparented, or its
+    /// skip flag flipped. Ancestors' cached lookups may mention the node, so
+    /// their maps are dropped — but only up to and including the first
+    /// skip-search ANCESTOR: the cached walk prunes at such a node (it can
+    /// match the node itself, never its descendants — see
+    /// `collect_within_graph_with_skip`), so entries rooted above that
+    /// barrier cannot mention `start_uid` and stay exact. The barrier node's
+    /// own map is still dropped (a lookup rooted AT it does descend: the
+    /// root frame ignores the flag), then the climb stops. `start_uid`'s own
+    /// flag is deliberately NOT a barrier — its rename or removal is exactly
+    /// what the ancestors below the barrier can still see.
     fn invalidate_path_cache_upward(inner: &mut WidgetTreeInner, start_uid: WidgetUid) {
         if start_uid == WidgetUid(0) {
             return;
         }
-
         inner.stats.invalidations += 1;
         inner.path_cache_epoch = inner.path_cache_epoch.wrapping_add(1);
-        let mut current = Some(start_uid);
+        inner.path_cache.remove(&start_uid);
         let mut visited = HashSet::new();
+        visited.insert(start_uid);
+        let parent = inner.graph.get(&start_uid).and_then(|node| node.parent);
+        Self::invalidate_ancestor_chain(inner, parent, &mut visited);
+    }
+
+    /// The CHILD SET of `parent_uid` changed — rows recycled in or out, the
+    /// child vector reordered, an edge dropped — with no change to the
+    /// parent node itself. Same barrier climb as
+    /// `invalidate_path_cache_upward`, except the parent acts as its own
+    /// barrier: a skip-search list's rows are invisible to every search
+    /// rooted above the list, so their churn ends here. This is what keeps a
+    /// scrolling PortalList from wiping the app-level cache every frame.
+    fn invalidate_path_cache_from_child_change(
+        inner: &mut WidgetTreeInner,
+        parent_uid: WidgetUid,
+    ) {
+        if parent_uid == WidgetUid(0) {
+            return;
+        }
+        inner.stats.invalidations += 1;
+        inner.path_cache_epoch = inner.path_cache_epoch.wrapping_add(1);
+        inner.path_cache.remove(&parent_uid);
+        let next = match inner.graph.get(&parent_uid) {
+            Some(node) if !node.skip_search => node.parent,
+            _ => None,
+        };
+        let mut visited = HashSet::new();
+        visited.insert(parent_uid);
+        Self::invalidate_ancestor_chain(inner, next, &mut visited);
+    }
+
+    /// Drop cache maps up an ancestor chain, stopping after the first
+    /// skip-search node (its own map dropped, nothing above touched).
+    fn invalidate_ancestor_chain(
+        inner: &mut WidgetTreeInner,
+        mut current: Option<WidgetUid>,
+        visited: &mut HashSet<WidgetUid>,
+    ) {
         while let Some(uid) = current {
             if uid == WidgetUid(0) || !visited.insert(uid) {
                 break;
             }
             inner.path_cache.remove(&uid);
-            current = inner.graph.get(&uid).and_then(|node| node.parent);
+            let Some(node) = inner.graph.get(&uid) else {
+                break;
+            };
+            if node.skip_search {
+                break;
+            }
+            current = node.parent;
         }
     }
 
@@ -420,7 +474,8 @@ impl WidgetTree {
         if node_is_new || widget_changed || name_changed || skip_search_changed || parent_changed {
             Self::invalidate_path_cache_upward(&mut inner, uid);
             if let Some(old_parent) = old_parent {
-                Self::invalidate_path_cache_upward(&mut inner, old_parent);
+                // The old parent merely lost an edge: its own barrier applies.
+                Self::invalidate_path_cache_from_child_change(&mut inner, old_parent);
             }
         }
     }
@@ -581,10 +636,14 @@ impl WidgetTree {
         inner.dirty.insert(child_uid);
 
         if child_is_new || name_changed || skip_search_changed || parent_changed {
-            Self::invalidate_path_cache_upward(&mut inner, parent_uid);
+            // The parent gained/kept an edge — its own barrier applies (a
+            // skip-search list's new row is invisible above the list). The
+            // child's climb re-covers the parent chain, but starting AT the
+            // child, whose own flag is never a barrier.
+            Self::invalidate_path_cache_from_child_change(&mut inner, parent_uid);
             Self::invalidate_path_cache_upward(&mut inner, child_uid);
             if let Some(old_parent) = old_parent {
-                Self::invalidate_path_cache_upward(&mut inner, old_parent);
+                Self::invalidate_path_cache_from_child_change(&mut inner, old_parent);
             }
         }
     }
@@ -803,7 +862,7 @@ impl WidgetTree {
         {
             Self::invalidate_path_cache_upward(&mut inner, uid);
             if let Some(old_parent) = old_parent {
-                Self::invalidate_path_cache_upward(&mut inner, old_parent);
+                Self::invalidate_path_cache_from_child_change(&mut inner, old_parent);
             }
         }
     }
@@ -947,13 +1006,24 @@ impl WidgetTree {
         inner.graph.contains_key(&uid)
     }
 
+    /// Leading path segments may match ancestors up to AND INCLUDING the
+    /// search root, never above it. The clamp is what lets the cache be
+    /// invalidated by subtree: an entry rooted at R depends only on R's own
+    /// name and R's subtree, so no mutation outside that subtree can go
+    /// unnoticed by it. (Unclamped, [above, target] rooted at R matched via
+    /// a node above R — and a rename of that node never invalidated R's
+    /// cache, a stale answer waiting to happen.)
     fn verify_path_graph(
         inner: &WidgetTreeInner,
         remaining: &[LiveId],
         mut current: Option<WidgetUid>,
         root_uid: WidgetUid,
     ) -> bool {
+        let mut above_root = false;
         for &segment in remaining.iter().rev() {
+            if above_root {
+                return false;
+            }
             loop {
                 let uid = match current {
                     Some(uid) => uid,
@@ -962,11 +1032,15 @@ impl WidgetTree {
                 let Some(node) = inner.graph.get(&uid) else {
                     return false;
                 };
+                let at_root = uid == root_uid;
                 if node.name == segment {
                     current = node.parent;
+                    if at_root {
+                        above_root = true;
+                    }
                     break;
                 }
-                if uid == root_uid {
+                if at_root {
                     return false;
                 }
                 current = node.parent;
@@ -1462,13 +1536,17 @@ impl WidgetTree {
             }
 
             if !child_is_new && !child_parent_changed {
-                // Property-only: patch in-place
+                // Property-only: patch in-place. Lookups rooted AT the child
+                // can use its own name as their outermost segment, so its
+                // own map goes too, not only the ancestors'.
                 if child_name_changed {
                     Self::patch_name(inner, child_uid, child_name);
+                    Self::invalidate_path_cache(inner, child_uid);
                     invalidate_uid_cache = true;
                 }
                 if child_skip_search_changed {
                     Self::patch_skip_search(inner, child_uid, child_skip_search);
+                    Self::invalidate_path_cache(inner, child_uid);
                     invalidate_uid_cache = true;
                 }
                 if child_widget_changed {
@@ -1517,7 +1595,11 @@ impl WidgetTree {
         }
 
         if invalidate_uid_cache {
-            Self::invalidate_path_cache_upward(inner, uid);
+            // Everything folded into this flag happened at or below `uid`'s
+            // children, so `uid` is a barrier when it is itself skip-search:
+            // a recycling list's per-frame row churn ends here instead of
+            // wiping every ancestor's cache (the app-level probes included).
+            Self::invalidate_path_cache_from_child_change(inner, uid);
         }
 
         if mark_structure_dirty {
@@ -2911,6 +2993,7 @@ mod tests {
     struct DynamicTestWidget {
         uid: WidgetUid,
         children: std::rc::Rc<std::cell::RefCell<Vec<(LiveId, WidgetRef)>>>,
+        skip_search: bool,
     }
 
     impl ScriptApply for DynamicTestWidget {
@@ -2927,6 +3010,10 @@ mod tests {
     impl WidgetNode for DynamicTestWidget {
         fn widget_uid(&self) -> WidgetUid {
             self.uid
+        }
+
+        fn skip_widget_tree_search(&self) -> bool {
+            self.skip_search
         }
 
         fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
@@ -2956,7 +3043,22 @@ mod tests {
         uid: WidgetUid,
         children: std::rc::Rc<std::cell::RefCell<Vec<(LiveId, WidgetRef)>>>,
     ) -> WidgetRef {
-        WidgetRef::new_with_inner(Box::new(DynamicTestWidget { uid, children }))
+        WidgetRef::new_with_inner(Box::new(DynamicTestWidget {
+            uid,
+            children,
+            skip_search: false,
+        }))
+    }
+
+    fn make_dynamic_widget_skip(
+        uid: WidgetUid,
+        children: std::rc::Rc<std::cell::RefCell<Vec<(LiveId, WidgetRef)>>>,
+    ) -> WidgetRef {
+        WidgetRef::new_with_inner(Box::new(DynamicTestWidget {
+            uid,
+            children,
+            skip_search: true,
+        }))
     }
 
     fn name(s: &str) -> LiveId {
@@ -4110,6 +4212,204 @@ mod tests {
             assert_eq!(look(&miss).widget_uid(), c_uid);
         }
         assert_eq!(tree.stats().walk_nodes, before);
+    }
+
+    /// The barrier law: a skip-search node hides its descendants from every
+    /// search rooted above it, so churn below one (a recycling list's rows,
+    /// frame after frame) must not invalidate lookups rooted above it. This
+    /// is the difference between an app scrolling a list at 120 fps and the
+    /// same app re-walking its whole tree for every `ids!()` probe on every
+    /// frame of that scroll.
+    #[test]
+    fn churn_below_a_skip_search_list_leaves_root_lookups_warm() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let send_uid = WidgetUid::new();
+        let list_uid = WidgetUid::new();
+
+        let send = make_widget(send_uid, vec![]);
+        let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let list = make_dynamic_widget_skip(list_uid, rows.clone());
+        let root_children = std::rc::Rc::new(std::cell::RefCell::new(vec![
+            (name("send"), send.clone()),
+            (name("list"), list.clone()),
+        ]));
+        let root = make_dynamic_widget(root_uid, root_children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        stabilize_graph_cache(&tree);
+
+        let hit = [name("send")];
+        let miss = [name("elsewhere")];
+        let look = |path: &[LiveId]| {
+            tree.find_within_from_borrowed(root_uid, path, |visit| {
+                for (child_name, child) in root_children.borrow().iter() {
+                    visit(*child_name, child.clone());
+                }
+            })
+        };
+        for _ in 0..3 {
+            assert_eq!(look(&hit).widget_uid(), send_uid);
+            assert!(look(&miss).is_empty());
+        }
+        let warm = tree.stats();
+
+        // Scroll: every round replaces the list's rows (fresh uids, shifted
+        // numeric names — exactly what PortalList recycling does).
+        for round in 0..50u64 {
+            let fresh: Vec<(LiveId, WidgetRef)> = (0..4)
+                .map(|i| (LiveId(round * 4 + i + 1), make_widget(WidgetUid::new(), vec![])))
+                .collect();
+            *rows.borrow_mut() = fresh;
+            tree.mark_dirty(list_uid);
+            assert_eq!(look(&hit).widget_uid(), send_uid);
+            assert!(look(&miss).is_empty());
+        }
+        let churned = tree.stats();
+        assert_eq!(
+            churned.walk_nodes, warm.walk_nodes,
+            "row churn below the skip barrier must not force a single re-walk above it"
+        );
+        assert_eq!(
+            churned.cache_misses, warm.cache_misses,
+            "the root-level hit and MISS must both survive the churn"
+        );
+    }
+
+    /// The barrier stops ABOVE the list, never at it: a lookup rooted at
+    /// the skip-search node itself descends into its children (the root
+    /// frame ignores the flag), so it must keep seeing the churn.
+    #[test]
+    fn lookup_rooted_at_the_skip_list_sees_its_churn() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let list_uid = WidgetUid::new();
+
+        let row_uid = WidgetUid::new();
+        let rows = std::rc::Rc::new(std::cell::RefCell::new(vec![(
+            name("row_a"),
+            make_widget(row_uid, vec![]),
+        )]));
+        let list = make_dynamic_widget_skip(list_uid, rows.clone());
+        let root = make_widget(root_uid, vec![(name("list"), list.clone())]);
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.sync_dirty();
+
+        assert_eq!(
+            tree.find_within(list_uid, &[name("row_a")]).widget_uid(),
+            row_uid
+        );
+
+        let row_b_uid = WidgetUid::new();
+        *rows.borrow_mut() = vec![(name("row_b"), make_widget(row_b_uid, vec![]))];
+        tree.mark_dirty(list_uid);
+
+        assert!(tree.find_within(list_uid, &[name("row_a")]).is_empty());
+        assert_eq!(
+            tree.find_within(list_uid, &[name("row_b")]).widget_uid(),
+            row_b_uid
+        );
+    }
+
+    /// A change to the barrier NODE ITSELF (here: its name) is visible from
+    /// above — the barrier applies to its descendants, never to it.
+    #[test]
+    fn renaming_the_barrier_node_invalidates_above_it() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let list_uid = WidgetUid::new();
+
+        let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let list = make_dynamic_widget_skip(list_uid, rows.clone());
+        let root_children =
+            std::rc::Rc::new(std::cell::RefCell::new(vec![(name("list"), list.clone())]));
+        let root = make_dynamic_widget(root_uid, root_children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.sync_dirty();
+
+        // Warm both answers.
+        assert_eq!(
+            tree.find_within(root_uid, &[name("list")]).widget_uid(),
+            list_uid
+        );
+        assert!(tree.find_within(root_uid, &[name("list2")]).is_empty());
+
+        root_children.borrow_mut()[0].0 = name("list2");
+        tree.mark_dirty(root_uid);
+
+        assert!(tree.find_within(root_uid, &[name("list")]).is_empty());
+        assert_eq!(
+            tree.find_within(root_uid, &[name("list2")]).widget_uid(),
+            list_uid
+        );
+    }
+
+    /// Reordering same-named children changes which one `find_within`
+    /// returns; the reorder happens above any barrier here, so the cached
+    /// first-match must not survive it.
+    #[test]
+    fn reorder_above_the_barrier_still_invalidates() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let first_uid = WidgetUid::new();
+        let second_uid = WidgetUid::new();
+
+        let first = make_widget(first_uid, vec![]);
+        let second = make_widget(second_uid, vec![]);
+        let root_children = std::rc::Rc::new(std::cell::RefCell::new(vec![
+            (name("dup"), first.clone()),
+            (name("dup"), second.clone()),
+        ]));
+        let root = make_dynamic_widget(root_uid, root_children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.sync_dirty();
+
+        assert_eq!(
+            tree.find_within(root_uid, &[name("dup")]).widget_uid(),
+            first_uid
+        );
+
+        root_children.borrow_mut().swap(0, 1);
+        tree.mark_dirty(root_uid);
+
+        assert_eq!(
+            tree.find_within(root_uid, &[name("dup")]).widget_uid(),
+            second_uid
+        );
+    }
+
+    /// The verification clamp: leading segments may match ancestors up to
+    /// and including the search root, never above it. An entry rooted at R
+    /// therefore depends only on R's subtree (plus R's own name), which is
+    /// what makes subtree-scoped invalidation exact.
+    #[test]
+    fn leading_segments_never_match_above_the_search_root() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let mid_uid = WidgetUid::new();
+        let target_uid = WidgetUid::new();
+
+        let target = make_widget(target_uid, vec![]);
+        let mid = make_widget(mid_uid, vec![(name("target"), target.clone())]);
+        let root = make_widget(root_uid, vec![(name("mid"), mid.clone())]);
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.sync_dirty();
+
+        // The root's own name may serve as the outermost segment...
+        assert_eq!(
+            tree.find_within(mid_uid, &[name("mid"), name("target")])
+                .widget_uid(),
+            target_uid
+        );
+        // ...but a segment naming a node ABOVE the search root must not.
+        assert!(tree
+            .find_within(mid_uid, &[name("root"), name("target")])
+            .is_empty());
+        // From the real root the full path still resolves.
+        assert_eq!(
+            tree.find_within(root_uid, &[name("mid"), name("target")])
+                .widget_uid(),
+            target_uid
+        );
     }
 
     #[test]

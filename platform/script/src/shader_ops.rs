@@ -72,9 +72,7 @@ impl ShaderFnCompiler {
         op: &str,
     ) {
         let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
+            self.packed_operand(vm, output, opargs)
         } else {
             self.pop_resolved(vm, output)
         };
@@ -244,9 +242,7 @@ impl ShaderFnCompiler {
         is_int: bool,
     ) {
         let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
+            self.packed_operand(vm, output, opargs)
         } else {
             self.pop_resolved(vm, output)
         };
@@ -320,9 +316,7 @@ impl ShaderFnCompiler {
         is_int: bool,
     ) {
         let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
+            self.packed_operand(vm, output, opargs)
         } else {
             self.pop_resolved(vm, output)
         };
@@ -394,9 +388,7 @@ impl ShaderFnCompiler {
         is_int: bool,
     ) {
         let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
+            self.packed_operand(vm, output, opargs)
         } else {
             self.pop_resolved(vm, output)
         };
@@ -552,9 +544,7 @@ impl ShaderFnCompiler {
         is_int: bool,
     ) {
         let (t2, s2) = if opargs.is_u32() {
-            let mut s = self.stack.new_string();
-            write!(s, "{}", opargs.to_u32()).ok();
-            (ShaderType::AbstractInt, s)
+            self.packed_operand(vm, output, opargs)
         } else {
             self.pop_resolved(vm, output)
         };

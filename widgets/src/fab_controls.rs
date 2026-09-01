@@ -444,6 +444,35 @@ pub fn script_mod(vm: &mut ScriptVm) {
             title := mod.widgets.FabHeaderLabel{ text: "Section" }
         }
 
+        // ---- theme palette strip (in the colour popover) ----
+        set_type_default() do #(DrawFabPaletteCell::script_shader(vm)){
+            ..mod.draw.DrawQuad
+            cell: instance(vec4(0.0, 0.0, 0.0, 1.0))
+            hot: instance(0.0)
+            cur: instance(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.0)
+                // A checker under the colour so translucent entries read as such.
+                let cx = floor(self.pos.x * self.rect_size.x / 4.0)
+                let cy = floor(self.pos.y * self.rect_size.y / 4.0)
+                let ch = modf(cx + cy, 2.0)
+                let back = vec3(0.22, 0.22, 0.22).mix(vec3(0.34, 0.34, 0.34), ch)
+                let rgb = back.mix(self.cell.xyz, self.cell.w)
+                sdf.fill_keep(vec4(rgb, 1.0))
+                let ring = fab.color_border.mix(fab.color_focus_ring, max(self.hot, self.cur))
+                sdf.stroke(ring, 1.0)
+                return sdf.result
+            }
+        }
+        mod.widgets.FabPaletteStripBase = #(FabPaletteStrip::register_widget(vm))
+        mod.widgets.FabPaletteStrip = set_type_default() do mod.widgets.FabPaletteStripBase{
+            width: Fill
+            height: Fit
+            cell_size: 12.0
+            gap: 2.0
+        }
+
         mod.widgets.FabColorPickBase = #(FabColorPick::register_widget(vm))
         mod.widgets.FabColorPick = set_type_default() do mod.widgets.FabColorPickBase{
             width: fab.swatch_width
@@ -501,6 +530,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         }
                     }
                 }
+                // The host's theme palette: hover names (and pulses) a
+                // colour, a click binds the property to it by reference.
+                palette_name := mod.widgets.FabLabelDim{ width: Fill text: "" }
+                palette := mod.widgets.FabPaletteStrip{}
             }
         }
     };
@@ -1589,6 +1622,169 @@ impl FabColorWheelRef {
 }
 
 // ===========================================================================
+// FabPaletteStrip — a wrapped grid of small colour cells (one draw call),
+// hit-tested by rect math. The host fills it (a theme palette); hover and
+// click come back as indices.
+// ===========================================================================
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawFabPaletteCell {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    pub cell: Vec4f,
+    #[live]
+    pub hot: f32,
+    #[live]
+    pub cur: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum FabPaletteAction {
+    /// The pointer rests on a cell (None: it left the strip).
+    Hover(Option<usize>),
+    Pick(usize),
+    #[default]
+    None,
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct FabPaletteStrip {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_cell: DrawFabPaletteCell,
+    #[walk]
+    walk: Walk,
+    #[live]
+    cell_size: f64,
+    #[live]
+    gap: f64,
+    #[rust]
+    colors: Vec<[f32; 4]>,
+    #[rust]
+    current: Option<usize>,
+    #[rust]
+    hot: Option<usize>,
+    #[rust]
+    cols: usize,
+    #[rust]
+    area: Area,
+}
+
+impl FabPaletteStrip {
+    pub fn set_colors(&mut self, cx: &mut Cx, colors: Vec<[f32; 4]>) {
+        self.colors = colors;
+        self.hot = None;
+        self.draw_cell.redraw(cx);
+    }
+
+    /// Mark the cell equal to the host's current colour.
+    pub fn set_current(&mut self, cx: &mut Cx, current: Option<usize>) {
+        if self.current != current {
+            self.current = current;
+            self.draw_cell.redraw(cx);
+        }
+    }
+
+    fn pitch(&self) -> f64 {
+        self.cell_size + self.gap
+    }
+
+    fn cols_for(&self, width: f64) -> usize {
+        (((width + self.gap) / self.pitch()).floor() as usize).max(1)
+    }
+
+    /// The strip's height at a width (the popover sizes itself with it).
+    pub fn height_for(&self, width: f64) -> f64 {
+        if self.colors.is_empty() {
+            return 0.0;
+        }
+        let rows = self.colors.len().div_ceil(self.cols_for(width));
+        rows as f64 * self.pitch() - self.gap
+    }
+
+    fn cell_at(&self, rect: Rect, abs: DVec2) -> Option<usize> {
+        if !rect.contains(abs) || self.cols == 0 {
+            return None;
+        }
+        let rel = abs - rect.pos;
+        let col = (rel.x / self.pitch()).floor() as usize;
+        let row = (rel.y / self.pitch()).floor() as usize;
+        if col >= self.cols {
+            return None;
+        }
+        // The gap between cells belongs to nobody.
+        if rel.x - col as f64 * self.pitch() > self.cell_size || rel.y - row as f64 * self.pitch() > self.cell_size {
+            return None;
+        }
+        let index = row * self.cols + col;
+        (index < self.colors.len()).then_some(index)
+    }
+}
+
+impl Widget for FabPaletteStrip {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, Layout::flow_down());
+        let width = cx.turtle().rect().size.x;
+        self.cols = self.cols_for(width);
+        let height = self.height_for(width);
+        // Claim the grid's height, then paint the cells over it.
+        let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(height)));
+        let (pitch, cell_size) = (self.pitch(), self.cell_size);
+        for (i, c) in self.colors.iter().enumerate() {
+            let col = (i % self.cols) as f64;
+            let row = (i / self.cols) as f64;
+            self.draw_cell.cell = vec4(c[0], c[1], c[2], c[3]);
+            self.draw_cell.hot = if self.hot == Some(i) { 1.0 } else { 0.0 };
+            self.draw_cell.cur = if self.current == Some(i) { 1.0 } else { 0.0 };
+            self.draw_cell.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + col * pitch, rect.pos.y + row * pitch),
+                    size: dvec2(cell_size, cell_size),
+                },
+            );
+        }
+        cx.end_turtle_with_area(&mut self.area);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        let rect = self.area.rect(cx);
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                let hot = self.cell_at(rect, fe.abs);
+                cx.set_cursor(if hot.is_some() { MouseCursor::Hand } else { MouseCursor::Default });
+                if hot != self.hot {
+                    self.hot = hot;
+                    self.draw_cell.redraw(cx);
+                    cx.widget_action(uid, FabPaletteAction::Hover(hot));
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                if self.hot.is_some() {
+                    self.hot = None;
+                    self.draw_cell.redraw(cx);
+                    cx.widget_action(uid, FabPaletteAction::Hover(None));
+                }
+            }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                if let Some(i) = self.cell_at(rect, fe.abs) {
+                    cx.widget_action(uid, FabPaletteAction::Pick(i));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ===========================================================================
 // FabColorPick — a swatch that opens a self-managed popover (wheel + RGBA
 // rows + hex). No shell bus: the popover draws in an overlay draw list
 // anchored at the swatch, outside-click commits, Escape reverts.
@@ -1619,6 +1815,11 @@ pub enum FabColorPickAction {
     /// The popover's `pick` button: sample a colour from the app — the
     /// host owns the eyedropper (it knows the window), the popover closes.
     Eyedropper,
+    /// The pointer rests on a palette cell (its name) or left the strip.
+    PaletteHover(Option<String>),
+    /// A palette cell was clicked: the host binds the property to the
+    /// named colour; the popover has closed without publishing a value.
+    PalettePick(String),
     #[default]
     None,
 }
@@ -1658,6 +1859,9 @@ pub struct FabColorPick {
     panel_rect: Rect,
     #[rust]
     sync_pending: bool,
+    /// Names of the palette entries, in strip order.
+    #[rust]
+    palette_names: Vec<String>,
 }
 
 impl ScriptHook for FabColorPick {
@@ -1686,6 +1890,42 @@ impl FabColorPick {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// The popover's palette strip: named colours in display order.
+    pub fn set_palette(&mut self, cx: &mut Cx, entries: Vec<(String, [f32; 4])>) {
+        let colors = entries.iter().map(|(_, c)| *c).collect();
+        self.palette_names = entries.into_iter().map(|(n, _)| n).collect();
+        if let Some(mut strip) = self.popover.child(live_id!(palette)).borrow_mut::<FabPaletteStrip>() {
+            strip.set_colors(cx, colors);
+        }
+        self.sync_pending = true;
+    }
+
+    fn palette_label(&self, cx: &mut Cx, hot: Option<usize>) {
+        let text = match hot.and_then(|i| self.palette_names.get(i)) {
+            Some(name) => format!("theme.{name}"),
+            None if self.palette_names.is_empty() => String::new(),
+            None => format!("theme colours ({})", self.palette_names.len()),
+        };
+        self.popover.child(live_id!(palette_name)).set_text(cx, &text);
+    }
+
+    /// Close without publishing: the host is about to bind the property
+    /// to a palette reference, and a `Changed` would ledger a hex first.
+    fn close_quiet(&mut self, cx: &mut Cx) {
+        if !self.open {
+            return;
+        }
+        let uid = self.widget_uid();
+        self.open = false;
+        self.draw_swatch.open = 0.0;
+        cx.widget_action(uid, FabColorPickAction::Closed);
+        if let Some(list) = &self.overlay_list {
+            list.redraw(cx);
+        }
+        self.draw_swatch.redraw(cx);
+        cx.redraw_all();
     }
 
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, ended: bool) {
@@ -1724,6 +1964,17 @@ impl FabColorPick {
             if hex.area() == Area::Empty || !cx.has_key_focus(hex.area()) {
                 hex.set_text(cx, &format_hex(rgba, self.with_alpha));
             }
+        }
+        if let Some(mut strip) = self.popover.child(live_id!(palette)).borrow_mut::<FabPaletteStrip>() {
+            let byte = |v: f32| (v * 255.0).round() as i32;
+            let current = strip
+                .colors
+                .iter()
+                .position(|c| (0..4).all(|k| byte(c[k]) == byte(rgba[k])));
+            strip.set_current(cx, current);
+            let hot = strip.hot;
+            drop(strip);
+            self.palette_label(cx, hot);
         }
     }
 
@@ -1830,7 +2081,12 @@ impl Widget for FabColorPick {
             // Anchor under the swatch; clamp into the pass, flip above when
             // the bottom would overflow.
             let width = 244.0_f64;
-            let est_height = 360.0_f64;
+            let strip_height = self
+                .popover
+                .child(live_id!(palette))
+                .borrow::<FabPaletteStrip>()
+                .map_or(0.0, |s| s.height_for(width - 16.0));
+            let est_height = 360.0_f64 + if strip_height > 0.0 { strip_height + 26.0 } else { 0.0 };
             let mut pos = dvec2(anchor.pos.x + anchor.size.x - width, anchor.pos.y + anchor.size.y + 2.0);
             if pos.y + est_height > pass_size.y {
                 pos.y = (anchor.pos.y - est_height - 2.0).max(0.0);
@@ -1839,6 +2095,13 @@ impl Widget for FabColorPick {
             let mut panel_walk = Walk::fit();
             panel_walk.abs_pos = Some(pos);
             panel_walk.width = Size::Fixed(width);
+            // Push state into the controls BEFORE they draw: a redraw
+            // requested during the draw event is dropped, so a sync after
+            // the draw only showed on the next unrelated redraw.
+            if self.sync_pending {
+                self.sync_pending = false;
+                self.sync_widgets(cx);
+            }
             let _ = self.popover.draw_walk(cx, scope, panel_walk);
             // The UNCLIPPED rect: the popover draws in an overlay above
             // every clip, but `clipped_rect` intersects the host row's
@@ -1848,10 +2111,6 @@ impl Widget for FabColorPick {
             self.panel_rect = self.popover.area().rect(cx);
             cx.end_pass_sized_turtle();
             self.overlay_list.as_mut().unwrap().end(cx);
-            if self.sync_pending {
-                self.sync_pending = false;
-                self.sync_widgets(cx);
-            }
         }
         DrawStep::done()
     }
@@ -1902,6 +2161,35 @@ impl Widget for FabColorPick {
                         let uid = self.widget_uid();
                         self.close_popover(cx, false);
                         cx.widget_action(uid, FabColorPickAction::Eyedropper);
+                    }
+                    continue;
+                }
+                let strip_uid = self.popover.child(live_id!(palette)).widget_uid();
+                if widget_action.widget_uid == strip_uid {
+                    match widget_action.cast::<FabPaletteAction>() {
+                        FabPaletteAction::Hover(hot) => {
+                            self.palette_label(cx, hot);
+                            let name = hot.and_then(|i| self.palette_names.get(i).cloned());
+                            cx.widget_action(uid, FabColorPickAction::PaletteHover(name));
+                        }
+                        FabPaletteAction::Pick(i) => {
+                            if let Some(name) = self.palette_names.get(i).cloned() {
+                                let color = self
+                                    .popover
+                                    .child(live_id!(palette))
+                                    .borrow::<FabPaletteStrip>()
+                                    .and_then(|s| s.colors.get(i).copied());
+                                if let Some(c) = color {
+                                    self.hsv = rgb_to_hsv(c[0], c[1], c[2]);
+                                    self.alpha = c[3];
+                                    self.draw_swatch.swatch = vec4(c[0], c[1], c[2], c[3]);
+                                }
+                                self.close_quiet(cx);
+                                cx.widget_action(uid, FabColorPickAction::PaletteHover(None));
+                                cx.widget_action(uid, FabColorPickAction::PalettePick(name));
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }
