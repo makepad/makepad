@@ -1,0 +1,12 @@
+[package]
+name = "makepad-musicxml"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Faithful MusicXML 4.0 document parsing and serialization"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-zip-file = { path = "../zip_file", version = "1.0.0" }

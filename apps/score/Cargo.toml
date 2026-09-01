@@ -1,0 +1,11 @@
+[package]
+name = "makepad-app-score"
+version = "0.1.0"
+edition = "2021"
+description = "Makepad Score professional notation editor and pianist viewer"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-score-ui = { path = "../../libs/score_ui", version = "0.1.0" }
+

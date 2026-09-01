@@ -1,0 +1,10 @@
+[package]
+name = "makepad-score-layout"
+version = "0.1.0"
+edition = "2021"
+description = "Music engraving layout kernel for Makepad - spacing springs, skylines, optimal breaking, curve fitting"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

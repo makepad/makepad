@@ -1,0 +1,9 @@
+[package]
+name = "makepad-score"
+version = "1.0.0"
+edition = "2021"
+description = "Headless music score engine and SMuFL metadata support for Makepad"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
