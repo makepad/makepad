@@ -3,6 +3,7 @@ workspace.members = [
     "apps/mpbrowser",
     "apps/mpterm",
     "apps/mpwm",
+    "apps/finance",
     "apps/mpsheets",
     "libs/mp_theme",
     "libs/mp_wm_api",
@@ -14,16 +15,19 @@ workspace.members = [
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
+    "apps/ai-hub",
     "apps/vj",
     "apps/mixer",
     "libs/asset/importer",
+    # The tiled-RTS map generator, shared by the importer and the sandbox.
+    "libs/rtsmap",
     "libs/texcomp",
     "libs/asset/data",
     "libs/asset/client",
     "libs/asset/widgets",
     "libs/asset/store",
     "libs/asset/chat",
-    "libs/asset/chat_ui",
+    "libs/chat_ui",
     "libs/asset/annotate",
     "libs/render",
     "libs/raytrace",
@@ -33,6 +37,8 @@ workspace.members = [
     "libs/sim",
     "libs/sim/math",
     "libs/show_control",
+    "libs/asset/creator",
+    "libs/strict_json",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
@@ -83,6 +89,20 @@ workspace.members = [
     "studio/desktop",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
+    # === headless music score engine ===
+    "libs/score",
+    "libs/score_layout",
+    "libs/score_play",
+    "libs/score_render",
+    "libs/score_ai",
+    "libs/score_import",
+    "libs/score_pdf",
+    "libs/score_ui",
+    "apps/score",
+    "libs/midi_file",
+    "libs/soundfont",
+    "libs/piano_model",
+    "libs/musicxml",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
@@ -97,9 +117,19 @@ workspace.members = [
     # === mkfl motion payload + classical optical flow + all-intra re-encode
     # (shared by the enhance backend and the VJ's flow-warp import) ===
     "libs/video_flow",
+    # === realtime frame tweening: the classical GPU optical-flow pass
+    # chain, the RIFE producer behind the same warp, and the mode set
+    # (extracted from the VJ, which is still its reference user) ===
+    "libs/frametween",
+    # === archive.org search + download content input (VJ / asset-ui) ===
+    "libs/archive_org",
+    # === mp4 sample index for range-streaming playback ===
+    "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
+    # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
+    "libs/map_build",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
@@ -112,10 +142,12 @@ workspace.exclude = [
     # like a subdirectory. Not a required member so a clean makepad tree
     # still loads.
     "apps/sandbox",
-    "apps/sandbox/tools/sandbox-eval",
+    # Private Source Library picture wall. Same shape as sandbox: clone into
+    # apps/source-library; path deps stay ../../.
+    "apps/source-library",
     "libs/terminal_core",
     # standalone GPU generate service (own workspace, like diffusion)
-    "libs/asset/ai",
+    "libs/ai/hub",
     "libs/diffusion",
     # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
     "libs/ai",
