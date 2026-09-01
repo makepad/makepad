@@ -554,7 +554,7 @@ fn inspect_layer(input: &[u8]) -> Result<LayerInspection, String> {
     })
 }
 
-pub(crate) fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32, u8), String> {
+pub fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32, u8), String> {
     let key = read_varint(input, offset)?;
     let field = u32::try_from(key >> 3).map_err(|_| "protobuf field exceeds u32".to_string())?;
     let wire = (key & 7) as u8;
@@ -564,7 +564,7 @@ pub(crate) fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32
     Ok((field, wire))
 }
 
-pub(crate) fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
+pub fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
     let length = to_usize(read_varint(input, offset)?, "protobuf byte length")?;
     let end = offset
         .checked_add(length)
@@ -576,7 +576,7 @@ pub(crate) fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Re
     Ok(result)
 }
 
-pub(crate) fn skip_protobuf_value(input: &[u8], offset: &mut usize, wire: u8) -> Result<(), String> {
+pub fn skip_protobuf_value(input: &[u8], offset: &mut usize, wire: u8) -> Result<(), String> {
     match wire {
         0 => {
             read_varint(input, offset)?;
@@ -697,7 +697,7 @@ fn write_varint(mut value: u64, output: &mut Vec<u8>) {
     output.push(value as u8);
 }
 
-pub(crate) fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64, String> {
+pub fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64, String> {
     let mut value = 0_u64;
     for shift in (0..=63).step_by(7) {
         let byte = read_byte(input, offset)?;

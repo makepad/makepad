@@ -1,0 +1,19 @@
+# The tiled-RTS map generator, shared by every producer of one.
+#
+# Pure and std-only ON PURPOSE: the asset importer (a headless tool) and the
+# sandbox (a renderer app, and a PRIVATE clone the public tree must build
+# without) both call it, so it can depend on neither. It also means the same
+# seed produces the same map on every box — no float transcendentals from a
+# third crate sit between the seed and the cells.
+[package]
+name = "makepad-rtsmap"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic tiled-RTS map generation: cell classes, tile picks, resources, fair starts"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_rtsmap"
+path = "src/lib.rs"
+
+[dependencies]

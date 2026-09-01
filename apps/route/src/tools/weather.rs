@@ -1,7 +1,7 @@
 //! weather.* tools — numeric radar nowcast (never VLM-on-pixels; user rule).
 
-use makepad_ai::makepad_micro_serde::JsonValue;
-use makepad_ai::ToolDefinition;
+use makepad_widgets::makepad_micro_serde::JsonValue;
+use makepad_converse::agent_seam::ToolDefinition;
 
 use crate::broker::{arg_f64, def, ToolCtx};
 use crate::nav_data::RadarGrid;
