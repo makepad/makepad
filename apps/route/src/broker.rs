@@ -9,8 +9,8 @@
 //! `route.plan` from route.md becomes `route_plan` on the wire.
 
 use makepad_widgets::*;
-use makepad_ai::*;
-use makepad_ai::makepad_micro_serde::*;
+use makepad_converse::agent_seam::*;
+use makepad_widgets::makepad_micro_serde::*;
 
 use crate::nav_data::NavData;
 use crate::tools;

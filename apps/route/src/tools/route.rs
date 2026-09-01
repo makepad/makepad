@@ -1,7 +1,7 @@
 //! route.* tools — trip planning over RouteGraph + TripModel.
 
-use makepad_ai::makepad_micro_serde::JsonValue;
-use makepad_ai::ToolDefinition;
+use makepad_widgets::makepad_micro_serde::JsonValue;
+use makepad_converse::agent_seam::ToolDefinition;
 use makepad_map_nav::geo::LonLat;
 use makepad_map_nav::graph::TravelMode;
 
