@@ -1634,16 +1634,84 @@ impl MacosApp {
         }
     }
 
-    pub fn open_save_file_dialog(&mut self, _settings: FileDialog) {
-        println!("open save file dialog!");
+    /// Native save panel (`NSSavePanel`). Deferred onto the main queue for
+    /// the same reason as the folder picker below: `runModal` spins its own
+    /// run loop, and the platform-op drain that calls this holds the `Cx`
+    /// borrow.
+    pub fn open_save_file_dialog(&mut self, settings: FileDialog) {
+        let id = settings.id;
+        let title = settings.title.clone().unwrap_or_default();
+        let filename = settings.filename.clone().unwrap_or_default();
+        let location = settings
+            .location
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let extensions = filter_extensions(&settings);
+        unsafe {
+            let main_thread_block = objc_block!(move || {
+                let picked = run_save_panel(&title, &filename, &location, &extensions);
+                Cx::post_action(match picked {
+                    Some(path) => FileDialogAction::SaveFileSelected { id, path },
+                    None => FileDialogAction::SaveFileCancelled { id },
+                });
+            });
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
     }
 
-    pub fn open_select_file_dialog(&mut self, _settings: FileDialog) {
-        println!("open select file dialog!");
+    /// Native file picker (`NSOpenPanel`, files only), with type filters
+    /// and optional multi-select.
+    pub fn open_select_file_dialog(&mut self, settings: FileDialog) {
+        let id = settings.id;
+        let title = settings.title.clone().unwrap_or_default();
+        let location = settings
+            .location
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let multiple = settings.multiple;
+        let extensions = filter_extensions(&settings);
+        unsafe {
+            let main_thread_block = objc_block!(move || {
+                let picked = run_open_panel(&title, &location, &extensions, multiple);
+                Cx::post_action(if picked.is_empty() {
+                    FileDialogAction::FileCancelled { id }
+                } else {
+                    FileDialogAction::FileSelected { id, paths: picked }
+                });
+            });
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
     }
 
-    pub fn open_save_folder_dialog(&mut self, _settings: FileDialog) {
-        println!("open save folder dialog!");
+    /// "Save into this folder": a save panel that names a directory.
+    pub fn open_save_folder_dialog(&mut self, settings: FileDialog) {
+        let title = settings.title.clone().unwrap_or_default();
+        let location = settings
+            .location
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        unsafe {
+            let main_thread_block = objc_block!(move || {
+                let picked = run_select_folder_panel(&title, &location, true);
+                Cx::post_action(match picked {
+                    Some(path) => FileDialogAction::FolderSelected(path),
+                    None => FileDialogAction::FolderCancelled,
+                });
+            });
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
     }
 
     /// Native folder picker (`NSOpenPanel`, directories only).
@@ -1663,7 +1731,7 @@ impl MacosApp {
             .unwrap_or_default();
         unsafe {
             let main_thread_block = objc_block!(move || {
-                let picked = run_select_folder_panel(&title, &location);
+                let picked = run_select_folder_panel(&title, &location, false);
                 Cx::post_action(match picked {
                     Some(path) => FileDialogAction::FolderSelected(path),
                     None => FileDialogAction::FolderCancelled,
@@ -1680,9 +1748,152 @@ impl MacosApp {
 /// `NSModalResponseOK`. Cancel is 0; anything else is "not a choice".
 const NS_MODAL_RESPONSE_OK: i64 = 1;
 
+/// Every extension the dialog's filters name, flattened. A filter of `*`
+/// (the conventional "All Files" row) means "no restriction at all", and
+/// wins over every other filter — a panel with an empty allowed-types list
+/// accepts anything, which is exactly what that row promises.
+fn filter_extensions(settings: &FileDialog) -> Vec<String> {
+    let mut out = Vec::new();
+    for filter in &settings.filters {
+        for extension in &filter.extensions {
+            let cleaned = extension.trim().trim_start_matches('*').trim_start_matches('.');
+            if cleaned.is_empty() || extension.trim() == "*" {
+                return Vec::new();
+            }
+            if !out.iter().any(|e: &String| e.eq_ignore_ascii_case(cleaned)) {
+                out.push(cleaned.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Restrict a panel to a set of extensions.
+///
+/// `setAllowedFileTypes:` is deprecated in favour of UTType-based
+/// `allowedContentTypes` on macOS 12+, but it still works, it takes plain
+/// extension strings, and it needs no UniformTypeIdentifiers linkage. When
+/// the list is empty the panel is left unrestricted.
+unsafe fn set_allowed_types(panel: ObjcId, extensions: &[String]) {
+    if extensions.is_empty() {
+        return;
+    }
+    let array: ObjcId = msg_send![class!(NSMutableArray), array];
+    for extension in extensions {
+        let () = msg_send![array, addObject: str_to_nsstring(extension)];
+    }
+    let () = msg_send![panel, setAllowedFileTypes: array];
+}
+
+unsafe fn set_start_location(panel: ObjcId, location: &str) {
+    if location.is_empty() {
+        return;
+    }
+    let is_directory = std::path::Path::new(location).is_dir();
+    let url: ObjcId = msg_send![
+        class!(NSURL),
+        fileURLWithPath: str_to_nsstring(location)
+        isDirectory: if is_directory { YES } else { NO }
+    ];
+    if url != nil {
+        let () = msg_send![panel, setDirectoryURL: url];
+    }
+}
+
+unsafe fn url_to_path(url: ObjcId) -> Option<std::path::PathBuf> {
+    if url == nil {
+        return None;
+    }
+    let path: ObjcId = msg_send![url, path];
+    if path == nil {
+        return None;
+    }
+    let path = nsstring_to_string(path);
+    (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+}
+
+/// Run the file open panel to completion on the main thread. An empty
+/// result means the user cancelled.
+fn run_open_panel(
+    title: &str,
+    location: &str,
+    extensions: &[String],
+    multiple: bool,
+) -> Vec<std::path::PathBuf> {
+    unsafe {
+        let panel: ObjcId = msg_send![class!(NSOpenPanel), openPanel];
+        if panel == nil {
+            return Vec::new();
+        }
+        let () = msg_send![panel, setCanChooseFiles: YES];
+        let () = msg_send![panel, setCanChooseDirectories: NO];
+        let () = msg_send![panel, setAllowsMultipleSelection: if multiple { YES } else { NO }];
+        let () = msg_send![panel, setCanCreateDirectories: NO];
+        if !title.is_empty() {
+            let () = msg_send![panel, setMessage: str_to_nsstring(title)];
+        }
+        set_start_location(panel, location);
+        set_allowed_types(panel, extensions);
+        let response: i64 = msg_send![panel, runModal];
+        if response != NS_MODAL_RESPONSE_OK {
+            return Vec::new();
+        }
+        // `URLs` covers both cases: a single-selection panel returns a
+        // one-element array.
+        let urls: ObjcId = msg_send![panel, URLs];
+        if urls == nil {
+            return Vec::new();
+        }
+        let count: usize = msg_send![urls, count];
+        let mut out = Vec::with_capacity(count);
+        for index in 0..count {
+            let url: ObjcId = msg_send![urls, objectAtIndex: index];
+            if let Some(path) = url_to_path(url) {
+                out.push(path);
+            }
+        }
+        out
+    }
+}
+
+/// Run the save panel to completion on the main thread. `None` = cancelled.
+/// The panel itself handles the "already exists, replace?" prompt.
+fn run_save_panel(
+    title: &str,
+    filename: &str,
+    location: &str,
+    extensions: &[String],
+) -> Option<std::path::PathBuf> {
+    unsafe {
+        let panel: ObjcId = msg_send![class!(NSSavePanel), savePanel];
+        if panel == nil {
+            return None;
+        }
+        let () = msg_send![panel, setCanCreateDirectories: YES];
+        if !title.is_empty() {
+            let () = msg_send![panel, setMessage: str_to_nsstring(title)];
+        }
+        if !filename.is_empty() {
+            let () = msg_send![panel, setNameFieldStringValue: str_to_nsstring(filename)];
+        }
+        set_start_location(panel, location);
+        set_allowed_types(panel, extensions);
+        let response: i64 = msg_send![panel, runModal];
+        if response != NS_MODAL_RESPONSE_OK {
+            return None;
+        }
+        let url: ObjcId = msg_send![panel, URL];
+        url_to_path(url)
+    }
+}
+
 /// Run the directory-only open panel to completion on the main thread.
 /// `None` = the user cancelled (or the panel returned nothing usable).
-fn run_select_folder_panel(title: &str, location: &str) -> Option<std::path::PathBuf> {
+fn run_select_folder_panel(
+    title: &str,
+    location: &str,
+    can_create: bool,
+) -> Option<std::path::PathBuf> {
     unsafe {
         let panel: ObjcId = msg_send![class!(NSOpenPanel), openPanel];
         if panel == nil {
@@ -1693,7 +1904,7 @@ fn run_select_folder_panel(title: &str, location: &str) -> Option<std::path::Pat
         let () = msg_send![panel, setCanChooseFiles: YES];
         let () = msg_send![panel, setCanChooseDirectories: YES];
         let () = msg_send![panel, setAllowsMultipleSelection: NO];
-        let () = msg_send![panel, setCanCreateDirectories: NO];
+        let () = msg_send![panel, setCanCreateDirectories: if can_create { YES } else { NO }];
         if !title.is_empty() {
             let () = msg_send![panel, setMessage: str_to_nsstring(title)];
         }

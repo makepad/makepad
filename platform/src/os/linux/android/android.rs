@@ -18,6 +18,7 @@ use {
         super::egl_sys::{self, LibEgl},
         super::libc_sys,
         android_camera_player::AndroidCameraPlayer,
+        android_file_dialog,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         android_media::CxAndroidMedia,
@@ -3090,6 +3091,18 @@ impl Cx {
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Android");
                     self.call_event_handler(&Event::DragEnd);
+                }
+                CxOsOp::SelectFileDialog(settings) => {
+                    android_file_dialog::open_select_file_dialog(settings);
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    android_file_dialog::open_save_file_dialog(settings);
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    android_file_dialog::open_select_folder_dialog(settings);
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    android_file_dialog::open_save_folder_dialog(settings);
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
