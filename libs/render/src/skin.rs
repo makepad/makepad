@@ -1373,6 +1373,64 @@ impl SkinnedModel {
         self.nodes.get(node).map(|node| node.name.as_str())
     }
 
+    /// Parent of `node` in the authored hierarchy; `None` for a root or an
+    /// out-of-range index. Retargets walk this parents-first.
+    pub fn node_parent(&self, node: usize) -> Option<usize> {
+        self.nodes.get(node).and_then(|node| node.parent)
+    }
+
+    /// Number of nodes, joints or not — the length of every `PoseBuffer`.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Weight-averaged rest position, in mesh space, of the vertices the
+    /// joint at `node` skins — where the flesh hangs off the bone. A leaf
+    /// limb has no child to point at; this is the way it actually runs.
+    /// `None` when `node` is not a joint or skins nothing.
+    pub fn joint_skinned_centroid(&self, node: usize) -> Option<Vec3f> {
+        let joint = self.joint_nodes.iter().position(|&n| n == node)?;
+        let mut sum = Vec3f::default();
+        let mut total = 0.0f32;
+        for v in &self.vertices {
+            for k in 0..4 {
+                if v.joints[k] as usize == joint && v.weights[k] > 0.0 {
+                    let w = v.weights[k];
+                    sum = sum + v.pos.scale(w);
+                    total += w;
+                }
+            }
+        }
+        if total <= 0.0 {
+            return None;
+        }
+        Some(sum.scale(1.0 / total))
+    }
+
+    /// A rig of nodes and nothing else — no mesh, no clips — for tests and
+    /// tools that exercise hierarchy maths (retargets) without a GLB. Every
+    /// node counts as a joint; `mesh_node` is the node whose inverse
+    /// premultiplies `node_mesh_transform`, as for a parsed model.
+    pub fn from_nodes(nodes: Vec<(String, Option<usize>, NodeTrs)>, mesh_node: usize) -> SkinnedModel {
+        let joint_nodes = (0..nodes.len()).collect();
+        SkinnedModel {
+            rest_hash_cache: std::sync::OnceLock::new(),
+            nodes: nodes
+                .into_iter()
+                .map(|(name, parent, rest)| Node { name, parent, rest })
+                .collect(),
+            joint_nodes,
+            inverse_bind: Vec::new(),
+            mesh_node,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            clips: Vec::new(),
+            skipped_unskinned: 0,
+            joint_bounds: Vec::new(),
+            ragdoll: None,
+        }
+    }
+
     /// Mask containing `root` and every node parented below it.
     ///
     /// Cache this alongside a resolved animation clip when applying a
