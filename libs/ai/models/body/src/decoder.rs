@@ -8,7 +8,7 @@ use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
 use crate::weights::BodyWeights;
 use crate::{
     DEC_DEPTH, DEC_DIM, DEC_FFN, DEC_HEADS, DEC_INNER, DEC_NORM_EPS, DINO_DIM, NCAM,
-    NPOSE, NUM_KEYPOINTS, NUM_PATCHES, PATCHES_SIDE, DiffusionError, Result,
+    NPOSE, NUM_KEYPOINTS, DiffusionError, Result,
 };
 
 pub const TOKEN_ROWS: usize = 5 + 2 * NUM_KEYPOINTS;
@@ -320,6 +320,18 @@ pub struct DecoderOutput {
     pub hand_logits: [[f32; 2]; 2],
     pub last_pose_pred: Vec<f32>,
     pub last_cam_pred: Vec<f32>,
+    pub timing: LoopTiming,
+}
+
+/// Where the loop's time went, milliseconds over all six steps: the GPU
+/// layer chain, the pose-row fetch + heads, the caller's step (rig, camera,
+/// projection), and the refinement update (FFNs, sampling, uploads).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LoopTiming {
+    pub layers_ms: f32,
+    pub heads_ms: f32,
+    pub step_ms: f32,
+    pub refine_ms: f32,
 }
 
 impl Decoder {
@@ -370,16 +382,20 @@ impl Decoder {
         F: FnMut(StepInput) -> StepFeedback,
     {
         validate_run_inputs(&tokens, context, context_pe)?;
+        let context_rows = context.rows();
+        let grid_side = (context_rows as f64).sqrt().round() as usize;
         let context_host = gpu_download(context).map_err(DiffusionError::model)?;
-        let context_pe = gpu_upload(context_pe, NUM_PATCHES, DINO_DIM)
+        let context_pe = gpu_upload(context_pe, context_rows, DINO_DIM)
             .map_err(DiffusionError::model)?;
         let mut hidden = gpu_upload(&tokens.tokens, TOKEN_ROWS, DEC_DIM)
             .map_err(DiffusionError::model)?;
         let mut final_normed = Vec::new();
         let mut last_pose = Vec::new();
         let mut last_camera = Vec::new();
+        let mut timing = LoopTiming::default();
 
         for (layer_index, layer) in self.layers.iter().enumerate() {
+            let t0 = std::time::Instant::now();
             let token_pe = gpu_upload(&tokens.token_augment, TOKEN_ROWS, DEC_DIM)
                 .map_err(DiffusionError::model)?;
             let token_pe = layer_norm_gpu(&token_pe, &layer.ln_pe_1)?;
@@ -410,6 +426,8 @@ impl Decoder {
             hidden = gpu_add(&hidden, &ffn).map_err(DiffusionError::model)?;
 
             let normed = layer_norm_gpu(&hidden, &self.norm_final)?;
+            timing.layers_ms += t0.elapsed().as_secs_f32() * 1000.0;
+            let t1 = std::time::Instant::now();
             // Only the pose token leaves the GPU mid-loop; the whole block
             // is downloaded once at the end (the hand-box rows and the
             // output) or when a trace wants every layer.
@@ -429,18 +447,28 @@ impl Decoder {
             add_in_place(&mut last_pose, &self.init_pose);
             last_camera = self.step_heads.camera(pose_token)?;
             add_in_place(&mut last_camera, &self.init_camera);
+            timing.heads_ms += t1.elapsed().as_secs_f32() * 1000.0;
+            let t2 = std::time::Instant::now();
             let feedback = step(StepInput {
                 layer: layer_index,
                 pose_pred_519: last_pose.clone(),
                 cam_pred_3: last_camera.clone(),
                 tokens_normed_row0: pose_token.to_vec(),
             });
+            timing.step_ms += t2.elapsed().as_secs_f32() * 1000.0;
 
             if layer_index + 1 < DEC_DEPTH {
-                let delta = self.refinement_update(&mut tokens.token_augment, &context_host, feedback)?;
+                let t3 = std::time::Instant::now();
+                let delta = self.refinement_update(
+                    &mut tokens.token_augment,
+                    &context_host,
+                    grid_side,
+                    feedback,
+                )?;
                 let delta = gpu_upload(&delta, TOKEN_ROWS, DEC_DIM)
                     .map_err(DiffusionError::model)?;
                 hidden = gpu_add(&hidden, &delta).map_err(DiffusionError::model)?;
+                timing.refine_ms += t3.elapsed().as_secs_f32() * 1000.0;
             }
         }
 
@@ -457,6 +485,7 @@ impl Decoder {
             hand_logits,
             last_pose_pred: last_pose,
             last_cam_pred: last_camera,
+            timing,
         })
     }
 
@@ -464,6 +493,7 @@ impl Decoder {
         &self,
         token_augment: &mut [f32],
         context: &[f32],
+        grid_side: usize,
         feedback: StepFeedback,
     ) -> Result<Vec<f32>> {
         if feedback.kp2d_cropped.len() != NUM_KEYPOINTS * 2
@@ -497,8 +527,8 @@ impl Decoder {
             if valid[index] {
                 let value = bilinear_sample(
                     context,
-                    PATCHES_SIDE,
-                    PATCHES_SIDE,
+                    grid_side,
+                    grid_side,
                     DINO_DIM,
                     2.0 * point[0],
                     2.0 * point[1],
@@ -592,20 +622,21 @@ fn validate_run_inputs(tokens: &TokenSet, context: &GpuTensor, context_pe: &[f32
             TOKEN_ROWS * DEC_DIM,
         )));
     }
-    if context.rows() != NUM_PATCHES || context.cols() != DINO_DIM {
+    let rows = context.rows();
+    let side = (rows as f64).sqrt().round() as usize;
+    if context.cols() != DINO_DIM || side * side != rows {
         return Err(DiffusionError::workflow(format!(
-            "decoder context is {}x{}, expected {}x{}",
+            "decoder context is {}x{}, expected a square patch grid x {}",
             context.rows(),
             context.cols(),
-            NUM_PATCHES,
             DINO_DIM,
         )));
     }
-    if context_pe.len() != NUM_PATCHES * DINO_DIM {
+    if context_pe.len() != rows * DINO_DIM {
         return Err(DiffusionError::workflow(format!(
             "decoder context PE has {} values, expected {}",
             context_pe.len(),
-            NUM_PATCHES * DINO_DIM,
+            rows * DINO_DIM,
         )));
     }
     Ok(())
