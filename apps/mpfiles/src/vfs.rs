@@ -26,7 +26,7 @@ use std::{
 use crate::{
     model::{self, FileEntry},
     ops::{OpKind, OpRequest, Undo},
-    treemap::{self, Node, ScanProgress},
+    treemap::{self, Node, ScanProgress, ScanRules, ScanStep},
 };
 
 /// What an operation did, once it is done: the sentence for the status bar,
@@ -77,6 +77,32 @@ pub trait Vfs: Send + Sync {
         cancel: &AtomicBool,
         progress: &dyn Fn(ScanProgress),
     ) -> Option<Node>;
+
+    /// The same tree, streamed back through `sink` as it is discovered, so a
+    /// map of a full disk is drawable after one `read_dir` instead of after
+    /// the whole walk. Returns false when the walk was cancelled.
+    ///
+    /// The default hands the finished tree over in one step, which is exactly
+    /// right for a filesystem that answers instantly — there is nothing to
+    /// stream when there is nothing to wait for. A real disk overrides it.
+    fn scan_stream(
+        &self,
+        root: &Path,
+        cancel: &AtomicBool,
+        sink: &(dyn Fn(ScanStep) + Sync),
+    ) -> bool {
+        match self.scan(root, cancel, &|_| {}) {
+            Some(node) => {
+                sink(ScanStep::Opened {
+                    at: Vec::new(),
+                    children: node.children,
+                    denied: false,
+                });
+                true
+            }
+            None => false,
+        }
+    }
 
     /// Perform an operation *synchronously*. Only a filesystem that can do so
     /// in no time at all implements this — see [`Vfs::is_instant`]; the real
@@ -133,7 +159,23 @@ impl Vfs for RealVfs {
         progress: &dyn Fn(ScanProgress),
     ) -> Option<Node> {
         let classify = |p: &Path, is_dir: bool| model::kind_for(p, is_dir) as u8;
-        treemap::scan(root, &classify, cancel, progress)
+        treemap::scan(root, &treemap::ScanRules { classify: &classify, skip: &model::skip_for_scan }, cancel, progress)
+    }
+
+    fn scan_stream(
+        &self,
+        root: &Path,
+        cancel: &AtomicBool,
+        sink: &(dyn Fn(ScanStep) + Sync),
+    ) -> bool {
+        // Closures with nothing captured, so the walk's threads can all share
+        // them without any synchronisation of their own.
+        let classify = |p: &Path, is_dir: bool| model::kind_for(p, is_dir) as u8;
+        let rules = ScanRules {
+            classify: &classify,
+            skip: &model::skip_for_scan,
+        };
+        treemap::scan_stream(root, &rules, cancel, sink)
     }
 
     fn perform(&self, _request: &OpRequest) -> Result<OpOutcome, String> {

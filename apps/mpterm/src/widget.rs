@@ -126,7 +126,24 @@ script_mod! {
         }
         draw_text +: {
             draw_call_group: @term_text
-            text_style: theme.font_code
+            // The shell and Omarchy prompts are designed around JetBrains
+            // Mono. Liberation Mono lacks even common prompt symbols such as
+            // U+276F; keep Font Awesome as a fallback for the icon codepoints
+            // it does cover. The distro package can add a full Nerd Font
+            // member here without making mpterm depend on host fontconfig.
+            text_style: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{
+                        res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                        asc: 0.0 desc: 0.0 weight: 400.0
+                    }
+                    icons := FontMember{
+                        res: crate_resource("self:../../widgets/resources/fa-solid-900.ttf")
+                        asc: 0.0 desc: 0.0
+                    }
+                }
+                line_spacing: 1.35
+            }
         }
         draw_cell_bg +: {}
         draw_underline +: {}

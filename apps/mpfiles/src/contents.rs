@@ -345,7 +345,8 @@ script_mod! {
     }
 }
 
-/// The four ways to look at a folder.
+/// The ways to look at a folder. The last three are one treemap under three
+/// projections — flat, extruded, perspective — sharing scan, camera and pick.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ViewMode {
     #[default]
@@ -363,6 +364,11 @@ impl ViewMode {
             ViewMode::Compact => "Compact",
             ViewMode::Treemap => "Treemap",
         }
+    }
+
+    /// Whether this mode shows the treemap page, whatever the projection.
+    pub fn is_treemap(self) -> bool {
+        matches!(self, ViewMode::Treemap)
     }
 }
 
@@ -387,6 +393,10 @@ pub enum FileContentsAction {
     Selected(FileEntry),
     /// A column header was clicked; the listing is re-ordered.
     Sorted,
+    /// The view changed what it is saying about itself and the status line
+    /// should ask it again — the treemap picking something the listing does
+    /// not hold, which is most of the map.
+    Restated,
     /// The inline editor was confirmed: `path` should become `name`.
     Renamed(PathBuf, String),
     /// The inline editor was dismissed with nothing changed.
@@ -396,8 +406,9 @@ pub enum FileContentsAction {
     Dropped(Vec<PathBuf>, DVec2),
     /// A folder in the List tree was opened and its children are not loaded.
     NeedChildren(PathBuf),
-    /// The treemap wants the browser to move into this folder.
-    Drill(PathBuf),
+    /// The map's filter chip was clicked away; the filter controls should
+    /// show themselves cleared.
+    MapFilterCleared,
     /// A secondary press: open the context menu at `at`, for `entry` when the
     /// press landed on one and for the folder itself when it landed on the
     /// empty space.
@@ -415,10 +426,14 @@ pub struct HitRect {
 }
 
 /// A secondary press, resolved against what was drawn.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ContextHit {
     pub at: DVec2,
     pub position: Option<usize>,
+    /// The target when it is not in the current listing at all — a file the
+    /// treemap found several folders down. The menu acts on it exactly as it
+    /// acts on a row, because it is exactly as real a file.
+    pub off_list: Option<FileEntry>,
 }
 
 /// The colors the body sets from Rust. Everything else comes straight from
@@ -652,7 +667,7 @@ impl FileContents {
             .set_visible(cx, mode == ViewMode::Compact);
         self.view
             .view(cx, ids!(treemap_page))
-            .set_visible(cx, mode == ViewMode::Treemap);
+            .set_visible(cx, mode.is_treemap());
         // The tree only exists in the List view, so leaving it flattens the
         // rows and entering it can bring them back.
         if was_tree != (mode == ViewMode::List) {
@@ -921,7 +936,7 @@ impl FileContents {
         if !self.rows.iter().any(|r| r.entry.path == path) {
             return false;
         }
-        if self.mode == ViewMode::Treemap {
+        if self.mode.is_treemap() {
             return false;
         }
         self.renaming = Some(path.to_path_buf());
@@ -1220,10 +1235,11 @@ impl FileContents {
     pub fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<FileContentsAction> {
         let mut out = Vec::new();
         if let Some(hit) = self.pending_context.take() {
-            let entry = hit
-                .position
-                .and_then(|p| self.rows.get(p))
-                .map(|r| r.entry.clone());
+            let entry = hit.off_list.clone().or_else(|| {
+                hit.position
+                    .and_then(|p| self.rows.get(p))
+                    .map(|r| r.entry.clone())
+            });
             out.push(FileContentsAction::Context { at: hit.at, entry });
             return out;
         }
@@ -1353,8 +1369,24 @@ impl FileContents {
                 }
             }
             ViewMode::Treemap => {
-                let map = self.treemap(cx);
-                match map.action(actions) {
+                // Every action from the map, not just the first: a secondary
+                // click emits its pick *and* its context request in one
+                // batch, and dropping either would lose the menu or the
+                // selection.
+                let map_uid = self.treemap(cx).widget_uid();
+                let map_actions: Vec<TreemapAction> = actions
+                    .iter()
+                    .filter_map(|a| a.as_widget_action().filter(|wa| wa.widget_uid == map_uid))
+                    .map(|wa| wa.cast::<TreemapAction>())
+                    .collect();
+                for action in map_actions {
+                    match action {
+                    // Picking is picking. The old rule — anything not in the
+                    // current listing means "go there" — made a single click
+                    // on any rectangle below the top level throw the whole
+                    // browser somewhere else, which is the opposite of what a
+                    // map is for. Deeper picks live on the map's own readout;
+                    // only the ones the listing also holds reach the shell.
                     TreemapAction::Selected(path) => {
                         self.selected.clear();
                         self.selected.insert(path.clone());
@@ -1367,11 +1399,31 @@ impl FileContents {
                         {
                             out.push(FileContentsAction::Selected(entry));
                         } else {
-                            out.push(FileContentsAction::Drill(path));
+                            // Below the listing, so there is no row to
+                            // describe — but the status line still has to
+                            // stop saying what the *last* pick was.
+                            out.push(FileContentsAction::Restated);
                         }
                     }
-                    TreemapAction::Drill(path) => out.push(FileContentsAction::Drill(path)),
+                    // The map was showing something that is not there any
+                    // more — deleted by something other than this app since
+                    // the folder was measured. It has already dropped it; the
+                    // listing should hear about it too.
+                    TreemapAction::Vanished(path) => {
+                        self.selected.remove(&path);
+                        out.push(FileContentsAction::Restated);
+                    }
+                    TreemapAction::FilterCleared => {
+                        out.push(FileContentsAction::MapFilterCleared);
+                    }
+                    // A secondary click that stayed a click: the menu opens
+                    // exactly as it would have on the press, only now it is
+                    // certain no pan was meant.
+                    TreemapAction::Context(at) => {
+                        self.open_context(cx, at);
+                    }
                     TreemapAction::None => {}
+                    }
                 }
             }
         }
@@ -1424,10 +1476,22 @@ impl FileContents {
     /// file manager does, and what keeps a right-click on one of five selected
     /// files from throwing the other four away.
     fn open_context(&mut self, cx: &mut Cx, at: DVec2) {
+        let mut off_list = None;
         let position = match self.mode {
             ViewMode::Treemap => {
                 let path = self.treemap(cx).path_at(at);
-                path.and_then(|p| self.rows.iter().position(|r| r.entry.path == p))
+                let position = path
+                    .as_ref()
+                    .and_then(|p| self.rows.iter().position(|r| r.entry.path == *p));
+                // Most of the map is below the folder being listed, so most
+                // right-clicks land on something the rows do not know about.
+                // The entry is read straight off the disk instead — a menu
+                // that refuses to act on what the map is showing would be
+                // useless for the one job the map exists for.
+                if position.is_none() {
+                    off_list = path.as_deref().and_then(crate::model::entry_at);
+                }
+                position
             }
             _ => self
                 .hit_rects
@@ -1445,7 +1509,11 @@ impl FileContents {
                 self.view.redraw(cx);
             }
         }
-        self.pending_context = Some(ContextHit { at, position });
+        self.pending_context = Some(ContextHit {
+            at,
+            position,
+            off_list,
+        });
         let uid = self.widget_uid();
         cx.widget_action(uid, ContentsPing::Ping);
     }
@@ -1531,7 +1599,10 @@ impl Widget for FileContents {
         if let Event::MouseDown(press) = event {
             let secondary = press.button.is_secondary()
                 || (press.button.is_primary() && press.modifiers.control);
-            if secondary && self.body_rect.contains(press.abs) {
+            // Not on the treemap: there a secondary press may be the start of
+            // a right-drag pan, so the map itself decides on release and
+            // reports a clean click as `TreemapAction::Context`.
+            if secondary && self.mode != ViewMode::Treemap && self.body_rect.contains(press.abs) {
                 self.open_context(cx, press.abs);
             }
         }
