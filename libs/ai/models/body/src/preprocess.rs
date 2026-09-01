@@ -24,7 +24,7 @@ pub fn crop_geometry(
     image_h: usize,
     intrinsics: Option<[f32; 3]>,
 ) -> CropGeometry {
-    crop_geometry_at(bbox_xyxy, image_w, image_h, intrinsics, IMAGE_SIZE)
+    crop_geometry_at(bbox_xyxy, image_w, image_h, intrinsics, IMAGE_SIZE, 1.25)
 }
 
 pub fn crop_geometry_at(
@@ -33,14 +33,15 @@ pub fn crop_geometry_at(
     image_h: usize,
     intrinsics: Option<[f32; 3]>,
     crop: usize,
+    padding: f32,
 ) -> CropGeometry {
     let center = [
         0.5 * (bbox_xyxy[0] + bbox_xyxy[2]),
         0.5 * (bbox_xyxy[1] + bbox_xyxy[3]),
     ];
     let mut scale = [
-        (bbox_xyxy[2] - bbox_xyxy[0]) * 1.25,
-        (bbox_xyxy[3] - bbox_xyxy[1]) * 1.25,
+        (bbox_xyxy[2] - bbox_xyxy[0]) * padding,
+        (bbox_xyxy[3] - bbox_xyxy[1]) * padding,
     ];
     if scale[0] > scale[1] * 0.75 {
         scale[1] = scale[0] / 0.75;
@@ -98,6 +99,19 @@ pub fn crop_normalized(
     h: usize,
     geo: &CropGeometry,
 ) -> Vec<f32> {
+    crop_normalized_mirrored(rgb, w, h, geo, false)
+}
+
+/// Crop and normalise, optionally sampling the horizontally mirrored source
+/// image. Mirroring happens before the affine warp, matching a real flipped
+/// full-image buffer without allocating that buffer.
+pub fn crop_normalized_mirrored(
+    rgb: &[u8],
+    w: usize,
+    h: usize,
+    geo: &CropGeometry,
+    mirror: bool,
+) -> Vec<f32> {
     let crop = geo.crop;
     let mut output = vec![0.0; 3 * crop * crop];
     let k = geo.affine[0];
@@ -124,7 +138,10 @@ pub fn crop_normalized(
                 for (row, v) in (v0..).enumerate().take(planes[0].len() / crop) {
                     let src_y = (v as f32 - geo.affine[5]) / k;
                     for u in 0..crop {
-                        let src_x = (u as f32 - geo.affine[2]) / k;
+                        let mut src_x = (u as f32 - geo.affine[2]) / k;
+                        if mirror {
+                            src_x = w as f32 - 1.0 - src_x;
+                        }
                         for c in 0..3 {
                             let pixel = bilinear_zero_border(rgb, w, h, src_x, src_y, c) / 255.0;
                             planes[c][row * crop + u] = (pixel - IMAGENET_MEAN[c]) / IMAGENET_STD[c];

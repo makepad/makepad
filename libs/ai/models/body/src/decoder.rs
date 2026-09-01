@@ -12,9 +12,62 @@ use crate::{
     NPOSE, NUM_KEYPOINTS, DiffusionError, Result,
 };
 
+/// The legacy one-dummy-prompt row count. Actual runs derive their row count
+/// from the prompt list (`144 + N`).
 pub const TOKEN_ROWS: usize = 5 + 2 * NUM_KEYPOINTS;
+const BASE_TOKEN_ROWS: usize = 4 + 2 * NUM_KEYPOINTS;
+#[cfg(test)]
 const KEYPOINT_ROW: usize = 5;
+#[cfg(test)]
 const KEYPOINT3D_ROW: usize = KEYPOINT_ROW + NUM_KEYPOINTS;
+
+#[derive(Clone, Copy)]
+pub struct DecoderNames {
+    pub decoder: &'static str,
+    pub pose_head: &'static str,
+    pub camera_head: &'static str,
+    pub init_pose: &'static str,
+    pub init_camera: &'static str,
+    pub init_to_token: &'static str,
+    pub prev_to_token: &'static str,
+    pub keypoint_embedding: &'static str,
+    pub keypoint3d_embedding: &'static str,
+    pub keypoint_posemb: &'static str,
+    pub keypoint3d_posemb: &'static str,
+    pub keypoint_feat: &'static str,
+}
+
+impl DecoderNames {
+    pub const BODY: Self = Self {
+        decoder: "decoder",
+        pose_head: "head_pose.proj",
+        camera_head: "head_camera.proj",
+        init_pose: "init_pose.weight",
+        init_camera: "init_camera.weight",
+        init_to_token: "init_to_token_mhr",
+        prev_to_token: "prev_to_token_mhr",
+        keypoint_embedding: "keypoint_embedding.weight",
+        keypoint3d_embedding: "keypoint3d_embedding.weight",
+        keypoint_posemb: "keypoint_posemb_linear",
+        keypoint3d_posemb: "keypoint3d_posemb_linear",
+        keypoint_feat: "keypoint_feat_linear",
+    };
+
+    pub const HAND: Self = Self {
+        decoder: "decoder_hand",
+        pose_head: "head_pose_hand.proj",
+        camera_head: "head_camera_hand.proj",
+        init_pose: "init_pose_hand.weight",
+        init_camera: "init_camera_hand.weight",
+        init_to_token: "init_to_token_mhr_hand",
+        prev_to_token: "prev_to_token_mhr_hand",
+        keypoint_embedding: "keypoint_embedding_hand.weight",
+        keypoint3d_embedding: "keypoint3d_embedding_hand.weight",
+        keypoint_posemb: "keypoint_posemb_linear_hand",
+        keypoint3d_posemb: "keypoint3d_posemb_linear_hand",
+        keypoint_feat: "keypoint_feat_linear_hand",
+    };
+}
 
 #[derive(Clone)]
 struct NormWeights {
@@ -86,6 +139,8 @@ struct TokenWeights {
     prev_to_token: HostLinear,
     prompt_to_token: HostLinear,
     invalid_point_embed: Vec<f32>,
+    point_pe: Vec<f32>,
+    point_embeddings: Vec<f32>,
     hand_box_embedding: Vec<f32>,
     keypoint_embedding: Vec<f32>,
     keypoint3d_embedding: Vec<f32>,
@@ -105,9 +160,13 @@ pub struct DecoderWeights {
 
 impl DecoderWeights {
     pub fn load(weights: &BodyWeights) -> Result<Self> {
+        Self::load_named(weights, DecoderNames::BODY)
+    }
+
+    pub fn load_named(weights: &BodyWeights, names: DecoderNames) -> Result<Self> {
         let mut layers = Vec::with_capacity(DEC_DEPTH);
         for index in 0..DEC_DEPTH {
-            let prefix = format!("decoder.layers.{index}");
+            let prefix = format!("{}.layers.{index}", names.decoder);
             layers.push(DecoderLayerWeights {
                 ln_pe_1: NormWeights::load(weights, &format!("{prefix}.ln_pe_1"), DEC_DIM)?,
                 ln_pe_2: NormWeights::load(weights, &format!("{prefix}.ln_pe_2"), DINO_DIM)?,
@@ -145,20 +204,31 @@ impl DecoderWeights {
         }
         Ok(Self {
             layers,
-            norm_final: NormWeights::load(weights, "decoder.norm_final", DEC_DIM)?,
-            heads: DecoderHeads::load(weights)?,
-            init_pose: weights.f32_shaped("init_pose.weight", &[1, NPOSE])?,
-            init_camera: weights.f32_shaped("init_camera.weight", &[1, NCAM])?,
+            norm_final: NormWeights::load(
+                weights,
+                &format!("{}.norm_final", names.decoder),
+                DEC_DIM,
+            )?,
+            heads: DecoderHeads::load_named(
+                weights,
+                names.pose_head,
+                names.camera_head,
+                names.keypoint_posemb,
+                names.keypoint3d_posemb,
+                names.keypoint_feat,
+            )?,
+            init_pose: weights.f32_shaped(names.init_pose, &[1, NPOSE])?,
+            init_camera: weights.f32_shaped(names.init_camera, &[1, NCAM])?,
             tokens: TokenWeights {
                 init_to_token: HostLinear::load(
                     weights,
-                    "init_to_token_mhr",
+                    names.init_to_token,
                     DEC_DIM,
                     NPOSE + NCAM + 3,
                 )?,
                 prev_to_token: HostLinear::load(
                     weights,
-                    "prev_to_token_mhr",
+                    names.prev_to_token,
                     DEC_DIM,
                     NPOSE + NCAM,
                 )?,
@@ -172,12 +242,27 @@ impl DecoderWeights {
                     "prompt_encoder.invalid_point_embed.weight",
                     &[1, DINO_DIM],
                 )?,
+                point_pe: weights.f32_shaped(
+                    "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
+                    &[2, DINO_DIM / 2],
+                )?,
+                point_embeddings: (0..NUM_KEYPOINTS)
+                    .map(|label| {
+                        weights.f32_shaped(
+                            &format!("prompt_encoder.point_embeddings.{label}.weight"),
+                            &[1, DINO_DIM],
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect(),
                 hand_box_embedding: weights
                     .f32_shaped("hand_box_embedding.weight", &[2, DEC_DIM])?,
                 keypoint_embedding: weights
-                    .f32_shaped("keypoint_embedding.weight", &[NUM_KEYPOINTS, DEC_DIM])?,
+                    .f32_shaped(names.keypoint_embedding, &[NUM_KEYPOINTS, DEC_DIM])?,
                 keypoint3d_embedding: weights
-                    .f32_shaped("keypoint3d_embedding.weight", &[NUM_KEYPOINTS, DEC_DIM])?,
+                    .f32_shaped(names.keypoint3d_embedding, &[NUM_KEYPOINTS, DEC_DIM])?,
             },
         })
     }
@@ -344,6 +429,32 @@ pub struct TokenSet {
     pub token_augment: Vec<f32>,
 }
 
+impl TokenSet {
+    pub fn rows(&self) -> usize {
+        self.tokens.len() / DEC_DIM
+    }
+
+    fn prompt_count(&self) -> usize {
+        self.rows() - BASE_TOKEN_ROWS
+    }
+
+    fn hand_box_row(&self) -> usize {
+        2 + self.prompt_count()
+    }
+
+    fn keypoint_row(&self) -> usize {
+        4 + self.prompt_count()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointPrompt {
+    /// Point coordinates in the body crop, normalised to `[0, 1]`.
+    pub point: [f32; 2],
+    /// One of the 70 keypoint labels.
+    pub label: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct StepInput {
     pub layer: usize,
@@ -385,6 +496,10 @@ impl Decoder {
         Self::from_weights(DecoderWeights::load(weights)?)
     }
 
+    pub fn load_named(weights: &BodyWeights, names: DecoderNames) -> Result<Self> {
+        Self::from_weights(DecoderWeights::load_named(weights, names)?)
+    }
+
     fn from_weights(weights: DecoderWeights) -> Result<Self> {
         let mut layers = Vec::with_capacity(DEC_DEPTH);
         for layer in weights.layers {
@@ -407,6 +522,33 @@ impl Decoder {
         build_tokens(&self.tokens, &self.init_pose, &self.init_camera, condition_info)
     }
 
+    pub fn run_with_prompts(
+        &self,
+        condition_info: [f32; 3],
+        prompts: &[PointPrompt],
+        prev_estimate: &[f32],
+        context: &GpuTensor,
+        context_pe: &[f32],
+        step: impl FnMut(StepInput) -> StepFeedback,
+    ) -> Result<DecoderOutput> {
+        if prev_estimate.len() != NPOSE + NCAM {
+            return Err(DiffusionError::workflow(format!(
+                "decoder previous estimate has {} values, expected {}",
+                prev_estimate.len(),
+                NPOSE + NCAM,
+            )));
+        }
+        let tokens = build_prompted_tokens(
+            &self.tokens,
+            &self.init_pose,
+            &self.init_camera,
+            condition_info,
+            prompts,
+            prev_estimate,
+        )?;
+        self.run(tokens, context, context_pe, step)
+    }
+
     pub fn run(
         &self,
         tokens: TokenSet,
@@ -415,6 +557,23 @@ impl Decoder {
         step: impl FnMut(StepInput) -> StepFeedback,
     ) -> Result<DecoderOutput> {
         self.run_impl(tokens, context, context_pe, step, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_traced(
+        &self,
+        tokens: TokenSet,
+        context: &GpuTensor,
+        context_pe: &[f32],
+        step: impl FnMut(StepInput) -> StepFeedback,
+        trace: &mut dyn FnMut(usize, &GpuTensor, &[f32]) -> Result<()>,
+    ) -> Result<DecoderOutput> {
+        self.run_impl(tokens, context, context_pe, step, Some(trace))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn init_pose(&self) -> &[f32] {
+        &self.init_pose
     }
 
     fn run_impl<F>(
@@ -434,7 +593,10 @@ impl Decoder {
         let context_host = gpu_download(context).map_err(DiffusionError::model)?;
         let context_pe = gpu_upload(context_pe, context_rows, DINO_DIM)
             .map_err(DiffusionError::model)?;
-        let mut hidden = gpu_upload(&tokens.tokens, TOKEN_ROWS, DEC_DIM)
+        let token_rows = tokens.rows();
+        let keypoint_row = tokens.keypoint_row();
+        let hand_box_row = tokens.hand_box_row();
+        let mut hidden = gpu_upload(&tokens.tokens, token_rows, DEC_DIM)
             .map_err(DiffusionError::model)?;
         let mut final_normed = Vec::new();
         let mut last_pose = Vec::new();
@@ -443,7 +605,7 @@ impl Decoder {
 
         for (layer_index, layer) in self.layers.iter().enumerate() {
             let t0 = std::time::Instant::now();
-            let token_pe = gpu_upload(&tokens.token_augment, TOKEN_ROWS, DEC_DIM)
+            let token_pe = gpu_upload(&tokens.token_augment, token_rows, DEC_DIM)
                 .map_err(DiffusionError::model)?;
             // The whole layer in one backend call when the backend offers it
             // (Metal: one command buffer, no host round trips between ops).
@@ -526,9 +688,11 @@ impl Decoder {
                     &mut tokens.token_augment,
                     &context_host,
                     grid_side,
+                    token_rows,
+                    keypoint_row,
                     feedback,
                 )?;
-                let delta = gpu_upload(&delta, TOKEN_ROWS, DEC_DIM)
+                let delta = gpu_upload(&delta, token_rows, DEC_DIM)
                     .map_err(DiffusionError::model)?;
                 hidden = gpu_add(&hidden, &delta).map_err(DiffusionError::model)?;
                 timing.refine_ms += t3.elapsed().as_secs_f32() * 1000.0;
@@ -538,7 +702,8 @@ impl Decoder {
         let mut hand_boxes = [[0.0; 4]; 2];
         let mut hand_logits = [[0.0; 2]; 2];
         for hand in 0..2 {
-            let row = &final_normed[(3 + hand) * DEC_DIM..(4 + hand) * DEC_DIM];
+            let row = &final_normed
+                [(hand_box_row + hand) * DEC_DIM..(hand_box_row + hand + 1) * DEC_DIM];
             hand_boxes[hand] = self.heads.bbox(row);
             hand_logits[hand] = self.heads.hand_logits(row);
         }
@@ -557,6 +722,8 @@ impl Decoder {
         token_augment: &mut [f32],
         context: &[f32],
         grid_side: usize,
+        token_rows: usize,
+        keypoint_row: usize,
         feedback: StepFeedback,
     ) -> Result<Vec<f32>> {
         if feedback.kp2d_cropped.len() != NUM_KEYPOINTS * 2
@@ -617,9 +784,10 @@ impl Decoder {
         }
         let posemb3d = self.step_heads.keypoint3d_posemb(&centered)?;
 
-        let mut delta = vec![0.0f32; TOKEN_ROWS * DEC_DIM];
+        let keypoint3d_row = keypoint_row + NUM_KEYPOINTS;
+        let mut delta = vec![0.0f32; token_rows * DEC_DIM];
         for index in 0..NUM_KEYPOINTS {
-            let row2d = (KEYPOINT_ROW + index) * DEC_DIM;
+            let row2d = (keypoint_row + index) * DEC_DIM;
             if valid[index] {
                 token_augment[row2d..row2d + DEC_DIM]
                     .copy_from_slice(&posemb[index * DEC_DIM..(index + 1) * DEC_DIM]);
@@ -628,7 +796,7 @@ impl Decoder {
             } else {
                 token_augment[row2d..row2d + DEC_DIM].fill(0.0);
             }
-            let row3d = (KEYPOINT3D_ROW + index) * DEC_DIM;
+            let row3d = (keypoint3d_row + index) * DEC_DIM;
             token_augment[row3d..row3d + DEC_DIM]
                 .copy_from_slice(&posemb3d[index * DEC_DIM..(index + 1) * DEC_DIM]);
         }
@@ -642,32 +810,96 @@ fn build_tokens(
     init_camera: &[f32],
     condition_info: [f32; 3],
 ) -> TokenSet {
+    let previous_input: Vec<f32> = init_pose.iter().chain(init_camera).copied().collect();
+    build_token_rows(
+        weights,
+        init_pose,
+        init_camera,
+        condition_info,
+        vec![weights
+            .prompt_to_token
+            .forward_row(&weights.invalid_point_embed)],
+        &previous_input,
+    )
+}
+
+fn build_prompted_tokens(
+    weights: &TokenWeights,
+    init_pose: &[f32],
+    init_camera: &[f32],
+    condition_info: [f32; 3],
+    prompts: &[PointPrompt],
+    previous_input: &[f32],
+) -> Result<TokenSet> {
+    let mut prompt_tokens = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        if prompt.label >= NUM_KEYPOINTS {
+            return Err(DiffusionError::workflow(format!(
+                "decoder prompt label {} is outside 0..{}",
+                prompt.label, NUM_KEYPOINTS,
+            )));
+        }
+        let mut embedding = vec![0.0f32; DINO_DIM];
+        let x = 2.0 * prompt.point[0] - 1.0;
+        let y = 2.0 * prompt.point[1] - 1.0;
+        for k in 0..DINO_DIM / 2 {
+            let angle = 2.0
+                * std::f32::consts::PI
+                * (x * weights.point_pe[k] + y * weights.point_pe[DINO_DIM / 2 + k]);
+            embedding[k] = angle.sin();
+            embedding[DINO_DIM / 2 + k] = angle.cos();
+        }
+        let label = &weights.point_embeddings
+            [prompt.label * DINO_DIM..(prompt.label + 1) * DINO_DIM];
+        for (value, label) in embedding.iter_mut().zip(label) {
+            *value += label;
+        }
+        prompt_tokens.push(weights.prompt_to_token.forward_row(&embedding));
+    }
+    Ok(build_token_rows(
+        weights,
+        init_pose,
+        init_camera,
+        condition_info,
+        prompt_tokens,
+        previous_input,
+    ))
+}
+
+fn build_token_rows(
+    weights: &TokenWeights,
+    init_pose: &[f32],
+    init_camera: &[f32],
+    condition_info: [f32; 3],
+    prompt_tokens: Vec<Vec<f32>>,
+    previous_input: &[f32],
+) -> TokenSet {
     let mut init_input = Vec::with_capacity(3 + NPOSE + NCAM);
     init_input.extend_from_slice(&condition_info);
     init_input.extend_from_slice(init_pose);
     init_input.extend_from_slice(init_camera);
     let pose_token = weights.init_to_token.forward_row(&init_input);
 
-    let mut previous_input = Vec::with_capacity(NPOSE + NCAM);
-    previous_input.extend_from_slice(init_pose);
-    previous_input.extend_from_slice(init_camera);
-    let previous_token = weights.prev_to_token.forward_row(&previous_input);
-    let prompt_token = weights
-        .prompt_to_token
-        .forward_row(&weights.invalid_point_embed);
+    let previous_token = weights.prev_to_token.forward_row(previous_input);
+    let rows = BASE_TOKEN_ROWS + prompt_tokens.len();
 
-    let mut tokens = Vec::with_capacity(TOKEN_ROWS * DEC_DIM);
+    let mut tokens = Vec::with_capacity(rows * DEC_DIM);
     tokens.extend_from_slice(&pose_token);
     tokens.extend_from_slice(&previous_token);
-    tokens.extend_from_slice(&prompt_token);
+    for prompt in &prompt_tokens {
+        tokens.extend_from_slice(prompt);
+    }
     tokens.extend_from_slice(&weights.hand_box_embedding);
     tokens.extend_from_slice(&weights.keypoint_embedding);
     tokens.extend_from_slice(&weights.keypoint3d_embedding);
-    debug_assert_eq!(tokens.len(), TOKEN_ROWS * DEC_DIM);
+    debug_assert_eq!(tokens.len(), rows * DEC_DIM);
 
-    let mut token_augment = vec![0.0f32; TOKEN_ROWS * DEC_DIM];
+    let mut token_augment = vec![0.0f32; rows * DEC_DIM];
     token_augment[DEC_DIM..2 * DEC_DIM].copy_from_slice(&previous_token);
-    token_augment[2 * DEC_DIM..3 * DEC_DIM].copy_from_slice(&prompt_token);
+    for (index, prompt) in prompt_tokens.iter().enumerate() {
+        let row = 2 + index;
+        token_augment[row * DEC_DIM..(row + 1) * DEC_DIM].copy_from_slice(prompt);
+    }
     TokenSet {
         tokens,
         token_augment,
@@ -675,14 +907,16 @@ fn build_tokens(
 }
 
 fn validate_run_inputs(tokens: &TokenSet, context: &GpuTensor, context_pe: &[f32]) -> Result<()> {
-    if tokens.tokens.len() != TOKEN_ROWS * DEC_DIM
-        || tokens.token_augment.len() != TOKEN_ROWS * DEC_DIM
+    let rows = tokens.rows();
+    if rows < BASE_TOKEN_ROWS
+        || tokens.tokens.len() != rows * DEC_DIM
+        || tokens.token_augment.len() != rows * DEC_DIM
     {
         return Err(DiffusionError::workflow(format!(
-            "decoder token shapes are {} and {}, expected {}",
+            "decoder token shapes are {} and {}, expected matching (144 + N) x {}",
             tokens.tokens.len(),
             tokens.token_augment.len(),
-            TOKEN_ROWS * DEC_DIM,
+            DEC_DIM,
         )));
     }
     let rows = context.rows();
@@ -824,6 +1058,8 @@ mod tests {
             prev_to_token: HostLinear::constant(NPOSE + NCAM, previous.clone()),
             prompt_to_token: HostLinear::constant(DINO_DIM, prompt.clone()),
             invalid_point_embed: vec![0.0; DINO_DIM],
+            point_pe: vec![0.0; DINO_DIM],
+            point_embeddings: vec![0.0; NUM_KEYPOINTS * DINO_DIM],
             hand_box_embedding: hand.clone(),
             keypoint_embedding: keypoint.clone(),
             keypoint3d_embedding: keypoint3d.clone(),
@@ -981,6 +1217,61 @@ mod tests {
             &tokens.token_augment,
             &fixture_values("decoder_token_augment_in"),
             1e-4,
+        );
+    }
+
+    #[test]
+    fn fixture_reprompt_token_assembly_and_shifted_rows() {
+        use crate::fixture::OracleRoot;
+        if fixture::oracle_dir_for(OracleRoot::Full).is_none() {
+            eprintln!("SKIP fixture_reprompt_token_assembly: oracle_full absent");
+            return;
+        }
+        let Some(weights) = fixture_weights() else {
+            return;
+        };
+        let weights = DecoderWeights::load(&weights).expect("load decoder weights");
+        let condition = fixture::load_from(OracleRoot::Full, "condition_info_0")
+            .expect("condition_info_0")
+            .1;
+        let prompt_values = fixture::load_from(OracleRoot::Full, "keypoint_prompt")
+            .expect("keypoint_prompt")
+            .1;
+        let prompts: Vec<PointPrompt> = prompt_values
+            .chunks_exact(3)
+            .map(|row| PointPrompt {
+                point: [row[0], row[1]],
+                label: row[2] as usize,
+            })
+            .collect();
+        let previous = fixture::load_from(OracleRoot::Full, "prev_to_token_in_1")
+            .expect("prev_to_token_in_1")
+            .1;
+        let tokens = build_prompted_tokens(
+            &weights.tokens,
+            &weights.init_pose,
+            &weights.init_camera,
+            [condition[0], condition[1], condition[2]],
+            &prompts,
+            &previous,
+        )
+        .expect("build prompted tokens");
+        assert_eq!(tokens.rows(), BASE_TOKEN_ROWS + prompts.len());
+        assert_close(
+            "decoder_tokens_in_1",
+            &tokens.tokens,
+            &fixture::load_from(OracleRoot::Full, "decoder_tokens_in_1")
+                .unwrap()
+                .1,
+            1.0e-4,
+        );
+        assert_close(
+            "decoder_token_augment_in_1",
+            &tokens.token_augment,
+            &fixture::load_from(OracleRoot::Full, "decoder_token_augment_in_1")
+                .unwrap()
+                .1,
+            1.0e-4,
         );
     }
 
