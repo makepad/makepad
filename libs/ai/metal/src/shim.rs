@@ -32,6 +32,7 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
+use crate::gpu_types::GpuTensor;
 use makepad_ai_cuda::prof;
 
 fn prof_rec(cat: usize, start: std::time::Instant, f32_count: usize) {
@@ -345,6 +346,67 @@ pub fn clear_decoder_kv_cache() {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One linear of a device-resident two-way decoder layer: an f32 `[n, k]`
+/// weight tensor (cached on the device under its content identity) and an
+/// optional `[1, n]` bias.
+#[derive(Clone, Copy)]
+pub struct DecLinearRef<'a> {
+    pub weight: &'a GpuTensor,
+    pub bias: Option<&'a GpuTensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DecAttnRef<'a> {
+    pub q: DecLinearRef<'a>,
+    pub k: DecLinearRef<'a>,
+    pub v: DecLinearRef<'a>,
+    pub out: DecLinearRef<'a>,
+}
+
+/// One SAM-style two-way decoder layer over `hidden` `[n_tok, dim]` with
+/// image context `[n_ctx, ctx_dim]`: token self-attention (queries/keys
+/// carry the token PE when `pe_on_self`), token-to-image cross-attention
+/// (query = LN(hidden) + token PE, key = LN(context) + image PE, value =
+/// LN(context)), an erf-GELU feed-forward, then `ln_final`. All norms are
+/// LayerNorm with affines; `ln_pe_1`/`ln_pe_2` normalise the two PEs.
+#[derive(Clone, Copy)]
+pub struct TwoWayLayerRef<'a> {
+    pub ln_pe_1: (&'a [f32], &'a [f32]),
+    pub ln_pe_2: (&'a [f32], &'a [f32]),
+    pub ln1: (&'a [f32], &'a [f32]),
+    pub ln2_1: (&'a [f32], &'a [f32]),
+    pub ln2_2: (&'a [f32], &'a [f32]),
+    pub ln3: (&'a [f32], &'a [f32]),
+    pub ln_final: (&'a [f32], &'a [f32]),
+    pub self_attn: DecAttnRef<'a>,
+    pub cross_attn: DecAttnRef<'a>,
+    pub ffn_first: DecLinearRef<'a>,
+    pub ffn_second: DecLinearRef<'a>,
+    pub n_head: usize,
+    pub eps: f32,
+    pub pe_on_self: bool,
+}
+
+/// Runs one two-way decoder layer device-resident (one command buffer,
+/// weights cached) and returns `(hidden, ln_final(hidden))`, both
+/// `[n_tok, dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn try_two_way_layer_resident_f32(
+    hidden: &[f32],
+    token_pe: &[f32],
+    context: &[f32],
+    context_pe: &[f32],
+    n_tok: usize,
+    dim: usize,
+    n_ctx: usize,
+    ctx_dim: usize,
+    layer: &TwoWayLayerRef<'_>,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    imp::try_two_way_layer_resident_f32(
+        hidden, token_pe, context, context_pe, n_tok, dim, n_ctx, ctx_dim, layer,
+    )
+}
+
 /// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
 /// a ggml dtype, its output width and its bias (empty for none).
 #[derive(Clone, Copy)]
@@ -1111,6 +1173,21 @@ mod imp {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        _hidden: &[f32],
+        _token_pe: &[f32],
+        _context: &[f32],
+        _context_pe: &[f32],
+        _n_tok: usize,
+        _dim: usize,
+        _n_ctx: usize,
+        _ctx_dim: usize,
+        _layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1682,6 +1759,21 @@ mod imp {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        _hidden: &[f32],
+        _token_pe: &[f32],
+        _context: &[f32],
+        _context_pe: &[f32],
+        _n_tok: usize,
+        _dim: usize,
+        _n_ctx: usize,
+        _ctx_dim: usize,
+        _layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1879,6 +1971,10 @@ mod imp {
     /// Persistent-scratch tag range `[VIT_TAG_BASE, VIT_TAG_BASE + 20)` of the
     /// resident ViT stack (`vit_layer_from_buffer_f32`).
     const VIT_TAG_BASE: u8 = 200;
+    const OP_UNARY_NUM_GELU_ERF: i16 = 104;
+    /// Cached-affine tag range `[TWO_WAY_TAG_BASE, TWO_WAY_TAG_BASE + 14)` of
+    /// the resident two-way decoder layer.
+    const TWO_WAY_TAG_BASE: u8 = 180;
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
@@ -4769,6 +4865,329 @@ mod imp {
             drop(x_buf);
             drop(out_buf);
             Ok(out)
+        }
+
+        /// `C(m, n) = X(m, k) @ W^T` from device buffers: `src0_id` holds the
+        /// `[n, k]` weight in `src0_ggml_type`, `src1_id` the f32 `[m, k]`
+        /// input, and the f32 `[m, n]` result lands in `dst_id`.
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_nt_into_buffer(
+            &mut self,
+            src0_ggml_type: u32,
+            src0_id: ObjcId,
+            src1_id: ObjcId,
+            dst_id: ObjcId,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            let src0 = src0_type_from_ggml(src0_ggml_type).ok_or_else(|| {
+                format!("unsupported src0 ggml_type for metal matmul: {}", src0_ggml_type)
+            })?;
+            let (src0_row_bytes, nb00) = src0_layout_bytes_per_row(src0, k)?;
+            let ne00 = i32::try_from(k).map_err(|_| format!("k too large: {}", k))?;
+            let ne01 = i32::try_from(n).map_err(|_| format!("n too large: {}", n))?;
+            let ne10 = ne00;
+            let ne11 = i32::try_from(m).map_err(|_| format!("m too large: {}", m))?;
+            let ne0 = ne01;
+            let ne1 = ne11;
+            let nb01 = src0_row_bytes as u64;
+            let nb10 = 4u64;
+            let nb11 = (k as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing nb11".to_string())?;
+            if can_use_mul_mv_ext(src0, ne00, ne11) {
+                self.dispatch_mul_mv_ext(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )
+            } else if ne00 >= 64 && ne11 > 8 {
+                match self.dispatch_mul_mm(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        super::log_metal_error_once(format!(
+                            "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
+                            src0, e
+                        ));
+                        self.dispatch_mul_mv(
+                            src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
+                            nb10, nb11, ne0, ne1,
+                        )
+                    }
+                }
+            } else {
+                self.dispatch_mul_mv(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )
+            }
+        }
+
+        /// The f32 contents of a host-backed tensor as little-endian bytes.
+        fn tensor_f32_bytes(t: &crate::gpu_types::GpuTensor) -> Result<Vec<u8>, String> {
+            let data = t
+                .data
+                .try_borrow()
+                .map_err(|_| "metal GpuTensor already borrowed".to_string())?;
+            let mut bytes = Vec::with_capacity(data.len() * 4);
+            for value in data.iter() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(bytes)
+        }
+
+        /// A pooled f32 `[rows, cols]` buffer registered in `keep` (given back
+        /// to the pool after the layer's read-back).
+        fn two_way_scratch(
+            &mut self,
+            rows: usize,
+            cols: usize,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            let bytes = rows
+                .checked_mul(cols)
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| "overflow computing two-way scratch bytes".to_string())?;
+            let buf = self.pool_take(bytes)?;
+            let id = buf.as_id();
+            keep.push(buf);
+            Ok(id)
+        }
+
+        fn two_way_linear(
+            &mut self,
+            src_id: ObjcId,
+            m: usize,
+            lin: &super::DecLinearRef<'_>,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            let n = lin.weight.rows;
+            let k = lin.weight.cols;
+            let weight = lin.weight;
+            let w_id = self.get_or_create_named_weight_buffer(
+                "two_way",
+                &format!("w{}", weight.id.get()),
+                || Self::tensor_f32_bytes(weight),
+            )?;
+            let dst_id = self.two_way_scratch(m, n, keep)?;
+            self.matmul_nt_into_buffer(GGML_TYPE_F32, w_id, src_id, dst_id, m, k, n)?;
+            if let Some(bias) = lin.bias {
+                if bias.rows * bias.cols != n {
+                    return Err(format!(
+                        "two-way linear bias {}x{} does not match n {}",
+                        bias.rows, bias.cols, n
+                    ));
+                }
+                let b_id = self.get_or_create_named_weight_buffer(
+                    "two_way",
+                    &format!("b{}", bias.id.get()),
+                    || Self::tensor_f32_bytes(bias),
+                )?;
+                let dst_shape = shape4_from_row_major(&[m, n], 4)?;
+                let b_shape = shape4_from_row_major(&[n], 4)?;
+                self.dispatch_bin_f32(0, dst_id, b_id, dst_id, &dst_shape, &b_shape)?;
+            }
+            Ok(dst_id)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn two_way_norm(
+            &mut self,
+            src_id: ObjcId,
+            rows: usize,
+            cols: usize,
+            affine: (&[f32], &[f32]),
+            tag: u8,
+            eps: f32,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            if affine.0.len() != cols || affine.1.len() != cols {
+                return Err(format!(
+                    "two-way layernorm affine {}/{} does not match {} cols",
+                    affine.0.len(),
+                    affine.1.len(),
+                    cols
+                ));
+            }
+            let w_id = self.get_or_create_cached_f32_buffer(affine.0, tag)?;
+            let b_id = self.get_or_create_cached_f32_buffer(affine.1, tag + 1)?;
+            let dst_id = self.two_way_scratch(rows, cols, keep)?;
+            let x_shape = shape4_from_row_major(&[rows, cols], 4)?;
+            let ln_shape = shape4_from_row_major(&[cols], 4)?;
+            self.dispatch_norm_f32(
+                src_id, w_id, b_id, dst_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            Ok(dst_id)
+        }
+
+        fn two_way_add(
+            &mut self,
+            a_id: ObjcId,
+            b_id: ObjcId,
+            dst_id: ObjcId,
+            rows: usize,
+            cols: usize,
+        ) -> Result<(), String> {
+            let shape = shape4_from_row_major(&[rows, cols], 4)?;
+            self.dispatch_bin_f32(0, a_id, b_id, dst_id, &shape, &shape)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn two_way_layer_resident_f32(
+            &mut self,
+            hidden: &[f32],
+            token_pe: &[f32],
+            context: &[f32],
+            context_pe: &[f32],
+            n_tok: usize,
+            dim: usize,
+            n_ctx: usize,
+            ctx_dim: usize,
+            layer: &super::TwoWayLayerRef<'_>,
+        ) -> Result<(Vec<f32>, Vec<f32>), String> {
+            if n_tok == 0 || dim == 0 || n_ctx == 0 || ctx_dim == 0 || layer.n_head == 0 {
+                return Err("two-way layer: empty dimension".to_string());
+            }
+            let tok_elems = n_tok * dim;
+            let ctx_elems = n_ctx * ctx_dim;
+            if hidden.len() != tok_elems || token_pe.len() != tok_elems {
+                return Err(format!(
+                    "two-way layer: hidden {} / token_pe {} vs {}x{}",
+                    hidden.len(),
+                    token_pe.len(),
+                    n_tok,
+                    dim
+                ));
+            }
+            if context.len() != ctx_elems || context_pe.len() != ctx_elems {
+                return Err(format!(
+                    "two-way layer: context {} / context_pe {} vs {}x{}",
+                    context.len(),
+                    context_pe.len(),
+                    n_ctx,
+                    ctx_dim
+                ));
+            }
+            let sa = &layer.self_attn;
+            let ca = &layer.cross_attn;
+            let inner = sa.q.weight.rows;
+            if inner == 0 || inner % layer.n_head != 0 {
+                return Err(format!(
+                    "two-way layer: attention width {} not divisible by {} heads",
+                    inner, layer.n_head
+                ));
+            }
+            let head_dim = inner / layer.n_head;
+            if !flash_attn_supported_head_dim(head_dim) {
+                return Err(format!("two-way layer: head dim {} unsupported", head_dim));
+            }
+            let shape_ok = |lin: &super::DecLinearRef<'_>, n: usize, k: usize| {
+                lin.weight.rows == n && lin.weight.cols == k
+            };
+            if !shape_ok(&sa.q, inner, dim)
+                || !shape_ok(&sa.k, inner, dim)
+                || !shape_ok(&sa.v, inner, dim)
+                || !shape_ok(&sa.out, dim, inner)
+                || !shape_ok(&ca.q, inner, dim)
+                || !shape_ok(&ca.k, inner, ctx_dim)
+                || !shape_ok(&ca.v, inner, ctx_dim)
+                || !shape_ok(&ca.out, dim, inner)
+                || layer.ffn_first.weight.cols != dim
+                || !shape_ok(&layer.ffn_second, dim, layer.ffn_first.weight.rows)
+            {
+                return Err("two-way layer: weight shapes do not match the layer".to_string());
+            }
+            let ffn_width = layer.ffn_first.weight.rows;
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let eps = layer.eps;
+            let tag = TWO_WAY_TAG_BASE;
+
+            let mut keep: Vec<StrongId> = Vec::new();
+            let x_buf = self.pool_take_filled(f32_slice_as_bytes(hidden))?;
+            let tpe_buf = self.pool_take_filled(f32_slice_as_bytes(token_pe))?;
+            let ctx_buf = self.pool_take_filled(f32_slice_as_bytes(context))?;
+            let cpe_buf = self.pool_take_filled(f32_slice_as_bytes(context_pe))?;
+            let normed_buf = self.pool_take(tok_elems * 4)?;
+            let x_id = x_buf.as_id();
+            let normed_id = normed_buf.as_id();
+
+            let run = self.with_batch(|ctx| {
+                let keep = &mut keep;
+                // Positional embeddings, normalised once per layer.
+                let tpe_n = ctx.two_way_norm(tpe_buf.as_id(), n_tok, dim, layer.ln_pe_1, tag, eps, keep)?;
+                let ipe_n =
+                    ctx.two_way_norm(cpe_buf.as_id(), n_ctx, ctx_dim, layer.ln_pe_2, tag + 2, eps, keep)?;
+
+                // Token self-attention.
+                let n1 = ctx.two_way_norm(x_id, n_tok, dim, layer.ln1, tag + 4, eps, keep)?;
+                let qk = if layer.pe_on_self {
+                    let qk = ctx.two_way_scratch(n_tok, dim, keep)?;
+                    ctx.two_way_add(n1, tpe_n, qk, n_tok, dim)?;
+                    qk
+                } else {
+                    n1
+                };
+                let q = ctx.two_way_linear(qk, n_tok, &sa.q, keep)?;
+                let k = ctx.two_way_linear(qk, n_tok, &sa.k, keep)?;
+                let v = ctx.two_way_linear(n1, n_tok, &sa.v, keep)?;
+                let attn = ctx.flash_attn_f32_from_buffers(
+                    q, k, v, n_tok, n_tok, layer.n_head, head_dim, scale,
+                )?;
+                let o = ctx.two_way_linear(attn.as_id(), n_tok, &sa.out, keep)?;
+                ctx.two_way_add(x_id, o, x_id, n_tok, dim)?;
+                drop(attn);
+
+                // Token-to-image cross-attention.
+                let q2n = ctx.two_way_norm(x_id, n_tok, dim, layer.ln2_1, tag + 6, eps, keep)?;
+                let q2 = ctx.two_way_scratch(n_tok, dim, keep)?;
+                ctx.two_way_add(q2n, tpe_n, q2, n_tok, dim)?;
+                let cn = ctx.two_way_norm(ctx_buf.as_id(), n_ctx, ctx_dim, layer.ln2_2, tag + 8, eps, keep)?;
+                let kx = ctx.two_way_scratch(n_ctx, ctx_dim, keep)?;
+                ctx.two_way_add(cn, ipe_n, kx, n_ctx, ctx_dim)?;
+                let q = ctx.two_way_linear(q2, n_tok, &ca.q, keep)?;
+                let k = ctx.two_way_linear(kx, n_ctx, &ca.k, keep)?;
+                let v = ctx.two_way_linear(cn, n_ctx, &ca.v, keep)?;
+                let attn = ctx.flash_attn_f32_from_buffers(
+                    q, k, v, n_tok, n_ctx, layer.n_head, head_dim, scale,
+                )?;
+                let o = ctx.two_way_linear(attn.as_id(), n_tok, &ca.out, keep)?;
+                ctx.two_way_add(x_id, o, x_id, n_tok, dim)?;
+                drop(attn);
+
+                // Feed-forward with the exact GELU.
+                let n3 = ctx.two_way_norm(x_id, n_tok, dim, layer.ln3, tag + 10, eps, keep)?;
+                let f = ctx.two_way_linear(n3, n_tok, &layer.ffn_first, keep)?;
+                let f_shape = shape4_from_row_major(&[n_tok, ffn_width], 4)?;
+                ctx.dispatch_unary_f32(OP_UNARY_NUM_GELU_ERF, f, f, &f_shape)?;
+                let f2 = ctx.two_way_linear(f, n_tok, &layer.ffn_second, keep)?;
+                ctx.two_way_add(x_id, f2, x_id, n_tok, dim)?;
+
+                // Final norm, read back alongside the hidden state.
+                let fw = ctx.get_or_create_cached_f32_buffer(layer.ln_final.0, tag + 12)?;
+                let fb = ctx.get_or_create_cached_f32_buffer(layer.ln_final.1, tag + 13)?;
+                let x_shape = shape4_from_row_major(&[n_tok, dim], 4)?;
+                let ln_shape = shape4_from_row_major(&[dim], 4)?;
+                ctx.dispatch_norm_f32(
+                    x_id, fw, fb, normed_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+                )
+            });
+            let result = run.and_then(|()| {
+                let hidden_out = self.read_f32_buffer(x_id, tok_elems)?;
+                let normed_out = self.read_f32_buffer(normed_id, tok_elems)?;
+                Ok((hidden_out, normed_out))
+            });
+            // Everything above waited on the queue, so the transients are free.
+            let _ = self.wait_queue_idle();
+            for buf in keep.drain(..) {
+                self.pool_give(buf);
+            }
+            for buf in [x_buf, tpe_buf, ctx_buf, cpe_buf, normed_buf] {
+                self.pool_give(buf);
+            }
+            self.pool_recycle();
+            result
         }
 
         fn dispatch_cpy_f32_to_f16(
@@ -9274,6 +9693,25 @@ mod imp {
             ctx.vit_backbone_resident_f32(
                 x, seq_len, n_state, n_head, rot_half, cos, sin, layers, final_norm_w,
                 final_norm_b, eps,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        hidden: &[f32],
+        token_pe: &[f32],
+        context: &[f32],
+        context_pe: &[f32],
+        n_tok: usize,
+        dim: usize,
+        n_ctx: usize,
+        ctx_dim: usize,
+        layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        with_context(|ctx| {
+            ctx.two_way_layer_resident_f32(
+                hidden, token_pe, context, context_pe, n_tok, dim, n_ctx, ctx_dim, layer,
             )
         })
     }

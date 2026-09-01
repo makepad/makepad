@@ -83,6 +83,7 @@ pub use crate::gpu::{
     gpu_rife_scale, gpu_rife_warp,
     gpu_rope_half, gpu_rope_half_bf16, gpu_rope_interleaved, gpu_silu, gpu_slice_cols, gpu_slice_rows,
     gpu_vit_backbone_resident, GpuVitLayer, GpuVitLinear,
+    gpu_two_way_layer_resident, GpuTwoWayAttention, GpuTwoWayLayer, GpuTwoWayLinear,
     gpu_splat_repo3d_tables, gpu_splat_rope_pairs_per_head,
     gpu_swiglu_gate_first, gpu_swiglu_value_gate, gpu_to_f16, gpu_upload, gpu_wavenet_gate,
     gpu_quant_linear_type_supported,
