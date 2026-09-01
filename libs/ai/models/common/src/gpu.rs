@@ -2326,7 +2326,14 @@ mod imp {
         _add: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::layer_norm_mul_add(_x, _mul, _add, _eps);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_layer_norm_mul_add_cached(
@@ -2337,7 +2344,14 @@ mod imp {
         _add: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::layer_norm_mul_add(_x, _mul, _add, _eps);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_layer_norm_pytorch(
@@ -2754,7 +2768,14 @@ mod imp {
         _cos_table: &GpuTensor,
         _sin_table: &GpuTensor,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::rope_half(_x, _head_count, _rot_half, _cos_table, _sin_table);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_rope_half_bf16(

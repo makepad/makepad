@@ -13,19 +13,29 @@ pub fn oracle_dir() -> Option<PathBuf> {
         .find(|candidate| candidate.is_dir())
 }
 
-/// Load `<name>.f32` and its shape from the oracle manifest.
+/// Load `<name>.f32` (or `<name>.u8`, widened) and its shape from the
+/// oracle manifest.
 pub fn load(name: &str) -> Option<(Vec<usize>, Vec<f32>)> {
     let root = oracle_dir()?;
     let manifest = std::fs::read_to_string(root.join("manifest.json")).ok()?;
     let shape = manifest_shape(&manifest, name)?;
-    let bytes = std::fs::read(root.join(format!("{name}.f32"))).ok()?;
-    if bytes.len() % 4 != 0 {
-        return None;
-    }
-    let values: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-        .collect();
+    let f32_path = root.join(format!("{name}.f32"));
+    let values: Vec<f32> = if f32_path.is_file() {
+        let bytes = std::fs::read(f32_path).ok()?;
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect()
+    } else {
+        std::fs::read(root.join(format!("{name}.u8")))
+            .ok()?
+            .into_iter()
+            .map(f32::from)
+            .collect()
+    };
     let expected = shape.iter().try_fold(1usize, |count, &dimension| {
         count.checked_mul(dimension)
     })?;
@@ -60,6 +70,15 @@ pub fn rig() -> Option<&'static MhrRig> {
         }
     })
     .as_ref()
+}
+
+/// The GPU tests need a device AND the layer-norm op family; a build without
+/// either skips them.
+pub fn gpu_required_ops_available() -> bool {
+    let Ok(input) = crate::backend::gpu_upload(&[0.0], 1, 1) else {
+        return false;
+    };
+    crate::backend::gpu_layer_norm_mul_add(&input, &[1.0], &[0.0], 1e-5).is_ok()
 }
 
 fn manifest_shape(manifest: &str, name: &str) -> Option<Vec<usize>> {
