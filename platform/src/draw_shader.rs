@@ -7,7 +7,7 @@ use {
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
-        makepad_script::value::{ScriptObject, ScriptPodType},
+        makepad_script::value::{ScriptIp, ScriptObject, ScriptPodType},
         makepad_script::NoTrap,
         makepad_script::ScriptObjectRef,
         os::CxOsDrawShader,
@@ -85,6 +85,9 @@ pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
     pub os_shaders: Vec<CxOsDrawShader>,
     pub compile_set: BTreeSet<usize>,
+    /// Explicit const-table mode override; None = decide from the
+    /// environment / remote bridge (see `Cx::shader_const_table_mode`).
+    pub const_table_mode: Option<bool>,
 
     pub cache_object_reuse_epoch_seen: u64,
     pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
@@ -100,6 +103,76 @@ impl CxDrawShaders {
     pub fn reset_for_live_reload(&mut self) {
         self.cache_object_id_to_shader.clear();
         self.cache_functions_to_shader.clear();
+    }
+}
+
+impl Cx {
+    /// Whether draw shaders compile with the constant table: annotated float
+    /// literals in fn bodies become hot-patchable scope-uniform slots
+    /// instead of folded code. Explicit `set_shader_const_table_mode` wins;
+    /// else `MAKEPAD_SHADER_CONST_TABLE=1|0`; else on exactly when the
+    /// remote bridge (the tweaker's channel) is active. Off, codegen is
+    /// byte-identical to a build without the feature.
+    pub fn shader_const_table_mode(&self) -> bool {
+        if let Some(on) = self.draw_shaders.const_table_mode {
+            return on;
+        }
+        match std::env::var("MAKEPAD_SHADER_CONST_TABLE").as_deref() {
+            Ok("1") | Ok("true") | Ok("on") => true,
+            Ok("0") | Ok("false") | Ok("off") => false,
+            _ => crate::remote::is_active(),
+        }
+    }
+
+    /// Force the const-table mode. Takes effect for shaders compiled from
+    /// now on: the shader caches are dropped so a re-applied draw object
+    /// recompiles, but a DrawVars holding a compiled shader keeps it until
+    /// it is re-applied (live edit / script reapply).
+    pub fn set_shader_const_table_mode(&mut self, on: bool) {
+        if self.draw_shaders.const_table_mode == Some(on) {
+            return;
+        }
+        self.draw_shaders.const_table_mode = Some(on);
+        self.draw_shaders.reset_for_live_reload();
+        self.draw_shaders.cache_code_to_shader.clear();
+    }
+
+    /// The hot-patchable constants of a compiled shader (empty when it was
+    /// compiled with the table off or has no annotated literals).
+    pub fn shader_const_table(&self, shader_id: DrawShaderId) -> &[DrawShaderTableConst] {
+        match self.draw_shaders.shaders.get(shader_id.index) {
+            Some(sh) => &sh.mapping.table_consts,
+            None => &[],
+        }
+    }
+
+    /// Hot-patch one table constant: the new value reaches the GPU on the
+    /// next frame through the scope-uniform buffer — no recompile, and the
+    /// shader source is untouched. Every draw sharing this compiled shader
+    /// changes together. Returns false for an unknown shader or index.
+    pub fn shader_const_patch(&mut self, shader_id: DrawShaderId, index: usize, value: f32) -> bool {
+        let Some(sh) = self.draw_shaders.shaders.get_mut(shader_id.index) else {
+            return false;
+        };
+        if !sh.mapping.patch_table_const(index, value) {
+            return false;
+        }
+        self.redraw_all();
+        true
+    }
+
+    /// Put one table constant back to the literal in the source.
+    pub fn shader_const_reset(&mut self, shader_id: DrawShaderId, index: usize) -> bool {
+        let initial = match self
+            .draw_shaders
+            .shaders
+            .get(shader_id.index)
+            .and_then(|sh| sh.mapping.table_consts.get(index))
+        {
+            Some(tc) => tc.initial,
+            None => return false,
+        };
+        self.shader_const_patch(shader_id, index, initial)
     }
 }
 
@@ -386,6 +459,40 @@ pub enum CxDrawShaderCode {
     Combined { code: String },
 }
 
+/// What fills one scope-uniform slot: a script scope value read from the
+/// heap, or one of the shader's table constants.
+#[derive(Clone, Copy, Debug)]
+pub enum ScopeUniformSlot {
+    Scope(ScriptObject, LiveId),
+    Const(usize),
+}
+
+/// A hot-patchable shader constant: a float literal in a shader fn body
+/// that carried a `/** name [min..max] [step s] */` annotation and was
+/// compiled under const-table mode. Patching writes the scope-uniform slot
+/// (`input`) and never touches the source; `ip` names the literal for the
+/// change ledger.
+#[derive(Clone, Debug)]
+pub struct DrawShaderTableConst {
+    /// Scope-uniform io name (`ct<n>`).
+    pub shader_name: LiveId,
+    /// Annotation text as written.
+    pub doc: String,
+    /// Parsed hint: friendly name and optional range/step.
+    pub name: String,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
+    /// The literal in the source.
+    pub initial: f32,
+    /// The live value (what the GPU reads).
+    pub value: f32,
+    /// Index into `scope_uniforms.inputs`.
+    pub input: usize,
+    /// The literal's immediate ip (file:line:col via the script code).
+    pub ip: ScriptIp,
+}
+
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
@@ -405,8 +512,14 @@ pub struct CxDrawShaderMapping {
     pub draw_clip: Option<usize>,
     pub uniform_buffer_bindings: UniformBufferBindings,
     pub scope_uniforms: DrawShaderInputs,
-    pub scope_uniform_sources: Vec<(ScriptObject, LiveId)>,
+    pub scope_uniform_sources: Vec<ScopeUniformSlot>,
     pub scope_uniforms_buf: Vec<f32>,
+    /// The shader's hot-patchable constants (annotated literals compiled
+    /// under const-table mode), each backed by one scope-uniform slot.
+    pub table_consts: Vec<DrawShaderTableConst>,
+    /// Bumped by every patch of `scope_uniforms_buf`; backends that keep a
+    /// GPU-side copy of the buffer re-upload when it moves.
+    pub scope_uniforms_gen: u64,
     pub geometry_id: Option<GeometryId>,
     /// Total f32 slots in the varying buffer (instances + explicit varyings).
     /// Set by the headless backend during shader compilation.
@@ -692,6 +805,7 @@ impl CxDrawShaderMapping {
         let mut scope_uniform_sources = Vec::new();
 
         // Process scope uniforms in order - same order as they appear in the io list
+        let mut table_consts: Vec<DrawShaderTableConst> = Vec::new();
         for io in &output.io {
             if let ShaderIoKind::ScopeUniform = io.kind {
                 // Find the corresponding ScopeUniformSource
@@ -702,8 +816,29 @@ impl CxDrawShaderMapping {
                 {
                     let pod_ty = heap.pod_type_ref(source.ty);
                     let slots = pod_ty.ty.slots();
+                    let input = scope_uniforms.inputs.len();
                     scope_uniforms.push(io.name, slots, DrawShaderAttrFormat::Float);
-                    scope_uniform_sources.push((source.source_obj, source.key));
+                    match source.table_const {
+                        Some(ci) => {
+                            let tc = &output.table_consts[ci];
+                            let hint = crate::makepad_script::docs::parse_doc_hint(&tc.doc);
+                            scope_uniform_sources.push(ScopeUniformSlot::Const(table_consts.len()));
+                            table_consts.push(DrawShaderTableConst {
+                                shader_name: tc.shader_name,
+                                doc: tc.doc.clone(),
+                                name: hint.name,
+                                min: hint.min,
+                                max: hint.max,
+                                step: hint.step,
+                                initial: tc.value as f32,
+                                value: tc.value as f32,
+                                input,
+                                ip: tc.ip,
+                            });
+                        }
+                        None => scope_uniform_sources
+                            .push(ScopeUniformSlot::Scope(source.source_obj, source.key)),
+                    }
                 }
             }
         }
@@ -869,10 +1004,28 @@ impl CxDrawShaderMapping {
             scope_uniforms,
             scope_uniform_sources,
             scope_uniforms_buf,
+            table_consts,
+            scope_uniforms_gen: 0,
             geometry_id,
             varying_total_slots: 0,
             color_format,
         }
+    }
+
+    /// Write one table constant's live value into its scope-uniform slot
+    /// and bump the generation so GPU-side copies refresh. Returns false
+    /// for an index the shader does not have.
+    pub fn patch_table_const(&mut self, index: usize, value: f32) -> bool {
+        let Some(tc) = self.table_consts.get_mut(index) else {
+            return false;
+        };
+        tc.value = value;
+        let input = &self.scope_uniforms.inputs[tc.input];
+        if let Some(slot) = self.scope_uniforms_buf.get_mut(input.offset) {
+            *slot = value;
+        }
+        self.scope_uniforms_gen = self.scope_uniforms_gen.wrapping_add(1);
+        true
     }
 
     /// Fill the scope uniform buffer from script values.
@@ -888,7 +1041,16 @@ impl CxDrawShaderMapping {
             if i >= self.scope_uniform_sources.len() {
                 break;
             }
-            let (source_obj, key) = self.scope_uniform_sources[i];
+            let (source_obj, key) = match self.scope_uniform_sources[i] {
+                ScopeUniformSlot::Scope(obj, key) => (obj, key),
+                ScopeUniformSlot::Const(ci) => {
+                    // A table constant: its live value, never the heap.
+                    if let Some(slot) = self.scope_uniforms_buf.get_mut(input.offset) {
+                        *slot = self.table_consts[ci].value;
+                    }
+                    continue;
+                }
+            };
 
             // Read the value from the heap
             let value = heap.scope_value(source_obj, key, *trap);

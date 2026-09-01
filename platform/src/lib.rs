@@ -272,3 +272,7 @@ pub use {
     smallvec,
     smallvec::SmallVec,
 };
+
+/// The compiled-shader handle the const-table API is keyed by
+/// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
+pub use crate::draw_shader::DrawShaderId;

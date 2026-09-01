@@ -117,12 +117,35 @@ pub enum ShaderIoKind {
 pub struct ScopeUniformSource {
     /// The source object to read the value from
     pub source_obj: ScriptObject,
-    /// The key to read from the source object  
+    /// The key to read from the source object
     pub key: LiveId,
     /// The name used in the shader (may be prefixed for collision avoidance)
     pub shader_name: LiveId,
     /// The pod type of this uniform
     pub ty: ScriptPodType,
+    /// `Some(i)`: this slot is `ShaderOutput::table_consts[i]` — an
+    /// annotated literal lifted out of the code — and is filled from the
+    /// table's current value, never from the heap.
+    pub table_const: Option<usize>,
+}
+
+/// A numeric literal inside a shader fn body that carried a `/** … */`
+/// annotation and was compiled under [`ShaderOutput::const_table`]: it is
+/// read from the scope-uniform buffer at draw time instead of being folded
+/// into the code, so its value can be hot-patched with zero recompiles. The
+/// source is never rewritten by a patch — the span is context for whoever
+/// eventually edits it (the ledger hands it to the AI).
+#[derive(Debug, Clone)]
+pub struct ShaderTableConst {
+    /// The scope-uniform io name this constant occupies (`ct0`, `ct1`, …).
+    pub shader_name: LiveId,
+    /// The annotation text as written (hint grammar not yet parsed).
+    pub doc: String,
+    /// The literal's value in the source.
+    pub value: f64,
+    /// Where the literal sits: the immediate's ip (resolves to file:line:col
+    /// through `ScriptCode::ip_to_loc`).
+    pub ip: ScriptIp,
 }
 
 /// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
@@ -198,6 +221,15 @@ pub struct ShaderOutput {
     pub scope_uniforms: Vec<ScopeUniformSource>,
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
     pub scope_textures: Vec<ScopeTextureSource>,
+    /// Compile flag: lift `/** name */`-annotated float literals in fn
+    /// bodies into hot-patchable table constants ([`ShaderTableConst`])
+    /// instead of folding them into the emitted code. Off (the default)
+    /// emits byte-identical code to a compiler without the feature.
+    pub const_table: bool,
+    /// The lifted literals, in emission order; each also appears as a
+    /// `ShaderIoKind::ScopeUniform` io and a [`ScopeUniformSource`] with
+    /// `table_const: Some(index)`.
+    pub table_consts: Vec<ShaderTableConst>,
     /// Per-texture sampler bindings inferred during shader lowering.
     /// Entries are `(texture_expr, sampler_index)`.
     pub texture_sampler_bindings: Vec<(String, usize)>,
