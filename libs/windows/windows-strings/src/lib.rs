@@ -42,5 +42,5 @@ mod pwstr;
 pub use pwstr::*;
 
 unsafe extern "C" {
-    fn strlen(s: PCSTR) -> usize;
+    fn strlen(s: *const core::ffi::c_char) -> usize;
 }
