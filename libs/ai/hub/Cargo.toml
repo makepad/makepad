@@ -20,8 +20,6 @@ default = [
     "llm",
     "tts",
     "indextts",
-    "speech",
-    "stt",
     "video",
     "interpolate",
     "audio",
@@ -29,7 +27,6 @@ default = [
     "matte-native",
     "depth-native",
     "segment-native",
-    "body-native",
     "upscale-native",
     "motion-native",
     "rig-native",
@@ -51,15 +48,10 @@ paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:
 paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
-# Speech sessions (AiHub::start_stt / start_tts): the OS engines as the
-# stt.system / tts.system pipes plus the in-process / machine / LAN ladder.
-speech = ["dep:makepad-system-speech"]
-# Whisper speech-to-text (stt.whisper), in-process and on the wire.
-stt = ["speech", "dep:makepad-ai-speech", "makepad-ai-speech/whisper"]
 # Real Kokoro speech synthesis via makepad-ai-speech.
-tts = ["dep:makepad-ai-speech", "makepad-ai-speech/kokoro"]
+tts = ["dep:makepad-ai-speech"]
 # Real IndexTTS-2.5 character-voice TTS via makepad-ai-speech.
-indextts = ["dep:makepad-ai-speech", "makepad-ai-speech/indextts", "dep:makepad-ai-common"]
+indextts = ["dep:makepad-ai-speech", "dep:makepad-ai-common"]
 # Real MiniMax H3 video generation via makepad-ai-h3 plus the hardware
 # video file encoder (makepad-video). Does NOT pull the UI platform crate.
 video = ["dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-video"]
@@ -81,8 +73,6 @@ matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
 segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
-# Native SAM 3D Body pose estimation.
-body-native = ["dep:makepad-ai-body", "dep:makepad-ai-common"]
 # Native RealESRGAN x4plus general-image upscaling. Independent of `mesh`.
 upscale-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native HY-Motion decode -> rig retarget -> animated GLB.
@@ -117,7 +107,6 @@ makepad-ai-flux = { path = "../../ai/models/flux", optional = true }
 makepad-ai-h3 = { path = "../../ai/models/h3", optional = true }
 makepad-ai-rife = { path = "../../ai/models/rife", optional = true }
 makepad-ai-vision = { path = "../../ai/models/vision", optional = true }
-makepad-ai-body = { path = "../models/body", optional = true }
 makepad-ai-rig = { path = "../../ai/models/rig", optional = true }
 makepad-ai-motion = { path = "../../ai/models/motion", optional = true }
 makepad-ai-sfx = { path = "../../ai/models/sfx", optional = true }
@@ -130,8 +119,7 @@ makepad-gltf = { path = "../../gltf", optional = true }
 makepad-xatlas = { path = "../../xatlas", optional = true }
 makepad-render = { path = "../../render", optional = true }
 makepad-ai-llm = { path = "../../ai/llm", optional = true }
-makepad-ai-speech = { path = "../../ai/models/speech", default-features = false, optional = true }
-makepad-system-speech = { path = "../../system_speech", optional = true }
+makepad-ai-speech = { path = "../../ai/models/speech", optional = true }
 makepad-video = { path = "../../../platform/video", optional = true }
 # The `mkfl` motion payload: ONE definition, shared with the VJ's import
 # converter (which fills the same box from a classical, model-free flow
@@ -177,9 +165,3 @@ path = "src/bin/context_ladder.rs"
 [[bin]]
 name = "ocr-bench"
 path = "src/bin/ocr_bench.rs"
-
-# TTS -> STT through the hub's own speech sessions, scored as word error rate:
-# the scoreboard for comparing engines and the end-to-end check of the ladder.
-[[bin]]
-name = "speech-roundtrip"
-path = "src/bin/speech_roundtrip.rs"

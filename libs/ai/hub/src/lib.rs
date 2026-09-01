@@ -33,7 +33,6 @@
 
 pub mod backend;
 pub mod body_backend;
-pub mod body_native_backend;
 pub mod chat_wire;
 pub use makepad_base64;
 pub mod client;
@@ -58,10 +57,6 @@ pub mod lane_advert;
 pub mod lease;
 pub mod indextts_backend;
 pub mod kokoro_backend;
-#[cfg(feature = "stt")]
-pub mod whisper_backend;
-#[cfg(feature = "speech")]
-pub mod speech;
 pub mod llm_backend;
 #[cfg(feature = "llm")]
 pub mod local_llm;
