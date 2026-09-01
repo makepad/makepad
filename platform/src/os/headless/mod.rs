@@ -154,7 +154,7 @@ impl CxMediaApi for Cx {
 
     fn use_audio_outputs(&mut self, _devices: &[AudioDeviceId]) {}
 
-    fn audio_output_box(&mut self, _index: usize, _f: AudioOutputFn) {}
+    fn audio_output_box_os(&mut self, _index: usize, _f: AudioOutputFn) {}
 
     fn audio_input_box(&mut self, _index: usize, _f: AudioInputFn) {}
 

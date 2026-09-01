@@ -242,6 +242,14 @@ impl Cx {
                     let instance_bytes = (draw_item.instances.as_ref().unwrap().len()
                         * std::mem::size_of::<f32>())
                         as u64;
+                    if instance_bytes > 524_288 && std::env::var_os("MPPRESENT").is_some() {
+                        crate::log!(
+                            "MPUPLOAD list {:?} item {} — {:.1}MB re-uploaded",
+                            draw_list_id,
+                            draw_item_id,
+                            instance_bytes as f64 / 1048576.0
+                        );
+                    }
                     self.os.bytes_written = self
                         .os
                         .bytes_written
@@ -626,6 +634,7 @@ impl Cx {
             .perf_monitor
             .enabled()
             .then(std::time::Instant::now);
+        let perf_encode_t0 = std::time::Instant::now();
         self.os.bytes_written = 0;
         self.os.draw_calls_done = 0;
         self.os.instances_done = 0;
@@ -1023,6 +1032,7 @@ impl Cx {
                     addCompletedHandler: &objc_block!(move |command_buffer: ObjcId| {
                         let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                         let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                        present_gpu_time(end - start);
                         query.record_seconds_tagged(tag, end - start);
                     })
                 ]
@@ -1031,6 +1041,7 @@ impl Cx {
 
         match mode {
             DrawPassMode::MTKView(view) => {
+                present_pulse();
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
@@ -1108,6 +1119,7 @@ impl Cx {
                 );
             }
             DrawPassMode::Drawable(drawable, target_presentation_time) => {
+                present_pulse();
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 if let Some(target_presentation_time) = target_presentation_time {
                     let () = unsafe {
@@ -1172,6 +1184,14 @@ impl Cx {
                 t0.elapsed().as_micros() as u64,
             );
         }
+        present_cpu_sample(
+            perf_encode_t0.elapsed().as_secs_f64(),
+            (self.os.instance_bytes_uploaded + self.os.vertex_buffer_bytes_uploaded) as u64,
+        );
+        TEX_BYTES.fetch_add(
+            self.os.texture_bytes_uploaded as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         true
     }
 
@@ -1193,7 +1213,11 @@ impl Cx {
         } else {
             (width, height)
         };
-        if !request_ids.is_empty() {
+        // A pending grab/probe request, or a screen-capture sink that is due a
+        // frame for this window: either way the drawable has to be blitted into
+        // a shared texture before it is presented.
+        let wants_capture = crate::screen_capture::capture_wants_window(window_id);
+        if !request_ids.is_empty() || wants_capture {
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
@@ -1225,7 +1249,8 @@ impl Cx {
                 request_ids,
                 width: width as _,
                 height: height as _,
-                texture: texture,
+                window_id,
+                texture,
             });
         }
         None
@@ -1275,6 +1300,14 @@ impl Cx {
                         for px in bgra.chunks_exact_mut(4) {
                             px.swap(0, 2);
                         }
+                        // Continuous capture sinks (the ScreenCap recorder) take the
+                        // raw bytes; they carry no request id and never consume one.
+                        crate::screen_capture::deliver_capture_frame(
+                            sf.window_id,
+                            sf.width as u32,
+                            sf.height as u32,
+                            &bgra,
+                        );
                         // Pixel probes (the eyedropper) want one sample, not a PNG.
                         let mut request_ids = sf.request_ids;
                         crate::pixel_probe::answer_pixel_probes(&mut request_ids, sf.width, sf.height, &bgra);
@@ -1541,6 +1574,9 @@ struct ScreenshotInfo {
     width: usize,
     height: usize,
     request_ids: Vec<u64>,
+    /// The window this pass presented to, so a continuous capture sink bound
+    /// to one window does not swallow another window's frames.
+    window_id: Option<usize>,
     texture: RcObjcId,
 }
 
@@ -4269,4 +4305,108 @@ mod vec_upload_tests {
         // with nothing pending uploads nothing and changes nothing.
         assert_eq!(upload(&mut cx, &mut metal_cx, &texture), 0);
     }
+}
+
+
+/// `MPPRESENT=1`: once a second, how many drawables were actually presented
+/// and the worst gap between two of them — the number the eye sees, below
+/// every app-side clock. Costs one env check when off.
+/// CPU encode seconds and uploaded bytes per pass, summed on the main
+/// thread; the present pulse folds them into its once-a-second line.
+static CPU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UP_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn present_cpu_sample(seconds: f64, bytes: u64) {
+    CPU_US.fetch_add((seconds * 1e6) as u64, std::sync::atomic::Ordering::Relaxed);
+    UP_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// GPU seconds per command buffer, summed off the completion thread; the
+/// present pulse folds them into its once-a-second line.
+static GPU_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GPU_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn present_gpu_time(seconds: f64) {
+    let us = (seconds * 1e6) as u64;
+    GPU_US.fetch_add(us, std::sync::atomic::Ordering::Relaxed);
+    GPU_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// MPPRESENT=1: stamp when an input event arrived; the next present logs
+/// the input→glass latency. THE number behind "the first letter hangs".
+static INPUT_AT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_input_event() {
+    if std::env::var_os("MPPRESENT").is_none() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    let _ = INPUT_AT_US.compare_exchange(
+        0,
+        now,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn present_pulse() {
+    use std::cell::Cell;
+    thread_local! {
+        static ON: bool = std::env::var("MPPRESENT").is_ok();
+        static LAST: Cell<f64> = const { Cell::new(0.0) };
+        static SINCE: Cell<f64> = const { Cell::new(0.0) };
+        static COUNT: Cell<u32> = const { Cell::new(0) };
+        static WORST: Cell<f64> = const { Cell::new(0.0) };
+    }
+    if !ON.with(|v| *v) {
+        return;
+    }
+    let input_at = INPUT_AT_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if input_at > 0 {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        crate::log!("MPINPUT input→present {:.1}ms", (now_us.saturating_sub(input_at)) as f64 / 1000.0);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    LAST.with(|last| {
+        let gap = now - last.get();
+        last.set(now);
+        WORST.with(|w| {
+            if gap < 1.0 && gap > w.get() {
+                w.set(gap);
+            }
+        });
+    });
+    COUNT.with(|c| c.set(c.get() + 1));
+    SINCE.with(|since| {
+        if now - since.get() >= 1.0 {
+            if since.get() > 0.0 {
+                let count = COUNT.with(|c| c.take());
+                let worst = WORST.with(|w| w.take());
+                let gpu_ms = GPU_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+                let gpu_max = GPU_MAX_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+                let cpu_ms = CPU_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+                let up_mb = UP_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
+                let tex_mb = TEX_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
+                crate::log!(
+                    "MPPRESENT {count} presents/s · worst gap {:.1}ms · cpu encode {:.1}ms/s · instances {:.2}MB/s · textures {tex_mb:.2}MB/s · gpu {:.1}ms/frame max {:.1}ms",
+                    worst * 1000.0,
+                    cpu_ms,
+                    up_mb,
+                    if count > 0 { gpu_ms / count as f64 } else { 0.0 },
+                    gpu_max
+                );
+            }
+            since.set(now);
+        }
+    });
 }
