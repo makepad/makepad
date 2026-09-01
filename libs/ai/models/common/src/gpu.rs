@@ -36,6 +36,59 @@ pub struct GpuVitLayer<'a> {
     pub down: GpuVitLinear<'a>,
 }
 
+/// One linear of a device-resident two-way decoder layer: an f32 `[n, k]`
+/// weight tensor and an optional `[1, n]` bias, both long-lived.
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayLinear<'a> {
+    pub weight: &'a GpuTensor,
+    pub bias: Option<&'a GpuTensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayAttention<'a> {
+    pub q: GpuTwoWayLinear<'a>,
+    pub k: GpuTwoWayLinear<'a>,
+    pub v: GpuTwoWayLinear<'a>,
+    pub out: GpuTwoWayLinear<'a>,
+}
+
+/// One SAM-style two-way decoder layer: token self-attention (queries and
+/// keys carry the token PE when `pe_on_self`), token-to-image
+/// cross-attention (query = LN(hidden) + token PE, key = LN(context) +
+/// image PE, value = LN(context)), an erf-GELU feed-forward, and `ln_final`
+/// on the result. `ln_pe_1`/`ln_pe_2` normalise the two PEs.
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayLayer<'a> {
+    pub ln_pe_1: (&'a [f32], &'a [f32]),
+    pub ln_pe_2: (&'a [f32], &'a [f32]),
+    pub ln1: (&'a [f32], &'a [f32]),
+    pub ln2_1: (&'a [f32], &'a [f32]),
+    pub ln2_2: (&'a [f32], &'a [f32]),
+    pub ln3: (&'a [f32], &'a [f32]),
+    pub ln_final: (&'a [f32], &'a [f32]),
+    pub self_attn: GpuTwoWayAttention<'a>,
+    pub cross_attn: GpuTwoWayAttention<'a>,
+    pub ffn_first: GpuTwoWayLinear<'a>,
+    pub ffn_second: GpuTwoWayLinear<'a>,
+    pub n_head: usize,
+    pub eps: f32,
+    pub pe_on_self: bool,
+}
+
+/// One two-way decoder layer in one backend call, returning
+/// `(hidden, ln_final(hidden))`. The Metal tensor backend runs it
+/// device-resident; CUDA declines and the caller keeps its per-op path.
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+pub fn gpu_two_way_layer_resident(
+    _hidden: &GpuTensor,
+    _token_pe: &GpuTensor,
+    _context: &GpuTensor,
+    _context_pe: &GpuTensor,
+    _layer: &GpuTwoWayLayer<'_>,
+) -> Result<(GpuTensor, GpuTensor), String> {
+    Err("gpu_two_way_layer_resident: CUDA runs the per-op path".to_string())
+}
+
 /// A whole ViT stack in one backend call (see `GpuVitLayer`): the Metal
 /// tensor backend runs it device-resident in one command buffer; CUDA
 /// declines (its per-op `gpu_*` path is already resident) and the caller
@@ -3322,6 +3375,61 @@ mod imp {
                 _final_norm_w,
                 _final_norm_b,
                 _eps,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    pub fn gpu_two_way_layer_resident(
+        _hidden: &GpuTensor,
+        _token_pe: &GpuTensor,
+        _context: &GpuTensor,
+        _context_pe: &GpuTensor,
+        _layer: &super::GpuTwoWayLayer<'_>,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        #[cfg(target_os = "macos")]
+        {
+            use makepad_ai_metal::gpu_tensor::{DecAttnRef, DecLinearRef, TwoWayLayerRef};
+            fn lin<'a>(l: &super::GpuTwoWayLinear<'a>) -> DecLinearRef<'a> {
+                DecLinearRef {
+                    weight: l.weight,
+                    bias: l.bias,
+                }
+            }
+            fn attn<'a>(a: &super::GpuTwoWayAttention<'a>) -> DecAttnRef<'a> {
+                DecAttnRef {
+                    q: lin(&a.q),
+                    k: lin(&a.k),
+                    v: lin(&a.v),
+                    out: lin(&a.out),
+                }
+            }
+            let l = _layer;
+            let layer = TwoWayLayerRef {
+                ln_pe_1: l.ln_pe_1,
+                ln_pe_2: l.ln_pe_2,
+                ln1: l.ln1,
+                ln2_1: l.ln2_1,
+                ln2_2: l.ln2_2,
+                ln3: l.ln3,
+                ln_final: l.ln_final,
+                self_attn: attn(&l.self_attn),
+                cross_attn: attn(&l.cross_attn),
+                ffn_first: lin(&l.ffn_first),
+                ffn_second: lin(&l.ffn_second),
+                n_head: l.n_head,
+                eps: l.eps,
+                pe_on_self: l.pe_on_self,
+            };
+            return makepad_ai_metal::gpu_tensor::two_way_layer_resident(
+                _hidden,
+                _token_pe,
+                _context,
+                _context_pe,
+                &layer,
             );
         }
         #[cfg(not(target_os = "macos"))]

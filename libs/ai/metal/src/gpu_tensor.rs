@@ -5,11 +5,12 @@
 
 use crate::gpu_types::{fresh_tensor_id, GpuLinearPart, GpuTensor};
 use makepad_ai_cuda::quant::GGML_TYPE_F32;
-pub use crate::shim::{VitLayerRef, VitLinearRef};
+pub use crate::shim::{DecAttnRef, DecLinearRef, TwoWayLayerRef, VitLayerRef, VitLinearRef};
 use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_group_norm_planar_f32, try_layer_norm_mul_add_f32, try_matmul_nt_f32, try_mul_f32,
-    try_matmul_nt_ggml_bytes_keyed, try_silu_f32, try_vit_backbone_resident_f32,
+    try_matmul_nt_ggml_bytes_keyed, try_silu_f32, try_two_way_layer_resident_f32,
+    try_vit_backbone_resident_f32,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -810,6 +811,44 @@ pub fn vit_backbone_resident(
     )
     .ok_or_else(|| "metal resident vit backbone failed".to_string())?;
     Ok(tensor(x.rows, x.cols, out))
+}
+
+/// One two-way decoder layer device-resident (see `shim::TwoWayLayerRef`);
+/// returns `(hidden, ln_final(hidden))`.
+pub fn two_way_layer_resident(
+    hidden: &GpuTensor,
+    token_pe: &GpuTensor,
+    context: &GpuTensor,
+    context_pe: &GpuTensor,
+    layer: &TwoWayLayerRef<'_>,
+) -> Result<(GpuTensor, GpuTensor), String> {
+    if token_pe.rows != hidden.rows
+        || token_pe.cols != hidden.cols
+        || context_pe.rows != context.rows
+        || context_pe.cols != context.cols
+    {
+        return Err("metal two-way layer: PE shapes do not match their tensors".to_string());
+    }
+    let h = data(hidden)?;
+    let t = data(token_pe)?;
+    let c = data(context)?;
+    let cp = data(context_pe)?;
+    let (out, normed) = try_two_way_layer_resident_f32(
+        &h,
+        &t,
+        &c,
+        &cp,
+        hidden.rows,
+        hidden.cols,
+        context.rows,
+        context.cols,
+        layer,
+    )
+    .ok_or_else(|| "metal resident two-way layer failed".to_string())?;
+    Ok((
+        tensor(hidden.rows, hidden.cols, out),
+        tensor(hidden.rows, hidden.cols, normed),
+    ))
 }
 
 pub fn layer_norm_mul_add(

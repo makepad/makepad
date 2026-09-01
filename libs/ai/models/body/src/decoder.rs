@@ -1,8 +1,9 @@
 //! Promptable body-pose decoder and its six-step refinement loop.
 
 use crate::backend::{
-    gpu_add, gpu_download, gpu_gelu_erf,
-    gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_slice_rows, gpu_upload, GpuTensor,
+    gpu_add, gpu_download, gpu_gelu_erf, gpu_layer_norm_mul_add, gpu_linear_f32_resident,
+    gpu_slice_rows, gpu_two_way_layer_resident, gpu_upload, GpuTensor, GpuTwoWayAttention,
+    GpuTwoWayLayer, GpuTwoWayLinear,
 };
 use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
 use crate::weights::BodyWeights;
@@ -290,6 +291,51 @@ pub struct Decoder {
     init_pose: Vec<f32>,
     init_camera: Vec<f32>,
     tokens: TokenWeights,
+    /// Set once the backend declined the whole-layer resident call; the
+    /// per-op path is used from then on.
+    resident_refused: std::cell::Cell<bool>,
+}
+
+impl GpuLinear {
+    fn two_way_ref(&self) -> GpuTwoWayLinear<'_> {
+        GpuTwoWayLinear {
+            weight: &self.weight,
+            bias: Some(&self.bias),
+        }
+    }
+}
+
+impl GpuAttention {
+    fn two_way_ref(&self) -> GpuTwoWayAttention<'_> {
+        GpuTwoWayAttention {
+            q: self.q.two_way_ref(),
+            k: self.k.two_way_ref(),
+            v: self.v.two_way_ref(),
+            out: self.out.two_way_ref(),
+        }
+    }
+}
+
+impl DecoderLayer {
+    fn two_way_ref<'a>(&'a self, norm_final: &'a NormWeights, pe_on_self: bool) -> GpuTwoWayLayer<'a> {
+        let affine = |n: &'a NormWeights| (n.weight.as_slice(), n.bias.as_slice());
+        GpuTwoWayLayer {
+            ln_pe_1: affine(&self.ln_pe_1),
+            ln_pe_2: affine(&self.ln_pe_2),
+            ln1: affine(&self.ln1),
+            ln2_1: affine(&self.ln2_1),
+            ln2_2: affine(&self.ln2_2),
+            ln3: affine(&self.ln3),
+            ln_final: affine(norm_final),
+            self_attn: self.self_attn.two_way_ref(),
+            cross_attn: self.cross_attn.two_way_ref(),
+            ffn_first: self.ffn_first.two_way_ref(),
+            ffn_second: self.ffn_second.two_way_ref(),
+            n_head: DEC_HEADS,
+            eps: DEC_NORM_EPS,
+            pe_on_self,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -353,6 +399,7 @@ impl Decoder {
             init_pose: weights.init_pose,
             init_camera: weights.init_camera,
             tokens: weights.tokens,
+            resident_refused: std::cell::Cell::new(false),
         })
     }
 
@@ -398,34 +445,50 @@ impl Decoder {
             let t0 = std::time::Instant::now();
             let token_pe = gpu_upload(&tokens.token_augment, TOKEN_ROWS, DEC_DIM)
                 .map_err(DiffusionError::model)?;
-            let token_pe = layer_norm_gpu(&token_pe, &layer.ln_pe_1)?;
-            let image_pe = layer_norm_gpu(&context_pe, &layer.ln_pe_2)?;
-
-            let normed = layer_norm_gpu(&hidden, &layer.ln1)?;
-            let self_update = if layer_index == 0 {
-                layer.self_attn.forward(&normed, &normed, &normed)?
+            // The whole layer in one backend call when the backend offers it
+            // (Metal: one command buffer, no host round trips between ops).
+            let mut resident = None;
+            if !self.resident_refused.get() {
+                let layer_ref = layer.two_way_ref(&self.norm_final, layer_index != 0);
+                match gpu_two_way_layer_resident(&hidden, &token_pe, context, &context_pe, &layer_ref)
+                {
+                    Ok(pair) => resident = Some(pair),
+                    Err(_) => self.resident_refused.set(true),
+                }
+            }
+            let normed = if let Some((new_hidden, normed)) = resident {
+                hidden = new_hidden;
+                normed
             } else {
-                let qk = gpu_add(&normed, &token_pe).map_err(DiffusionError::model)?;
-                layer.self_attn.forward(&qk, &qk, &normed)?
+                let token_pe = layer_norm_gpu(&token_pe, &layer.ln_pe_1)?;
+                let image_pe = layer_norm_gpu(&context_pe, &layer.ln_pe_2)?;
+
+                let normed = layer_norm_gpu(&hidden, &layer.ln1)?;
+                let self_update = if layer_index == 0 {
+                    layer.self_attn.forward(&normed, &normed, &normed)?
+                } else {
+                    let qk = gpu_add(&normed, &token_pe).map_err(DiffusionError::model)?;
+                    layer.self_attn.forward(&qk, &qk, &normed)?
+                };
+                hidden = gpu_add(&hidden, &self_update).map_err(DiffusionError::model)?;
+
+                let query = layer_norm_gpu(&hidden, &layer.ln2_1)?;
+                let query = gpu_add(&query, &token_pe).map_err(DiffusionError::model)?;
+                let context_normed = layer_norm_gpu(context, &layer.ln2_2)?;
+                let key = gpu_add(&context_normed, &image_pe).map_err(DiffusionError::model)?;
+                let cross_update = layer
+                    .cross_attn
+                    .forward(&query, &key, &context_normed)?;
+                hidden = gpu_add(&hidden, &cross_update).map_err(DiffusionError::model)?;
+
+                let normed = layer_norm_gpu(&hidden, &layer.ln3)?;
+                let ffn = layer.ffn_first.forward(&normed)?;
+                let ffn = gpu_gelu_erf(&ffn).map_err(DiffusionError::model)?;
+                let ffn = layer.ffn_second.forward(&ffn)?;
+                hidden = gpu_add(&hidden, &ffn).map_err(DiffusionError::model)?;
+
+                layer_norm_gpu(&hidden, &self.norm_final)?
             };
-            hidden = gpu_add(&hidden, &self_update).map_err(DiffusionError::model)?;
-
-            let query = layer_norm_gpu(&hidden, &layer.ln2_1)?;
-            let query = gpu_add(&query, &token_pe).map_err(DiffusionError::model)?;
-            let context_normed = layer_norm_gpu(context, &layer.ln2_2)?;
-            let key = gpu_add(&context_normed, &image_pe).map_err(DiffusionError::model)?;
-            let cross_update = layer
-                .cross_attn
-                .forward(&query, &key, &context_normed)?;
-            hidden = gpu_add(&hidden, &cross_update).map_err(DiffusionError::model)?;
-
-            let normed = layer_norm_gpu(&hidden, &layer.ln3)?;
-            let ffn = layer.ffn_first.forward(&normed)?;
-            let ffn = gpu_gelu_erf(&ffn).map_err(DiffusionError::model)?;
-            let ffn = layer.ffn_second.forward(&ffn)?;
-            hidden = gpu_add(&hidden, &ffn).map_err(DiffusionError::model)?;
-
-            let normed = layer_norm_gpu(&hidden, &self.norm_final)?;
             timing.layers_ms += t0.elapsed().as_secs_f32() * 1000.0;
             let t1 = std::time::Instant::now();
             // Only the pose token leaves the GPU mid-loop; the whole block
