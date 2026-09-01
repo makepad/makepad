@@ -447,9 +447,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
         // ---- theme palette strip (in the colour popover) ----
         set_type_default() do #(DrawFabPaletteCell::script_shader(vm)){
             ..mod.draw.DrawQuad
-            cell: instance(vec4(0.0, 0.0, 0.0, 1.0))
-            hot: instance(0.0)
-            cur: instance(0.0)
+            // `#[live]` fields on DrawFabPaletteCell, so they are already
+            // instances — see DrawDragNum above: `instance(..)` here hands a
+            // Vec4f (and two f32s) an object, and every app that loads these
+            // widgets says so in three lines at startup.
+            cell: vec4(0.0, 0.0, 0.0, 1.0)
+            hot: 0.0
+            cur: 0.0
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.0)
