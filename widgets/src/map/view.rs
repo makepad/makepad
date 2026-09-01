@@ -1164,6 +1164,11 @@ const LABEL_REPLACE_PAN_PX: f64 = 420.0;
 /// frames at 120Hz — and tile arrivals during panning invalidated the cache
 /// almost every other frame).
 const LABEL_REPLACE_MIN_SECONDS: f64 = 0.30;
+/// How long the camera (rotation/tilt/zoom/warp tween) must be QUIET before
+/// a full label re-place runs. While it moves, cached labels ride the GPU
+/// camera+fold transforms exactly — regenerating mid-gesture cost 5-20ms a
+/// beat and landed a frame stale, which read as labels trailing the map.
+const LABEL_SETTLE_SECONDS: f64 = 0.15;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
@@ -1488,6 +1493,11 @@ impl DrawMapVector {
 
 #[derive(Script, Widget)]
 pub struct MapView {
+    /// The @cam readout in the corner: the exact command to recreate this
+    /// view, drawn over the map. On by default — map work is driven by it —
+    /// and off for an app shipping the map as a face rather than a bench.
+    #[live(true)]
+    debug_cam: bool,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -1738,11 +1748,6 @@ pub struct MapView {
     label_cache_rotation: f64,
     #[rust]
     label_cache_tilt: f64,
-    /// Warp amount the cached placement was computed at: the fold is a
-    /// non-affine screen transform, so any change forces a full re-place
-    /// (the rigid-delta reuse would leave labels floating off the fold).
-    #[rust]
-    label_cache_warp: f64,
     #[rust]
     label_cache_tiles: Vec<TileKey>,
     #[rust]
@@ -1768,6 +1773,15 @@ pub struct MapView {
     tiles_generation: u64,
     #[rust]
     last_full_place_time: Option<std::time::Instant>,
+    /// When the camera (rotation/tilt/zoom/warp tween) last CHANGED — the
+    /// full label re-place waits for ~a beat of camera quiet, so labels
+    /// ride the exact GPU transforms through the whole gesture and settle
+    /// once, where the transforms already put them.
+    #[rust]
+    camera_motion_last: Option<std::time::Instant>,
+    /// Camera signature of the previous draw, for the motion detector.
+    #[rust]
+    camera_motion_sig: (f64, f64, f64, f64),
     #[rust]
     needs_label_followup: bool,
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
@@ -2132,7 +2146,19 @@ impl Widget for MapView {
         }
         self.perf_last_frame = Some(perf_start);
 
-        let rect = cx.walk_turtle(walk);
+        // The map's own draw list carries the clip: hosted as a pane beside
+        // other content, every tile/terrain/label draw clamps against
+        // view_clip (the shaders always did — the list just never had a
+        // rect narrower than the window until the map was embedded).
+        cx.begin_turtle(
+            walk,
+            Layout {
+                clip_x: true,
+                clip_y: true,
+                ..Layout::default()
+            },
+        );
+        let rect = cx.turtle().rect();
         self.view_rect = rect;
         self.draw_bg.draw_abs(cx, rect);
         self.ensure_visible_tiles(cx, rect);
@@ -2881,8 +2907,11 @@ impl Widget for MapView {
 
         self.update_status_text();
         // Viewport debug readout: the exact @cam command for this view, so
-        // a screenshot alone is enough to recreate the camera.
-        {
+        // a screenshot alone is enough to recreate the camera. On by
+        // default — it is how map work has always been driven — and
+        // gated so an app shipping the map as a face, not a workbench,
+        // can turn it off.
+        if self.debug_cam {
             let center = self.center_norm;
             let lon = center.x * 360.0 - 180.0;
             let lat = (std::f64::consts::PI * (1.0 - 2.0 * center.y))
@@ -2903,6 +2932,7 @@ impl Widget for MapView {
                 &cam,
             );
         }
+        cx.end_turtle();
         DrawStep::done()
     }
 }
@@ -3622,7 +3652,7 @@ impl MapView {
 
         let active_path = self.active_mbtiles_path().to_string();
         let mbtiles_path = Path::new(&active_path);
-        if !mbtiles_path.is_file() && !self.local_source_missing_logged {
+        if !mbtiles_path.exists() && !self.local_source_missing_logged {
             log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", active_path);
             self.local_source_missing_logged = true;
         }
@@ -3927,8 +3957,17 @@ impl MapView {
     }
 
     fn wrap_and_clamp_center(&mut self) {
-        self.center_norm.x = self.center_norm.x.rem_euclid(1.0);
-        self.center_norm.y = self.center_norm.y.clamp(0.0, 1.0);
+        // The renderer draws exactly one world width (visible_tile_keys
+        // dedups wrapped x), so a WRAPPING centre was a lie: panning past
+        // the antimeridian slid the whole world off-centre and showed void
+        // — a drag into nothing that read as a broken pan. The centre is
+        // CLAMPED instead: the viewport never leaves the world, and a world
+        // narrower than the view sits pinned in its middle.
+        let world = tile_world_size_zoom(self.view_zoom()).max(1.0);
+        let half_x = (self.view_rect.size.x * 0.5 / world).min(0.5);
+        let half_y = (self.view_rect.size.y * 0.5 / world).min(0.5);
+        self.center_norm.x = if half_x >= 0.5 { 0.5 } else { self.center_norm.x.clamp(half_x, 1.0 - half_x) };
+        self.center_norm.y = if half_y >= 0.5 { 0.5 } else { self.center_norm.y.clamp(half_y, 1.0 - half_y) };
     }
 
     fn zoom_with_anchor(&mut self, cx: &mut Cx, scroll: f64, anchor_abs: Vec2d) {
@@ -4440,11 +4479,11 @@ impl MapView {
         let pan_delta = map_offset - self.label_cache_offset;
         let pan_dist = pan_delta.x.abs().max(pan_delta.y.abs());
         let rot_delta = self.rotation - self.label_cache_rotation;
-        // The fold is a non-affine screen transform: any warp change makes
-        // the cached rigid-delta reuse wrong (labels would float off the
-        // fold) — treat it like a tilt change and force a full re-place.
-        let tilt_delta = self.tilt != self.label_cache_tilt
-            || self.space_warp_eff.amount != self.label_cache_warp;
+        // The fold does NOT invalidate the cache: glyphs are emitted
+        // unwarped and DrawRotatedText folds them per frame from the same
+        // uniforms the tiles get, so warp-amount changes (and rotation
+        // under the fold) ride the GPU exactly like tile geometry.
+        let tilt_delta = self.tilt != self.label_cache_tilt;
         let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
             && rot_delta == 0.0
@@ -4461,14 +4500,41 @@ impl MapView {
         // that's what keeps labels from wiggling during heading-up nav —
         // but only at identical zoom (rotation+zoom compose non-affinely
         // with the cached-screen transform below).
+        // While the camera is MOVING (rotation, tilt, zoom gesture, warp
+        // tween), keep riding the cached placement on the GPU transforms —
+        // a mid-gesture re-place costs 5-20ms AND lands on positions a
+        // frame stale, which reads as labels trailing the map. The full
+        // re-place runs once the camera has been quiet for a beat, and
+        // lands where the transforms already put everything.
+        let camera_sig = (
+            self.rotation,
+            self.tilt,
+            view_zoom,
+            self.space_warp_eff.amount,
+        );
+        if camera_sig != self.camera_motion_sig {
+            self.camera_motion_sig = camera_sig;
+            self.camera_motion_last = Some(std::time::Instant::now());
+        }
+        let camera_moving = self
+            .camera_motion_last
+            .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_SETTLE_SECONDS);
         let cache_soft = self.label_cache_valid
             && ((rot_delta == 0.0 && !tilt_delta)
                 || self.label_cache_zoom == view_zoom)
             && (self.label_cache_zoom - view_zoom).abs() < 0.5
-            && self
-                .last_full_place_time
-                .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_REPLACE_MIN_SECONDS);
+            && (camera_moving
+                || self
+                    .last_full_place_time
+                    .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_REPLACE_MIN_SECONDS));
         if cache_strict || cache_soft {
+            if camera_moving {
+                // Guarantee the settle re-place: the last gesture frame
+                // leaves no other redraw scheduled, so arm one past the
+                // quiet window (re-armed each moving frame, fires once).
+                cx.cx.stop_timer(self.zoom_settle_timer);
+                self.zoom_settle_timer = cx.cx.start_timeout(LABEL_SETTLE_SECONDS + 0.02);
+            }
             // Screen positions transform affinely under zoom-about-cursor:
             // s_new = s_old * k + R·(off_new - off_old * k) with the
             // heading-up rotation R applied about the view pivot. A plain
@@ -4784,6 +4850,16 @@ impl MapView {
         let t1 = self.tilt_cos() as f32;
         let m = [dc, -ds / t0, t1 * ds, t1 * dc / t0];
         self.draw_label.set_camera_delta(cx.cx, m, pivot);
+        // The fold, stamped with the SAME values the tile shader carries
+        // this frame: labels are emitted unwarped and bend on the GPU, so
+        // they track rotation/tilt/warp exactly like tile geometry.
+        let w = &self.space_warp_eff;
+        self.draw_label.set_space_warp(
+            cx.cx,
+            [w.amount as f32, w.start_px as f32, w.radius_px as f32, w.sin_t as f32],
+            [w.kappa as f32, 0.0, w.cap as f32],
+            self.tilt_cos() as f32,
+        );
         // Pan/zoom ride uniforms too (same-frame as the tile map_offset):
         // glyphs below emit in CACHED placement space, scale 1, no offset.
         self.draw_label.set_pan_delta(
@@ -4846,7 +4922,6 @@ impl MapView {
         self.label_cache_zoom = view_zoom;
         self.label_cache_rotation = self.rotation;
         self.label_cache_tilt = self.tilt;
-        self.label_cache_warp = self.space_warp_eff.amount;
         self.label_cache_tiles.clear();
         self.label_cache_tiles.extend_from_slice(draw_tiles);
         self.label_cache_generation = self.tiles_generation;
@@ -4874,6 +4949,24 @@ impl MapView {
         let rot_pivot = rect.pos + rect.size * 0.5;
         let tilt_cos = self.tilt_cos();
         let rotated = rot != (1.0, 0.0) || tilt_cos != 1.0;
+        // Labels are placed UNWARPED (the fold rides shader uniforms), so
+        // the accept window must cover the ground the fold pulls back on
+        // screen: the risen far wall lives ABOVE the flat frustum in
+        // unwarped coordinates, and the near field spreads slightly with
+        // perspective. Same honesty rule as the tile cull.
+        let label_rect = if self.space_warp_eff.is_on() {
+            let half_h = rect.size.y * 0.5;
+            let half_h_flat = half_h / tilt_cos.max(0.05);
+            let (reach, widen) = self.space_warp_eff.cull_extents(half_h, half_h_flat);
+            let top = (rot_pivot.y - reach * tilt_cos).min(rect.pos.y);
+            let half_w = rect.size.x * 0.5 * widen;
+            Rect {
+                pos: dvec2(rot_pivot.x - half_w, top),
+                size: dvec2(half_w * 2.0, rect.pos.y + rect.size.y - top),
+            }
+        } else {
+            rect
+        };
 
         for key in draw_tiles {
             label_perf.draw_tiles += 1;
@@ -4976,7 +5069,12 @@ impl MapView {
                         (rect.size.x + rect.size.y) * 0.25
                     } else {
                         0.0
-                    };
+                    }
+                    // The fold sees further than the flat frustum: widen
+                    // the map-space pre-cull by the same extra reach the
+                    // accept window got, or wall labels die here first.
+                    + (rect.pos.y - label_rect.pos.y).max(0.0)
+                    + (label_rect.size.x - rect.size.x).max(0.0) * 0.5;
                 if (bbox.2 as f64 * scale64 + tile_offset.x) < rect.pos.x - rot_margin
                     || (bbox.3 as f64 * scale64 + tile_offset.y) < rect.pos.y - rot_margin
                     || (bbox.0 as f64 * scale64 + tile_offset.x)
@@ -5035,30 +5133,21 @@ impl MapView {
                 // shader camera-deltas the GROUND anchor and re-applies it.
                 let mut baked_lift_px = 0.0f64;
                 // Terrain: labels ride the displaced ground like the tiles.
-                // Ground lift is looked up from the UNWARPED point (the
-                // inverse projection knows nothing of the fold), THEN the
-                // path goes through the warp camera (fold + perspective on
-                // BOTH axes), THEN lifts subtract as screen shifts scaled
-                // by the local perspective factor so pins don't tower over
-                // their perspective-shrunken far buildings.
+                // The path stays UNWARPED here — the fold + perspective
+                // are applied per frame in DrawRotatedText's vertex fn
+                // (space_warp uniforms, same values as the tiles), which
+                // is what keeps labels glued to the map while the camera
+                // rotates under the warp instead of trailing the next
+                // CPU re-place. Lifts stay plain screen shifts; the
+                // shader perspective-scales them at the label's own
+                // ground point, as the CPU bake used to.
                 if !self.scratch_screen_path.is_empty() {
                     let ground_px =
                         self.terrain_ground_lift_px_at_screen(self.scratch_screen_path[0]);
-                    let mut persp_w = 1.0f64;
-                    if self.space_warp_eff.is_on() {
-                        persp_w = self
-                            .space_warp_eff
-                            .screen_w(self.scratch_screen_path[0], rot_pivot);
-                        for p in self.scratch_screen_path.iter_mut() {
-                            *p = self.space_warp_eff.warp_screen_point(*p, rot_pivot, 0.0);
-                        }
-                        lift_px *= persp_w;
-                    }
                     if ground_px > 0.0 {
-                        let shift = ground_px * persp_w;
-                        baked_lift_px += shift;
+                        baked_lift_px += ground_px;
                         for p in self.scratch_screen_path.iter_mut() {
-                            p.y -= shift;
+                            p.y -= ground_px;
                         }
                     }
                 }
@@ -5091,7 +5180,7 @@ impl MapView {
                     }
                 }
                 if self.scratch_screen_path.len() < 2
-                    || polyline_outside_rect(&self.scratch_screen_path, rect, LABEL_VIEW_MARGIN)
+                    || polyline_outside_rect(&self.scratch_screen_path, label_rect, LABEL_VIEW_MARGIN)
                 {
                     continue;
                 }
@@ -5860,6 +5949,35 @@ impl MapView {
     /// Rebuild every resident tile under the current style/mode while its
     /// previous geometry stays on screen (bucket sentinel → the normal
     /// stale-bucket restyle path picks it up and cross-fades).
+    /// Swap the tile source archives at runtime. Unlike the overlay swap
+    /// there is nothing worth keeping on screen: geometry from the old
+    /// archive is not this archive's, so every tile and both negative
+    /// caches go, and the normal request path refills from the new source.
+    /// (First-run bake: the app starts with no archive at all and points
+    /// the view at the one it just built.) Empty strings clear the
+    /// optional detail/bridge-dz sources.
+    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        if self.mbtiles_path == base
+            && self.detail_mbtiles_path == detail
+            && self.bridge_dz_mbtiles_path == bridge_dz
+        {
+            return;
+        }
+        self.mbtiles_path = base.to_string();
+        self.detail_mbtiles_path = detail.to_string();
+        self.bridge_dz_mbtiles_path = bridge_dz.to_string();
+        self.tiles.clear();
+        self.local_requested_tiles.clear();
+        self.local_missing_tiles.clear();
+        self.local_source_missing_logged = false;
+        // Force the zoom-range probe to re-read: the new archive declares
+        // its own minzoom/maxzoom (a city extract is not the planet).
+        self.local_source_zoom_range = None;
+        self.local_source_zoom_range_path = None;
+        self.local_source_zoom_range_checked = false;
+        self.redraw(cx);
+    }
+
     /// Swap the active geodata overlays; stale tiles keep rendering while
     /// rebuilt ones stream in with the new layer set.
     pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
@@ -6571,6 +6689,12 @@ impl MapViewRef {
     pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_overlay_paths(cx, paths);
+        }
+    }
+
+    pub fn set_source_paths(&self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_paths(cx, base, detail, bridge_dz);
         }
     }
 
