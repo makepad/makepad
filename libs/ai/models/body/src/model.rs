@@ -36,6 +36,10 @@ pub struct BodyModel {
     /// The crop side the backbone sees; 512 is the trained size, smaller is
     /// faster and less accurate (see `set_crop_size`).
     crop_size: usize,
+    /// Pose correctives on every refinement step (the reference) or only
+    /// on the last one: the intermediate steps only feed keypoints back into
+    /// the decoder, where the corrective's few millimetres barely register.
+    pub correctives_every_step: bool,
     /// Per-stage wall times of the last `infer`, milliseconds:
     /// crop, backbone, context, decoder loop (incl. rig), packet.
     pub last_stage_ms: [f32; 5],
@@ -82,6 +86,7 @@ impl BodyModel {
             decoder,
             rig,
             crop_size: IMAGE_SIZE,
+            correctives_every_step: false,
             last_stage_ms: [0.0; 5],
             last_loop: LoopTiming::default(),
         };
@@ -143,11 +148,13 @@ impl BodyModel {
         let tokens = self.decoder.build_tokens(condition_info(&geo));
         let rig = &self.rig;
         let dense_pe = &self.dense_pe[&self.crop_size];
+        let every_step = self.correctives_every_step;
         let mut last: Option<StepResult> = None;
         let output = self
             .decoder
             .run(tokens, &context, dense_pe, |step: StepInput| {
-                let result = close_the_loop(rig, &geo, &step);
+                let correctives = every_step || step.layer + 1 == crate::DEC_DEPTH;
+                let result = close_the_loop(rig, &geo, &step, correctives);
                 let feedback = StepFeedback {
                     kp2d_cropped: full_to_crop(&result.kp2d, &geo),
                     depth: depths(&result.kp3d, result.cam_t),
@@ -190,10 +197,10 @@ impl BodyModel {
 
 /// One refinement step's tail: head output -> rig parameters -> posed rig
 /// -> keypoints in camera axes -> camera translation -> projection.
-fn close_the_loop(rig: &MhrRig, geo: &CropGeometry, step: &StepInput) -> StepResult {
+fn close_the_loop(rig: &MhrRig, geo: &CropGeometry, step: &StepInput, correctives: bool) -> StepResult {
     let pose = unpack_pose(&step.pose_pred_519);
     let params = model_params(rig, &pose);
-    let rigged = rig.forward(&pose.shape, &params, &pose.expr, true);
+    let rigged = rig.forward(&pose.shape, &params, &pose.expr, correctives);
     // Rig output is centimetres in the rig's axes; the camera frame is
     // metres with y and z flipped.
     let to_camera = |values: &[f32], count: usize| -> Vec<f32> {
@@ -266,6 +273,8 @@ mod tests {
         let load_started = Instant::now();
         let mut model = BodyModel::load(&weights_path).expect("load body model");
         eprintln!("body model load {:?}", load_started.elapsed());
+        // The exact mode first (correctives on every step, as the reference).
+        model.correctives_every_step = true;
         let packet = model.infer(&rgb, w, h, None).expect("infer");
         // A second run reports the warm timings.
         let packet = model.infer(&rgb, w, h, None).unwrap_or(packet);
@@ -282,6 +291,16 @@ mod tests {
             model.last_loop.step_ms,
             model.last_loop.refine_ms
         );
+        // Correctives only on the final step: the cheaper loop, measured.
+        model.correctives_every_step = false;
+        let _ = model.infer(&rgb, w, h, None).expect("infer");
+        let lean = model.infer(&rgb, w, h, None).expect("infer");
+        let (lean3, _) = max_abs(&lean.people[0].kp3d, &fixture::load("final_pred_keypoints_3d").unwrap().1);
+        eprintln!(
+            "body correctives on the last step only: warm {:.1} ms (loop {:.1}); kp3d max {lean3:.4} m vs reference",
+            lean.ms, model.last_stage_ms[3]
+        );
+        assert!(lean3 < 5.0e-3, "lean rig mode drifted: {lean3} m");
         // The same image through smaller crops: the speed/accuracy knob,
         // reported against the reference at 512 (not asserted tightly: these
         // sizes were never trained).

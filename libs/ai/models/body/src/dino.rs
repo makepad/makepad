@@ -6,8 +6,8 @@
 
 use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
-    gpu_download,
-    gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_f32acc, gpu_mul, gpu_rope_half,
+    gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
+    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_mul, gpu_rope_half,
     gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
 };
 use crate::weights::BodyWeights;
@@ -89,19 +89,38 @@ impl Bf16Linear {
         })
     }
 
+    /// The tensor-core paths first (cuBLASLt with the bias in the epilogue,
+    /// or the bias-free bf16 mm), the f32-accumulating GEMM as the fallback
+    /// where a backend lacks them. All three carry bf16 operands with f32
+    /// accumulation; the fast paths round the output to bf16, which is the
+    /// reference's own precision.
     fn forward(&self, input: &GpuTensor) -> Result<GpuTensor> {
-        gpu_linear_nt_cached_bf16_f32acc(
-            input,
-            CACHE_NAMESPACE,
-            &[GpuLinearPart {
-                bt_ggml_type: GGML_TYPE_BF16,
-                n: self.out,
-                cache_key: &self.key,
-                bytes: &self.bytes,
-            }],
-            &self.bias,
-        )
-        .map_err(DiffusionError::model)
+        let part = GpuLinearPart {
+            bt_ggml_type: GGML_TYPE_BF16,
+            n: self.out,
+            cache_key: &self.key,
+            bytes: &self.bytes,
+        };
+        let fast = if self.bias.is_empty() {
+            gpu_linear_nt_cached_bf16_mm(input, CACHE_NAMESPACE, &[part])
+        } else {
+            gpu_linear_nt_cached_bf16_bias_epilogue(input, CACHE_NAMESPACE, &[part], &self.bias)
+        };
+        match fast {
+            Ok(out) => Ok(out),
+            Err(_) => gpu_linear_nt_cached_bf16_f32acc(
+                input,
+                CACHE_NAMESPACE,
+                &[GpuLinearPart {
+                    bt_ggml_type: GGML_TYPE_BF16,
+                    n: self.out,
+                    cache_key: &self.key,
+                    bytes: &self.bytes,
+                }],
+                &self.bias,
+            )
+            .map_err(DiffusionError::model),
+        }
     }
 }
 
