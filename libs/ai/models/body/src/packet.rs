@@ -15,6 +15,15 @@ pub struct BodyPerson {
     pub kp2d: Vec<f32>,
     pub joints: Option<Vec<f32>>,
     pub rots: Option<Vec<f32>>,
+    /// Present when the hands pass ran: which hands were trusted and fused
+    /// into the pose (left, right) and their boxes in full-image pixels.
+    pub hands: Option<PersonHands>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PersonHands {
+    pub fused: [bool; 2],
+    pub boxes: [[f32; 4]; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +78,17 @@ fn push_person(out: &mut String, person: &BodyPerson) {
         out.push_str(",\"rots\":");
         push_f32s(out, rots);
     }
+    if let Some(hands) = &person.hands {
+        out.push_str(",\"hands\":{\"fused\":[");
+        out.push_str(if hands.fused[0] { "true" } else { "false" });
+        out.push(',');
+        out.push_str(if hands.fused[1] { "true" } else { "false" });
+        out.push_str("],\"boxes\":[");
+        push_f32s(out, &hands.boxes[0]);
+        out.push(',');
+        push_f32s(out, &hands.boxes[1]);
+        out.push_str("]}");
+    }
     out.push('}');
 }
 
@@ -120,6 +140,7 @@ mod tests {
                 kp2d: vec![5.67894; 70 * 2],
                 joints: Some(vec![0.25; 127 * 3]),
                 rots: None,
+                hands: None,
             }],
             ms: 12.34567,
         };
