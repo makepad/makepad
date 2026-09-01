@@ -632,3 +632,25 @@ pub fn encode_intra_frame_mp4(
     }
     apple_intra_frame::encode_intra_frame_mp4(nv12, width, height, fps.max(1), bitrate_bps, codec)
 }
+
+/// Only the Apple compression session is driven directly today; every other
+/// platform answers with an error so a caller (the image-tiles tape baker)
+/// can fall back or report, instead of the crate failing to build there.
+#[cfg(not(target_os = "macos"))]
+pub fn encode_intra_frame_mp4(
+    _nv12: &[u8],
+    width: u32,
+    height: u32,
+    _fps: u32,
+    _bitrate_bps: u32,
+    _codec: VideoFileCodec,
+) -> Result<Vec<u8>, VideoFileError> {
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err(VideoFileError::new(format!(
+            "invalid frame size {width}x{height} (must be nonzero and even)"
+        )));
+    }
+    Err(VideoFileError::new(
+        "single-frame mp4 encode is only implemented on macOS",
+    ))
+}
