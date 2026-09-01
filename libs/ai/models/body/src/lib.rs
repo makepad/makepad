@@ -26,7 +26,9 @@ pub use makepad_ai_common::error;
 pub use makepad_ai_common::{emit_progress, DiffusionError, ProgressHook, Result};
 
 pub mod condition;
+pub mod decoder;
 pub mod dino;
+mod heads;
 pub mod mhr;
 pub mod pose;
 pub mod preprocess;
