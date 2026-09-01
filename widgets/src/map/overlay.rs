@@ -20,10 +20,11 @@ use crate::DrawVector;
 /// renders as an undistorted, uniform-scale, face-on flat map — near field
 /// stays true perspective street view; the fold is the hinge between them.
 ///
-/// One math, two implementations — this struct is the CPU twin of the
-/// `space_warp`/`space_warp2` uniform branch in DrawMapVector's vertex fn;
-/// keep them in LOCKSTEP or CPU-projected overlays/labels detach from the
-/// GPU-warped tiles.
+/// One math, three implementations — this struct is the CPU twin of the
+/// `space_warp`/`space_warp2` uniform branch in DrawMapVector's vertex fn
+/// AND of the `warp_ground` fn in DrawRotatedText (labels are emitted
+/// unwarped and fold per frame on the GPU); keep all three in LOCKSTEP or
+/// CPU-projected overlays / GPU-folded labels detach from the warped tiles.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct SpaceWarp {
     /// Tween 0..1 (eased); 0 compiles to the exact identity path.
