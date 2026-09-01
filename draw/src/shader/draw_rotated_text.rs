@@ -33,6 +33,52 @@ script_mod! {
         // re-transform between frames, so labels can never trail the map.
         cam_scale: uniform(1.0)
         cam_shift: uniform(vec2(0.0, 0.0))
+        // The Inception fold, in LOCKSTEP with DrawMapVector's vertex
+        // branch (map view.rs) and SpaceWarp on the CPU (map overlay.rs) —
+        // labels are emitted UNWARPED (plain tilt projection) and fold
+        // here per frame, which is what keeps them glued to the tiles
+        // while the camera rotates instead of trailing a CPU re-place.
+        // space_warp: x = tween amount, y = fold start r0 (pre-tilt ground
+        // px), z = curl radius, w = sin(tilt). space_warp2: x = kappa
+        // (perspective 1/D), y = unused here (labels carry lift in screen
+        // px), z = bend cap angle, w = cos(tilt).
+        space_warp: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        space_warp2: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+
+        // Fold one camera-delta'd GROUND position (lift already removed)
+        // and re-apply `lift` scaled by the local perspective factor —
+        // exactly how the CPU placement used to treat lifts (vertical
+        // screen shifts × w), so the at-rest picture is unchanged.
+        warp_ground: fn(ground: vec2, lift: float) -> vec2 {
+            let cos_t = max(self.space_warp2.w, 0.05)
+            let sin_t = self.space_warp.w
+            let wg = (self.cam_pivot.y - ground.y) / cos_t
+            var wf = wg
+            var wu = 0.0
+            let wa = wg - self.space_warp.y
+            if wa > 0.0 {
+                let wr = max(self.space_warp.z, 1.0)
+                let cap = self.space_warp2.z
+                let th = min(wa / wr, cap)
+                let sth = sin(th)
+                let cth = cos(th)
+                wf = self.space_warp.y + wr * sth
+                wu = wr * (1.0 - cth)
+                let we = wa - wr * cap
+                if we > 0.0 {
+                    wf = wf + we * cos_t
+                    wu = wu + we * sin_t
+                }
+            }
+            let bf = wg + (wf - wg) * self.space_warp.x
+            let bu = wu * self.space_warp.x
+            let zrel = bf * sin_t - bu * cos_t
+            let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+            return vec2(
+                self.cam_pivot.x + (ground.x - self.cam_pivot.x) * pw,
+                self.cam_pivot.y - (bf * cos_t + bu * sin_t) * pw - lift * pw
+            )
+        }
         // self.upright (instance from the Rust struct): 1.0 = screen-upright
         // label (place names, pin/brand text) — its ANCHOR tracks the camera
         // delta but its orientation must not; the re-place keeps such labels
@@ -51,10 +97,16 @@ script_mod! {
             if self.upright > 0.5 {
                 let anchor2 = origin * self.cam_scale + self.cam_shift
                 let anchor_rel = anchor2 + vec2(0.0, self.lift) - self.cam_pivot
-                let cam_anchor = vec2(
+                let cam_ground = vec2(
                     anchor_rel.x * self.cam_a + anchor_rel.y * self.cam_b,
                     anchor_rel.x * self.cam_c + anchor_rel.y * self.cam_d
-                ) + self.cam_pivot - vec2(0.0, self.lift)
+                ) + self.cam_pivot
+                var cam_anchor = cam_ground - vec2(0.0, self.lift)
+                if self.space_warp.x > 0.0001 {
+                    // The anchor folds with the ground; the glyph offsets
+                    // stay rigid screen px (upright text never bends).
+                    cam_anchor = self.warp_ground(cam_ground, self.lift)
+                }
                 var offs = rotated - origin
                 if self.billboard < 0.5 {
                     // Street-cap/city names scale with the gesture; text
@@ -65,10 +117,16 @@ script_mod! {
             } else {
                 let q = rotated * self.cam_scale + self.cam_shift
                 let cam_rel = q + vec2(0.0, self.lift) - self.cam_pivot
-                rotated = vec2(
+                let cam_ground = vec2(
                     cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
                     cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
-                ) + self.cam_pivot - vec2(0.0, self.lift)
+                ) + self.cam_pivot
+                rotated = cam_ground - vec2(0.0, self.lift)
+                if self.space_warp.x > 0.0001 {
+                    // Per-vertex like the tiles: a street name crossing
+                    // the fold bends glyph by glyph with the road.
+                    rotated = self.warp_ground(cam_ground, self.lift)
+                }
             }
 
             self.pos = self.geom.pos
@@ -159,6 +217,20 @@ impl DrawRotatedText {
         self.draw_vars.set_uniform(cx, live_id!(cam_scale), &[scale]);
         self.draw_vars
             .set_uniform(cx, live_id!(cam_shift), &[shift.x, shift.y]);
+    }
+
+    /// The Inception-fold uniforms, stamped every frame with the SAME
+    /// values the tile shader gets (`warp` = amount/start/radius/sin_t,
+    /// `warp2` = kappa/unused/cap and `cos_t` packed in w). Labels are
+    /// emitted unwarped and fold in the vertex shader, so they track the
+    /// camera exactly like tiles instead of waiting for a CPU re-place.
+    pub fn set_space_warp(&mut self, cx: &mut Cx, warp: [f32; 4], warp2: [f32; 3], cos_t: f32) {
+        self.draw_vars.set_uniform(cx, live_id!(space_warp), &warp);
+        self.draw_vars.set_uniform(
+            cx,
+            live_id!(space_warp2),
+            &[warp2[0], warp2[1], warp2[2], cos_t],
+        );
     }
 }
 

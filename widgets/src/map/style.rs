@@ -972,7 +972,11 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
 /// 5@z15, 6@z16, 12@z17; majors 6@z14 -> 18@z17).
 pub fn zoom_width_mult(render_zoom: u32) -> f32 {
     match render_zoom {
-        0..=11 => 0.35,
+        // A zoomed-out country is drawn in hairlines: carto's z7 motorway
+        // is under a pixel wide, not a ribbon.
+        0..=7 => 0.16,
+        8..=9 => 0.22,
+        10..=11 => 0.3,
         12 => 0.45,
         13 => 0.7,
         14 => 1.0,
@@ -1609,21 +1613,24 @@ pub fn probe_compiled_theme() -> CompiledMapTheme {
         road("motorway", 700, Some((0xdc2a67, 7.2)), (0xe892a2, 6.0), 0.0, 0.0),
         road("trunk", 640, Some((0xc84e2f, 7.2)), (0xf9b29c, 6.0), 0.0, 0.0),
         road("primary", 560, Some((0xa06b00, 6.4)), (0xfcd6a4, 5.0), 0.0, 0.0),
-        road("secondary", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 0.0),
-        road("busway", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 0.0),
-        road("tertiary", 390, Some((0x8f8f8f, 6.2)), (0xffffff, 5.0), 0.0, 0.0),
-        road("residential", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 0.0),
-        road("unclassified", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 0.0),
-        road("living_street", 310, Some((0xbbbbbb, 4.0)), (0xededed, 3.0), 0.0, 0.0),
-        road("service", 240, Some((0xbbbbbb, 3.0)), (0xffffff, 2.0), 0.0, 0.0),
-        road("pedestrian", 240, Some((0x999999, 4.0)), (0xdddde8, 3.0), 0.0, 0.0),
+        // Carto's ladder: the small classes join as the town does. A country
+        // view is motorways and primaries as fine lines — not every street
+        // in the Netherlands at once.
+        road("secondary", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 9.0),
+        road("busway", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 9.0),
+        road("tertiary", 390, Some((0x8f8f8f, 6.2)), (0xffffff, 5.0), 0.0, 10.0),
+        road("residential", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 12.0),
+        road("unclassified", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 12.0),
+        road("living_street", 310, Some((0xbbbbbb, 4.0)), (0xededed, 3.0), 0.0, 12.0),
+        road("service", 240, Some((0xbbbbbb, 3.0)), (0xffffff, 2.0), 0.0, 13.0),
+        road("pedestrian", 240, Some((0x999999, 4.0)), (0xdddde8, 3.0), 0.0, 13.0),
         road("pedestrian", 300, Some((0xb5b5b5, 4.0)), (0xfdfdfd, 2.8), 0.0, 14.0),
         road("cycleway", 160, None, (0x6262ff, 0.9), 10.0, 14.0),
         road("footway", 160, None, (0xaaa8a5, 0.9), 10.0, 15.0),
         road("path", 160, None, (0xaaa8a5, 0.8), 10.0, 15.0),
         road("steps", 160, None, (0xaaa8a5, 2.0), 10.0, 15.0),
         road("track", 160, None, (0xaaa8a5, 1.0), 10.0, 14.0),
-        road("*", 280, Some((0xbbbbbb, 3.6)), (0xffffff, 2.5), 0.0, 0.0),
+        road("*", 280, Some((0xbbbbbb, 3.6)), (0xffffff, 2.5), 0.0, 12.0),
     ];
     style.waterway_rules = vec![
         waterway("river", 4.0, 0.0),
