@@ -8044,6 +8044,19 @@ impl Renderer {
         if let Some(sc) = draws.screen.as_deref_mut() {
             let geometry_id = self.ensure_flare_geometry(cx.cx);
             sc.draw_vars.geometry_id = Some(geometry_id);
+            // The sprite lane below BORROWS this draw — one shader serves both
+            // the video screen and every billboard — so it overwrites the pose
+            // and texture the host owns. Remember them here and hand them back
+            // when the lane is done: otherwise the last sprite of the frame
+            // leaves its pose behind, next frame the "is there a screen?" test
+            // (a zero `screen_size` draws nothing) reads THAT and passes, and
+            // the sprite's whole sheet is drawn as one opaque quad with full
+            // 0..1 UVs — an atlas standing in the world under the unit that
+            // happened to be drawn last, and still standing there after the
+            // level that owned it is gone.
+            let host_pos = sc.screen_pos;
+            let host_size = sc.screen_size;
+            let host_texture = sc.draw_vars.texture_slots[0].clone();
             sc.depth_clip = 1.0;
             sc.cutout = 0.0;
             sc.pixelated = 0.0;
@@ -8082,6 +8095,10 @@ impl Renderer {
                     sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
                 }
             }
+            // The borrow ends here: the host's screen is exactly as it left it.
+            sc.screen_pos = host_pos;
+            sc.screen_size = host_size;
+            sc.draw_vars.texture_slots[0] = host_texture;
         }
 
         // 7. View-local held meshes, after the complete world. The dedicated
