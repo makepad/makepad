@@ -25,7 +25,49 @@ use crate::search::{normalize_tokens, score_search_hit, Category, SearchResult};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::os::unix::fs::FileExt;
+/// Positioned read, portable: unix `pread` and Windows `seek_read` both
+/// leave the file's own cursor alone, which is what lets a shared reader
+/// serve lookups from several threads without a lock.
+trait ReadExactAt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+}
+
+impl ReadExactAt for File {
+    #[cfg(unix)]
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(self, buf, offset)
+    }
+
+    #[cfg(windows)]
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to fill whole buffer",
+                    ))
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = self;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(buf)
+    }
+}
 use std::path::{Path, PathBuf};
 
 const SEARCHDB_MAGIC: u32 = 0x4d53_4442; // "BDSM"^W "MSDB"
