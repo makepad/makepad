@@ -738,6 +738,7 @@ mod tests {
     use super::*;
     use crate::backend::gpu_device_available;
     use crate::fixture;
+    use crate::NUM_PATCHES;
 
     fn identity(input: &[f32]) -> Vec<f32> {
         input.to_vec()
