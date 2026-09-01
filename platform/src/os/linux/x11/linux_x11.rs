@@ -712,6 +712,20 @@ impl X11Cx {
                 CxOsOp::SetCursor(cursor) => {
                     xlib_app.set_mouse_cursor(cursor);
                 }
+                // The desktop's own dialog helper, on its own thread; the
+                // answer arrives as a FileDialogAction like every OS.
+                CxOsOp::SelectFileDialog(settings) => {
+                    crate::os::linux::file_dialog::open_select_file_dialog(settings);
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    crate::os::linux::file_dialog::open_save_file_dialog(settings);
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    crate::os::linux::file_dialog::open_select_folder_dialog(settings);
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    crate::os::linux::file_dialog::open_save_folder_dialog(settings);
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,

@@ -31,6 +31,7 @@ use {
                 ios::{
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
                     ios_event::IosEvent,
+                    ios_file_dialog,
                 },
             },
             apple_classes::init_apple_classes_global,
@@ -1538,6 +1539,18 @@ impl Cx {
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on iOS");
                     self.call_event_handler(&Event::DragEnd);
+                }
+                CxOsOp::SelectFileDialog(settings) => {
+                    ios_file_dialog::open_select_file_dialog(settings);
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    ios_file_dialog::open_save_file_dialog(settings);
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    ios_file_dialog::open_select_folder_dialog(settings);
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    ios_file_dialog::open_save_folder_dialog(settings);
                 }
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     IosApp::set_status_bar_dark_icons(dark_icons);

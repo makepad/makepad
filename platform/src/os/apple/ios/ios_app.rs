@@ -145,6 +145,7 @@ pub struct IosClasses {
     pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
     pub edit_menu_delegate: *const Class,
+    pub document_picker_delegate: *const Class,
     // UITextInput protocol classes for IME support
     pub makepad_text_view: *const Class,
 }
@@ -160,6 +161,8 @@ impl IosClasses {
             textfield_delegate: define_textfield_delegate(),
             timer_delegate: define_ios_timer_delegate(),
             edit_menu_delegate: define_edit_menu_interaction_delegate(),
+            document_picker_delegate:
+                crate::os::apple::ios::ios_file_dialog::define_document_picker_delegate(),
             // All UITextInput classes enabled
             makepad_text_view: define_makepad_text_view(),
         }
