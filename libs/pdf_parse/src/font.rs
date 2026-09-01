@@ -1,5 +1,48 @@
 use crate::page::{BaseEncoding, FontEncoding, FontResource};
 
+impl FontResource {
+    /// Return the PostScript glyph name for an encoded character code.
+    ///
+    /// Precedence is deliberate: an explicit PDF `/Differences` entry is
+    /// authoritative and wins over the embedded font program's CFF Encoding
+    /// or sfnt `cmap`/`post` tables. When `/Differences` does not contain the
+    /// code, embedded metadata is used as an additive fallback.
+    pub fn glyph_name(&self, char_code: u32) -> Option<&str> {
+        if let FontEncoding::Custom(_, differences) = &self.encoding {
+            if let Ok(code) = u8::try_from(char_code) {
+                if let Some(name) = differences.get(&code) {
+                    return Some(name);
+                }
+            }
+        }
+        self.font_program.as_ref()?.glyph_name(char_code)
+    }
+
+    /// Look up a code in an embedded TrueType/OpenType `cmap`, when present.
+    pub fn cmap_gid(&self, char_code: u32) -> Option<u16> {
+        self.font_program.as_ref()?.cmap_gid(char_code)
+    }
+}
+
+/// [`decode_codes`] plus each code's raw [`glyph_name`], for consumers that
+/// need the name a symbol font gives its glyphs rather than the text. Music,
+/// maths and logo fonts carry their meaning in these names, which the text
+/// decoders deliberately flatten to Unicode.
+pub fn decode_codes_named(font: &FontResource, bytes: &[u8]) -> Vec<(u32, String, Option<String>)> {
+    decode_codes(font, bytes)
+        .into_iter()
+        .map(|(code, text)| {
+            let name = font.glyph_name(code).map(|s| s.to_string());
+            (code, text, name)
+        })
+        .collect()
+}
+
+/// Free-function form of [`FontResource::glyph_name`].
+pub fn glyph_name(font: &FontResource, char_code: u32) -> Option<&str> {
+    font.glyph_name(char_code)
+}
+
 /// Get the width of a character code in a font (in PDF text space units, i.e. 1/1000 of text size).
 pub fn char_width(font: &FontResource, char_code: u32) -> f64 {
     // Type0/CID: the descendant font's W map, DW for everything else.

@@ -336,6 +336,40 @@ fn try_parse_obj_header(data: &[u8], pos: usize) -> Option<(u32, u16, usize)> {
     }
 }
 
+/// Is `pos` the end of a stream's data — i.e. does `endstream` follow,
+/// across at most one EOL?
+fn endstream_follows(data: &[u8], pos: usize) -> bool {
+    let mut p = pos;
+    if data.get(p) == Some(&b'\r') {
+        p += 1;
+    }
+    if data.get(p) == Some(&b'\n') {
+        p += 1;
+    }
+    data[p.min(data.len())..].starts_with(b"endstream")
+}
+
+/// The end of the stream data starting at `start`: the first `endstream`
+/// keyword after it, minus the EOL that PDF requires before the keyword.
+fn scan_endstream(data: &[u8], start: usize) -> Option<usize> {
+    let hay = data.get(start..)?;
+    let mut i = 0usize;
+    while i + 9 <= hay.len() {
+        if hay[i] == b'e' && hay[i..].starts_with(b"endstream") {
+            let mut end = start + i;
+            if end > start && data[end - 1] == b'\n' {
+                end -= 1;
+            }
+            if end > start && data[end - 1] == b'\r' {
+                end -= 1;
+            }
+            return Some(end);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse an indirect object at the given offset.
 /// Returns (ObjRef, PdfObj).
 pub fn parse_indirect_object_at(data: &[u8], offset: usize) -> PdfResult<(ObjRef, PdfObj)> {
@@ -374,13 +408,24 @@ pub fn parse_indirect_object_at(data: &[u8], offset: usize) -> PdfResult<(ObjRef
             _ => return Err(PdfError::new("stream must follow a dict")),
         };
 
-        // Get stream length
-        let length = dict
-            .get_int("Length")
-            .ok_or_else(|| PdfError::new("stream missing /Length"))? as usize;
-
+        // Stream length. /Length is very often an INDIRECT reference
+        // (writers that stream out objects before they know the size emit
+        // `/Length 6 0 R`), which cannot be resolved from here — and some
+        // writers simply get the number wrong. Both cases recover the same
+        // way: trust a direct /Length only when the bytes it names really
+        // are followed by `endstream`, else find that keyword ourselves.
         let stream_start = lex.pos;
-        let stream_end = (stream_start + length).min(data.len());
+        let declared = dict
+            .get_int("Length")
+            .filter(|n| *n >= 0)
+            .map(|n| n as usize)
+            .filter(|n| stream_start.saturating_add(*n) <= data.len())
+            .filter(|n| endstream_follows(data, stream_start + *n));
+        let stream_end = match declared {
+            Some(n) => stream_start + n,
+            None => scan_endstream(data, stream_start)
+                .ok_or_else(|| PdfError::new("stream has no usable /Length"))?,
+        };
         let stream_data = data[stream_start..stream_end].to_vec();
 
         PdfObj::Stream(PdfStream {

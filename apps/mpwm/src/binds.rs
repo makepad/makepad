@@ -1,10 +1,10 @@
 //! The Omarchy keymap (`default/hypr/bindings/*.lua`, read from source),
 //! carried over binding-for-binding where the host OS allows.
 //!
-//! SUPER mapping: on a Linux session mpwm will own the Super key. Nested on
-//! macOS/Windows the OS reserves most Cmd/Win combos, so SUPER maps to
-//! **Ctrl+Alt** there, and Omarchy's SUPER+CTRL layer maps to
-//! **Ctrl+Alt+Cmd** (Cmd is the only modifier left).
+//! SUPER mapping: the Logo key is the direct spelling on every desktop.
+//! When mpwm is nested inside another window manager, that manager commonly
+//! consumes Logo-key chords first, so **Ctrl+Alt** is accepted as a fallback;
+//! Omarchy's SUPER+CTRL layer then maps to **Ctrl+Alt+Logo**.
 //!
 //! That leaves Omarchy's SUPER+ALT layer with no bits of its own —
 //! `KeyModifiers` carries exactly four (shift/control/alt/logo) and SUPER
@@ -251,10 +251,9 @@ pub fn keymap() -> Vec<Bind> {
     binds
 }
 
-/// How SUPER is spelled on this keyboard. macOS/Windows accept both: the
-/// Logo key (⌘, exactly Hyprland's SUPER) and Ctrl+Alt, which is the way
-/// in for the chords the host OS keeps for itself (⌘Space is Spotlight,
-/// ⌘Tab the app switcher, ⌘⇧3/4/5 screenshots).
+/// How SUPER is spelled on this keyboard. Every desktop accepts both: the
+/// Logo key (⌘ on macOS) and Ctrl+Alt, which is the way in for chords the
+/// host desktop or compositor keeps for itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spelling {
     /// SUPER = the Logo key; the other three modifiers mean themselves.
@@ -265,15 +264,13 @@ pub enum Spelling {
 }
 
 /// Every spelling this OS understands, best first.
+///
+/// Linux needs the Ctrl+Alt spelling too when mpwm is nested inside a real
+/// desktop compositor: Hyprland consumes its SUPER bindings before the key
+/// event can reach mpwm. Keeping Logo first preserves direct/session use,
+/// while Ctrl+Alt provides an unclaimed way to operate the inner WM.
 pub fn spellings() -> &'static [Spelling] {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        &[Spelling::Logo, Spelling::CtrlAlt]
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        &[Spelling::Logo]
-    }
+    &[Spelling::Logo, Spelling::CtrlAlt]
 }
 
 /// True when the event's modifiers form the given layer, read in one
@@ -428,6 +425,10 @@ mod tests {
         mods(false, true, false, true)
     }
 
+    fn fallback_sup() -> KeyModifiers {
+        mods(false, true, true, false)
+    }
+
     #[test]
     fn the_three_fullscreen_layers_are_distinct() {
         assert_eq!(
@@ -488,13 +489,25 @@ mod tests {
     fn the_alt_prefix_reaches_the_alt_layer() {
         // Without the prefix, SUPER+S toggles the scratchpad...
         assert_eq!(
-            match_bind(KeyCode::KeyS, &sup()),
+            match_bind(KeyCode::KeyS, &fallback_sup()),
             Some(WmAction::ToggleScratchpad)
         );
         // ...with it, the same chord moves the window there.
         assert_eq!(
-            match_bind_armed(KeyCode::KeyS, &sup(), true),
+            match_bind_armed(KeyCode::KeyS, &fallback_sup(), true),
             Some(WmAction::MoveToScratchpad)
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_is_a_nested_super_fallback() {
+        assert_eq!(
+            match_bind(KeyCode::KeyQ, &fallback_sup()),
+            Some(WmAction::CloseWindow)
+        );
+        assert_eq!(
+            match_bind(KeyCode::ArrowLeft, &fallback_sup()),
+            Some(WmAction::FocusDir(Dir::Left))
         );
     }
 
