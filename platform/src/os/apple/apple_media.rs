@@ -267,7 +267,7 @@ impl CxMediaApi for Cx {
             .use_audio_outputs(devices);
     }
 
-    fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
+    fn audio_output_box_os(&mut self, index: usize, f: AudioOutputFn) {
         *self.os.media.audio_unit().lock().unwrap().audio_output_cb[index]
             .lock()
             .unwrap() = Some(f);

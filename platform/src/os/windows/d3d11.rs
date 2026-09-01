@@ -958,10 +958,15 @@ impl Cx {
     /// whether to render a frame at all, and they have to see the request while
     /// it is still pending.
     pub(crate) fn has_pending_window_screenshot(&self, window_id: WindowId) -> bool {
+        let window_id = Some(window_id.id());
+        // A continuous capture sink (the ScreenCap recorder) is standing
+        // permission rather than a queued request, so it is asked separately.
+        if crate::screen_capture::capture_wants_window(window_id) {
+            return true;
+        }
         if self.screenshot_requests.is_empty() {
             return false;
         }
-        let window_id = Some(window_id.id());
         self.screenshot_requests.iter().any(|request| {
             request.kind_id == 0
                 && crate::remote::grab_targets_window(request.request_id, window_id)
@@ -979,9 +984,11 @@ impl Cx {
     /// `Map(D3D11_MAP_READ)` blocks until that copy has retired — the same
     /// argument `debug_read_render_texture` already relies on.
     fn capture_window_screenshot(&mut self, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
-        let request_ids = self
-            .take_studio_screenshot_request_ids_for_window(0, Some(d3d11_window.window_id.id()));
-        if request_ids.is_empty() {
+        let capture_window_id = Some(d3d11_window.window_id.id());
+        let request_ids =
+            self.take_studio_screenshot_request_ids_for_window(0, capture_window_id);
+        let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
+        if request_ids.is_empty() && !wants_capture {
             return;
         }
         // Every failure path below still answers the request with an empty PNG:
@@ -1001,6 +1008,12 @@ impl Cx {
         // stray alpha make the PNG disagree with what is on the glass.
         for px in rgba.chunks_exact_mut(4) {
             px[3] = 255;
+        }
+        // Continuous capture sinks (the ScreenCap recorder) take the raw bytes;
+        // they carry no request id, so a recording frame does not pay for a PNG.
+        crate::screen_capture::deliver_capture_frame(capture_window_id, width, height, &rgba);
+        if request_ids.is_empty() {
+            return;
         }
         match Self::encode_rgba_as_png(width, height, &rgba) {
             Ok(png) => Self::send_studio_screenshot_response(request_ids, width, height, png),

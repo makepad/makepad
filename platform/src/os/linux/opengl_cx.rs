@@ -449,8 +449,12 @@ impl Cx {
         }
 
         // Studio screenshot readback: read framebuffer pixels before swap.
+        let capture_window_id = self.get_pass_window_id(draw_pass_id).map(|w| w.id());
         let request_ids = self.take_studio_screenshot_request_ids(0);
-        if !request_ids.is_empty() {
+        // A continuous capture sink (the ScreenCap recorder) is standing
+        // permission rather than a queued request, so it is asked separately.
+        let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
+        if !request_ids.is_empty() || wants_capture {
             let w = pix_width.floor() as u32;
             let h = pix_height.floor() as u32;
             let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -475,9 +479,12 @@ impl Cx {
                     pixels.swap(top + x, bot + x);
                 }
             }
+            crate::screen_capture::deliver_capture_frame(capture_window_id, w, h, &pixels);
             // Encode as PNG.
-            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
-                Self::send_studio_screenshot_response(request_ids, w, h, png);
+            if !request_ids.is_empty() {
+                if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
+                    Self::send_studio_screenshot_response(request_ids, w, h, png);
+                }
             }
         }
 
