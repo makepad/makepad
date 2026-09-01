@@ -287,8 +287,29 @@ script_mod! {
 pub struct DrawVector {
     #[rust]
     pub many_instances: Option<ManyInstances>,
+    /// Geometry slots this `DrawVector` has uploaded into during the current
+    /// frame.
+    ///
+    /// A draw call only records a `geometry_id`; the vertex data itself lives
+    /// in `cx.geometries[id]`. A widget may open several begin/end sessions in
+    /// one frame (a score page draws its paper, then its batches, then its
+    /// overlays), and each `end()` issues its own draw call. Handing every
+    /// session the same slot therefore made all of the frame's draw calls
+    /// render whatever the *last* session happened to upload. The pool is
+    /// rewound at the start of every frame, so it only ever grows to the
+    /// widest single frame.
     #[rust]
-    pub geometry: Option<Geometry>,
+    pub geometry_pool: Vec<Geometry>,
+    #[rust]
+    geometry_cursor: usize,
+    #[rust]
+    geometry_redraw_id: u64,
+    /// The slot the most recent session bound, so `submit_existing_geometry`
+    /// can point a new draw call at an already uploaded mesh.
+    #[rust]
+    pub geometry: Option<GeometryId>,
+    #[rust]
+    geometry_slot: Option<usize>,
     #[rust]
     pub path: VectorPath,
     #[rust]
@@ -720,11 +741,14 @@ impl DrawVector {
             }
         }
 
-        let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
+        let slot = self.acquire_geometry_slot(cx);
+        let geometry_id = self.geometry_pool[slot].geometry_id();
         let mut packed = crate::vector::pack_vector_vertices(&self.acc_verts);
         let mut indices = self.acc_indices.clone();
-        geom.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
-        self.draw_vars.geometry_id = Some(geom.geometry_id());
+        self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
+        self.geometry = Some(geometry_id);
+        self.geometry_slot = Some(slot);
+        self.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -732,12 +756,38 @@ impl DrawVector {
         }
     }
 
+    /// Rewind the per-frame geometry pool when a new frame has started, then
+    /// hand out the next free slot. See `geometry_pool`.
+    fn acquire_geometry_slot(&mut self, cx: &mut Cx2d) -> usize {
+        self.rewind_geometry_pool(cx);
+        let slot = self.geometry_cursor;
+        self.geometry_cursor += 1;
+        if slot >= self.geometry_pool.len() {
+            let geometry = Geometry::new(cx.cx.cx);
+            self.geometry_pool.push(geometry);
+        }
+        slot
+    }
+
+    fn rewind_geometry_pool(&mut self, cx: &mut Cx2d) {
+        let redraw_id = cx.cx.cx.redraw_id;
+        if self.geometry_redraw_id != redraw_id {
+            self.geometry_redraw_id = redraw_id;
+            self.geometry_cursor = 0;
+        }
+    }
+
     /// Submit the already uploaded geometry as a draw call without rebuilding or reuploading.
     pub fn submit_existing_geometry(&mut self, cx: &mut Cx2d) -> bool {
-        let Some(geom) = self.geometry.as_ref() else {
+        let (Some(geometry_id), Some(slot)) = (self.geometry, self.geometry_slot) else {
             return false;
         };
-        self.draw_vars.geometry_id = Some(geom.geometry_id());
+        // The mesh stays where it is, so keep its slot reserved for the rest of
+        // the frame: a later `end()` must not upload over what this draw call
+        // is pointing at.
+        self.rewind_geometry_pool(cx);
+        self.geometry_cursor = self.geometry_cursor.max(slot + 1);
+        self.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
