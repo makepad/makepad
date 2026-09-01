@@ -1,0 +1,12 @@
+# ISO BMFF (MP4/M4V/MOV) sample index: parse `moov` into per-sample byte
+# ranges, timestamps and keyframe marks — what a byte-range streamer needs
+# to play a remote file without downloading it. Pure Rust, no deps.
+
+[package]
+name = "makepad-mp4-index"
+version = "0.1.0"
+edition = "2021"
+description = "MP4 sample table index for range-streaming playback"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

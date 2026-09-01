@@ -1278,6 +1278,13 @@ impl NavGrid {
         (self.nx, self.nz)
     }
 
+    /// World x/z of column `(0, 0)`'s CENTRE. A consumer that wants to lay
+    /// its own lattice over this one (a strategy map played on a streamed
+    /// level) needs the origin as well as the pitch.
+    pub fn origin_xz(&self) -> (f32, f32) {
+        (self.origin_x, self.origin_z)
+    }
+
     pub fn len(&self) -> usize {
         self.cells.len()
     }

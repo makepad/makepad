@@ -1395,6 +1395,7 @@ pub(crate) mod forensics {
         /// Input/output triangle index -> chart index.
         pub tri_chart: Vec<usize>,
         /// Chart rects (x, y, w, h) in atlas texels.
+        #[allow(dead_code)] // captured for forensic dumps
         pub charts: Vec<(usize, usize, usize, usize)>,
         /// The lightmapper debug RGB: r=rendered, g=interpolated, b=rejected.
         pub debug: Vec<u8>,
@@ -1408,6 +1409,7 @@ pub(crate) mod forensics {
         pub out_pos: Vec<makepad_draw::makepad_math::Vec3f>,
         pub out_idx: Vec<u32>,
         pub lm_nrm: Vec<makepad_draw::makepad_math::Vec3f>,
+        #[allow(dead_code)] // captured for forensic dumps
         pub ao_uv: Vec<[f32; 2]>,
     }
     thread_local! {

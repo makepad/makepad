@@ -394,6 +394,7 @@ struct DragState {
     /// The value at press, restored on cancel.
     press_value: f64,
     /// The zone the press landed in, for the click path on release.
+    #[allow(dead_code)] // recorded at press; the release path re-derives it today
     zone: FieldZone,
     /// Row width at press, for the bounded mapping.
     width: f64,

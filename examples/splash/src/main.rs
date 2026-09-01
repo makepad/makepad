@@ -197,7 +197,8 @@ script_mod! {
             title := Label{text: "Item Title" draw_text.color: #fff draw_text.text_style.font_size: 11}
             subtitle := Label{text: "Item subtitle text" draw_text.color: #888 draw_text.text_style.font_size: 9}
         }
-        action_btn := ButtonFlatter{text: "View" draw_text.text_style.font_size: 9}
+        /** the row's borderless action button: no face until it is disabled */
+        action_btn := ButtonFlatter{text: "View" draw_text.text_style.font_size: /** row button type size 6..24 step 0.5 */ 9}
     }
 
     let ListHeader = View{
@@ -240,14 +241,19 @@ script_mod! {
             Label{text: "Button Variants" draw_text.color: #fff draw_text.text_style.font_size: 13}
 
             View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
+            /** the stock button: outset gradient face plus bevel */
             button := Button{text: "Standard"}
+            /** the flat variant: the same face without the outset gradient */
             flat_button := ButtonFlat{text: "Flat"}
+            /** the borderless variant: face and bevel hidden until disabled */
             flatter_button := ButtonFlatter{text: "Flatter"}
 
+            /** a standard button with an SVG mark left of the label */
             icon_button := Button{
                 text: "With Icon"
-                icon_walk: Walk{width: 16 height: 16}
-                draw_icon.color: #fff
+                /** the icon's box, smaller than the button default */
+                icon_walk: Walk{/** icon width in pixels 8..64 step 1 */ width: 16 /** icon height in pixels 8..64 step 1 */ height: 16}
+                draw_icon.color: /** icon tint */ #fff
                 draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
             }
 
@@ -257,18 +263,23 @@ script_mod! {
             Label{text: "on_press fires on pointer down and can call widget methods directly" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
+            /** fires on pointer down, before any click is decided */
             press_demo_button := Button{
                 text: "Run on_press"
+                /** the down hook: writes the status line straight from script */
                 on_press: || ui.press_status.set_text("Last press: Run on_press")
             }
+            /** fires on release, clearing the status line */
             press_reset_button := ButtonFlat{
                 text: "Reset"
+                /** the click hook: runs on release over the button */
                 on_click: || ui.press_status.set_text("Last press: none")
             }
+            /** the line both hooks write into */
             press_status := Label{
                 text: "Last press: none"
-                draw_text.color: #8fd
-                draw_text.text_style.font_size: 10
+                draw_text.color: /** status ink */ #8fd
+                draw_text.text_style.font_size: /** status type size 6..24 step 0.5 */ 10
             }
 
             Hr{}
@@ -299,7 +310,9 @@ script_mod! {
             Label{text: "Click button to show tooltip, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
+            /** opens the plain tooltip overlay below */
             normal_tooltip_button := Button{text: "Show Normal Tooltip"}
+            /** opens the callout tooltip, the pointed variant */
             callout_tooltip_button := Button{text: "Show Callout Tooltip"}
 
             Hr{}
@@ -308,7 +321,9 @@ script_mod! {
             Label{text: "Click to show/hide notification popup" draw_text.color: #888 draw_text.text_style.font_size: 10}
 
             View{width: Fill height: Fit flow: Right spacing: 10}
+            /** raises the corner notification overlay */
             show_popup_btn := Button{text: "Show Notification"}
+            /** dismisses it again */
             hide_popup_btn := ButtonFlat{text: "Hide Notification"}
         }
 
@@ -1975,18 +1990,23 @@ script_mod! {
                                         diffraction_strength: 5.2
                                     }
                                 }
+                                /** the click target over the glass lens: label only, face erased */
                                 close_glass_lens_button_btn := ButtonFlat{
                                     width: Fill
                                     height: Fill
                                     text: "Focus"
-                                    draw_text.color: #fff
-                                    draw_text.text_style.font_size: 22
+                                    draw_text.color: /** lens label ink */ #fff
+                                    draw_text.text_style.font_size: /** lens label size in points 8..48 step 1 */ 22
+                                    /** every face state erased so the glass panel behind shows through */
                                     draw_bg +: {
+                                        /** no bevel: the glass draws its own edge 0..4 step 0.5 */
                                         border_size: 0.0
+                                        /** face transparent in every state */
                                         color: #0000
                                         color_hover: #0000
                                         color_down: #0000
                                         color_focus: #0000
+                                        /** bevel transparent in every state */
                                         border_color: #0000
                                         border_color_hover: #0000
                                         border_color_down: #0000
@@ -2083,7 +2103,7 @@ impl App {
         &mut self,
         cx: &mut Cx,
         flatten: f32,
-        ripple_start: f32,
+        ripple_age: f32,
         ripple_strength: f32,
     ) {
         if let Some(mut glass) = self
@@ -2091,7 +2111,7 @@ impl App {
             .widget(cx, ids!(glass_lens_button_bg))
             .borrow_mut::<GaussRoundedView>()
         {
-            glass.set_press_response(cx, flatten, ripple_start, ripple_strength);
+            glass.set_press_response(cx, flatten, ripple_age, ripple_strength);
         }
     }
 
@@ -2132,18 +2152,13 @@ impl MatchEvent for App {
             let flatten = t * t * (3.0 - 2.0 * t);
             self.lens_press_flatten = flatten;
             let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * (1.0 - flatten * 0.10);
-            self.set_focus_lens_press_response(
-                cx,
-                flatten,
-                self.lens_press_started_at as f32,
-                ripple_strength,
-            );
+            self.set_focus_lens_press_response(cx, flatten, age as f32, ripple_strength);
 
             if age < 1.08 {
                 self.lens_press_next_frame = cx.new_next_frame();
             } else {
                 self.lens_ripple_animating = false;
-                self.set_focus_lens_press_response(cx, 1.0, self.lens_press_started_at as f32, 0.0);
+                self.set_focus_lens_press_response(cx, 1.0, 1000.0, 0.0);
             }
         } else {
             if self.lens_release_started_at <= 0.0 {
@@ -2152,19 +2167,14 @@ impl MatchEvent for App {
             let age = (e.time - self.lens_release_started_at).max(0.0);
             let restore = self.lens_press_flatten.clamp(0.0, 1.0);
             let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * 0.62;
-            self.set_focus_lens_press_response(
-                cx,
-                -restore,
-                self.lens_release_started_at as f32,
-                ripple_strength,
-            );
+            self.set_focus_lens_press_response(cx, -restore, age as f32, ripple_strength);
 
             if age < 1.08 {
                 self.lens_press_next_frame = cx.new_next_frame();
             } else {
                 self.lens_ripple_animating = false;
                 self.lens_press_flatten = 0.0;
-                self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+                self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
                 if self.lens_pending_close {
                     self.lens_pending_close = false;
                     self.ui
@@ -2275,7 +2285,7 @@ impl MatchEvent for App {
             self.lens_ripple_animating = false;
             self.lens_pending_close = false;
             self.lens_press_flatten = 0.0;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
             self.ui
                 .popup_notification(cx, ids!(glass_lens_button_popup))
                 .open(cx);
@@ -2320,7 +2330,7 @@ impl MatchEvent for App {
             self.lens_release_started_at = 0.0;
             self.lens_press_flatten = 0.0;
             self.lens_pending_close = false;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.set_focus_lens_press_response(cx, 0.0, 1000.0, 0.0);
             self.lens_press_next_frame = cx.new_next_frame();
         }
         if focus_lens_button.released(actions) {
@@ -2555,6 +2565,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
+        makepad_code_editor::script_mod(vm);
         self::script_mod(vm)
     }
 
