@@ -5446,17 +5446,21 @@ impl CxVulkan {
                 .sub_list()
             {
                 let child_resets_zbias = cx.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
+                let mut own_zbias = 0.0f32;
+                let child_zbias = if child_resets_zbias {
+                    &mut own_zbias
+                } else {
+                    &mut *zbias
+                };
+                // An overlay list carries a depth floor: this is what makes it
+                // composite above body content that uses `draw_depth`.
+                cx.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
                 self.record_draw_list(
                     cx,
                     draw_pass_id,
                     sub_list_id,
                     render_pass_key,
-                    if child_resets_zbias {
-                        &mut child_zbias
-                    } else {
-                        zbias
-                    },
+                    child_zbias,
                     zbias_step,
                     draw_stats,
                     xr_depth_view,

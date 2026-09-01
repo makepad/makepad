@@ -1232,15 +1232,19 @@ impl Cx {
 
             if let Some(sub_list_id) = kind_tag {
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
+                let mut own_zbias = 0.0f32;
+                let child_zbias = if child_resets_zbias {
+                    &mut own_zbias
+                } else {
+                    &mut *zbias
+                };
+                // An overlay list carries a depth floor: this is what makes it
+                // composite above body content that uses `draw_depth`.
+                self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
                 self.headless_render_view(
                     draw_pass_id,
                     sub_list_id,
-                    if child_resets_zbias {
-                        &mut child_zbias
-                    } else {
-                        zbias
-                    },
+                    child_zbias,
                     zbias_step,
                     options,
                     fb,
