@@ -310,6 +310,16 @@ pub fn encode_stats_message(mut stats: StatsMessageJson) -> String {
     stats.serialize_json()
 }
 
+/// Wraps an already-validated backend JSON value without parsing or
+/// re-serializing it. Server pushes are websocket Binary payloads, so the
+/// returned bytes intentionally have no FRFL frame header.
+pub fn encode_aux_message(frame_index: u64, data_json: &str) -> Vec<u8> {
+    format!(
+        "{{\"type\":\"aux\",\"frame_index\":{frame_index},\"data\":{data_json}}}"
+    )
+    .into_bytes()
+}
+
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
 struct ErrorMessageJson {
     #[rename(type)]
@@ -421,6 +431,17 @@ mod tests {
     fn is_frame_message_false_for_json_text() {
         let json = encode_error_message("boom");
         assert!(!is_frame_message(json.as_bytes()));
+    }
+
+    #[test]
+    fn aux_message_embeds_raw_json_without_a_frame_header() {
+        let data = r#"{"n_people":1,"opaque":[1, 2]}"#;
+        let bytes = encode_aux_message(17, data);
+        assert_eq!(
+            bytes,
+            br#"{"type":"aux","frame_index":17,"data":{"n_people":1,"opaque":[1, 2]}}"#
+        );
+        assert!(!is_frame_message(&bytes));
     }
 
     #[test]

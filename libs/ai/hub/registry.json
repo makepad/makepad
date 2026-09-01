@@ -1742,6 +1742,22 @@
    ]
   },
   {
+   "id": "sam3dbody-ref",
+   "domain": "body",
+   "backend": "body",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "SAM 3D Body License",
+    "url": "https://github.com/facebookresearch/sam-3d-body",
+    "summary": "SAM 3D Body is served by an externally provisioned worker. Review and comply with the upstream model and checkpoint terms before production use.",
+    "restriction": "community"
+   },
+   "vram_gb": 4.0,
+   "note": "SAM 3D Body reference worker: live or single-image RGB input -> application/json human pose packet. The Rust hub only owns the persistent length-prefixed PNG/JSON-lines process seam; the worker and model remain box-provisioned through MAKEPAD_SAM3DBODY_WORKER. Warm reference inference is approximately 0.6-0.9 seconds per frame and uses approximately 3.5 GiB VRAM.",
+   "files": []
+  },
+  {
    "id": "sam3-1-multiplex",
    "domain": "segment",
    "backend": "segment-native",

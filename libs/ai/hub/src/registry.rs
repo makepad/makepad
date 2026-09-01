@@ -139,6 +139,8 @@ pub enum Domain {
     Matte,
     /// Image -> metric depthmap (Depth-Anything-3).
     Depth,
+    /// Image/frame -> structured human body pose packet (SAM 3D Body).
+    Body,
     /// Image + text prompt -> instance mask PNG + RGBA cutout (SAM 3.1).
     Segment,
     /// Mesh GLB -> skinned/rigged GLB (SkinTokens).
@@ -207,6 +209,7 @@ impl Domain {
             "world" => Some(Domain::World),
             "matte" => Some(Domain::Matte),
             "depth" => Some(Domain::Depth),
+            "body" => Some(Domain::Body),
             "segment" => Some(Domain::Segment),
             "rig" => Some(Domain::Rig),
             "motion" => Some(Domain::Motion),
@@ -235,6 +238,7 @@ impl Domain {
             Domain::World => "world",
             Domain::Matte => "matte",
             Domain::Depth => "depth",
+            Domain::Body => "body",
             Domain::Segment => "segment",
             Domain::Rig => "rig",
             Domain::Motion => "motion",
@@ -447,7 +451,7 @@ impl Registry {
         for model in wire.models {
             let domain = Domain::parse(&model.domain).ok_or_else(|| {
                 AssetAiError::Registry(format!(
-                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|segment|rig|motion)",
+                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion)",
                     model.id, model.domain
                 ))
             })?;
@@ -1487,6 +1491,15 @@ mod tests {
         assert_eq!(depth.vram_gb, Some(3.0));
         // The licensing guard lives in the note: the x.1 refreshes are NC.
         assert!(depth.note.as_deref().unwrap().contains("Apache-2.0"));
+
+        // Body domain: externally provisioned persistent worker, no hub-side
+        // model artifact download.
+        let body = registry.find("sam3dbody-ref").unwrap();
+        assert_eq!(body.domain, Domain::Body);
+        assert_eq!(body.backend, "body");
+        assert!(body.available);
+        assert_eq!(body.vram_gb, Some(4.0));
+        assert!(body.files.is_empty());
 
         // Segment domain: pinned Comfy-Org SAM 3.1 multiplex CUDA artifact.
         let segment = registry.find("sam3-1-multiplex").unwrap();

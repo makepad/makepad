@@ -589,6 +589,9 @@ pub fn img2img_start_step(strength: f32, steps: u32) -> u32 {
 /// enforced (it picks what the session itself encodes and pushes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OutputEncoding {
+    /// Do not send output frames. JSON stats/aux/error/stopped messages still
+    /// flow, making this suitable for structured per-frame backends.
+    None,
     /// Raw RGB8, no compression — cheapest on a LAN, always available.
     #[default]
     Raw,
@@ -606,14 +609,16 @@ impl OutputEncoding {
             "" | "raw" => Ok(OutputEncoding::Raw),
             "png" => Ok(OutputEncoding::Png),
             "h264" => Ok(OutputEncoding::H264),
+            "none" => Ok(OutputEncoding::None),
             other => Err(AssetAiError::Params(format!(
-                "unknown output_encoding {other:?} (expected \"raw\", \"png\" or \"h264\")"
+                "unknown output_encoding {other:?} (expected \"none\", \"raw\", \"png\" or \"h264\")"
             ))),
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            OutputEncoding::None => "none",
             OutputEncoding::Raw => "raw",
             OutputEncoding::Png => "png",
             OutputEncoding::H264 => "h264",
@@ -625,7 +630,7 @@ impl OutputEncoding {
     /// hardware codec seam); `Raw`/`Png` are always available.
     pub fn is_supported_in_this_build(&self) -> bool {
         match self {
-            OutputEncoding::Raw | OutputEncoding::Png => true,
+            OutputEncoding::None | OutputEncoding::Raw | OutputEncoding::Png => true,
             OutputEncoding::H264 => cfg!(feature = "video"),
         }
     }
@@ -979,6 +984,12 @@ impl LiveParams {
                 input_encoding.as_str()
             )));
         }
+        if loop_mode == LoopMode::Feedback && output_encoding == OutputEncoding::None {
+            return Err(AssetAiError::Params(
+                "realtime: loop_mode \"feedback\" requires output frames; output_encoding \"none\" is not allowed"
+                    .to_string(),
+            ));
+        }
         let max_fps = request
             .max_fps
             .filter(|v| v.is_finite() && *v >= 0.0)
@@ -1051,13 +1062,15 @@ pub struct LiveFrameIn<'a> {
     pub config: &'a LiveConfig,
 }
 
-/// One `ContentBackend::live_step` call's output: the produced frame plus
-/// the backend's own wall-clock cost (surfaced in the `stats` message's
-/// `stage_ms.model`) and, inside that, the share the text encoder took
-/// (`stage_ms.text_encode`; 0 for backends without one, and near 0 on the
-/// frames where `flux2_backend` served the prompt embeds from its cache).
+/// One `ContentBackend::live_step` call's output: the produced frame, an
+/// optional structured JSON packet sent before that frame, plus the backend's
+/// own wall-clock cost (surfaced in the `stats` message's `stage_ms.model`)
+/// and, inside that, the share the text encoder took (`stage_ms.text_encode`;
+/// 0 for backends without one, and near 0 on frames where `flux2_backend`
+/// served the prompt embeds from its cache).
 pub struct LiveFrameOut {
     pub image: RgbImage,
+    pub aux_json: Option<String>,
     pub model_ms: f64,
     pub text_encode_ms: f64,
 }
@@ -1546,6 +1559,7 @@ pub fn backend_live_supported(spec: &ModelSpec) -> bool {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
+        "body" => true,
         "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         // The vision domain rides the same llama session + the mmproj tower,
@@ -1621,6 +1635,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),
         "ocr" => crate::vision_backend::vision_provisioned(),
+        "body" => crate::body_backend::body_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
@@ -1752,6 +1767,7 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "testpattern" => Ok(Box::new(crate::testpattern::TestPatternBackend::new(
             &spec.id,
         ))),
+        "body" => Ok(Box::new(crate::body_backend::BodyBackend::new(&spec.id))),
         #[cfg(feature = "flux")]
         "flux" => Ok(Box::new(crate::flux_backend::FluxBackend::new(&spec.id))),
         #[cfg(not(feature = "flux"))]
@@ -2042,6 +2058,11 @@ mod tests {
         // Development machines without a VRAM probe retain the previous
         // behavior: absence of evidence is not a fabricated hard limit.
         assert!(model_availability(&model, &GpuInfo::default(), 2 * 1024).is_ok());
+    }
+
+    #[test]
+    fn body_backend_is_compiled() {
+        assert!(backend_compiled("body"));
     }
 
     #[test]

@@ -486,6 +486,7 @@ impl ContentBackend for Flux2Backend {
         let (rgb, width, height) = crate::testpattern::decode_png_rgb8(&result.png)?;
         Ok(LiveFrameOut {
             image: RgbImage { width, height, data: rgb },
+            aux_json: None,
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
             text_encode_ms: if embeds_cached { 0.0 } else { result.te_ms },
         })
