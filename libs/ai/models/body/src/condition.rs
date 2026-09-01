@@ -10,6 +10,41 @@ const PE_HALF: usize = DINO_DIM / 2;
 const RAY_FEATURES: usize = 99;
 const RAY_FREQUENCIES: usize = 16;
 
+/// Apply a supplied mask prompt before the existing ray-conditioning seam.
+/// `None` performs no operation so the v1 no-mask path remains byte-for-byte
+/// unchanged. For a mask, subtract the no-mask embedding because
+/// [`RayCond::apply`] adds its projection back through the folded bias.
+pub fn apply_mask_prompt(
+    x: &GpuTensor,
+    mask: Option<(&[f32], f32)>,
+    no_mask_embed: &[f32; DINO_DIM],
+) -> Result<Option<GpuTensor>> {
+    let Some((mask_tokens, mask_score)) = mask else {
+        return Ok(None);
+    };
+    if x.cols() != DINO_DIM || mask_tokens.len() != x.rows() * DINO_DIM {
+        return Err(DiffusionError::workflow(format!(
+            "body mask conditioning shapes are x={}x{} mask={}, expected {} values",
+            x.rows(),
+            x.cols(),
+            mask_tokens.len(),
+            x.rows() * DINO_DIM,
+        )));
+    }
+    let mut adjustment = vec![0.0f32; mask_tokens.len()];
+    for (token, row) in adjustment.chunks_exact_mut(DINO_DIM).enumerate() {
+        let mask_row = &mask_tokens[token * DINO_DIM..(token + 1) * DINO_DIM];
+        for channel in 0..DINO_DIM {
+            row[channel] = mask_score * mask_row[channel] - no_mask_embed[channel];
+        }
+    }
+    let adjustment = gpu_upload(&adjustment, x.rows(), DINO_DIM)
+        .map_err(DiffusionError::model)?;
+    gpu_add(x, &adjustment)
+        .map(Some)
+        .map_err(DiffusionError::model)
+}
+
 pub fn dense_pe(g: &[f32]) -> Vec<f32> {
     dense_pe_at(g, PATCHES_SIDE)
 }
@@ -334,5 +369,72 @@ mod tests {
             .fold(0.0f32, f32::max);
         eprintln!("body ray conditioning max abs error: {max_error:.7}");
         assert!(max_error <= 1e-3);
+    }
+
+    #[test]
+    fn gpu_oracle_mask_conditioned_context() {
+        use crate::fixture::OracleRoot;
+
+        if crate::fixture::oracle_dir_for(OracleRoot::Mask).is_none() {
+            eprintln!("SKIP gpu_oracle_mask_conditioned_context: fixtures absent");
+            return;
+        }
+        if !gpu_device_available() || !crate::fixture::gpu_required_ops_available() {
+            eprintln!("SKIP gpu_oracle_mask_conditioned_context: no GPU");
+            return;
+        }
+        let Some(weights_path) = crate::fixture::weights_path_from(OracleRoot::Mask).or_else(crate::fixture::weights_path) else {
+            eprintln!("SKIP gpu_oracle_mask_conditioned_context: weights absent");
+            return;
+        };
+        let load = |name: &str| {
+            crate::fixture::load_from(OracleRoot::Mask, name)
+                .unwrap_or_else(|| panic!("missing mask fixture {name}"))
+                .1
+        };
+        let weights = BodyWeights::load(weights_path).expect("load body weights");
+        let no_mask_values = weights
+            .f32_shaped("prompt_encoder.no_mask_embed.weight", &[1, DINO_DIM])
+            .expect("load no-mask embedding");
+        let mut no_mask = [0.0f32; DINO_DIM];
+        no_mask.copy_from_slice(&no_mask_values);
+
+        let image = planar_to_tokens(&load("image_embeddings_before_mask"), DINO_DIM);
+        let mask = planar_to_tokens(&load("mask_embeddings_raw"), DINO_DIM);
+        let score = load("batch_mask_score")[0];
+        let image = gpu_upload(&image, NUM_PATCHES, DINO_DIM).expect("upload image embedding");
+        let conditioned = apply_mask_prompt(&image, Some((&mask, score)), &no_mask)
+            .expect("apply mask prompt")
+            .expect("mask prompt result");
+
+        let image_shape = crate::fixture::load_from(OracleRoot::Mask, "input_rgb_u8")
+            .expect("input image")
+            .0;
+        let bbox_values = load("box_xyxy");
+        let geo = crate::preprocess::crop_geometry_at(
+            [bbox_values[0], bbox_values[1], bbox_values[2], bbox_values[3]],
+            image_shape[1],
+            image_shape[0],
+            None,
+            crate::IMAGE_SIZE,
+            1.25,
+        );
+        let feats = ray_features(&crate::preprocess::patch_rays(&geo));
+        let ray_cond = RayCond::prepare(&weights).expect("prepare ray conditioning");
+        let actual = ray_cond
+            .apply(&conditioned, &no_mask, &feats)
+            .expect("ray conditioning");
+        let actual = gpu_download(&actual).expect("download ray conditioning");
+        let expected = planar_to_tokens(&load("raycond_out_0"), DINO_DIM);
+        let (maximum, at) = actual
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .map(|(index, (actual, expected))| ((actual - expected).abs(), index))
+            .fold((0.0f32, 0usize), |best, value| {
+                if value.0 > best.0 { value } else { best }
+            });
+        eprintln!("body masked raycond_out_0: max {maximum:.7} at {at}");
+        assert!(maximum <= 5e-3, "raycond_out_0 max abs {maximum} at {at}");
     }
 }

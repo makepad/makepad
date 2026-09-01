@@ -7,10 +7,11 @@
 //! parameters come from the body decoder, the hand crops of the reference's
 //! "full" mode are a later phase.
 
-use crate::condition::{dense_pe_at, ray_features, RayCond};
+use crate::condition::{apply_mask_prompt, dense_pe_at, ray_features, RayCond};
 use crate::decoder::{Decoder, LoopTiming, StepFeedback, StepInput};
 use crate::dino::BodyDino;
 use crate::hands::{hand_crops, BodyImage, FusionReport, HandBranch, HandOutput};
+use crate::mask::{warp_mask, MaskEmbed};
 use crate::mhr::MhrRig;
 use crate::packet::{BodyPacket, BodyPerson};
 use crate::pose::{camera_translation, model_params, project, unpack_pose};
@@ -35,6 +36,8 @@ pub struct BodyModel {
     pub(crate) decoder: Decoder,
     pub(crate) rig: MhrRig,
     hands: Option<HandBranch>,
+    /// The mask-prompt encoder, loaded on the first masked call.
+    mask_embed: Option<MaskEmbed>,
     /// The crop side the backbone sees; 512 is the trained size, smaller is
     /// faster and less accurate (see `set_crop_size`).
     crop_size: usize,
@@ -114,6 +117,7 @@ impl BodyModel {
             decoder,
             rig,
             hands: None,
+            mask_embed: None,
             crop_size: IMAGE_SIZE,
             correctives_every_step: false,
             last_stage_ms: [0.0; 5],
@@ -164,6 +168,31 @@ impl BodyModel {
         height: u32,
         bbox: Option<[f32; 4]>,
     ) -> Result<BodyPacket> {
+        self.infer_with(rgb, width, height, bbox, None)
+    }
+
+    /// [`Self::infer`] for one provided person box, optionally conditioned
+    /// by that person's full-frame 0/1 segmentation mask and its confidence
+    /// (the reference's mask prompt; spec 13.2).
+    pub fn infer_masked(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        bbox: [f32; 4],
+        mask: Option<(&[u8], f32)>,
+    ) -> Result<BodyPacket> {
+        self.infer_with(rgb, width, height, Some(bbox), mask)
+    }
+
+    fn infer_with(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        bbox: Option<[f32; 4]>,
+        mask: Option<(&[u8], f32)>,
+    ) -> Result<BodyPacket> {
         let (w, h) = (width as usize, height as usize);
         if rgb.len() != w * h * 3 {
             return Err(DiffusionError::workflow(format!(
@@ -172,15 +201,42 @@ impl BodyModel {
                 w * h * 3
             )));
         }
+        if let Some((full_mask, _)) = mask {
+            if full_mask.len() != w * h {
+                return Err(DiffusionError::workflow(format!(
+                    "body infer mask: {} bytes for {width}x{height}, expected {}",
+                    full_mask.len(),
+                    w * h
+                )));
+            }
+            if self.crop_size != IMAGE_SIZE {
+                return Err(DiffusionError::workflow(format!(
+                    "body mask prompts require the {IMAGE_SIZE}px crop, current crop is {}",
+                    self.crop_size
+                )));
+            }
+        }
         let bbox = bbox.unwrap_or([0.0, 0.0, width as f32, height as f32]);
         let total = Instant::now();
         let geo = crop_geometry_at(bbox, w, h, None, self.crop_size, 1.25);
         let crop = crop_normalized(rgb, w, h, &geo);
+        let crop_mask = mask.map(|(full_mask, _)| warp_mask(full_mask, w, h, &geo));
         let t_crop = total.elapsed();
 
         let embeddings = self.dino.forward_normalized(&crop)?;
         let t_backbone = total.elapsed();
 
+        let embeddings = match (crop_mask, mask) {
+            (Some(crop_mask), Some((_, score))) => {
+                if self.mask_embed.is_none() {
+                    self.mask_embed = Some(MaskEmbed::load(&self.weights)?);
+                }
+                let tokens = self.mask_embed.as_ref().unwrap().embed(&crop_mask);
+                apply_mask_prompt(&embeddings, Some((&tokens, score)), &self.no_mask_embed)?
+                    .unwrap_or(embeddings)
+            }
+            _ => embeddings,
+        };
         let feats = ray_features(&patch_rays(&geo));
         let context = self.ray_cond.apply(&embeddings, &self.no_mask_embed, &feats)?;
         drop(embeddings);
