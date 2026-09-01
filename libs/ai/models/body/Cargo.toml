@@ -1,0 +1,10 @@
+[package]
+name = "makepad-ai-body"
+version = "0.1.0"
+edition = "2021"
+description = "SAM 3D Body native port: DINOv3 ViT-H+/16 backbone, promptable pose decoder, MHR rig. Our own implementation on the makepad-ai-common gpu_* surface; weights are the Comfy-Org repack, pulled at runtime."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }

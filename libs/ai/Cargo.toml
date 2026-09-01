@@ -15,6 +15,7 @@ members = [
     "models/h3",
     "models/flux",
     "models/vision",
+    "models/body",
     "models/rig",
     "models/motion",
     "models/rife",
