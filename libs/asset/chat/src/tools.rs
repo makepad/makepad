@@ -799,8 +799,12 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           game.part_swing for gait, and give the body a follower/chaser/ \
                           pacer class. Never reposition parts from game.on_tick. PLACE \
                           spawned creatures NEAR THE PLAYER: `let p = game.player_pos()` \
-                          then pos: p + vec3(2, 0.55, 0) — an absolute guess like \
-                          vec3(0,0,2) lands 50 m away where nobody sees it.",
+                          then pos: p + vec3(2, 0.55, 0) for game.mover/game.character \
+                          (their y is absolute) — an absolute guess like vec3(0,0,2) \
+                          lands 50 m away where nobody sees it. game.model's pos.y is \
+                          height ABOVE the ground: use vec3(p.x + 2, 0, p.z) there, \
+                          never p + vec3(...) — p.y is an absolute feet height and \
+                          buries the model.",
             args_doc: r#"{"name": "forest", "src": "for i in 0..12 {\n  game.model(\"kenney/nature-kit/tree_oak\", {pos: vec3(i * 3, 0, 8), scale: 2})\n}"}"#,
             parameters: schema_object(
                 vec![

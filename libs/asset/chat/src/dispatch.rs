@@ -82,6 +82,44 @@ impl AssetServerTools {
         }
     }
 
+    /// One bounded SELECT over the live catalog, via the server's
+    /// `/v1/assets/query` route (the server owns the row/step/deadline
+    /// budgets and the single-SELECT guard). Rendered exactly like the old
+    /// broker did — aligned text plus a row count — so the model reads it
+    /// the same way it always has.
+    fn assets_query(&self, sql: &str) -> ToolOutcome {
+        match self.api.assets_query(sql) {
+            Err(e) => err_outcome(e),
+            Ok(dto) => query_outcome(dto),
+        }
+    }
+
+    /// The catalog schema, fetched from the server's own `sqlite_master`
+    /// through the same bounded query route (there is no dedicated schema
+    /// endpoint), plus the usage notes the model needs to write good SQL.
+    fn assets_schema(&self) -> ToolOutcome {
+        const SCHEMA_SQL: &str = "SELECT name, sql FROM sqlite_master WHERE name IN \
+             ('assets', 'asset_aliases', 'asset_revisions', 'search_annotations', \
+              'search_labels') ORDER BY name";
+        match self.api.assets_query(SCHEMA_SQL) {
+            Err(e) => err_outcome(e),
+            Ok(dto) => {
+                let mut text =
+                    String::from("Catalog tables (SELECT-only; single statement):\n");
+                for row in &dto.rows {
+                    if let Some(sql) = row.get(1) {
+                        text.push_str(sql);
+                        text.push('\n');
+                    }
+                }
+                text.push_str(crate::catalog_sql::SCHEMA_NOTES);
+                ToolOutcome::Ok {
+                    value: json::obj(vec![("text", json::s(text))]),
+                }
+            }
+        }
+    }
+
     fn inspect(&self, target: &InspectTarget) -> ToolOutcome {
         match target {
             InspectTarget::Revision(rev) => self.revision_summary(rev),
@@ -217,12 +255,20 @@ impl ToolExecutor for AssetServerTools {
             ContentToolCall::LlmConsult { .. } => ToolOutcome::Unavailable {
                 reason: "llm.consult is executed by the chat broker".to_string(),
             },
+            // Catalog SQL runs HERE, over the same authenticated client the
+            // search uses. The game session advertises assets.query/schema
+            // (see `tools::sandbox_definitions`) and, since the session
+            // engine moved in-process (aicore P8), this executor is the one
+            // that answers them — the old "the broker runs it" refusal left
+            // the game AI's main alias-search tool permanently dead
+            // (observed live 2026-09-01: every doom-enemy lookup answered
+            // "Unavailable" and the model gave up on the store).
+            ContentToolCall::AssetsQuery { sql } => self.assets_query(sql),
+            ContentToolCall::AssetsSchema => self.assets_schema(),
             // Game-client tools: the broker's dispatcher never advertises
             // them (see `ToolExecutor::tool_definitions`); a model that
             // calls one anyway gets the honest answer, not an execution.
-            ContentToolCall::AssetsQuery { .. }
-            | ContentToolCall::AssetsSchema
-            | ContentToolCall::ModelBuild { .. }
+            ContentToolCall::ModelBuild { .. }
             | ContentToolCall::ModelFetch { .. }
             | ContentToolCall::WorldPlace { .. }
             | ContentToolCall::WorldRemove { .. }
@@ -236,8 +282,7 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldTune { .. }
             | ContentToolCall::WorldAddAddon { .. }
             | ContentToolCall::WorldInSub { .. } => ToolOutcome::Unavailable {
-                reason: "catalog SQL, local model, and world tools run in a game chat session"
-                    .to_string(),
+                reason: "local model and world tools run in a game chat session".to_string(),
             },
         }
     }
@@ -246,6 +291,25 @@ impl ToolExecutor for AssetServerTools {
 /// Typed error mapping: authorization failures are `Denied` (the ACL
 /// answer), everything else is an operational failure with a bounded
 /// description. Never a panic, never a silent Ok.
+/// Render one bounded query result the way the broker always has: aligned
+/// text with a row-count footer, plus the machine-readable row count the
+/// chat UI's chip reads (`outcome_summary` shows "queried → N rows").
+fn query_outcome(dto: makepad_asset_client::dto::AssetsQueryDto) -> ToolOutcome {
+    let out = crate::catalog_sql::QueryOutput {
+        columns: dto.columns,
+        rows: dto.rows,
+        truncated: dto.truncated,
+        elapsed_ms: dto.elapsed_ms,
+    };
+    ToolOutcome::Ok {
+        value: json::obj(vec![
+            ("rows", Value::Int(out.rows.len() as i64)),
+            ("truncated", Value::Bool(out.truncated)),
+            ("text", json::s(out.to_text())),
+        ]),
+    }
+}
+
 fn err_outcome(e: ClientError) -> ToolOutcome {
     match e {
         ClientError::Unauthenticated => {
@@ -322,6 +386,33 @@ mod tests {
         }) {
             ToolOutcome::Refused { what } => assert_no_credential(&what),
             other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    /// assets.query answers with rendered rows the model can read AND the
+    /// row count the UI chip reads — not the old "Unavailable" refusal
+    /// (which left the game session's advertised SQL tool permanently
+    /// dead; the live doom-enemy hunt died on it, 2026-09-01).
+    #[test]
+    fn assets_query_outcome_renders_rows_and_counts() {
+        let dto = makepad_asset_client::dto::AssetsQueryDto {
+            columns: vec!["canon_alias".into(), "kind".into()],
+            rows: vec![
+                vec!["doom/doom/billboards/doom1/troo".into(), "billboard".into()],
+                vec!["doom/doom/billboards/doom1/sarg".into(), "billboard".into()],
+            ],
+            truncated: false,
+            elapsed_ms: 3,
+        };
+        match query_outcome(dto) {
+            ToolOutcome::Ok { value } => {
+                assert_eq!(value.get("rows").and_then(Value::as_i64), Some(2));
+                let text = value.get("text").and_then(Value::as_str).unwrap();
+                assert!(text.contains("canon_alias"), "{text}");
+                assert!(text.contains("doom/doom/billboards/doom1/troo"), "{text}");
+                assert!(text.contains("(2 rows)"), "{text}");
+            }
+            other => panic!("expected Ok, got {other:?}"),
         }
     }
 }
