@@ -5,17 +5,45 @@ use std::path::{Path, PathBuf};
 use crate::mhr::MhrRig;
 use crate::weights::BodyWeights;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OracleRoot {
+    Body,
+    Full,
+    Hands,
+}
+
+impl OracleRoot {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Body => "oracle",
+            Self::Full => "oracle_full",
+            Self::Hands => "oracle_hands",
+        }
+    }
+}
+
 pub fn oracle_dir() -> Option<PathBuf> {
+    oracle_dir_for(OracleRoot::Body)
+}
+
+pub fn oracle_dir_for(root: OracleRoot) -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|root| root.join("local/agent_state/sam3dbody/oracle"))
+        .map(|base| {
+            base.join("local/agent_state/sam3dbody")
+                .join(root.directory())
+        })
         .find(|candidate| candidate.is_dir())
 }
 
 /// Load `<name>.f32` (or `<name>.u8`, widened) and its shape from the
 /// oracle manifest.
 pub fn load(name: &str) -> Option<(Vec<usize>, Vec<f32>)> {
-    let root = oracle_dir()?;
+    load_from(OracleRoot::Body, name)
+}
+
+pub fn load_from(root: OracleRoot, name: &str) -> Option<(Vec<usize>, Vec<f32>)> {
+    let root = oracle_dir_for(root)?;
     let manifest = std::fs::read_to_string(root.join("manifest.json")).ok()?;
     let shape = manifest_shape(&manifest, name)?;
     let f32_path = root.join(format!("{name}.f32"));
@@ -42,7 +70,11 @@ pub fn load(name: &str) -> Option<(Vec<usize>, Vec<f32>)> {
 }
 
 pub fn weights_path() -> Option<PathBuf> {
-    let root = oracle_dir()?;
+    weights_path_from(OracleRoot::Body)
+}
+
+pub fn weights_path_from(selected: OracleRoot) -> Option<PathBuf> {
+    let root = oracle_dir_for(selected)?;
     let value = std::fs::read_to_string(root.join("weights_path.txt")).ok()?;
     let path = PathBuf::from(value.trim());
     let path = if path.is_absolute() { path } else { root.join(path) };

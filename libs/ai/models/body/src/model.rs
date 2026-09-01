@@ -10,9 +10,10 @@
 use crate::condition::{dense_pe_at, ray_features, RayCond};
 use crate::decoder::{Decoder, LoopTiming, StepFeedback, StepInput};
 use crate::dino::BodyDino;
+use crate::hands::{hand_crops, BodyImage, FusionReport, HandBranch, HandOutput};
 use crate::mhr::MhrRig;
 use crate::packet::{BodyPacket, BodyPerson};
-use crate::pose::{camera_translation, model_params, project, unpack_pose, PoseHeadParams};
+use crate::pose::{camera_translation, model_params, project, unpack_pose};
 use crate::preprocess::{
     condition_info, crop_geometry_at, crop_normalized, full_to_crop, patch_rays, CropGeometry,
 };
@@ -26,13 +27,14 @@ use std::time::Instant;
 
 pub struct BodyModel {
     pub weights: BodyWeights,
-    dino: BodyDino,
+    pub(crate) dino: BodyDino,
     ray_cond: RayCond,
     gaussian: Vec<f32>,
     dense_pe: HashMap<usize, Vec<f32>>,
-    no_mask_embed: [f32; DINO_DIM],
-    decoder: Decoder,
-    rig: MhrRig,
+    pub(crate) no_mask_embed: [f32; DINO_DIM],
+    pub(crate) decoder: Decoder,
+    pub(crate) rig: MhrRig,
+    hands: Option<HandBranch>,
     /// The crop side the backbone sees; 512 is the trained size, smaller is
     /// faster and less accurate (see `set_crop_size`).
     crop_size: usize,
@@ -47,14 +49,40 @@ pub struct BodyModel {
     pub last_loop: LoopTiming,
 }
 
-/// Everything one refinement step produced; the last one is the answer.
-struct StepResult {
-    pose: PoseHeadParams,
-    params: [f32; 204],
-    cam_t: [f32; 3],
-    kp3d: Vec<f32>,
-    kp2d: Vec<f32>,
-    joints: Vec<f32>,
+/// What [`BodyModel::infer_full`] returns: the fused body, the two hand
+/// passes (left first, already un-mirrored) and the fusion report.
+#[derive(Clone, Debug)]
+pub struct FullOutput {
+    pub body: BodyOutput,
+    pub hands: [HandOutput; 2],
+    pub report: FusionReport,
+}
+
+/// Rich model output used by the body, hand, re-prompt, and fusion passes.
+/// The packet API deliberately exposes only its stable transport subset.
+#[derive(Clone, Debug)]
+pub struct BodyOutput {
+    pub pred_pose_raw: Vec<f32>,
+    pub global_rot: [f32; 3],
+    pub body_pose: [f32; 133],
+    pub shape: [f32; 45],
+    pub scale: [f32; 28],
+    pub hand: [f32; 108],
+    pub face: [f32; 72],
+    pub pred_keypoints_3d: Vec<f32>,
+    pub pred_vertices: Vec<f32>,
+    pub pred_joint_coords: Vec<f32>,
+    pub joint_global_rots: Vec<f32>,
+    pub mhr_model_params: [f32; 204],
+    pub pred_cam: [f32; 3],
+    pub pred_keypoints_2d: Vec<f32>,
+    pub pred_cam_t: [f32; 3],
+    pub focal_length: f32,
+    pub pred_keypoints_2d_depth: Vec<f32>,
+    pub pred_keypoints_2d_cropped: Vec<f32>,
+    pub hand_box: [[f32; 4]; 2],
+    pub hand_logits: [[f32; 2]; 2],
+    pub bbox: [f32; 4],
 }
 
 impl BodyModel {
@@ -85,6 +113,7 @@ impl BodyModel {
             no_mask_embed,
             decoder,
             rig,
+            hands: None,
             crop_size: IMAGE_SIZE,
             correctives_every_step: false,
             last_stage_ms: [0.0; 5],
@@ -96,6 +125,12 @@ impl BodyModel {
 
     /// The crop side: a multiple of 16 between 128 and 1024. The model was
     /// trained at 512; 256 runs the backbone on a quarter of the tokens.
+    /// The MHR rig, for callers that want the unposed mesh of a person the
+    /// model just inferred (`rig().rest_vertices(&shape, &expr)`).
+    pub fn rig(&self) -> &MhrRig {
+        &self.rig
+    }
+
     pub fn set_crop_size(&mut self, size: usize) -> Result<()> {
         if size % PATCH != 0 || !(128..=1024).contains(&size) {
             return Err(DiffusionError::workflow(format!(
@@ -139,7 +174,7 @@ impl BodyModel {
         }
         let bbox = bbox.unwrap_or([0.0, 0.0, width as f32, height as f32]);
         let total = Instant::now();
-        let geo = crop_geometry_at(bbox, w, h, None, self.crop_size);
+        let geo = crop_geometry_at(bbox, w, h, None, self.crop_size, 1.25);
         let crop = crop_normalized(rgb, w, h, &geo);
         let t_crop = total.elapsed();
 
@@ -155,16 +190,16 @@ impl BodyModel {
         let rig = &self.rig;
         let dense_pe = &self.dense_pe[&self.crop_size];
         let every_step = self.correctives_every_step;
-        let mut last: Option<StepResult> = None;
+        let mut last: Option<BodyOutput> = None;
         let output = self
             .decoder
             .run(tokens, &context, dense_pe, |step: StepInput| {
                 let correctives = every_step || step.layer + 1 == crate::DEC_DEPTH;
                 let result = close_the_loop(rig, &geo, &step, correctives);
                 let feedback = StepFeedback {
-                    kp2d_cropped: full_to_crop(&result.kp2d, &geo),
-                    depth: depths(&result.kp3d, result.cam_t),
-                    kp3d: result.kp3d.clone(),
+                    kp2d_cropped: result.pred_keypoints_2d_cropped.clone(),
+                    depth: result.pred_keypoints_2d_depth.clone(),
+                    kp3d: result.pred_keypoints_3d.clone(),
                 };
                 last = Some(result);
                 feedback
@@ -172,18 +207,21 @@ impl BodyModel {
         self.last_loop = output.timing;
         let t_decoder = total.elapsed();
 
-        let last = last.ok_or_else(|| DiffusionError::model("body decoder ran no steps"))?;
+        let mut last = last.ok_or_else(|| DiffusionError::model("body decoder ran no steps"))?;
+        last.hand_box = output.hand_boxes;
+        last.hand_logits = output.hand_logits;
+        last.bbox = bbox;
         let person = BodyPerson {
-            mhr: last.params,
-            global_rot: last.pose.global_rot,
-            cam_t: last.cam_t,
-            shape: last.pose.shape,
-            expr: last.pose.expr,
+            mhr: last.mhr_model_params,
+            global_rot: last.global_rot,
+            cam_t: last.pred_cam_t,
+            shape: last.shape,
+            expr: last.face,
             focal: geo.focal,
             bbox,
-            kp3d: last.kp3d,
-            kp2d: last.kp2d,
-            joints: Some(last.joints),
+            kp3d: last.pred_keypoints_3d,
+            kp2d: last.pred_keypoints_2d,
+            joints: Some(last.pred_joint_coords),
             rots: None,
         };
         let t_packet = total.elapsed();
@@ -199,11 +237,104 @@ impl BodyModel {
             ms: t_packet.as_secs_f32() * 1000.0,
         })
     }
+
+    /// Full body + two hand crops + wrist fusion. Unlike [`Self::infer`],
+    /// this returns the rich fused result, the two hand passes and the
+    /// fusion report (which hands were trusted and why).
+    pub fn infer_full(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        bbox: Option<[f32; 4]>,
+    ) -> Result<FullOutput> {
+        if self.crop_size != IMAGE_SIZE {
+            return Err(DiffusionError::workflow(format!(
+                "body full inference requires the trained {IMAGE_SIZE}px crop, got {}",
+                self.crop_size,
+            )));
+        }
+        let (w, h) = (width as usize, height as usize);
+        if rgb.len() != w * h * 3 {
+            return Err(DiffusionError::workflow(format!(
+                "body infer_full: {} bytes for {width}x{height} rgb, expected {}",
+                rgb.len(),
+                w * h * 3,
+            )));
+        }
+        let bbox = bbox.unwrap_or([0.0, 0.0, width as f32, height as f32]);
+        let geo = crop_geometry_at(bbox, w, h, None, IMAGE_SIZE, 1.25);
+        let crop = crop_normalized(rgb, w, h, &geo);
+        let embeddings = self.dino.forward_normalized(&crop)?;
+        let features = ray_features(&patch_rays(&geo));
+        let context = self
+            .ray_cond
+            .apply(&embeddings, &self.no_mask_embed, &features)?;
+        let tokens = self.decoder.build_tokens(condition_info(&geo));
+        let mut last = None;
+        let decoded = self.decoder.run(
+            tokens,
+            &context,
+            &self.dense_pe[&IMAGE_SIZE],
+            |step| {
+                let correctives = self.correctives_every_step
+                    || step.layer + 1 == crate::DEC_DEPTH;
+                let result = close_the_loop(&self.rig, &geo, &step, correctives);
+                let feedback = StepFeedback {
+                    kp2d_cropped: result.pred_keypoints_2d_cropped.clone(),
+                    depth: result.pred_keypoints_2d_depth.clone(),
+                    kp3d: result.pred_keypoints_3d.clone(),
+                };
+                last = Some(result);
+                feedback
+            },
+        )?;
+        let mut body = last.ok_or_else(|| DiffusionError::model("body decoder ran no steps"))?;
+        body.hand_box = decoded.hand_boxes;
+        body.hand_logits = decoded.hand_logits;
+        body.bbox = bbox;
+
+        if self.hands.is_none() {
+            self.hands = Some(HandBranch::load(&self.weights)?);
+        }
+        let branch = self.hands.as_ref().unwrap();
+        let crops = hand_crops(
+            &body,
+            &geo,
+            BodyImage {
+                rgb,
+                width: w,
+                height: h,
+            },
+        );
+        let left = branch.infer_hand(self, &crops[0])?;
+        let right = branch.infer_hand(self, &crops[1])?;
+        let report = branch.fuse(
+            self,
+            &mut body,
+            &left,
+            &right,
+            &crops,
+            &geo,
+            &context,
+            &self.dense_pe[&IMAGE_SIZE],
+        )?;
+        Ok(FullOutput {
+            body,
+            hands: [left, right],
+            report,
+        })
+    }
 }
 
 /// One refinement step's tail: head output -> rig parameters -> posed rig
 /// -> keypoints in camera axes -> camera translation -> projection.
-fn close_the_loop(rig: &MhrRig, geo: &CropGeometry, step: &StepInput, correctives: bool) -> StepResult {
+pub(crate) fn close_the_loop(
+    rig: &MhrRig,
+    geo: &CropGeometry,
+    step: &StepInput,
+    correctives: bool,
+) -> BodyOutput {
     let pose = unpack_pose(&step.pose_pred_519);
     let params = model_params(rig, &pose);
     let rigged = rig.forward(&pose.shape, &params, &pose.expr, correctives);
@@ -219,6 +350,7 @@ fn close_the_loop(rig: &MhrRig, geo: &CropGeometry, step: &StepInput, corrective
         out
     };
     let kp3d = to_camera(&rigged.keypoints308, NUM_KEYPOINTS);
+    let vertices = to_camera(&rigged.verts, crate::MHR_VERTS);
     let mut joint_positions = Vec::with_capacity(MHR_JOINTS * 3);
     for joint in 0..MHR_JOINTS {
         joint_positions.extend_from_slice(&rigged.skel_state[joint * 8..joint * 8 + 3]);
@@ -226,19 +358,31 @@ fn close_the_loop(rig: &MhrRig, geo: &CropGeometry, step: &StepInput, corrective
     let joints = to_camera(&joint_positions, MHR_JOINTS);
     let cam = [step.cam_pred_3[0], step.cam_pred_3[1], step.cam_pred_3[2]];
     let cam_t = camera_translation(cam, geo.center, geo.side, geo.focal, geo.principal);
-    let (kp2d, _) = project(&kp3d, cam_t, geo.focal, geo.principal);
-    StepResult {
-        pose,
-        params,
-        cam_t,
-        kp3d,
-        kp2d,
-        joints,
+    let (kp2d, depth) = project(&kp3d, cam_t, geo.focal, geo.principal);
+    let pred_cam = cam;
+    BodyOutput {
+        pred_pose_raw: step.pose_pred_519[..266].to_vec(),
+        global_rot: pose.global_rot,
+        body_pose: pose.body,
+        shape: pose.shape,
+        scale: pose.scale,
+        hand: pose.hands,
+        face: pose.expr,
+        pred_keypoints_3d: kp3d,
+        pred_vertices: vertices,
+        pred_joint_coords: joints,
+        joint_global_rots: rigged.joint_global_rots,
+        mhr_model_params: params,
+        pred_cam,
+        pred_keypoints_2d: kp2d.clone(),
+        pred_cam_t: cam_t,
+        focal_length: geo.focal,
+        pred_keypoints_2d_depth: depth,
+        pred_keypoints_2d_cropped: full_to_crop(&kp2d, geo),
+        hand_box: [[0.0; 4]; 2],
+        hand_logits: [[0.0; 2]; 2],
+        bbox: [0.0; 4],
     }
-}
-
-fn depths(kp3d: &[f32], cam_t: [f32; 3]) -> Vec<f32> {
-    kp3d.chunks_exact(3).map(|point| point[2] + cam_t[2]).collect()
 }
 
 #[cfg(test)]
@@ -360,5 +504,59 @@ mod tests {
         let json = packet.to_json();
         assert!(json.starts_with("{\"n_people\":1,\"people\":[{\"mhr\":["));
         assert!(json.contains("\"kp3d\":[") && json.contains("\"joints\":["));
+    }
+
+    fn full_end_to_end(root: fixture::OracleRoot, label: &str) {
+        let Some((shape, image)) = fixture::load_from(root, "input_rgb_u8") else {
+            eprintln!("SKIP {label}: fixture absent");
+            return;
+        };
+        if !gpu_device_available() || !fixture::gpu_required_ops_available() {
+            eprintln!("SKIP {label}: no GPU");
+            return;
+        }
+        let Some(weights_path) = fixture::weights_path() else {
+            eprintln!("SKIP {label}: weights absent");
+            return;
+        };
+        let (h, w) = (shape[0] as u32, shape[1] as u32);
+        let rgb: Vec<u8> = image.into_iter().map(|value| value as u8).collect();
+        let mut model = BodyModel::load(&weights_path).expect("load full body model");
+        model.correctives_every_step = true;
+        let full = model.infer_full(&rgb, w, h, None).expect("full inference");
+        let field = |name: &str| fixture::load_from(root, name).unwrap().1;
+        eprintln!("{label}: fusion report {:?}", full.report);
+        let output = &full.body;
+        // Parameter tolerances absorb the bf16 backbone noise of the hand
+        // crops (2-3% relative), which the hand decoder amplifies more than
+        // the body decoder does; the keypoint tolerances are the contract.
+        let checks = [
+            ("final_body_pose_params", output.body_pose.as_slice(), 2.0e-2),
+            ("final_hand_pose_params", output.hand.as_slice(), 5.0e-2),
+            ("final_scale_params", output.scale.as_slice(), 5.0e-2),
+            ("final_shape_params", output.shape.as_slice(), 5.0e-2),
+            ("final_pred_keypoints_3d", output.pred_keypoints_3d.as_slice(), 4.0e-3),
+            ("final_pred_keypoints_2d", output.pred_keypoints_2d.as_slice(), 1.0),
+        ];
+        let mut failures = Vec::new();
+        for (name, actual, tolerance) in checks {
+            let expected = field(name);
+            let (error, at) = max_abs(actual, &expected);
+            eprintln!("{label}: {name} max abs {error:.6} at {at} (ours {} reference {})", actual[at], expected[at]);
+            if error >= tolerance {
+                failures.push(format!("{name} max abs {error} at {at}, tolerance {tolerance}"));
+            }
+        }
+        assert!(failures.is_empty(), "{label}: {}", failures.join("; "));
+    }
+
+    #[test]
+    fn oracle_full_end_to_end() {
+        full_end_to_end(fixture::OracleRoot::Full, "oracle_full_end_to_end");
+    }
+
+    #[test]
+    fn oracle_hands_end_to_end() {
+        full_end_to_end(fixture::OracleRoot::Hands, "oracle_hands_end_to_end");
     }
 }

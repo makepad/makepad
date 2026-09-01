@@ -150,27 +150,46 @@ pub(crate) struct DecoderHeads {
 }
 
 impl DecoderHeads {
+    #[cfg(test)]
     pub(crate) fn load(weights: &BodyWeights) -> Result<Self> {
+        Self::load_named(
+            weights,
+            "head_pose.proj",
+            "head_camera.proj",
+            "keypoint_posemb_linear",
+            "keypoint3d_posemb_linear",
+            "keypoint_feat_linear",
+        )
+    }
+
+    pub(crate) fn load_named(
+        weights: &BodyWeights,
+        pose: &str,
+        camera: &str,
+        keypoint_posemb: &str,
+        keypoint3d_posemb: &str,
+        keypoint_feat: &str,
+    ) -> Result<Self> {
         Ok(Self {
-            pose: ReluFfn::load(weights, "head_pose.proj", DEC_DIM, DEC_DIM, NPOSE)?,
-            camera: ReluFfn::load(weights, "head_camera.proj", DEC_DIM, DEC_DIM, NCAM)?,
+            pose: ReluFfn::load(weights, pose, DEC_DIM, DEC_DIM, NPOSE)?,
+            camera: ReluFfn::load(weights, camera, DEC_DIM, DEC_DIM, NCAM)?,
             keypoint_posemb: ReluFfn::load(
                 weights,
-                "keypoint_posemb_linear",
+                keypoint_posemb,
                 2,
                 DEC_DIM,
                 DEC_DIM,
             )?,
             keypoint3d_posemb: ReluFfn::load(
                 weights,
-                "keypoint3d_posemb_linear",
+                keypoint3d_posemb,
                 3,
                 DEC_DIM,
                 DEC_DIM,
             )?,
             keypoint_feat: HostLinear::load(
                 weights,
-                "keypoint_feat_linear",
+                keypoint_feat,
                 DEC_DIM,
                 DINO_DIM,
             )?,

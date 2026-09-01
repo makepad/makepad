@@ -67,6 +67,8 @@ pub struct MhrOutput {
     pub verts: Vec<f32>,
     pub skel_state: Vec<f32>,
     pub keypoints308: Vec<f32>,
+    /// Row-major global rotation matrices, one per skeleton joint.
+    pub joint_global_rots: Vec<f32>,
 }
 
 impl MhrRig {
@@ -451,12 +453,28 @@ impl MhrRig {
         }
         let verts = self.skin(&skel_state, &rest);
         let keypoints308 = self.keypoints(&verts, &skel_state);
+        let joint_global_rots = joint_global_rots(&skel_state);
         MhrOutput {
             verts,
             skel_state,
             keypoints308,
+            joint_global_rots,
         }
     }
+}
+
+/// Convert the quaternion part of 127 `(t, q_xyzw, s)` skeleton states to
+/// row-major global rotation matrices.
+pub fn joint_global_rots(skel_state: &[f32]) -> Vec<f32> {
+    assert_eq!(skel_state.len(), MHR_JOINTS * STATE_WIDTH);
+    let mut output = Vec::with_capacity(MHR_JOINTS * 9);
+    for joint in 0..MHR_JOINTS {
+        let offset = joint * STATE_WIDTH + 3;
+        output.extend_from_slice(&quat_matrix(
+            skel_state[offset..offset + 4].try_into().unwrap(),
+        ));
+    }
+    output
 }
 
 #[derive(Clone, Copy)]
@@ -521,6 +539,24 @@ fn quat_rotate(q: [f32; 4], point: [f32; 3]) -> [f32; 3] {
         point[0] + 2.0 * (q[3] * uv[0] + uuv[0]),
         point[1] + 2.0 * (q[3] * uv[1] + uuv[1]),
         point[2] + 2.0 * (q[3] * uv[2] + uuv[2]),
+    ]
+}
+
+fn quat_matrix(q: [f32; 4]) -> [f32; 9] {
+    let [x, y, z, w] = q;
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, xz, yz) = (x * y, x * z, y * z);
+    let (wx, wy, wz) = (w * x, w * y, w * z);
+    [
+        1.0 - 2.0 * (yy + zz),
+        2.0 * (xy - wz),
+        2.0 * (xz + wy),
+        2.0 * (xy + wz),
+        1.0 - 2.0 * (xx + zz),
+        2.0 * (yz - wx),
+        2.0 * (xz - wy),
+        2.0 * (yz + wx),
+        1.0 - 2.0 * (xx + yy),
     ]
 }
 
@@ -793,5 +829,28 @@ mod tests {
         let error = max_abs(&actual, &expected);
         eprintln!("MHR first-70 keypoint max abs error {error:.7} m");
         assert!(error <= 1.0e-4, "keypoint max abs error {error} m");
+    }
+
+    #[test]
+    fn oracle_joint_global_rotations_from_skeleton_quaternions() {
+        use crate::fixture::OracleRoot;
+        let Some((_, skel)) = fixture::load_from(OracleRoot::Full, "mhrjit_out_skel_5") else {
+            eprintln!("SKIP oracle_joint_global_rotations: oracle_full absent");
+            return;
+        };
+        let Some((_, expected)) =
+            fixture::load_from(OracleRoot::Full, "step_body_joint_global_rots_0")
+        else {
+            eprintln!("SKIP oracle_joint_global_rotations: expected rotations absent");
+            return;
+        };
+        let actual = joint_global_rots(&skel);
+        let error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("joint-global-rotation max abs {error:.7}");
+        assert!(error < 2.0e-5, "joint rotations max abs {error}");
     }
 }

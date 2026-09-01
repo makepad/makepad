@@ -80,4 +80,6 @@ The port reproduces the reference pipeline's numerics for the body decoder
 path (`inference_type = "body"`): rig vertices within 1e-4 cm, keypoints
 within 1e-6 m from identical rig parameters, and end to end from an image
 within 2 mm on 3D keypoints and 0.5 px on 2D keypoints, the residue being
-bf16 accumulation-order noise in the backbone.
+bf16 accumulation-order noise in the backbone. The full path
+(`inference_type = "full"`: both hand crops, the hand decoder, the wrist
+fusion and the keypoint re-prompt) matches end to end within 2 mm and 1 px.

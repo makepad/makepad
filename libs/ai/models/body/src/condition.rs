@@ -68,8 +68,12 @@ pub struct RayCond {
 
 impl RayCond {
     pub fn prepare(weights: &BodyWeights) -> Result<Self> {
+        Self::prepare_named(weights, "ray_cond_emb")
+    }
+
+    pub fn prepare_named(weights: &BodyWeights, prefix: &str) -> Result<Self> {
         let conv = weights.f32_shaped(
-            "ray_cond_emb.conv.weight",
+            &format!("{prefix}.conv.weight"),
             &[DINO_DIM, DINO_DIM + RAY_FEATURES, 1, 1],
         )?;
         let cols = DINO_DIM + RAY_FEATURES;
@@ -85,8 +89,8 @@ impl RayCond {
             image_w: gpu_upload(&image_w, DINO_DIM, DINO_DIM).map_err(DiffusionError::model)?,
             ray_w: gpu_upload(&ray_w, DINO_DIM, RAY_FEATURES).map_err(DiffusionError::model)?,
             image_w_host: image_w,
-            norm_w: weights.f32_shaped("ray_cond_emb.norm.weight", &[DINO_DIM])?,
-            norm_b: weights.f32_shaped("ray_cond_emb.norm.bias", &[DINO_DIM])?,
+            norm_w: weights.f32_shaped(&format!("{prefix}.norm.weight"), &[DINO_DIM])?,
+            norm_b: weights.f32_shaped(&format!("{prefix}.norm.bias"), &[DINO_DIM])?,
         })
     }
 

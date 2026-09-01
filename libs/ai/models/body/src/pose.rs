@@ -71,6 +71,74 @@ pub fn rotmat_to_euler_zyx(matrix: [[f32; 3]; 3]) -> [f32; 3] {
     }
 }
 
+/// roma's lowercase `xyz` (verified against the hand-mode rig oracle):
+/// `R = Rz(z) * Ry(y) * Rx(x)`, the same order the rig applies to every
+/// joint's `(rx, ry, rz)` triple.
+pub fn euler_xyz_to_matrix([x, y, z]: [f32; 3]) -> [[f32; 3]; 3] {
+    let (sx, cx) = x.sin_cos();
+    let (sy, cy) = y.sin_cos();
+    let (sz, cz) = z.sin_cos();
+    [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ]
+}
+
+/// Inverse of [`euler_xyz_to_matrix`], returning `(x, y, z)`.
+pub fn matrix_to_euler_xyz(matrix: [[f32; 3]; 3]) -> [f32; 3] {
+    let cy = (matrix[0][0] * matrix[0][0] + matrix[1][0] * matrix[1][0]).sqrt();
+    let y = (-matrix[2][0]).atan2(cy);
+    if cy < 1.0e-6 {
+        [(-matrix[1][2]).atan2(matrix[1][1]), y, 0.0]
+    } else {
+        [
+            matrix[2][1].atan2(matrix[2][2]),
+            y,
+            matrix[1][0].atan2(matrix[0][0]),
+        ]
+    }
+}
+
+/// Intrinsic `XZY`: input and output triples are convention ordered
+/// `(x, z, y)`, and `R = Rx(x) * Rz(z) * Ry(y)`.
+pub fn euler_xzy_to_matrix([x, z, y]: [f32; 3]) -> [[f32; 3]; 3] {
+    let (sx, cx) = x.sin_cos();
+    let (sy, cy) = y.sin_cos();
+    let (sz, cz) = z.sin_cos();
+    [
+        [cz * cy, -sz, cz * sy],
+        [cx * sz * cy + sx * sy, cx * cz, cx * sz * sy - sx * cy],
+        [sx * sz * cy - cx * sy, sx * cz, sx * sz * sy + cx * cy],
+    ]
+}
+
+/// Inverse of [`euler_xzy_to_matrix`], returning convention-ordered
+/// `(x, z, y)`.
+pub fn matrix_to_euler_xzy(matrix: [[f32; 3]; 3]) -> [f32; 3] {
+    let cz = (matrix[0][0] * matrix[0][0] + matrix[0][2] * matrix[0][2]).sqrt();
+    let z = (-matrix[0][1]).atan2(cz);
+    if cz < 1.0e-6 {
+        [(-matrix[1][2]).atan2(matrix[2][2]), z, 0.0]
+    } else {
+        [
+            matrix[2][1].atan2(matrix[1][1]),
+            z,
+            matrix[0][2].atan2(matrix[0][0]),
+        ]
+    }
+}
+
+pub fn matrix_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    std::array::from_fn(|row| {
+        std::array::from_fn(|column| (0..3).map(|k| a[row][k] * b[k][column]).sum())
+    })
+}
+
+pub fn matrix_transpose(value: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    std::array::from_fn(|row| std::array::from_fn(|column| value[column][row]))
+}
+
 /// Decode the 23 ball joints, 58 hinges, and six translations.
 pub fn body_cont_to_model_params(value: &[f32; 260]) -> [f32; 133] {
     let mut output = [0.0; 133];
@@ -215,9 +283,22 @@ pub fn camera_translation(
     focal: f32,
     principal: [f32; 2],
 ) -> [f32; 3] {
+    camera_translation_scaled(pred_cam, bbox_center, bbox_side, focal, principal, 1.0)
+}
+
+/// [`camera_translation`] with the camera head's `default_scale_factor`
+/// multiplying the box size (1 for the body head, 10 for the hand head).
+pub fn camera_translation_scaled(
+    pred_cam: [f32; 3],
+    bbox_center: [f32; 2],
+    bbox_side: f32,
+    focal: f32,
+    principal: [f32; 2],
+    scale_factor: f32,
+) -> [f32; 3] {
     let scale = -pred_cam[0];
     let ty = -pred_cam[2];
-    let bbox_scale = bbox_side * scale + 1.0e-8;
+    let bbox_scale = bbox_side * scale * scale_factor + 1.0e-8;
     [
         pred_cam[1] + 2.0 * (bbox_center[0] - principal[0]) / bbox_scale,
         ty + 2.0 * (bbox_center[1] - principal[1]) / bbox_scale,
