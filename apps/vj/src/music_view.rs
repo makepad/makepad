@@ -2488,6 +2488,11 @@ script_mod! {
                                         width: Fill
                                         flow: Flow.Right{wrap: false}
                                         empty_text: "category"
+                                        // The explorer opens filtered to
+                                        // music (the model's default);
+                                        // showing the word keeps the box
+                                        // honest — clear it for all audio.
+                                        text: "music"
                                     }
                                 }
                                 music_go := MusicChipButton{
@@ -5629,7 +5634,6 @@ mod tests {
         assert_eq!(narrow.sweep_w, 200.0);
     }
 
-    use super::*;
     use crate::mixer::TrackPcm;
 
     #[test]
