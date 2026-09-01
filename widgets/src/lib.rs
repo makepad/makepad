@@ -132,6 +132,7 @@ pub mod flat_list;
 
 pub mod chart;
 pub mod perf_graph;
+pub mod screen_cap;
 
 // Commented out modules (not yet converted)
 // lets depricate these for now
@@ -257,6 +258,7 @@ pub use crate::vector::*;
 
 pub use crate::chart::*;
 pub use crate::perf_graph::*;
+pub use crate::screen_cap::*;
 
 pub use crate::video::*;
 
@@ -560,6 +562,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::nav_control::script_mod(vm);
     crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
+    crate::screen_cap::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);

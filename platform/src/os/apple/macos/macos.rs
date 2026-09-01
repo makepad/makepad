@@ -950,6 +950,7 @@ impl Cx {
                 self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
                 self.os.timer0_idle_since = None;
                 self.ensure_timer0_started();
+                crate::os::apple::metal::note_input_event();
             }
             MacosEvent::Timer(te) => {
                 if take_contained_panic() {

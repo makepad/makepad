@@ -1401,6 +1401,35 @@ impl MacosApp {
                         displayLinkWithTarget: self.timer_delegate_instance
                         selector: sel!(receivedDisplayLink:)
                     ];
+                    // An unconstrained CADisplayLink lets the SYSTEM pick the
+                    // rate, and it adaptively throttles a "static" window to
+                    // 30Hz — measured as a hard 33.9ms lock on frames that
+                    // cost 3ms. Pin the range to the panel's maximum.
+                    if link != nil {
+                        let responds: bool =
+                            msg_send![link, respondsToSelector: sel!(setPreferredFrameRateRange:)];
+                        if responds {
+                            let screen: ObjcId = msg_send![window, screen];
+                            let maximum_fps: isize = if screen != nil {
+                                msg_send![screen, maximumFramesPerSecond]
+                            } else {
+                                60
+                            };
+                            let fps = maximum_fps.max(1) as f32;
+                            let range = CAFrameRateRange {
+                                minimum: fps,
+                                maximum: fps,
+                                preferred: fps,
+                            };
+                            let () = msg_send![link, setPreferredFrameRateRange: range];
+                            crate::log!(
+                                "macos: display link pinned to {}fps (panel maximum)",
+                                maximum_fps
+                            );
+                        } else {
+                            crate::log!("macos: display link has no rate-range API");
+                        }
+                    }
                 }
                 if link == nil {
                     continue;

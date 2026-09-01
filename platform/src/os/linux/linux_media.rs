@@ -177,7 +177,7 @@ impl CxMediaApi for Cx {
         }
     }
 
-    fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
+    fn audio_output_box_os(&mut self, index: usize, f: AudioOutputFn) {
         *self.os.media.alsa_audio().lock().unwrap().audio_output_cb[index]
             .lock()
             .unwrap() = Some(f);
