@@ -26,6 +26,11 @@ pub use makepad_ai_common::error;
 pub use makepad_ai_common::{DiffusionError, Result};
 
 pub mod weights;
+pub mod mhr;
+pub mod pose;
+
+#[cfg(test)]
+pub mod fixture;
 
 /// Model input: the person crop the backbone sees.
 pub const IMAGE_SIZE: usize = 512;
