@@ -72,7 +72,7 @@ from boxes; never make it a plain game.model (that is scenery).
 A "small car" = `world.spawn({model: "...", scale: 0.5})` or `scale: "small"`
 — it stays driveable; `world.place` makes static scenery.
 
-CITIES, VILLAGES, RACETRACKS, ROADS, FORESTS AND DUNGEONS ARE ONE CALL;
+CITIES, VILLAGES, RACETRACKS, RAILWAYS, ROADS, FORESTS AND DUNGEONS ARE ONE CALL;
 never hand-place their tiles. They are deterministic from seed:
 - `game.city({seed, size, density})`, `game.village({seed, size})`, and
   `game.dungeon({kit, extent, seed})` build complete layouts.
@@ -87,6 +87,14 @@ never hand-place their tiles. They are deterministic from seed:
     let r = game.car({model: "kenney/car-kit/race", color: #4488ff})
     game.place(r, t.slots[1])
     game.autodrive(r, {points: t.waypoints, pace: 0.85})
+- `game.traintrack({seed, size})` lays a complete closed RAILWAY from the
+  train kit — never hand-place track pieces (the joins will not line up;
+  the generator's are seamless). `game.train({cars})` puts a driveable
+  locomotive with trailing carriages on it: board it like any vehicle,
+  drive with forward/back only, it cannot leave the rails. A railway's
+  essential shape is:
+    game.traintrack({seed: 3, size: 90})
+    game.train({cars: 4})
     game.race({laps: 3})
     game.player_character({pos: t.start, model: "kenney/mini-characters/character-male-b"})
 Every car gets a different `t.slots` entry; spawn the player at `t.start`.
