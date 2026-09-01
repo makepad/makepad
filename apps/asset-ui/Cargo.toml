@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../../widgets" }
 # Service wire types + fleet/affinity scheduler (transport here is
 # cx.http_request; the lib's blocking client is for worker-thread consumers).
-makepad-asset-ai = { path = "../../libs/asset/ai", default-features = false }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 makepad-micro-serde = { path = "../../libs/micro_serde" }
 makepad-base64 = { path = "../../libs/base64" }
 # Mesh viewer: Renderer stage for a single GLB.
@@ -23,6 +23,7 @@ makepad-xr = { path = "../../xr" }
 # retry), catalog runtimes, committed-event subscriber, verified cache. The
 # VJ worker owns these crates; this app consumes the public API only.
 makepad-asset-client = { path = "../../libs/asset/client" }
+makepad-asset-creator = { path = "../../libs/asset/creator" }
 # Shared preview/viewer widgets: the pool every host draws catalog content
 # with (VJ and the DJ surface adopt the same set).
 # The renderer feature brings the 3D faces (mesh turntable, world walker).
@@ -33,7 +34,7 @@ makepad-asset-chat = { path = "../../libs/asset/chat" }
 # broker session + its worker channel, the transcript with its tool chips
 # and rate meter, and the list widget. This app supplies the personality
 # (namespace `gen`, client profile `gen`, its own client-executed tools).
-makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
+makepad-chat-ui = { path = "../../libs/chat_ui" }
 # Embedded catalog/chat broker for now: the app starts the real Asset
 # Server in-process instead of waiting for a LAN beacon.
 makepad-asset-store = { path = "../../libs/asset/store" }

@@ -41,7 +41,8 @@ pub mod discovery;
 pub mod dto;
 pub mod error;
 pub mod http;
-pub mod json;
+// The module moved; this re-export keeps every dependent's `makepad_asset_client::json::Value` path compiling.
+pub mod json { pub use makepad_strict_json::*; }
 pub mod side_channels;
 pub mod publish;
 pub mod resolver;
@@ -62,7 +63,7 @@ pub use api::{
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
 pub use client::{
     AssetClient, AssetsPage, CatalogEventCursor, CatalogEventsPage, CatalogPage, ClientConfig,
-    JobControl, PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
+    PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
 };
 pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,

@@ -4,7 +4,7 @@
 use crate::backend::{
     gpu_add, gpu_attention_packed_causal, gpu_concat_rows, gpu_device_available, gpu_download,
     gpu_linear_nt_cached_bf16_f32acc, gpu_rms_norm_mul, gpu_slice_rows, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
 };
 use crate::music3::{
     MUSIC3_AUDIO_VOCAB, MUSIC3_LM_RMS_EPS, MUSIC3_NUM_CODEBOOKS, MUSIC3_RVQ_FF, MUSIC3_RVQ_HEADS,

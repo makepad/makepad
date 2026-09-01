@@ -1,4 +1,4 @@
-//! Additive Import cards for Freedoom, LibreQuake, and official shareware.
+//! Additive Import cards for libre, freeware, and official shareware packs.
 //!
 //! Downloads go through platform `cx.http_request`. Bytes are unpacked by
 //! [`makepad_asset_importer::classic_fetch`], then converted via
@@ -107,6 +107,87 @@ pub const DUKE3D_MODULE: PackModule = PackModule {
     import_wired: true,
 };
 
+const EA_CNC_HOME: &str = "https://www.ea.com/games/command-and-conquer";
+const EA_CLASSIC_LICENSE: &str = "EA freeware — local use, not redistributable";
+const EA_CLASSIC_LICENSE_BLURB: &str = "© Westwood Studios / Electronic Arts. EA freeware for local preview in this app only. Not a redistributable grant.";
+const EA_CLASSIC_CREDITS: &str = "Westwood Studios / Electronic Arts";
+
+pub const EA_MODULES: [PackModule; 4] = [
+    PackModule {
+        id: "cnc",
+        title: "Tiberian Dawn",
+        blurb: "EA's 1995 RTS, freeware since 2007 — terrain, units, structures, sounds and every campaign and multiplayer map convert into RTS maps for the sandbox.",
+        license: EA_CLASSIC_LICENSE,
+        license_blurb: EA_CLASSIC_LICENSE_BLURB,
+        homepage: EA_CNC_HOME,
+        terms_url: EA_CNC_HOME,
+        source_page: EA_CNC_HOME,
+        github: None,
+        credits: EA_CLASSIC_CREDITS,
+        import_wired: true,
+    },
+    PackModule {
+        id: "ra",
+        title: "Red Alert",
+        blurb: "The 1996 sequel, freeware since 2008 — Allied and Soviet arsenals, snow/temperate/interior maps.",
+        license: EA_CLASSIC_LICENSE,
+        license_blurb: EA_CLASSIC_LICENSE_BLURB,
+        homepage: EA_CNC_HOME,
+        terms_url: EA_CNC_HOME,
+        source_page: EA_CNC_HOME,
+        github: None,
+        credits: EA_CLASSIC_CREDITS,
+        import_wired: true,
+    },
+    PackModule {
+        id: "ts",
+        title: "Tiberian Sun",
+        blurb: "The 1999 isometric sequel, freeware since 2010 — GDI/Nod units and tilesets; maps are generated from the tilesets.",
+        license: EA_CLASSIC_LICENSE,
+        license_blurb: EA_CLASSIC_LICENSE_BLURB,
+        homepage: EA_CNC_HOME,
+        terms_url: EA_CNC_HOME,
+        source_page: EA_CNC_HOME,
+        github: None,
+        credits: EA_CLASSIC_CREDITS,
+        import_wired: true,
+    },
+    PackModule {
+        id: "d2k",
+        title: "Dune 2000",
+        blurb: "Westwood's 1998 Dune RTS — Atreides/Harkonnen/Ordos units and the Arrakis tilesets; maps are generated.",
+        license: EA_CLASSIC_LICENSE,
+        license_blurb: EA_CLASSIC_LICENSE_BLURB,
+        homepage: EA_CNC_HOME,
+        terms_url: EA_CNC_HOME,
+        source_page: EA_CNC_HOME,
+        github: None,
+        credits: EA_CLASSIC_CREDITS,
+        import_wired: true,
+    },
+];
+
+pub const EA_SOURCES: [ClassicSource; 4] = [
+    ClassicSource::Cnc,
+    ClassicSource::RedAlert,
+    ClassicSource::TiberianSun,
+    ClassicSource::Dune2000,
+];
+
+pub const EA_PACK_LABELS: [&str; 4] = ["Tiberian Dawn", "Red Alert", "Tiberian Sun", "Dune 2000"];
+
+pub fn ea_source_for_index(index: usize) -> ClassicSource {
+    EA_SOURCES.get(index).copied().unwrap_or(ClassicSource::Cnc)
+}
+
+pub fn ea_index_for_source(source: ClassicSource) -> Option<usize> {
+    EA_SOURCES.iter().position(|candidate| *candidate == source)
+}
+
+fn is_ea_source(source: ClassicSource) -> bool {
+    ea_index_for_source(source).is_some()
+}
+
 pub const QUAKE2_MODULE: PackModule = PackModule {
     id: QUAKE2_SOURCE_ID,
     title: "Quake II shareware",
@@ -157,6 +238,10 @@ pub const PACK_MODULES_WITH_CLASSIC: &[PackModule] = &[
     LIBREQUAKE_MODULE,
     QUAKE_MODULE,
     DUKE3D_MODULE,
+    EA_MODULES[0],
+    EA_MODULES[1],
+    EA_MODULES[2],
+    EA_MODULES[3],
     QUAKE2_MODULE,
     QUAKE3_MODULE,
     DARKMOD_MODULE,
@@ -1813,8 +1898,10 @@ fn classic_library_landings(
     let mut seen_icons = std::collections::BTreeSet::new();
     let mut seen_titles = std::collections::BTreeSet::new();
     for asset in assets {
+        let ea_source = is_ea_source(source);
         if matches!(asset.kind, AssetKind::Texture)
             && !matches!(source, classic_import::ClassicSource::Quake3)
+            && !(ea_source && asset.key.starts_with("icons/"))
         {
             continue;
         }
@@ -1839,11 +1926,30 @@ fn classic_library_landings(
             AssetKind::Character => (path, "model/gltf-binary", "character"),
             AssetKind::Weapon => (path, "model/gltf-binary", "weapon"),
             AssetKind::Prop => (path, "model/gltf-binary", "prop"),
-            AssetKind::Texture => (path, "image/png", "image"),
+            AssetKind::Texture => (
+                path,
+                "image/png",
+                if ea_source && asset.key.starts_with("icons/") {
+                    "texture"
+                } else {
+                    "image"
+                },
+            ),
             AssetKind::Audio => {
                 let music = asset.key.starts_with("music/")
                     || asset.tags.iter().any(|t| t.eq_ignore_ascii_case("music"));
-                (path, "audio/wav", if music { "music" } else { "sfx" })
+                let speech = asset.tags.iter().any(|t| t.eq_ignore_ascii_case("speech"));
+                (
+                    path,
+                    "audio/wav",
+                    if speech {
+                        "speech"
+                    } else if music {
+                        "music"
+                    } else {
+                        "sfx"
+                    },
+                )
             }
             AssetKind::Billboard => {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -1908,12 +2014,17 @@ fn classic_library_landings(
         {
             continue;
         }
+        let dedupe_key = if ea_source {
+            asset.key.clone()
+        } else {
+            title.clone()
+        };
         if !matches!(source, classic_import::ClassicSource::Quake3)
             && matches!(
                 asset.kind,
                 AssetKind::Billboard | AssetKind::Audio | AssetKind::Texture
             )
-            && !seen_titles.insert(title.clone())
+            && !seen_titles.insert(dedupe_key)
         {
             continue;
         }
@@ -2191,6 +2302,10 @@ pub struct ClassicImportPage {
     pub librequake: ClassicImportCard,
     pub quake: ClassicImportCard,
     pub duke3d: ClassicImportCard,
+    pub cnc: ClassicImportCard,
+    pub ra: ClassicImportCard,
+    pub ts: ClassicImportCard,
+    pub d2k: ClassicImportCard,
     pub quake2: ClassicImportCard,
     pub quake3: ClassicImportCard,
     pub darkmod: ClassicImportCard,
@@ -2204,6 +2319,10 @@ impl Default for ClassicImportPage {
             librequake: ClassicImportCard::new(ClassicSource::LibreQuake),
             quake: ClassicImportCard::new(ClassicSource::Quake),
             duke3d: ClassicImportCard::new(ClassicSource::Duke3d),
+            cnc: ClassicImportCard::new(ClassicSource::Cnc),
+            ra: ClassicImportCard::new(ClassicSource::RedAlert),
+            ts: ClassicImportCard::new(ClassicSource::TiberianSun),
+            d2k: ClassicImportCard::new(ClassicSource::Dune2000),
             quake2: ClassicImportCard::new(ClassicSource::Quake2),
             quake3: ClassicImportCard::new(ClassicSource::Quake3),
             darkmod: ClassicImportCard::new(ClassicSource::DarkMod),
@@ -2219,6 +2338,10 @@ impl ClassicImportPage {
             ClassicSource::LibreQuake => &self.librequake,
             ClassicSource::Quake => &self.quake,
             ClassicSource::Duke3d => &self.duke3d,
+            ClassicSource::Cnc => &self.cnc,
+            ClassicSource::RedAlert => &self.ra,
+            ClassicSource::TiberianSun => &self.ts,
+            ClassicSource::Dune2000 => &self.d2k,
             ClassicSource::Quake2 => &self.quake2,
             ClassicSource::Quake3 => &self.quake3,
             ClassicSource::DarkMod => &self.darkmod,
@@ -2232,6 +2355,10 @@ impl ClassicImportPage {
             ClassicSource::LibreQuake => &mut self.librequake,
             ClassicSource::Quake => &mut self.quake,
             ClassicSource::Duke3d => &mut self.duke3d,
+            ClassicSource::Cnc => &mut self.cnc,
+            ClassicSource::RedAlert => &mut self.ra,
+            ClassicSource::TiberianSun => &mut self.ts,
+            ClassicSource::Dune2000 => &mut self.d2k,
             ClassicSource::Quake2 => &mut self.quake2,
             ClassicSource::Quake3 => &mut self.quake3,
             ClassicSource::DarkMod => &mut self.darkmod,
@@ -2244,6 +2371,10 @@ impl ClassicImportPage {
             || self.librequake.compiling()
             || self.quake.compiling()
             || self.duke3d.compiling()
+            || self.cnc.compiling()
+            || self.ra.compiling()
+            || self.ts.compiling()
+            || self.d2k.compiling()
             || self.quake2.compiling()
             || self.quake3.compiling()
             || self.darkmod.compiling()
@@ -2293,6 +2424,10 @@ impl ClassicImportPage {
             &mut self.librequake,
             &mut self.quake,
             &mut self.duke3d,
+            &mut self.cnc,
+            &mut self.ra,
+            &mut self.ts,
+            &mut self.d2k,
             &mut self.quake2,
             &mut self.quake3,
             &mut self.darkmod,
@@ -2306,10 +2441,14 @@ impl ClassicImportPage {
         let c = self.librequake.poll();
         let d = self.quake.poll();
         let e = self.duke3d.poll();
-        let f = self.quake2.poll();
-        let g = self.quake3.poll();
-        let h = self.darkmod.poll();
-        a || b || c || d || e || f || g || h
+        let f = self.cnc.poll();
+        let g = self.ra.poll();
+        let h = self.ts.poll();
+        let i = self.d2k.poll();
+        let j = self.quake2.poll();
+        let k = self.quake3.poll();
+        let l = self.darkmod.poll();
+        a || b || c || d || e || f || g || h || i || j || k || l
     }
 
     pub fn take_all_landings(&mut self) -> Vec<LibraryLanding> {
@@ -2318,6 +2457,10 @@ impl ClassicImportPage {
         out.extend(self.librequake.take_library_landings());
         out.extend(self.quake.take_library_landings());
         out.extend(self.duke3d.take_library_landings());
+        out.extend(self.cnc.take_library_landings());
+        out.extend(self.ra.take_library_landings());
+        out.extend(self.ts.take_library_landings());
+        out.extend(self.d2k.take_library_landings());
         out.extend(self.quake2.take_library_landings());
         out.extend(self.quake3.take_library_landings());
         out.extend(self.darkmod.take_library_landings());
@@ -2330,6 +2473,10 @@ impl ClassicImportPage {
         out.extend(self.librequake.take_previews());
         out.extend(self.quake.take_previews());
         out.extend(self.duke3d.take_previews());
+        out.extend(self.cnc.take_previews());
+        out.extend(self.ra.take_previews());
+        out.extend(self.ts.take_previews());
+        out.extend(self.d2k.take_previews());
         out.extend(self.quake2.take_previews());
         out.extend(self.quake3.take_previews());
         out.extend(self.darkmod.take_previews());
@@ -2399,6 +2546,10 @@ mod tests {
             DOOM_MODULE,
             QUAKE_MODULE,
             DUKE3D_MODULE,
+            EA_MODULES[0],
+            EA_MODULES[1],
+            EA_MODULES[2],
+            EA_MODULES[3],
             QUAKE2_MODULE,
             QUAKE3_MODULE,
         ] {
@@ -2414,6 +2565,62 @@ mod tests {
                 module.id
             );
         }
+    }
+
+    #[test]
+    fn ea_classics_modules_dropdown_and_library_domains_are_wired() {
+        let ids: Vec<_> = PACK_MODULES_WITH_CLASSIC.iter().map(|module| module.id).collect();
+        for id in ["cnc", "ra", "ts", "d2k"] {
+            assert!(ids.contains(&id), "missing EA classic module {id}");
+        }
+        for (index, source) in EA_SOURCES.into_iter().enumerate() {
+            assert_eq!(ea_source_for_index(index), source);
+            assert_eq!(ea_index_for_source(source), Some(index));
+        }
+
+        let staged = std::env::temp_dir().join(format!(
+            "asset-ui-ea-landings-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&staged);
+        std::fs::create_dir_all(staged.join("billboards/cnc")).unwrap();
+        std::fs::create_dir_all(staged.join("worlds")).unwrap();
+        std::fs::write(staged.join("billboards/cnc/mtnk.billboard"), b"manifest").unwrap();
+        std::fs::write(staged.join("billboards/cnc/mtnk_thumb.png"), b"png").unwrap();
+        std::fs::write(staged.join("worlds/scm01ea.glb"), b"glb").unwrap();
+        std::fs::write(staged.join("worlds/scm01ea.png"), b"png").unwrap();
+        let assets = [
+            classic_import::ClassicAsset {
+                key: "billboards/cnc/mtnk".into(),
+                kind: AssetKind::Billboard,
+                rel_path: "billboards/cnc/mtnk.billboard".into(),
+                tags: vec!["unit".into()],
+                icon_rel: Some("billboards/cnc/mtnk_thumb.png".into()),
+            },
+            classic_import::ClassicAsset {
+                key: "worlds/scm01ea".into(),
+                kind: AssetKind::World,
+                rel_path: "worlds/scm01ea.glb".into(),
+                tags: vec!["map".into()],
+                icon_rel: Some("worlds/scm01ea.png".into()),
+            },
+        ];
+        let landings = classic_library_landings(&staged, ClassicSource::Cnc, "cnc", &assets);
+        assert_eq!(
+            landings
+                .iter()
+                .find(|landing| landing.path.ends_with("mtnk.billboard"))
+                .map(|landing| landing.domain),
+            Some("billboard")
+        );
+        assert_eq!(
+            landings
+                .iter()
+                .find(|landing| landing.path.ends_with("scm01ea.glb"))
+                .map(|landing| landing.domain),
+            Some("map")
+        );
+        let _ = std::fs::remove_dir_all(staged);
     }
 
     #[test]

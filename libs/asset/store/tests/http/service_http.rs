@@ -5,6 +5,7 @@
 mod common;
 
 use common::*;
+use makepad_asset_client::{Api, ApiEndpoints, HttpLimits};
 use makepad_asset_store::discovery::DiscoveryListener;
 use makepad_asset_store::json::Value;
 use makepad_asset_store::{AssetServer, DiscoveryConfig};
@@ -38,6 +39,75 @@ fn health_bootstrap_and_whoami() {
     // Unknown paths and wrong methods refuse cleanly.
     assert_eq!(admin.get("/v1/nothing").status, 404);
     assert_eq!(admin.post_json("/v1/health", &jobj(vec![])).status, 405);
+}
+
+#[test]
+fn assets_query_accepts_select_refuses_writes_and_requires_auth() {
+    let ts = start_server("assets_query");
+    let admin_token = ts.admin_token();
+    let mut admin = ts.control(Some(&admin_token));
+    let reader_token = principal_with(&mut admin, &[]);
+    let mut reader = ts.control(Some(&reader_token));
+
+    let select = jobj(vec![("sql", jstr("SELECT 7 AS answer"))]);
+    let r = reader.post_json("/v1/assets/query", &select);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let result = r.json();
+    assert_eq!(
+        result.get("columns").and_then(Value::as_arr).unwrap()[0].as_str(),
+        Some("answer")
+    );
+    assert_eq!(
+        result.get("rows").and_then(Value::as_arr).unwrap()[0]
+            .as_arr()
+            .unwrap()[0]
+            .as_str(),
+        Some("7")
+    );
+    assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(false));
+
+    let api = Api::new(
+        ApiEndpoints {
+            control: ts.server.control_addr(),
+            data: ts.server.data_addr(),
+        },
+        HttpLimits::default_v1(),
+        Some(reader_token.clone()),
+    )
+    .unwrap();
+    let typed = api.assets_query("SELECT 8 AS typed_answer").unwrap();
+    assert_eq!(typed.columns, vec!["typed_answer"]);
+    assert_eq!(typed.rows, vec![vec!["8"]]);
+
+    let limited = jobj(vec![
+        (
+            "sql",
+            jstr("SELECT name FROM principals ORDER BY name"),
+        ),
+        ("limit", Value::Int(1)),
+    ]);
+    let r = reader.post_json("/v1/assets/query", &limited);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json().get("rows").and_then(Value::as_arr).unwrap().len(), 1);
+    assert_eq!(r.json().get("truncated").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        reader
+            .post_json(
+                "/v1/assets/query",
+                &jobj(vec![
+                    ("sql", jstr("SELECT 1")),
+                    ("limit", Value::Int(201)),
+                ]),
+            )
+            .status,
+        400
+    );
+
+    let write = jobj(vec![("sql", jstr("INSERT INTO assets DEFAULT VALUES"))]);
+    assert_eq!(reader.post_json("/v1/assets/query", &write).status, 400);
+
+    let mut anonymous = ts.control(None);
+    assert_eq!(anonymous.post_json("/v1/assets/query", &select).status, 401);
 }
 
 #[test]

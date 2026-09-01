@@ -186,4 +186,4 @@ mod own_db {
     }
 }
 
-pub use own_db::{Db, Stmt};
+pub use own_db::Db;

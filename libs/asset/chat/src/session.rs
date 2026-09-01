@@ -185,6 +185,9 @@ pub struct Session {
     origin: Origin,
     provider: Box<dyn ChatProvider>,
     history: Vec<ChatMessage>,
+    /// Volatile per-turn context, handed to the provider beside the stable
+    /// system block (see `send_with_context`).
+    dynamic_context: String,
     known: HashSet<AssetRevisionId>,
     phase: Phase,
     system: String,
@@ -269,6 +272,7 @@ impl Session {
             known: HashSet::new(),
             phase: Phase::Idle,
             system: String::new(),
+            dynamic_context: String::new(),
             events: VecDeque::new(),
             seq: 0,
             turn,
@@ -420,11 +424,13 @@ impl Session {
             .map_err(|_| SendRefusal::TooLarge { what: "message" })?;
 
         let defs = tools_exec.tool_definitions();
-        let mut cap = tools_exec.capability_doc();
-        if !dynamic_context.is_empty() {
-            cap.push('\n');
-            cap.push_str(dynamic_context);
-        }
+        // The system block stays STABLE across turns — a per-turn world
+        // manifest baked in here re-prefills the whole conversation on
+        // every KV-holding provider. The volatile layer travels separately
+        // (TurnInput::dynamic_context) and each provider places it where
+        // its transport can afford it.
+        let cap = tools_exec.capability_doc();
+        self.dynamic_context = dynamic_context.to_string();
         self.system = if self.provider.kind().uses_native_tools() {
             tools::render_native_system(&defs, &cap)
         } else {
@@ -583,7 +589,8 @@ impl Session {
         for m in &self.history {
             m.validate().map_err(|_| "message empty or too large".to_string())?;
         }
-        let input = TurnInput::new(self.system.clone(), self.history.clone());
+        let mut input = TurnInput::new(self.system.clone(), self.history.clone());
+        input.dynamic_context = self.dynamic_context.clone();
         self.provider.begin_turn(&input)?;
         self.phase = Phase::Streaming { collected: String::new() };
         Ok(())

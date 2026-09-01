@@ -3062,6 +3062,50 @@ extern "C" cudaError_t mkllm_cast_f32_bf16(
     return cudaGetLastError();
 }
 
+// The activation cast for GEMMs whose weights are already f16 and so need no
+// dequant slab. It writes the activation TWICE — once rounded to f16, once as
+// the f16 of what that rounding threw away — because one f16 copy is not
+// accurate enough for this.
+//
+// A single f16 activation loses 11 bits, and a vision tower is the worst
+// place to lose them: a handful of channels carry activations orders of
+// magnitude larger than the rest, so their absolute rounding error is
+// correspondingly enormous. Measured on the Qwen3-VL tower against the f32
+// reference kernel, a plain f16 cast moved the output embeddings by 8e-4 to
+// 1.7e-2 relative RMS depending on the page — an order of magnitude past the
+// gate, and page-dependent precisely because it is those outliers that decide
+// it.
+//
+// hi + lo is exact to ~2^-22 of the original instead of 2^-11, at the price
+// of running the GEMM twice (the second accumulating on top of the first).
+// The weight side loses nothing either way: it is stored f16, so the f32
+// reference kernel reads exactly these bits too. Both halves are clamped into
+// f16 range so a value past 65504 degrades instead of turning into a NaN.
+static __global__ void mkllm_cast_f32_f16_split_kernel(
+        const uint8_t * __restrict__ src, __half * __restrict__ hi, __half * __restrict__ lo,
+        int K, int M, size_t src_nb0, size_t src_nb1) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int m = blockIdx.y;
+    if (k >= K || m >= M) return;
+    const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
+    const float clamped = fminf(fmaxf(v, -65504.0f), 65504.0f);
+    const __half h = __float2half_rn(clamped);
+    const float r = fminf(fmaxf(v - __half2float(h), -65504.0f), 65504.0f);
+    const size_t o = (size_t) m * K + k;
+    hi[o] = h;
+    lo[o] = __float2half_rn(r);
+}
+
+extern "C" cudaError_t mkllm_cast_f32_f16_split(
+        const void * src, void * hi, void * lo, int K, int M,
+        size_t src_nb0, size_t src_nb1, cudaStream_t stream) {
+    dim3 block(256);
+    dim3 grid((K + 255) / 256, M);
+    mkllm_cast_f32_f16_split_kernel<<<grid, block, 0, stream>>>(
+        (const uint8_t *) src, (__half *) hi, (__half *) lo, K, M, src_nb0, src_nb1);
+    return cudaGetLastError();
+}
+
 // ---------------------------------------------------------------------------
 // General strided batched mat-mul, f16 or f32 A x f32 B -> f32:
 //   dst[n, m, b2, b3] = sum_k A[k, n, b2 % a_ne2, b3 % a_ne3] * B[k, m, b2, b3]
@@ -4421,23 +4465,19 @@ static void mkllm_fattn_trace_launch(
     ++prints;
 }
 
-extern "C" cudaError_t mkllm_fattn_mma_f16(
+// The MMA launcher, templated on the tile shape so the GQA ratio can pick
+// it. `ncols2` is how many query heads of one KV head a tile covers, and
+// `ncols1` how many tokens; their product is the 64-column tile every size
+// below is derived from, so a different split costs nothing in shared memory.
+template <int ncols1, int ncols2>
+static cudaError_t mkllm_fattn_mma_launch(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
-        int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
+        int kc, int n_q, int H, int Hkv, float scale,
         size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
-        size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
+        size_t v_nb1, size_t v_nb2, size_t m_nb1,
         int nsm, int cc, float * tmp_fixup, cudaStream_t stream) {
-    (void) d_nb1;
-    (void) d_nb2;
-    if (D != 256 || Dv != 256 || n_q <= 0 || kc <= 0 || H <= 0 || Hkv <= 0
-            || H % Hkv != 0 || q == nullptr || k == nullptr || v == nullptr
-            || mask == nullptr || dst == nullptr) {
-        return cudaErrorInvalidValue;
-    }
     constexpr int DKQ = 256;
     constexpr int DV = 256;
-    constexpr int ncols1 = 8;
-    constexpr int ncols2 = 8;
     constexpr int ncols = ncols1 * ncols2;
     constexpr bool use_logit_softcap = false;
     constexpr bool V_is_K_view = false;
@@ -4504,8 +4544,10 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
     } else {
         blocks_num = dim3(ntiles_x, 1, ntiles_z_gqa * Hkv);
     }
+    char kind[16];
+    snprintf(kind, sizeof(kind), "mma%dx%d", ncols1, ncols2);
     mkllm_fattn_trace_launch(
-        "mma8x8", D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
+        kind, DKQ, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
         use_stream_k ? nblocks_stream_k : 1, ntiles_dst, ntiles_KV,
         use_stream_k ? 1 : 0, blocks_num.x, blocks_num.y, blocks_num.z);
 
@@ -4515,9 +4557,9 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
         (const char *) q, (const char *) k, (const char *) v, (const char *) mask,
         nullptr, nullptr, (float *) dst, use_stream_k ? (float2 *) tmp_fixup : nullptr,
         scale, 0.0f, 1.0f, 1.0f, n_head_log2, 0.0f,
-        D, ne01, H, 1,
+        DKQ, ne01, H, 1,
         (int32_t) q_nb1, (int32_t) q_nb2, 0,
-        D, kc, Hkv, 1,
+        DKQ, kc, Hkv, 1,
         (int32_t) k_nb1, (int32_t) k_nb2, 0,
         (int32_t) v_nb1, (int32_t) v_nb2, 0,
         n_q, 1, 1,
@@ -4536,6 +4578,49 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
         return cudaGetLastError();
     }
     return cudaSuccess;
+}
+
+extern "C" cudaError_t mkllm_fattn_mma_f16(
+        const void * q, const void * k, const void * v, const void * mask, void * dst,
+        int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
+        size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
+        size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
+        int nsm, int cc, float * tmp_fixup, cudaStream_t stream) {
+    (void) d_nb1;
+    (void) d_nb2;
+    if (D != 256 || Dv != 256 || n_q <= 0 || kc <= 0 || H <= 0 || Hkv <= 0
+            || H % Hkv != 0 || q == nullptr || k == nullptr || v == nullptr
+            || mask == nullptr || dst == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    // llama.cpp fattn.cu switch_ncols2: the GQA ratio decides how many query
+    // heads share a tile. Getting this wrong is not slow, it is wrong — a
+    // tile that claims 8 query heads of a 4-to-1 model reads heads that do
+    // not exist — which is why the caller used to hand anything below 8 to
+    // the generic kernel instead. Chandra 2 and Qwen3.5-9B are 16 heads over
+    // 4 KV heads, i.e. exactly the ratio that was being turned away, and
+    // their prefill spent 84% of itself in that generic kernel.
+#define MKLLM_FATTN_MMA_ARGS                                                   \
+    q, k, v, mask, dst, kc, n_q, H, Hkv, scale,                                \
+    q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, nsm, cc, tmp_fixup, stream
+    const int gqa_ratio = H / Hkv;
+    if (gqa_ratio % 8 == 0) {
+        return mkllm_fattn_mma_launch<8, 8>(MKLLM_FATTN_MMA_ARGS);
+    }
+    if (gqa_ratio % 4 == 0) {
+        return mkllm_fattn_mma_launch<16, 4>(MKLLM_FATTN_MMA_ARGS);
+    }
+    if (gqa_ratio % 2 == 0) {
+        // The rung llama.cpp's switch_ncols2 ladder has and this port was
+        // missing: ncols2 = 2 serves every even ratio the bigger tiles
+        // cannot, and Qwen3.8-27B is 24 heads over 4 KV heads — ratio 6.
+        // Without it the caller's gate sent that model to the generic
+        // FlashDecode kernel: measured 11-20x slower past 8k context, flat
+        // 85-91 tok/s restored with the tile.
+        return mkllm_fattn_mma_launch<32, 2>(MKLLM_FATTN_MMA_ARGS);
+    }
+    return cudaErrorInvalidValue;
+#undef MKLLM_FATTN_MMA_ARGS
 }
 
 extern "C" size_t mkllm_fattn_mma_fixup_bytes(int nsm) {

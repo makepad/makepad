@@ -23,11 +23,12 @@ use super::events::{self, EventBody};
 use super::http::{Conn, Head, Resp};
 use super::json::{obj, s, Value};
 use super::routes::{call_state, read_body, require_cap, secret_of, Outcome, RouteCtx};
-use super::routes_control::{read_json_body, worker_name, worker_suffix};
+use super::routes_control::read_json_body;
+use crate::PrincipalId;
 use super::util::{from_hex_bounded, now_ms};
 use crate::{
     imports::MAX_SOURCE_PAGE_ROWS, Capability, DerivationOutcome, DerivationStatus, DerivedResult,
-    ImportEntryRow, NewJob, ServerError,
+    ImportEntryRow, ServerError,
 };
 use makepad_asset_data::{
     derivation_key, AssetFile, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
@@ -456,10 +457,6 @@ fn status_value(status: &DerivationStatus) -> Value {
         ("recipe_digest", s(status.recipe_digest.to_string())),
         ("round", Value::Int(status.round as i64)),
         ("job", s(super::api::job_str(&status.job_id))),
-        ("job_state", match status.job_state {
-            Some(js) => s(js.as_str()),
-            None => Value::Null,
-        }),
         ("variant", match &status.variant {
             Some(v) => s(v.to_string()),
             None => Value::Null,
@@ -486,62 +483,10 @@ pub fn derivation_request(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> Ro
             .ok_or(ServerError::NotFound { what: "derivation base asset" })?;
         require_cap(ctx, &p, Capability::DeriveRequest, &ns)?;
         let outcome = ctx.core.variants().begin_derivation(&base, &recipe_bytes, now)?;
-        if let DerivationOutcome::NeedsJob {
-            dkey,
-            job_id,
-            kind,
-            recipe_digest,
-        } = &outcome
-        {
-            // Arm the typed worker job through the SAME invariants the job
-            // route enforces: metadata row first (the claim gate and job
-            // visibility read it), core enqueue second, meta rolled back on
-            // enqueue refusal. The payload envelope carries everything a
-            // worker needs to fetch its inputs.
-            let job_body = obj(vec![
-                ("dkey", s(dkey.to_string())),
-                ("base_asset", s(base.asset_id.to_string())),
-                ("base_revision", s(base.revision.to_string())),
-                ("recipe_digest", s(recipe_digest.to_string())),
-            ]);
-            let payload = super::state::envelope_build(&ns, &p, &job_body);
-            let distinct = ctx.meta_distinct_ns()?;
-            if !distinct.iter().any(|n| n == &ns)
-                && distinct.len() as u64 >= super::state::MAX_JOB_NAMESPACES
-            {
-                return Err(ServerError::OverBudget {
-                    what: "job namespaces",
-                    limit: super::state::MAX_JOB_NAMESPACES,
-                    found: distinct.len() as u64 + 1,
-                });
-            }
-            if ctx.meta_get(job_id)?.is_none() {
-                ctx.meta_insert(job_id, &ns, kind, &p, now)?;
-            }
-            let enqueue = ctx.core.jobs().enqueue(
-                &NewJob {
-                    job_id: *job_id,
-                    parent: None,
-                    kind,
-                    payload: &payload,
-                    priority: 0,
-                    max_attempts: 3,
-                    not_before_ms: 0,
-                    deps: &[],
-                },
-                now,
-            );
-            match enqueue {
-                Ok(()) => {}
-                // Crash-repair replay: the job already exists from a prior
-                // arming of this same round — joining it is the point.
-                Err(ServerError::Conflict { what: "job id" }) => {}
-                Err(e) => {
-                    ctx.meta_delete(job_id)?;
-                    return Err(e);
-                }
-            }
-        }
+        // Client-driven derivation (aicore P7): NeedsJob answers the
+        // CALLER with the deterministic job identity; the caller runs the
+        // kernel and posts derivation_complete under that identity. No
+        // queue is armed — there is no queue.
         Ok(outcome)
     })?;
     let (status, value) = match outcome {
@@ -702,6 +647,35 @@ fn derived_result_of(body: &Value) -> RouteResult<DerivedResult> {
     })
 }
 
+/// Worker identity is always derived from the authenticated principal, so
+/// one principal can never report on another's completion.
+fn worker_name(p: &PrincipalId, suffix: &Option<String>) -> String {
+    match suffix {
+        None => super::api::principal_str(p),
+        Some(sfx) => format!("{}/{}", super::api::principal_str(p), sfx),
+    }
+}
+
+/// Optional worker suffix, letting one principal run several deriver
+/// threads with distinct identities.
+fn worker_suffix(body: &Value) -> RouteResult<Option<String>> {
+    match body.get("suffix") {
+        None => Ok(None),
+        Some(v) => {
+            let t = v.as_str().ok_or(Fail::Http(400, "malformed worker suffix"))?;
+            if t.is_empty()
+                || t.len() > 32
+                || !t.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                })
+            {
+                return Err(Fail::Http(400, "malformed worker suffix"));
+            }
+            Ok(Some(t.to_string()))
+        }
+    }
+}
+
 pub fn derivation_complete(
     conn: &mut Conn,
     head: &mut Head,
@@ -719,25 +693,27 @@ pub fn derivation_complete(
     let now = now_ms();
     let variant = call_state(&rc.state, move |ctx| {
         let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
-        let meta = ctx
-            .meta_get(&job)?
-            .ok_or(ServerError::NotFound { what: "job" })?;
-        require_cap(ctx, &p, Capability::JobWorker, &meta.ns)?;
+        // Authorize against the derivation's base-asset namespace — the
+        // same namespace `derive_request` authorized when it minted this
+        // job identity. (The job-routing table left with the queue; the
+        // derivation row itself is the authority, and complete_derivation
+        // still refuses a job id a newer round superseded.)
+        let status = ctx
+            .core
+            .variants()
+            .derivation_status(&dkey)?
+            .ok_or(ServerError::NotFound { what: "derivation" })?;
+        let ns = ctx
+            .core
+            .catalog()
+            .asset_namespace(&status.base.asset_id)?
+            .ok_or(ServerError::NotFound { what: "derivation base asset" })?;
+        require_cap(ctx, &p, Capability::JobWorker, &ns)?;
         let worker = worker_name(&p, &suffix);
         let variant = ctx
             .core
             .variants()
             .complete_derivation(&dkey, &job, &worker, &result, now)?;
-        // Mirror the outcome for job_get consumers.
-        let attempt = ctx
-            .core
-            .jobs()
-            .attempts(&job)?
-            .last()
-            .map(|a| a.attempt as u64)
-            .unwrap_or(0);
-        let doc = obj(vec![("variant", s(variant.to_string()))]).to_json().into_bytes();
-        ctx.result_set(&job, "succeeded", attempt, &doc, now)?;
         Ok(variant)
     })?;
     Ok(Outcome::Resp(Resp::json(

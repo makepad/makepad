@@ -56,9 +56,7 @@ pub mod catalog;
 pub mod error;
 pub mod gc;
 pub mod imports;
-pub mod jobs;
 pub mod observe;
-pub mod operations;
 pub mod search;
 pub mod seed;
 pub mod server;
@@ -74,14 +72,7 @@ pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
 pub use error::{ServerError, ServerResult};
 pub use gc::{Gc, GcConfig, GcPhase, GcStatus};
 pub use imports::{ImportEntryRow, ImportReport, Imports};
-pub use jobs::{AttemptRow, ClaimedJob, JobId, JobState, Jobs, NewJob};
 pub use observe::{ObserveConfig, Outcome as ObserveOutcome};
-pub use operations::{
-    AliasExpect, ArmedJob, OperationAvailability, OperationCreateOutcome,
-    OperationCreateRequest, OperationDef, OperationEventRow, OperationId, OperationInputBinding,
-    OperationPublication, OperationResultFacts, OperationSnapshot, OperationState, Operations,
-    ParamValue, PinnedInput, MESH_FROM_IMAGE_V1,
-};
 pub use variants::{
     DerivationOutcome, DerivationStatus, DerivedResult, Variants, MAX_DERIVATION_ROUNDS,
 };
@@ -98,8 +89,8 @@ pub use server::{
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.
 pub mod host;
 pub use host::{
-    AssetServer, BlobRefPolicy, ChatConfig, ChatScript, DiscoveryConfig, ScriptedLane,
-    ScriptedTurn, LISTEN_FILE, ServerConfig, DEFAULT_DISCOVERY_PORT,
+    AssetServer, BlobRefPolicy, DiscoveryConfig, LISTEN_FILE, ServerConfig,
+    DEFAULT_DISCOVERY_PORT,
 };
 pub use host::discovery;
 pub use host::json;

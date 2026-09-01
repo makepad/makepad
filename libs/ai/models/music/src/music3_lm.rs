@@ -542,7 +542,7 @@ fn layer_forward(
     tokens: usize,
     batch: usize,
 ) -> Result<LayerOut> {
-    let n = tokens.saturating_mul(batch.max(1));
+
     let half = MUSIC3_LM_HEAD_DIM / 2;
     let q_inner = MUSIC3_LM_HEADS * MUSIC3_LM_HEAD_DIM;
     let kv_inner = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;

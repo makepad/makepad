@@ -15,7 +15,6 @@ use crate::budget::Budgets;
 use crate::cas::{BlobCommit, BlobWriter, Cas};
 use crate::catalog::{Catalog, CandidateState, CATALOG_SCHEMA};
 use crate::error::{io_err, ServerError, ServerResult};
-use crate::jobs::{Jobs, JOBS_SCHEMA};
 use crate::search::AssetAnnotation;
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
@@ -129,7 +128,8 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                 // v1: the original catalog/jobs/auth tables.
                 0 => {
                     db.exec("create catalog schema", CATALOG_SCHEMA)?;
-                    db.exec("create jobs schema", JOBS_SCHEMA)?;
+                    // v4 created the job queue; the queue is gone
+                    // (aicore P7) and a fresh root simply skips the step.
                     db.exec("create auth schema", crate::auth::AUTH_SCHEMA)?;
                 }
                 // v2: search tables join the versioned schema. Pre-v2 roots
@@ -170,10 +170,8 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                 }
                 // v5: typed asset operations. Purely additive.
                 4 => {
-                    db.exec(
-                        "create operations schema",
-                        crate::operations::OPERATIONS_SCHEMA,
-                    )?;
+                    // v5 created the operations schema; gone with the
+                    // queue (aicore P7).
                 }
                 // v6: kind CHECK accepts billboard (sprite/billboard content).
                 // v7: kind CHECK accepts game. Both rebuild the table with
@@ -339,12 +337,12 @@ impl AssetServerCore {
     }
 
     /// Restart recovery: purge orphan CAS temp files, finish or abandon blob
-    /// delete intents a crash left mid-sweep, and tear down expired worker
-    /// leases (re-queueing or failing their jobs).
-    pub fn recover(&self, now_ms: u64) -> ServerResult<RecoverReport> {
+    /// delete intents a crash left mid-sweep. (Worker-lease teardown left
+    /// with the queue; the report field stays for callers that print it.)
+    pub fn recover(&self, _now_ms: u64) -> ServerResult<RecoverReport> {
         let cas_temps_removed = self.cas.recover()?;
         let gc_deletes_resolved = self.gc().recover_pending(&self.cas)?;
-        let leases_expired = self.jobs().expire_leases(now_ms)?;
+        let leases_expired = 0u64;
         Ok(RecoverReport {
             cas_temps_removed,
             gc_deletes_resolved,
@@ -358,10 +356,6 @@ impl AssetServerCore {
 
     pub fn catalog(&self) -> Catalog<'_> {
         Catalog { db: &self.db, budgets: &self.budgets }
-    }
-
-    pub fn jobs(&self) -> Jobs<'_> {
-        Jobs { db: &self.db, budgets: &self.budgets }
     }
 
     pub fn auth(&self) -> Auth<'_> {
@@ -378,10 +372,6 @@ impl AssetServerCore {
 
     pub fn variants(&self) -> crate::variants::Variants<'_> {
         crate::variants::Variants { db: &self.db, budgets: &self.budgets }
-    }
-
-    pub fn operations(&self) -> crate::operations::Operations<'_> {
-        crate::operations::Operations { db: &self.db, budgets: &self.budgets }
     }
 
     pub fn cas(&self) -> &Cas {

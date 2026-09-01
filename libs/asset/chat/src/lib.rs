@@ -39,19 +39,97 @@
 //! [`fleet_http`] (minimal bounded HTTP for the fleet wire).
 
 pub mod catalog_sql;
-pub mod claude;
-pub mod cli;
-pub mod codex_cli;
+pub mod claude {
+    pub use makepad_ai_hub::providers::claude::*;
+}
+pub mod cli {
+    pub use makepad_ai_hub::providers::cli::*;
+}
+pub mod codex_cli {
+    pub use makepad_ai_hub::providers::codex_cli::*;
+}
 pub mod context;
 pub mod dispatch;
 pub mod fleet_discovery;
-pub mod fleet_http;
-pub mod grok;
-pub mod grok_cli;
-pub mod openai;
-pub mod provider;
-pub mod qwen;
-pub mod responses;
+pub mod fleet_http {
+    pub use makepad_ai_hub::providers::fleet_http::*;
+}
+pub mod grok {
+    pub use makepad_ai_hub::providers::grok::*;
+    use makepad_ai_hub::providers::responses::{
+        ApiKey, BlockingTransport, ResponsesConfig, ResponsesTransport,
+    };
+
+    pub fn from_env() -> GrokChatProvider<BlockingTransport> {
+        makepad_ai_hub::providers::grok::from_env(Some(crate::tools::native_tools_payload()))
+    }
+
+    pub fn new(
+        api_key: ApiKey,
+        model: impl Into<String>,
+    ) -> GrokChatProvider<BlockingTransport> {
+        makepad_ai_hub::providers::grok::new(
+            api_key,
+            model,
+            Some(crate::tools::native_tools_payload()),
+        )
+    }
+
+    pub fn with_transport<T: ResponsesTransport>(
+        config: ResponsesConfig,
+        transport: T,
+    ) -> Result<GrokChatProvider<T>, String> {
+        makepad_ai_hub::providers::grok::with_transport(
+            config,
+            transport,
+            Some(crate::tools::native_tools_payload()),
+        )
+    }
+}
+pub mod grok_cli {
+    pub use makepad_ai_hub::providers::grok_cli::*;
+}
+pub mod openai {
+    pub use makepad_ai_hub::providers::openai::*;
+    use makepad_ai_hub::providers::responses::{
+        ApiKey, BlockingTransport, ResponsesConfig, ResponsesTransport,
+    };
+
+    pub fn from_env() -> OpenAiChatProvider<BlockingTransport> {
+        makepad_ai_hub::providers::openai::from_env(Some(crate::tools::native_tools_payload()))
+    }
+
+    pub fn new(
+        api_key: ApiKey,
+        model: impl Into<String>,
+    ) -> OpenAiChatProvider<BlockingTransport> {
+        makepad_ai_hub::providers::openai::new(
+            api_key,
+            model,
+            Some(crate::tools::native_tools_payload()),
+        )
+    }
+
+    pub fn with_transport<T: ResponsesTransport>(
+        config: ResponsesConfig,
+        transport: T,
+    ) -> Result<OpenAiChatProvider<T>, String> {
+        makepad_ai_hub::providers::openai::with_transport(
+            config,
+            transport,
+            Some(crate::tools::native_tools_payload()),
+        )
+    }
+}
+pub mod provider {
+    pub use makepad_ai_hub::providers::provider::*;
+}
+pub mod qwen {
+    pub use makepad_ai_hub::providers::qwen::*;
+}
+pub mod responses {
+    pub use makepad_ai_hub::providers::responses::*;
+}
 pub mod session;
 pub mod toolcall;
 pub mod tools;

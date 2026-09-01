@@ -1,0 +1,23 @@
+[package]
+name = "makepad-asset-creator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The pipeline library drives compute through the hub…
+makepad-ai-hub = { path = "../../ai/hub", default-features = false }
+# …speaks strict JSON on every wire…
+makepad-strict-json = { path = "../../strict_json" }
+# …and publishes finished assets through the client. The hub itself never
+# sees this dependency: creation is the app's side of the boundary.
+makepad-asset-chat = { path = "../chat" }
+makepad-asset-client = { path = "../client" }
+makepad-asset-data = { path = "../data" }
+# The worker's own product builder + kind table, until P7 retires the rest.
+makepad-asset-importer = { path = "../importer", default-features = false }
+
+# The detached client: a long run is a client that does not close.
+[[bin]]
+name = "makepad-creator-run"
+path = "src/bin/creator_run.rs"
