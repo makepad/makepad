@@ -787,7 +787,7 @@ mod tests {
         let mut p = Playout::new(cfg());
         let period = 1_000_000 / ppm.unsigned_abs().max(1) as u32; // ticks between corrections
         let mut seq = 0u32;
-        let mut push = |ring: &JitterRing, seq: &mut u32| {
+        let push = |ring: &JitterRing, seq: &mut u32| {
             ring.insert(*seq, &frame_of(*seq), false);
             *seq = seq.wrapping_add(1);
         };

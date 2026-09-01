@@ -44,7 +44,7 @@ script_mod! {
     // waste in the stream on a bandwidth-bound tiler. `fog_density` stays
     // per-instance because shadows switch it off individually.
     mod.draw.DrawSceneCube = mod.std.set_type_default() do #(DrawSceneCube::script_shader(vm)){
-        ..mod.draw.DrawCube
+        ..mod.draw.DrawCube,
         ..ColorAdjust
         // The platform default is OFF (draw_shader.rs:41) and DrawCube does not
         // override it, so every slab, crate, ground plane and rigid body was
@@ -823,10 +823,45 @@ script_mod! {
             // matching the camera-forward convention (sin yaw, ., -cos yaw)
             // so screen_yaw == camera_yaw faces the orbit camera squarely.
             let right = vec3(cos(yaw), 0.0, sin(yaw))
+            // A FLOOR card lies flat on the ground plane instead of standing
+            // up: its second axis is the ground-projected camera forward
+            // (sin yaw, 0, -cos yaw), so the artwork reads screen-up on a
+            // top-down view and the whole card stays at one height. Asked
+            // for by a NEGATIVE retained sheet height (`screen_size.w`),
+            // which every upright caller leaves positive.
+            var up = vec3(0.0, 1.0, 0.0)
+            if self.screen_size.w < 0.0 {
+                up = vec3(right.z, 0.0, -right.x)
+            }
+            // A GROUND-ANCHORED billboard STANDS ON `screen_pos` instead of
+            // being centred on it, and every one of its fragments takes the
+            // DEPTH of that one point. Asked for by a NEGATIVE retained sheet
+            // WIDTH (`screen_size.z`), which every other caller leaves
+            // positive; its magnitude carries `1 + pad`, where `pad` is how
+            // much transparent padding the sheet packs UNDER the figure, as a
+            // share of the card's height. Both halves matter, and they are
+            // one decision:
+            //  * a sprite means "this thing stands here", so the caller says
+            //    where the FEET are; the card drops by its own padding so the
+            //    drawing — not the empty cell it is packed in — touches down;
+            //  * a card looking down on a strategy map leans its head TOWARD
+            //    the eye, so raw per-fragment depth lets a far unit's head
+            //    win against a near unit's boots. Flattening the quad onto
+            //    its own ground point is the classic sprite-engine answer:
+            //    pieces sort by where they STAND, which is what a commander
+            //    reads, while the world still occludes them normally.
+            var oy = corner.y
+            var anchored = 0.0
+            if self.screen_size.z < 0.0 {
+                oy = corner.y + 1.5 + self.screen_size.z
+                anchored = 1.0
+            }
             let world3 = vec3(
-                center.x + right.x * corner.x * self.screen_size.x,
-                center.y + corner.y * self.screen_size.y,
+                center.x + right.x * corner.x * self.screen_size.x
+                    + up.x * oy * self.screen_size.y,
+                center.y + up.y * oy * self.screen_size.y,
                 center.z + right.z * corner.x * self.screen_size.x
+                    + up.z * oy * self.screen_size.y
             )
             self.world = self.draw_list.view_transform
                 * vec4(world3.x, world3.y, world3.z, 1.0)
@@ -837,8 +872,23 @@ script_mod! {
                 self.uv_rect.x + q.x * (self.uv_rect.z - self.uv_rect.x),
                 self.uv_rect.y + q.y * (self.uv_rect.w - self.uv_rect.y)
             )
-            self.vertex_pos = self.draw_pass.camera_projection
+            let clip = self.draw_pass.camera_projection
                 * (self.draw_pass.camera_view * self.world)
+            self.vertex_pos = clip
+            if anchored > 0.5 {
+                let foot = self.draw_list.view_transform
+                    * vec4(center.x, center.y, center.z, 1.0)
+                let foot_clip = self.draw_pass.camera_projection
+                    * (self.draw_pass.camera_view * foot)
+                if foot_clip.w > 0.0001 {
+                    self.vertex_pos = vec4(
+                        clip.x,
+                        clip.y,
+                        foot_clip.z * clip.w / foot_clip.w,
+                        clip.w
+                    )
+                }
+            }
             return self.vertex_pos
         }
 
@@ -5104,6 +5154,8 @@ pub struct DrawSceneScreen {
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_pos: Vec4f,
     /// x = width, y = height in world units; zw may carry source sheet size.
+    /// A NEGATIVE `w` asks for a floor-aligned card and a NEGATIVE `z` for a
+    /// ground-anchored, depth-flattened billboard (see the vertex shader).
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub screen_size: Vec4f,
     /// 1 = alpha-cut-out sprite artwork (transparent pixels discard), 0 = an
@@ -5675,6 +5727,56 @@ pub struct DrawLmTopDilate {
 /// flags. DrawLmTop's lit gate (`lm_a >=`) rides the TOP edge: every texel
 /// the window would darken at all must carry a blocker height.
 pub const LM_SUN_SOFT: (f32, f32) = (0.2, 0.8);
+
+#[cfg(test)]
+mod shader_registration_tests {
+    use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+
+    #[test]
+    fn cube_family_script_shaders_compile_without_errors() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = {
+                    ..mod.std,
+                    ..mod.pod,
+                    ..mod.math,
+                    ..mod.sdf,
+                    ..mod.shader,
+                    draw:mod.draw,
+                }
+            });
+            vm.bx.heap.new_module(id!(widgets));
+            super::script_mod(vm);
+
+            let cube_errors = script_eval!(vm, {
+                mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCube)
+            });
+            let alpha_errors = script_eval!(vm, {
+                mod.shader.test_compile_draw_errors(mod.draw.DrawSceneAlpha)
+            });
+            let cube_errors = vm
+                .bx
+                .heap
+                .string_with(cube_errors, |_heap, value| value.to_string())
+                .expect("cube compile result should be a string");
+            let alpha_errors = vm
+                .bx
+                .heap
+                .string_with(alpha_errors, |_heap, value| value.to_string())
+                .expect("alpha compile result should be a string");
+            let setup_errors = vm.take_errors();
+
+            assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
+            assert!(cube_errors.is_empty(), "DrawSceneCube: {cube_errors}");
+            assert!(alpha_errors.is_empty(), "DrawSceneAlpha: {alpha_errors}");
+        });
+    }
+}
 
 #[cfg(test)]
 mod lm_soft_tests {
