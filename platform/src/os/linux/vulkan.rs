@@ -2614,7 +2614,12 @@ impl CxVulkan {
         }
         let screenshot_request_ids = cx.take_studio_screenshot_request_ids(0);
         let run_view_request = cx.take_studio_run_view_frame_request(0);
-        let capture_swapchain = !screenshot_request_ids.is_empty() || run_view_request.is_some();
+        // A continuous capture sink (the ScreenCap recorder) is standing
+        // permission rather than a queued request, so it is asked separately.
+        let capture_window_id = cx.get_pass_window_id(draw_pass_id).map(|w| w.id());
+        let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
+        let capture_swapchain =
+            !screenshot_request_ids.is_empty() || run_view_request.is_some() || wants_capture;
         if capture_swapchain && self.swapchain_readback_buffer.is_none() {
             return Err(
                 "swapchain capture requested but readback buffer is unavailable".to_string(),
@@ -2835,6 +2840,8 @@ impl CxVulkan {
             let width = self.swapchain_extent.width.max(1);
             let height = self.swapchain_extent.height.max(1);
             let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
+
+            crate::screen_capture::deliver_capture_frame(capture_window_id, width, height, &rgba);
 
             if !screenshot_request_ids.is_empty() {
                 let png = Cx::encode_rgba_as_png(width, height, &rgba)?;

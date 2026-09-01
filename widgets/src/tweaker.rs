@@ -618,8 +618,12 @@ pub fn window_intercept(
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
     // there, and the panel still is.
+    //
+    // SHIFT+F12 is not ours: that is the screen recorder
+    // (widgets/src/screen_cap.rs), and it must not drag the design surface
+    // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.key_code == KeyCode::F12 {
+        if key_event.key_code == KeyCode::F12 && !key_event.modifiers.shift {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {

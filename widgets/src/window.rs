@@ -11,6 +11,7 @@ use crate::{
     makepad_draw::shader::draw_sploded_hairline::DrawSplodedHairline,
     makepad_draw::*,
     nav_control::NavControl,
+    screen_cap::ScreenCap,
     view::*,
     widget::*,
 };
@@ -25,6 +26,7 @@ script_mod! {
     use mod.widgets.KeyboardView
     use mod.widgets.WindowMenu
     use mod.widgets.NavControl
+    use mod.widgets.ScreenCap
     use mod.widgets.Tweaker
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
@@ -134,6 +136,10 @@ script_mod! {
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
         nav_control: NavControl {}
+        // SHIFT+F12 records this window to local/screencap/*.mp4, picture and
+        // sound (widgets/src/screen_cap.rs). Hardcoded like the caption bar:
+        // inert and free until the key is pressed.
+        screen_cap: ScreenCap {}
         caption_bar := SolidView {
             visible: false
 
@@ -311,6 +317,11 @@ pub struct Window {
     //#[live] performance_view: PerformanceView,
     #[live]
     nav_control: NavControl,
+    /// Shift+F12 screen recorder. Hardcoded here so every app can record
+    /// itself; Window owns it so the capture sink can be bound to THIS
+    /// window rather than whichever one presents first.
+    #[live]
+    screen_cap: ScreenCap,
     #[live]
     window: ScriptWindowHandle,
     #[live]
@@ -483,6 +494,11 @@ struct GaussStack {
     levels: Vec<GaussStackLevel>,
 }
 
+fn gauss_fast() -> bool {
+    thread_local! { static ON: bool = std::env::var_os("MAKEPAD_GAUSS_FAST").is_some(); }
+    ON.with(|v| *v)
+}
+
 fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
     match os_type {
         OsType::Android(_) => 1.0,
@@ -624,6 +640,11 @@ impl GaussStack {
         let mut source_texture = self.scene_texture.clone();
 
         for (index, level) in self.levels.iter_mut().enumerate() {
+            // MAKEPAD_GAUSS_FAST=1: probe rig — stop the chain early to
+            // measure how much of a frame the pass COUNT itself costs.
+            if gauss_fast() && index > 3 {
+                break;
+            }
             let level_size = Self::level_size(root_size, dpi, index);
 
             level.pass.set_size(cx, level_size);
@@ -659,6 +680,9 @@ impl GaussStack {
         upsample: &mut DrawGaussUpsample,
         root_size: Vec2d,
     ) {
+        if gauss_fast() {
+            return;
+        }
         let dpi = cx.current_dpi_factor();
         for index in GAUSS_SMOOTH_LEVEL_START..self.levels.len() {
             let level = &mut self.levels[index];
@@ -1275,6 +1299,18 @@ impl Window {
         //    self.performance_view.draw_all(cx, &mut Scope::empty());
         //}
 
+        // The REC dot goes on last, in the WINDOW pass, so it sits over every
+        // scene mechanism (gauss / ssaa / sploded) and over the overlay - and
+        // so it lands in the recording, which reads back this same pass.
+        let pass_size = cx.current_pass_size();
+        self.screen_cap.draw_indicator(
+            cx,
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: pass_size,
+            },
+        );
+
         cx.end_pass_sized_turtle();
 
         self.main_draw_list.end(cx);
@@ -1469,6 +1505,22 @@ impl Widget for Window {
         self.nav_control
             .handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
+        // The recorder is fed the raw event before focus routing, so Shift+F12
+        // works while a text input holds the caret, and is told which window
+        // it is recording so its capture sink follows THIS window.
+        self.screen_cap.set_window_id(self.window.window_id().id());
+        self.screen_cap.handle_event(cx, event, scope);
+        if self.screen_cap.take_redraw_request() {
+            // The REC dot appearing or disappearing is a change to the draw
+            // lists, so it needs a real redraw — twice per recording.
+            self.view.redraw(cx);
+        }
+        if self.screen_cap.take_repaint_request() {
+            // A still app presents no frames, and a recorder with no frames is
+            // an empty file. A pass repaint re-presents the existing draw lists
+            // at frame rate without re-running the widget tree.
+            cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
+        }
         if self.demo_next_frame.is_event(event).is_some() {
             if self.demo {
                 self.demo_next_frame = cx.new_next_frame();

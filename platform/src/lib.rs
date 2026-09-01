@@ -79,6 +79,8 @@ pub mod display_context;
 mod app_main;
 pub mod remote;
 pub mod pixel_probe;
+pub mod screen_capture;
+pub mod audio_output_tap;
 pub mod shader_error;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 // Working-tree startup instrumentation (MAKEPAD_STARTUP_TRACE=1).
