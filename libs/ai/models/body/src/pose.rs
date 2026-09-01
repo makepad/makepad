@@ -465,7 +465,7 @@ mod tests {
         assert!(max_abs(&pose.hands, &expected_hands) <= 1.0e-4);
 
         let rig = fixture::rig().expect("oracle rig must load after weights check");
-        let model = model_params(rig, &pose);
+        let model = model_params(&rig, &pose);
         let model_error = max_abs(&model, &expected_params);
         eprintln!("pose oracle MHR parameter max abs error {model_error:.7}");
         assert!(model_error <= 1.0e-4);

@@ -1,5 +1,9 @@
-//! CPU implementation of the Momentum Human Rig forward pass.
+//! The Momentum Human Rig forward pass: kinematics, skinning and keypoint
+//! regression on the CPU (small), the two dense products — identity
+//! blendshapes and the pose-corrective output layer — on the GPU when one is
+//! prepared, since they are the whole cost of a rig evaluation.
 
+use crate::backend::{gpu_download, gpu_linear_f32_resident, gpu_upload, GpuTensor};
 use crate::weights::BodyWeights;
 use crate::{
     DiffusionError, Result, MHR_JOINTS, MHR_JOINT_PARAMS, MHR_KEYPOINTS_ALL,
@@ -47,6 +51,15 @@ pub struct MhrRig {
     keypoint_row_offsets: Vec<usize>,
     keypoint_columns: Vec<u32>,
     keypoint_values: Vec<f32>,
+    gpu: Option<MhrGpu>,
+}
+
+/// The rig's two dense matrices, resident on the GPU as linear layers:
+/// identity blendshapes as `[55317, 45]` (basis transposed) and the pose
+/// corrective output layer as `[55317, 3000]`.
+struct MhrGpu {
+    identity_w: GpuTensor,
+    corrective_w: GpuTensor,
 }
 
 #[derive(Clone, Debug)]
@@ -170,20 +183,62 @@ impl MhrRig {
             keypoint_row_offsets,
             keypoint_columns,
             keypoint_values,
+            gpu: None,
         })
+    }
+
+    /// Put the two dense products on the GPU. Without this the rig runs
+    /// entirely on the host (tests, tools); the results are the same.
+    pub fn prepare_gpu(&mut self) -> Result<()> {
+        let vertex_values = MHR_VERTS * XYZ;
+        let mut identity_t = vec![0.0f32; vertex_values * NUM_SHAPE];
+        for basis in 0..NUM_SHAPE {
+            let source = &self.identity_basis[basis * vertex_values..(basis + 1) * vertex_values];
+            for (row, &value) in source.iter().enumerate() {
+                identity_t[row * NUM_SHAPE + basis] = value;
+            }
+        }
+        let identity_w = gpu_upload(&identity_t, vertex_values, NUM_SHAPE).map_err(DiffusionError::model)?;
+        let corrective_w = gpu_upload(&self.pose_corr_weight, vertex_values, POSE_HIDDEN)
+            .map_err(DiffusionError::model)?;
+        self.gpu = Some(MhrGpu {
+            identity_w,
+            corrective_w,
+        });
+        Ok(())
+    }
+
+    pub fn gpu_prepared(&self) -> bool {
+        self.gpu.is_some()
     }
 
     /// Build unposed vertices in rig-space centimetres.
     pub fn rest_vertices(&self, identity: &[f32; 45], expr: &[f32; 72]) -> Vec<f32> {
         let vertex_values = MHR_VERTS * XYZ;
         let mut output = self.base_shape.clone();
-        for (basis, &coefficient) in identity.iter().enumerate() {
-            if coefficient == 0.0 {
-                continue;
+        let mut identity_done = false;
+        if let Some(gpu) = &self.gpu {
+            if let Ok(delta) = gpu_upload(identity, 1, NUM_SHAPE)
+                .and_then(|coeffs| gpu_linear_f32_resident(&coeffs, &gpu.identity_w, None))
+                .and_then(|delta| gpu_download(&delta))
+            {
+                if delta.len() == vertex_values {
+                    for (target, value) in output.iter_mut().zip(delta) {
+                        *target += value;
+                    }
+                    identity_done = true;
+                }
             }
-            let source = &self.identity_basis[basis * vertex_values..(basis + 1) * vertex_values];
-            for (target, &value) in output.iter_mut().zip(source) {
-                *target += coefficient * value;
+        }
+        if !identity_done {
+            for (basis, &coefficient) in identity.iter().enumerate() {
+                if coefficient == 0.0 {
+                    continue;
+                }
+                let source = &self.identity_basis[basis * vertex_values..(basis + 1) * vertex_values];
+                for (target, &value) in output.iter_mut().zip(source) {
+                    *target += coefficient * value;
+                }
             }
         }
         for (basis, &coefficient) in expr.iter().enumerate() {
@@ -284,6 +339,16 @@ impl MhrRig {
             *value = value.max(0.0);
         }
 
+        if let Some(gpu) = &self.gpu {
+            if let Ok(output) = gpu_upload(&hidden, 1, POSE_HIDDEN)
+                .and_then(|h| gpu_linear_f32_resident(&h, &gpu.corrective_w, None))
+                .and_then(|out| gpu_download(&out))
+            {
+                if output.len() == MHR_VERTS * XYZ {
+                    return output;
+                }
+            }
+        }
         let mut output = vec![0.0; MHR_VERTS * XYZ];
         for (row, target) in output.iter_mut().enumerate() {
             let weights = &self.pose_corr_weight[row * POSE_HIDDEN..(row + 1) * POSE_HIDDEN];
@@ -296,14 +361,21 @@ impl MhrRig {
     pub fn skin(&self, skel_state: &[f32], rest: &[f32]) -> Vec<f32> {
         assert_eq!(skel_state.len(), MHR_JOINTS * STATE_WIDTH);
         assert_eq!(rest.len(), MHR_VERTS * XYZ);
+        // One skinning transform per joint, not per influence.
+        let transforms: Vec<Transform> = (0..MHR_JOINTS)
+            .map(|joint| {
+                compose(
+                    read_transform(skel_state, joint),
+                    read_transform(&self.lbs_inverse_bind_pose, joint),
+                )
+            })
+            .collect();
         let mut output = vec![0.0; MHR_VERTS * XYZ];
         let mut touched = vec![false; MHR_VERTS];
         for entry in 0..LBS_ENTRIES {
             let vertex = self.lbs_vert_indices[entry] as usize;
             let joint = self.lbs_skin_indices[entry] as usize;
-            let global = read_transform(skel_state, joint);
-            let inverse_bind = read_transform(&self.lbs_inverse_bind_pose, joint);
-            let transform = compose(global, inverse_bind);
+            let transform = transforms[joint];
             let point = [rest[vertex * 3], rest[vertex * 3 + 1], rest[vertex * 3 + 2]];
             let posed = apply(transform, point);
             let weight = self.lbs_skin_weights[entry];

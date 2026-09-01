@@ -4,7 +4,7 @@ use crate::backend::{
     gpu_add, gpu_attention_packed_cross, gpu_download, gpu_gelu_erf,
     gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_upload, GpuTensor,
 };
-use crate::heads::{DecoderHeads, HostLinear};
+use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
 use crate::weights::BodyWeights;
 use crate::{
     DEC_DEPTH, DEC_DIM, DEC_FFN, DEC_HEADS, DEC_INNER, DEC_NORM_EPS, DINO_DIM, NCAM,
@@ -294,6 +294,7 @@ pub struct Decoder {
     layers: Vec<DecoderLayer>,
     norm_final: NormWeights,
     heads: DecoderHeads,
+    step_heads: GpuStepHeads,
     init_pose: Vec<f32>,
     init_camera: Vec<f32>,
     tokens: TokenWeights,
@@ -339,10 +340,12 @@ impl Decoder {
         for layer in weights.layers {
             layers.push(DecoderLayer::upload(layer)?);
         }
+        let step_heads = GpuStepHeads::upload(&weights.heads)?;
         Ok(Self {
             layers,
             norm_final: weights.norm_final,
             heads: weights.heads,
+            step_heads,
             init_pose: weights.init_pose,
             init_camera: weights.init_camera,
             tokens: weights.tokens,
@@ -420,9 +423,9 @@ impl Decoder {
                 (**callback)(layer_index, &hidden, &final_normed)?;
             }
             let pose_token = &final_normed[..DEC_DIM];
-            last_pose = self.heads.pose(pose_token);
+            last_pose = self.step_heads.pose(pose_token)?;
             add_in_place(&mut last_pose, &self.init_pose);
-            last_camera = self.heads.camera(pose_token);
+            last_camera = self.step_heads.camera(pose_token)?;
             add_in_place(&mut last_camera, &self.init_camera);
             let feedback = step(StepInput {
                 layer: layer_index,
@@ -486,7 +489,7 @@ impl Decoder {
                     && depth >= 1e-5
             })
             .collect();
-        let posemb = self.heads.keypoint_posemb(&feedback.kp2d_cropped);
+        let posemb = self.step_heads.keypoint_posemb(&feedback.kp2d_cropped)?;
         let mut sampled = vec![0.0f32; NUM_KEYPOINTS * DINO_DIM];
         for (index, point) in feedback.kp2d_cropped.chunks_exact(2).enumerate() {
             if valid[index] {
@@ -502,7 +505,7 @@ impl Decoder {
                     .copy_from_slice(&value);
             }
         }
-        let features = self.heads.keypoint_features(&sampled);
+        let features = self.step_heads.keypoint_features(&sampled)?;
 
         let hip9 = &feedback.kp3d[9 * 3..10 * 3];
         let hip10 = &feedback.kp3d[10 * 3..11 * 3];
@@ -517,7 +520,7 @@ impl Decoder {
                 point[axis] -= pelvis[axis];
             }
         }
-        let posemb3d = self.heads.keypoint3d_posemb(&centered);
+        let posemb3d = self.step_heads.keypoint3d_posemb(&centered)?;
 
         let mut delta = vec![0.0f32; TOKEN_ROWS * DEC_DIM];
         for index in 0..NUM_KEYPOINTS {
