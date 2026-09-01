@@ -2564,6 +2564,15 @@ impl App {
         while i < args.len() {
             if args[i] == "--test-action" {
                 if let Some(name) = args.get(i + 1) {
+                    // launch-<app id>: spawn a registered app directly — the
+                    // deterministic way to put one app on the desk in a test.
+                    if let Some(app) = name.strip_prefix("launch-") {
+                        let app = app.to_string();
+                        log!("mpwm: --test-action launch {}", app);
+                        self.launch_app(cx, &app);
+                        i += 2;
+                        continue;
+                    }
                     match test_action(name) {
                         Some(action) => {
                             log!("mpwm: --test-action {} -> {:?}", name, action);
