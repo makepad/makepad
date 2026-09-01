@@ -23,11 +23,14 @@
 
 pub use makepad_ai_common::backend;
 pub use makepad_ai_common::error;
-pub use makepad_ai_common::{DiffusionError, Result};
+pub use makepad_ai_common::{emit_progress, DiffusionError, ProgressHook, Result};
 
-pub mod weights;
+pub mod condition;
+pub mod dino;
 pub mod mhr;
 pub mod pose;
+pub mod preprocess;
+pub mod weights;
 
 #[cfg(test)]
 pub mod fixture;

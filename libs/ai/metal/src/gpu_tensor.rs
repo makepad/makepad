@@ -684,13 +684,80 @@ pub fn rope_interleaved(
     Ok(tensor(x.rows, x.cols, out))
 }
 
+/// Rotate-half rope (the DINOv3 / LLaMA layout): within each head the first
+/// `rot_half` lanes pair with the next `rot_half`, `out1 = x1 c - x2 s`,
+/// `out2 = x2 c + x1 s`, with one `[rows, rot_half]` cos/sin table shared by
+/// both halves; lanes past `2 * rot_half` pass through. Same contract as the
+/// CUDA `rope_half` kernel.
 pub fn rope_half(
     x: &GpuTensor,
     heads: usize,
+    rot_half: usize,
     cos: &GpuTensor,
     sin: &GpuTensor,
 ) -> Result<GpuTensor, String> {
-    rope_interleaved(x, heads, cos, sin)
+    if heads == 0 || x.cols % heads != 0 {
+        return Err("metal rope_half head mismatch".to_string());
+    }
+    let dim = x.cols / heads;
+    if rot_half * 2 > dim {
+        return Err("metal rope_half rotary span exceeds head dim".to_string());
+    }
+    if cos.rows != x.rows || cos.cols != rot_half || sin.rows != x.rows || sin.cols != rot_half {
+        return Err("metal rope_half table mismatch".to_string());
+    }
+    let xd = data(x)?;
+    let cd = data(cos)?;
+    let sd = data(sin)?;
+    let mut out = xd.clone();
+    for r in 0..x.rows {
+        for h in 0..heads {
+            let base = r * x.cols + h * dim;
+            for i in 0..rot_half {
+                let c = cd[r * rot_half + i];
+                let s = sd[r * rot_half + i];
+                let x1 = xd[base + i];
+                let x2 = xd[base + rot_half + i];
+                out[base + i] = x1 * c - x2 * s;
+                out[base + rot_half + i] = x2 * c + x1 * s;
+            }
+        }
+    }
+    Ok(tensor(x.rows, x.cols, out))
+}
+
+/// Per-row layer norm with an affine: `(x - mean) / sqrt(var + eps) * mul + add`
+/// (biased variance), `mul`/`add` one value per column.
+pub fn layer_norm_mul_add(
+    x: &GpuTensor,
+    mul: &[f32],
+    add: &[f32],
+    eps: f32,
+) -> Result<GpuTensor, String> {
+    if mul.len() != x.cols || add.len() != x.cols {
+        return Err(format!(
+            "metal layer_norm_mul_add affine width {}/{} != {} cols",
+            mul.len(),
+            add.len(),
+            x.cols
+        ));
+    }
+    let xd = data(x)?;
+    let out = try_layer_norm_mul_add_f32(&xd, &[x.rows, x.cols], mul, &[x.cols], add, &[x.cols], eps)
+        .unwrap_or_else(|| {
+            let mut out = vec![0.0; xd.len()];
+            for r in 0..x.rows {
+                let row = &xd[r * x.cols..(r + 1) * x.cols];
+                let mean = row.iter().sum::<f32>() / x.cols as f32;
+                let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / x.cols as f32;
+                let inv = (var + eps).sqrt().recip();
+                for c in 0..x.cols {
+                    out[r * x.cols + c] = (row[c] - mean) * inv * mul[c] + add[c];
+                }
+            }
+            out
+        });
+    Ok(tensor(x.rows, x.cols, out))
 }
 
 pub fn rpb_expand(
