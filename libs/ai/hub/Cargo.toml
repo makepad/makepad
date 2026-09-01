@@ -34,6 +34,8 @@ default = [
     "motion-native",
     "rig-native",
     "splat-native",
+    "beats-native",
+    "notes-native",
 ]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
@@ -95,6 +97,14 @@ splat-native = ["matte-native", "dep:makepad-ai-splat", "dep:makepad-ai-common"]
 # lossless skinned-GLB augmentation. The reference Torch/bpy backend remains
 # separately available as `rig-oracle` through `python-backends`.
 rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
+# In-process registry/downloader/backend runner for desktop applications.
+# Opt-in so featureless fleet clients do not pull the GPU model substrate.
+local = ["dep:makepad-ai-common"]
+# Native Beat This! audio -> beat/downbeat JSON analysis.
+beats-native = ["dep:makepad-ai-beats", "dep:makepad-ai-common"]
+# Native Spotify Basic Pitch audio -> notes/MIDI transcription. The model is
+# tiny and has a CPU fallback, so this lane is available without a GPU.
+notes-native = ["dep:makepad-ai-notes"]
 
 [dependencies]
 makepad-micro-serde = { path = "../../micro_serde" }
@@ -131,6 +141,8 @@ makepad-xatlas = { path = "../../xatlas", optional = true }
 makepad-render = { path = "../../render", optional = true }
 makepad-ai-llm = { path = "../../ai/llm", optional = true }
 makepad-ai-speech = { path = "../../ai/models/speech", default-features = false, optional = true }
+makepad-ai-beats = { path = "../../ai/models/beats", optional = true }
+makepad-ai-notes = { path = "../../ai/models/notes", optional = true }
 makepad-system-speech = { path = "../../system_speech", optional = true }
 makepad-video = { path = "../../../platform/video", optional = true }
 # The `mkfl` motion payload: ONE definition, shared with the VJ's import
@@ -147,11 +159,6 @@ makepad-live-id = { path = "../../live_id" }
 # encoding/decoding with the same hardware codec seam the service uses
 # internally (behind the crate's own optional/default `video` feature).
 makepad-video = { path = "../../../platform/video" }
-
-[[test]]
-name = "body_worker"
-path = "tests/body_worker.rs"
-harness = false
 
 # The standing "is chat slow right now?" check. Its own code is std-only —
 # no HTTP or JSON crate — so what it measures is the box, not a client

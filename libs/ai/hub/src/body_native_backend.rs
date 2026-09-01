@@ -80,6 +80,20 @@ impl BodyOptions {
     }
 }
 
+/// The packet contract every body result must meet before it leaves the
+/// backend: a JSON object with a top-level `n_people`.
+pub fn validate_pose_packet(line: &str) -> Result<(), AssetAiError> {
+    let value = makepad_strict_json::parse(line.as_bytes()).map_err(|error| {
+        AssetAiError::Backend(format!("sam3dbody returned invalid json: {error}"))
+    })?;
+    if !matches!(&value, makepad_strict_json::Value::Obj(_)) || value.get("n_people").is_none() {
+        return Err(AssetAiError::Backend(
+            "sam3dbody json is missing top-level n_people".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Pluggable inference for CPU-only backend tests.
 pub type BodyFn = Box<
     dyn FnMut(&[u8], u32, u32, Option<[f32; 4]>) -> Result<String, AssetAiError> + Send,
@@ -170,7 +184,7 @@ impl BodyNativeBackend {
                 packet.to_json()
             }
         };
-        crate::body_backend::validate_pose_packet(&packet)?;
+        validate_pose_packet(&packet)?;
         Ok(packet)
     }
 

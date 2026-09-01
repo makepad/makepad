@@ -1529,8 +1529,7 @@ mod tests {
         // The licensing guard lives in the note: the x.1 refreshes are NC.
         assert!(depth.note.as_deref().unwrap().contains("Apache-2.0"));
 
-        // Body domain: pinned native artifact and externally provisioned
-        // reference worker.
+        // Body domain: the pinned native artifact.
         let native_body = registry.find("sam3dbody").unwrap();
         assert_eq!(native_body.domain, Domain::Body);
         assert_eq!(native_body.backend, "body-native");
@@ -1570,13 +1569,6 @@ mod tests {
             "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors"
         );
         assert!(!body_weights.repo.starts_with("facebook/"));
-
-        let body = registry.find("sam3dbody-ref").unwrap();
-        assert_eq!(body.domain, Domain::Body);
-        assert_eq!(body.backend, "body");
-        assert!(body.available);
-        assert_eq!(body.vram_gb, Some(4.0));
-        assert!(body.files.is_empty());
 
         // Segment domain: pinned Comfy-Org SAM 3.1 multiplex CUDA artifact.
         let segment = registry.find("sam3-1-multiplex").unwrap();

@@ -32,7 +32,8 @@
 //!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
 pub mod backend;
-pub mod body_backend;
+#[cfg(feature = "beats-native")]
+pub mod beats_backend;
 pub mod body_native_backend;
 pub mod chat_wire;
 pub use makepad_base64;
@@ -56,6 +57,8 @@ pub mod http_client;
 pub mod jobs;
 pub mod lane_advert;
 pub mod lease;
+#[cfg(feature = "local")]
+pub mod license;
 pub mod indextts_backend;
 pub mod kokoro_backend;
 #[cfg(feature = "stt")]
@@ -65,6 +68,8 @@ pub mod speech;
 pub mod llm_backend;
 #[cfg(feature = "llm")]
 pub mod local_llm;
+#[cfg(feature = "local")]
+pub mod local;
 pub mod matte_backend;
 pub mod segment_backend;
 pub mod upscale_backend;
@@ -106,6 +111,8 @@ pub mod trellis_backend;
 pub mod wav;
 pub mod woosh_backend;
 pub mod music3_backend;
+#[cfg(feature = "notes-native")]
+pub mod notes_backend;
 pub mod world_backend;
 
 #[cfg(feature = "flux")]
