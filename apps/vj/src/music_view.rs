@@ -1921,6 +1921,20 @@ script_mod! {
                         // The analyser's grid can sit on the off pulse: same tempo,
                         // sync exactly half a beat out. This flips it.
                         deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        // Headphone cue: latch this deck onto the phones bus.
+                        // Green when live — monitoring, never program.
+                        //
+                        // Up here with SYNC and KEY rather than down in the
+                        // transport: pre-listen changes what the OPERATOR
+                        // hears, not what the room does, and so do the two it
+                        // now sits between. The height is the row's 22, not the
+                        // icon button's own 24 — two points proud of the
+                        // buttons either side reads as a mistake.
+                        deck_a_hp := MusicIconButton{
+                            width: 30
+                            height: 22
+                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
+                        }
                         deck_a_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
                         // The key steps in whole semitones, so it steps: a fader
                         // with twelve detents a side would be a worse way to ask
@@ -2193,25 +2207,36 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
                         deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // Headphone cue: latch this deck onto the phones bus.
-                        // Green when live — monitoring, never program.
-                        deck_a_hp := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
-                        }
                         // Beat jump: four bars back / forward on the deck's own
                         // grid (shift: sixteen), so a synced deck stays in phase.
                         deck_a_jump_back := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
                         }
+                        // One beat back, one beat on — the nudge a hand makes
+                        // when the drop lands a hair early. A beat is a GRID
+                        // measurement, so these do nothing until a grid does:
+                        // there is no length to step by before one lands.
+                        //
+                        // NOT mirrored on deck B, for the reason the loop marks
+                        // are not: these point along the TRACK, and back is on
+                        // the left of every transport in the room whichever
+                        // deck it belongs to.
+                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
                         deck_a_jump_fwd := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
                         }
                         deck_a_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
-                        deck_a_loop_halve := MusicButton{width: 22 height: 24 text: "<"}
+                        // Minus and plus, not the chevrons they were: the pair
+                        // beside CUE now steps the PLAYHEAD by a beat, and two
+                        // sets of chevrons a few points apart, one moving the
+                        // track and one halving a loop, is one pair too many.
+                        // These change a LENGTH, which is what − and + say.
+                        deck_a_loop_halve := MusicButton{width: 22 height: 24 text: "-"}
                         deck_a_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_a_loop_double := MusicButton{width: 22 height: 24 text: ">"}
+                        deck_a_loop_double := MusicButton{width: 22 height: 24 text: "+"}
                         // The CDJ's loop pair, in glyphs that read as the marks
                         // they set: `[` in, `]` out. The loop icon left of the
                         // stepper is RELOOP/EXIT; the sparkle past them opens the
@@ -2475,6 +2500,13 @@ script_mod! {
                         deck_b_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
                         deck_b_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
                         deck_b_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        // Deck A's phones latch, mirrored: KEY then hp then
+                        // SYNC, reading outward from the console's centre.
+                        deck_b_hp := MusicIconButton{
+                            width: 30
+                            height: 22
+                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
+                        }
                         deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
                     }
                     View{
@@ -2725,22 +2757,23 @@ script_mod! {
                         // left-to-right on every CDJ regardless of deck side.
                         deck_b_loop_in := MusicButton{width: 22 height: 24 text: "["}
                         deck_b_loop_out := MusicButton{width: 22 height: 24 text: "]"}
-                        deck_b_loop_halve := MusicButton{width: 22 height: 24 text: "<"}
+                        // − and +, matching deck A: these size a loop, and the
+                        // chevrons now belong to the beat nudge beside CUE.
+                        deck_b_loop_halve := MusicButton{width: 22 height: 24 text: "-"}
                         deck_b_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_b_loop_double := MusicButton{width: 22 height: 24 text: ">"}
+                        deck_b_loop_double := MusicButton{width: 22 height: 24 text: "+"}
                         deck_b_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
-                        // The mirror of deck A's phones latch: hp then CUE,
-                        // reading inward like the rest of the row.
                         deck_b_jump_back := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
                         }
+                        // NOT mirrored, exactly as the loop marks above are
+                        // not: back is left on every transport in the room.
+                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
                         deck_b_jump_fwd := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
-                        }
-                        deck_b_hp := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
                         deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
                         deck_b_play := MusicIconButton{
@@ -2929,6 +2962,33 @@ script_mod! {
                                     draw_icon +: { svg: crate_resource("self:resources/icons/more.svg") }
                                 }
                             }
+                            // Narrow the listing to what has already been worked
+                            // out. Several at once AND together: "a key and a
+                            // tempo" is the harmonic-mixing question, and it is
+                            // not answerable one column at a time.
+                            //
+                            // One chip that drops a list of ticks, not four chips
+                            // in a row: four of them cost most of a narrow
+                            // console's line to say something the operator reads
+                            // once a set. Closed, the chip carries the count, so
+                            // a filter that is narrowing the listing still says
+                            // so without being opened.
+                            //
+                            // OUTSIDE `music_catalog`, which folds away with the
+                            // local listing: STEMS/KARAOKE/KEY/BPM is work that
+                            // has been done or not, and a local file answers that
+                            // question exactly as a catalog row does. Search and
+                            // More are catalog-only; this is not.
+                            //
+                            // Height PINNED to the chips it now sits between —
+                            // its own line let it stand at 18, and four points
+                            // short in this row reads as a mistake.
+                            music_has_filter := DropToggles{
+                                height: 22
+                                text: "FILTER"
+                                labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
+                                draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
+                            }
                             music_local := MusicChipButton{
                                 text: "LOCAL FILES"
                                 draw_icon +: { svg: crate_resource("self:resources/icons/folder.svg") }
@@ -3008,34 +3068,6 @@ script_mod! {
                             text: ""
                             draw_text.color: #xff5c39
                         }
-                        // Narrow the listing to what has already been worked
-                        // out. Several at once AND together: "a key and a
-                        // tempo" is the harmonic-mixing question, and it is
-                        // not answerable one column at a time.
-                        //
-                        // One chip that drops a list of ticks, not four chips
-                        // in a row: four of them cost most of a narrow
-                        // console's line to say something the operator reads
-                        // once a set. Closed, the chip carries the count, so
-                        // a filter that is narrowing the listing still says
-                        // so without being opened.
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
-                            align: Align{x: 0.0, y: 0.5}
-                            music_has_filter := DropToggles{
-                                height: 18
-                                text: "FILTER"
-                                labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
-                                draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
-                            }
-                            // What the filters left, and what the background
-                            // passes are doing about the rest.
-                            music_prep_status := MusicLabel{width: Fill text: ""}
-                        }
                         // The column heads. Every one of them sorts: a click takes
                         // the order, a second click reverses it, and the arrow in the
                         // label says which column is holding it.
@@ -3083,6 +3115,22 @@ script_mod! {
                             // chips, so a head sits over its own column
                             // rather than 24 points to the right of it.
                             MusicLabel{width: 50 text: ""}
+                            // What the filters left, and what the background
+                            // passes are doing about the rest — at the
+                            // explorer's right edge, level with the heads.
+                            //
+                            // It used to hold a whole line for one short
+                            // string. Up here it costs the width of the string
+                            // and nothing when there is no string: FIT, never
+                            // Fill, because a Fill would claim the right end of
+                            // the row while empty and stand every head off its
+                            // own column for nothing.
+                            //
+                            // While a count IS showing the heads do sit that
+                            // much to the left of their cells. That is the
+                            // trade this placement makes, and the count is
+                            // short and comes and goes.
+                            music_prep_status := MusicLabel{width: Fit text: ""}
                         }
                         music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                     }

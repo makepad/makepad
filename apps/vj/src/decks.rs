@@ -2312,6 +2312,34 @@ impl DeckEngine {
             .unwrap_or(own)
     }
 
+    /// Step the playhead a whole number of beats, forward or back — the
+    /// correction a hand makes when the drop lands a hair off.
+    ///
+    /// Measured on the deck's OWN grid, so a deck running slow steps its
+    /// own slow beats and lands where the operator is looking.
+    ///
+    /// Nothing without a grid: a beat has no length until the analysis
+    /// arrives, and inventing one would move the playhead by an amount
+    /// nobody could predict. Nothing while a hand is scratching either —
+    /// the hand owns the transport for as long as it is down.
+    ///
+    /// A WHOLE beat is deliberate. `seek_secs` re-locks the phase behind
+    /// us, and a whole-beat step is already phase-consistent, so the
+    /// re-lock finds nothing to undo. A fractional step would be pulled
+    /// straight back and the button would look broken.
+    pub fn nudge_beats(&mut self, deck: DeckId, beats: f64) -> Vec<DeckCmd> {
+        let state = self.deck(deck);
+        if !state.is_loaded() || state.scratching {
+            return Vec::new();
+        }
+        let Some(grid) = state.grid else { return Vec::new() };
+        if !(grid.beat_secs > 0.0) {
+            return Vec::new();
+        }
+        let target = (state.position_secs + beats * grid.beat_secs).max(0.0);
+        self.seek_secs(deck, target)
+    }
+
     /// An operator-chosen seek, run through QUANT first. Only the overview
     /// strip uses this. Everything else — CUE, a lyric line, RELOOP,
     /// engaging a loop, every sync correction — seeks a target that must

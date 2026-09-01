@@ -2385,10 +2385,15 @@ pub struct DrawVjBeatsChip {
 /// slowest, then free-running.
 const BEATS_ROWS: [(u32, &str); 6] =
     [(1, "1"), (2, "2"), (4, "4"), (8, "8"), (16, "16"), (0, "—")];
-/// The loop-length flavour of the same dropdown: X (manual), the powers
+/// The loop-length flavour of the same dropdown: 0 (manual), the powers
 /// of two, and the bookmark rung.
+///
+/// The manual rung reads 0 rather than X: every other rung is a beat
+/// count, and a letter among the numbers looked like a different KIND of
+/// answer when it is only the count nobody has set yet. It also sits
+/// between − and + now, which are arithmetic.
 const LOOP_ROWS: [(u32, &str); 9] = [
-    (0, "X"),
+    (0, "0"),
     (1, "1"),
     (2, "2"),
     (4, "4"),

@@ -3310,6 +3310,9 @@ struct DeckRefs {
     kar_title: ButtonRef,
     loop_halve: ButtonRef,
     loop_double: ButtonRef,
+    /// The beat nudge beside CUE: one beat back, one beat on.
+    beat_back: ButtonRef,
+    beat_fwd: ButtonRef,
     loop_in: ButtonRef,
     loop_out: ButtonRef,
     loop_scan: ButtonRef,
@@ -3361,6 +3364,8 @@ impl DeckRefs {
             kar_title: ui.button(cx, ids.kar_title),
             loop_halve: ui.button(cx, ids.loop_halve),
             loop_double: ui.button(cx, ids.loop_double),
+            beat_back: ui.button(cx, ids.beat_back),
+            beat_fwd: ui.button(cx, ids.beat_fwd),
             loop_in: ui.button(cx, ids.loop_in),
             loop_out: ui.button(cx, ids.loop_out),
             loop_scan: ui.button(cx, ids.loop_scan),
@@ -3464,6 +3469,8 @@ struct MusicDeckIds {
     stem_mix: &'static [LiveId],
     loop_halve: &'static [LiveId],
     loop_double: &'static [LiveId],
+    beat_back: &'static [LiveId],
+    beat_fwd: &'static [LiveId],
     loop_in: &'static [LiveId],
     loop_out: &'static [LiveId],
     loop_scan: &'static [LiveId],
@@ -3518,6 +3525,8 @@ impl MusicDeckIds {
                 stem_mix: ids!(deck_a_stem_mix),
                 loop_halve: ids!(deck_a_loop_halve),
                 loop_double: ids!(deck_a_loop_double),
+                beat_back: ids!(deck_a_beat_back),
+                beat_fwd: ids!(deck_a_beat_fwd),
                 loop_in: ids!(deck_a_loop_in),
                 loop_out: ids!(deck_a_loop_out),
                 loop_scan: ids!(deck_a_loop_scan),
@@ -3600,6 +3609,8 @@ impl MusicDeckIds {
                 stem_mix: ids!(deck_b_stem_mix),
                 loop_halve: ids!(deck_b_loop_halve),
                 loop_double: ids!(deck_b_loop_double),
+                beat_back: ids!(deck_b_beat_back),
+                beat_fwd: ids!(deck_b_beat_fwd),
                 loop_in: ids!(deck_b_loop_in),
                 loop_out: ids!(deck_b_loop_out),
                 loop_scan: ids!(deck_b_loop_scan),
@@ -22125,6 +22136,14 @@ p2 {}
         // the line.
         self.ui.drop_down(cx, ids!(deck_target)).set_icon_only(cx, narrow);
         self.ui.label(cx, ids!(music_load_label)).set_visible(cx, !narrow);
+        // The FILTER chip rides this row now, so it gives up its word with
+        // the rest of it: one chip still spelling FILTER beside four round
+        // keys is the only thing left claiming room the row has run out of.
+        // The count survives the word — a filter that is narrowing the
+        // listing goes on saying so bare.
+        self.ui
+            .drop_toggles(cx, ids!(music_has_filter))
+            .set_text(cx, if narrow { "" } else { "FILTER" });
         // STEM/KRK carry the same S/K abbreviation as the sort arrows do,
         // and both cells just changed width above — without this the words
         // stayed full-length in a cell sized for the letter, crowding into
@@ -24011,6 +24030,17 @@ p2 {}
             }
             if refs.loop_double.clicked(actions) {
                 let cmds = self.decks.loop_double(deck);
+                self.run_deck_cmds(cx, cmds);
+            }
+            // One beat either way. Dead until the grid lands — the engine
+            // refuses rather than guessing a beat length, so an early press
+            // does nothing instead of throwing the playhead somewhere.
+            if refs.beat_back.clicked(actions) {
+                let cmds = self.decks.nudge_beats(deck, -1.0);
+                self.run_deck_cmds(cx, cmds);
+            }
+            if refs.beat_fwd.clicked(actions) {
+                let cmds = self.decks.nudge_beats(deck, 1.0);
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.loop_in.clicked(actions) {
