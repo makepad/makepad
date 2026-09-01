@@ -11,13 +11,18 @@ const RAY_FEATURES: usize = 99;
 const RAY_FREQUENCIES: usize = 16;
 
 pub fn dense_pe(g: &[f32]) -> Vec<f32> {
+    dense_pe_at(g, PATCHES_SIDE)
+}
+
+/// The dense positional encoding of a `side x side` patch grid.
+pub fn dense_pe_at(g: &[f32], side: usize) -> Vec<f32> {
     assert_eq!(g.len(), 2 * PE_HALF, "dense PE matrix must be 2x640");
-    let mut output = vec![0.0f32; NUM_PATCHES * DINO_DIM];
-    for gy in 0..PATCHES_SIDE {
-        let y = 2.0 * ((gy as f32 + 0.5) / PATCHES_SIDE as f32) - 1.0;
-        for gx in 0..PATCHES_SIDE {
-            let x = 2.0 * ((gx as f32 + 0.5) / PATCHES_SIDE as f32) - 1.0;
-            let row = gy * PATCHES_SIDE + gx;
+    let mut output = vec![0.0f32; side * side * DINO_DIM];
+    for gy in 0..side {
+        let y = 2.0 * ((gy as f32 + 0.5) / side as f32) - 1.0;
+        for gx in 0..side {
+            let x = 2.0 * ((gx as f32 + 0.5) / side as f32) - 1.0;
+            let row = gy * side + gx;
             for k in 0..PE_HALF {
                 let angle = 2.0 * std::f32::consts::PI * (x * g[k] + y * g[PE_HALF + k]);
                 output[row * DINO_DIM + k] = angle.sin();
@@ -29,9 +34,10 @@ pub fn dense_pe(g: &[f32]) -> Vec<f32> {
 }
 
 pub fn ray_features(rays: &[f32]) -> Vec<f32> {
-    assert_eq!(rays.len(), NUM_PATCHES * 2, "patch rays must be 1024x2");
-    let mut output = vec![0.0f32; NUM_PATCHES * RAY_FEATURES];
-    for token in 0..NUM_PATCHES {
+    assert_eq!(rays.len() % 2, 0, "patch rays must be (x, y) pairs");
+    let tokens = rays.len() / 2;
+    let mut output = vec![0.0f32; tokens * RAY_FEATURES];
+    for token in 0..tokens {
         let ray = [rays[token * 2], rays[token * 2 + 1], 1.0];
         let row = &mut output[token * RAY_FEATURES..(token + 1) * RAY_FEATURES];
         row[..3].copy_from_slice(&ray);
@@ -90,18 +96,19 @@ impl RayCond {
         no_mask_embed: &[f32; DINO_DIM],
         feats: &[f32],
     ) -> Result<GpuTensor> {
-        if e.rows() != NUM_PATCHES || e.cols() != DINO_DIM {
+        let tokens = e.rows();
+        if e.cols() != DINO_DIM {
             return Err(DiffusionError::workflow(format!(
-                "ray conditioning image shape is {}x{}, expected {NUM_PATCHES}x{DINO_DIM}",
+                "ray conditioning image shape is {}x{}, expected {tokens}x{DINO_DIM}",
                 e.rows(),
                 e.cols()
             )));
         }
-        if feats.len() != NUM_PATCHES * RAY_FEATURES {
+        if feats.len() != tokens * RAY_FEATURES {
             return Err(DiffusionError::workflow(format!(
                 "ray conditioning features have {} values, expected {}",
                 feats.len(),
-                NUM_PATCHES * RAY_FEATURES
+                tokens * RAY_FEATURES
             )));
         }
         // W_e no_mask: 1.6M multiply-adds on the host, once per frame.
@@ -111,7 +118,7 @@ impl RayCond {
             *value = row.iter().zip(no_mask_embed).map(|(w, m)| w * m).sum();
         }
         let bias = gpu_upload(&bias, 1, DINO_DIM).map_err(DiffusionError::model)?;
-        let feats = gpu_upload(feats, NUM_PATCHES, RAY_FEATURES).map_err(DiffusionError::model)?;
+        let feats = gpu_upload(feats, tokens, RAY_FEATURES).map_err(DiffusionError::model)?;
         let from_image = gpu_linear_f32_resident(e, &self.image_w, None).map_err(DiffusionError::model)?;
         let from_rays =
             gpu_linear_f32_resident(&feats, &self.ray_w, Some(&bias)).map_err(DiffusionError::model)?;

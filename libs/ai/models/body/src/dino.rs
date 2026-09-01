@@ -13,8 +13,8 @@ use crate::backend::{
 use crate::weights::BodyWeights;
 use crate::{
     emit_progress, DiffusionError, ProgressHook, Result, DINO_DEPTH, DINO_DIM, DINO_FFN,
-    DINO_HEADS, DINO_HEAD_DIM, DINO_NORM_EPS, DINO_PREFIX_TOKENS, DINO_ROPE_BASE, IMAGE_SIZE,
-    NUM_PATCHES, PATCH, PATCHES_SIDE, ROPE_HALF,
+    DINO_HEADS, DINO_HEAD_DIM, DINO_NORM_EPS, DINO_PREFIX_TOKENS, DINO_ROPE_BASE, PATCH,
+    ROPE_HALF,
 };
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
@@ -164,6 +164,21 @@ fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
+/// The crop side of a normalised CHW buffer: square, a multiple of the patch.
+pub(crate) fn crop_side(values: usize) -> Result<usize> {
+    if values % 3 != 0 {
+        return Err(DiffusionError::workflow(format!("body crop has {values} values, not 3 planes")));
+    }
+    let plane = values / 3;
+    let side = (plane as f64).sqrt().round() as usize;
+    if side * side != plane || side % PATCH != 0 || side == 0 {
+        return Err(DiffusionError::workflow(format!(
+            "body crop plane of {plane} values is not a square with a side that is a multiple of {PATCH}"
+        )));
+    }
+    Ok(side)
+}
+
 /// Head-dim-64 attention: the FA2 flash kernel (f16 operands, f32 softmax
 /// and accumulation — the reference's own precision class) where the
 /// backend has it, else the composite f32 path.
@@ -274,19 +289,19 @@ impl BodyDino {
         })
     }
 
-    fn rope_tables(&self) -> (Vec<f32>, Vec<f32>) {
-        let rows = DINO_PREFIX_TOKENS + NUM_PATCHES;
+    fn rope_tables(&self, side: usize) -> (Vec<f32>, Vec<f32>) {
+        let rows = DINO_PREFIX_TOKENS + side * side;
         let mut inv_freq = [0.0f32; 16];
         for (j, value) in inv_freq.iter_mut().enumerate() {
             *value = 1.0 / DINO_ROPE_BASE.powf(j as f32 * 4.0 / DINO_HEAD_DIM as f32);
         }
         let mut cos = vec![1.0f32; rows * ROPE_HALF];
         let mut sin = vec![0.0f32; rows * ROPE_HALF];
-        for gy in 0..PATCHES_SIDE {
-            for gx in 0..PATCHES_SIDE {
-                let row = DINO_PREFIX_TOKENS + gy * PATCHES_SIDE + gx;
-                let y = 2.0 * ((gy as f32 + 0.5) / PATCHES_SIDE as f32) - 1.0;
-                let x = 2.0 * ((gx as f32 + 0.5) / PATCHES_SIDE as f32) - 1.0;
+        for gy in 0..side {
+            for gx in 0..side {
+                let row = DINO_PREFIX_TOKENS + gy * side + gx;
+                let y = 2.0 * ((gy as f32 + 0.5) / side as f32) - 1.0;
+                let x = 2.0 * ((gx as f32 + 0.5) / side as f32) - 1.0;
                 for (j, frequency) in inv_freq.iter().enumerate() {
                     let ay = 2.0 * std::f32::consts::PI * y * frequency;
                     let ax = 2.0 * std::f32::consts::PI * x * frequency;
@@ -300,40 +315,39 @@ impl BodyDino {
         (cos, sin)
     }
 
+    /// `pixels` is a normalised CHW crop of any square side that is a
+    /// multiple of the patch (512 is the trained size); the output has
+    /// `(side / 16)^2` rows.
     pub fn forward_normalized(&self, pixels: &[f32]) -> Result<GpuTensor> {
-        if pixels.len() != 3 * IMAGE_SIZE * IMAGE_SIZE {
-            return Err(DiffusionError::workflow(format!(
-                "body DINO input has {} values, expected {}",
-                pixels.len(),
-                3 * IMAGE_SIZE * IMAGE_SIZE
-            )));
-        }
+        let size = crop_side(pixels.len())?;
+        let side = size / PATCH;
+        let num_patches = side * side;
 
         // Patch vectors use [channel][patch_y][patch_x], matching flattened
         // conv2d weights [out, channel, patch_y, patch_x].
-        let mut patch_rows = vec![0.0f32; NUM_PATCHES * PATCH_DIM];
-        let plane = IMAGE_SIZE * IMAGE_SIZE;
-        for gy in 0..PATCHES_SIDE {
-            for gx in 0..PATCHES_SIDE {
-                let row = gy * PATCHES_SIDE + gx;
+        let mut patch_rows = vec![0.0f32; num_patches * PATCH_DIM];
+        let plane = size * size;
+        for gy in 0..side {
+            for gx in 0..side {
+                let row = gy * side + gx;
                 let base = row * PATCH_DIM;
                 for c in 0..3 {
                     for py in 0..PATCH {
-                        let src = c * plane + (gy * PATCH + py) * IMAGE_SIZE + gx * PATCH;
+                        let src = c * plane + (gy * PATCH + py) * size + gx * PATCH;
                         let dst = base + c * PATCH * PATCH + py * PATCH;
                         patch_rows[dst..dst + PATCH].copy_from_slice(&pixels[src..src + PATCH]);
                     }
                 }
             }
         }
-        let patch_rows = gpu_upload(&patch_rows, NUM_PATCHES, PATCH_DIM)
+        let patch_rows = gpu_upload(&patch_rows, num_patches, PATCH_DIM)
             .map_err(DiffusionError::model)?;
         let patches = self.patch.forward(&patch_rows)?;
         let mut hidden = gpu_concat_rows_many(&[&self.prefix, &patches])
             .map_err(DiffusionError::model)?;
 
-        let rows = DINO_PREFIX_TOKENS + NUM_PATCHES;
-        let (cos, sin) = self.rope_tables();
+        let rows = DINO_PREFIX_TOKENS + num_patches;
+        let (cos, sin) = self.rope_tables(side);
         let cos = gpu_upload(&cos, rows, ROPE_HALF).map_err(DiffusionError::model)?;
         let sin = gpu_upload(&sin, rows, ROPE_HALF).map_err(DiffusionError::model)?;
 
@@ -378,7 +392,7 @@ impl BodyDino {
             DINO_NORM_EPS,
         )
         .map_err(DiffusionError::model)?;
-        gpu_slice_rows(&normalized, DINO_PREFIX_TOKENS, NUM_PATCHES)
+        gpu_slice_rows(&normalized, DINO_PREFIX_TOKENS, num_patches)
             .map_err(DiffusionError::model)
     }
 
@@ -392,6 +406,7 @@ impl BodyDino {
 mod tests {
     use super::*;
     use crate::backend::gpu_device_available;
+    use crate::{NUM_PATCHES, PATCHES_SIDE};
 
     fn planar_to_tokens(values: &[f32]) -> Vec<f32> {
         let mut output = vec![0.0f32; NUM_PATCHES * DINO_DIM];

@@ -1,6 +1,6 @@
 //! CPU crop, camera conditioning, and patch-ray construction.
 
-use crate::{IMAGE_SIZE, PATCH, PATCHES_SIDE};
+use crate::{IMAGE_SIZE, PATCH};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -13,6 +13,9 @@ pub struct CropGeometry {
     pub affine: [f32; 6],
     pub focal: f32,
     pub principal: [f32; 2],
+    /// The crop's pixel size (square, a multiple of the patch): 512 is what
+    /// the model was trained at; smaller trades accuracy for speed.
+    pub crop: usize,
 }
 
 pub fn crop_geometry(
@@ -20,6 +23,16 @@ pub fn crop_geometry(
     image_w: usize,
     image_h: usize,
     intrinsics: Option<[f32; 3]>,
+) -> CropGeometry {
+    crop_geometry_at(bbox_xyxy, image_w, image_h, intrinsics, IMAGE_SIZE)
+}
+
+pub fn crop_geometry_at(
+    bbox_xyxy: [f32; 4],
+    image_w: usize,
+    image_h: usize,
+    intrinsics: Option<[f32; 3]>,
+    crop: usize,
 ) -> CropGeometry {
     let center = [
         0.5 * (bbox_xyxy[0] + bbox_xyxy[2]),
@@ -35,14 +48,14 @@ pub fn crop_geometry(
         scale[0] = scale[1] * 0.75;
     }
     let side = scale[0].max(scale[1]);
-    let k = IMAGE_SIZE as f32 / side;
+    let k = crop as f32 / side;
     let affine = [
         k,
         0.0,
-        0.5 * IMAGE_SIZE as f32 - k * center[0],
+        0.5 * crop as f32 - k * center[0],
         0.0,
         k,
-        0.5 * IMAGE_SIZE as f32 - k * center[1],
+        0.5 * crop as f32 - k * center[1],
     ];
     let [focal, cx, cy] = intrinsics.unwrap_or_else(|| {
         let w = image_w as f32;
@@ -55,6 +68,7 @@ pub fn crop_geometry(
         affine,
         focal,
         principal: [cx, cy],
+        crop,
     }
 }
 
@@ -84,16 +98,17 @@ pub fn crop_normalized(
     h: usize,
     geo: &CropGeometry,
 ) -> Vec<f32> {
-    let mut output = vec![0.0; 3 * IMAGE_SIZE * IMAGE_SIZE];
+    let crop = geo.crop;
+    let mut output = vec![0.0; 3 * crop * crop];
     let k = geo.affine[0];
-    let plane = IMAGE_SIZE * IMAGE_SIZE;
-    for v in 0..IMAGE_SIZE {
+    let plane = crop * crop;
+    for v in 0..crop {
         let src_y = (v as f32 - geo.affine[5]) / k;
-        for u in 0..IMAGE_SIZE {
+        for u in 0..crop {
             let src_x = (u as f32 - geo.affine[2]) / k;
             for c in 0..3 {
                 let pixel = bilinear_zero_border(rgb, w, h, src_x, src_y, c) / 255.0;
-                output[c * plane + v * IMAGE_SIZE + u] =
+                output[c * plane + v * crop + u] =
                     (pixel - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
             }
         }
@@ -117,11 +132,15 @@ pub fn condition_info(geo: &CropGeometry) -> [f32; 3] {
 /// for interior patches, pulled inward at the two edges (oracle-verified:
 /// block centres are 0.1 off in the conditioned context, this is 1e-3).
 pub fn patch_sample_coord(index: usize) -> f32 {
+    patch_sample_coord_at(index, IMAGE_SIZE)
+}
+
+pub fn patch_sample_coord_at(index: usize, crop: usize) -> f32 {
     let centre = (index as f32 + 0.5) * PATCH as f32 - 0.5;
     let mut weight_sum = 0.0f32;
     let mut coord_sum = 0.0f32;
     let lo = (centre - PATCH as f32).floor().max(0.0) as usize;
-    let hi = ((centre + PATCH as f32).ceil() as usize).min(IMAGE_SIZE - 1);
+    let hi = ((centre + PATCH as f32).ceil() as usize).min(crop - 1);
     for tap in lo..=hi {
         let weight = (1.0 - (tap as f32 - centre).abs() / PATCH as f32).max(0.0);
         weight_sum += weight;
@@ -131,12 +150,13 @@ pub fn patch_sample_coord(index: usize) -> f32 {
 }
 
 pub fn patch_rays(geo: &CropGeometry) -> Vec<f32> {
-    let mut rays = Vec::with_capacity(PATCHES_SIDE * PATCHES_SIDE * 2);
+    let side = geo.crop / PATCH;
+    let mut rays = Vec::with_capacity(side * side * 2);
     let k = geo.affine[0];
-    let coords: Vec<f32> = (0..PATCHES_SIDE).map(patch_sample_coord).collect();
-    for gy in 0..PATCHES_SIDE {
+    let coords: Vec<f32> = (0..side).map(|i| patch_sample_coord_at(i, geo.crop)).collect();
+    for gy in 0..side {
         let full_y = (coords[gy] - geo.affine[5]) / k;
-        for gx in 0..PATCHES_SIDE {
+        for gx in 0..side {
             let full_x = (coords[gx] - geo.affine[2]) / k;
             rays.push((full_x - geo.principal[0]) / geo.focal);
             rays.push((full_y - geo.principal[1]) / geo.focal);
@@ -150,8 +170,8 @@ pub fn full_to_crop(kp2d_full: &[f32], geo: &CropGeometry) -> Vec<f32> {
     for point in kp2d_full.chunks_exact(2) {
         let x = geo.affine[0] * point[0] + geo.affine[1] * point[1] + geo.affine[2];
         let y = geo.affine[3] * point[0] + geo.affine[4] * point[1] + geo.affine[5];
-        output.push(x / IMAGE_SIZE as f32 - 0.5);
-        output.push(y / IMAGE_SIZE as f32 - 0.5);
+        output.push(x / geo.crop as f32 - 0.5);
+        output.push(y / geo.crop as f32 - 0.5);
     }
     output
 }
@@ -159,6 +179,7 @@ pub fn full_to_crop(kp2d_full: &[f32], geo: &CropGeometry) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PATCHES_SIDE;
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
@@ -193,6 +214,7 @@ mod tests {
             affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             focal: 512.0,
             principal: [256.0, 256.0],
+            crop: IMAGE_SIZE,
         };
         let rays = patch_rays(&geo);
         assert_eq!(rays.len(), 1024 * 2);
@@ -246,6 +268,7 @@ mod tests {
             ],
             focal,
             principal: [cx, cy],
+            crop: IMAGE_SIZE,
         };
         let rgb: Vec<u8> = image_values.iter().map(|value| *value as u8).collect();
         let crop = crop_normalized(&rgb, w, h, &geo);
