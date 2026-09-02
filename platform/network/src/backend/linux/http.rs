@@ -86,8 +86,16 @@ fn run_http_request(
 
     let (status_code, headers_string, mut body_prefix, chunked) =
         read_response_head(&mut stream, cancel_flag).map_err(|e| format!("read failed: {e}"))?;
+    let max_body = request.max_response_body_bytes;
+    let declared = content_length_of(&headers_string);
+    if (!matches!(request.method, crate::types::HttpMethod::HEAD) && declared > max_body)
+        || body_prefix.len() as u64 > max_body
+    {
+        return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
+    }
 
     if request.is_streaming {
+        let mut streamed = body_prefix.len() as u64;
         if !body_prefix.is_empty() {
             let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                 request_id,
@@ -108,6 +116,10 @@ fn run_http_request(
             match stream.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    streamed = streamed.saturating_add(n as u64);
+                    if streamed > max_body {
+                        return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
+                    }
                     let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
                         request_id,
                         response: HttpResponse {
@@ -146,7 +158,7 @@ fn run_http_request(
     }
 
     let mut body = std::mem::take(&mut body_prefix);
-    let total = content_length_of(&headers_string);
+    let total = declared;
     let mut last_emit = 0usize;
     let emit_progress = |loaded: u64| {
         let _ = response_sender.send(NetworkResponse::HttpProgress {
@@ -163,6 +175,9 @@ fn run_http_request(
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                if body.len().saturating_add(n) as u64 > max_body {
+                    return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
+                }
                 body.extend_from_slice(&buf[..n]);
                 if body.len().saturating_sub(last_emit) >= 256 * 1024 {
                     last_emit = body.len();

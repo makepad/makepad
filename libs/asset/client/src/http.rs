@@ -681,7 +681,19 @@ fn check_extra_header(name: &str, value: &str) -> ClientResult<()> {
     if name.is_empty()
         || name.len() > 128
         || !name.bytes().all(token_byte_ok)
-        || matches!(name.to_ascii_lowercase().as_str(), "host" | "connection" | "content-length")
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "host"
+                | "connection"
+                | "content-length"
+                | "transfer-encoding"
+                | "te"
+                | "trailer"
+                | "upgrade"
+                | "expect"
+                | "keep-alive"
+                | "proxy-connection"
+        )
     {
         return Err(ClientError::InvalidInput { what: "request header name" });
     }
@@ -952,6 +964,13 @@ mod tests {
 
     fn head_of(raw: &[u8]) -> ClientResult<ResponseHead> {
         parse_response_head(raw, false, false)
+    }
+
+    #[test]
+    fn extra_headers_reject_caller_controlled_framing() {
+        for name in ["content-length", "transfer-encoding", "te", "trailer", "upgrade", "expect"] {
+            assert!(check_extra_header(name, "value").is_err(), "accepted {name}");
+        }
     }
 
     // ---- keep-alive pool recovery -----------------------------------------

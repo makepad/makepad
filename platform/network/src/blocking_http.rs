@@ -148,15 +148,33 @@ pub struct Request {
 #[derive(Clone, Copy)]
 enum Method {
     Get,
+    Head,
     Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
 }
 
 impl Method {
     fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
+            Method::Head => "HEAD",
             Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Connect => "CONNECT",
+            Method::Options => "OPTIONS",
+            Method::Trace => "TRACE",
+            Method::Patch => "PATCH",
         }
+    }
+
+    fn is_head(self) -> bool {
+        matches!(self, Method::Head)
     }
 }
 
@@ -167,6 +185,21 @@ impl Request {
 
     pub fn post(url: impl Into<String>) -> Request {
         Request::new(Method::Post, url.into())
+    }
+
+    pub fn with_method(url: impl Into<String>, method: crate::types::HttpMethod) -> Request {
+        let method = match method {
+            crate::types::HttpMethod::GET => Method::Get,
+            crate::types::HttpMethod::HEAD => Method::Head,
+            crate::types::HttpMethod::POST => Method::Post,
+            crate::types::HttpMethod::PUT => Method::Put,
+            crate::types::HttpMethod::DELETE => Method::Delete,
+            crate::types::HttpMethod::CONNECT => Method::Connect,
+            crate::types::HttpMethod::OPTIONS => Method::Options,
+            crate::types::HttpMethod::TRACE => Method::Trace,
+            crate::types::HttpMethod::PATCH => Method::Patch,
+        };
+        Request::new(method, url.into())
     }
 
     fn new(method: Method, url: String) -> Request {
@@ -204,6 +237,11 @@ impl Request {
             req.body = bytes;
             req
         })
+    }
+
+    pub fn body(mut self, bytes: Vec<u8>) -> Request {
+        self.body = bytes;
+        self
     }
 
     pub fn limits(mut self, limits: Limits) -> Request {
@@ -1437,7 +1475,7 @@ fn read_response(
         }
         let raw_headers = parse_header_block(&header_block, &req.limits)?;
         let validated = validate_response_headers(raw_headers, &req.limits)?;
-        let no_body = status == 204 || status == 304;
+        let no_body = req.method.is_head() || status == 204 || status == 304;
         let body = if no_body {
             if !prefix.is_empty() {
                 return Err(Error::InvalidResponse);
@@ -2147,7 +2185,7 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     let parsed = parse_header_block(&raw, &req.limits)?;
     let ValidatedHeaders { headers, content_length, chunked } =
         validate_response_headers(parsed, &req.limits)?;
-    let no_body = status == 204 || status == 304;
+    let no_body = req.method.is_head() || status == 204 || status == 304;
     let body = if no_body {
         Vec::new()
     } else {

@@ -2,7 +2,7 @@
 
 use crate::error::{ClientError, ClientResult};
 use crate::wire;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 /// The two socket endpoints advertised by a native Asset Server.
@@ -18,6 +18,9 @@ pub enum ClientMode {
     Native,
     StaticWeb,
 }
+
+pub const CAPABILITY_BLOCKING_API: &str = "blocking_api";
+pub const CAPABILITY_STATIC_SITE_SESSION: &str = "static_site_session";
 
 /// Where a client obtains its immutable asset data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,16 +70,18 @@ impl BaseUrl {
         if authority.is_empty() || authority.contains('@') {
             return Err(ClientError::InvalidInput { what: "static base url authority" });
         }
-        let host = authority_host(authority)
+        let (authority, host) = canonical_authority(authority, is_https)
             .ok_or(ClientError::InvalidInput { what: "static base url authority" })?;
-        if is_http && !is_loopback_host(host) {
+        if is_http && !is_loopback_host(&host) {
             return Err(ClientError::InvalidInput { what: "static base url requires https" });
         }
+        let path = canonical_path(&remainder[authority_end..])
+            .ok_or(ClientError::InvalidInput { what: "static base url path" })?;
 
         let mut normalized = String::with_capacity(value.len() + 1);
         normalized.push_str(if is_https { "https://" } else { "http://" });
-        normalized.push_str(remainder.trim_end_matches('/'));
-        normalized.push('/');
+        normalized.push_str(&authority);
+        normalized.push_str(&path);
         Ok(Self(normalized))
     }
 
@@ -90,6 +95,7 @@ impl BaseUrl {
             || !target.starts_with('/')
             || target.len() > wire::MAX_TARGET_BYTES
             || !target.bytes().all(wire::target_byte_ok)
+            || has_dot_segment(target.split_once('?').map_or(target, |(path, _)| path))
         {
             return Err(ClientError::InvalidInput { what: "static request target" });
         }
@@ -122,31 +128,134 @@ impl TryFrom<String> for BaseUrl {
     }
 }
 
-fn authority_host(authority: &str) -> Option<&str> {
+fn canonical_authority(authority: &str, is_https: bool) -> Option<(String, String)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let end = rest.find(']')?;
         let host = &rest[..end];
         let tail = &rest[end + 1..];
-        if host.is_empty() || (!tail.is_empty() && !valid_port(tail.strip_prefix(':')?)) {
+        let address = Ipv6Addr::from_str(host).ok()?;
+        let port = if tail.is_empty() {
+            None
+        } else {
+            Some(parse_port(tail.strip_prefix(':')?)?)
+        };
+        let host = address.to_string();
+        let mut out = format!("[{host}]");
+        if port.is_some_and(|port| port != if is_https { 443 } else { 80 }) {
+            out.push(':');
+            out.push_str(&port?.to_string());
+        }
+        return Some((out, host));
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.is_empty() || host.contains(':') {
+                return None;
+            }
+            (host, Some(parse_port(port)?))
+        }
+        None => (authority, None),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let host = if let Ok(address) = Ipv4Addr::from_str(host) {
+        address.to_string()
+    } else {
+        let host = host.to_ascii_lowercase();
+        if host.split('.').any(|label| {
+            label.is_empty()
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) {
             return None;
         }
-        return Some(host);
+        host
+    };
+    let mut out = host.clone();
+    if port.is_some_and(|port| port != if is_https { 443 } else { 80 }) {
+        out.push(':');
+        out.push_str(&port?.to_string());
     }
-    match authority.rsplit_once(':') {
-        Some((host, port)) => {
-            if host.is_empty() || !valid_port(port) || host.contains(':') {
-                None
-            } else {
-                Some(host)
-            }
-        }
-        None if !authority.is_empty() => Some(authority),
-        None => None,
-    }
+    Some((out, host))
 }
 
-fn valid_port(port: &str) -> bool {
-    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+fn parse_port(port: &str) -> Option<u16> {
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    port.parse().ok()
+}
+
+fn canonical_path(path: &str) -> Option<String> {
+    let path = if path.is_empty() { "/" } else { path };
+    if !path.starts_with('/')
+        || !path.bytes().all(url_path_byte_ok)
+        || has_dot_segment(path)
+    {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len() + 1);
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hi = *bytes.get(at + 1)?;
+            let lo = *bytes.get(at + 2)?;
+            if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+                return None;
+            }
+            out.push('%');
+            out.push((hi as char).to_ascii_uppercase());
+            out.push((lo as char).to_ascii_uppercase());
+            at += 3;
+        } else {
+            out.push(bytes[at] as char);
+            at += 1;
+        }
+    }
+    while out.ends_with("//") {
+        out.pop();
+    }
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    Some(out)
+}
+
+fn url_path_byte_ok(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.' | b'_' | b'~' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+                | b'*' | b'+' | b',' | b';' | b'=' | b':' | b'@' | b'/' | b'%'
+        )
+}
+
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        let mut dots = 0usize;
+        let bytes = segment.as_bytes();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            if bytes[at] == b'.' {
+                dots += 1;
+                at += 1;
+            } else if bytes.get(at) == Some(&b'%')
+                && bytes.get(at + 1).is_some_and(|byte| *byte == b'2')
+                && bytes
+                    .get(at + 2)
+                    .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'e'))
+            {
+                dots += 1;
+                at += 3;
+            } else {
+                return false;
+            }
+        }
+        dots == 1 || dots == 2
+    })
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -157,14 +266,14 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiEndpoints, BaseUrl, ClientMode};
+    use super::{ApiEndpoints, BaseUrl, ClientMode, CAPABILITY_STATIC_SITE_SESSION};
     use crate::{AssetClient, ClientConfig, ClientError, SessionConfig, SessionConnector};
 
     #[test]
     fn validation_table_and_normalization() {
         let accepted = [
             ("https://assets.example", "https://assets.example/"),
-            ("HTTPS://assets.example/root///", "https://assets.example/root/"),
+            ("HTTPS://ASSETS.EXAMPLE:443/root///", "https://assets.example/root/"),
             ("http://localhost:8080", "http://localhost:8080/"),
             ("http://127.0.0.1:8080/static/", "http://127.0.0.1:8080/static/"),
             ("http://[::1]:8080", "http://[::1]:8080/"),
@@ -177,6 +286,8 @@ mod tests {
             "https://user:pass@assets.example", "https://assets.example?q=1",
             "https://assets.example/#frag", "https://assets.example:bad",
             "https://assets.example/path with space",
+            "https://assets.example/./root", "https://assets.example/../root",
+            "https://assets.example/%2e/root", "https://assets.example/%2E%2e/root",
         ] {
             assert!(BaseUrl::parse(input).is_err(), "accepted {input}");
         }
@@ -186,7 +297,10 @@ mod tests {
     fn join_accepts_only_wire_targets() {
         let base = BaseUrl::parse("https://assets.example/export").unwrap();
         assert_eq!(base.join("/v1/health").unwrap(), "https://assets.example/export/v1/health");
-        for target in ["", "v1/health", "/bad%20path", "/bad#fragment"] {
+        for target in [
+            "", "v1/health", "/bad%20path", "/bad#fragment", "/../v1/health",
+            "/./v1/health", "/safe/../v1/health", "/%2e%2e/v1/health",
+        ] {
             assert!(base.join(target).is_err(), "accepted {target}");
         }
     }
@@ -201,7 +315,7 @@ mod tests {
         assert!(matches!(
             AssetClient::connect(ClientConfig::static_site(base.clone()), endpoints, None),
             Err(ClientError::Unavailable {
-                capability: "static_site_session" | "blocking_api",
+                capability: CAPABILITY_STATIC_SITE_SESSION,
                 mode: ClientMode::StaticWeb,
             })
         ));

@@ -26,7 +26,9 @@ use crate::dto::{
 };
 use crate::error::{ClientError, ClientResult};
 use crate::http::HttpLimits;
-use crate::location::{BaseUrl, ClientLocation, ClientMode};
+use crate::location::{
+    BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
+};
 use crate::util::now_ms;
 use crate::wire;
 use makepad_asset_data::{
@@ -42,7 +44,8 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     /// `None` selects the native endpoints passed to [`AssetClient::connect`].
-    /// The static constructor records its validated URL here.
+    /// `Native` is authoritative over that compatibility argument; the
+    /// static constructor records its validated URL here.
     pub location: Option<ClientLocation>,
     pub cache_root: PathBuf,
     pub cache: CacheBudgets,
@@ -279,10 +282,15 @@ impl AssetClient {
         config.validate()?;
         if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
             return Err(ClientError::Unavailable {
-                capability: "static_site_session",
+                capability: CAPABILITY_STATIC_SITE_SESSION,
                 mode: ClientMode::StaticWeb,
             });
         }
+        let endpoints = match config.location.as_ref() {
+            Some(ClientLocation::Native(endpoints)) => *endpoints,
+            Some(ClientLocation::StaticSite(_)) => unreachable!(),
+            None => endpoints,
+        };
         let cache = ContentCache::open(&config.cache_root, config.cache, now_ms())?;
         let api = Api::with_keep_alive(
             endpoints,
