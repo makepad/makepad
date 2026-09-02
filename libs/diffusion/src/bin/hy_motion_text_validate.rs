@@ -352,7 +352,7 @@ fn run() -> Result<(), String> {
             checkpoint_started.elapsed().as_secs_f64()
         );
         let prepared = device_weights
-            .prepare_cfg(&run.context, &vector.data, MOTION_TOKENS)
+            .prepare_cfg(&run.context, &vector.data, MOTION_TOKENS, true)
             .map_err(|error| error.to_string())?;
         let trajectory_started = Instant::now();
         let sampled = device_weights

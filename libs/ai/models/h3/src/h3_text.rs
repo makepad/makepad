@@ -21,10 +21,11 @@
 
 use crate::backend::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_causal, gpu_concat_cols,
-    gpu_concat_rows, gpu_download, gpu_gelu, gpu_gelu_erf, gpu_gemm_f16acc_enabled,
-    gpu_layer_norm_mul_add, gpu_linear_nt_cached, gpu_rms_norm_mul, gpu_rope_half,
+    gpu_concat_rows, gpu_download, gpu_gelu, gpu_gelu_erf, gpu_layer_norm_mul_add,
+    gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, GemmPrecision, GpuLinearPart,
+    GpuTensor,
 };
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
@@ -38,6 +39,22 @@ pub const H3_TE_HEAD_DIM: usize = 128;
 pub const H3_TE_FFN: usize = 25600;
 pub const H3_TE_ROPE_THETA: f32 = 5_000_000.0;
 pub const H3_TE_RMS_EPS: f32 = 1e-6;
+
+/// H3 text/vision activations contain >1e4 outliers, so the validated model
+/// contract keeps both accumulation and the activation spine in f32.
+pub const H3_TE_PRECISION: GemmPrecision = GemmPrecision {
+    f16_accumulate: false,
+    f16_activations: false,
+};
+
+fn linear_launch(
+    x: &GpuTensor,
+    cache_namespace: &str,
+    parts: &[GpuLinearPart<'_>],
+    bias: &[f32],
+) -> std::result::Result<GpuTensor, String> {
+    gpu_linear_nt_cached_with_precision(x, cache_namespace, parts, bias, H3_TE_PRECISION)
+}
 
 fn layer_prefix(layer: usize) -> String {
     format!("model.language_model.layers.{layer}")
@@ -61,7 +78,7 @@ fn ensure_linear<'a>(
         })
         .map_err(DiffusionError::model)?;
     } else {
-        let want_a16 = gpu_gemm_f16acc_enabled() && m > 1;
+        let want_a16 = H3_TE_PRECISION.f16_accumulate && m > 1;
         gpu_weight_cache_ensure(weights.te_namespace(), name, ggml_type, n, k, want_a16, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
@@ -83,7 +100,7 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached(x, weights.te_namespace(), &parts, &[]).map_err(DiffusionError::model)
+    linear_launch(x, weights.te_namespace(), &parts, &[]).map_err(DiffusionError::model)
 }
 
 /// Host-cached per-layer norm scales (small, read once).
@@ -236,7 +253,7 @@ fn text_layer_forward(
         && q_part.bt_ggml_type == v_part.bt_ggml_type
     {
         let parts = [q_part, k_part, v_part];
-        let qkv = gpu_linear_nt_cached(&normed, weights.te_namespace(), &parts, &[])
+        let qkv = linear_launch(&normed, weights.te_namespace(), &parts, &[])
             .map_err(DiffusionError::model)?;
         let q = gpu_slice_cols(&qkv, 0, q_inner).map_err(DiffusionError::model)?;
         let k = gpu_slice_cols(&qkv, q_inner, kv_inner).map_err(DiffusionError::model)?;
@@ -245,11 +262,11 @@ fn text_layer_forward(
         drop(qkv);
         (q, k, v)
     } else {
-        let q = gpu_linear_nt_cached(&normed, weights.te_namespace(), &[q_part], &[])
+        let q = linear_launch(&normed, weights.te_namespace(), &[q_part], &[])
             .map_err(DiffusionError::model)?;
-        let k = gpu_linear_nt_cached(&normed, weights.te_namespace(), &[k_part], &[])
+        let k = linear_launch(&normed, weights.te_namespace(), &[k_part], &[])
             .map_err(DiffusionError::model)?;
-        let v = gpu_linear_nt_cached(&normed, weights.te_namespace(), &[v_part], &[])
+        let v = linear_launch(&normed, weights.te_namespace(), &[v_part], &[])
             .map_err(DiffusionError::model)?;
         (q, k, v)
     };
@@ -336,7 +353,7 @@ fn text_layer_forward(
         ensure_linear(weights, &up_name, H3_TE_FFN, H3_TE_HIDDEN, n)?,
         ensure_linear(weights, &gate_name, H3_TE_FFN, H3_TE_HIDDEN, n)?,
     ];
-    let up_gate = gpu_linear_nt_cached(&normed, weights.te_namespace(), &parts, &[])
+    let up_gate = linear_launch(&normed, weights.te_namespace(), &parts, &[])
         .map_err(DiffusionError::model)?;
     drop(normed);
     let ff = gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
@@ -649,7 +666,7 @@ fn linear_cached_bias(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached(x, weights.te_namespace(), &parts, bias).map_err(DiffusionError::model)
+    linear_launch(x, weights.te_namespace(), &parts, bias).map_err(DiffusionError::model)
 }
 
 /// Reinterpret (rows, cols) as (rows/4, cols*4): 4 consecutive block-major
@@ -690,7 +707,7 @@ fn vision_block_forward(
     let qkv_name = vis_name(&format!("{prefix}.attn.qkv.weight"));
     let qkv_part = ensure_linear(weights, &qkv_name, 3 * H3_VIS_HIDDEN, H3_VIS_HIDDEN, seq)?;
     let parts = [qkv_part];
-    let qkv = gpu_linear_nt_cached(&normed, weights.te_namespace(), &parts, &prepared.qkv_bias[block])
+    let qkv = linear_launch(&normed, weights.te_namespace(), &parts, &prepared.qkv_bias[block])
         .map_err(DiffusionError::model)?;
     drop(normed);
     let q = gpu_slice_cols(&qkv, 0, H3_VIS_HIDDEN).map_err(DiffusionError::model)?;

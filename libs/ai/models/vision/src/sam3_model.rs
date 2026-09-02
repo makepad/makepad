@@ -141,7 +141,7 @@ fn linear(
 /// Twice the f32-accumulate tensor-op rate. Used only where it measurably
 /// helps without costing dump parity: the ViT trunk (05 IoU improved) —
 /// spreading it to the decoder/score path cost IoU for ~2ms and was
-/// rejected. FLUX_GEMM_F16ACC=0 restores f32 accumulation.
+/// rejected. The generic model default deliberately selects this policy.
 fn linear_fast(
     x: &GpuTensor,
     bytes: &[u8],

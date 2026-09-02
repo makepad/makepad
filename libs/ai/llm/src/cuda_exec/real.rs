@@ -54,8 +54,7 @@ use crate::error::{LlamaError, Result};
 use crate::runtime::{
     build_hybrid_decode_graph_with_attention_key_count, build_hybrid_decode_graph_with_sequences,
     build_hybrid_decode_writes,
-    collect_hybrid_decode_run, debug_trace_outputs, import_hybrid_graph_context,
-    validate_hybrid_decode_layout,
+    collect_hybrid_decode_run, import_hybrid_graph_context, validate_hybrid_decode_layout,
     HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeOutputConfig, HybridDecodeRun,
     HybridDecodeSpec, HybridSharedCacheTensorIds, ImportedHybridGraphContext, LogitsProbeInput,
 };
@@ -122,17 +121,8 @@ const GRAPH_WEIGHT_SCRATCH: usize = GEMM_SLAB_BYTES;
 /// VRAM the arena refuses to consume (driver/display/allocator slack).
 const VRAM_RESERVE_BYTES: u64 = 1 << 30;
 
-/// llama-bench.cpp:2026 test_gen host vs GPU split. Env-gated so the
-/// official pp/tg line stays free of extra event records.
 fn host_split_enabled() -> bool {
-    std::env::var_os("MAKEPAD_LLAMA_HOST_SPLIT").is_some()
-}
-
-/// llama-bench.cpp:2036-2042 test_gen never calls llama_get_logits.
-/// Decode + synchronize + rand; logits stay on device. Our collect of
-/// vocab=248320 was 0.57 ms/tok of host-after-sync that they elide.
-fn skip_logits_readback() -> bool {
-    std::env::var_os("MAKEPAD_LLAMA_SKIP_LOGITS").is_some()
+    HOST_SPLIT_ENABLED.with(Cell::get)
 }
 
 #[derive(Default, Clone, Debug)]
@@ -192,6 +182,7 @@ impl HostSplit {
 }
 
 thread_local! {
+    static HOST_SPLIT_ENABLED: Cell<bool> = const { Cell::new(false) };
     static HOST_SPLIT: RefCell<HostSplit> = RefCell::new(HostSplit::default());
     /// Set while a CUDA graph capture is open on this thread's stream. A
     /// device allocation there is illegal (and would move a pointer the
@@ -224,6 +215,10 @@ impl Drop for GraphCaptureGuard {
 
 pub fn host_split_reset() {
     HOST_SPLIT.with(|slot| *slot.borrow_mut() = HostSplit::default());
+}
+
+pub fn host_split_set_enabled(enabled: bool) {
+    HOST_SPLIT_ENABLED.with(|slot| slot.set(enabled));
 }
 
 pub fn host_split_snapshot() -> HostSplit {
@@ -264,131 +259,6 @@ fn check(err: CudaErr, what: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-struct EventTimeline {
-    stream: cudaStream_t,
-    events: Vec<CudaEvent>,
-}
-
-impl EventTimeline {
-    fn new(stream: cudaStream_t) -> Result<Self> {
-        let mut timeline = Self {
-            stream,
-            events: Vec::new(),
-        };
-        timeline.mark()?;
-        Ok(timeline)
-    }
-
-    fn mark(&mut self) -> Result<()> {
-        let mut event = std::ptr::null_mut();
-        check(unsafe { cudaEventCreate(&mut event) }, "profile event create")?;
-        if let Err(err) = check(
-            unsafe { cudaEventRecord(event, self.stream) },
-            "profile event record",
-        ) {
-            unsafe {
-                cudaEventDestroy(event);
-            }
-            return Err(err);
-        }
-        self.events.push(event);
-        Ok(())
-    }
-
-    fn elapsed_ms(&self, index: usize) -> Result<f32> {
-        let mut ms = 0.0f32;
-        check(
-            unsafe {
-                cudaEventElapsedTime(&mut ms, self.events[index], self.events[index + 1])
-            },
-            "profile event elapsed",
-        )?;
-        Ok(ms)
-    }
-}
-
-impl Drop for EventTimeline {
-    fn drop(&mut self) {
-        for event in self.events.drain(..) {
-            unsafe {
-                cudaEventDestroy(event);
-            }
-        }
-    }
-}
-
-struct QuantStage {
-    start: usize,
-    end: usize,
-    kind: i32,
-    name: &'static str,
-}
-
-struct QuantTimeline {
-    stream: cudaStream_t,
-    events: Vec<CudaEvent>,
-    stages: Vec<QuantStage>,
-}
-
-impl QuantTimeline {
-    fn new(stream: cudaStream_t) -> Self {
-        Self {
-            stream,
-            events: Vec::new(),
-            stages: Vec::new(),
-        }
-    }
-
-    fn mark(&mut self) -> Result<usize> {
-        let mut event = std::ptr::null_mut();
-        check(unsafe { cudaEventCreate(&mut event) }, "quant profile event create")?;
-        if let Err(err) = check(
-            unsafe { cudaEventRecord(event, self.stream) },
-            "quant profile event record",
-        ) {
-            unsafe {
-                cudaEventDestroy(event);
-            }
-            return Err(err);
-        }
-        let index = self.events.len();
-        self.events.push(event);
-        Ok(index)
-    }
-
-    fn finish(&mut self, start: usize, kind: i32, name: &'static str) -> Result<usize> {
-        let end = self.mark()?;
-        self.stages.push(QuantStage {
-            start,
-            end,
-            kind,
-            name,
-        });
-        Ok(end)
-    }
-
-    fn elapsed_ms(&self, stage: &QuantStage) -> Result<f32> {
-        let mut ms = 0.0f32;
-        check(
-            unsafe {
-                cudaEventElapsedTime(&mut ms, self.events[stage.start], self.events[stage.end])
-            },
-            "quant profile event elapsed",
-        )?;
-        Ok(ms)
-    }
-}
-
-impl Drop for QuantTimeline {
-    fn drop(&mut self) {
-        for event in self.events.drain(..) {
-            unsafe {
-                cudaEventDestroy(event);
-            }
-        }
-    }
 }
 
 struct DeviceState {
@@ -924,11 +794,7 @@ impl Runtime {
             plan,
             graph_exec: RefCell::new(None),
             graph_scratch_epoch: Cell::new(Default::default()),
-            graph_disabled: Cell::new(
-                std::env::var_os("MKLLM_DISABLE_CUDA_GRAPH")
-                    .map(|v| v == "1")
-                    .unwrap_or(false),
-            ),
+            graph_disabled: Cell::new(false),
             graph_warmup: Cell::new(false),
         })
     }
@@ -944,7 +810,7 @@ impl Runtime {
         writes: &[(TensorId, Vec<u8>)],
         wanted: &[TensorId],
     ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
-        let plan = plan_raw_graph(ctx, graph, pinned)?;
+        let plan = plan_raw_graph(ctx, graph, pinned, super::CudaGraphOptions::default())?;
         if plan.required_size > ctx.mem_size() {
             return Err(LlamaError::format(format!(
                 "context out of memory allocating {} bytes for graph activations",
@@ -982,9 +848,10 @@ impl Runtime {
         ctx: &Context,
         graph: &crate::Graph,
         pinned: &[TensorId],
+        options: super::CudaGraphOptions,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<RawSession> {
-        let plan = plan_raw_graph(ctx, graph, pinned)?;
+        let plan = plan_raw_graph(ctx, graph, pinned, options)?;
         let arena = self.create_context_arena_sized(ctx, plan.required_size, progress)?;
         let arena_ref = ArenaRef {
             ro_dev: arena.ro_dev,
@@ -1141,6 +1008,7 @@ struct GraphPlan {
     fused_rms: usize,
     fused_unary: usize,
     fused_ssm: usize,
+    options: super::CudaGraphOptions,
 }
 
 fn resolve_root(tensors: &[Tensor], id: TensorId) -> Result<(TensorId, usize)> {
@@ -1189,7 +1057,11 @@ fn unsupported_node(t: &Tensor, why: &str) -> LlamaError {
     ))
 }
 
-fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
+fn select_kernel(
+    tensors: &[Tensor],
+    t: &Tensor,
+    options: super::CudaGraphOptions,
+) -> Result<KernelSel> {
     let src = |i: usize| -> Result<&Tensor> {
         t.src[i]
             .and_then(|id| tensors.get(id))
@@ -1335,13 +1207,6 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
             // (fattn.cu:402-404, fattn-vec.cuh:543-547).
             // K.ne[1] must be the live padded n_kv (llama-kv-cache.cpp:1121),
             // not the 8192 allocation, or this falls through to FlashDecode.
-            // MKLLM_DISABLE_FATTN_MMA=1 / MKLLM_DISABLE_FATTN_VEC=1 roll back.
-            let fattn_disabled = std::env::var_os("MKLLM_DISABLE_FATTN_MMA")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            let fattn_vec_disabled = std::env::var_os("MKLLM_DISABLE_FATTN_VEC")
-                .map(|v| v == "1")
-                .unwrap_or(false);
             let gqa = q.ne[2] / k.ne[2];
             let aligned = k.ne[1] % 256 == 0
                 && q.nb[1] % 16 == 0
@@ -1350,9 +1215,8 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                 && k.nb[2] % 16 == 0
                 && v.nb[1] % 16 == 0
                 && v.nb[2] % 16 == 0;
-            if !fattn_disabled && q.ne[0] == 256 && v.ne[0] == 256 && aligned {
-                if !fattn_vec_disabled
-                    && q.ne[1] == 1
+            if q.ne[0] == 256 && v.ne[0] == 256 && aligned {
+                if q.ne[1] == 1
                     && q.ne[3] == 1
                     && !(gqa > 4 && k.ne[1] >= 8192)
                 {
@@ -1514,12 +1378,12 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                     // columns the cast plus a GEMM launch costs more than the
                     // dot-product kernel, which is fine at that width.
                     let a_2d = a.ne[2] == 1 && a.ne[3] == 1;
-                    if a_2d
+                    if options.use_f16_gemm
+                        && a_2d
                         && m_total >= GEMM_F16_MIN_COLUMNS
                         && a.is_contiguous()
                         && b.is_contiguous()
                         && t.is_contiguous()
-                        && !disabled_by_env("MKLLM_DISABLE_GEMM_F16")
                     {
                         KernelSel::GemmF16
                     } else {
@@ -1651,15 +1515,6 @@ fn next_compute(nodes: &[PlannedNode], from: usize) -> Option<usize> {
 // with shared activations, same weight type/shape, SiLU/SwiGLU, M=1.
 // Evaluate: ggml-cuda.cu:3887-3921.
 fn fuse_mmvq_swiglu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if std::env::var_os("MKLLM_DISABLE_MMVQ_FUSION")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        || std::env::var_os("MKLLM_DISABLE_Q81_MMVQ")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    {
-        return 0;
-    }
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1743,19 +1598,9 @@ const UNARY_SIGMOID: i32 = 7;
 const UNARY_SILU: i32 = 10;
 const UNARY_SOFTPLUS: i32 = 15;
 
-/// `MKLLM_DISABLE_*=1` kill switches: fusion passes and kernel choices both
-/// roll back through this one spelling, so an A/B on the box is an env var
-/// rather than a rebuild.
-fn disabled_by_env(var: &str) -> bool {
-    std::env::var_os(var).map(|v| v == "1").unwrap_or(false)
-}
-
 // llama.cpp ggml-cuda.cu:3371-3410 / 3994-4004: RMS_NORM + MUL (+ ADD).
 // Intermediate nodes must have a single use (ggml_can_fuse_ext n_uses==1).
 fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if disabled_by_env("MKLLM_DISABLE_RMS_FUSION") {
-        return 0;
-    }
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1831,9 +1676,6 @@ fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [
 
 // llama.cpp ggml-cuda.cu:3425-3450 / 4012-4017: UNARY + MUL.
 fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if disabled_by_env("MKLLM_DISABLE_UNARY_MUL_FUSION") {
-        return 0;
-    }
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1904,7 +1746,7 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
     let force_on = std::env::var_os("MKLLM_ENABLE_SSM_SILU_FUSION")
         .map(|v| v == "1")
         .unwrap_or(false);
-    if !force_on || disabled_by_env("MKLLM_DISABLE_SSM_SILU_FUSION") {
+    if !force_on {
         return 0;
     }
     let mut fused = 0usize;
@@ -1942,9 +1784,6 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
 // (qwen35.cpp:267-276, ggml-cuda.cu:2520). We still build CONT+SET_ROWS;
 // collapse that pair to the same single strided copy.
 fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) {
-    if disabled_by_env("MKLLM_DISABLE_CPY_FUSION") {
-        return;
-    }
     let mut i = 0;
     while i + 1 < nodes.len() {
         match (nodes[i].kernel, nodes[i + 1].kernel) {
@@ -1986,9 +1825,6 @@ fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
 // view; collapse a same-type same-size F32 write to the same single copy.
 // Official SET_ROWS remains only the attn K/V f16 path.
 fn fuse_set_rows_cpy(tensors: &[Tensor], nodes: &mut [PlannedNode]) {
-    if disabled_by_env("MKLLM_DISABLE_CPY_FUSION") {
-        return;
-    }
     for node in nodes.iter_mut() {
         let KernelSel::SetRows { f16: false } = node.kernel else {
             continue;
@@ -2010,110 +1846,23 @@ fn fuse_set_rows_cpy(tensors: &[Tensor], nodes: &mut [PlannedNode]) {
     }
 }
 
-fn dump_plan(nodes: &[PlannedNode], tensors: &[Tensor]) {
-    if std::env::var_os("MAKEPAD_LLAMA_CUDA_PROFILE").is_none()
-        && std::env::var_os("MAKEPAD_LLAMA_CUDA_DUMP_PLAN").is_none()
-    {
-        return;
-    }
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut launched = 0usize;
-    for node in nodes {
-        *counts.entry(format!("{:?}", node.kernel)).or_default() += 1;
-        if !matches!(node.kernel, KernelSel::Skip) {
-            launched += 1;
-        }
-    }
-    eprintln!(
-        "cuda.plan: nodes={} launched={} skipped={}",
-        nodes.len(),
-        launched,
-        nodes.len() - launched
-    );
-    for (kernel, count) in &counts {
-        eprintln!("cuda.plan.kernel: {kernel} count={count}");
-    }
-    let mut shown = 0usize;
-    for (index, node) in nodes.iter().enumerate() {
-        if matches!(node.kernel, KernelSel::Skip) {
-            continue;
-        }
-        if shown >= 96 {
-            eprintln!("cuda.plan.seq: ... {} more launched", launched - shown);
-            break;
-        }
-        let tensor = &tensors[node.node_id];
-        eprintln!(
-            "cuda.plan.seq: i={index} {:?} op={:?} name={} ne={:?}",
-            node.kernel,
-            tensor.op,
-            tensor.name().unwrap_or("<unnamed>"),
-            tensor.ne
-        );
-        shown += 1;
-    }
-    for (index, node) in nodes.iter().enumerate() {
-        match node.kernel {
-            KernelSel::FlashDecode | KernelSel::FlashVec | KernelSel::FlashMma => {
-                let tensor = &tensors[node.node_id];
-                let k_ne = tensor
-                    .src
-                    .get(1)
-                    .and_then(|id| *id)
-                    .and_then(|id| tensors.get(id))
-                    .map(|k| k.ne);
-                let q_ne = tensor
-                    .src
-                    .get(0)
-                    .and_then(|id| *id)
-                    .and_then(|id| tensors.get(id))
-                    .map(|q| q.ne);
-                eprintln!(
-                    "cuda.plan.flash: i={index} {:?} name={} q_ne={:?} k_ne={:?} dst_ne={:?}",
-                    node.kernel,
-                    tensor.name().unwrap_or("<unnamed>"),
-                    q_ne,
-                    k_ne,
-                    tensor.ne
-                );
-            }
-            KernelSel::CopyStrided
-            | KernelSel::CopyViewTo
-            | KernelSel::SetRows { .. }
-            | KernelSel::RopeMulti
-            | KernelSel::RopeVision
-            | KernelSel::Norm { .. }
-            | KernelSel::LayerNorm
-            | KernelSel::UpscaleBilinear { .. }
-            | KernelSel::Unary(_)
-            | KernelSel::Glu(_) => {
-                let tensor = &tensors[node.node_id];
-                eprintln!(
-                    "cuda.plan.extra: i={index} {:?} op={:?} name={} ne={:?} nb={:?}",
-                    node.kernel,
-                    tensor.op,
-                    tensor.name().unwrap_or("<unnamed>"),
-                    tensor.ne,
-                    tensor.nb
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
 fn plan_graph(ctx: &Context, decode: &HybridDecodeGraph) -> Result<GraphPlan> {
     let mut pinned = vec![decode.result_logits, decode.result_hidden];
     pinned.extend(decode.moe_selected_experts.iter().map(|s| s.selected_experts));
     pinned.extend(decode.state_updates.iter().copied());
-    pinned.extend(decode.debug_outputs.iter().copied());
-    plan_raw_graph(ctx, &decode.graph, &pinned)
+    plan_raw_graph(
+        ctx,
+        &decode.graph,
+        &pinned,
+        super::CudaGraphOptions::default(),
+    )
 }
 
 fn plan_raw_graph(
     ctx: &Context,
     graph: &crate::Graph,
     pinned: &[TensorId],
+    options: super::CudaGraphOptions,
 ) -> Result<GraphPlan> {
     let tensors = ctx.tensors();
 
@@ -2126,7 +1875,7 @@ fn plan_raw_graph(
             .ok_or_else(|| LlamaError::format(format!("invalid graph node {node_id}")))?;
         nodes.push(PlannedNode {
             node_id,
-            kernel: select_kernel(tensors, t)?,
+            kernel: select_kernel(tensors, t, options)?,
         });
     }
     let fused_mmvq = fuse_mmvq_swiglu(tensors, &graph.nodes, &mut nodes);
@@ -2135,7 +1884,6 @@ fn plan_raw_graph(
     let fused_ssm = fuse_ssm_conv_silu(tensors, &graph.nodes, &mut nodes);
     fuse_cont_set_rows(tensors, &graph.nodes, &mut nodes);
     fuse_set_rows_cpy(tensors, &mut nodes);
-    dump_plan(&nodes, tensors);
 
     // Lifetimes over root storage: def = first producing node, last_use =
     // last reading node; graph outputs are pinned alive to the end.
@@ -2258,15 +2006,11 @@ fn plan_raw_graph(
         }
         // Free blocks that die at this node (after its output allocation so
         // outputs never alias this node's own inputs).
-        // MAKEPAD_LLAMA_CUDA_NO_REUSE=1 disables reuse entirely (pure bump
-        // allocation) — the A/B switch for isolating aliasing bugs.
-        if std::env::var_os("MAKEPAD_LLAMA_CUDA_NO_REUSE").is_none() {
-            if let Some(dead) = expiry.get(&index) {
-                for root in dead {
-                    if let Some(&offset) = planned.get(root) {
-                        let size = align_up(tensors[*root].nbytes());
-                        free.push((offset, size));
-                    }
+        if let Some(dead) = expiry.get(&index) {
+            for root in dead {
+                if let Some(&offset) = planned.get(root) {
+                    let size = align_up(tensors[*root].nbytes());
+                    free.push((offset, size));
                 }
             }
         }
@@ -2299,6 +2043,7 @@ fn plan_raw_graph(
         fused_rms,
         fused_unary,
         fused_ssm,
+        options,
     })
 }
 
@@ -2410,6 +2155,7 @@ impl Compiled {
         input: LogitsProbeInput<'_>,
         layout: &HybridDecodeBatchLayout,
         capture_hidden: bool,
+        skip_logits_readback: bool,
     ) -> Result<HybridDecodeRun> {
         let split = host_split_enabled();
         let t_wall = split.then(Instant::now);
@@ -2431,12 +2177,9 @@ impl Compiled {
         if capture_hidden {
             wanted.push(self.decode.result_hidden);
         }
-        wanted.extend(self.decode.debug_outputs.iter().copied());
-        let skip_logits = !capture_hidden && skip_logits_readback();
+        let skip_logits = !capture_hidden && skip_logits_readback;
         let wanted_read = if skip_logits { &[][..] } else { wanted.as_slice() };
-        let outputs = if self.graph_disabled.get()
-            || std::env::var_os("MAKEPAD_LLAMA_CUDA_PROFILE").is_some()
-        {
+        let outputs = if self.graph_disabled.get() {
             view.run(&writes, wanted_read)?
         } else {
             Self::execute_with_graph(self, &view, &writes, wanted_read)?
@@ -2464,8 +2207,6 @@ impl Compiled {
                 selected_experts: Vec::new(),
             });
         }
-
-        debug_trace_outputs("cuda", &self.ctx, &self.decode, &outputs)?;
 
         let output_config = if capture_hidden {
             HybridDecodeOutputConfig::FULL
@@ -2575,7 +2316,7 @@ impl Compiled {
         if !replayed {
             // ggml-cuda.cu:4125-4133: first call after compile is eager.
             if !self.graph_warmup.get() {
-                view.dispatch_all(None)?;
+                view.dispatch_all()?;
                 self.graph_warmup.set(true);
             } else {
                 // last_q81 reuse is CPU-side; a leftover hit from the warmup
@@ -2588,7 +2329,7 @@ impl Compiled {
                 // Refuses a scratch realloc for as long as the capture is open
                 // (see `Scratch::ensure`); cleared on every exit path.
                 let capture_guard = GraphCaptureGuard::open();
-                let dispatch = view.dispatch_all(None);
+                let dispatch = view.dispatch_all();
                 if let Err(err) = dispatch {
                     let _ = end_stream_capture(stream);
                     return Err(err);
@@ -2661,7 +2402,7 @@ impl Compiled {
                     Err(err) => {
                         eprintln!("cuda.graph: capture failed ({err}); staying on eager dispatch");
                         self.graph_disabled.set(true);
-                        view.dispatch_all(None)?;
+                        view.dispatch_all()?;
                     }
                 }
             }
@@ -2771,7 +2512,7 @@ impl ExecView<'_> {
         Ok(())
     }
 
-    fn dispatch_all(&self, mut quant_profile: Option<&mut QuantTimeline>) -> Result<()> {
+    fn dispatch_all(&self) -> Result<()> {
         // The q8_1 activation reuse below is keyed on a raw DEVICE ADDRESS plus
         // (k, m). That is exactly right inside one graph — the fused gate/up
         // pair reads the same activations twice — but across graph executions
@@ -2786,7 +2527,7 @@ impl ExecView<'_> {
         self.state.last_q81_k.set(0);
         self.state.last_q81_m.set(0);
         for index in 0..self.plan.nodes.len() {
-            self.dispatch_node(index, quant_profile.as_deref_mut())
+            self.dispatch_node(index)
                 .map_err(|err| LlamaError::format(format!("node {index}: {err:?}")))?;
         }
         Ok(())
@@ -2875,121 +2616,11 @@ impl ExecView<'_> {
         wanted: &[TensorId],
     ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
         self.write_inputs_borrowed(writes)?;
-        let stream = self.state.stream;
-        let mut profile = std::env::var_os("MAKEPAD_LLAMA_CUDA_PROFILE")
-            .map(|_| EventTimeline::new(stream))
-            .transpose()?;
-        let mut quant_profile =
-            std::env::var_os("MAKEPAD_LLAMA_CUDA_PROFILE").map(|_| QuantTimeline::new(stream));
-
         for index in 0..self.plan.nodes.len() {
-            self.dispatch_node(index, quant_profile.as_mut())
+            self.dispatch_node(index)
                 .map_err(|err| LlamaError::format(format!("node {index}: {err:?}")))?;
-            if let Some(timeline) = profile.as_mut() {
-                timeline.mark()?;
-            }
         }
-
-        let outputs = self.read_outputs(wanted, None)?;
-        if let Some(timeline) = profile.as_ref() {
-            self.report_profile(timeline)?;
-        }
-        if let Some(timeline) = quant_profile.as_ref() {
-            self.report_quant_profile(timeline)?;
-        }
-        Ok(outputs)
-    }
-
-    fn report_quant_profile(&self, timeline: &QuantTimeline) -> Result<()> {
-        let mut aggregate: BTreeMap<(i32, &'static str), (usize, f64, f32)> = BTreeMap::new();
-        for stage in &timeline.stages {
-            let ms = timeline.elapsed_ms(stage)?;
-            let entry = aggregate
-                .entry((stage.kind, stage.name))
-                .or_insert((0, 0.0, 0.0));
-            entry.0 += 1;
-            entry.1 += f64::from(ms);
-            entry.2 = entry.2.max(ms);
-        }
-        let mut aggregate = aggregate.into_iter().collect::<Vec<_>>();
-        aggregate.sort_by(|lhs, rhs| (rhs.1).1.total_cmp(&(lhs.1).1));
-        for ((kind, name), (count, sum_ms, max_ms)) in aggregate {
-            eprintln!(
-                "cuda.profile.quant: kind={kind} stage={name} count={count} total_ms={sum_ms:.3} avg_ms={:.4} max_ms={max_ms:.3}",
-                sum_ms / count as f64,
-            );
-        }
-        Ok(())
-    }
-
-    fn report_profile(&self, timeline: &EventTimeline) -> Result<()> {
-        if timeline.events.len() != self.plan.nodes.len() + 1 {
-            return Err(LlamaError::format("CUDA profile timeline length mismatch"));
-        }
-
-        let mut aggregate: BTreeMap<String, (usize, f64, f32)> = BTreeMap::new();
-        let mut nodes = Vec::with_capacity(self.plan.nodes.len());
-        let mut total_ms = 0.0f64;
-        for (index, node) in self.plan.nodes.iter().enumerate() {
-            let ms = timeline.elapsed_ms(index)?;
-            total_ms += f64::from(ms);
-            let key = format!("{:?}", node.kernel);
-            let entry = aggregate.entry(key.clone()).or_insert((0, 0.0, 0.0));
-            entry.0 += 1;
-            entry.1 += f64::from(ms);
-            entry.2 = entry.2.max(ms);
-            let tensor = self.ctx.tensor(node.node_id).ok_or_else(|| {
-                LlamaError::format(format!("invalid profiled tensor id {}", node.node_id))
-            })?;
-            nodes.push((
-                ms,
-                index,
-                key,
-                tensor.op,
-                tensor.name().unwrap_or("<unnamed>").to_string(),
-            ));
-        }
-
-        let mut aggregate = aggregate.into_iter().collect::<Vec<_>>();
-        aggregate.sort_by(|lhs, rhs| (rhs.1).1.total_cmp(&(lhs.1).1));
-        eprintln!(
-            "cuda.profile: nodes={} total_ms={total_ms:.3}",
-            self.plan.nodes.len()
-        );
-        for (kernel, (count, sum_ms, max_ms)) in aggregate {
-            let percent = if total_ms > 0.0 {
-                100.0 * sum_ms / total_ms
-            } else {
-                0.0
-            };
-            eprintln!(
-                "cuda.profile.kernel: {kernel} count={count} total_ms={sum_ms:.3} pct={percent:.2} avg_ms={:.4} max_ms={max_ms:.3}",
-                sum_ms / count as f64,
-            );
-        }
-
-        nodes.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0));
-        for (ms, index, kernel, op, name) in nodes.into_iter().take(20) {
-            let extra = self
-                .ctx
-                .tensor(self.plan.nodes[index].node_id)
-                .and_then(|tensor| {
-                    let a = tensor.src[0].and_then(|id| self.ctx.tensor(id))?;
-                    let b = tensor.src[1].and_then(|id| self.ctx.tensor(id))?;
-                    Some(format!(
-                        " w={} K={} N={} M={}",
-                        a.desc.ty.name(),
-                        a.ne[0],
-                        a.ne[1],
-                        b.ne[1] * b.ne[2] * b.ne[3]
-                    ))
-                })
-                .unwrap_or_default();
-            eprintln!(
-                "cuda.profile.node: index={index} ms={ms:.3} kernel={kernel} op={op:?} name={name}{extra}"
-            );
-        }
-        Ok(())
+        self.read_outputs(wanted, None)
     }
 
     fn binding(&self, tensor_id: TensorId) -> Result<usize> {
@@ -3015,11 +2646,7 @@ impl ExecView<'_> {
         self.arena.ptr_at(self.binding(id)?, len)
     }
 
-    fn dispatch_node(
-        &self,
-        index: usize,
-        mut quant_profile: Option<&mut QuantTimeline>,
-    ) -> Result<()> {
+    fn dispatch_node(&self, index: usize) -> Result<()> {
         let PlannedNode { node_id, kernel } = self.plan.nodes[index];
         let stream = self.state.stream;
         let t = self.tensor(node_id)?.clone();
@@ -3406,9 +3033,9 @@ impl ExecView<'_> {
                 // extra constraint (its accumulator split); 72 and 64 satisfy
                 // it, and anything that does not falls back rather than
                 // failing.
-                let tiled = k.ne[1] >= ATTN_TILED_MIN_KEYS
-                    && q.ne[0] % 8 == 0
-                    && !disabled_by_env("MKLLM_DISABLE_ROFORMER_TILED");
+                let tiled = self.plan.options.tiled_roformer
+                    && k.ne[1] >= ATTN_TILED_MIN_KEYS
+                    && q.ne[0] % 8 == 0;
                 let (attn, label): (RoformerAttnFn, &str) = if tiled {
                     (roformer_attn_f32_tiled, "roformer_attn_tiled")
                 } else {
@@ -3811,7 +3438,7 @@ impl ExecView<'_> {
                 )
             }
             KernelSel::MmvqFusedSwiglu { kind } => {
-                self.mmv_quant_q81_swiglu(&t, kind, quant_profile.as_deref_mut())
+                self.mmv_quant_q81_swiglu(&t, kind)
             }
             KernelSel::MmvQuant(kind) => {
                 let a_id = self.src_id(&t, 0)?;
@@ -3825,17 +3452,13 @@ impl ExecView<'_> {
                     ggml_row_size_for_type(a.desc.ty, a.ne[0]).map_err(LlamaError::format)?;
                 let cc = self.state.features.compute_capability;
                 // Faithful llama.cpp Ada MMVQ: block_q8_1 half2(d,sum(xi)),
-                // 4 warps/row, integer vecdots. Test-only until 32/128-token
-                // parity holds. The previous f32-scale/2-warp path is gone.
-                let q81_disabled = std::env::var_os("MKLLM_DISABLE_Q81_MMVQ")
-                    .map(|v| v == "1")
-                    .unwrap_or(false);
+                // 4 warps/row, integer vecdots. The previous
+                // f32-scale/2-warp path is gone.
                 // mul_mat_vec_q reads the weights once for up to
                 // MMVQ_MAX_BATCH_SIZE destination columns; the multi-column
                 // form needs contiguous activation columns (one flat q8_1
                 // quantize) and a contiguous destination (stride_col_dst = n).
-                let q81_ok = !q81_disabled
-                    && m >= 1
+                let q81_ok = m >= 1
                     && m <= MMV_MAX_COLUMNS
                     && (m == 1 || (b.nb[1] == 4 * k && t.nb[1] == 4 * n))
                     && (k % 256) == 0
@@ -3847,12 +3470,12 @@ impl ExecView<'_> {
                     && mmvq_q81_kind_ok(kind)
                     && (cc.0 > 6 || (cc.0 == 6 && cc.1 >= 1));
                 if q81_ok {
-                    self.mmv_quant_q81(&t, kind, k, n, m, row_bytes, quant_profile.as_deref_mut())
+                    self.mmv_quant_q81(&t, kind, k, n, m, row_bytes)
                 } else if quant_kind_is_official_only(kind) {
                     // The IQ / Q3_K kinds have no hand-written mat-vec kernel;
                     // rather than hit `mmv_quant`'s hard error, fall back to
                     // the dequant-slab + cuBLAS GEMM, which handles any M.
-                    self.gemm_quant(&t, kind, quant_profile.as_deref_mut())
+                    self.gemm_quant(&t, kind)
                 } else {
                     check(
                         unsafe {
@@ -4052,7 +3675,7 @@ impl ExecView<'_> {
                 Ok(())
             }
             KernelSel::GemmQuant(kind) => {
-                self.gemm_quant(&t, kind, quant_profile.as_deref_mut())
+                self.gemm_quant(&t, kind)
             }
             KernelSel::SsmConv | KernelSel::SsmConvSilu => {
                 self.ssm_conv(&t, tensors, matches!(kernel, KernelSel::SsmConvSilu))
@@ -4247,12 +3870,7 @@ impl ExecView<'_> {
         )
     }
 
-    fn mmv_quant_q81_swiglu(
-        &self,
-        t: &Tensor,
-        kind: i32,
-        mut profile: Option<&mut QuantTimeline>,
-    ) -> Result<()> {
+    fn mmv_quant_q81_swiglu(&self, t: &Tensor, kind: i32) -> Result<()> {
         let tensors = self.ctx.tensors();
         let gate_mm_id = self.src_id(t, 0)?;
         let up_mm_id = self.src_id(t, 1)?;
@@ -4292,7 +3910,6 @@ impl ExecView<'_> {
         let reuse_q81 = src1 == self.state.last_q81_src.get()
             && k == self.state.last_q81_k.get()
             && m == self.state.last_q81_m.get();
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         if !reuse_q81 {
             // Columns are contiguous, so one flat quantize produces exactly the
             // column-major q8_1 block layout mul_mat_vec_q indexes with
@@ -4304,9 +3921,6 @@ impl ExecView<'_> {
             self.state.last_q81_src.set(src1);
             self.state.last_q81_k.set(k);
             self.state.last_q81_m.set(m);
-            if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-                stage_start = Some(timeline.finish(start, kind, "q81_quant")?);
-            }
         }
         check(
             unsafe {
@@ -4326,9 +3940,6 @@ impl ExecView<'_> {
             },
             "mmv_q81_swiglu",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmv_q81_swiglu")?;
-        }
         Ok(())
     }
 
@@ -4341,7 +3952,6 @@ impl ExecView<'_> {
         n: usize,
         m: usize,
         row_bytes: usize,
-        mut profile: Option<&mut QuantTimeline>,
     ) -> Result<()> {
         let a_id = self.src_id(t, 0)?;
         let b_id = self.src_id(t, 1)?;
@@ -4360,7 +3970,6 @@ impl ExecView<'_> {
         let reuse_q81 = src1 == self.state.last_q81_src.get()
             && k == self.state.last_q81_k.get()
             && m == self.state.last_q81_m.get();
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         if !reuse_q81 {
             check(
                 unsafe { quantize_q81(src1, scratch, (k * m) as i32, stream) },
@@ -4369,9 +3978,6 @@ impl ExecView<'_> {
             self.state.last_q81_src.set(src1);
             self.state.last_q81_k.set(k);
             self.state.last_q81_m.set(m);
-            if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-                stage_start = Some(timeline.finish(start, kind, "q81_quant")?);
-            }
         }
         check(
             unsafe {
@@ -4390,9 +3996,6 @@ impl ExecView<'_> {
             },
             "mmv_q81",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmv_q81")?;
-        }
         Ok(())
     }
 
@@ -4404,7 +4007,6 @@ impl ExecView<'_> {
         n: usize,
         m: usize,
         row_bytes: usize,
-        mut profile: Option<&mut QuantTimeline>,
     ) -> Result<()> {
         let tensors = self.ctx.tensors();
         let a_id = self.src_id(t, 0)?;
@@ -4422,7 +4024,6 @@ impl ExecView<'_> {
             .ensure(scratch_bytes, "q81 mmq activation scratch")?;
         let q_ptr = scratch as *mut i8;
         let d_ptr = unsafe { (scratch as *mut u8).add(d_off) as *mut f32 };
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         check(
             unsafe {
                 quantize_q81_batched(
@@ -4437,9 +4038,6 @@ impl ExecView<'_> {
             },
             "q81 mmq quantize",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, "q81_quant")?);
-        }
         check(
             unsafe {
                 mmq_quant_q81(
@@ -4458,9 +4056,6 @@ impl ExecView<'_> {
             },
             "mmq_q81",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmq_q81")?;
-        }
         Ok(())
     }
 
@@ -4478,28 +4073,16 @@ impl ExecView<'_> {
         m: usize,
         stride_row_x: usize,
         act_stride_elems: usize,
-        mut profile: Option<&mut QuantTimeline>,
     ) -> Result<()> {
         let a_id = self.src_id(t, 0)?;
         let b_id = self.src_id(t, 1)?;
         let stream = self.state.stream;
         let n_q8_blocks = k / 128;
-        let stream_k = std::env::var_os("MKLLM_DISABLE_STREAM_K")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        let nsm = if stream_k {
-            i32::try_from(self.state.features.sm_count.max(1))
-                .map_err(|_| LlamaError::format("mmq nsm exceeds i32"))?
-        } else {
-            0
-        };
-        let fixup_elems = if nsm > 0 {
-            (nsm as usize)
-                .checked_mul(128 * 128)
-                .ok_or_else(|| LlamaError::format("mmq fixup overflow"))?
-        } else {
-            0
-        };
+        let nsm = i32::try_from(self.state.features.sm_count.max(1))
+            .map_err(|_| LlamaError::format("mmq nsm exceeds i32"))?;
+        let fixup_elems = (nsm as usize)
+            .checked_mul(128 * 128)
+            .ok_or_else(|| LlamaError::format("mmq fixup overflow"))?;
         let y_bytes = m
             .checked_mul(n_q8_blocks)
             .and_then(|bytes| bytes.checked_mul(144))
@@ -4521,21 +4104,15 @@ impl ExecView<'_> {
             .scratch_acts
             .borrow_mut()
             .ensure(scratch_bytes, "mmq activation scratch")?;
-        let tmp_fixup = if nsm > 0 {
-            unsafe { (scratch as *mut u8).add(y_bytes) as *mut f32 }
-        } else {
-            std::ptr::null_mut()
-        };
+        let tmp_fixup = unsafe { (scratch as *mut u8).add(y_bytes) as *mut f32 };
         // mmq_get_q8_1_ds_layout(): Q4_K/Q5_K want DS4 (half2 scale+sum per 32),
         // Q6_K/Q3_K/IQ* want D4 (scale only). Getting this wrong is silent
         // corruption, so ask the kernel side rather than re-deriving it.
         let ds4 = unsafe { quant_kind_mmq_ds4(kind) };
-        let stage_label = match ds4 {
-            1 => "mmq_ds4",
-            0 => "mmq_d4",
+        match ds4 {
+            1 | 0 => {}
             _ => return Err(LlamaError::unsupported(format!("no MMQ layout for kind {kind}"))),
-        };
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
+        }
         check(
             unsafe {
                 let x = self.ptr_of(b_id)? as *const f32;
@@ -4545,11 +4122,8 @@ impl ExecView<'_> {
                     quantize_mmq_d4(x, scratch, k_i, m_i, stride_col, stream)
                 }
             },
-            stage_label,
+            if ds4 == 1 { "mmq_ds4" } else { "mmq_d4" },
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, stage_label)?);
-        }
         check(
             unsafe {
                 mmq_kind_j128(
@@ -4569,18 +4143,10 @@ impl ExecView<'_> {
             },
             "mmq_kind_j128",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmq_kind_j128")?;
-        }
         Ok(())
     }
 
-    fn gemm_quant(
-        &self,
-        t: &Tensor,
-        kind: i32,
-        mut profile: Option<&mut QuantTimeline>,
-    ) -> Result<()> {
+    fn gemm_quant(&self, t: &Tensor, kind: i32) -> Result<()> {
         let tensors = self.ctx.tensors();
         let a_id = self.src_id(t, 0)?;
         let b_id = self.src_id(t, 1)?;
@@ -4597,7 +4163,6 @@ impl ExecView<'_> {
         let m = b.ne[1] as usize;
         let row_bytes = ggml_row_size_for_type(a.desc.ty, a.ne[0]).map_err(LlamaError::format)?;
         let stream = self.state.stream;
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
 
         // Packed Q8_1 MMQ is compiled but disabled: p512 prefill was 84.6
         // vs 865.7 slab+cublas and the 128-token greedy stream changed.
@@ -4613,7 +4178,7 @@ impl ExecView<'_> {
                 || kind == MKLLM_QUANT_Q6K
                 || kind == MKLLM_QUANT_Q80);
         if mmq_s8_ok {
-            return self.gemm_quant_q81(t, kind, k, n, m, row_bytes, profile);
+            return self.gemm_quant_q81(t, kind, k, n, m, row_bytes);
         }
 
         // The lossless packed-dequant + BF16 WMMA experiment is compiled but
@@ -4650,32 +4215,17 @@ impl ExecView<'_> {
                 },
                 "mmq_bf16",
             )?;
-            if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-                timeline.finish(start, kind, "mmq_bf16")?;
-            }
             return Ok(());
         }
 
-        // llama.cpp J=128 MMA MMQ. Default-on for full J tiles (M>=128,
-        // M%128==0) on Ampere+. Does not touch the shared ggml CUDA backend
-        // used by diffusion / other models. MKLLM_DISABLE_MMQ=1 restores the
-        // dequant-slab + cuBLAS path for every kind; the older per-type
-        // MKLLM_DISABLE_Q{4,5,6}K_MMQ switches still work for their own kind.
+        // llama.cpp J=128 MMA MMQ for full J tiles (M>=128, M%128==0) on
+        // Ampere+. Does not touch the shared ggml CUDA backend used by
+        // diffusion / other models.
         //
         // The per-kind facts (weight block size, activation scale layout) come
         // from the CUDA tables, so adding a kind in one place is enough.
         let cc = self.state.features.compute_capability;
         let act_stride = b.nb[1] / 4;
-        let disabled = |name: &str| {
-            std::env::var_os(name).map(|v| v == "1").unwrap_or(false)
-        };
-        let kind_disabled = disabled("MKLLM_DISABLE_MMQ")
-            || match kind {
-                MKLLM_QUANT_Q4K => disabled("MKLLM_DISABLE_Q4K_MMQ"),
-                MKLLM_QUANT_Q5K => disabled("MKLLM_DISABLE_Q5K_MMQ"),
-                MKLLM_QUANT_Q6K => disabled("MKLLM_DISABLE_Q6K_MMQ"),
-                _ => false,
-            };
         // Bytes per ggml block for this kind (18 for iq4_nl, 256-value
         // super-block otherwise) and how many of them make up one K row.
         let blk_bytes = usize::try_from(unsafe { quant_kind_block_bytes(kind) }).unwrap_or(0);
@@ -4692,8 +4242,7 @@ impl ExecView<'_> {
             && a.nb[0] == blk_bytes
             && a.nb[1] % blk_bytes == 0
             && a.nb[1] / blk_bytes >= row_blocks;
-        let mmq_ok = !kind_disabled
-            && has_mmq
+        let mmq_ok = has_mmq
             && cc.0 >= 8
             && (k % 256) == 0
             && m >= 128
@@ -4715,7 +4264,6 @@ impl ExecView<'_> {
                 m,
                 a.nb[1] / blk_bytes,
                 act_stride,
-                profile,
             );
         }
 
@@ -4743,9 +4291,6 @@ impl ExecView<'_> {
             },
             "activation cast",
         )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, "activation_cast")?);
-        }
 
         // Row-slab loop: dequant a bounded slab to bf16, GEMM into the
         // output row range, reuse the slab. Peak transient = one slab.
@@ -4774,9 +4319,6 @@ impl ExecView<'_> {
                 },
                 "slab dequant",
             )?;
-            if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-                stage_start = Some(timeline.finish(start, kind, "weight_dequant")?);
-            }
             let alpha = 1.0f32;
             let beta_scalar = 0.0f32;
             let status = unsafe {
@@ -4806,9 +4348,6 @@ impl ExecView<'_> {
                 return Err(LlamaError::format(format!(
                     "cublas quantized GEMM failed: {status}"
                 )));
-            }
-            if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-                stage_start = Some(timeline.finish(start, kind, "cublas_gemm")?);
             }
             r0 += rc;
         }

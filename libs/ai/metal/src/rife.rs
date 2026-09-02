@@ -13,40 +13,10 @@
 
 use crate::gpu_types::GpuTensor;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-/// MAKEPAD_RIFE_PROF=1: accumulate wall time per op family and print at
-/// every `prof_dump` (the bench calls it once per pair batch).
-static PROF: [AtomicU64; 6] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-const PROF_NAMES: [&str; 6] = ["im2col", "gemm", "deconv_prep", "warp", "resize_etc", "elementwise"];
+pub fn prof_dump() {}
 
-fn prof_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RIFE_PROF").is_some())
-}
-
-pub(crate) fn prof_add(slot: usize, t0: std::time::Instant) {
-    if prof_on() {
-        PROF[slot].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-}
-
-pub fn prof_dump() {
-    if !prof_on() {
-        return;
-    }
-    for (name, cell) in PROF_NAMES.iter().zip(PROF.iter()) {
-        let ms = cell.swap(0, Ordering::Relaxed) as f64 / 1e6;
-        eprintln!("rife prof {name}: {ms:.1} ms");
-    }
-}
+pub(crate) fn prof_add(_slot: usize, _started: std::time::Instant) {}
 
 fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
     GpuTensor {
@@ -211,7 +181,6 @@ pub fn conv2d_planar_strided(
     }
     let n = out_width * out_height;
     let xd: &[f32] = &xd;
-    let prof_t0 = std::time::Instant::now();
     // K-MAJOR im2col: cols[k][n] — each (ic, ky, kx) row over the output
     // positions. Stride-1 interior segments are straight memcpys of the
     // source row; the position-major layout scattered every write behind
@@ -260,13 +229,10 @@ pub fn conv2d_planar_strided(
             }
         }
     });
-    prof_add(0, prof_t0);
-    let prof_t0 = std::time::Instant::now();
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let mut out = matmul_nn_blas(weights, &cols, out_channels, k, n);
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let mut out = matmul_nn_cpu(weights, &cols, out_channels, k, n);
-    prof_add(1, prof_t0);
     for (oc, row) in out.chunks_mut(n).enumerate() {
         let b = bias[oc];
         for v in row.iter_mut() {
@@ -301,7 +267,6 @@ pub fn conv_transpose2d(
         return Err("rife deconv: weight length mismatch".to_string());
     }
     // Zero-stuffed input: value (iy, ix) lands at (iy*stride, ix*stride).
-    let prof_t0 = std::time::Instant::now();
     let sw = (in_width - 1) * stride + 1;
     let sh = (in_height - 1) * stride + 1;
     let xd = data(x)?;
@@ -332,7 +297,6 @@ pub fn conv_transpose2d(
     }
     let out_w = (in_width - 1) * stride + kw - 2 * pad;
     let out_h = (in_height - 1) * stride + kh - 2 * pad;
-    prof_add(2, prof_t0);
     let stuffed_tensor = tensor(in_channels, sw * sh, stuffed);
     conv2d_planar_strided(
         &stuffed_tensor,
@@ -369,7 +333,6 @@ pub fn warp(
     }
     let xd: &[f32] = &xd;
     let fd: &[f32] = &fd;
-    let prof_t0 = std::time::Instant::now();
     let max_x = (width - 1) as f32;
     let max_y = (height - 1) as f32;
     let mut out = vec![0.0f32; channels * plane];
@@ -401,7 +364,6 @@ pub fn warp(
             }
         }
     });
-    prof_add(3, prof_t0);
     Ok(tensor(channels, plane, out))
 }
 
@@ -424,7 +386,6 @@ pub fn res_conv(
     }
     let cd: &[f32] = &cd;
     let rd: &[f32] = &rd;
-    let prof_t0 = std::time::Instant::now();
     let mut out = vec![0.0f32; channels * plane];
     par_bands(&mut out, plane, |c0, band| {
         for (ci, channel) in band.chunks_mut(plane).enumerate() {
@@ -437,7 +398,6 @@ pub fn res_conv(
             }
         }
     });
-    prof_add(5, prof_t0);
     Ok(tensor(channels, plane, out))
 }
 
@@ -481,7 +441,6 @@ pub fn pixel_shuffle_planar(
     let out_plane = out_w * out_h;
     let xd = data(x)?;
     let xd: &[f32] = &xd;
-    let prof_t0 = std::time::Instant::now();
     let mut out = vec![0.0f32; out_channels * out_plane];
     par_bands(&mut out, out_plane, |c0, band| {
         for (ci, channel) in band.chunks_mut(out_plane).enumerate() {
@@ -498,7 +457,6 @@ pub fn pixel_shuffle_planar(
             }
         }
     });
-    prof_add(4, prof_t0);
     Ok(tensor(out_channels, out_plane, out))
 }
 

@@ -571,27 +571,17 @@ impl Tally {
 
 // ------------------------------------------------------------ tower parity
 
-/// The kernel kill switches that put the CUDA vision tower back on the
-/// arithmetic every fast path replaced: the dot-product-per-element f16
-/// matmul instead of cuBLAS, and the stems-shaped attention kernel instead
-/// of the register-tiled one. Setting all of them is the reference; clearing
-/// them is what ships.
-const REFERENCE_KERNEL_ENV: &[&str] =
-    &["MKLLM_DISABLE_GEMM_F16", "MKLLM_DISABLE_ROFORMER_TILED"];
+/// Stable CLI names for the two explicit reference arithmetic choices.
+const REFERENCE_KERNEL_OPTIONS: &[&str] = &["f32-gemm", "untiled-roformer"];
 
-/// Sets every reference switch, or clears all but `keep`.
-///
-/// `keep` is what turns one number into an attribution: leaving a switch set
-/// in the fast arm measures the tower with every kernel but that one
-/// replaced, so a failing total can be charged to the kernel that actually
-/// moved it rather than to the change as a whole.
-fn reference_kernels(on: bool, keep: &[String]) {
-    for var in REFERENCE_KERNEL_ENV {
-        if on || keep.iter().any(|k| k == var) {
-            std::env::set_var(var, "1");
-        } else {
-            std::env::remove_var(var);
-        }
+fn vision_execution_config(
+    reference: bool,
+    keep: &[String],
+) -> makepad_ai_llm::VisionExecutionConfig {
+    let disabled = |name: &str| reference || keep.iter().any(|value| value == name);
+    makepad_ai_llm::VisionExecutionConfig {
+        use_f16_gemm: !disabled("f32-gemm"),
+        tiled_roformer: !disabled("untiled-roformer"),
     }
 }
 
@@ -605,10 +595,8 @@ fn reference_kernels(on: bool, keep: &[String]) {
 /// and a synthetic image cannot tell you whether a real page's activations
 /// stay inside the range a narrower dtype can hold.
 ///
-/// Two towers rather than one because the kernel choice is made when a graph
-/// is planned, and each tower caches its plan per patch grid; the switches
-/// are set immediately before every encode so a cache miss re-plans into the
-/// configuration that encode is supposed to be measuring.
+/// Two towers rather than one because the explicit arithmetic choices are
+/// fixed when each patch-grid graph is planned and cached.
 fn vision_parity(args: &[String]) -> i32 {
     use makepad_ai_llm::{preprocess_rgb8, GgufFile, VisionConfig, VisionTower};
     use makepad_ai_hub::ocr_backend::{page_fit, resample_rgb8, MAX_INPUT_PIXELS};
@@ -627,8 +615,8 @@ fn vision_parity(args: &[String]) -> i32 {
         .map(|list| list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         .unwrap_or_default();
     for var in &keep {
-        if !REFERENCE_KERNEL_ENV.contains(&var.as_str()) {
-            eprintln!("vision-parity: --keep-reference {var} is not one of {REFERENCE_KERNEL_ENV:?}");
+        if !REFERENCE_KERNEL_OPTIONS.contains(&var.as_str()) {
+            eprintln!("vision-parity: --keep-reference {var} is not one of {REFERENCE_KERNEL_OPTIONS:?}");
             return 2;
         }
     }
@@ -675,8 +663,10 @@ fn vision_parity(args: &[String]) -> i32 {
 
     let mut towers = Vec::new();
     for reference in [true, false] {
-        reference_kernels(reference, &keep);
-        match VisionTower::load(mmproj) {
+        match VisionTower::load_with_execution_config(
+            mmproj,
+            vision_execution_config(reference, &keep),
+        ) {
             Ok(t) => towers.push(t),
             Err(e) => {
                 eprintln!("vision-parity: load vision tower: {e:?}");
@@ -715,7 +705,6 @@ fn vision_parity(args: &[String]) -> i32 {
         };
         drop(fitted);
 
-        reference_kernels(true, &keep);
         let reference = match ref_tower.encode(&prepared) {
             Ok(v) => v,
             Err(e) => {
@@ -723,7 +712,6 @@ fn vision_parity(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        reference_kernels(false, &keep);
         let fast = match fast_tower.encode(&prepared) {
             Ok(v) => v,
             Err(e) => {

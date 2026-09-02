@@ -215,6 +215,7 @@ fn run() -> Result<(), String> {
         steps: 50,
         guidance: 5.0,
         seed: 123,
+        f16_attention_operands: true,
         initial_latent: Some(noise.data[..FRAMES * HY_MOTION_INPUT_DIM].to_vec()),
         smooth: true,
     };

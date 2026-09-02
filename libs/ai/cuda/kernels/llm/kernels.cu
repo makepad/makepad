@@ -2040,8 +2040,7 @@ extern "C" cudaError_t mkllm_mmq_quant(
 // Q4_K tile: padded stride 76, s8 nibbles + half2(d*sc, -dmin*m).
 // vec_dot is llama.cpp q8_1 x q8_1 MMA: one m16n8k32 per expanded
 // 32-value group. Host rejects M tails.
-// Q4_K J=128 is default-on in the llama executor (MKLLM_DISABLE_Q4K_MMQ=1
-// restores slab). Q6_K J=128 is the matching llama.cpp MMA path for the
+// Q4_K J=128 is the default route in the llama executor. Q6_K J=128 is the matching llama.cpp MMA path for the
 // Q6 weights in Q4_K_M. Neither touches libs/ggml CUDA.
 // ---------------------------------------------------------------------------
 

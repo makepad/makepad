@@ -148,16 +148,6 @@ pub struct UnetFirst {
     enc_lin: RefCell<HashMap<String, GpuTensor>>,
 }
 
-/// Pin the slow fp32 tap path. Inference binaries leave GEMM/im2col/fp16-attn
-/// at their crate defaults (on). Canaries set `MAKEPAD_PBR_TAP_PARITY=1`.
-pub fn maybe_pin_tap_parity() {
-    if std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() == Ok("1") {
-        std::env::set_var("FLUX_VAE_CONV_GEMM", "0");
-        std::env::set_var("FLUX_VAE_CONV_IM2COL", "0");
-        std::env::set_var("FLUX_ATTN_F16", "0");
-    }
-}
-
 /// Inference extras use fp16 GEMM + hd=64 flash. Tap canaries stay fp32.
 pub(crate) fn paint_fast() -> bool {
     std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() != Ok("1")
@@ -212,7 +202,6 @@ impl UnetFirst {
         if !gpu_device_available() {
             return Err("CUDA unavailable".into());
         }
-        maybe_pin_tap_parity();
         let mut file = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
         let index = torch_bin::read_index_from(&mut file).map_err(|e| e.to_string())?;
         let mut raw = Vec::new();

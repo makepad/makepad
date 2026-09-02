@@ -618,23 +618,6 @@ impl PaintModelExec for NativeHunyuanExec {
                 encoded.lat_h
             );
         }
-        if std::env::var_os("MAKEPAD_GPU_PROF").is_some() {
-            let perf = makepad_ai_common::backend::cuda::gpu_perf_stats(false);
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("PBR_GPU_PROF ")
-            );
-            eprintln!(
-                "PBR_GPU_PERF evict={} stream={} stream_mb={:.1} pool_fresh={} pool_fresh_mb={:.1} oom_clears={} free_mb={:.0}",
-                perf.weight_evict_events,
-                perf.weight_stream_count,
-                perf.weight_stream_bytes as f64 / 1.0e6,
-                perf.pool_fresh_alloc_count,
-                perf.pool_fresh_alloc_bytes as f64 / 1.0e6,
-                perf.pool_oom_clears,
-                perf.mem_free_bytes as f64 / 1.0e6
-            );
-        }
         let (alb_lat, mr_lat) = batch.split_materials();
         let mut albedo = Vec::with_capacity(n_views);
         let mut mr = Vec::with_capacity(n_views);

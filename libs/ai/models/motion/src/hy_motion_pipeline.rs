@@ -333,6 +333,8 @@ pub struct HyMotionGenerateParams {
     pub steps: usize,
     pub guidance: f32,
     pub seed: u64,
+    /// Use f16 operands for the HY-Motion attention GEMMs.
+    pub f16_attention_operands: bool,
     /// Optional normalized starting noise (`frames x 201`). Supplying the
     /// oracle noise is the fixed-seed parity path. `None` uses the native,
     /// deterministic distribution-compatible generator below.
@@ -347,6 +349,7 @@ impl Default for HyMotionGenerateParams {
             steps: HY_MOTION_STEPS,
             guidance: HY_MOTION_CFG,
             seed: 0,
+            f16_attention_operands: true,
             initial_latent: None,
             smooth: true,
         }
@@ -501,6 +504,7 @@ impl HyMotionSampler {
             &conditioning.context,
             &conditioning.vector,
             params.frames,
+            params.f16_attention_operands,
         )?;
         let prepare_s = prepare_started.elapsed().as_secs_f64();
 
@@ -742,6 +746,7 @@ mod tests {
         assert_eq!(params.frames, 120);
         assert_eq!(params.steps, 50);
         assert_eq!(params.guidance, 5.0);
+        assert!(params.f16_attention_operands);
         assert!(params.smooth);
         params.validate().unwrap();
     }

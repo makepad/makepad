@@ -97,6 +97,11 @@ impl AiServicePort {
         if !cx.in_makepad_studio() {
             return None;
         }
+        Self::hosted_unchecked(manifest)
+    }
+
+    /// The hosted transport without the host check: the caller knows.
+    fn hosted_unchecked(manifest: ServiceManifest) -> Option<AiServicePort> {
         if let Err(e) = manifest.validate() {
             makepad_platform::error!("ai service manifest refused: {e}");
             return None;
@@ -358,5 +363,107 @@ mod tests {
             ServiceUp::Result(r) => assert!(r.text.len() <= MAX_RESULT_BYTES),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+// ------------------------------------------------------------- open
+
+/// In-process links waiting for a chat root to adopt them.
+///
+/// Parked on `Cx` as a typed global (never a static) by
+/// [`AiServicePort::open`] when the process is standalone. Whichever chat
+/// root is up drains it into its registry on its next event — the
+/// Window's F10 overlay today, the superbuild's in-process pane later. A
+/// link that arrives before any root exists simply waits here; the port
+/// behind it is already registered from the app's point of view and the
+/// `Registered` answer comes when the root adopts it.
+#[derive(Default)]
+pub struct PendingServiceLinks {
+    pub links: Vec<ServiceLink>,
+}
+
+impl PendingServiceLinks {
+    /// Everything parked so far; the lot is empty afterwards.
+    pub fn take(&mut self) -> Vec<ServiceLink> {
+        std::mem::take(&mut self.links)
+    }
+}
+
+impl AiServicePort {
+    /// The one call every app makes to expose itself: hosted by the window
+    /// manager it is the hosted transport; standalone it is an in-process
+    /// port whose link waits on `Cx` ([`PendingServiceLinks`]) for the chat
+    /// root to adopt it. `None` only for a manifest that does not validate
+    /// — a programming error, logged.
+    pub fn open(cx: &mut Cx, manifest: ServiceManifest) -> Option<AiServicePort> {
+        let hosted = cx.in_makepad_studio();
+        Self::open_in(hosted, cx.global::<PendingServiceLinks>(), manifest)
+    }
+
+    /// [`open`](Self::open) without a `Cx`: `hosted` is the host flag,
+    /// `pending` the lot a standalone link is parked in.
+    pub fn open_in(
+        hosted: bool,
+        pending: &mut PendingServiceLinks,
+        manifest: ServiceManifest,
+    ) -> Option<AiServicePort> {
+        if hosted {
+            return Self::hosted_unchecked(manifest);
+        }
+        match Self::in_process(manifest) {
+            Ok((port, link)) => {
+                pending.links.push(link);
+                Some(port)
+            }
+            Err(e) => {
+                makepad_platform::error!("ai service manifest refused: {e}");
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+    use crate::engine::ServiceRegistry;
+
+    fn sheets() -> ServiceManifest {
+        ServiceManifest::new("sheets", "Sheets", "The spreadsheet.").with_tool(ToolDef::new(
+            "summary",
+            "The sheet's name, size and header row.",
+            r#"{"type":"object","properties":{}}"#,
+            Risk::Read,
+        ))
+    }
+
+    #[test]
+    fn a_standalone_open_parks_a_link_a_chat_root_can_adopt() {
+        let mut pending = PendingServiceLinks::default();
+        let mut port = AiServicePort::open_in(false, &mut pending, sheets()).expect("a valid manifest opens");
+        assert_eq!(pending.links.len(), 1);
+        assert!(port.endpoint().is_none(), "no address until a root adopts the link");
+        // The root (the overlay) drains the lot into its registry…
+        let registry = ServiceRegistry::new();
+        for link in pending.take() {
+            registry.register(link, "in this window", None).expect("adopted");
+        }
+        assert!(pending.links.is_empty());
+        // …and the registry's pump answers the port's Register with its address.
+        let _ = registry.pump();
+        let events = port.test_drain();
+        assert!(matches!(events.as_slice(), [PortEvent::Registered(_)]), "{events:?}");
+        assert_eq!(registry.services().len(), 1);
+        assert_eq!(registry.services()[0].id, "sheets");
+    }
+
+    #[test]
+    fn a_bad_manifest_opens_nothing_either_way() {
+        let mut bad = sheets();
+        bad.tools[0].name = "Summary".into();
+        let mut pending = PendingServiceLinks::default();
+        assert!(AiServicePort::open_in(false, &mut pending, bad.clone()).is_none());
+        assert!(pending.links.is_empty());
+        assert!(AiServicePort::open_in(true, &mut pending, bad).is_none());
     }
 }
