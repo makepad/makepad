@@ -25031,6 +25031,9 @@ p2 {}
                 crate::blend::Lane::Stem(stem) => {
                     self.mixer.set_blend_stem(deck, stem, gain)
                 }
+                crate::blend::Lane::Filter => {
+                    self.mixer.set_blend_filter(deck, gain)
+                }
             },
             AutoCmd::ClearBlend { deck } => self.mixer.clear_blend(deck),
         }

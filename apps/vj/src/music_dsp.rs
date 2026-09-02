@@ -791,6 +791,9 @@ pub struct DeckEq {
     blend: [ParamRamp; 3],
     /// Bipolar filter knob, 0.5 = off.
     filter: ParamRamp,
+    /// The autopilot's own hand on the sweep, as an OFFSET from wherever
+    /// the operator left the knob. Rests at zero.
+    blend_filter: ParamRamp,
     /// Cutoff the coefficients were last built for.
     filter_built: f32,
     /// Crossfade between the dry input and the processed chain.
@@ -806,6 +809,7 @@ impl DeckEq {
             gain: [ParamRamp::at(1.0); 3],
             blend: [ParamRamp::at(1.0); 3],
             filter: ParamRamp::at(0.5),
+            blend_filter: ParamRamp::at(0.0),
             filter_built: f32::NAN,
             wet: ParamRamp::at(0.0),
         }
@@ -860,6 +864,30 @@ impl DeckEq {
         }
     }
 
+    /// The autopilot's hand on the sweep filter, as an offset from the
+    /// operator's knob rather than a value in its place.
+    ///
+    /// An offset because the knob is bipolar and belongs to the hand: a
+    /// factor has no meaning on it, and writing a position would need the
+    /// operator's own to be saved and put back. Zero is the identity, so a
+    /// deck nobody has swept is bit-transparent, and clearing IS the
+    /// restore. Seats instantly on a silent strip for the same reason the
+    /// band factors do.
+    pub fn set_blend_filter(&mut self, offset: f32) {
+        let offset = offset.clamp(-1.0, 1.0);
+        if self.wet.current() <= 0.0 {
+            self.blend_filter.jump(offset);
+        } else {
+            self.blend_filter.slew(offset, BLEND_ENGAGE_SECS);
+        }
+    }
+
+    /// Where the sweep actually sits: the hand's knob plus the autopilot's
+    /// offset, clamped into the knob's own range.
+    pub fn effective_filter(&self) -> f32 {
+        (self.filter.target() + self.blend_filter.target()).clamp(0.0, 1.0)
+    }
+
     /// Ramp every blend factor home.
     pub fn clear_blend(&mut self) {
         for ramp in &mut self.blend {
@@ -869,12 +897,18 @@ impl DeckEq {
                 ramp.slew(1.0, BLEND_ENGAGE_SECS);
             }
         }
+        if self.wet.current() <= 0.0 {
+            self.blend_filter.jump(0.0);
+        } else {
+            self.blend_filter.slew(0.0, BLEND_ENGAGE_SECS);
+        }
     }
 
     /// Snap the blend home instantly — a fresh track never inherits a
     /// transition's ducking.
     pub fn reset_blend(&mut self) {
         self.blend = [ParamRamp::at(1.0); 3];
+        self.blend_filter = ParamRamp::at(0.0);
     }
 
     #[cfg(test)]
@@ -896,14 +930,14 @@ impl DeckEq {
     pub fn at_unity(&self) -> bool {
         self.gain.iter().all(|g| (g.target() - 1.0).abs() < EQ_KILL_EPSILON)
             && self.blend.iter().all(|g| (g.target() - 1.0).abs() < EQ_KILL_EPSILON)
-            && (self.filter.target() - 0.5).abs() <= FILTER_DEADZONE
+            && (self.effective_filter() - 0.5).abs() <= FILTER_DEADZONE
     }
 
     /// Rebuild rate-dependent coefficients. Called once per device buffer,
     /// never per frame — the trig is the expensive part and the ear cannot
     /// hear a cutoff quantized to one buffer.
     pub fn prepare_block(&mut self) {
-        let position = self.filter.target();
+        let position = self.effective_filter();
         let engaged = !self.at_unity();
         self.wet.slew(if engaged { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
         if (position - self.filter_built).abs() < 1e-4 {
@@ -941,6 +975,7 @@ impl DeckEq {
             self.gain[2].tick(device_rate) * self.blend[2].tick(device_rate),
         ];
         self.filter.tick(device_rate);
+        self.blend_filter.tick(device_rate);
         let wet = self.wet.tick(device_rate);
         if wet <= 0.0 {
             // Untouched deck: the sample the decoder produced, unchanged.
@@ -1536,6 +1571,30 @@ mod tests {
             after - before
         );
     }
+    #[test]
+    fn the_blend_filter_offsets_the_knob_and_lets_go_of_it() {
+        let mut eq = DeckEq::new(48_000.0);
+        assert!(eq.at_unity(), "fresh strip is bit-transparent");
+
+        // An offset, not a value: it composes with wherever the hand left
+        // the knob, and rests at zero so an untouched deck is untouched.
+        eq.set_blend_filter(-0.5);
+        assert!(!eq.at_unity(), "a swept filter engages the chain");
+        assert!((eq.effective_filter() - 0.0).abs() < 1e-6, "centre and a full sweep down");
+
+        eq.set_filter(0.7);
+        assert!((eq.effective_filter() - 0.2).abs() < 1e-6, "the hand and the sweep add");
+
+        // Past either end it clamps rather than wrapping into the far side.
+        eq.set_blend_filter(-1.0);
+        assert!((eq.effective_filter() - 0.0).abs() < 1e-6);
+
+        eq.clear_blend();
+        assert!((eq.effective_filter() - 0.7).abs() < 1e-6, "the knob is where the hand left it");
+        eq.set_filter(0.5);
+        assert!(eq.at_unity(), "released, the strip is transparent again");
+    }
+
     #[test]
     fn an_engaged_blend_defeats_the_unity_bypass() {
         let mut eq = DeckEq::new(48_000.0);

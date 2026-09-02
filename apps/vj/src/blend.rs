@@ -39,12 +39,17 @@ pub enum Role {
     In,
 }
 
+/// What a step moves. Read a step's value accordingly: a FACTOR on the
+/// operator's own setting for the bands and the stems, and an OFFSET from
+/// it for the sweep, whose knob is bipolar and has no meaningful factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
     /// One 3-band EQ band (0 = low).
     Band(usize),
     /// One separated stem lane, `STEM_ORDER` indexing.
     Stem(usize),
+    /// The sweep filter, as an offset from wherever the hand left it.
+    Filter,
 }
 
 /// Stem lane indices, pinned to `stems::STEM_ORDER` (vocals, drums, bass,

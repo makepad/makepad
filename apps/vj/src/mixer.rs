@@ -1958,6 +1958,12 @@ impl Mixer {
             .slew(gain.clamp(0.0, 1.0), BLEND_SECS);
     }
 
+    /// The autopilot's hand on the sweep filter, offset from the knob.
+    /// The strip's own clear_blend already lets it go with the bands.
+    pub fn set_blend_filter(&self, deck: DeckId, offset: f32) {
+        self.state.lock().unwrap().decks[deck.index()].eq.set_blend_filter(offset);
+    }
+
     pub fn clear_blend(&self, deck: DeckId) {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
@@ -3583,6 +3589,36 @@ mod tests {
         let half = std::hint::black_box(0.5f32);
         assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
         crate::music_dsp::set_flush_denormals(false);
+    }
+
+    #[test]
+    fn sweeping_the_blend_filter_is_click_free() {
+        // A recipe steps the filter offset rather than dragging it, and
+        // every step rebuilds the sweep coefficients. Whether that lands a
+        // click is a measurement, not an opinion.
+        let settle = |mixer: &Mixer| {
+            mixer.set_master(1.0);
+            mixer.install_deck(DeckId::A, tone_pcm(800.0, 48_000, 10.0));
+            mixer.set_crossfader(0.0);
+            mixer.set_deck_playing(DeckId::A, true);
+        };
+
+        let control = Mixer::new();
+        settle(&control);
+        render(&control, 48_000.0, 8192);
+        let untouched = worst_adjacent_step(render(&control, 48_000.0, 8192).channel(0));
+
+        let mixer = Mixer::new();
+        settle(&mixer);
+        render(&mixer, 48_000.0, 8192);
+        // A quarter of the sweep: the size a recipe would step.
+        mixer.set_blend_filter(DeckId::A, -0.25);
+        let out = render(&mixer, 48_000.0, 8192);
+        let swept = worst_adjacent_step(out.channel(0));
+        assert!(
+            swept < untouched * 2.0,
+            "a sweep step must not crack: {swept} against {untouched} standing still"
+        );
     }
 
     #[test]
