@@ -6,8 +6,9 @@ use makepad_math::{vec2f, vec3f, vec4f, Mat4f, Vec3f, Vec4f};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
-    time::Instant,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 pub const DEPTH_VOXEL_EYE_INDEX: usize = 0;
 const DEPTH_TSD_CHUNK_EDGE_VOXELS: i32 = 4;
@@ -297,6 +298,8 @@ fn submit_depth_readback_min_interval_millis(novelty: SubmitDepthFrameNovelty) -
     }
 }
 
+/// XR only: the browser build has no depth camera and no `Instant`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn submit_should_readback_depth_frame(
     snapshot: Option<&TsdfPublishedSnapshot>,
     camera_world: Vec3f,
@@ -1397,6 +1400,8 @@ pub fn update_published_height_map(volume: &mut DepthMeshVolume) -> bool {
     true
 }
 
+/// XR only: the browser build has no depth camera and no `Instant`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn projected_height_refresh_budget(
     pending_samples: usize,
     now: Instant,
