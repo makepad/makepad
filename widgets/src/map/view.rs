@@ -1069,6 +1069,187 @@ script_mod! {
         }
     }
 
+    // Compact road-only path: eight 32-bit lanes instead of DrawMapVector's
+    // twelve. params.x is an f16 integer: class + 8*material in the low
+    // six bits, then dash (get_stroke_mask 10/11/12 as 1/2/3) and kind
+    // (stroke/fill/fringe). params.y carries the one kind-specific pixel
+    // scalar (dash distance, route-emissive strength, or coverage); uv
+    // preserves both tessellator coordinates.
+    mod.draw.DrawMapRoad = mod.std.set_type_default() do #(DrawMapRoad::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.RoadVertexPacked, geom.RoadGeomPacked)
+
+        vertex: fn() {
+            let off = unpack2f16(self.geom.off)
+            let road_params = unpack2f16(self.geom.params)
+            let road_depth = unpack2f16(self.geom.depth)
+            let road_uv = unpack2f16(self.geom.uv)
+            let expanded = floor(road_params.x / 1024.0)
+            let meta = road_params.x - expanded * 1024.0
+            let kind = floor(meta / 256.0)
+            let dash_id = floor(modf(meta, 256.0) / 64.0)
+            let class_material = modf(meta, 64.0)
+            var cls = modf(class_material, 8.0)
+            let material = floor(class_material / 8.0)
+
+            let pos = vec2(self.geom.x, self.geom.y)
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+            var corr = self.width_correction.x
+            if cls > 3.5 {
+                cls = cls - 4.0
+                corr = self.face_correction.x
+                if cls > 2.5 {
+                    corr = self.face_correction.w
+                } else if cls > 1.5 {
+                    corr = self.face_correction.z
+                } else if cls > 0.5 {
+                    corr = self.face_correction.y
+                }
+            } else if cls > 2.5 {
+                corr = self.width_correction.w
+            } else if cls > 1.5 {
+                corr = self.width_correction.z
+            } else if cls > 0.5 {
+                corr = self.width_correction.y
+            }
+            transformed = transformed + off * self.map_scale * corr
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                transformed = transformed
+                    + self.shadow_dir * self.geom.deck * self.height_grow * self.map_scale
+            }
+
+            // Roads sample terrain at their centerline anchor, so casing and
+            // center remain on one plane even though their offsets differ.
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            var ground_fill = ground_m
+            if expanded < 0.5 {
+                ground_fill = ground_m * self.terrain_fill_lift
+            }
+            let lift_m = self.geom.deck * self.height_grow + ground_fill
+
+            // Inception/space-warp projection, in lockstep with the generic
+            // vector path. Road meshes use their own packed-stride midpoint
+            // subdivision before upload, so long chords follow the fold.
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            // get_stroke_mask distinguishes 10 / 11 / 12; anything else is solid.
+            var shape_id = 0.0
+            if dash_id > 0.5 && dash_id < 1.5 {
+                shape_id = 10.0
+            } else if dash_id > 1.5 && dash_id < 2.5 {
+                shape_id = 11.0
+            } else if dash_id > 2.5 {
+                shape_id = 12.0
+            }
+            let color = unpack4u8(self.geom.color)
+            if kind > 1.5 {
+                self.v_color = color
+                self.v_stroke_mult = 2000000.0
+            } else if kind > 0.5 {
+                self.v_color = color
+                self.v_stroke_mult = 1000000.0
+            } else {
+                self.v_color = color
+                self.v_stroke_mult = 1.0
+            }
+            self.v_tcoord = road_uv
+            self.v_stroke_dist = road_params.y * self.map_scale.x
+            self.v_shape_id = shape_id
+            self.v_param0 = 0.0
+            self.v_param1 = 0.0
+            self.v_param2 = 0.0
+            self.v_param3 = 0.0
+            self.v_param4 = 0.0
+            if expanded < 0.5 {
+                if material > 6.5 {
+                    self.v_param1 = road_params.y
+                }
+                self.v_param3 = material
+                self.v_param4 = self.geom.deck
+            }
+            self.v_param5 = road_depth.x
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = self.geom.deck * self.height_grow
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + road_depth.y * 0.000001,
+                        road_depth.x
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
     // Instanced POI symbols: one shared mesh per symbol slot, an 8-float
     // record per placement (anchor, screen offset, scale, the zoom-floor /
     // pin-lift composite, zbias, colour). This is DrawMapVector's shape-20
@@ -2173,6 +2354,116 @@ impl DrawMapVector {
     }
 }
 
+/// Road-only draw path backed by `RoadVertexPacked`. It deliberately has no
+/// per-placement instance inputs: each tile road mesh is one ordinary draw.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapRoad {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    /// Mirrors of DrawMapVector's per-frame shadow / space-warp state; MapView
+    /// copies them before every road draw so both shaders see one view.
+    #[rust]
+    shadow_mask: Option<Texture>,
+    #[rust([0.0, 0.0])]
+    shadow_dir: [f32; 2],
+    #[rust(0.0)]
+    shadow_cast: f32,
+    #[rust(0.0)]
+    shadow_mask_on: f32,
+    #[rust([1.0, 1.0])]
+    shadow_mask_size: [f32; 2],
+    #[rust(0.0)]
+    shadow_mask_flip: f32,
+    #[rust([0.0, 0.0, 0.0, 0.0])]
+    space_warp_u: [f32; 4],
+    #[rust([0.0, 0.0, 0.0, 0.0])]
+    space_warp2_u: [f32; 4],
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+}
+
+impl DrawMapRoad {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_geometry(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        map_scale: Vec2f,
+        map_offset: Vec2f,
+        fade: f32,
+        width_correction: [f32; 4],
+        view_rot: [f32; 2],
+        rot_pivot: [f32; 2],
+        tilt_params: [f32; 4],
+        icon_zoom: f32,
+        height_grow: f32,
+        terrain_org: [f32; 2],
+        terrain_span: [f32; 2],
+        terrain_uvfit: [f32; 4],
+        terrain_tex: &Texture,
+        pass_depth: f32,
+        terrain_fill_lift: f32,
+    ) {
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(
+            &mut self.draw_vars,
+            cx.cx,
+            &MapDrawUniforms {
+                map_scale,
+                map_offset,
+                fade,
+                width_correction,
+                view_rot,
+                rot_pivot,
+                tilt_params,
+                icon_zoom,
+                height_grow,
+                terrain_org,
+                terrain_span,
+                terrain_uvfit,
+                terrain_fill_lift,
+                shadow_dir: self.shadow_dir,
+                shadow_cast: self.shadow_cast,
+                shadow_mask_on: self.shadow_mask_on,
+                shadow_mask_size: self.shadow_mask_size,
+                shadow_mask_flip: self.shadow_mask_flip,
+                space_warp: self.space_warp_u,
+                space_warp2: self.space_warp2_u,
+            },
+            &self.shiny,
+            terrain_tex,
+            self.shadow_mask.as_ref(),
+        );
+        self.draw_vars.geometry_id = Some(geometry_id);
+        cx.new_draw_call(&self.draw_vars);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
+/// Casing / stroke / fringe geometry is on the 8-slot road layout and must
+/// go through `DrawMapRoad`; everything else through `DrawMapVector`. Both
+/// take the same argument list. A macro rather than a method: the call sites
+/// hold a borrow of `self.tiles`, so only field-level borrows of `self` work.
+macro_rules! draw_map_or_road {
+    ($self:ident, $road:expr, $($arg:expr),* $(,)?) => {
+        if $road {
+            $self.draw_road.draw_geometry($($arg),*)
+        } else {
+            $self.draw_map.draw_geometry($($arg),*)
+        }
+    };
+}
+
 /// The per-draw view state every map shader stamps as uniforms: one struct
 /// so the vector and the instanced-icon draws cannot drift apart.
 #[derive(Clone, Copy)]
@@ -2602,6 +2893,9 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_fill: DrawMapFill,
+    #[redraw]
+    #[live]
+    draw_road: DrawMapRoad,
     #[redraw]
     #[live]
     draw_icon: DrawMapIcon,
@@ -3370,13 +3664,21 @@ impl Widget for MapView {
         // One uniform set for the whole frame: every draw_geometry call
         // below shares draw_map's draw_vars.
         self.draw_map.space_warp_u = warp_uniform;
+        self.draw_road.space_warp_u = warp_uniform;
         self.draw_map.space_warp2_u = warp2_uniform;
+        self.draw_road.space_warp2_u = warp2_uniform;
         self.draw_map
             .draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(space_warp), &warp_uniform);
         self.draw_map
             .draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(space_warp2), &warp2_uniform);
+        self.draw_road
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(space_warp), &warp_uniform);
+        self.draw_road
             .draw_vars
             .set_uniform(cx.cx, live_id!(space_warp2), &warp2_uniform);
         // Tilted map depth lives in a negative domain well below every UI
@@ -3415,6 +3717,7 @@ impl Widget for MapView {
         // shiny.md gates + sun for the material dispatch, per active theme.
         self.draw_map.shiny = self.active_style().shiny;
         self.draw_fill.shiny = self.draw_map.shiny;
+        self.draw_road.shiny = self.draw_map.shiny;
         self.draw_icon.shiny = self.draw_map.shiny;
         self.draw_wall.shiny = self.draw_map.shiny;
         self.draw_shadow.shiny = self.draw_map.shiny;
@@ -3513,6 +3816,12 @@ impl Widget for MapView {
             self.draw_fill.shadow_mask = None;
             self.draw_map.shadow_mask_on = 0.0;
         }
+        self.draw_road.shadow_mask = self.draw_map.shadow_mask.clone();
+        self.draw_road.shadow_dir = self.draw_map.shadow_dir;
+        self.draw_road.shadow_cast = self.draw_map.shadow_cast;
+        self.draw_road.shadow_mask_on = self.draw_map.shadow_mask_on;
+        self.draw_road.shadow_mask_size = self.draw_map.shadow_mask_size;
+        self.draw_road.shadow_mask_flip = self.draw_map.shadow_mask_flip;
 
         // Four global passes (carto layer order): every tile's fills, then
         // every tile's road casings, then road centers, then POI symbols.
@@ -3693,7 +4002,29 @@ impl Widget for MapView {
                         _ => &None,
                     } {
                         let outgoing_id = outgoing.geometry_id();
-                        self.draw_map.draw_geometry(
+                        let road_pass = matches!(pass, 1 | 2);
+                        if road_pass {
+                            self.draw_road.draw_geometry(
+                                cx,
+                                outgoing_id,
+                                map_scale,
+                                screen_offset,
+                                1.0,
+                                stroke_width_correction(fade.bucket, view_zoom),
+                                view_rot_uniform,
+                                rot_pivot_uniform,
+                                tilt_uniform,
+                                view_zoom as f32,
+                                1.0,
+                                terrain_org,
+                                terrain_span,
+                                terrain_uvfit,
+                                &terrain_tex,
+                                if tilt_rad > 1e-4 { pass_boost + (pass - 1) as f32 * 0.02 } else { 0.0 },
+                                terrain_fill_lift,
+                            );
+                        } else {
+                            self.draw_map.draw_geometry(
                             cx,
                             outgoing_id,
                             map_scale,
@@ -3715,7 +4046,8 @@ impl Widget for MapView {
                                 0.0
                             },
                             terrain_fill_lift,
-                        );
+                            );
+                        }
                     }
                 }
                 let reused_road_pass = matches!(pass, 1 | 2)
@@ -3794,7 +4126,9 @@ impl Widget for MapView {
                     let Some(geometry) = geometry else {
                         continue;
                     };
-                    self.draw_map.draw_geometry(
+                    draw_map_or_road!(
+                        self,
+                        matches!(pass, 1 | 2),
                         cx,
                         geometry.geometry_id(),
                         map_scale,
@@ -3981,7 +4315,7 @@ impl Widget for MapView {
                 if pass == 1 && self.tilt < 25.0 {
                     if let Some(fringe) = fringe_geometry {
                         let fringe_id = fringe.geometry_id();
-                        self.draw_map.draw_geometry(
+                        self.draw_road.draw_geometry(
                             cx,
                             fringe_id,
                             map_scale,
@@ -4088,7 +4422,9 @@ impl Widget for MapView {
                     };
                     if let Some(outgoing) = outgoing {
                         let outgoing_id = outgoing.geometry_id();
-                        self.draw_map.draw_geometry(
+                        draw_map_or_road!(
+                            self,
+                            matches!(pass, 1 | 2),
                             cx,
                             outgoing_id,
                             map_scale,
@@ -4842,11 +5178,21 @@ impl MapView {
 
             // b. Roof / deck projections of lifted geometry.
             self.draw_map.shadow_cast = 1.0;
-            for geometry in [fill_3d_geometry, casing_geometry, stroke_geometry]
-                .into_iter()
-                .flatten()
-            {
-                self.draw_map.draw_geometry(
+            self.draw_road.shadow_cast = 1.0;
+            self.draw_road.shadow_dir = shadow_dir;
+            self.draw_road.shadow_mask = None;
+            self.draw_road.shadow_mask_on = 0.0;
+            for (geometry, road) in [
+                (fill_3d_geometry, false),
+                (casing_geometry, true),
+                (stroke_geometry, true),
+            ] {
+                let Some(geometry) = geometry else {
+                    continue;
+                };
+                draw_map_or_road!(
+                    self,
+                    road,
                     cx,
                     geometry.geometry_id(),
                     map_scale,
@@ -4919,6 +5265,8 @@ impl MapView {
 
         self.draw_map.shadow_cast = 0.0;
         self.draw_map.shadow_dir = [0.0, 0.0];
+        self.draw_road.shadow_cast = 0.0;
+        self.draw_road.shadow_dir = [0.0, 0.0];
         self.shadow_mask_list.as_mut().unwrap().end(cx);
         let pass = self.shadow_mask_pass.as_ref().unwrap();
         cx.end_pass(pass);
@@ -5044,17 +5392,17 @@ impl MapView {
                 &mut buffers.fill_misc_vertices,
                 max_edge,
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
+            crate::makepad_draw::vector::subdivide_road_mesh(
                 &mut buffers.casing_indices,
                 &mut buffers.casing_vertices,
                 max_edge,
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
+            crate::makepad_draw::vector::subdivide_road_mesh(
                 &mut buffers.stroke_indices,
                 &mut buffers.stroke_vertices,
                 max_edge,
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
+            crate::makepad_draw::vector::subdivide_road_mesh(
                 &mut buffers.fringe_indices,
                 &mut buffers.fringe_vertices,
                 max_edge,

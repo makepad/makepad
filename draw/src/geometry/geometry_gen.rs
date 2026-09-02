@@ -128,6 +128,36 @@ pub struct FillVertexPacked {
     #[live]
     pub zbias: f32,
 }
+/// Compact map-road vertex (32 bytes). The centerline anchor and deck height
+/// stay full precision; offset, depth and tessellator coordinates use f16
+/// pairs and colour uses unorm8x4.
+#[derive(Clone, Script, ScriptHook)]
+#[repr(C)]
+pub struct RoadVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// f16(offset.x) | f16(offset.y) — baked half-width offset from the anchor
+    #[live]
+    pub off: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    /// f16(class + 8*material + 64*dash + 256*kind) | f16(pixel aux):
+    /// along-stroke distance, route-emissive strength, or coverage
+    #[live]
+    pub params: f32,
+    /// Exact per-vertex bridge/ramp deck height in metres
+    #[live]
+    pub deck: f32,
+    /// f16(param5 tilt depth) | f16(zbias in VECTOR_ZBIAS_STEP ticks)
+    #[live]
+    pub depth: f32,
+    /// f16(tessellator u) | f16(tessellator v); v carries round-cap coverage
+    #[live]
+    pub uv: f32,
+}
 
 /// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
 /// instance anchor, f16 uv pair, stroke distance. 16 bytes; the anchor,
@@ -320,6 +350,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.FillVertexPacked);
     let fpgen = shared(vm, id!(FillGeomPacked), GeometryGen::from_triangle_2d_fill_packed);
     set_script_value!(vm, geom.FillGeomPacked = fpgen);
+    // Compact map-road geometry: vertex type + placeholder geom.
+    set_script_value_to_pod!(vm, geom.RoadVertexPacked);
+    let rpgen = shared(vm, id!(RoadGeomPacked), GeometryGen::from_triangle_2d_road_packed);
+    set_script_value!(vm, geom.RoadGeomPacked = rpgen);
     // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
     set_script_value_to_pod!(vm, geom.IconVertexPacked);
     let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
@@ -421,6 +455,23 @@ impl GeometryGen {
             g.vertices.extend_from_slice(
                 &crate::vector::pack_fill_record(&logical).expect("placeholder is a map fill"),
             );
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+    pub fn from_triangle_2d_road_packed() -> GeometryGen {
+        let mut g = Self::default();
+        let logical = [
+            0.0, 0.0, 0.5, 1.0,
+            1.0, 1.0, 1.0, 1.0,
+            1e6, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0,
+            0.0,
+        ];
+        let packed = crate::vector::pack_road_vertices(&logical);
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&packed);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

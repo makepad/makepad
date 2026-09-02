@@ -5,7 +5,8 @@ use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
     append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
-    pack_fill_vertices, pack_vector_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX,
+    pack_fill_vertices, pack_road_vertices, pack_vector_vertices,
+    VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
@@ -351,8 +352,15 @@ pub struct TileBuffers {
     pub fill_vertices: Vec<f32>,
     pub fill_misc_indices: Vec<u32>,
     pub fill_misc_vertices: Vec<f32>,
+    /// Compact eight-float `RoadVertexPacked` records: GPU-expandable strokes
+    /// (shape >= 100) and shape-0 Boolean union faces.
     pub casing_indices: Vec<u32>,
     pub casing_vertices: Vec<f32>,
+    /// Compact eight-float `RoadVertexPacked` records. Rails, dashed tunnels
+    /// and other patterned lines go through `append_expanded_stroke_geometry`
+    /// (shape 11/12 become 111/112); plaza fills are shape-0. Oneway arrows
+    /// stay in `icon_*` / `road_icon_*`. No leftover non-road shapes, so
+    /// there is no `stroke_misc` stream.
     pub stroke_indices: Vec<u32>,
     pub stroke_vertices: Vec<f32>,
     /// Vertex-baked symbols that must ride the map plane: road-surface
@@ -373,7 +381,9 @@ pub struct TileBuffers {
     /// shadow mask pass as coverage rather than as ground decals.
     pub shadow_disc_indices: Vec<u32>,
     pub shadow_disc_vertices: Vec<f32>,
-    /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
+    /// Analytic AA fringes split from `casing_*` (see split_fringe_band),
+    /// stored as compact eight-float `RoadVertexPacked` records and drawn
+    /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
     pub fringe_indices: Vec<u32>,
     pub fringe_vertices: Vec<f32>,
     /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
@@ -3460,6 +3470,122 @@ fn compact_fill_record_roundtrips_within_packed_precision() {
     let (zbias, param5) = unpack_fill_depths(packed[4]);
     assert!((zbias - record[18]).abs() <= VECTOR_ZBIAS_STEP * 0.5 + f32::EPSILON);
     assert!((param5 - record[16]).abs() <= 0.000005 + f32::EPSILON);
+}
+
+#[cfg(test)]
+#[test]
+fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
+    use crate::makepad_draw::geometry::geometry_gen::RoadVertexPacked;
+    use crate::makepad_draw::vector::{
+        unpack_pair_f16, ROAD_PACKED_FLOATS_PER_VERTEX, ROAD_PARAM_KIND_SCALE,
+    };
+
+    assert_eq!(std::mem::size_of::<RoadVertexPacked>(), 32);
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 14.0;
+    record[1] = 27.0;
+    record[2] = 0.25;
+    record[3] = 0.625;
+    record[4..8].copy_from_slice(&[0.1, 0.3, 0.7, 1.0]);
+    record[9] = 511.5;
+    record[10] = 112.0;
+    record[12] = -1.75;
+    record[13] = 2.5;
+    record[14] = 1.0;
+    record[15] = 100.25;
+    record[16] = 0.384;
+    record[18] = 321.0 * VECTOR_ZBIAS_STEP;
+    let packed = pack_road_vertices(&record);
+    assert_eq!(packed.len(), ROAD_PACKED_FLOATS_PER_VERTEX);
+    let (ox, oy) = unpack_pair_f16(packed[2]);
+    assert!((ox + 1.75).abs() < 0.002 && (oy - 2.5).abs() < 0.002);
+    let rgba = packed[3].to_bits().to_le_bytes();
+    for (actual, expected) in rgba
+        .into_iter()
+        .zip([0.1f32, 0.3, 0.7, 1.0])
+    {
+        assert!((actual as f32 / 255.0 - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let (meta, stroke_dist) = unpack_pair_f16(packed[4]);
+    assert_eq!(meta, 1.0 + 64.0 * 3.0 + 1024.0);
+    assert_eq!(stroke_dist, record[9]);
+    assert_eq!(packed[5], 100.25);
+    let (param5, zbias_ticks) = unpack_pair_f16(packed[6]);
+    assert!((param5 - record[16]).abs() < 0.0002);
+    assert_eq!(zbias_ticks, 321.0);
+    let (u, v) = unpack_pair_f16(packed[7]);
+    assert!((u - record[2]).abs() < 0.001);
+    assert!((v - record[3]).abs() < 0.001);
+
+    record[2] = -1.0;
+    record[3] = 0.375;
+    record[8] = VECTOR_ANALYTIC_FRINGE_STROKE_MULT;
+    record[10] = 0.0;
+    record[14] = 3.0;
+    let packed = pack_road_vertices(&record);
+    let (meta, coverage) = unpack_pair_f16(packed[4]);
+    assert_eq!(meta, 24.0 + ROAD_PARAM_KIND_SCALE * 2.0);
+    assert_eq!(coverage, 0.0);
+    let (u, v) = unpack_pair_f16(packed[7]);
+    assert_eq!(u, -1.0);
+    assert!((v - 0.375).abs() < 0.001);
+
+    record[2] = 0.5;
+    record[8] = 1e6;
+    record[12] = 0.35;
+    record[14] = 7.0;
+    let packed = pack_road_vertices(&record);
+    let (meta, emissive) = unpack_pair_f16(packed[4]);
+    assert_eq!(meta, 8.0 * 7.0 + ROAD_PARAM_KIND_SCALE);
+    assert!((emissive - 0.35).abs() < 0.001);
+}
+
+#[cfg(test)]
+#[test]
+fn split_fringe_band_then_road_pack_round_trips() {
+    use crate::makepad_draw::vector::{
+        unpack_pair_f16, ROAD_PACKED_FLOATS_PER_VERTEX, ROAD_PARAM_KIND_SCALE,
+    };
+
+    fn push_record(buf: &mut Vec<f32>, x: f32, u: f32, stroke_mult: f32) {
+        let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+        record[0] = x;
+        record[1] = 20.0;
+        record[2] = u;
+        record[4..8].copy_from_slice(&[0.2, 0.4, 0.6, 1.0]);
+        record[8] = stroke_mult;
+        buf.extend_from_slice(&record);
+    }
+
+    let mut vertices = Vec::new();
+    push_record(&mut vertices, 10.0, 0.5, 1e6);
+    push_record(&mut vertices, 12.0, 0.5, 1e6);
+    push_record(&mut vertices, 11.0, 0.5, 1e6);
+    push_record(&mut vertices, 11.0, 0.0, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    push_record(&mut vertices, 15.0, -1.0, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    push_record(&mut vertices, 13.0, -0.5, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    let mut indices = vec![0, 1, 2, 3, 4, 5];
+    let (fringe_vertices, fringe_indices) = split_fringe_band(&mut vertices, &mut indices);
+
+    assert_eq!(vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+    assert_eq!(indices, vec![0, 1, 2]);
+    assert_eq!(fringe_vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+    assert_eq!(fringe_indices, vec![0, 1, 2]);
+
+    let packed_body = pack_road_vertices(&vertices);
+    assert_eq!(packed_body.len(), ROAD_PACKED_FLOATS_PER_VERTEX * 3);
+    let (meta, coverage) = unpack_pair_f16(packed_body[4]);
+    assert_eq!(meta, ROAD_PARAM_KIND_SCALE);
+    assert!((coverage - 0.5).abs() < 0.001);
+
+    let packed_fringe = pack_road_vertices(&fringe_vertices);
+    assert_eq!(packed_fringe.len(), ROAD_PACKED_FLOATS_PER_VERTEX * 3);
+    let (meta0, cov0) = unpack_pair_f16(packed_fringe[4]);
+    let (meta1, cov1) = unpack_pair_f16(packed_fringe[4 + ROAD_PACKED_FLOATS_PER_VERTEX]);
+    assert_eq!(meta0, ROAD_PARAM_KIND_SCALE * 2.0);
+    assert_eq!(meta1, ROAD_PARAM_KIND_SCALE * 2.0);
+    assert!((cov0 - 1.0).abs() < 0.001);
+    assert_eq!(cov1, 0.0);
 }
 
 struct TileProfiler {
@@ -6983,12 +7109,21 @@ fn build_tile_buffers_from_features_profiled(
     let fill_vertices = pack_fill_vertices(&fill_vertices);
     let fill_misc_vertices = pack_vector_vertices(&fill_misc_vertices);
     let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
-    let casing_vertices = pack_vector_vertices(&casing_vertices);
-    let stroke_vertices = pack_vector_vertices(&stroke_vertices);
+    debug_assert!(casing_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    debug_assert!(stroke_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    debug_assert!(fringe_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    let casing_vertices = pack_road_vertices(&casing_vertices);
+    let stroke_vertices = pack_road_vertices(&stroke_vertices);
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
     let shadow_disc_vertices = pack_vector_vertices(&shadow_disc_vertices);
-    let fringe_vertices = pack_vector_vertices(&fringe_vertices);
+    let fringe_vertices = pack_road_vertices(&fringe_vertices);
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
     let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);

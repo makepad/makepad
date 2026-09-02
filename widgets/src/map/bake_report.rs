@@ -11,7 +11,7 @@ use super::geometry::{lon_lat_to_normalized, tile_world_size, TileKey, TILE_SIZE
 use super::style::probe_compiled_theme;
 use super::tile::{load_local_tile_batch, TileBuffers};
 use crate::makepad_draw::vector::{
-    FILL_PACKED_FLOATS_PER_VERTEX, VECTOR_FLOATS_PER_VERTEX,
+    FILL_PACKED_FLOATS_PER_VERTEX, ROAD_PACKED_FLOATS_PER_VERTEX, VECTOR_FLOATS_PER_VERTEX,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
 };
 use makepad_mbtile_reader::TileArchiveReader;
@@ -73,9 +73,9 @@ fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
             b.fill_misc_indices.len(),
             VECTOR_PACKED_FLOATS_PER_VERTEX,
         ),
-        ("casing", b.casing_vertices.len(), b.casing_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("stroke", b.stroke_vertices.len(), b.stroke_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("fringe", b.fringe_vertices.len(), b.fringe_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
+        ("casing", b.casing_vertices.len(), b.casing_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
+        ("stroke", b.stroke_vertices.len(), b.stroke_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
+        ("fringe", b.fringe_vertices.len(), b.fringe_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
         ("icon", b.icon_vertices.len(), b.icon_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("icon_high", b.icon_high_vertices.len(), b.icon_high_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("shadow_disc", b.shadow_disc_vertices.len(), b.shadow_disc_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
@@ -116,6 +116,31 @@ fn classify_fill_packed(
             material => (0, material),
         };
         *into.entry((shape_id, material)).or_default() += FILL_PACKED_FLOATS_PER_VERTEX * 4;
+    }
+}
+
+fn classify_road_packed(
+    vertices: &[f32],
+    into: &mut std::collections::BTreeMap<(i32, i32), usize>,
+) {
+    use crate::makepad_draw::vector::unpack_pair_f16;
+    for record in vertices.chunks_exact(8) {
+        let meta = unpack_pair_f16(record[4]).0 % 1024.0;
+        let kind = (meta / 256.0).floor() as i32;
+        let dash = ((meta % 256.0) / 64.0).floor() as i32;
+        let low = meta % 64.0;
+        let shape_id = if kind == 1 {
+            0
+        } else {
+            100 + match dash {
+                1 => 10,
+                2 => 11,
+                3 => 12,
+                _ => 0,
+            }
+        };
+        let material = if kind == 1 { (low / 8.0).floor() as i32 } else { 0 };
+        *into.entry((shape_id, material)).or_default() += 8 * 4;
     }
 }
 
@@ -226,7 +251,7 @@ fn amsterdam_start_view_bake_report() {
             * 4;
         classify_packed(&b.icon_vertices, &mut icon_kinds);
         classify_fill_packed(&b.fill_vertices, &mut fill_kinds);
-        classify_packed(&b.casing_vertices, &mut casing_kinds);
+        classify_road_packed(&b.casing_vertices, &mut casing_kinds);
         println!(
             "{:>14} {:>8} {:>8} {:>7} {:>9.1} {:>8} {:>7} {:>8} {:>8.0} | {} + {} / {:.0}",
             format!("{}/{}/{}", key.z, key.x, key.y),
