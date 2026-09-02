@@ -590,7 +590,8 @@ mod tests {
         }
         let mut lanes: [Vec<[i16; 2]>; 4] = Default::default();
         for (lane, source) in LANE_FROM_ROLE.into_iter().enumerate() {
-            lanes[lane] = decode_stem(&paths[source], rate).expect("decode");
+            lanes[lane] = decode_stem(&FetchedSource::Path(paths[source].clone()), rate)
+                .expect("decode");
         }
         for (lane, stem) in STEM_ORDER.into_iter().enumerate() {
             let frames = &lanes[lane];

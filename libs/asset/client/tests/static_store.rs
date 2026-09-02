@@ -107,10 +107,8 @@ fn music_fixture_row(
         ("kind", s("audio")),
         ("title", s(title)),
         ("description", s("CC0 music fixture")),
-        // Deliberately no `music` category: the web explorer contract is
-        // namespace-scoped, exactly like the deployed static snapshot.
-        ("categories", Value::Arr(vec![])),
-        ("tags", Value::Arr(vec![])),
+        ("categories", Value::Arr(vec![s("music")])),
+        ("tags", Value::Arr(vec![s("music"), s("stems")])),
         ("creator", s(creator)),
         ("generator", s("makepad-dj-pack")),
         ("backend", s("fixture")),
@@ -497,7 +495,7 @@ fn complete(runtime: &mut ClientRuntime, request: ClientRequest) -> Result<Clien
 }
 
 #[test]
-fn static_snapshot_music_namespace_yields_two_rows() {
+fn static_snapshot_accepts_the_vj_music_query() {
     let fixture = fixture();
     let transport = MockTransport {
         next: 1,
@@ -517,10 +515,14 @@ fn static_snapshot_music_namespace_yields_two_rows() {
         }
     }
     assert!(store.is_ready());
-    let mut query = makepad_asset_client::CatalogQuery::browse(10);
+    // Exact query emitted by BrowseModel<Audio>("music") on wasm.
+    let mut query = makepad_asset_client::CatalogQuery::text("", 48);
     query.namespace = Some("music".into());
     query.kind = Some(AssetKind::Audio);
+    query.exclude_tag = Some("intermediate".into());
     let page = store.catalog_search(&query, None).unwrap();
+    assert_eq!(page.total, 2);
+    assert!(page.hits.iter().all(|hit| hit.live && hit.kind == Some(AssetKind::Audio)));
     assert_eq!(
         page.hits.iter().map(|hit| (hit.title.as_str(), hit.creator.as_str())).collect::<Vec<_>>(),
         [
