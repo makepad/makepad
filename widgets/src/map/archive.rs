@@ -1113,13 +1113,6 @@ impl<S: ByteSource> TileArchive<S> {
         self.root.as_ref().map(|root| root.metadata())
     }
 
-    pub fn leaf_cache_bytes(&self) -> usize {
-        self.leaves
-            .values()
-            .map(|cached| cached.leaf.retained_bytes())
-            .sum()
-    }
-
     pub fn request_tile(&mut self, cx: &mut Cx, key: TileKey, generation: u64) {
         self.request_tile_prioritized(cx, key, generation, 0);
     }
@@ -1770,13 +1763,6 @@ impl MapTileArchive {
         match self {
             Self::File(archive) => archive.zoom_range(),
             Self::Http(archive) => archive.zoom_range(),
-        }
-    }
-
-    pub fn leaf_cache_bytes(&self) -> usize {
-        match self {
-            Self::File(archive) => archive.leaf_cache_bytes(),
-            Self::Http(archive) => archive.leaf_cache_bytes(),
         }
     }
 
