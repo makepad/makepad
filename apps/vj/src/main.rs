@@ -25159,7 +25159,8 @@ p2 {}
             let summary = self.row_summary(&key);
             let artist = self.row_tags(&key).artist;
             // The overview alone, seeked to rather than decoded: the
-            // waveform behind it is megabytes a picker will never draw.
+            // waveform in front of it is about thirty times the size and a
+            // picker will never draw it.
             let energy = self
                 .row_analysis_key(&key)
                 .and_then(|cache_key| {

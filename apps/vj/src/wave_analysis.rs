@@ -2208,7 +2208,10 @@ pub fn load_cached_summary(dir: &Path, key: &AnalysisKey) -> Option<TrackSummary
 /// The 2048-column overview for `key`, without paging in the waveform.
 ///
 /// A picker ranking a whole pool needs each record's loudness envelope and
-/// nothing else, and the zoom channel behind it is megabytes. The layout
+/// nothing else. The zoom channel in front of it is a hundred columns a
+/// second at four bytes each — about 140 KB for a six-minute record against
+/// the overview's four — so reading the whole sidecar to answer "how loud
+/// does this run" costs some thirty times what the answer needs. The layout
 /// puts a length in front of each run, so the overview sits at an offset
 /// that can be computed from two four-byte reads and a seek rather than a
 /// whole decode — which is why ranking a library needs no change to the
@@ -3160,7 +3163,8 @@ mod tests {
     #[test]
     fn the_overview_comes_off_disk_without_the_waveform_behind_it() {
         // The whole point: rank a pool by loudness without paging in the
-        // zoom channel, which is megabytes a picker will never draw.
+        // zoom channel, which is some thirty times the size and which a
+        // picker will never draw.
         let pcm = click_track(48_000, 120.0, 8.0, 0.2);
         let analysis = analyze(&pcm);
         let dir = std::env::temp_dir()
