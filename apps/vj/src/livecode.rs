@@ -206,6 +206,7 @@ fn collect(message: &str, level: LogLevel) {
 pub fn install() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::fs::create_dir_all(scratch_origin().join("status"));
         makepad_widgets::makepad_platform::log::set_log_tap(Some(collect));
     });
@@ -249,6 +250,7 @@ fn aliases() -> &'static Mutex<HashMap<String, String>> {
 
 /// Remember which document a revision is, so an outcome reported against a
 /// revision can be written under the file stem an agent knows.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn remember(revision: &str, alias: Option<&str>) {
     let Some(alias) = alias else { return };
     let stem = alias.rsplit('/').next().unwrap_or(alias);
@@ -261,6 +263,9 @@ pub fn remember(revision: &str, alias: Option<&str>) {
     }
     map.insert(revision.to_string(), stem.to_string());
 }
+
+#[cfg(target_arch = "wasm32")]
+pub fn remember(_revision: &str, _alias: Option<&str>) {}
 
 /// The file stem behind a revision, when it is an observed document.
 pub fn stem_of(revision: &str) -> Option<String> {
@@ -337,6 +342,7 @@ fn worker() -> &'static Sender<Job> {
 /// loaded". A load that succeeded still waits out [`SETTLE_MS`] before
 /// claiming `compile ok`, because the draw shader compiles after the load
 /// returns and its failure arrives through the log.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
     let Some(stem) = stem_of(revision) else { return };
     let job = match outcome {
@@ -350,6 +356,9 @@ pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
     };
     let _ = worker().send(job);
 }
+
+#[cfg(target_arch = "wasm32")]
+pub fn report(_revision: &str, _mark: u64, _outcome: Result<(), String>) {}
 
 fn now_ms() -> u64 {
     (makepad_widgets::Cx::time_now().max(0.0) * 1000.0) as u64

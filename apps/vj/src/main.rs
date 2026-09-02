@@ -11958,6 +11958,7 @@ p2 {}
     }
 
     /// The hub model store, opened on first use.
+    #[cfg(not(target_arch = "wasm32"))]
     fn hub_models(&mut self) -> Option<&mut makepad_ai_hub::local::LocalModels> {
         if self.hub_models.is_none() {
             let opened = match makepad_ai_hub::local::LocalModels::open() {
@@ -11970,6 +11971,13 @@ p2 {}
             self.hub_models = Some(opened);
         }
         self.hub_models.as_mut().and_then(|slot| slot.as_mut())
+    }
+
+    /// Local model weights and licence state are native filesystem services.
+    #[cfg(target_arch = "wasm32")]
+    fn hub_models(&mut self) -> Option<&mut makepad_ai_hub::local::LocalModels> {
+        self.hub_models = Some(None);
+        None
     }
 
     /// Where an installed, licence-acknowledged hub model file lives, by
@@ -14047,18 +14055,24 @@ p2 {}
                     self.identify_fx_slots();
                     if !self.gen_panel_loaded {
                         self.gen_panel_loaded = true;
-                        self.load_gen_panel(cx);
-                        self.load_autopilot_settings();
-                        self.load_loop_scan_settings();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            self.load_gen_panel(cx);
+                            self.load_autopilot_settings();
+                            self.load_loop_scan_settings();
+                        }
                         self.sync_autopilot_panel(cx);
                         // Dev/automation hook: VJ_IMPORT_PATH=<dir|file>
                         // ARMS the import panel on first connect, exactly as
                         // a pick would — headless rigs have no native picker
                         // to click, but they can click START over the bridge,
                         // so automation walks the same road the operator does.
-                        if let Ok(path) = std::env::var("VJ_IMPORT_PATH") {
-                            if !path.trim().is_empty() {
-                                self.arm_import(cx, path.trim().to_string());
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if let Ok(path) = std::env::var("VJ_IMPORT_PATH") {
+                                if !path.trim().is_empty() {
+                                    self.arm_import(cx, path.trim().to_string());
+                                }
                             }
                         }
                     }
@@ -15825,12 +15839,25 @@ p2 {}
         self.ui.label(cx, ids!(import_count_lab)).set_text(cx, "counting…");
         // The preview scan is read_dir only — no hashing, no decode — but a
         // network mount can still stall, so it runs off-thread and the count
-        // arrives whenever it does.
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.import_scan_rx = Some(rx);
-        std::thread::spawn(move || {
-            let _ = tx.send(media_scan::scan(&root).files.len());
-        });
+        // arrives whenever it does. A browser has neither directory paths
+        // nor a filesystem to scan; browser-picked files use the music
+        // importer's VirtualFile path instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.import_scan_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(media_scan::scan(&root).files.len());
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = root;
+            self.import_scan_rx = None;
+            self.ui
+                .label(cx, ids!(import_count_lab))
+                .set_text(cx, "folder import unavailable on web");
+        }
         self.ui.redraw(cx);
     }
 
@@ -16565,6 +16592,10 @@ p2 {}
     /// (livecoded heads, imported or generated docs) bakes via the store
     /// fetch path the moment its tile resolves. A cached sheet decodes
     /// straight from disk instead of rendering.
+    #[cfg(target_arch = "wasm32")]
+    fn pump_fx_thumbs(&mut self, _cx: &mut Cx) {}
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
         // THUMB LOAD PROFILE: one line a second from boot until the load
         // settles — which counter stalls IS the diagnosis (heads = the seed
@@ -24462,9 +24493,15 @@ impl MatchEvent for App {
         self.external_sync_enabled = true;
         // `VJ_SURFACE=music` (or a file on the command line) opens straight
         // on the deck surface — the everyday "open the DJ set" start.
+        #[cfg(not(target_arch = "wasm32"))]
         let files = Self::startup_audio_files();
+        #[cfg(target_arch = "wasm32")]
+        let files: Vec<PathBuf> = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
         let want_music = !files.is_empty()
             || std::env::var("VJ_SURFACE").is_ok_and(|value| value.eq_ignore_ascii_case("music"));
+        #[cfg(target_arch = "wasm32")]
+        let want_music = false;
         if want_music {
             self.apc.surface = ApcSurface::Music;
             self.ui
@@ -24475,6 +24512,7 @@ impl MatchEvent for App {
             // Files on the command line open the local lane; a bare
             // `VJ_SURFACE=music` opens the store, like clicking the tab.
             self.music_local = !files.is_empty();
+            #[cfg(not(target_arch = "wasm32"))]
             if self.music_local {
                 self.local_tracks = wave_analysis::list_local_audio(&Self::local_music_dir());
             }
@@ -24486,7 +24524,16 @@ impl MatchEvent for App {
                     self.run_deck_cmds(cx, cmds);
                 }
             }
-        } else if let Some(surface) = Self::load_ui_surface() {
+        } else if let Some(surface) = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                Self::load_ui_surface()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        } {
             // No explicit ask (files, VJ_SURFACE): reopen where the last
             // session closed, so shutting down on the DJ tab comes back on
             // the DJ tab.
@@ -24532,11 +24579,19 @@ impl MatchEvent for App {
         // Effect slots restore from their local splash files — before (and
         // independent of) the store connection; the MIDI map rides the same
         // boot.
-        self.load_fx_slots_panel(cx);
-        self.load_midi_map();
-        // The phones rig loads before the first devices event, which then
-        // resolves the saved name against what the OS actually has.
-        self.load_phones_settings();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.load_fx_slots_panel(cx);
+            self.load_midi_map();
+            // The phones rig loads before the first devices event, which then
+            // resolves the saved name against what the OS actually has.
+            self.load_phones_settings();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.sync_fx_slots_ui(cx);
+            self.sync_autofade_ui(cx);
+        }
         self.sync_midi_learn_ui(cx);
         self.sync_slot_controls_ui(cx);
         // First paint of the fx slot strips: an app that starts with empty
