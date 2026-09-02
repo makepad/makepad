@@ -5,7 +5,7 @@ use crate::{
 };
 use makepad_geodata::query::LayerDb;
 use makepad_map_nav::{
-    geo::{haversine_m, LonLat},
+    geo::{cumulative_distances, haversine_m, sample_polyline, LonLat, MAX_ROUTE_POINTS},
     graph::{Route, RouteGraph, TravelMode},
     nav::ManeuverKind,
     search::{SearchIndex, SearchResult},
@@ -13,7 +13,7 @@ use makepad_map_nav::{
     searchdb::SearchDb,
 };
 use makepad_network::{
-    http_server::{HttpServerResponse, HttpServerResponseSender},
+    http_server::{HttpServerPendingBody, HttpServerResponse, HttpServerResponseSender},
     HttpServerHeaders,
 };
 use std::{
@@ -22,14 +22,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, RwLock, Weak,
     },
 };
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const MAX_ALONG_BODY: usize = 2 * 1024 * 1024;
 const MAX_ALONG_ALLOC: usize = 1024 * 1024;
-const MAX_ROUTE_POINTS: usize = 250_000;
 const MAX_ROUTE_MANEUVERS: usize = 10_000;
 const MAX_ROUTE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CHARGER_CANDIDATES: usize = 20_000;
@@ -38,6 +37,8 @@ const MAX_CHARGER_CANDIDATES: usize = 20_000;
 pub struct HealthState {
     pub ok: bool,
     pub search: &'static str,
+    pub along: &'static str,
+    pub chargers: &'static str,
     pub regional_graph: &'static str,
     pub major_graph: &'static str,
     // Reserved service slots for the later radar/weather/wind lane.
@@ -50,6 +51,8 @@ impl Default for HealthState {
         Self {
             ok: false,
             search: "unavailable",
+            along: "unavailable",
+            chargers: "unavailable",
             regional_graph: "unavailable",
             major_graph: "disabled",
             radar: "unavailable",
@@ -61,9 +64,11 @@ impl Default for HealthState {
 impl HealthState {
     fn json(&self) -> String {
         format!(
-            "{{\"ok\":{},\"search\":{},\"regional_graph\":{},\"major_graph\":{},\"radar\":{},\"wind\":{}}}",
+            "{{\"ok\":{},\"search\":{},\"along\":{},\"chargers\":{},\"regional_graph\":{},\"major_graph\":{},\"radar\":{},\"wind\":{}}}",
             self.ok,
             json_string(self.search),
+            json_string(self.along),
+            json_string(self.chargers),
             json_string(self.regional_graph),
             json_string(self.major_graph),
             json_string(self.radar),
@@ -135,6 +140,9 @@ pub trait NavBackend: Send + Sync + 'static {
     fn search(&self, request: SearchRequest) -> Result<Vec<SearchResult>, ApiFailure>;
     fn route(&self, request: RouteRequest) -> Result<RouteResult, ApiFailure>;
     fn along(&self, request: AlongRequest) -> Result<Vec<AlongResult>, ApiFailure>;
+    fn chargers_status(&self) -> &'static str {
+        "disabled"
+    }
 }
 
 struct ProductionBackend {
@@ -205,7 +213,7 @@ impl NavBackend for ProductionBackend {
     fn along(&self, request: AlongRequest) -> Result<Vec<AlongResult>, ApiFailure> {
         const MIN_PER_M: f64 = 2.0 / (40_000.0 / 60.0);
         let radius_m = (request.max_detour_min / MIN_PER_M).min(5_000.0);
-        let samples = sample_along(&request.polyline, &request.cum_dist_m);
+        let samples = sample_along(&request.polyline);
         let mut candidates = Vec::new();
         let mut charger_budget = MAX_CHARGER_CANDIDATES;
         for kind in &request.kinds {
@@ -278,11 +286,20 @@ impl NavBackend for ProductionBackend {
         kept.truncate(request.limit);
         Ok(kept)
     }
+
+    fn chargers_status(&self) -> &'static str {
+        if self.chargers.is_some() { "ready" } else { "disabled" }
+    }
+}
+
+enum AlongBody {
+    Ready(Vec<u8>),
+    Pending(HttpServerPendingBody),
 }
 
 enum QueryJob {
     Search(SearchRequest, HttpServerResponseSender),
-    Along(Vec<u8>, HttpServerResponseSender),
+    Along(AlongBody, HttpServerResponseSender),
 }
 
 struct RouteJob(RouteRequest, HttpServerResponseSender);
@@ -321,13 +338,15 @@ impl ServiceRegistry {
         route_queue: usize,
         major_ready: bool,
     ) {
+        let chargers = backend.chargers_status();
         let (search_sender, search_receiver) = mpsc::sync_channel(route_queue);
         let (along_sender, along_receiver) = mpsc::sync_channel(route_queue);
         let (route_sender, route_receiver) = mpsc::sync_channel(route_queue);
         let along_workers = query_workers.saturating_sub(1).max(1);
-        spawn_query_workers(self.clone(), backend.clone(), search_receiver, 1, "search");
-        spawn_query_workers(self.clone(), backend.clone(), along_receiver, along_workers, "along");
-        spawn_route_workers(self.clone(), backend, route_receiver, route_workers);
+        let registry = Arc::downgrade(self);
+        spawn_query_workers(registry.clone(), backend.clone(), search_receiver, 1, "search");
+        spawn_query_workers(registry.clone(), backend.clone(), along_receiver, along_workers, "along");
+        spawn_route_workers(registry, backend, route_receiver, route_workers);
         *self.workers.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(WorkerSenders {
             search: search_sender,
             along: along_sender,
@@ -336,6 +355,8 @@ impl ServiceRegistry {
         *self.health.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = HealthState {
             ok: true,
             search: "ready",
+            along: "ready",
+            chargers,
             regional_graph: "ready",
             major_graph: if major_ready { "ready" } else { "disabled" },
             radar: "unavailable",
@@ -363,6 +384,7 @@ impl ServiceRegistry {
         health.ok = false;
         match service {
             "route" => health.regional_graph = "degraded",
+            "along" => health.along = "degraded",
             _ => health.search = "degraded",
         }
     }
@@ -375,7 +397,8 @@ impl ServiceRegistry {
                 } else if !matches!(headers.verb.as_str(), "GET" | "HEAD") {
                     send_response(sender, api_method_not_allowed("GET, HEAD, OPTIONS"));
                 } else {
-                    send_response(sender, json_response(200, "no-store", self.health().json()));
+                    let health = self.health();
+                    send_response(sender, json_response(if health.ok { 200 } else { 503 }, "no-store", health.json()));
                 }
                 true
             }
@@ -440,11 +463,15 @@ impl ServiceRegistry {
         sender: &HttpServerResponseSender,
     ) -> bool {
         if headers.path == "/api/along" {
+            if !has_json_content_type(headers) {
+                send_response(sender, api_error(415, "unsupported_media_type", "Content-Type must be application/json"));
+                return true;
+            }
             if body.len() > MAX_ALONG_BODY {
                 send_response(sender, api_error(413, "too_large", "request body exceeds 2 MiB"));
                 return true;
             }
-            self.enqueue_query(QueryJob::Along(body, sender.clone()));
+            self.enqueue_query(QueryJob::Along(AlongBody::Ready(body), sender.clone()));
             true
         } else if headers.path.starts_with("/api/") {
             let status = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
@@ -464,13 +491,36 @@ impl ServiceRegistry {
         }
     }
 
+    pub fn handle_post_pending(
+        &self,
+        headers: &HttpServerHeaders,
+        body: HttpServerPendingBody,
+        sender: &HttpServerResponseSender,
+    ) -> bool {
+        if headers.path == "/api/along" {
+            if !has_json_content_type(headers) {
+                body.reject(api_error(415, "unsupported_media_type", "Content-Type must be application/json"));
+                return true;
+            }
+            self.enqueue_query(QueryJob::Along(AlongBody::Pending(body), sender.clone()));
+            true
+        } else if headers.path.starts_with("/api/") {
+            let response = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
+                api_method_not_allowed("GET, HEAD, OPTIONS")
+            } else {
+                api_error(404, "not_found", "API endpoint not found")
+            };
+            body.reject(response);
+            true
+        } else {
+            false
+        }
+    }
+
     fn enqueue_query(&self, job: QueryJob) {
         let workers = self.workers.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        let sender = match &job {
-            QueryJob::Search(_, sender) | QueryJob::Along(_, sender) => sender.clone(),
-        };
         let Some(workers) = workers else {
-            send_response(&sender, api_error(503, "unavailable", "navigation services are not ready"));
+            reject_query_job(job, api_error(503, "unavailable", "navigation services are not ready"));
             return;
         };
         let queue = match &job {
@@ -480,12 +530,10 @@ impl ServiceRegistry {
         match queue.try_send(job) {
             Ok(()) => {}
             Err(TrySendError::Full(job)) => {
-                let sender = match job { QueryJob::Search(_, sender) | QueryJob::Along(_, sender) => sender };
-                send_response(&sender, api_error(429, "busy", "query queue is full"));
+                reject_query_job(job, api_error(429, "busy", "query queue is full"));
             }
             Err(TrySendError::Disconnected(job)) => {
-                let sender = match job { QueryJob::Search(_, sender) | QueryJob::Along(_, sender) => sender };
-                send_response(&sender, api_error(503, "unavailable", "query workers are unavailable"));
+                reject_query_job(job, api_error(503, "unavailable", "query workers are unavailable"));
             }
         }
     }
@@ -506,7 +554,7 @@ impl ServiceRegistry {
 }
 
 fn spawn_query_workers(
-    registry: Arc<ServiceRegistry>,
+    registry: Weak<ServiceRegistry>,
     backend: Arc<dyn NavBackend>,
     receiver: Receiver<QueryJob>,
     count: usize,
@@ -533,7 +581,9 @@ fn spawn_query_workers(
                             .map(|results| search_response_for(&query, results))
                             .unwrap_or_else(ApiFailure::response)
                     }
-                    QueryJob::Along(body, _) => parse_along(&body)
+                    QueryJob::Along(body, _) => body
+                        .receive()
+                        .and_then(|body| parse_along(&body))
                         .and_then(|request| backend.along(request))
                         .map(along_response)
                         .unwrap_or_else(ApiFailure::response),
@@ -541,7 +591,9 @@ fn spawn_query_workers(
                 match result {
                     Ok(response) => send_response(&sender, response),
                     Err(_) => {
-                        registry.mark_degraded(class);
+                        if let Some(registry) = registry.upgrade() {
+                            registry.mark_degraded(class);
+                        }
                         send_response(&sender, ApiFailure::internal("query worker panic").response());
                     }
                 }
@@ -550,8 +602,43 @@ fn spawn_query_workers(
     }
 }
 
+impl AlongBody {
+    fn receive(self) -> Result<Vec<u8>, ApiFailure> {
+        match self {
+            Self::Ready(body) => Ok(body),
+            Self::Pending(body) => body
+                .receive()
+                .map_err(|_| bad_request("request body connection closed")),
+        }
+    }
+}
+
+fn reject_query_job(job: QueryJob, response: HttpServerResponse) {
+    match job {
+        QueryJob::Search(_, sender) | QueryJob::Along(AlongBody::Ready(_), sender) => {
+            send_response(&sender, response)
+        }
+        QueryJob::Along(AlongBody::Pending(body), _) => body.reject(response),
+    }
+}
+
+fn has_json_content_type(headers: &HttpServerHeaders) -> bool {
+    let mut values = headers
+        .lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| makepad_network::utils::split_header_line(line, "Content-Type"));
+    let valid = values.next().is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+    });
+    valid && values.next().is_none()
+}
+
 fn spawn_route_workers(
-    registry: Arc<ServiceRegistry>,
+    registry: Weak<ServiceRegistry>,
     backend: Arc<dyn NavBackend>,
     receiver: Receiver<RouteJob>,
     count: usize,
@@ -577,7 +664,9 @@ fn spawn_route_workers(
                 match result {
                     Ok(response) => send_response(&response_sender, response),
                     Err(_) => {
-                        registry.mark_degraded("route");
+                        if let Some(registry) = registry.upgrade() {
+                            registry.mark_degraded("route");
+                        }
                         send_response(
                             &response_sender,
                             ApiFailure::internal("route worker panic").response(),
@@ -759,7 +848,9 @@ fn parse_along(body: &[u8]) -> Result<AlongRequest, ApiFailure> {
     if request.polyline.len() != request.cum_dist_m.len() {
         return Err(bad_request("cum_dist_m must match polyline length"));
     }
-    validate_cumulative_distances(&request.polyline, &request.cum_dist_m)?;
+    request.cum_dist_m = cumulative_distances(&request.polyline)
+        .filter(|distances| distances.last().is_some_and(|total| *total > 0.0 && *total <= 20_000_000.0))
+        .ok_or_else(|| bad_request("polyline geometry is outside the supported range"))?;
     let max_detour_min = request.max_detour_min;
     if !max_detour_min.is_finite() || !(1.0..=60.0).contains(&max_detour_min) {
         return Err(bad_request("max_detour_min must be in 1..=60"));
@@ -845,7 +936,7 @@ impl<'a> AlongJsonParser<'a> {
         let mut points = Vec::new();
         if !self.consume(b']') {
             loop {
-                if points.len() >= 20_000 {
+                if points.len() >= MAX_ROUTE_POINTS {
                     return Err(bad_request("polyline must contain 2..=20000 points"));
                 }
                 self.open(b'[')?;
@@ -863,7 +954,7 @@ impl<'a> AlongJsonParser<'a> {
             }
         }
         self.close();
-        if !(2..=20_000).contains(&points.len()) {
+        if !(2..=MAX_ROUTE_POINTS).contains(&points.len()) {
             return Err(bad_request("polyline must contain 2..=20000 points"));
         }
         Ok(points)
@@ -874,7 +965,7 @@ impl<'a> AlongJsonParser<'a> {
         let mut numbers = Vec::new();
         if !self.consume(b']') {
             loop {
-                if numbers.len() >= 20_000 {
+                if numbers.len() >= MAX_ROUTE_POINTS {
                     return Err(bad_request("cum_dist_m has too many values"));
                 }
                 let value = self.number()?;
@@ -1061,38 +1152,6 @@ impl<'a> AlongJsonParser<'a> {
     }
 }
 
-fn validate_cumulative_distances(polyline: &[LonLat], cumulative: &[f64]) -> Result<(), ApiFailure> {
-    const MAX_TOTAL_M: f64 = 20_000_000.0;
-    if cumulative.first().copied() != Some(0.0) {
-        return Err(bad_request("cum_dist_m must start at zero"));
-    }
-    if cumulative.iter().any(|distance| !distance.is_finite() || *distance < 0.0)
-        || cumulative.windows(2).any(|window| window[1] < window[0])
-    {
-        return Err(bad_request("cum_dist_m must be finite, non-negative, and sorted"));
-    }
-    let total = cumulative.last().copied().unwrap_or(0.0);
-    if !(0.0..=MAX_TOTAL_M).contains(&total) || total == 0.0 {
-        return Err(bad_request("route distance is outside the supported range"));
-    }
-    let geometry_total = polyline
-        .windows(2)
-        .try_fold(0.0, |sum, points| {
-            let segment = haversine_m(points[0], points[1]);
-            let next = sum + segment;
-            next.is_finite().then_some(next)
-        })
-        .ok_or_else(|| bad_request("polyline geometry overflows"))?;
-    if geometry_total <= 0.0
-        || geometry_total > MAX_TOTAL_M
-        || total < geometry_total * 0.5
-        || total > geometry_total * 2.0
-    {
-        return Err(bad_request("cum_dist_m total is implausible for the polyline"));
-    }
-    Ok(())
-}
-
 fn value<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
     pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str())
 }
@@ -1247,40 +1306,24 @@ fn json_number(value: f64) -> String {
     if value.is_finite() { value.to_string() } else { "null".into() }
 }
 
-pub fn sample_along(polyline: &[LonLat], cumulative: &[f64]) -> Vec<(LonLat, f64)> {
-    let total = cumulative.last().copied().unwrap_or(0.0);
+pub fn sample_along(polyline: &[LonLat]) -> Vec<(LonLat, f64)> {
+    let total = cumulative_distances(polyline)
+        .and_then(|distances| distances.last().copied())
+        .unwrap_or(0.0);
     let spacing = (total / 48.0).max(3_000.0);
-    let mut samples = vec![(polyline[0], 0.0)];
-    let mut distance = spacing;
-    while distance <= total {
-        samples.push((interpolate(polyline, cumulative, distance), distance));
-        distance += spacing;
-    }
-    if total - samples.last().unwrap().1 > spacing * 0.5 {
-        samples.push((*polyline.last().unwrap(), total));
-    }
-    samples
-}
-
-fn interpolate(polyline: &[LonLat], cumulative: &[f64], distance: f64) -> LonLat {
-    let index = cumulative.partition_point(|value| *value < distance).min(cumulative.len() - 1);
-    if index == 0 { return polyline[0] }
-    let start = cumulative[index - 1];
-    let end = cumulative[index];
-    let fraction = if end > start { (distance - start) / (end - start) } else { 0.0 };
-    LonLat::new(
-        polyline[index - 1].lon + (polyline[index].lon - polyline[index - 1].lon) * fraction,
-        polyline[index - 1].lat + (polyline[index].lat - polyline[index - 1].lat) * fraction,
-    )
+    sample_polyline(polyline, spacing)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_geodata::{mvt::AttrVal, sidecar::SidecarBuilder, wkb::Geometry};
     use makepad_map_nav::{
         graph::GraphBuilder,
         search::{Category, SearchIndexBuilder},
     };
+    use makepad_mbtile_reader::MbtilesWriter;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn search_bounds_are_strict() {
@@ -1302,10 +1345,12 @@ mod tests {
         let valid = br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[0,10000],"kinds":["museum"],"limit":12}"#;
         let request = parse_along(valid).unwrap();
         assert_eq!(request.limit, 12);
+        assert_eq!(request.cum_dist_m[0], 0.0);
         assert!(parse_along(br#"{"polyline":[[4.9,52.3]],"cum_dist_m":[0],"kinds":["museum"]}"#).is_err());
         assert!(parse_along(&vec![b' '; MAX_ALONG_BODY + 1]).is_err());
-        assert!(parse_along(br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[1,10000],"kinds":["museum"]}"#).is_err());
-        assert!(parse_along(br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[0,19000000],"kinds":["museum"]}"#).is_err());
+        let untrusted = parse_along(br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[1,19000000],"kinds":["museum"]}"#).unwrap();
+        assert_eq!(untrusted.cum_dist_m[0], 0.0);
+        assert!(untrusted.cum_dist_m[1] < 20_000.0);
         assert!(parse_along(br#"{"polyline":[[[[[0]]]]],"cum_dist_m":[0,1],"kinds":["museum"]}"#).is_err());
         assert!(parse_along(br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[0,10000],"kinds":["museum"]} trailing"#).is_err());
     }
@@ -1313,17 +1358,43 @@ mod tests {
     #[test]
     fn corridor_sampling_is_bounded() {
         let points = [LonLat::new(0.0, 0.0), LonLat::new(1.0, 1.0)];
-        let samples = sample_along(&points, &[0.0, 1_000_000.0]);
+        let samples = sample_along(&points);
         assert!(samples.len() <= 49);
         assert_eq!(samples.first().unwrap().1, 0.0);
-        assert!((samples[1].1 - 1_000_000.0 / 48.0).abs() < 1e-6);
+        let total = haversine_m(points[0], points[1]);
+        assert!((samples[1].1 - total / 48.0).abs() < 1e-6);
     }
 
     #[test]
     fn ten_km_sampling_matches_trip_policy() {
         let points = [LonLat::new(0.0, 0.0), LonLat::new(0.09, 0.0)];
-        let samples = sample_along(&points, &[0.0, 10_000.0]);
+        let samples = sample_along(&points);
         assert_eq!(samples.iter().map(|sample| sample.1).collect::<Vec<_>>(), vec![0.0, 3_000.0, 6_000.0, 9_000.0]);
+    }
+
+    #[test]
+    fn caller_cumulative_values_cannot_move_samples_between_segments() {
+        let request = parse_along(
+            br#"{"polyline":[[0,0],[0.045,0],[0.09,0]],"cum_dist_m":[0,100,10000],"kinds":["museum"]}"#,
+        )
+        .unwrap();
+        let samples = sample_along(&request.polyline);
+        assert_eq!(samples[1].1, 3_000.0);
+        assert!(samples[1].0.lon < request.polyline[1].lon);
+    }
+
+    #[test]
+    fn route_response_enforces_shared_point_limit() {
+        let points = vec![LonLat::new(4.0, 52.0); MAX_ROUTE_POINTS + 1];
+        let route = Route {
+            mode: TravelMode::Car,
+            cum_dist_m: vec![0.0; points.len()],
+            points,
+            length_m: 0.0,
+            duration_s: 0.0,
+            maneuvers: Vec::new(),
+        };
+        assert!(route_response(RouteResult { graph: "fixture".into(), route }, "car").is_err());
     }
 
     #[test]
@@ -1358,6 +1429,90 @@ mod tests {
             limit: 12,
         }).unwrap();
         assert!(results.iter().any(|result| result.name == "Fast Charger"));
+    }
+
+    #[test]
+    fn poisoned_charger_database_is_reopened() {
+        let path = std::env::temp_dir().join(format!(
+            "makepad-poisoned-chargers-{}-{}.mbtiles",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        let mut sidecar = SidecarBuilder::new();
+        sidecar.add(
+            "chargers",
+            &Geometry::Point(4.9, 52.3),
+            &[("max_kw".into(), AttrVal::Int(150))],
+            false,
+        );
+        sidecar.write(&mut writer).unwrap();
+        writer.finish().unwrap();
+
+        let database = Arc::new(ReopenableLayerDb {
+            path: path.clone(),
+            db: Mutex::new(Some(LayerDb::open(&path).unwrap())),
+        });
+        let poison = database.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = poison.db.lock().unwrap();
+            panic!("poison charger mutex");
+        })
+        .join()
+        .is_err());
+        let mut budget = 8;
+        let hits = database
+            .query_radius(LonLat::new(4.9, 52.3), 1_000.0, 8, &mut budget)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    struct DropBackend {
+        dropped: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Drop for DropBackend {
+        fn drop(&mut self) {
+            let (lock, changed) = &*self.dropped;
+            *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            changed.notify_all();
+        }
+    }
+
+    impl NavBackend for DropBackend {
+        fn search(&self, _request: SearchRequest) -> Result<Vec<SearchResult>, ApiFailure> {
+            unreachable!()
+        }
+
+        fn route(&self, _request: RouteRequest) -> Result<RouteResult, ApiFailure> {
+            unreachable!()
+        }
+
+        fn along(&self, _request: AlongRequest) -> Result<Vec<AlongResult>, ApiFailure> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn workers_exit_when_registry_closes_input_channels() {
+        let dropped = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        {
+            let registry = ServiceRegistry::new(false);
+            registry.install(
+                Arc::new(DropBackend { dropped: dropped.clone() }),
+                1,
+                1,
+                1,
+                false,
+            );
+        }
+        let (lock, changed) = &*dropped;
+        let guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (guard, _) = changed
+            .wait_timeout_while(guard, std::time::Duration::from_secs(2), |done| !*done)
+            .unwrap();
+        assert!(*guard, "worker threads retained their backend after input closure");
     }
 
     #[test]

@@ -8,9 +8,9 @@ pub use crate::web_socket_parser::{
 use std::io::prelude::*;
 use std::fs::File;
 use std::collections::HashMap;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, mpsc::RecvTimeoutError, Mutex, OnceLock};
+use std::sync::{mpsc, mpsc::RecvTimeoutError, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Sockets whose peer vanished (a client retry storm timing out and
@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 /// threads eventually slow `thread::spawn` on the ACCEPT loop itself, the
 /// listen backlog fills, and new SYNs get dropped: the service looks dead
 /// from outside while established flows stay fine. Bound every socket wait.
-const SOCKET_TIMEOUT: Duration = HTTP_READ_TIMEOUT;
-/// How long a request thread waits for the app side to answer before 504.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const API_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const STATIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Concurrent connection threads (process-wide). Over the cap, new
 /// connections are shed with an inline 503 — cheap and honest — instead of
 /// growing the thread pile.
 const MAX_CONNS: usize = 256;
+const MAX_CONNS_PER_IP: usize = 16;
+const MAX_IN_FLIGHT_BODY_BYTES: usize = 32 * 1024 * 1024;
 static ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 
 struct ConnGuard;
@@ -45,6 +46,71 @@ impl Drop for ConnGuard {
     }
 }
 
+struct IpConnGuard {
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl IpConnGuard {
+    fn try_acquire(counts: Arc<Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr) -> Option<Self> {
+        let ip = normalize_ip(ip);
+        let mut locked = counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = locked.entry(ip).or_default();
+        if *count >= MAX_CONNS_PER_IP {
+            return None;
+        }
+        *count += 1;
+        drop(locked);
+        Some(Self { counts, ip })
+    }
+}
+
+impl Drop for IpConnGuard {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from(u128::from(ip) & (!0u128 << 64))),
+    }
+}
+
+struct BodyBudgetGuard {
+    used: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl BodyBudgetGuard {
+    fn try_acquire(used: Arc<AtomicUsize>, bytes: usize, limit: usize) -> Option<Self> {
+        let mut current = used.load(Ordering::Acquire);
+        loop {
+            let next = current.checked_add(bytes)?;
+            if next > limit {
+                return None;
+            }
+            match used.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(Self { used, bytes }),
+                Err(changed) => current = changed,
+            }
+        }
+    }
+}
+
+impl Drop for BodyBudgetGuard {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
 #[cfg(feature = "script")]
 use makepad_script::*;
 
@@ -56,6 +122,12 @@ pub struct HttpServer {
     /// Exact-path POST limits checked before the request body is allocated.
     /// The smallest matching limit wins over `post_max_size`.
     pub post_max_size_overrides: Vec<(String, u64)>,
+    /// Dispatch POST headers first, allowing the application to reserve a
+    /// bounded worker/queue slot before any declared body buffer is allocated.
+    pub pre_admit_posts: bool,
+    /// Resolves the client identity used by the per-IP connection cap. A
+    /// reverse-proxy deployment must validate its trusted peers here.
+    pub client_ip_resolver: Option<fn(&HttpServerHeaders) -> IpAddr>,
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
@@ -87,23 +159,46 @@ impl HttpServerResponse {
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // A receiver normally consumes this immediately. Bound abandoned
-        // registrations as well, so a dropped response channel cannot leak
-        // open descriptors indefinitely.
-        if responses.len() >= 1_024 {
-            if let Some(oldest) = responses.keys().copied().min() {
-                responses.remove(&oldest);
-            }
-        }
         responses.insert(id, HttpServerFileResponse { file, offset, len });
         drop(responses);
         let mut body = FILE_RESPONSE_MARKER.to_vec();
         body.extend_from_slice(&id.to_le_bytes());
         Self { header, body }
     }
+
+    /// Closes a registered file payload when its response could not be sent.
+    pub fn discard_file(&self) {
+        let _ = take_file_response(&self.body);
+    }
 }
 
 pub type HttpServerResponseSender = mpsc::Sender<HttpServerResponse>;
+
+enum PostAdmission {
+    Read,
+    Respond(HttpServerResponse),
+}
+
+/// A body whose allocation and socket read are waiting on application-level
+/// admission. `receive` should only be called by an already-admitted worker.
+pub struct HttpServerPendingBody {
+    pub content_length: usize,
+    admission: Option<mpsc::SyncSender<PostAdmission>>,
+    body: mpsc::Receiver<Result<Vec<u8>, ()>>,
+}
+
+impl HttpServerPendingBody {
+    pub fn receive(mut self) -> Result<Vec<u8>, ()> {
+        self.admission.take().ok_or(())?.send(PostAdmission::Read).map_err(|_| ())?;
+        self.body.recv().map_err(|_| ())?
+    }
+
+    pub fn reject(mut self, response: HttpServerResponse) {
+        if let Some(admission) = self.admission.take() {
+            let _ = admission.send(PostAdmission::Respond(response));
+        }
+    }
+}
 
 fn take_file_response(body: &[u8]) -> Option<HttpServerFileResponse> {
     if body.len() != FILE_RESPONSE_MARKER.len() + 8 || !body.starts_with(FILE_RESPONSE_MARKER) {
@@ -145,6 +240,11 @@ pub enum HttpServerRequest {
         body: Vec<u8>,
         response: HttpServerResponseSender,
     },
+    PostPending {
+        headers: HttpServerHeaders,
+        body: HttpServerPendingBody,
+        response: HttpServerResponseSender,
+    },
 }
 
 pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
@@ -155,6 +255,9 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
         return None;
     };
 
+    let ip_connections = Arc::new(Mutex::new(HashMap::new()));
+    let in_flight_body_bytes = Arc::new(AtomicUsize::new(0));
+    let body_budget_limit = MAX_IN_FLIGHT_BODY_BYTES;
     let listen_thread = {
         std::thread::spawn(move || {
             let mut connection_counter = 0u64;
@@ -166,6 +269,8 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     continue;
                 };
                 let http_server = http_server.clone();
+                let ip_connections = ip_connections.clone();
+                let in_flight_body_bytes = in_flight_body_bytes.clone();
                 connection_counter += 1;
                 // Shed over the cap INLINE (no thread): the pile of leaked
                 // connection threads is what used to stall this accept loop.
@@ -173,14 +278,21 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     http_error_out(tcp_stream, 503);
                     continue;
                 };
-                // Bounded socket waits, so an abandoned peer can never pin
-                // this thread forever (websocket upgrades clear it again —
-                // their idle reads are legitimate and ping-covered).
-                let _ = tcp_stream.set_read_timeout(Some(SOCKET_TIMEOUT));
-                let _ = tcp_stream.set_write_timeout(Some(SOCKET_TIMEOUT));
+                let peer_ip = match tcp_stream.peer_addr() {
+                    Ok(address) => address.ip(),
+                    Err(_) => {
+                        http_error_out(tcp_stream, 400);
+                        continue;
+                    }
+                };
+                let Some(peer_guard) = IpConnGuard::try_acquire(ip_connections.clone(), peer_ip) else {
+                    http_error_out(tcp_stream, 503);
+                    continue;
+                };
                 let _read_thread = std::thread::spawn(move || {
                     let _guard = guard;
-                    let head_deadline = Instant::now() + SOCKET_TIMEOUT;
+                    let started = Instant::now();
+                    let head_deadline = started + API_CONNECTION_TIMEOUT;
                     let head = match HttpServerHeaders::from_tcp_stream_until(
                         &mut tcp_stream,
                         head_deadline,
@@ -191,6 +303,19 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     // Whatever arrived in the same segment as the headers is
                     // already off the socket and has to be handed onward.
                     let (headers, body_prefix) = head;
+                    let client_ip = http_server
+                        .client_ip_resolver
+                        .map(|resolve| resolve(&headers))
+                        .unwrap_or(peer_ip);
+                    let _ip_guard = if normalize_ip(client_ip) == peer_guard.ip {
+                        peer_guard
+                    } else {
+                        let Some(client_guard) = IpConnGuard::try_acquire(ip_connections, client_ip) else {
+                            return http_error_out(tcp_stream, 503);
+                        };
+                        drop(peer_guard);
+                        client_guard
+                    };
 
                     if headers.sec_websocket_key.is_some() {
                         return handle_web_socket(
@@ -201,14 +326,25 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                             connection_counter,
                         );
                     }
+                    let deadline = started
+                        + if headers.path.starts_with("/api/") {
+                            API_CONNECTION_TIMEOUT
+                        } else {
+                            STATIC_CONNECTION_TIMEOUT
+                        };
                     if headers.verb == "POST" {
-                        return handle_post(http_server, tcp_stream, headers, body_prefix);
+                        return handle_post(
+                            http_server,
+                            tcp_stream,
+                            headers,
+                            body_prefix,
+                            deadline,
+                            in_flight_body_bytes,
+                            body_budget_limit,
+                        );
                     }
-                    if matches!(headers.verb.as_str(), "GET" | "HEAD" | "OPTIONS") {
-                        return handle_get(http_server, tcp_stream, headers);
-                    }
-                    if matches!(headers.verb.as_str(), "PUT" | "DELETE") {
-                        return http_error_out(tcp_stream, 405);
+                    if matches!(headers.verb.as_str(), "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE") {
+                        return handle_get(http_server, tcp_stream, headers, deadline);
                     }
                     http_error_out(tcp_stream, 400)
                 });
@@ -223,6 +359,9 @@ fn handle_post(
     mut tcp_stream: TcpStream,
     headers: HttpServerHeaders,
     body_prefix: Vec<u8>,
+    deadline: Instant,
+    in_flight_body_bytes: Arc<AtomicUsize>,
+    body_budget_limit: usize,
 ) {
     // we have to have a content-length or bust
     let Some(content_length) = headers.content_length else {
@@ -238,11 +377,66 @@ fn handle_post(
     if content_length > path_limit {
         return http_error_out(tcp_stream, 413);
     }
-    let bytes_total = content_length as usize;
+    let Ok(bytes_total) = usize::try_from(content_length) else {
+        return http_error_out(tcp_stream, 413);
+    };
     if body_prefix.len() > bytes_total {
         return http_error_out(tcp_stream, 400);
     }
-    let body_deadline = Instant::now() + SOCKET_TIMEOUT;
+    if headers
+        .lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| split_header_line(line, "Content-Encoding"))
+        .any(|value| !value.eq_ignore_ascii_case("identity"))
+    {
+        return http_error_out(tcp_stream, 415);
+    }
+
+    let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse>();
+    let mut pending_body_sender = None;
+    if http_server.pre_admit_posts {
+        let (admission_sender, admission_receiver) = mpsc::sync_channel(1);
+        let (body_sender, body_receiver) = mpsc::sync_channel(1);
+        if http_server
+            .request
+            .send(HttpServerRequest::PostPending {
+                headers: headers.clone(),
+                body: HttpServerPendingBody {
+                    content_length: bytes_total,
+                    admission: Some(admission_sender),
+                    body: body_receiver,
+                },
+                response: tx_socket.clone(),
+            })
+            .is_err()
+        {
+            return http_error_out(tcp_stream, 500);
+        }
+        let Some(remaining) = remaining(deadline) else {
+            return http_error_out(tcp_stream, 408);
+        };
+        match admission_receiver.recv_timeout(remaining) {
+            Ok(PostAdmission::Read) => pending_body_sender = Some(body_sender),
+            Ok(PostAdmission::Respond(response)) => {
+                write_response(&mut tcp_stream, response, false, deadline);
+                let _ = tcp_stream.shutdown(Shutdown::Both);
+                return;
+            }
+            Err(_) => return http_error_out(tcp_stream, 503),
+        }
+    }
+
+    let Some(_body_budget) = BodyBudgetGuard::try_acquire(
+        in_flight_body_bytes,
+        bytes_total,
+        body_budget_limit,
+    ) else {
+        if let Some(sender) = pending_body_sender {
+            let _ = sender.send(Err(()));
+        }
+        return http_error_out(tcp_stream, 503);
+    };
     let mut body = Vec::new();
     body.resize(bytes_total, 0u8);
 
@@ -253,12 +447,12 @@ fn handle_post(
 
     let mut bytes_left = bytes_total - prefix_len;
     while bytes_left > 0 {
-        let Some(remaining) = body_deadline.checked_duration_since(Instant::now()) else {
+        let Some(remaining) = remaining(deadline) else {
+            if let Some(sender) = pending_body_sender {
+                let _ = sender.send(Err(()));
+            }
             return http_error_out(tcp_stream, 408);
         };
-        if remaining.is_zero() {
-            return http_error_out(tcp_stream, 408);
-        }
         if tcp_stream.set_read_timeout(Some(remaining)).is_err() {
             return http_error_out(tcp_stream, 400);
         }
@@ -281,21 +475,23 @@ fn handle_post(
         bytes_left -= bytes_read;
     }
 
-    let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse>();
-    if http_server
+    if let Some(sender) = pending_body_sender {
+        if sender.send(Ok(body)).is_err() {
+            return http_error_out(tcp_stream, 500);
+        }
+    } else if http_server
         .request
-        .send(HttpServerRequest::Post {
-            headers,
-            body,
-            response: tx_socket,
-        })
+        .send(HttpServerRequest::Post { headers, body, response: tx_socket })
         .is_err()
     {
         return http_error_out(tcp_stream, 500);
-    };
+    }
 
-    match rx_socket.recv_timeout(RESPONSE_TIMEOUT) {
-        Ok(response) => write_response(&mut tcp_stream, response, false),
+    let Some(wait) = remaining(deadline) else {
+        return http_error_out(tcp_stream, 504);
+    };
+    match rx_socket.recv_timeout(wait) {
+        Ok(response) => write_response(&mut tcp_stream, response, false, deadline),
         Err(_) => return http_error_out(tcp_stream, 504),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -447,7 +643,12 @@ fn handle_web_socket(
         .send(HttpServerRequest::DisconnectWebSocket { web_socket_id });
 }
 
-fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {
+fn handle_get(
+    http_server: HttpServer,
+    mut tcp_stream: TcpStream,
+    headers: HttpServerHeaders,
+    deadline: Instant,
+) {
     // send our channel the post
     let suppress_body = headers.verb == "HEAD";
     let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse>();
@@ -462,8 +663,11 @@ fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpS
         return http_error_out(tcp_stream, 500);
     };
 
-    match rx_socket.recv_timeout(RESPONSE_TIMEOUT) {
-        Ok(response) => write_response(&mut tcp_stream, response, suppress_body),
+    let Some(wait) = remaining(deadline) else {
+        return http_error_out(tcp_stream, 504);
+    };
+    match rx_socket.recv_timeout(wait) {
+        Ok(response) => write_response(&mut tcp_stream, response, suppress_body, deadline),
         Err(_) => return http_error_out(tcp_stream, 504),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -473,18 +677,100 @@ fn write_response(
     tcp_stream: &mut TcpStream,
     response: HttpServerResponse,
     suppress_body: bool,
+    deadline: Instant,
 ) {
     let file_response = take_file_response(&response.body);
-    write_bytes_to_tcp_stream_no_error(tcp_stream, response.header.as_bytes());
+    if !write_bytes_until(tcp_stream, response.header.as_bytes(), deadline) {
+        return;
+    }
     if suppress_body {
         return;
     }
     if let Some(HttpServerFileResponse { mut file, offset, len }) = file_response {
         if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
-            let mut region = file.take(len);
-            let _ = std::io::copy(&mut region, tcp_stream);
+            let mut left = len;
+            let mut buffer = [0u8; 64 * 1024];
+            while left > 0 {
+                let amount = left.min(buffer.len() as u64) as usize;
+                let Ok(read) = file.read(&mut buffer[..amount]) else { break };
+                if read == 0 || !write_bytes_until(tcp_stream, &buffer[..read], deadline) {
+                    break;
+                }
+                left -= read as u64;
+            }
         }
     } else {
-        write_bytes_to_tcp_stream_no_error(tcp_stream, &response.body);
+        let _ = write_bytes_until(tcp_stream, &response.body, deadline);
+    }
+}
+
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now()).filter(|duration| !duration.is_zero())
+}
+
+fn write_bytes_until(tcp_stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> bool {
+    let mut written = 0;
+    while written < bytes.len() {
+        let Some(wait) = remaining(deadline) else { return false };
+        if tcp_stream.set_write_timeout(Some(wait)).is_err() {
+            return false;
+        }
+        match tcp_stream.write(&bytes[written..]) {
+            Ok(0) => return false,
+            Ok(count) => written += count,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn aggregate_body_budget_is_bounded_and_released() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let first = BodyBudgetGuard::try_acquire(used.clone(), 7, 10).unwrap();
+        assert!(BodyBudgetGuard::try_acquire(used.clone(), 4, 10).is_none());
+        let second = BodyBudgetGuard::try_acquire(used.clone(), 3, 10).unwrap();
+        assert_eq!(used.load(Ordering::Acquire), 10);
+        drop((first, second));
+        assert_eq!(used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn per_ip_cap_groups_ipv6_by_64_and_releases_entries() {
+        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let first: IpAddr = "2001:db8::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8::ffff".parse().unwrap();
+        let mut guards = Vec::new();
+        for _ in 0..MAX_CONNS_PER_IP {
+            guards.push(IpConnGuard::try_acquire(counts.clone(), first).unwrap());
+        }
+        assert!(IpConnGuard::try_acquire(counts.clone(), same_64).is_none());
+        drop(guards);
+        assert!(counts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn abandoned_file_response_registration_is_removed() {
+        let path = std::env::temp_dir().join(format!(
+            "makepad-http-file-response-{}-{}",
+            std::process::id(),
+            NEXT_FILE_RESPONSE.load(Ordering::Relaxed)
+        ));
+        fs::write(&path, b"fixture").unwrap();
+        let before = FILE_RESPONSES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .len();
+        let response = HttpServerResponse::from_file(String::new(), File::open(&path).unwrap(), 0, 7);
+        assert_eq!(FILE_RESPONSES.get().unwrap().lock().unwrap().len(), before + 1);
+        response.discard_file();
+        assert_eq!(FILE_RESPONSES.get().unwrap().lock().unwrap().len(), before);
+        fs::remove_file(path).unwrap();
     }
 }

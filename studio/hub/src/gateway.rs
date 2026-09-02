@@ -44,6 +44,8 @@ pub fn start_http_gateway(
         request: request_tx,
         post_max_size,
         post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
     })
     .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
 
@@ -212,6 +214,9 @@ pub fn start_http_gateway(
                 }
                 HttpServerRequest::Post { response, .. } => {
                     let _ = response.send(not_found_response());
+                }
+                HttpServerRequest::PostPending { body, .. } => {
+                    body.reject(not_found_response());
                 }
             }
         }

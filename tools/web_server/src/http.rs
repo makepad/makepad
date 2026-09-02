@@ -45,7 +45,9 @@ pub fn response(
 }
 
 pub fn send_response(sender: &HttpServerResponseSender, response: HttpServerResponse) {
-    let _ = sender.send(response);
+    if let Err(error) = sender.send(response) {
+        error.0.discard_file();
+    }
 }
 
 pub fn json_response(status: u16, cache_control: &str, json: String) -> HttpServerResponse {

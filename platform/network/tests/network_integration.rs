@@ -256,6 +256,8 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
             request: request_sender,
             post_max_size: 1024,
             post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
         })
         .expect("start HTTP server");
     let handler = std::thread::spawn(move || {
@@ -307,6 +309,8 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
             request: request_sender,
             post_max_size: 16,
             post_max_size_overrides: vec![("/small".into(), 2)],
+            pre_admit_posts: false,
+            client_ip_resolver: None,
         })
         .unwrap();
 
@@ -322,12 +326,32 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
         assert!(response.contains("Cross-Origin-Opener-Policy: same-origin"));
         assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp"));
     }
+    let method_handler = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let HttpServerRequest::Get { headers, response_sender } = request_receiver
+                .recv_timeout(Duration::from_secs(3))
+                .expect("method request reached dispatcher")
+            else {
+                panic!("unexpected request shape");
+            };
+            let allow = if headers.path == "/x" { "GET, HEAD, OPTIONS" } else { "OPTIONS" };
+            response_sender
+                .send(HttpServerResponse {
+                    header: format!(
+                        "HTTP/1.1 405 Method Not Allowed\r\nAllow: {allow}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    body: Vec::new(),
+                })
+                .unwrap();
+        }
+    });
     for verb in ["PUT", "DELETE"] {
         let response = raw_server_request(
             listen_address,
             format!("{verb} /x HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
         );
         assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+        assert!(response.contains("Allow: GET, HEAD, OPTIONS"), "{response:?}");
     }
     assert!(raw_server_request(
         listen_address,
@@ -339,7 +363,46 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
         b"POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"
     )
     .starts_with("HTTP/1.1 413"));
-    assert!(request_receiver.try_recv().is_err(), "rejected verbs reached application dispatch");
+    method_handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 2 * 1024 * 1024,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: true,
+            client_ip_resolver: None,
+        })
+        .unwrap();
+    let handler = std::thread::spawn(move || {
+        let HttpServerRequest::PostPending { body, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("pending POST")
+        else {
+            panic!("POST body was read before admission");
+        };
+        assert_eq!(body.content_length, 2 * 1024 * 1024);
+        body.reject(HttpServerResponse {
+            header: "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            body: Vec::new(),
+        });
+    });
+    let response = raw_server_request(
+        listen_address,
+        b"POST /queued HTTP/1.1\r\nHost: x\r\nContent-Length: 2097152\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 429"), "{response:?}");
+    handler.join().unwrap();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -356,6 +419,8 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         request: request_sender,
         post_max_size: 1024 * 1024,
         post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
     }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;

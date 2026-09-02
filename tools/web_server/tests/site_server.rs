@@ -154,8 +154,14 @@ fn direct_headers(verb: &str, target: &str) -> HttpServerHeaders {
     HttpServerHeaders {
         addr: "127.0.0.1:12345".parse().unwrap(),
         addr_text: "127.0.0.1:12345".into(),
-        lines: vec![format!("{verb} {target} HTTP/1.1\r\n")],
-        parsed_headers: Vec::new(),
+        lines: if verb == "POST" {
+            vec![
+                format!("{verb} {target} HTTP/1.1\r\n"),
+                "Content-Type: application/json\r\n".into(),
+            ]
+        } else {
+            vec![format!("{verb} {target} HTTP/1.1\r\n")]
+        },
         verb: verb.into(),
         path: path.into(),
         path_no_slash: path.trim_start_matches('/').into(),
@@ -201,8 +207,8 @@ fn start_fixture_server(base: &Path) -> (ServerChild, SocketAddr) {
     fs::create_dir_all(root.join("maps")).unwrap();
     fs::create_dir_all(data.join("nav")).unwrap();
     fs::write(root.join("index.html"), b"<h1>fixture</h1>").unwrap();
-    fs::write(root.join("app-a1b2c3d4.wasm"), b"0123456789").unwrap();
-    fs::write(root.join("app-a1b2c3d4.wasm.br"), b"BR").unwrap();
+    fs::write(root.join("app.0123456789abcdef.wasm"), b"0123456789").unwrap();
+    fs::write(root.join("app.0123456789abcdef.wasm.br"), b"BR").unwrap();
     fs::write(root.join("plus+file.js"), b"plus").unwrap();
     fs::write(root.join("maps/root.mkidx"), b"map-index").unwrap();
     fs::write(root.join("maps/root.mkidx.br"), b"wrong-index-representation").unwrap();
@@ -242,18 +248,26 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert_eq!(full.body, b"<h1>fixture</h1>");
     assert!(full.headers.contains("Cross-Origin-Opener-Policy: same-origin"));
     assert!(full.headers.contains("Cross-Origin-Embedder-Policy: require-corp"));
+    assert!(full.headers.contains("Cache-Control: private, no-cache"));
+    assert!(full.headers.contains("Vary: Accept-Encoding"));
+    assert!(full.headers.contains("Last-Modified: "));
 
-    let compressed = get(address, "/app-a1b2c3d4.wasm", "Accept-Encoding: gzip, br\r\n");
+    let compressed = get(address, "/app.0123456789abcdef.wasm", "Accept-Encoding: gzip, br\r\n");
     assert_eq!(compressed.status, 200);
     assert_eq!(compressed.body, b"BR");
     assert!(compressed.headers.contains("Content-Encoding: br"));
     assert!(compressed.headers.contains("Vary: Accept-Encoding"));
-    let invalid_quality = get(address, "/app-a1b2c3d4.wasm", "Accept-Encoding: br;q=garbage\r\n");
+    assert!(compressed.headers.contains("Cache-Control: public, max-age=31536000, immutable"));
+    assert_eq!(
+        get(address, "/app.0123456789abcdef.wasm", "Accept-Encoding: *;q=1\r\n").body,
+        b"BR"
+    );
+    let invalid_quality = get(address, "/app.0123456789abcdef.wasm", "Accept-Encoding: br;q=garbage\r\n");
     assert_eq!(invalid_quality.body, b"0123456789");
     assert!(!invalid_quality.headers.contains("Content-Encoding: br"));
     assert_eq!(get(address, "/plus+file.js", "").body, b"plus");
 
-    let partial = get(address, "/app-a1b2c3d4.wasm", "Range: bytes=2-5\r\nAccept-Encoding: br\r\n");
+    let partial = get(address, "/app.0123456789abcdef.wasm", "Range: bytes=2-5\r\nAccept-Encoding: br\r\n");
     assert_eq!(partial.status, 206);
     assert_eq!(partial.body, b"2345");
     assert!(partial.headers.contains("Content-Range: bytes 2-5/10"));
@@ -265,6 +279,7 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     let index = get(address, "/maps/root.mkidx", "Accept-Encoding: br\r\n");
     assert_eq!(index.body, b"map-index");
     assert!(!index.headers.contains("Content-Encoding: br"));
+    assert!(index.headers.contains("Cache-Control: public, max-age=31536000, immutable"));
 
     let head = request(address, b"HEAD /index.html HTTP/1.1\r\nHost: test\r\n\r\n");
     assert_eq!(head.status, 200);
@@ -277,9 +292,38 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
         .lines()
         .find_map(|line| line.strip_prefix("ETag: "))
         .unwrap();
+    let last_modified = etag_response
+        .headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Last-Modified: "))
+        .unwrap();
     let not_modified = get(address, "/index.html", &format!("If-None-Match: {etag}\r\n"));
     assert_eq!(not_modified.status, 304);
     assert!(not_modified.body.is_empty());
+    assert_eq!(
+        get(address, "/index.html", &format!("If-Modified-Since: {last_modified}\r\n")).status,
+        304
+    );
+    let if_range_match = get(
+        address,
+        "/index.html",
+        &format!("Range: bytes=0-2\r\nIf-Range: {etag}\r\n"),
+    );
+    assert_eq!(if_range_match.status, 206);
+    assert_eq!(if_range_match.body, b"<h1");
+    let if_range_date = get(
+        address,
+        "/index.html",
+        &format!("Range: bytes=0-2\r\nIf-Range: {last_modified}\r\n"),
+    );
+    assert_eq!(if_range_date.status, 206);
+    let if_range_miss = get(
+        address,
+        "/index.html",
+        "Range: bytes=0-2\r\nIf-Range: \"different\"\r\n",
+    );
+    assert_eq!(if_range_miss.status, 200);
+    assert_eq!(if_range_miss.body, b"<h1>fixture</h1>");
 
     let options = request(address, b"OPTIONS /maps/root.mkidx HTTP/1.1\r\nHost: test\r\n\r\n");
     assert_eq!(options.status, 204);
@@ -324,6 +368,22 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert_eq!(along.status, 200, "{}", String::from_utf8_lossy(&along.body));
     assert!(String::from_utf8_lossy(&along.body).contains("Fixture Museum"));
     assert_eq!(post(address, "/api/along", br#"{"polyline":[]}"#).status, 400);
+    assert_eq!(
+        request(
+            address,
+            b"POST /api/along HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .status,
+        415
+    );
+    assert_eq!(
+        request(
+            address,
+            b"POST /api/along HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .status,
+        415
+    );
     assert_eq!(get(address, "/api/search?q=x&near=999,52", "").status, 400);
 }
 
@@ -342,6 +402,9 @@ fn check_unavailable_is_returned_before_navigation_is_ready() {
         .unwrap();
     let _server = ServerChild(child);
     wait_until_listening(address);
+    let health = get(address, "/api/healthz", "");
+    assert_eq!(health.status, 503);
+    assert!(String::from_utf8_lossy(&health.body).contains("\"along\":\"unavailable\""));
     let response = get(address, "/api/search?q=Amsterdam", "");
     assert_eq!(response.status, 503);
     assert!(String::from_utf8_lossy(&response.body).contains("\"code\":\"unavailable\""));
@@ -464,6 +527,41 @@ fn check_worker_panic_returns_error_recovers_and_degrades_health() {
     let health = direct_get(&registry, "/api/healthz");
     assert!(String::from_utf8_lossy(&health.body).contains("\"ok\":false"));
     assert!(String::from_utf8_lossy(&health.body).contains("\"search\":\"degraded\""));
+    assert_eq!(direct_status(&health), 503);
+}
+
+struct PanicAlongBackend;
+
+impl NavBackend for PanicAlongBackend {
+    fn search(&self, _request: SearchRequest) -> Result<Vec<SearchResult>, ApiFailure> {
+        Ok(Vec::new())
+    }
+
+    fn route(&self, _request: RouteRequest) -> Result<RouteResult, ApiFailure> {
+        Err(ApiFailure { status: 422, code: "not_found", message: "fixture".into() })
+    }
+
+    fn along(&self, _request: AlongRequest) -> Result<Vec<AlongResult>, ApiFailure> {
+        panic!("adversarial along panic")
+    }
+}
+
+fn check_along_panic_degrades_along_not_search() {
+    let registry = ServiceRegistry::new(false);
+    registry.install(Arc::new(PanicAlongBackend), 2, 1, 2, false);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    assert!(registry.handle_post(
+        &direct_headers("POST", "/api/along"),
+        br#"{"polyline":[[4.9,52.3],[5.0,52.2]],"cum_dist_m":[0,1],"kinds":["museum"]}"#.to_vec(),
+        &sender,
+    ));
+    assert_eq!(direct_status(&receiver.recv_timeout(Duration::from_secs(2)).unwrap()), 500);
+    let health = direct_get(&registry, "/api/healthz");
+    let body = String::from_utf8_lossy(&health.body);
+    assert_eq!(direct_status(&health), 503);
+    assert!(body.contains("\"search\":\"ready\""), "{body}");
+    assert!(body.contains("\"along\":\"degraded\""), "{body}");
+    assert!(body.contains("\"chargers\":\"disabled\""), "{body}");
 }
 
 struct BlockingAlongBackend {
@@ -589,6 +687,7 @@ fn live_server_adversarial_contracts() {
     check_report_rate_limiter_is_bounded_and_expires_entries();
     check_dense_charger_query_obeys_shared_scan_budget_and_top_k_bound();
     check_worker_panic_returns_error_recovers_and_degrades_health();
+    check_along_panic_degrades_along_not_search();
     check_along_admission_cannot_starve_search_capacity();
     check_full_route_queue_returns_busy();
     check_api_options_has_allow_without_cors();
@@ -634,11 +733,10 @@ fn reference_trip_samples(line: &[LonLat], spacing_m: f64) -> Vec<(LonLat, f64)>
 
 fn check_along_sampling_matches_trip_reference_policy() {
     let line = [LonLat::new(0.0, 0.0), LonLat::new(0.04, 0.0), LonLat::new(0.09, 0.0)];
-    let first = makepad_map_nav::geo::haversine_m(line[0], line[1]);
-    let total = first + makepad_map_nav::geo::haversine_m(line[1], line[2]);
-    let cumulative = [0.0, first, total];
+    let total = makepad_map_nav::geo::haversine_m(line[0], line[1])
+        + makepad_map_nav::geo::haversine_m(line[1], line[2]);
     let spacing = (total / 48.0).max(3_000.0);
-    let actual = sample_along(&line, &cumulative);
+    let actual = sample_along(&line);
     let expected = reference_trip_samples(&line, spacing);
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected.iter()) {
@@ -651,11 +749,12 @@ fn check_along_sampling_matches_trip_reference_policy() {
 fn check_report_rate_limiter_is_bounded_and_expires_entries() {
     let now = Instant::now();
     let mut limiter = ReportRateLimiter::new(3);
-    for octet in 1..=12 {
+    for octet in 1..=3 {
         assert!(limiter.allow_at(IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)), now));
-        assert!(limiter.len() <= 3);
     }
     assert_eq!(limiter.len(), 3);
+    assert!(!limiter.allow_at(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4)), now));
+    assert!(limiter.allow_at(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), now));
     assert!(limiter.allow_at(
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         now + Duration::from_secs(61),
