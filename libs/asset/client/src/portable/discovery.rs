@@ -3,6 +3,8 @@
 use crate::wire::{
     caps, BEACON_LEN, DISCOVERY_MAGIC, FLAG_AUTH_REQUIRED, FLAG_TLS,
 };
+use crate::{ClientError, ClientMode, ClientResult};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Beacon {
@@ -57,4 +59,67 @@ impl Beacon {
 
 pub fn content_client_caps() -> u32 {
     caps::CATALOG | caps::BLOBS
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredServer {
+    pub server_id: [u8; 16],
+    pub protocol_version: u16,
+    pub ip: IpAddr,
+    pub control_port: u16,
+    pub data_port: u16,
+    pub auth_required: bool,
+    pub tls: bool,
+    pub capability_bits: u32,
+    pub last_seen_ms: u64,
+}
+
+impl DiscoveredServer {
+    pub fn control_endpoint(&self) -> SocketAddr {
+        SocketAddr::new(self.ip, self.control_port)
+    }
+
+    pub fn data_endpoint(&self) -> SocketAddr {
+        SocketAddr::new(self.ip, self.data_port)
+    }
+}
+
+pub struct DiscoveryListener;
+
+pub fn bind_reuse_udp(_port: u16) -> std::io::Result<UdpSocket> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "UDP discovery is unavailable on portable targets",
+    ))
+}
+
+impl DiscoveryListener {
+    pub fn start(
+        _port: u16,
+        _ttl_ms: u64,
+        _now_ms: fn() -> u64,
+    ) -> ClientResult<Self> {
+        Err(ClientError::Unavailable {
+            capability: "udp_discovery",
+            mode: ClientMode::StaticWeb,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        0
+    }
+
+    pub fn snapshot(&self, _now_ms: u64) -> Vec<DiscoveredServer> {
+        Vec::new()
+    }
+
+    pub fn find(&self, _server_id: &[u8; 16], _now_ms: u64) -> Option<DiscoveredServer> {
+        None
+    }
+
+    pub fn pick(&self, _need: u32, _now_ms: u64) -> Option<DiscoveredServer> {
+        None
+    }
+
+    pub fn stop(&mut self) {}
 }

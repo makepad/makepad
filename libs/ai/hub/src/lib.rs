@@ -101,6 +101,10 @@ pub mod rig_native_backend;
 pub mod ace_backend;
 pub mod moss_backend;
 pub mod sa3_backend;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod discovery;
+#[cfg(target_arch = "wasm32")]
+#[path = "discovery_portable.rs"]
 pub mod discovery;
 pub mod server;
 pub mod sha256;

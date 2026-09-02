@@ -6,6 +6,8 @@ use crate::location::{
 };
 use makepad_asset_data::AssetKind;
 use std::path::PathBuf;
+use crate::runtime::ClientRuntime;
+use crate::subscriber::CatalogSubscriber;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CatalogSubscriberConfig {
@@ -156,6 +158,27 @@ pub enum SessionStatus {
 
 pub enum SessionMsg {
     Status(SessionStatus),
+    Up(Box<SessionHandles>),
+}
+
+pub struct SessionHandles {
+    pub catalog: ClientRuntime,
+    pub media: Vec<ClientRuntime>,
+    pub subscriber: CatalogSubscriber,
+    pub server_label: String,
+    pub server_id: [u8; 16],
+    pub endpoints: ApiEndpoints,
+    pub token: Option<String>,
+}
+
+impl SessionHandles {
+    pub fn shutdown(self) {
+        self.subscriber.shutdown();
+        self.catalog.shutdown();
+        for lane in self.media {
+            lane.shutdown();
+        }
+    }
 }
 
 pub struct SessionConnector;

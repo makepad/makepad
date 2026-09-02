@@ -133,6 +133,23 @@ impl Discovered {
     }
 }
 
+/// Platform discovery availability. Portable targets return
+/// [`Unavailable`](Self::Unavailable) rather than attempting UDP I/O.
+#[derive(Clone)]
+pub enum Discovery {
+    Available(Discovered),
+    Unavailable { reason: &'static str },
+}
+
+impl Discovery {
+    pub fn nodes(&self) -> Vec<DiscoveredNode> {
+        match self {
+            Self::Available(discovered) => discovered.nodes(),
+            Self::Unavailable { .. } => Vec::new(),
+        }
+    }
+}
+
 /// Client side: listen for beacons on [`DISCOVERY_PORT`]. Returns the shared
 /// set; poll it from the fleet timer. The bind joins the reuse group, so the
 /// VJ, the Asset UI and a game on one machine all see the fleet (an
@@ -145,9 +162,9 @@ impl Discovered {
 /// Asset UI sat on 22 sockets bound to :41830 after ten minutes, growing).
 /// The filter reads `MAKEPAD_AI_FLEET` per beacon, so sharing across
 /// callers changes nothing they observe.
-pub fn start_listener() -> Discovered {
+pub fn start_listener() -> Discovery {
     static SHARED: OnceLock<Discovered> = OnceLock::new();
-    SHARED.get_or_init(spawn_listener).clone()
+    Discovery::Available(SHARED.get_or_init(spawn_listener).clone())
 }
 
 fn spawn_listener() -> Discovered {
@@ -230,6 +247,9 @@ mod tests {
     fn listener_is_one_per_process() {
         let a = start_listener();
         let b = start_listener();
+        let (Discovery::Available(a), Discovery::Available(b)) = (a, b) else {
+            panic!("native discovery unexpectedly unavailable");
+        };
         assert!(Arc::ptr_eq(&a.nodes, &b.nodes));
     }
 

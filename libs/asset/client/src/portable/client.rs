@@ -6,6 +6,29 @@ use crate::location::{
     CAPABILITY_STATIC_SITE_SESSION,
 };
 use std::path::PathBuf;
+use crate::api::{AnnotationUpload, CatalogQuery};
+use crate::dto::{AliasStatusDto, CatalogFacet, CatalogHit};
+use makepad_asset_data::{AssetAlias, AssetId, AssetManifest, AssetRevisionId, BlobId};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageCursor {
+    server_id: [u8; 16],
+    token: String,
+}
+
+impl PageCursor {
+    pub fn server_id(&self) -> &[u8; 16] {
+        &self.server_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPage {
+    pub hits: Vec<CatalogHit>,
+    pub total: u64,
+    pub next: Option<PageCursor>,
+    pub facets: Vec<CatalogFacet>,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CacheBudgets {
@@ -151,5 +174,55 @@ impl AssetClient {
             ClientMode::StaticWeb => CAPABILITY_STATIC_SITE_SESSION,
         };
         Err(ClientError::Unavailable { capability, mode })
+    }
+
+    fn unavailable<T>(&self, capability: &'static str) -> ClientResult<T> {
+        Err(ClientError::Unavailable {
+            capability,
+            mode: ClientMode::StaticWeb,
+        })
+    }
+
+    pub fn resolve_alias(&self, _alias: &AssetAlias) -> ClientResult<crate::dto::AliasDto> {
+        self.unavailable("resolve_alias")
+    }
+
+    pub fn alias_status(
+        &self,
+        _entries: &[(AssetAlias, Option<BlobId>)],
+        _tags: &[String],
+    ) -> ClientResult<Vec<AliasStatusDto>> {
+        self.unavailable("alias_status")
+    }
+
+    pub fn catalog_search(
+        &self,
+        _query: &CatalogQuery,
+        _cursor: Option<&PageCursor>,
+    ) -> ClientResult<CatalogPage> {
+        self.unavailable("catalog_search")
+    }
+
+    pub fn put_annotation(
+        &self,
+        _asset: &AssetId,
+        _annotation: &AnnotationUpload,
+    ) -> ClientResult<()> {
+        self.unavailable("put_annotation")
+    }
+
+    pub fn fetch_asset_manifest(
+        &mut self,
+        _revision: &AssetRevisionId,
+    ) -> ClientResult<AssetManifest> {
+        self.unavailable("fetch_asset_manifest")
+    }
+
+    pub fn fetch_blob_bytes(
+        &mut self,
+        _blob: &BlobId,
+        _expected_len: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        self.unavailable("fetch_blob_bytes")
     }
 }
