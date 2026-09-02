@@ -854,6 +854,47 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             parameters: schema_object(vec![], &[], Some(false)),
         },
         ToolDef {
+            name: "world.get_plan",
+            api_name: "world_get_plan",
+            description: "Read the running map's PLAN: the normalized world.plan input \
+                          (v, seed, biome, terrain, landforms, water, corridors, places, \
+                          dressing — every feature with its id), its `revision`, the last \
+                          solve's `diagnostics` and the engine's `capabilities` (the kinds \
+                          it accepts). THE way to inspect or change a map: call it, edit \
+                          the object it returns, send it back with world.set_plan.",
+            args_doc: r#"{}"#,
+            parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.set_plan",
+            api_name: "world_set_plan",
+            description: "Replace the running map's plan with a COMPLETE edited plan object \
+                          (start from world.get_plan's `plan`) and re-solve the map. \
+                          `revision` MUST be the revision world.get_plan returned — a stale \
+                          revision is refused and nothing changes; read again. The engine \
+                          writes the world.plan call into the level source itself and keeps \
+                          everything after it (player, cars, logic). Every feature needs a \
+                          unique `id`; a kind outside `capabilities` is refused by name; \
+                          errors refuse the WHOLE plan (nothing changes). Returns the new \
+                          `revision`, the resolved plan, `diagnostics` and `committed: true` \
+                          only once the world is built and installed.",
+            args_doc: r#"{"revision": 3, "plan": {"v": 1, "seed": 7, "biome": "alpine", "terrain": {"size": 200, "relief": "hilly"}, "water": [{"id": "brook", "kind": "river", "from": "west", "to": "east", "width": 9}], "corridors": [{"id": "high", "kind": "road", "from": "north", "to": "mill:east"}], "places": [{"id": "mill", "kind": "village", "at": "brook:south_bank", "size": "small"}]}, "note": "removed the railway"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "plan",
+                        schema_free_object(
+                            "the complete plan object: {v: 1, seed, biome?, biomes?, terrain?, landforms?, water?, corridors?, places?, dressing?} — every feature an object with a unique `id`",
+                        ),
+                    ),
+                    ("revision", schema_integer_range("the `revision` world.get_plan returned (0 for a level with no plan yet)", 0, 1_000_000_000)),
+                    ("note", schema_string_len("one line saying what changed", 1, 200)),
+                ],
+                &["plan", "revision"],
+                Some(false),
+            ),
+        },
+        ToolDef {
             name: "world.set_source",
             api_name: "world_set_source",
             description: "Replace the running game's splash source with a COMPLETE new \
@@ -1102,6 +1143,8 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_move" => Some("world.move"),
         "world_list" => Some("world.list"),
         "world_get_source" => Some("world.get_source"),
+        "world_get_plan" => Some("world.get_plan"),
+        "world_set_plan" => Some("world.set_plan"),
         "world_set_source" => Some("world.set_source"),
         "world_new_level" => Some("world.new_level"),
         "world_set_player_model" => Some("world.set_player_model"),
@@ -1500,6 +1543,14 @@ pub enum ContentToolCall {
     WorldList,
     /// Read the running game's splash source (sandbox sessions only).
     WorldGetSource,
+    /// Read the running map's plan (normalized world.plan input, revision,
+    /// diagnostics, capabilities) — sandbox sessions only.
+    WorldGetPlan,
+    /// Replace the running map's plan with a complete edited plan object,
+    /// guarded by the revision it was read at (a stale revision is refused).
+    /// The plan is a typed JSON object the client validated by shape; the
+    /// engine's schema check refuses the rest by name.
+    WorldSetPlan { plan: Value, revision: u64, note: Option<String> },
     /// Replace the running game's splash source — the level-authoring
     /// primary path (sandbox sessions only; evaluated with last-good
     /// rollback on the client).
@@ -1687,6 +1738,8 @@ impl ContentToolCall {
             ContentToolCall::WorldMove { .. } => "world.move",
             ContentToolCall::WorldList => "world.list",
             ContentToolCall::WorldGetSource => "world.get_source",
+            ContentToolCall::WorldGetPlan => "world.get_plan",
+            ContentToolCall::WorldSetPlan { .. } => "world.set_plan",
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
             ContentToolCall::WorldNewLevel { .. } => "world.new_level",
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
@@ -2054,6 +2107,34 @@ impl ContentToolCall {
             "world.get_source" => {
                 check_known(args, &[], "world.get_source argument")?;
                 Ok(ContentToolCall::WorldGetSource)
+            }
+            "world.get_plan" => {
+                check_known(args, &[], "world.get_plan argument")?;
+                Ok(ContentToolCall::WorldGetPlan)
+            }
+            "world.set_plan" => {
+                check_known(args, &["plan", "revision", "note"], "world.set_plan argument")?;
+                let plan = args
+                    .get("plan")
+                    .cloned()
+                    .ok_or_else(|| "plan is required (start from world.get_plan's `plan`)".to_string())?;
+                validate_plan_shape(&plan)?;
+                let revision = match args.get("revision") {
+                    Some(Value::Int(n)) if *n >= 0 => *n as u64,
+                    Some(Value::F64(f)) if *f >= 0.0 && f.fract() == 0.0 => *f as u64,
+                    Some(_) => return Err("revision must be a non-negative integer".to_string()),
+                    None => return Err("revision is required — the `revision` world.get_plan returned".to_string()),
+                };
+                let note = optional_str(args, "note")?
+                    .map(|n| {
+                        if n.len() > 200 {
+                            Err("note too long".to_string())
+                        } else {
+                            Ok(n.to_string())
+                        }
+                    })
+                    .transpose()?;
+                Ok(ContentToolCall::WorldSetPlan { plan, revision, note })
             }
             "model.build" => {
                 check_known(args, &["title", "source"], "model.build argument")?;
@@ -2459,6 +2540,96 @@ fn parse_operation_create(args: &Value) -> Result<ContentToolCall, String> {
         }
     };
     Ok(ContentToolCall::OperationCreate { kind, inputs, params, publication, idempotency_key })
+}
+
+/// The plan object's SHAPE, checked where the model authors it — so a
+/// malformed plan never reaches the game: an object of known top-level
+/// fields, feature lists of objects that each carry a unique non-empty
+/// string `id` and only the fields their category has, bounded in size.
+/// Kinds, anchors and ranges are the engine's schema check (it names the
+/// capability set); this is the part that stops a typo cold.
+pub fn validate_plan_shape(plan: &Value) -> Result<(), String> {
+    const TOP: &[&str] = &["v", "seed", "biome", "biomes", "terrain", "landforms", "water", "corridors", "places", "dressing"];
+    const BIOME: &[&str] = &["id", "kind", "at", "pos", "r"];
+    const LANDFORM: &[&str] = &["id", "kind", "at", "pos", "r", "height"];
+    const WATER: &[&str] = &["id", "kind", "from", "to", "at", "pos", "path", "width", "depth"];
+    const CORRIDOR: &[&str] = &["id", "kind", "from", "to", "through", "path", "closed", "size", "radius", "width", "lift_height", "loops", "corkscrews"];
+    const PLACE: &[&str] = &["id", "kind", "at", "pos", "size", "density", "class"];
+    const TERRAIN: &[&str] = &["size", "relief", "amp", "cells", "base"];
+    const DRESSING: &[&str] = &["forest", "models", "biome"];
+    const MAX_FEATURES: usize = 64;
+    const MAX_POINTS: usize = 600;
+    let Value::Obj(pairs) = plan else {
+        return Err("plan must be an object".to_string());
+    };
+    for (key, _) in pairs {
+        if !TOP.contains(&key.as_str()) {
+            return Err(format!("unknown plan field '{}' (fields: {})", bounded(key, 32), TOP.join(", ")));
+        }
+    }
+    match plan.get("v") {
+        None | Some(Value::Int(1)) => {}
+        Some(Value::F64(f)) if *f == 1.0 => {}
+        Some(_) => return Err("plan.v must be 1".to_string()),
+    }
+    for (key, allowed) in [("terrain", TERRAIN), ("dressing", DRESSING)] {
+        match plan.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => check_known(v, allowed, &format!("plan.{key} field"))?,
+        }
+    }
+    let mut ids: Vec<&str> = Vec::new();
+    let mut points = 0usize;
+    for (key, allowed) in [("biomes", BIOME), ("landforms", LANDFORM), ("water", WATER), ("corridors", CORRIDOR), ("places", PLACE)] {
+        let items = match plan.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Arr(items)) => items,
+            Some(_) => return Err(format!("plan.{key} must be a list of objects")),
+        };
+        for (i, item) in items.iter().enumerate() {
+            let Value::Obj(fields) = item else {
+                return Err(format!("plan.{key}[{i}] must be an object"));
+            };
+            for (field, _) in fields {
+                if !allowed.contains(&field.as_str()) {
+                    return Err(format!(
+                        "plan.{key}[{i}] has no field '{}' (fields: {})",
+                        bounded(field, 32),
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            let id = item.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            if id.is_empty() {
+                return Err(format!("plan.{key}[{i}] needs a non-empty string `id` — anchors and edits name it"));
+            }
+            if id.len() > 48 || id.contains(':') || id.contains('@') || id.chars().any(char::is_whitespace) {
+                return Err(format!("plan.{key}[{i}] id '{}' must be one word without ':' or '@'", bounded(id, 48)));
+            }
+            if ids.contains(&id) {
+                return Err(format!("plan.{key}[{i}] repeats the id '{id}' — every feature needs its own"));
+            }
+            ids.push(id);
+            if let Some(kind) = item.get("kind") {
+                if kind.as_str().is_none() {
+                    return Err(format!("plan.{key}[{i}].kind must be a string"));
+                }
+            }
+            if let Some(Value::Arr(path)) = item.get("path") {
+                points += path.len();
+                if path.iter().any(|p| !matches!(p, Value::Arr(xyz) if xyz.len() == 3 && xyz.iter().all(|n| matches!(n, Value::Int(_) | Value::F64(_))))) {
+                    return Err(format!("plan.{key}[{i}].path must be a list of [x, y, z] numbers"));
+                }
+            }
+        }
+    }
+    if ids.len() > MAX_FEATURES {
+        return Err(format!("a plan holds at most {MAX_FEATURES} features"));
+    }
+    if points > MAX_POINTS {
+        return Err(format!("a plan's paths hold at most {MAX_POINTS} points in total"));
+    }
+    Ok(())
 }
 
 fn check_known(v: &Value, allowed: &[&str], what: &str) -> Result<(), String> {
@@ -2873,6 +3044,14 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         }
         ContentToolCall::WorldList => Value::Obj(Vec::new()),
         ContentToolCall::WorldGetSource => Value::Obj(Vec::new()),
+        ContentToolCall::WorldGetPlan => Value::Obj(Vec::new()),
+        ContentToolCall::WorldSetPlan { plan, revision, note } => {
+            let mut pairs = vec![("plan", plan.clone()), ("revision", Value::Int(*revision as i64))];
+            if let Some(n) = note {
+                pairs.push(("note", json::s(n.clone())));
+            }
+            json::obj(pairs)
+        }
         ContentToolCall::WorldSetSource { source, note } => {
             let mut pairs = vec![("source", json::s(source.clone()))];
             if let Some(n) = note {

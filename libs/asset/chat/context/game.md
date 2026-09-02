@@ -19,33 +19,48 @@ world.set_source edits THIS game in place.
 
 MAPS ARE ONE CALL — `world.plan`. To build a map, describe FEATURES and
 where they are RELATIVE to each other; never place tiles, never invent
-coordinates. The source's first statement:
+coordinates. Every feature has a unique one-word `id` — anchors and edits
+name it. The source's first statement:
     let p = world.plan({
-      seed: 7,
+      v: 1, seed: 7,
       biome: "temperate",   // the WORLD: temperate | alpine | desert | woodland | tundra
       terrain: {size: 200, relief: "rolling"},      // flat | rolling | hilly | mountain
       landforms: [{id: "crag", kind: "ridge", at: "northwest", r: 50, height: 22}],
       water: [{id: "brook", kind: "river", from: "west", to: "east", width: 9}],
+      places: [{id: "mill", kind: "village", at: "brook:south_bank", size: "small"}],
       corridors: [
         {id: "high", kind: "road",    from: "north", to: "south"},
         {id: "loop", kind: "rail",    closed: true, size: 140},
         {id: "a1",   kind: "highway", from: "northeast", to: "mill:east"}
       ],
-      places: [{id: "mill", kind: "village", at: "brook:south_bank", size: "small"}],
       dressing: {forest: 0.3}
     })
     game.train({cars: 4})
     let hero = game.player_character({pos: p.places[0].at, model: "kenney/mini-characters/character-male-b"})
-The engine realises the plan in a FIXED order whatever order you wrote
-it — terrain, landforms, water, corridors ROUTED over the hills and around
-water and buildings (every river crossing becomes a bridge, road x rail a
-gated level crossing, highways overpass), towns slid onto free ground —
-and returns the RESOLVED plan: each corridor's `path` (waypoints), each
-place's final `at`, and an `assists` list saying what it moved and why.
-Kinds: landform mountain|hill|ridge|valley|crater|plateau · water river ·
-corridor road|highway|rail|monorail (`closed: true` + `size` = a loop;
+The engine realises the plan in a FIXED stage order — terrain, landforms,
+water, place centres, corridors ROUTED over the hills and around water and
+buildings (every river crossing becomes a bridge, road x rail a gated level
+crossing, highways overpass), places, dressing — in whatever order the plan
+lists them, with ONE rule: a corridor anchored on another corridor
+(`loop@0.3`, `high:end`) must be listed after it, and a corridor crosses
+only corridors listed before it. It then VALIDATES what it laid against
+the map invariants (grades, bridges, crossings, nothing floating or
+drowned) and returns the RESOLVED plan: each corridor's `path` (waypoints),
+each place's final `at`, the new `revision`, and `diagnostics` —
+[{severity, code, feature, line, constraint, requested, accepted, repair}]:
+an `error` refused the WHOLE plan and nothing changed (fix what `repair`
+says); a `warning` is a value the engine changed (`requested` →
+`accepted`); a `note` is an assist (a town slid off the water) or the id
+it derived for a feature you left unnamed.
+Kinds (plan schema v1, solver v2): biome temperate|alpine|desert|woodland|tundra
+· terrain.relief flat|rolling|hilly|mountain · landform
+mountain|hill|ridge|valley|crater|plateau · water river|lake|canal · corridor
+road|highway|rail|monorail|path|coaster (`closed: true` + `size` = a loop;
 `path: [vec3…]` = exact waypoints; `radius` rounds corners) · place
-town|village|city (`size`: tiny|small|medium|large or metres).
+town|village|city|airfield|airstrip|helipad (`size`: tiny|small|medium|large
+or metres; airfield `class`: light|regional). REFUSED by name: tunnel,
+rollercoaster, interchange, ramp, sea, coast, dock, harbour, harbor, tram,
+street and the savanna/tropical/volcanic/jungle/rainforest/swamp worlds.
 BIOMES: `biome` shapes the whole map — alpine = jagged ridged peaks, a
 snowline (snow ground, snow on roofs and decks, white road shoulders),
 frozen tarns, pines then bare rock above the treeline; desert = dunes,
@@ -56,23 +71,28 @@ walk on, low shrubs. Ground grips by material (sand and snow slow, ice
 slides). `biomes: [{id, kind, at, r}]` paints regions blended at their
 edges. "a snowy mountain world with a village in the valley" =
 world.plan({biome: "alpine", places: [{kind: "village", at: "centre"}]}).
-Savanna, tropical, volcanic are REFUSED by name. game.ground_paint
-({biome, seed}) repaints a running world's ground alone.
+game.ground_paint({biome, seed}) repaints a running world's ground alone.
 ANCHORS: "north"/"south"/"east"/"west"/"northeast"…/"centre";
 "<river>:east_bank|west_bank|north_bank|south_bank|centre|source|mouth";
 "<place>:north|south|east|west|centre"; "<corridor>@0.3" (fraction along
 it); or a vec3 when editing something you can see.
-TO CHANGE A MAP: EDIT THE PLAN LITERAL ALREADY IN THE SOURCE — delete
-one corridor entry, change one number, move one point in a resolved
-`path` — never rewrite the plan from scratch (a rewrite re-rolls every
-feature the player did not ask about). Send the whole source again; the
-engine re-solves and logs `world.plan: re-solve — changed: …; added: …;
-removed: …` so you can confirm only the asked-for features moved; the
-player, cars, followers and train carry across, and anything the new
-ground would swallow is moved with a `solve: assist moved …` line. Read
-`assists`, that re-solve line and the refusal text, and tell the player
-what moved. Anything
-outside v1 (tunnels, rollercoasters, interchanges, lakes/seas, docks) is REFUSED by name — say so instead of hand-building it.
+TO CHANGE A MAP: world.get_plan, edit the `plan` it returns — delete one
+corridor entry, change one number, move one point — and send the WHOLE
+edited plan with world.set_plan and the `revision` you read (a stale
+revision is refused: read again). Never rewrite the plan from scratch (a
+rewrite re-rolls every feature the player did not ask about). Every eval
+re-realises the whole plan deterministically, so untouched features land
+exactly where they were; on a re-solve the engine logs `world.plan:
+re-solve — changed: …; added: …; removed: …` so you can confirm only the
+asked-for features moved; the player, cars, followers and train carry
+across, and anything the new ground would swallow is moved with a `solve:
+assist moved …` line. Read `diagnostics`, that re-solve line and any
+refusal, and tell the player what moved. A tool result says `committed:
+true` only once the world is built AND installed — anything else is not a
+success. Unsupported and REFUSED by name: tunnels; highway x highway
+interchanges; seas/coasts; docks and boat routing; custom rollercoaster
+loops beyond those generated by `game.coaster`; and savanna, tropical or
+volcanic biomes. Say so instead of hand-building them.
 
 CITIES, VILLAGES, RACETRACKS, RAILWAYS, ROADS, RIVERS, FORESTS AND
 DUNGEONS ARE ONE CALL; never hand-place their tiles. These are the parts
@@ -143,13 +163,13 @@ world (they are deterministic from seed):
   like any vehicle, forward/back only; any resolvable model id drives.
 - THE GROUND IS DESTRUCTIBLE, no setup: game.dig(pos, {r, mode:
   carve|fill|flatten}), game.landform(pos, {kind, r, height, seed}) — a
-  mountain is ONE call, never a loop of digs — game.tunnel(from, to, {r}),
-  game.ground_y(x, z) = the live surface height. Roads and rails re-drape
+  mountain is ONE call, never a loop of digs — game.ground_y(x, z) = the
+  live surface height. Roads and rails re-drape
   onto edited ground on the next eval. Edits replicate and survive reload.
-The engine keeps the map sane whatever the call order: towns slide off
-rivers, lots on water or roads are left unbuilt, props asked for in water
-go to the shore, every corridor bridges water. Each repair is an "assist"
-line — read them and edit the plan rather than fighting them.
+The engine repairs conflicts against features already declared: towns slide
+off rivers, lots on water or roads are left unbuilt, props asked for in
+water go to the shore, and corridors bridge water laid earlier. Each repair
+is an "assist" line — read them and edit the plan rather than fighting them.
 
 ALWAYS BUILD SOMETHING. Primitives (terrain, water, box, mover,
 character, labels) need no store content; missing artwork never blocks a
@@ -158,7 +178,10 @@ chunk — never replace the user's level to conjure one thing.
 
 MODELS. Only 'mesh' and rigged 'character' assets place with game.model;
 a 'world' alias loads through game.map as a whole level (its own
-terrain, collision, doors, cast — never hand-spawn its monsters).
+terrain, collision, doors, cast — never hand-spawn its monsters). A
+loaded map is also a FOUNDATION: game.traintrack/road_network/racetrack/
+city/village/scatter build on its floors — give a corridor a `path`
+through the rooms you mean; a line through a wall or a pit is refused.
 Billboard assets are map/weapon artwork, not props. Never guess an
 alias: the catalog's canon_alias is the id (ONE narrow assets.query, e.g.
 canon_alias LIKE 'kenney/building-kit/%', then build — never browse
