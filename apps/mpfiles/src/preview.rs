@@ -23,13 +23,14 @@
 use makepad_widgets::*;
 use mp_wm_api::{viewer_for, WmEvent, WmRequest};
 
-use std::{
-    path::{Path, PathBuf},
-    process::{Child, Command},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::process::{Child, Command};
 
 /// Resolve a sibling binary of the running executable, the way mpwm resolves
 /// its clients.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sibling_bin(bin: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut path = exe.parent()?.join(bin);
@@ -37,6 +38,11 @@ pub fn sibling_bin(bin: &str) -> Option<PathBuf> {
         path.set_extension("exe");
     }
     path.exists().then_some(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn sibling_bin(_bin: &str) -> Option<PathBuf> {
+    None
 }
 
 /// What came of a Quick Look request.
@@ -51,6 +57,7 @@ pub enum Preview {
 #[derive(Default)]
 pub struct PreviewHost {
     /// Only set when *we* spawned it; hosted, the compositor owns the float.
+    #[cfg(not(target_arch = "wasm32"))]
     child: Option<Child>,
     path: Option<PathBuf>,
     /// What the window manager says its Quick Look panel is showing. Only the
@@ -95,17 +102,20 @@ impl PreviewHost {
     /// panel is open, which is what makes it safe to call on every selection
     /// change — that is how arrow keys dial through previews.
     pub fn retarget(&mut self, cx: &Cx, path: &Path) -> bool {
-        if self.hosted.is_none() || path.is_dir() {
+        let fs = crate::vfs::vfs();
+        if self.hosted.is_none() || fs.is_demo() || fs.is_dir(path) {
             return false;
         }
-        mp_wm_api::preview(cx, &crate::vfs::vfs().real_path(path))
+        mp_wm_api::preview(cx, &fs.real_path(path))
     }
 
-    /// Quick Look `path` in its associated viewer. What the viewer is handed
-    /// is the real file behind the name — identical on a real disk, and the
-    /// backing asset in the demo.
+    /// Quick Look `path` in its associated viewer. External viewers are a
+    /// RealVfs-only integration; demo files fall back to the in-app preview.
     pub fn open(&mut self, cx: &Cx, path: &Path) -> Preview {
         let name = crate::model::display_name(path);
+        if crate::vfs::vfs().is_demo() {
+            return Preview::NoViewer("External previews are not in this demo".to_string());
+        }
         let app = viewer_for(path);
         let real = crate::vfs::vfs().real_path(path);
         let path = real.as_path();
@@ -125,13 +135,21 @@ impl PreviewHost {
         let Some(bin) = sibling_bin(app) else {
             return Preview::NoViewer(format!("{} is not built — no preview for {}", app, name));
         };
-        match Command::new(&bin).arg("--preview").arg(path).spawn() {
-            Ok(child) => {
-                self.child = Some(child);
-                self.path = Some(path.to_path_buf());
-                Preview::Shown(format!("Previewing {} in {} — Space or Esc to close", name, app))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match Command::new(&bin).arg("--preview").arg(path).spawn() {
+                Ok(child) => {
+                    self.child = Some(child);
+                    self.path = Some(path.to_path_buf());
+                    Preview::Shown(format!("Previewing {} in {} — Space or Esc to close", name, app))
+                }
+                Err(error) => Preview::NoViewer(format!("Could not preview {}: {}", name, error)),
             }
-            Err(error) => Preview::NoViewer(format!("Could not preview {}: {}", name, error)),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (bin, path, app);
+            Preview::NoViewer("External previews are not in this demo".to_string())
         }
     }
 
@@ -141,9 +159,12 @@ impl PreviewHost {
         if self.hosted.is_some() {
             mp_wm_api::send(cx, &WmRequest::PreviewClose);
         }
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
         self.path = None;
     }
@@ -153,10 +174,13 @@ impl PreviewHost {
     /// decision that depends on the answer — not only when a signal happens to
     /// arrive.
     pub fn poll(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                self.child = None;
-                self.path = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(child) = self.child.as_mut() {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    self.child = None;
+                    self.path = None;
+                }
             }
         }
     }
@@ -166,6 +190,9 @@ impl PreviewHost {
 /// process standalone, and the desktop's own opener when neither can.
 pub fn open_file(cx: &Cx, path: &Path) -> String {
     let name = crate::model::display_name(path);
+    if crate::vfs::vfs().is_demo() {
+        return format!("Opening {name} is not in this demo");
+    }
     let app = viewer_for(path);
     let real = crate::vfs::vfs().real_path(path);
     let path = real.as_path();
@@ -183,6 +210,9 @@ pub fn open_file(cx: &Cx, path: &Path) -> String {
 /// of ours claims the file.
 pub fn open_file_with(cx: &Cx, path: &Path, app: &str) -> String {
     let name = crate::model::display_name(path);
+    if crate::vfs::vfs().is_demo() {
+        return format!("Open With for {name} is not in this demo");
+    }
     let real = crate::vfs::vfs().real_path(path);
     let path = real.as_path();
     if app.is_empty() {
@@ -203,18 +233,27 @@ pub fn open_file_with(cx: &Cx, path: &Path, app: &str) -> String {
     let Some(bin) = sibling_bin(app) else {
         return format!("{app} is not built");
     };
-    match Command::new(&bin).arg(path).spawn() {
-        Ok(_) => format!("Opening {name} in {app}"),
-        Err(error) => format!("Could not start {app}: {error}"),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match Command::new(&bin).arg(path).spawn() {
+            Ok(_) => format!("Opening {name} in {app}"),
+            Err(error) => format!("Could not start {app}: {error}"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (bin, path);
+        format!("Open With for {name} is not in this demo")
     }
 }
 
 /// True when a sibling app of this name can actually be run — what the Open
 /// With submenu offers is only ever what exists.
 pub fn app_available(cx: &Cx, app: &str) -> bool {
-    mp_wm_api::hosted(cx) || sibling_bin(app).is_some()
+    !crate::vfs::vfs().is_demo() && (mp_wm_api::hosted(cx) || sibling_bin(app).is_some())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn os_open(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -232,6 +271,14 @@ fn os_open(path: &Path) -> std::io::Result<()> {
             "opening files is supported on macOS and Linux",
         ))
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn os_open(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opening files is not in this demo",
+    ))
 }
 
 #[cfg(test)]

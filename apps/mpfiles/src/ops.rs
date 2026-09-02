@@ -169,7 +169,7 @@ pub enum OpUpdate {
 /// very end instead.
 pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
-    if !candidate.exists() {
+    if !crate::vfs::vfs().exists(&candidate) {
         return candidate;
     }
     let (stem, ext) = split_stem_ext(name);
@@ -181,7 +181,7 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
             format!("{stem} ({n}).{ext}")
         };
         let candidate = dir.join(&candidate_name);
-        if !candidate.exists() {
+        if !crate::vfs::vfs().exists(&candidate) {
             return candidate;
         }
         n += 1;

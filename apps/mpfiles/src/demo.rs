@@ -1,13 +1,11 @@
-//! The demo filesystem: a whole fake home, in memory, for screen recordings.
+//! A closed, deterministic fake filesystem for the native and web demos.
 //!
 //! `--demo` (or `MPFILES_DEMO=1`, see [`crate::vfs::demo_requested`]) points
 //! the browser at [`DemoVfs`] instead of the real disk, so a recording can
 //! show `mpfiles` doing real work — thumbnails, Space preview, rename, copy,
 //! the treemap, undo — without a single one of the user's own files ever
-//! appearing on screen. It is not a mock of those features: every operation
-//! genuinely mutates a real tree, and every thumbnailable file has a real,
-//! repo-safe asset behind it (see [`Vfs::real_path`]) so the same decoders
-//! and viewers the real filesystem uses render something real.
+//! appearing on screen. Every operation genuinely mutates the in-memory tree;
+//! thumbnails are supplied separately from embedded, repo-owned images.
 //!
 //! The tree is built once, deterministically — a seeded PRNG, never the
 //! clock — so two runs (and two recordings) show byte-identical sizes and
@@ -16,7 +14,6 @@
 //! interior mutability to survive a rename.
 
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::{atomic::AtomicBool, atomic::Ordering, Mutex},
 };
@@ -53,11 +50,6 @@ const THIRTY_DAYS_SECS: u64 = 2_592_000;
 /// The PRNG's seed. Any nonzero constant works; this one has no meaning
 /// beyond "not zero, not a round number that looks like a bug".
 const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-
-/// The repo root this process almost always already has as its current
-/// directory. [`repo_asset`] tries the current directory first and this
-/// second, so the demo still finds its assets when launched some other way.
-const REPO_ROOT_FALLBACK: &str = "/Users/admin/makepad/makepad";
 
 // ---------------------------------------------------------------------
 // A tiny, deterministic PRNG
@@ -96,209 +88,19 @@ impl Rng {
 /// formats a timestamp, which a seeded file must never claim to be).
 fn seeded_age(rng: &mut Rng) -> (u64, u64) {
     let modified = DEMO_NOW_SECS - rng.range(0, TWO_YEARS_SECS);
-    let created = modified.saturating_sub(rng.range(0, THIRTY_DAYS_SECS));
+    let created = modified
+        .saturating_sub(rng.range(0, THIRTY_DAYS_SECS))
+        .max(DEMO_NOW_SECS - TWO_YEARS_SECS);
     (modified, created)
-}
-
-/// A file's size: the real asset's own byte count when it has one (so a
-/// thumbnail and its properties panel never disagree), else a plausible
-/// number for its kind from the seeded RNG.
-fn seeded_size(real: Option<&Path>, rng: &mut Rng, range: (u64, u64)) -> u64 {
-    if let Some(path) = real {
-        if let Ok(meta) = fs::metadata(path) {
-            return meta.len();
-        }
-    }
-    rng.range(range.0, range.1)
-}
-
-// ---------------------------------------------------------------------
-// Finding real, repo-safe assets to back the virtual files
-// ---------------------------------------------------------------------
-
-/// Resolve `relative` against the repo root: the current directory first
-/// (the normal case — this process starts in the repo root), then
-/// [`REPO_ROOT_FALLBACK`]. `None` when neither has it, which a caller
-/// treats the same as "no real asset" rather than an error — a demo file
-/// with a missing backing asset just falls back to its type icon.
-fn repo_asset(relative: &str) -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join(relative);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    let fallback = Path::new(REPO_ROOT_FALLBACK).join(relative);
-    fallback.exists().then_some(fallback)
-}
-
-/// Every file directly inside a repo-relative directory whose extension is
-/// one of `exts` (case-insensitive), sorted by path. The sort is what makes
-/// this deterministic: `read_dir` order is whatever the OS feels like
-/// handing back, and two demo trees built in the same checkout must pick
-/// the same assets in the same order every time. A missing directory is
-/// simply an empty pool, never an error.
-fn discover_repo_files(relative_dir: &str, exts: &[&str]) -> Vec<PathBuf> {
-    let Some(dir) = repo_asset(relative_dir) else {
-        return Vec::new();
-    };
-    let Ok(read_dir) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<PathBuf> = read_dir
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .filter(|path| {
-            path.extension()
-                .map(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)))
-                .unwrap_or(false)
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// The window manager's own desktop backgrounds, when this machine has any
-/// — the one place outside the repo this module is allowed to look (every
-/// other asset is repo-safe), and entirely optional: an absent directory
-/// just means the wallpaper pool falls back to the repo's own photos.
-/// Never looks anywhere else under the user's home.
-fn discover_wallpapers() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    let themes_dir = PathBuf::from(home).join(".config/mpwm/themes");
-    let Ok(theme_entries) = fs::read_dir(&themes_dir) else {
-        return Vec::new();
-    };
-    let mut theme_dirs: Vec<PathBuf> = theme_entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    theme_dirs.sort();
-
-    let mut out = Vec::new();
-    for theme_dir in theme_dirs {
-        let Ok(bg_entries) = fs::read_dir(theme_dir.join("backgrounds")) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = bg_entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .collect();
-        files.sort();
-        out.extend(files);
-    }
-    out
-}
-
-/// One real file per kind of virtual file, cycled through in order. A
-/// deterministic sort (see [`discover_repo_files`]) plus deterministic
-/// cycling is what makes two [`DemoVfs`] instances identical: nothing here
-/// ever consults `read_dir` order or the clock.
-struct Pools {
-    videos: Vec<PathBuf>,
-    photos: Vec<PathBuf>,
-    wallpapers: Vec<PathBuf>,
-    pdfs: Vec<PathBuf>,
-    screenshots: Vec<PathBuf>,
-    csvs: Vec<PathBuf>,
-    txts: Vec<PathBuf>,
-    mds: Vec<PathBuf>,
-    rss: Vec<PathBuf>,
-    tomls: Vec<PathBuf>,
-}
-
-impl Pools {
-    fn discover() -> Self {
-        let photos = discover_repo_files("local/mb3d", &["jpg", "jpeg"]);
-
-        let mut wallpapers = discover_wallpapers();
-        if wallpapers.is_empty() {
-            // No mpwm theme on this machine: the repo's own photos are
-            // still real images, just not desktop backgrounds.
-            wallpapers = photos.clone();
-        }
-
-        // The AI-generated clips lead the pool: they are the richest thing in
-        // the repo to look at, which is what a demo of a file browser wants
-        // behind its video thumbnails and previews.
-        let mut videos = discover_repo_files("local/ai_content_app", &["mp4"]);
-        videos.extend(discover_video_cache());
-        videos.extend(discover_repo_files("local/flowtest/real", &["mp4"]));
-        videos.extend(discover_repo_files("local/flowtest", &["mp4"]));
-
-        let mut pdfs = discover_repo_files("local/rotorquant/paper", &["pdf"]);
-        pdfs.extend(repo_asset("local/retourformulier-techpunt-ned.pdf"));
-
-        let screenshots: Vec<PathBuf> = [
-            "examples/splash/window_0_frame_000000.png",
-            "examples/map/window_0_frame_000000.png",
-        ]
-        .into_iter()
-        .filter_map(repo_asset)
-        .collect();
-
-        let csvs = discover_repo_files("box3d", &["csv"]);
-        let txts = discover_repo_files("local/mb3d", &["txt"]);
-        let mds: Vec<PathBuf> = ["AGENTS.md", "README.md"].into_iter().filter_map(repo_asset).collect();
-        let rss = discover_repo_files("apps/mpfiles/src", &["rs"]);
-        let tomls: Vec<PathBuf> = ["Cargo.toml"].into_iter().filter_map(repo_asset).collect();
-
-        Pools { videos, photos, wallpapers, pdfs, screenshots, csvs, txts, mds, rss, tomls }
-    }
-}
-
-/// The VJ's decoder cache, when this machine has one. It is read-only extra
-/// volume for the demo's video pool and entirely optional — a machine that has
-/// never run the VJ gets the repo's own clips and nothing is missing.
-fn discover_video_cache() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for side in ["media-video-a", "media-video-b"] {
-        let dir = home.join(".makepad-vj").join(side).join("decoder-input");
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut found: Vec<PathBuf> = read
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")))
-            .collect();
-        // `read_dir` order is not stable across machines and the demo tree
-        // must be, so the names are sorted before anything uses them.
-        found.sort();
-        out.extend(found);
-    }
-    out
-}
-
-/// Take the next item of `pool`, wrapping around once it runs out. `None`
-/// when the pool is empty — the caller's file simply gets no real asset.
-fn cycle(pool: &[PathBuf], index: &mut usize) -> Option<PathBuf> {
-    if pool.is_empty() {
-        return None;
-    }
-    let item = pool[*index % pool.len()].clone();
-    *index += 1;
-    Some(item)
 }
 
 // ---------------------------------------------------------------------
 // The tree
 // ---------------------------------------------------------------------
 
-/// One node of the demo's tree: a folder with children, or a file with a
-/// size, two timestamps and — maybe — a real asset behind it. Unlike
-/// [`FileEntry`] this carries no full path: a node only knows its own
-/// name, and the path is rebuilt by whoever is walking the tree, the same
-/// way a real directory entry does not know its own parent either.
-#[derive(Clone, Debug)]
+/// One node in the closed tree. Paths are rebuilt while walking so moving a
+/// subtree never requires rewriting thousands of descendants.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct VNode {
     name: String,
     is_dir: bool,
@@ -308,248 +110,366 @@ struct VNode {
     size: u64,
     modified_secs: u64,
     created_secs: u64,
-    /// The real file [`Vfs::real_path`] hands back for this node; always
-    /// `None` for a folder.
-    real_asset: Option<PathBuf>,
     children: Vec<VNode>,
 }
 
-fn folder(name: &str, children: Vec<VNode>) -> VNode {
+fn folder_at(name: impl Into<String>, modified_secs: u64, created_secs: u64, children: Vec<VNode>) -> VNode {
     VNode {
-        name: name.to_string(),
+        name: name.into(),
         is_dir: true,
         size: 0,
-        modified_secs: DEMO_NOW_SECS,
-        created_secs: DEMO_NOW_SECS,
-        real_asset: None,
+        modified_secs,
+        created_secs,
         children,
     }
 }
 
-/// Builds the seeded tree. One `Builder` lives exactly as long as
-/// [`build_root`]'s call to it: the RNG state and the per-kind cycle
-/// counters are what make repeated calls to `b.photo(...)` etc. hand out a
-/// different (but, across two whole trees, identical) size/date/asset every
-/// time.
-struct Builder {
-    rng: Rng,
-    pools: Pools,
-    video_i: usize,
-    photo_i: usize,
-    wallpaper_i: usize,
-    pdf_i: usize,
-    png_i: usize,
-    csv_i: usize,
-    txt_i: usize,
-    md_i: usize,
-    rs_i: usize,
-    toml_i: usize,
+fn file_at(name: impl Into<String>, size: u64, modified_secs: u64, created_secs: u64) -> VNode {
+    VNode {
+        name: name.into(),
+        is_dir: false,
+        size,
+        modified_secs,
+        created_secs,
+        children: Vec::new(),
+    }
 }
 
-impl Builder {
-    fn new() -> Self {
-        Builder {
-            rng: Rng::new(SEED),
-            pools: Pools::discover(),
-            video_i: 0,
-            photo_i: 0,
-            wallpaper_i: 0,
-            pdf_i: 0,
-            png_i: 0,
-            csv_i: 0,
-            txt_i: 0,
-            md_i: 0,
-            rs_i: 0,
-            toml_i: 0,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    Pictures,
+    Projects,
+    Library,
+    Mail,
+    Music,
+    Documents,
+    Videos,
+    Downloads,
+    Desktop,
+    Network,
+    Trash,
+}
+
+impl Profile {
+    fn folder_name(self, index: usize) -> String {
+        match self {
+            Profile::Pictures => format!("archive-{index:04}"),
+            Profile::Projects => format!("package-{index:04}"),
+            Profile::Library => format!("cache-shard-{index:04}"),
+            Profile::Mail => format!("mailbox-{index:04}"),
+            Profile::Music => format!("Artist {index:04}"),
+            Profile::Documents => format!("Archive-{index:04}"),
+            Profile::Videos => format!("Clips-{index:03}"),
+            Profile::Downloads => format!("download-batch-{index:03}"),
+            Profile::Desktop => format!("Workspace {index:03}"),
+            Profile::Network => format!("shared-{index:03}"),
+            Profile::Trash => format!("deleted-{index:03}"),
         }
     }
 
-    fn file(&mut self, name: &str, real: Option<PathBuf>, size_range: (u64, u64)) -> VNode {
-        let size = seeded_size(real.as_deref(), &mut self.rng, size_range);
-        let (modified_secs, created_secs) = seeded_age(&mut self.rng);
-        VNode { name: name.to_string(), is_dir: false, size, modified_secs, created_secs, real_asset: real, children: Vec::new() }
+    fn file_name(self, index: usize) -> String {
+        match self {
+            Profile::Pictures => {
+                if index % 17 == 0 { format!("DSC_{index:05}.ARW") } else { format!("IMG_{index:05}.jpg") }
+            }
+            Profile::Projects => match index % 8 {
+                0 => format!("module_{index:05}.rs"),
+                1 => format!("index_{index:05}.js"),
+                2 => format!("package-{index:05}.json"),
+                3 => format!("types_{index:05}.ts"),
+                4 => format!("README-{index:05}.md"),
+                5 => format!("Cargo-{index:05}.toml"),
+                6 => format!("shader_{index:05}.wgsl"),
+                _ => format!("config_{index:05}.json"),
+            },
+            Profile::Library => format!("blob-{index:06}.cache"),
+            Profile::Mail => format!("message-{index:06}.eml"),
+            Profile::Music => {
+                if index % 23 == 0 { format!("{index:02} Lossless.flac") } else { format!("{index:02} Track.mp3") }
+            }
+            Profile::Documents => match index % 8 {
+                0 => format!("report-{index:05}.pdf"),
+                1 => format!("letter-{index:05}.docx"),
+                2 => format!("ledger-{index:05}.xlsx"),
+                3 => format!("export-{index:05}.csv"),
+                4 => format!("slides-{index:05}.pptx"),
+                5 => format!("receipt-{index:05}.pdf"),
+                6 => format!("notes-{index:05}.md"),
+                _ => format!("outline-{index:05}.txt"),
+            },
+            Profile::Videos => {
+                if index % 2 == 0 { format!("clip-{index:04}.mp4") } else { format!("camera-{index:04}.mkv") }
+            }
+            Profile::Downloads => match index % 8 {
+                0 => format!("installer-{index:04}.dmg"),
+                1 => format!("linux-{index:04}.iso"),
+                2 => format!("assets-{index:04}.zip"),
+                3 => format!("setup-{index:04}.pkg"),
+                4 => format!("partial-{index:04}.download"),
+                5 => format!("screenshot-{index:04}.png"),
+                6 => format!("manual-{index:04}.pdf"),
+                _ => format!("export-{index:04}.csv"),
+            },
+            Profile::Desktop => format!("desktop-note-{index:04}.md"),
+            Profile::Network => format!("team-file-{index:04}.pdf"),
+            Profile::Trash => if index % 2 == 0 { format!("old-export-{index:03}.zip") } else { format!("recording-{index:03}.mkv") },
+        }
     }
 
-    fn video(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.videos, &mut self.video_i);
-        self.file(name, real, (8_000_000, 120_000_000))
-    }
-
-    fn photo(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.photos, &mut self.photo_i);
-        self.file(name, real, (1_000_000, 6_000_000))
-    }
-
-    fn wallpaper(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.wallpapers, &mut self.wallpaper_i);
-        self.file(name, real, (1_000_000, 6_000_000))
-    }
-
-    fn pdf(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.pdfs, &mut self.pdf_i);
-        self.file(name, real, (100_000, 4_000_000))
-    }
-
-    /// A pdf pinned to one specific repo-relative asset rather than the
-    /// cycling pool — for the one file (`retourformulier.pdf`) whose real
-    /// name and content should actually agree.
-    fn pdf_exact(&mut self, name: &str, relative: &str) -> VNode {
-        let real = repo_asset(relative);
-        self.file(name, real, (100_000, 4_000_000))
-    }
-
-    fn screenshot(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.screenshots, &mut self.png_i);
-        self.file(name, real, (200_000, 3_000_000))
-    }
-
-    fn csv(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.csvs, &mut self.csv_i);
-        self.file(name, real, (1_000, 40_000))
-    }
-
-    fn code(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.rss, &mut self.rs_i);
-        self.file(name, real, (1_000, 40_000))
-    }
-
-    fn markdown(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.mds, &mut self.md_i);
-        self.file(name, real, (500, 20_000))
-    }
-
-    fn toml(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.tomls, &mut self.toml_i);
-        self.file(name, real, (200, 5_000))
-    }
-
-    fn text(&mut self, name: &str) -> VNode {
-        let real = cycle(&self.pools.txts, &mut self.txt_i);
-        self.file(name, real, (200, 20_000))
-    }
-
-    /// No repo-safe audio asset exists (see the module doc comment's list
-    /// of sources), so every track stays unmapped: it still gets the audio
-    /// icon and a plausible size, just no waveform or playback preview.
-    fn audio(&mut self, name: &str) -> VNode {
-        self.file(name, None, (3_000_000, 9_000_000))
-    }
-
-    /// Junk with no kind-appropriate repo-safe asset to point at (an
-    /// archive, an installer): unmapped by design, per the module's rule
-    /// that a wrong-kind mapping is worse than no mapping at all.
-    fn junk(&mut self, name: &str, size_range: (u64, u64)) -> VNode {
-        self.file(name, None, size_range)
+    fn size(self, index: usize, rng: &mut Rng) -> u64 {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        match self {
+            Profile::Pictures if index % 17 == 0 => rng.range(25 * MIB, 40 * MIB),
+            Profile::Pictures => rng.range(2 * MIB, 9 * MIB),
+            Profile::Projects if index % 97 == 0 => rng.range(MIB, 3 * MIB),
+            Profile::Projects => rng.range(1024, 40 * 1024),
+            Profile::Library => rng.range(128 * 1024, 12 * MIB),
+            Profile::Mail => rng.range(4 * 1024, 180 * 1024),
+            Profile::Music if index % 23 == 0 => rng.range(25 * MIB, 60 * MIB),
+            Profile::Music => rng.range(3 * MIB, 12 * MIB),
+            Profile::Documents => rng.range(8 * 1024, 18 * MIB),
+            Profile::Videos if index < 5 => rng.range(2 * GIB, 6 * GIB),
+            Profile::Videos if index < 85 => rng.range(100 * MIB, 900 * MIB),
+            Profile::Videos => rng.range(8 * MIB, 100 * MIB),
+            Profile::Downloads if index < 40 => rng.range(80 * MIB, 4 * GIB),
+            Profile::Downloads => rng.range(64 * 1024, 160 * MIB),
+            Profile::Desktop => rng.range(1024, 20 * MIB),
+            Profile::Network => rng.range(32 * 1024, 50 * MIB),
+            Profile::Trash if index < 5 => rng.range(500 * MIB, 3 * GIB),
+            Profile::Trash => rng.range(MIB, 200 * MIB),
+        }
     }
 }
 
-/// The whole seeded tree, rooted at [`VIRTUAL_HOME`]. See the module doc
-/// comment for why this is deterministic, and the struct-level docs on
-/// [`Builder`] for how the cycling works.
-fn build_root() -> VNode {
-    let mut b = Builder::new();
+struct TempFolder {
+    name: String,
+    depth: usize,
+    modified_secs: u64,
+    created_secs: u64,
+    children: Vec<usize>,
+    files: Vec<VNode>,
+}
 
-    let invoices = folder(
-        "invoices",
-        vec![
-            b.pdf("invoice-2024-014.pdf"),
-            b.pdf("invoice-2024-021.pdf"),
-            b.csv("invoice-2024-033.csv"),
-            b.pdf("invoice-2024-045.pdf"),
-            b.csv("invoice-2024-058.csv"),
-            b.pdf("invoice-2024-067.pdf"),
-            b.pdf("invoice-2024-079.pdf"),
-            b.csv("invoice-2024-090.csv"),
-        ],
-    );
-    let documents = folder(
-        "Documents",
-        vec![
-            invoices,
-            b.markdown("notes.md"),
-            b.csv("budget.csv"),
-            b.csv("contacts.csv"),
-            b.pdf_exact("retourformulier.pdf", "local/retourformulier-techpunt-ned.pdf"),
-        ],
-    );
+fn add_folder(folders: &mut Vec<TempFolder>, parent: usize, name: String, rng: &mut Rng) -> usize {
+    let (modified_secs, created_secs) = seeded_age(rng);
+    let index = folders.len();
+    let depth = folders[parent].depth + 1;
+    folders.push(TempFolder { name, depth, modified_secs, created_secs, children: Vec::new(), files: Vec::new() });
+    folders[parent].children.push(index);
+    index
+}
 
-    let vacation = folder(
-        "vacation-2026",
-        (42..54).map(|n| b.photo(&format!("IMG_{n:04}.jpg"))).collect(),
-    );
-    let wallpapers = folder(
-        "wallpapers",
-        ["sunrise-ridge.jpg", "neon-drift.jpg", "atlas-peaks.jpg", "coral-fade.jpg", "midnight-grid.jpg", "velvet-dune.jpg"]
+fn add_path(folders: &mut Vec<TempFolder>, path: &[&str], rng: &mut Rng) -> usize {
+    let mut parent = 0;
+    for name in path {
+        let found = folders[parent]
+            .children
             .iter()
-            .map(|n| b.wallpaper(n))
-            .collect(),
-    );
-    let pictures = folder("Pictures", vec![vacation, wallpapers]);
+            .copied()
+            .find(|&child| folders[child].name == *name);
+        parent = found.unwrap_or_else(|| add_folder(folders, parent, (*name).to_string(), rng));
+    }
+    parent
+}
 
-    let videos = folder(
-        "Videos",
-        [
-            "neon-city-loop.mp4",
-            "ocean-drone.mp4",
-            "dancing-crowd.mp4",
-            "sunset-timelapse.mp4",
-            "tunnel-drive.mp4",
-            "plasma-bloom.mp4",
-            "paper-lanterns.mp4",
-            "rooftop-rain.mp4",
-            "glass-forest.mp4",
-            "harbour-lights.mp4",
-        ]
-        .iter()
-        .map(|n| b.video(n))
-        .collect(),
-    );
+fn materialize(index: usize, folders: &mut [Option<TempFolder>]) -> VNode {
+    let temp = folders[index].take().expect("folder is materialized once");
+    let mut children = Vec::with_capacity(temp.children.len() + temp.files.len());
+    for child in temp.children {
+        children.push(materialize(child, folders));
+    }
+    children.extend(temp.files);
+    folder_at(temp.name, temp.modified_secs, temp.created_secs, children)
+}
 
-    let midnight_hours = folder(
-        "Midnight Hours",
-        vec![
-            b.audio("01 Intro.mp3"),
-            b.audio("02 Wavelength.mp3"),
-            b.audio("03 Undertow.mp3"),
-            b.audio("04 Skyline.mp3"),
-            b.audio("05 Afterglow.mp3"),
+/// Build one bushy category with bounded listings. `folder_count` includes
+/// the category root; the few supplied paths create the intentionally deep
+/// branches before the remaining folders are spread four-wide.
+fn build_category(
+    name: &str,
+    folder_count: usize,
+    file_count: usize,
+    max_depth: usize,
+    profile: Profile,
+    special_paths: &[&[&str]],
+    rng: &mut Rng,
+) -> VNode {
+    let (modified_secs, created_secs) = seeded_age(rng);
+    let mut folders = vec![TempFolder {
+        name: name.to_string(),
+        depth: 0,
+        modified_secs,
+        created_secs,
+        children: Vec::new(),
+        files: Vec::new(),
+    }];
+    for path in special_paths {
+        add_path(&mut folders, path, rng);
+    }
+    if profile == Profile::Pictures {
+        const TRIPS: [&str; 4] = ["Lisbon", "Kyoto", "Reykjavik", "Dolomites"];
+        for year in 2023..=2026 {
+            let year = year.to_string();
+            for month in 1..=12 {
+                for trip in 0..4 {
+                    let trip = format!("{month:02}-{}-{trip}", TRIPS[(month + trip) % TRIPS.len()]);
+                    add_path(&mut folders, &[year.as_str(), trip.as_str()], rng);
+                }
+            }
+        }
+    }
+    if profile == Profile::Projects {
+        let node_modules = add_path(&mut folders, &["web-dashboard", "node_modules"], rng);
+        for package in 0..120 {
+            add_folder(&mut folders, node_modules, format!("dependency-{package:03}"), rng);
+        }
+    }
+
+    let mut parent = 0usize;
+    while folders.len() < folder_count {
+        while folders[parent].depth >= max_depth || folders[parent].children.len() >= 4 {
+            parent += 1;
+        }
+        let index = folders.len();
+        add_folder(&mut folders, parent, profile.folder_name(index), rng);
+    }
+
+    let base = file_count / folders.len();
+    let extra = file_count % folders.len();
+    let mut file_index = 0usize;
+    for folder_index in 0..folders.len() {
+        let count = base + usize::from(folder_index < extra);
+        let folder_modified = folders[folder_index].modified_secs;
+        folders[folder_index].files.reserve(count);
+        for _ in 0..count {
+            let modified_secs = (folder_modified + rng.range(0, 7 * 86_400)).min(DEMO_NOW_SECS);
+            let created_secs = modified_secs
+                .saturating_sub(rng.range(0, THIRTY_DAYS_SECS))
+                .max(DEMO_NOW_SECS - TWO_YEARS_SECS);
+            folders[folder_index].files.push(file_at(
+                profile.file_name(file_index),
+                profile.size(file_index, rng),
+                modified_secs,
+                created_secs,
+            ));
+            file_index += 1;
+        }
+    }
+    let mut folders: Vec<Option<TempFolder>> = folders.into_iter().map(Some).collect();
+    let mut root = materialize(0, &mut folders);
+    if profile == Profile::Projects {
+        let node_modules = descendant_mut(&mut root, &["web-dashboard", "node_modules"])
+            .expect("the web project has node_modules");
+        let target = 950 * 1024 * 1024;
+        let current = sum_bytes_unchecked(node_modules);
+        if current < target {
+            let (modified, created) = seeded_age(rng);
+            node_modules.children.push(file_at(".vite-dependency-cache.bin", target - current, modified, created));
+        }
+    }
+    root
+}
+
+fn descendant_mut<'a>(mut node: &'a mut VNode, path: &[&str]) -> Option<&'a mut VNode> {
+    for name in path {
+        node = node.children.iter_mut().find(|child| child.is_dir && child.name == *name)?;
+    }
+    Some(node)
+}
+
+fn push_featured_file(folder: &mut VNode, name: &str, size: u64, rng: &mut Rng) {
+    let (modified, created) = seeded_age(rng);
+    folder.children.push(file_at(name, size, modified, created));
+}
+
+/// 38,000 files in 2,026 folders. The category ratios keep ordinary listings
+/// near twenty entries while a scan of Home sees the whole varied tree.
+fn build_root_with_seed(seed: u64) -> VNode {
+    let mut rng = Rng::new(seed);
+    let mut pictures = build_category(
+        "Pictures", 350, 8_000, 6, Profile::Pictures,
+        &[&["2024", "07-Lisbon"], &["2025", "11-Kyoto"], &["wallpapers"], &["screenshots", "2026", "08"]],
+        &mut rng,
+    );
+    push_featured_file(&mut pictures, "wallpaper-sunrise.jpg", 6 * 1024 * 1024, &mut rng);
+
+    let mut projects = build_category(
+        "Projects", 650, 12_500, 10, Profile::Projects,
+        &[
+            &["atlas", "crates", "render", "src", "passes", "shadow", "cascade", "partition", "cache"],
+            &["web-dashboard", "node_modules", "@makepad", "renderer", "node_modules", "tiny-color"],
+            &[
+                "orbit", "src", "platform", "web", "runtime", "renderer", "cache", "shaders",
+                "compiled",
+            ],
         ],
+        &mut rng,
     );
-    let analog_drift = folder(
-        "Analog Drift",
-        vec![
-            b.audio("01 Static Bloom.mp3"),
-            b.audio("02 Vector Sun.mp3"),
-            b.audio("03 Coastline.mp3"),
-            b.audio("04 Nightbus.mp3"),
-            b.audio("05 Drift Home.mp3"),
+    push_featured_file(&mut projects, "README.md", 6_000, &mut rng);
+
+    let library = build_category(
+        "Library", 400, 7_000, 8, Profile::Library,
+        &[
+            &[
+                "Caches",
+                "com.makepad.studio",
+                "versions",
+                "v12",
+                "data",
+                "blobs",
+                "segments",
+                "compiled",
+                "chunks",
+            ],
+            &["Application Support", "Browser", "CacheStorage"],
         ],
+        &mut rng,
     );
-    let music = folder("Music", vec![midnight_hours, analog_drift]);
-
-    let downloads = folder(
-        "Downloads",
-        vec![
-            b.junk("project-assets.zip", (5_000_000, 80_000_000)),
-            b.junk("App-Installer.pkg", (20_000_000, 300_000_000)),
-            b.screenshot("screenshot-2026-03-14.png"),
-            b.pdf("report-draft.pdf"),
-            b.csv("export-data.csv"),
-            b.code("scratch.rs"),
-            // Downloads is where a video lands before anyone files it.
-            b.video("trailer-cut-v3.mp4"),
-            b.video("clip_from_chat.mp4"),
-        ],
+    let mail = build_category(
+        "Mail",
+        200,
+        3_500,
+        9,
+        Profile::Mail,
+        &[&[
+            "Accounts",
+            "Personal",
+            "Archive",
+            "2025",
+            "Receipts",
+            "Travel",
+            "Thread Data",
+            "Attachments",
+            "Inline",
+        ]],
+        &mut rng,
     );
+    let music = build_category("Music", 180, 3_200, 5, Profile::Music, &[&["Aurora Lines", "Midnight Hours"], &["Northbound", "Lossless Sessions"]], &mut rng);
+    let mut documents = build_category(
+        "Documents", 100, 1_600, 6, Profile::Documents,
+        &[&["Archive", "2024", "Taxes"], &["Scanned Receipts", "2025", "Q4"]],
+        &mut rng,
+    );
+    push_featured_file(&mut documents, "notes.md", 4_096, &mut rng);
+    push_featured_file(&mut documents, "budget.csv", 18_432, &mut rng);
+    push_featured_file(&mut documents, "contacts.csv", 12_288, &mut rng);
+    let videos = build_category("Videos", 25, 500, 4, Profile::Videos, &[&["Camera Uploads", "2025"], &["Edits", "Final"]], &mut rng);
+    let downloads = build_category("Downloads", 50, 1_000, 4, Profile::Downloads, &[&["Installers"], &["Unsorted"]], &mut rng);
+    let desktop = build_category("Desktop", 30, 400, 4, Profile::Desktop, &[&["Current Work"]], &mut rng);
+    let network = build_category("Network", 30, 250, 4, Profile::Network, &[&["shared", "Design Team"], &["shared", "Engineering"]], &mut rng);
+    let trash = build_category(TRASH_NAME, 10, 50, 3, Profile::Trash, &[&["Old Downloads"]], &mut rng);
+    let (modified, created) = seeded_age(&mut rng);
+    folder_at(
+        "Demo",
+        modified,
+        created,
+        vec![desktop, documents, downloads, library, mail, music, network, pictures, projects, videos, trash],
+    )
+}
 
-    let atlas_src = folder("src", vec![b.code("main.rs"), b.code("lib.rs"), b.code("render.rs")]);
-    let atlas = folder("atlas", vec![b.toml("Cargo.toml"), b.markdown("README.md"), atlas_src]);
-    let proj_notes = folder("notes", vec![b.markdown("TODO.md"), b.text("ideas.txt")]);
-    let projects = folder("Projects", vec![atlas, proj_notes]);
-
-    let trash = folder(TRASH_NAME, Vec::new());
-
-    folder("Demo", vec![documents, pictures, videos, music, downloads, projects, trash])
+fn build_root() -> VNode {
+    build_root_with_seed(SEED)
 }
 
 // ---------------------------------------------------------------------
@@ -621,6 +541,28 @@ fn sum_bytes(node: &VNode, cancel: &AtomicBool) -> u64 {
         total += sum_bytes(child, cancel);
     }
     total
+}
+
+fn sum_bytes_unchecked(node: &VNode) -> u64 {
+    if node.is_dir {
+        node.children.iter().map(sum_bytes_unchecked).sum()
+    } else {
+        node.size
+    }
+}
+
+fn file_entry(path: PathBuf, node: &VNode) -> FileEntry {
+    FileEntry {
+        kind: model::kind_for(&path, node.is_dir),
+        name: node.name.clone(),
+        is_dir: node.is_dir,
+        size: sum_bytes_unchecked(node),
+        modified_secs: node.modified_secs,
+        created_secs: node.created_secs,
+        permissions: if node.is_dir { "rwxr-xr-x".to_string() } else { "rw-r--r--".to_string() },
+        child_count: node.is_dir.then(|| node.children.len() as u32),
+        path,
+    }
 }
 
 /// `name` split the way [`unique_name`] needs it: a dotfile or an
@@ -709,15 +651,7 @@ fn perform_new_folder(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome
     }
     let requested = request.new_name.as_deref().unwrap_or("New Folder");
     let name = unique_name(&dest.children, requested);
-    dest.children.push(VNode {
-        name: name.clone(),
-        is_dir: true,
-        size: 0,
-        modified_secs: DEMO_NOW_SECS,
-        created_secs: DEMO_NOW_SECS,
-        real_asset: None,
-        children: Vec::new(),
-    });
+    dest.children.push(folder_at(name.clone(), DEMO_NOW_SECS, DEMO_NOW_SECS, Vec::new()));
     let path = request.dest_dir.join(&name);
 
     Ok(OpOutcome {
@@ -955,20 +889,15 @@ fn scan_vnode(
 // The Vfs
 // ---------------------------------------------------------------------
 
-/// The demo filesystem: a fake home, seeded once and mutated in place by
-/// whatever the user does during a recording. Nothing here ever touches
-/// `std::fs` except to read the real assets [`Vfs::real_path`] hands out
-/// and to `stat` them for a byte-accurate size — the tree itself lives and
-/// dies with the process.
+/// The demo filesystem is entirely memory-backed and never resolves a
+/// virtual path against the host.
 pub struct DemoVfs {
     root: Mutex<VNode>,
 }
 
 impl DemoVfs {
-    /// Builds the seeded tree immediately (it is cheap — a few dozen nodes
-    /// and a handful of `stat` calls) rather than lazily on first use, so a
-    /// window that opens straight into the demo home never has to wait for
-    /// its first listing.
+    /// Build the full seeded tree immediately so every later operation is an
+    /// in-memory lookup.
     pub fn new() -> Self {
         DemoVfs { root: Mutex::new(build_root()) }
     }
@@ -999,17 +928,7 @@ impl Vfs for DemoVfs {
                 continue;
             }
             let child_path = path.join(&child.name);
-            entries.push(FileEntry {
-                kind: model::kind_for(&child_path, child.is_dir),
-                name: child.name.clone(),
-                is_dir: child.is_dir,
-                size: child.size,
-                modified_secs: child.modified_secs,
-                created_secs: child.created_secs,
-                permissions: if child.is_dir { "rwxr-xr-x".to_string() } else { "rw-r--r--".to_string() },
-                child_count: child.is_dir.then(|| child.children.len() as u32),
-                path: child_path,
-            });
+            entries.push(file_entry(child_path, child));
         }
         let mut order: Vec<usize> = (0..entries.len()).collect();
         model::sort_indices(&entries, &mut order, SortSpec::default());
@@ -1021,16 +940,33 @@ impl Vfs for DemoVfs {
         resolve(&tree, path).is_some_and(|n| n.is_dir)
     }
 
-    fn real_path(&self, path: &Path) -> PathBuf {
-        // A folder never has a real asset (there is nothing to decode), and
-        // neither does a path that resolves to nothing at all — both fall
-        // back to the identity, exactly like `RealVfs::real_path`, so the
-        // caller never has to special-case "no mapping" against "no node".
+    fn stat(&self, path: &Path) -> Result<FileEntry, String> {
         let tree = self.root.lock().unwrap();
-        match resolve(&tree, path) {
-            Some(node) if !node.is_dir => node.real_asset.clone().unwrap_or_else(|| path.to_path_buf()),
-            _ => path.to_path_buf(),
+        let node = resolve(&tree, path).ok_or_else(|| format!("No such file: {}", path.display()))?;
+        Ok(file_entry(path.to_path_buf(), node))
+    }
+
+    fn read_bytes(&self, path: &Path, max: usize) -> Result<Vec<u8>, String> {
+        let tree = self.root.lock().unwrap();
+        let node = resolve(&tree, path).ok_or_else(|| format!("No such file: {}", path.display()))?;
+        if node.is_dir {
+            return Err(format!("{} is a folder", path.display()));
         }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !matches!(ext.as_str(), "txt" | "md" | "rs" | "toml" | "json" | "csv" | "ts" | "js" | "wgsl" | "eml") {
+            return Err(format!("{} has no text content in the demo", path.display()));
+        }
+        let name = node.name.as_str();
+        let text = match ext.as_str() {
+            "json" => format!("{{\n  \"file\": \"{name}\",\n  \"source\": \"mpfiles demo\",\n  \"generated\": true\n}}\n"),
+            "csv" => format!("file,kind,status\n{name},synthetic,ready\nsummary.csv,demo,closed filesystem\n"),
+            "rs" => format!("// Synthetic preview for {name}\npub fn demo_file() -> &'static str {{\n    \"mpfiles demo\"\n}}\n"),
+            "md" => format!("# {name}\n\nThis is synthetic content from the closed mpfiles demo filesystem.\n\nNo host files were read.\n"),
+            _ => format!("Synthetic preview for {name}\nGenerated by the closed mpfiles demo filesystem.\nNo host files were read.\n"),
+        };
+        let mut bytes = text.into_bytes();
+        bytes.truncate(max);
+        Ok(bytes)
     }
 
     fn total_bytes(&self, path: &Path, cancel: &AtomicBool) -> u64 {
@@ -1087,39 +1023,13 @@ mod tests {
         vfs.read_dir(Path::new(path), true).unwrap()
     }
 
-    fn top_level_folders() -> [&'static str; 6] {
-        ["Documents", "Pictures", "Videos", "Music", "Downloads", "Projects"]
-    }
-
-    /// A listing carries enough to prove two trees are identical without
-    /// pulling in the whole `FileEntry` (whose `path` also embeds the
-    /// comparison, redundantly, once name is included).
-    fn fingerprint(entries: &[FileEntry]) -> Vec<(String, bool, u64, u64, u64)> {
-        entries.iter().map(|e| (e.name.clone(), e.is_dir, e.size, e.modified_secs, e.created_secs)).collect()
+    fn top_level_folders() -> [&'static str; 10] {
+        ["Desktop", "Documents", "Downloads", "Library", "Mail", "Music", "Network", "Pictures", "Projects", "Videos"]
     }
 
     #[test]
     fn the_tree_is_deterministic() {
-        let a = DemoVfs::new();
-        let b = DemoVfs::new();
-        // Depth-first over every folder in the tree, comparing each one's
-        // listing between the two instances.
-        let mut stack = vec![PathBuf::from(VIRTUAL_HOME)];
-        let mut folders_checked = 0;
-        while let Some(dir) = stack.pop() {
-            let la = listing(&a, dir.to_str().unwrap());
-            let lb = listing(&b, dir.to_str().unwrap());
-            assert_eq!(fingerprint(&la), fingerprint(&lb), "listing of {} differs between two demo trees", dir.display());
-            folders_checked += 1;
-            for entry in &la {
-                if entry.is_dir {
-                    stack.push(entry.path.clone());
-                }
-            }
-        }
-        // Home itself, its six visible children and .Trash, plus every
-        // folder nested under them.
-        assert!(folders_checked > 10, "suspiciously few folders walked: {folders_checked}");
+        assert_eq!(build_root_with_seed(SEED), build_root_with_seed(SEED));
     }
 
     #[test]
@@ -1138,46 +1048,11 @@ mod tests {
                 assert_ne!(entry.created_secs, 0, "{} has no created time", entry.path.display());
                 assert!(entry.modified_secs <= DEMO_NOW_SECS, "{} is modified in the future", entry.path.display());
                 assert!(entry.created_secs <= DEMO_NOW_SECS, "{} is created in the future", entry.path.display());
+                assert!(entry.modified_secs >= DEMO_NOW_SECS - TWO_YEARS_SECS, "{} is older than the demo window", entry.path.display());
+                assert!(entry.created_secs >= DEMO_NOW_SECS - TWO_YEARS_SECS, "{} was created before the demo window", entry.path.display());
             }
         }
-        assert!(files_checked > 20, "suspiciously few files walked: {files_checked}");
-    }
-
-    #[test]
-    fn mapped_files_point_at_a_real_asset_of_the_matching_kind() {
-        let vfs = DemoVfs::new();
-        let mut stack = vec![PathBuf::from(VIRTUAL_HOME)];
-        let mut mapped = 0;
-        let mut unmapped = 0;
-        while let Some(dir) = stack.pop() {
-            for entry in listing(&vfs, dir.to_str().unwrap()) {
-                if entry.is_dir {
-                    stack.push(entry.path.clone());
-                    continue;
-                }
-                let real = vfs.real_path(&entry.path);
-                if real == entry.path {
-                    unmapped += 1;
-                    continue;
-                }
-                mapped += 1;
-                assert!(real.exists(), "{} claims to map to {} which does not exist", entry.path.display(), real.display());
-                let virtual_kind = model::kind_for(&entry.path, false);
-                let real_kind = model::kind_for(&real, false);
-                assert_eq!(
-                    virtual_kind, real_kind,
-                    "{} ({:?}) maps to {} ({:?}) — kinds disagree",
-                    entry.path.display(),
-                    virtual_kind,
-                    real.display(),
-                    real_kind
-                );
-            }
-        }
-        assert!(mapped > 0, "nothing mapped to a real asset at all");
-        // Documented in the module's report to the integrator: audio and
-        // some junk are expected to stay unmapped.
-        assert!(unmapped > 0, "expected at least the audio tracks to stay unmapped");
+        assert!((30_000..=45_000).contains(&files_checked), "file count out of range: {files_checked}");
     }
 
     #[test]
@@ -1331,6 +1206,56 @@ mod tests {
             }
         }
         assert_eq!(file_total, total);
+    }
+
+    fn scan_stats(node: &Node, depth: usize, stats: &mut (usize, usize, usize, usize)) -> u64 {
+        stats.2 = stats.2.max(depth);
+        if node.is_dir {
+            stats.1 += 1;
+            let sum: u64 = node.children.iter().map(|child| scan_stats(child, depth + 1, stats)).sum();
+            assert_eq!(node.size, sum, "folder {} has an inconsistent recursive size", node.name);
+            sum
+        } else {
+            stats.0 += 1;
+            if node.size >= 2 * 1024 * 1024 * 1024 {
+                stats.3 += 1;
+            }
+            node.size
+        }
+    }
+
+    #[test]
+    fn generator_shape_sizes_and_timings_meet_the_demo_contract() {
+        let generated_at = std::time::Instant::now();
+        let vfs = DemoVfs::new();
+        let generation = generated_at.elapsed();
+        let scan_at = std::time::Instant::now();
+        let node = vfs.scan(Path::new(VIRTUAL_HOME), &AtomicBool::new(false), &|_| {}).unwrap();
+        let scan = scan_at.elapsed();
+        let mut stats = (0usize, 0usize, 0usize, 0usize);
+        let total = scan_stats(&node, 0, &mut stats);
+        eprintln!("mpfiles demo generator: {generation:?}; full inline scan: {scan:?}");
+        assert!((30_000..=45_000).contains(&stats.0), "file count: {}", stats.0);
+        assert!((2_000..=3_500).contains(&stats.1), "folder count: {}", stats.1);
+        assert!(stats.2 >= 9, "max depth: {}", stats.2);
+        assert!(stats.3 >= 3, "only {} files are at least 2 GiB", stats.3);
+        assert!(total >= 150 * 1024 * 1024 * 1024, "tree is only {total} bytes");
+        assert!(generation.as_millis() < 150, "generation took {generation:?}");
+        assert!(scan.as_millis() < 100, "inline scan took {scan:?}");
+    }
+
+    #[test]
+    fn stat_and_synthetic_markdown_reads_work() {
+        let vfs = DemoVfs::new();
+        let path = Path::new("/Demo/Documents/notes.md");
+        let entry = vfs.stat(path).unwrap();
+        assert_eq!(entry.path, path);
+        assert_eq!(entry.name, "notes.md");
+        assert!(!entry.is_dir);
+        let bytes = vfs.read_bytes(path, 4096).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("notes.md"));
+        assert!(text.contains("closed mpfiles demo filesystem"));
     }
 
     #[test]

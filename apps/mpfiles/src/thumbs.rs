@@ -1,14 +1,14 @@
 //! Thumbnails and type icons — one widget draws both.
 //!
-//! Pictures get a real thumbnail: the file is read and decoded on a worker
-//! thread (never the UI thread), box-filtered down to at most [`THUMB_PX`] on
-//! its long edge, and handed back as BGRA pixels the UI turns into a texture.
+//! Pictures get a real thumbnail: native files are decoded on workers; demo
+//! paths select from a tiny embedded pool and decode inline. Both are
+//! box-filtered down to at most [`THUMB_PX`] on their long edge and handed
+//! back as BGRA pixels the UI turns into a texture.
 //! Decoded thumbs live in a bounded LRU so browsing a 20k-file photo folder
 //! costs a fixed amount of GPU memory.
 //!
-//! Playable video gets the same treatment through the platform's standalone
-//! file decoder: its first frame is the thumbnail. Videos the decoder does not
-//! demux keep the film-strip icon.
+//! Native video uses the platform decoder's first frame. Demo video uses one
+//! embedded still and never opens a demuxer or decoder.
 //!
 //! Everything else gets its kind's SVG, drawn by the same `Image` widget —
 //! which is why [`MpfThumb`] exists: it remembers what it is already showing,
@@ -17,6 +17,7 @@
 
 use makepad_widgets::*;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_widgets::makepad_platform::video_file::VideoFileDecoder;
 
 use std::{
@@ -78,12 +79,15 @@ struct CacheSlot {
 
 /// The thumbnail cache: request pictures, drain finished decodes, look them up.
 pub struct Thumbs {
+    done_tx: Sender<ThumbDone>,
     senders: Vec<Sender<PathBuf>>,
     results: Receiver<ThumbDone>,
     slots: HashMap<PathBuf, CacheSlot>,
     inflight: HashMap<PathBuf, ()>,
     tick: u64,
     next_worker: usize,
+    instant: bool,
+    started: bool,
 }
 
 impl Default for Thumbs {
@@ -95,10 +99,32 @@ impl Default for Thumbs {
 impl Thumbs {
     pub fn new() -> Self {
         let (done_tx, results) = channel::<ThumbDone>();
-        let mut senders = Vec::with_capacity(WORKERS);
+        Self {
+            done_tx,
+            senders: Vec::new(),
+            results,
+            slots: HashMap::new(),
+            inflight: HashMap::new(),
+            tick: 0,
+            next_worker: 0,
+            instant: false,
+            started: false,
+        }
+    }
+
+    fn ensure_started(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        self.instant = crate::vfs::vfs().is_instant();
+        if self.instant {
+            return;
+        }
+        self.senders.reserve(WORKERS);
         for _ in 0..WORKERS {
             let (tx, rx) = channel::<PathBuf>();
-            let done = done_tx.clone();
+            let done = self.done_tx.clone();
             // A dedicated channel per worker (instead of one shared, mutex-guarded
             // receiver) keeps a blocking `recv` from serializing the pool.
             thread::spawn(move || {
@@ -110,21 +136,14 @@ impl Thumbs {
                     SignalToUI::set_ui_signal();
                 }
             });
-            senders.push(tx);
-        }
-        Self {
-            senders,
-            results,
-            slots: HashMap::new(),
-            inflight: HashMap::new(),
-            tick: 0,
-            next_worker: 0,
+            self.senders.push(tx);
         }
     }
 
     /// The texture for `path` if it is decoded; queues a decode if it is not.
     /// Returns `None` while the decode is pending or after it failed.
-    pub fn get_or_request(&mut self, path: &Path) -> Option<Texture> {
+    pub fn get_or_request(&mut self, cx: &mut Cx, path: &Path) -> Option<Texture> {
+        self.ensure_started();
         self.tick += 1;
         let tick = self.tick;
         if let Some(slot) = self.slots.get_mut(path) {
@@ -135,6 +154,12 @@ impl Thumbs {
             return None;
         }
         self.inflight.insert(path.to_path_buf(), ());
+        if self.instant {
+            let item = ThumbDone { path: path.to_path_buf(), pixels: decode_thumb(path) };
+            self.finish(cx, item);
+            self.evict();
+            return self.slots.get(path).and_then(|slot| slot.texture.clone());
+        }
         let worker = self.next_worker % self.senders.len();
         self.next_worker = self.next_worker.wrapping_add(1);
         let _ = self.senders[worker].send(path.to_path_buf());
@@ -149,24 +174,28 @@ impl Thumbs {
             return false;
         }
         for item in done {
-            self.inflight.remove(&item.path);
-            let texture = item.pixels.map(|p| {
-                Texture::new_with_format(
-                    cx,
-                    TextureFormat::VecBGRAu8_32 {
-                        width: p.width,
-                        height: p.height,
-                        data: Some(p.data),
-                        updated: TextureUpdated::Full,
-                    },
-                )
-            });
-            self.tick += 1;
-            let tick = self.tick;
-            self.slots.insert(item.path, CacheSlot { texture, tick });
+            self.finish(cx, item);
         }
         self.evict();
         true
+    }
+
+    fn finish(&mut self, cx: &mut Cx, item: ThumbDone) {
+        self.inflight.remove(&item.path);
+        let texture = item.pixels.map(|p| {
+            Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: p.width,
+                    height: p.height,
+                    data: Some(p.data),
+                    updated: TextureUpdated::Full,
+                },
+            )
+        });
+        self.tick += 1;
+        let tick = self.tick;
+        self.slots.insert(item.path, CacheSlot { texture, tick });
     }
 
     /// Drop the least recently looked-at slots down to the cap.
@@ -190,30 +219,79 @@ impl Thumbs {
     }
 }
 
-/// Read, decode and downscale one file's picture. Runs on a worker thread.
-///
-/// The *kind* comes from the name the browser shows, and the *bytes* from
-/// whatever file actually backs it — the two are the same thing on a real
-/// disk and deliberately different in the demo, which is what lets a made-up
-/// photo have a real thumbnail.
-fn decode_thumb(path: &Path) -> Option<ThumbPixels> {
-    let real = crate::vfs::vfs().real_path(path);
-    if crate::model::is_playable_video(path) {
-        // A video is never read whole — the decoder demuxes to the first
-        // frame — so the picture-sized file cap does not apply here.
-        return decode_video_thumb(&real);
+trait ThumbSource {
+    fn decode(&self, path: &Path) -> Option<ThumbPixels>;
+}
+
+struct NativeThumbSource;
+
+impl ThumbSource for NativeThumbSource {
+    fn decode(&self, path: &Path) -> Option<ThumbPixels> {
+        let real = crate::vfs::vfs().real_path(path);
+        if crate::model::is_playable_video(path) {
+            #[cfg(not(target_arch = "wasm32"))]
+            return decode_video_thumb(&real);
+            #[cfg(target_arch = "wasm32")]
+            return None;
+        }
+        let meta = std::fs::metadata(&real).ok()?;
+        if meta.len() > THUMB_MAX_FILE_BYTES {
+            return None;
+        }
+        let data = std::fs::read(&real).ok()?;
+        decode_image_bytes(&data)
     }
-    let meta = std::fs::metadata(&real).ok()?;
-    if meta.len() > THUMB_MAX_FILE_BYTES {
-        return None;
+}
+
+struct DemoThumbSource;
+
+impl DemoThumbSource {
+    const IMAGES: [&'static [u8]; 3] = [
+        include_bytes!("../demos/ducky.png"),
+        include_bytes!("../demos/mixer.png"),
+        include_bytes!("../demos/xr.png"),
+    ];
+    const VIDEO_STILL: &'static [u8] = include_bytes!("../demos/ducky.png");
+
+    fn bytes(path: &Path) -> &'static [u8] {
+        if crate::model::is_playable_video(path) {
+            return Self::VIDEO_STILL;
+        }
+        let hash = path
+            .as_os_str()
+            .to_string_lossy()
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ byte as u64).wrapping_mul(0x1000_0000_01b3)
+            });
+        Self::IMAGES[hash as usize % Self::IMAGES.len()]
     }
-    let data = std::fs::read(&real).ok()?;
-    let image = decode_image_from_data(&data).ok()?;
+}
+
+impl ThumbSource for DemoThumbSource {
+    fn decode(&self, path: &Path) -> Option<ThumbPixels> {
+        decode_image_bytes(Self::bytes(path))
+    }
+}
+
+fn decode_image_bytes(data: &[u8]) -> Option<ThumbPixels> {
+    let image = decode_image_from_data(data).ok()?;
     Some(downscale(image.width, image.height, &image.data))
+}
+
+/// Dispatch at the filesystem seam: a demo path never becomes a host path,
+/// and a video in the closed demo is just one embedded still.
+fn decode_thumb(path: &Path) -> Option<ThumbPixels> {
+    if crate::vfs::vfs().is_demo() {
+        DemoThumbSource.decode(path)
+    } else {
+        NativeThumbSource.decode(path)
+    }
 }
 
 /// The first frame of a video, through the platform's hardware file decoder —
 /// the same seam the importer's video probe uses, minus its crate.
+#[cfg(not(target_arch = "wasm32"))]
 fn decode_video_thumb(path: &Path) -> Option<ThumbPixels> {
     let mut decoder = VideoFileDecoder::open(path.to_str()?).ok()?;
     let frame = decoder.next_frame().ok()??;
@@ -377,7 +455,7 @@ pub fn fill_thumb(cx: &mut Cx, slot: &WidgetRef, entry: &crate::model::FileEntry
         return;
     };
     if crate::model::is_thumbnailable(&entry.path) {
-        if let Some(texture) = thumbs.get_or_request(&entry.path) {
+        if let Some(texture) = thumbs.get_or_request(cx, &entry.path) {
             thumb.show_thumb(cx, &entry.path, texture);
             return;
         }
@@ -428,5 +506,15 @@ mod tests {
         // The same kind shares one allocation, which is what lets the SVG
         // load be skipped on repopulate.
         assert!(Arc::ptr_eq(&kind_svg(FileKind::Audio), &kind_svg(FileKind::Audio)));
+    }
+
+    #[test]
+    fn demo_source_returns_decodable_images_and_video_stills() {
+        for path in [Path::new("/Demo/Pictures/IMG_00042.jpg"), Path::new("/Demo/Videos/clip-0001.mp4")] {
+            let bytes = DemoThumbSource::bytes(path);
+            assert!(decode_image_from_data(bytes).is_ok(), "embedded demo thumb for {} did not decode", path.display());
+            assert!(DemoThumbSource.decode(path).is_some());
+        }
+        assert_eq!(DemoThumbSource::bytes(Path::new("/Demo/Videos/a.mp4")), DemoThumbSource::VIDEO_STILL);
     }
 }

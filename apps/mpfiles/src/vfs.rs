@@ -12,11 +12,9 @@
 //! Threading a handle through every signature would buy nothing: no part of
 //! this app ever wants a *different* filesystem than the rest of it.
 //!
-//! The one thing a virtual file cannot do is be decoded, previewed or opened:
-//! a thumbnail decoder and a viewer process both need a real file. That is
-//! what [`Vfs::real_path`] is for — the demo's virtual names map onto real,
-//! repo-safe assets, so pictures thumbnail, videos preview and PDFs open
-//! through exactly the same code paths as the real thing.
+//! Virtual files are also statted and read through this seam. `real_path` is
+//! reserved for native integrations backed by [`RealVfs`]; the closed demo
+//! never maps a virtual name onto the host disk.
 
 use std::{
     path::{Path, PathBuf},
@@ -43,8 +41,15 @@ pub trait Vfs: Send + Sync {
     fn home(&self) -> PathBuf;
 
     /// One directory listing, sorted the way [`model::read_directory`] sorts.
-    /// Runs on a worker thread — never the UI thread.
+    /// Real disks are dispatched to a worker; instant backends run inline.
     fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String>;
+
+    /// Metadata for one path, including paths below the current listing.
+    fn stat(&self, path: &Path) -> Result<FileEntry, String>;
+
+    /// At most `max` bytes of a file. Consumers must not assume the host has
+    /// a corresponding path.
+    fn read_bytes(&self, path: &Path, max: usize) -> Result<Vec<u8>, String>;
 
     fn is_dir(&self, path: &Path) -> bool;
 
@@ -65,7 +70,9 @@ pub trait Vfs: Send + Sync {
 
     /// The real file on disk behind a path: what a decoder opens and what a
     /// viewer process is handed. The identity function for a real filesystem.
-    fn real_path(&self, path: &Path) -> PathBuf;
+    fn real_path(&self, path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
 
     /// Recursive byte total, for the properties panel. Stops when cancelled.
     fn total_bytes(&self, path: &Path, cancel: &AtomicBool) -> u64;
@@ -134,6 +141,22 @@ impl Vfs for RealVfs {
 
     fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
         model::read_directory(path, show_hidden)
+    }
+
+    fn stat(&self, path: &Path) -> Result<FileEntry, String> {
+        model::real_entry_at(path).ok_or_else(|| format!("No such file: {}", path.display()))
+    }
+
+    fn read_bytes(&self, path: &Path, max: usize) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let mut data = Vec::with_capacity(max.min(64 * 1024));
+        file.take(max as u64)
+            .read_to_end(&mut data)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        Ok(data)
     }
 
     fn is_dir(&self, path: &Path) -> bool {
@@ -214,7 +237,8 @@ pub fn is_demo() -> bool {
 /// in the environment, so it can be started from a launcher that has no
 /// argument list of its own.
 pub fn demo_requested() -> bool {
-    std::env::args().any(|a| a == "--demo")
+    cfg!(feature = "demo")
+        || std::env::args().any(|a| a == "--demo")
         || std::env::var("MPFILES_DEMO").is_ok_and(|v| v != "0" && !v.is_empty())
 }
 
@@ -243,6 +267,19 @@ mod tests {
         assert_eq!(real.real_path(path), path);
         assert!(!real.is_instant());
         assert!(!real.is_demo());
+    }
+
+    #[test]
+    fn real_stat_and_bounded_reads_use_the_same_entry_shape() {
+        let real = RealVfs;
+        let path = std::env::temp_dir().join(format!("mpfiles-vfs-stat-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let entry = real.stat(&path).unwrap();
+        assert_eq!(entry.path, path);
+        assert_eq!(entry.size, 6);
+        assert!(!entry.is_dir);
+        assert_eq!(real.read_bytes(&path, 3).unwrap(), b"abc");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
