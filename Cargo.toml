@@ -29,6 +29,7 @@ workspace.members = [
     "libs/asset/chat",
     "libs/chat_ui",
     "libs/ai/hub_ui",
+    "libs/ai/services",
     "libs/asset/annotate",
     "libs/render",
     "libs/raytrace",

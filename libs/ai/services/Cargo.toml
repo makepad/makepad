@@ -1,0 +1,32 @@
+# The AI services layer.
+#
+# One conversation, many apps. An app EXPOSES an AI service: a manifest (who
+# it is, a short brief, the tools it will execute) and a port that receives
+# calls and answers them. A HOST owns the conversation: the desktop (mpwm's
+# slide-in chat pane) or an app that embeds the chat panel itself. The host's
+# engine aggregates every connected service into one tool table, drives the
+# model, routes each call to the service that owns it, and shows the result.
+#
+# `wire` + `port` are what every app links (platform-only, no widgets, no
+# model runtime). The `engine` feature is what a host links: the agent seam,
+# the hub's providers and the local model election.
+#
+# Design of record: local/agent_state/aichat/DESIGN.md
+
+[package]
+name = "makepad-ai-services"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "What an app exposes to a central AI chat (manifest, tools, calls, results) and the engine that drives many apps from one conversation"
+
+[features]
+default = []
+engine = ["makepad-converse", "makepad-ai-hub"]
+
+[dependencies]
+makepad-platform = { path = "../../../platform" }
+makepad-micro-serde = { path = "../../micro_serde" }
+makepad-strict-json = { path = "../../strict_json" }
+makepad-converse = { path = "../../converse", features = ["local-llm"], optional = true }
+makepad-ai-hub = { path = "../hub", default-features = false, features = ["llm"], optional = true }
