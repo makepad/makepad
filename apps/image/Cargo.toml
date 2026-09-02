@@ -1,0 +1,26 @@
+# image — a dumb picture viewer, part of the Makepad app family (terminal,
+# wm, files, task, sheets, route, mixer...).
+#
+# Opens one image fit-to-window, centered on a dark makepad_wm_theme background.
+# Left/Right walks the sorted sibling images in the same folder, +/-/wheel
+# zoom around the cursor, 0 fits, 1 shows 100%, drag pans when zoomed,
+# Escape/Q/Space quits. `--preview <path>` sizes the window as a popup.
+
+[package]
+name = "makepad-image"
+version = "0.1.0"
+edition = "2021"
+default-run = "image"
+
+[lib]
+name = "makepad_image"
+path = "src/lib.rs"
+
+[[bin]]
+name = "image"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }

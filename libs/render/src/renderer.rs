@@ -3009,7 +3009,10 @@ impl Renderer {
                 return m;
             }
         }
-        if e.kind == BodyKind::Rigid {
+        // A rigid body's orientation comes from box3d; a kinematic RIDE body
+        // (a coaster car halfway round a loop) writes its own. Either way a
+        // set quaternion is the pose — only an unset one falls back to yaw.
+        if e.kind == BodyKind::Rigid || e.orient != Quat::default() {
             let (x, y, z, w) = (e.orient.x, e.orient.y, e.orient.z, e.orient.w);
             let mut m = Mat4f::identity();
             m.v[0] = 1.0 - 2.0 * (y * y + z * z);

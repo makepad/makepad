@@ -1,7 +1,7 @@
 //! The in-process LLM engine: one local model on a thread of its own.
 //!
 //! A `makepad_ai_llm::LlamaSession` (pure Rust on makepad-ggml — no external
-//! process, nothing over the network) generalized out of mpfiles' chat agent
+//! process, nothing over the network) generalized out of files' chat agent
 //! so every app consumes the same engine through [`crate::hub::AiHub`]. The
 //! session is `!Send`: it is built on, and never leaves, one dedicated worker
 //! thread; the consumer talks to it over a pair of channels and is woken
@@ -64,7 +64,7 @@ impl ToolSpec {
     }
 }
 
-/// Engine limits. The defaults are the ones mpfiles shipped with.
+/// Engine limits. The defaults are the ones files shipped with.
 #[derive(Clone, Debug)]
 pub struct LocalLlmConfig {
     /// The GGUF to load. Path policy (env overrides, checkout search) is the

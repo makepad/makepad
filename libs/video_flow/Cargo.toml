@@ -20,7 +20,7 @@ default = ["convert"]
 convert = ["dep:makepad-video"]
 
 [dependencies]
-makepad-video = { path = "../../platform/video", optional = true }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video", optional = true }
 
 # The synthetic optical-flow debug clips. It writes mp4s, so it needs the
 # codec seam the `convert` feature pulls in — declared explicitly rather than

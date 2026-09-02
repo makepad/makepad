@@ -21,6 +21,6 @@ makepad-widgets = { path = "../../widgets" }
 makepad-sqlite = { path = "../sqlite_query" }
 # Hardware HEVC intra frames (VideoToolbox) for the on-disk tapes: no JPEGs
 # or PNGs are ever kept, one hardware decode fills a whole atlas level.
-makepad-video = { path = "../../platform/video" }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video" }
 # The baker's downloader: the dependency-free blocking HTTP client.
 makepad-network = { path = "../../platform/network" }

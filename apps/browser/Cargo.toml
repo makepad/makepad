@@ -1,0 +1,25 @@
+# browser — a Chrome-like browser as a plain full-window Makepad app.
+#
+# Chromium (CEF, libs/cef) renders ONLY the page, GPU-accelerated straight
+# into an IOSurface-backed Makepad texture. All browser chrome — the tab
+# strip, the toolbar with back/forward/reload, the omnibox and the menu —
+# is Makepad splash UI, styled from the wm theme when hosted by
+# makepad-wm (`MAKEPAD_WM_THEME_SPLASH`) and from a Chrome-dark palette otherwise.
+#
+# Runs standalone, and unmodified inside makepad-wm / Studio tiles via the
+# shared --stdin-loop client runtime every Makepad app has.
+
+[package]
+name = "makepad-browser"
+version = "0.1.0"
+edition = "2021"
+default-run = "browser"
+
+[[bin]]
+name = "browser"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", features = ["cef"] }
+makepad-cef = { path = "../../libs/cef" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }

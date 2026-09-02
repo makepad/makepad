@@ -55,7 +55,7 @@ impl MatchEvent for App {}
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
-        mp_theme::apply(vm);
+        makepad_wm_theme::apply(vm);
         crate::theme::install(vm);
         crate::chart::script_mod(vm);
         crate::view::script_mod(vm);
