@@ -6994,6 +6994,9 @@ pub struct App {
     /// the render itself ever threatens its buffer.
     #[rust]
     audio_contended_seen: u64,
+    /// Poisoned callbacks already reported.
+    #[rust]
+    audio_poisoned_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
     /// The monitor's own dropout count, as last reported.
@@ -13777,6 +13780,17 @@ p2 {}
                 health.contended - self.audio_contended_seen
             );
             self.audio_contended_seen = health.contended;
+        }
+        // A panic on a thread that held the mixer lock. The buffer played,
+        // so nobody heard a thing; the app is one panic worse off than it
+        // looks, and this is the only place that says so.
+        if health.poisoned != self.audio_poisoned_seen {
+            log!(
+                "audio: state lock POISONED by a panic elsewhere {} time(s) (+{} since last); the callback took it over and carried on",
+                health.poisoned,
+                health.poisoned - self.audio_poisoned_seen
+            );
+            self.audio_poisoned_seen = health.poisoned;
         }
         // The monitor's own dropout: heard in the cans, invisible in the
         // room, and until now counted nowhere at all.

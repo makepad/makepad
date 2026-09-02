@@ -364,6 +364,9 @@ pub struct SplatFrames {
 pub struct AudioHealth {
     /// Whole buffers silenced by lock contention, since the app started.
     pub contended: u64,
+    /// Callbacks that found the lock poisoned by a panic elsewhere and took
+    /// it over, since the app started. These buffers were heard.
+    pub poisoned: u64,
     /// Buffers the monitor could not fill from the cue ring, since the app
     /// started. Priming a fresh or re-opened phones device does not count.
     pub phones_starved: u64,
@@ -1296,6 +1299,11 @@ pub struct Mixer {
     /// growth, so a dropout heard in the room can be told apart from a
     /// device-level glitch by whether this moved.
     contended_callbacks: Arc<AtomicU64>,
+    /// Callbacks that found the state lock POISONED, took it over and
+    /// carried on. Not a gap in the programme — the buffer still played —
+    /// but every count is a panic that happened somewhere else in the app,
+    /// and the operator deserves to be told which of the two it was.
+    poisoned_callbacks: Arc<AtomicU64>,
     /// High-water render time, nanoseconds, for the other failure class: a
     /// render that outruns its buffer starves the device with the lock
     /// UNCONTENDED.
@@ -1359,6 +1367,7 @@ impl Mixer {
             device_frames: Arc::new(AtomicU64::new(0)),
             device_rate_bits: Arc::new(AtomicU64::new(0)),
             contended_callbacks: Arc::new(AtomicU64::new(0)),
+            poisoned_callbacks: Arc::new(AtomicU64::new(0)),
             render_max_nanos: Arc::new(AtomicU64::new(0)),
             render_nanos: Arc::new(AtomicU64::new(0)),
             buffer_frames: Arc::new(AtomicU64::new(0)),
@@ -1393,6 +1402,7 @@ impl Mixer {
     pub fn audio_health(&self) -> AudioHealth {
         AudioHealth {
             contended: self.contended_callbacks.load(Ordering::Relaxed),
+            poisoned: self.poisoned_callbacks.load(Ordering::Relaxed),
             // The monitor counts its own: the ring is the only thing that
             // knows it could not fill a buffer.
             phones_starved: self.cue_ring.starved.load(Ordering::Relaxed),
@@ -2312,9 +2322,24 @@ impl Mixer {
         // contended and this buffer must remain silent. That lets a later
         // callback mark an exact deadline Missed instead of firing it late.
         let buffer_start = self.device_frames.fetch_add(frames as u64, Ordering::AcqRel);
-        let Ok(mut s) = self.state.try_lock() else {
-            self.contended_callbacks.fetch_add(1, Ordering::Relaxed);
-            return;
+        // Contention is one silent buffer; POISON is every buffer for the
+        // rest of the set, and it used to arrive wearing contention's name.
+        // A panic on any thread that held this lock left `try_lock` failing
+        // forever, and the only sign was the contention count climbing once
+        // a buffer. So the two are told apart: contention still yields the
+        // buffer, and poison is taken over and cleared, because whatever the
+        // state is now, playing on with it beats silence in front of a room.
+        let mut s = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.contended_callbacks.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Err(std::sync::TryLockError::Poisoned(taken)) => {
+                self.poisoned_callbacks.fetch_add(1, Ordering::Relaxed);
+                self.state.clear_poison();
+                taken.into_inner()
+            }
         };
         let render_started = std::time::Instant::now();
         let s = &mut *s;
@@ -3664,6 +3689,37 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_taken_over_rather_than_silencing_the_rest_of_the_set() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        // A panic on ANY thread that holds the state lock poisons it, and
+        // every later `try_lock` fails for good.
+        let held = mixer.clone();
+        let hush = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _guard = held.state.lock().unwrap();
+            panic!("something went wrong on some other thread");
+        })
+        .join();
+        std::panic::set_hook(hush);
+        assert!(mixer.state.is_poisoned(), "the setup did poison it");
+
+        let before = mixer.audio_health();
+        let out = render(&mixer, 48_000.0, 512);
+        let after = mixer.audio_health();
+        assert_eq!(after.poisoned, before.poisoned + 1, "counted as what it is");
+        assert_eq!(after.contended, before.contended, "and not as contention");
+        assert!(
+            out.data.iter().any(|sample| *sample != 0.0),
+            "the room still hears the track"
+        );
+        assert!(!mixer.state.is_poisoned(), "cleared, so the next buffer is ordinary");
     }
 
     #[test]

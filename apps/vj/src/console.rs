@@ -202,10 +202,17 @@ pub fn detail_text(health: &AudioHealth, meters: &[f32; 5], decks: [f32; 2]) -> 
         health.render_nanos as f64 / 1e6,
         health.render_max_nanos as f64 / 1e6,
     ));
+    // The poison count only appears once there is one: it means a panic
+    // happened somewhere else in the app, and a permanent "poisoned 0"
+    // would teach the eye to skip the line that matters.
     text.push_str(&format!(
-        "silenced {}, phones {}\n",
+        "silenced {}, phones {}",
         health.contended, health.phones_starved
     ));
+    if health.poisoned > 0 {
+        text.push_str(&format!(", POISONED {}", health.poisoned));
+    }
+    text.push('\n');
     text.push_str(&format!(
         "deck A {:.0}%, deck B {:.0}%\n",
         decks[0].clamp(0.0, 1.0) * 100.0,
@@ -244,6 +251,7 @@ mod tests {
 
     fn health() -> AudioHealth {
         AudioHealth {
+            poisoned: 0,
             contended: 0,
             phones_starved: 0,
             render_nanos: 500_000,
@@ -260,6 +268,17 @@ mod tests {
         let line = summary_line(&health(), 0.5, false);
         assert!(line.starts_with("5%"), "the budget comes first: {line}");
         assert!(line.contains("512"), "and it says what buffer that was: {line}");
+    }
+
+    #[test]
+    fn a_panic_elsewhere_shows_up_in_the_numbers_and_silence_does_not_pretend_to_be_it() {
+        let quiet = detail_text(&health(), &[0.0; 5], [0.0, 0.0]);
+        assert!(quiet.contains("silenced 0, phones 0"));
+        assert!(!quiet.contains("POISONED"), "nothing to say while nothing has gone wrong");
+        let mut hurt = health();
+        hurt.poisoned = 3;
+        let text = detail_text(&hurt, &[0.0; 5], [0.0, 0.0]);
+        assert!(text.contains("POISONED 3"), "and it is unmissable when there is: {text}");
     }
 
     #[test]
