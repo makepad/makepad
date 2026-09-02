@@ -28,6 +28,10 @@ use crate::music_import_ui::MusicImporter;
 /// The third list tab: the loops page that stands in for the explorer and
 /// the queue together.
 const LISTS_LOOPS: usize = 2;
+
+/// How long a beat chevron may be held and still count as a tap. Longer
+/// than a click, shorter than a deliberate lean on the tempo.
+const BEND_TAP_SECS: f64 = 0.25;
 mod apc40;
 mod archive_stream;
 mod archive_ui;
@@ -6945,6 +6949,10 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// When each beat chevron went down, per deck and per direction, so a
+    /// tap can be told from a hold on release.
+    #[rust]
+    bend_press: [[Option<std::time::Instant>; 2]; 2],
     /// The console's height when its grip was grabbed.
     #[rust]
     console_grab: Option<f64>,
@@ -21940,6 +21948,7 @@ p2 {}
             let grid = state.grid;
             let rate = state.rate;
             let pitch = state.pitch;
+            let bend = state.bend;
             let synced = state.synced;
             let loaded = state.is_loaded();
             let loop_on = state.loop_on();
@@ -21987,12 +21996,26 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
-            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate));
+            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate + bend));
             self.set_label(
                 cx,
                 base + 3,
                 &refs.pitch_text,
-                &format!("{}{}", format_pitch(pitch), if synced { " SYNC" } else { "" }),
+                // A held bend says so. It does not move the fader, so
+                // without this the only sign that a deck is leaning is the
+                // sound of it.
+                &format!(
+                    "{}{}{}",
+                    format_pitch(pitch),
+                    if bend > 0.0 {
+                        " BEND +"
+                    } else if bend < 0.0 {
+                        " BEND -"
+                    } else {
+                        ""
+                    },
+                    if synced { " SYNC" } else { "" }
+                ),
             );
             self.set_label(
                 cx,
@@ -24313,21 +24336,56 @@ p2 {}
             // engine refuses rather than guessing a beat length, so an early
             // press does nothing instead of throwing the playhead somewhere.
             //
-            // Named for what they do, so the sign here never has to lie about
-            // it. The bar-sized jumps take the operator's hand back from the
-            // autopilot; a one-beat nudge is the correction it expects.
-            for (button, sign) in [(&refs.beat_back, -1.0), (&refs.beat_fwd, 1.0)] {
-                let Some(modifiers) = button.clicked_modifiers(actions) else { continue };
-                let cmds = if modifiers.control {
-                    self.deck_hands_on();
-                    self.decks.beat_jump(deck, sign * 16.0 * 4.0)
-                } else if modifiers.shift {
-                    self.deck_hands_on();
-                    self.decks.beat_jump(deck, sign * 4.0 * 4.0)
-                } else {
-                    self.decks.nudge_beats(deck, sign)
-                };
-                self.run_deck_cmds(cx, cmds);
+            // Which GLYPH sits on which of these lives in the DSL: the
+            // chevrons point at the track rather than the playhead, so <
+            // is wired to the forward step. Named for what they do, so the
+            // sign here never has to lie about it. The bar-sized jumps take
+            // the operator's hand back from the autopilot; a one-beat nudge
+            // is the correction it expects.
+            //
+            // A TAP steps; a HOLD bends the tempo for as long as it is down
+            // and lets go of it on release. Both live on the same pair
+            // because the transport row has no width left for another, and
+            // because they are the same gesture at two lengths: a tap moves
+            // the record, a hold leans on it.
+            for (index, (button, sign)) in
+                [(&refs.beat_back, -1.0), (&refs.beat_fwd, 1.0)].into_iter().enumerate()
+            {
+                if let Some(modifiers) = button.pressed_modifiers(actions) {
+                    if modifiers.control {
+                        self.deck_hands_on();
+                        let cmds = self.decks.beat_jump(deck, sign * 16.0 * 4.0);
+                        self.run_deck_cmds(cx, cmds);
+                    } else if modifiers.shift {
+                        self.deck_hands_on();
+                        let cmds = self.decks.beat_jump(deck, sign * 4.0 * 4.0);
+                        self.run_deck_cmds(cx, cmds);
+                    } else {
+                        self.bend_press[deck.index()][index] =
+                            Some(std::time::Instant::now());
+                        let cmds = self.decks.hold_bend(deck, sign, false);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+                // A finger lifted INSIDE the button reports Clicked, and
+                // one lifted outside reports Released; only one action per
+                // widget comes back, so a release has to accept either or
+                // the bend never lets go.
+                if button.released(actions) || button.clicked(actions) {
+                    let Some(down_at) = self.bend_press[deck.index()][index].take() else {
+                        continue;
+                    };
+                    let cmds = self.decks.release_bend(deck);
+                    self.run_deck_cmds(cx, cmds);
+                    // Short enough to have been a tap: the bend that just
+                    // happened moved the track by a couple of milliseconds
+                    // and nobody heard it, and the beat step is what was
+                    // meant.
+                    if down_at.elapsed().as_secs_f64() < BEND_TAP_SECS {
+                        let cmds = self.decks.nudge_beats(deck, sign);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
             }
             if refs.loop_in.clicked(actions) {
                 let cmds = self.decks.loop_in(deck);

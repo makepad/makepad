@@ -224,6 +224,12 @@ impl PitchRange {
 const SYNC_RATE_MIN: f64 = 0.80;
 const SYNC_RATE_MAX: f64 = 1.25;
 /// Hard clamp on any rate the engine emits.
+/// How far a held bend pushes the tempo, as a fraction of the track's own.
+/// Four percent is a shove that lands a bar inside a beat; two is the
+/// correction you make while listening to whether it worked.
+pub const BEND_COARSE: f64 = 0.04;
+pub const BEND_FINE: f64 = 0.02;
+
 pub const RATE_MIN: f64 = 0.25;
 pub const RATE_MAX: f64 = 4.0;
 /// How far the key can be shifted, in semitones either way. An octave: past
@@ -558,6 +564,11 @@ pub struct DeckState {
     pub rate: f64,
     /// Operator pitch offset as a fraction (−0.08 = 8% slow).
     pub pitch: f64,
+    /// A HELD bend, on top of whatever the fader says, in the same units.
+    /// Deliberately not part of `pitch`: moving the fader opts a follower
+    /// out of the lock, and nudging a deck back into place must not cost it
+    /// its sync. Zero unless a bend button is down.
+    pub bend: f64,
     pub pitch_range: PitchRange,
     /// Tempo/phase are being held against the other deck.
     pub synced: bool,
@@ -623,6 +634,7 @@ impl Default for DeckState {
             splat: None,
             position_secs: 0.0,
             rate: 1.0,
+            bend: 0.0,
             pitch: 0.0,
             pitch_range: PitchRange::Narrow,
             synced: false,
@@ -2111,12 +2123,36 @@ impl DeckEngine {
             state.synced = false;
             state.auto_opt_out = true;
         }
-        let mut cmds = vec![DeckCmd::SetRate { deck, rate }];
+        let mut cmds = vec![DeckCmd::SetRate { deck, rate: self.bent(deck, rate) }];
         // A tempo move on the LEADER propagates: the follower keeps up.
         if self.sync_leader() == Some(deck) {
             cmds.extend(self.apply_auto_sync());
         }
         cmds
+    }
+
+    /// What to command this deck, with any held bend on top.
+    ///
+    /// Clamped rather than merely added: a bend that could drive the rate
+    /// to zero or through it would stop or reverse the record, and a bend
+    /// is a nudge, never a transport control.
+    fn bent(&self, deck: DeckId, base: f64) -> f64 {
+        (base + self.deck(deck).bend).clamp(RATE_MIN, RATE_MAX)
+    }
+
+    /// Hold a bend: `direction` is +1 to push forward, -1 to hold back.
+    pub fn hold_bend(&mut self, deck: DeckId, direction: f64, fine: bool) -> Vec<DeckCmd> {
+        let step = if fine { BEND_FINE } else { BEND_COARSE };
+        self.deck_mut(deck).bend = direction.signum() * step;
+        let base = self.deck(deck).rate;
+        vec![DeckCmd::SetRate { deck, rate: self.bent(deck, base) }]
+    }
+
+    /// Let it go: straight back to whatever the fader says.
+    pub fn release_bend(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        self.deck_mut(deck).bend = 0.0;
+        let rate = self.deck(deck).rate;
+        vec![DeckCmd::SetRate { deck, rate }]
     }
 
     /// Nudge the pitch by a small step (the ± buttons / an encoder).
@@ -3387,6 +3423,72 @@ mod tests {
         let (deck, gen) = load_gen(&engine.click(item(seed), target));
         engine.track_ready(deck, gen, 300.0);
         engine.grid_ready(deck, gen, grid(bpm, first_beat_secs));
+    }
+
+    // ---- momentary pitch bend -------------------------------------------
+
+    #[test]
+    fn a_bend_moves_the_rate_without_moving_the_fader() {
+        let mut decks = DeckEngine::new();
+        let before = decks.deck(DeckId::A).pitch;
+        let cmds = decks.hold_bend(DeckId::A, 1.0, false);
+        assert_eq!(rate_of(&cmds, DeckId::A), Some(1.0 + BEND_COARSE));
+        assert_eq!(decks.deck(DeckId::A).pitch, before, "the fader has not moved");
+    }
+
+    #[test]
+    fn releasing_a_bend_puts_the_rate_back_exactly() {
+        let mut decks = DeckEngine::new();
+        decks.hold_bend(DeckId::A, -1.0, false);
+        let cmds = decks.release_bend(DeckId::A);
+        assert_eq!(rate_of(&cmds, DeckId::A), Some(1.0), "back to the track's own tempo");
+        assert_eq!(decks.deck(DeckId::A).bend, 0.0);
+    }
+
+    #[test]
+    fn a_fine_bend_is_smaller_than_a_coarse_one() {
+        let mut decks = DeckEngine::new();
+        let coarse = rate_of(&decks.hold_bend(DeckId::A, 1.0, false), DeckId::A).unwrap();
+        decks.release_bend(DeckId::A);
+        let fine = rate_of(&decks.hold_bend(DeckId::A, 1.0, true), DeckId::A).unwrap();
+        assert!(fine > 1.0 && fine < coarse, "fine {fine} coarse {coarse}");
+    }
+
+    #[test]
+    fn a_bend_does_not_drop_a_follower_out_of_sync() {
+        // This is the whole reason a bend is not a pitch move: `set_pitch`
+        // opts a follower out of the lock, and nudging a deck back into
+        // place must not cost it its sync.
+        let mut decks = DeckEngine::new();
+        decks.deck_mut(DeckId::B).synced = true;
+        decks.deck_mut(DeckId::B).auto_opt_out = false;
+        decks.hold_bend(DeckId::B, 1.0, false);
+        assert!(decks.deck(DeckId::B).synced, "still locked");
+        assert!(!decks.deck(DeckId::B).auto_opt_out, "and not opted out");
+    }
+
+    #[test]
+    fn a_bend_never_drives_the_deck_backwards() {
+        let mut decks = DeckEngine::new();
+        decks.set_pitch(DeckId::A, -1.0);
+        for _ in 0..40 {
+            decks.hold_bend(DeckId::A, -1.0, false);
+        }
+        let rate = rate_of(&decks.hold_bend(DeckId::A, -1.0, false), DeckId::A).unwrap();
+        assert!(rate >= RATE_MIN, "a bend must never reverse the record: {rate}");
+    }
+
+    #[test]
+    fn a_held_bend_survives_a_pitch_move_underneath_it() {
+        let mut decks = DeckEngine::new();
+        decks.hold_bend(DeckId::A, 1.0, false);
+        let cmds = decks.set_pitch(DeckId::A, 0.5);
+        let base = 1.0 + 0.5 * decks.deck(DeckId::A).pitch_range.fraction();
+        assert_eq!(
+            rate_of(&cmds, DeckId::A),
+            Some(base + BEND_COARSE),
+            "the bend rides on top of whatever the fader now says"
+        );
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
