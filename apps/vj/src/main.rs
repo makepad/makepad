@@ -42,6 +42,8 @@ mod cue;
 mod deck_sections;
 mod deck_tabs;
 mod decks;
+// Writing the operator's own work so that losing power cannot cost it.
+mod durable;
 // VJ effect renderstack: mesh-generating engines configured by splash
 // documents (see effects/mod.rs for the document contract). Also compiled
 // standalone by the effect_gallery example.
@@ -8161,10 +8163,7 @@ impl App {
 
     fn save_midi_map(&self) {
         let path = Self::midi_map_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.midi_learn.encode());
+        let _ = crate::durable::write_file(&path, self.midi_learn.encode());
     }
 
     fn load_midi_map(&mut self) {
@@ -8964,7 +8963,7 @@ tween {}
             u8::from(self.slot_beat_sync[i]),
             self.slot_tween_mode[i],
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     fn load_clip_profile(rev: &AssetRevisionId) -> Option<ClipProfile> {
@@ -9022,7 +9021,7 @@ p2 {}
             p(slot.p[1]),
             p(slot.p[2]),
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     /// Layer the effect's own sticky dial profile onto a freshly loaded
@@ -9071,18 +9070,12 @@ p2 {}
 
     fn save_fx_slots(&self) {
         let path = Self::fx_slots_state_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.fx_slots.encode());
+        let _ = crate::durable::write_file(&path, self.fx_slots.encode());
     }
 
     fn save_fx_slot_source(&self, kind: FxSlotKind, source: &str) {
         let path = Self::fx_slot_source_path(kind);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, source);
+        let _ = crate::durable::write_file(&path, source);
     }
 
     fn load_fx_slots_panel(&mut self, cx: &mut Cx) {
@@ -10863,15 +10856,12 @@ p2 {}
 
     fn save_ui_surface(surface: ApcSurface) {
         let path = Self::ui_surface_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let name = match surface {
             ApcSurface::Video => "video",
             ApcSurface::Music => "music",
             ApcSurface::Sfx => "sfx",
         };
-        let _ = std::fs::write(path, name);
+        let _ = crate::durable::write_file(&path, name);
     }
 
     fn load_ui_surface() -> Option<ApcSurface> {
@@ -10939,14 +10929,11 @@ p2 {}
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let path = Self::loop_marks_path(item);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let mut text = format!("cue {}\n", state.cue_secs);
         for slot in &state.loop_slots {
             text.push_str(&format!("{} {}\n", slot.start_secs, slot.end_secs));
         }
-        let _ = std::fs::write(path, text);
+        let _ = crate::durable::write_file(&path, text);
     }
 
     /// Where a track last had its red marker, so it starts where the
@@ -10955,7 +10942,7 @@ p2 {}
         let text = std::fs::read_to_string(Self::loop_marks_path(item)).ok()?;
         text.lines()
             .find_map(|line| line.strip_prefix("cue "))
-            .and_then(|secs| secs.trim().parse::<f64>().ok())
+            .and_then(|secs| crate::durable::seconds(secs.trim()))
             .filter(|secs| secs.is_finite() && *secs > 0.0)
     }
 
@@ -10966,8 +10953,10 @@ p2 {}
         text.lines()
             .filter_map(|line| {
                 let mut parts = line.split_whitespace();
-                let start = parts.next()?.parse().ok()?;
-                let end = parts.next()?.parse().ok()?;
+                // Same guard the found-loops sibling puts on its own spans: a
+                // torn write leaves text that parses and means nothing.
+                let start = crate::durable::seconds(parts.next()?)?;
+                let end = crate::durable::seconds(parts.next()?)?;
                 Some(crate::decks::LoopSpan { start_secs: start, end_secs: end })
             })
             .collect()
@@ -10991,16 +10980,13 @@ p2 {}
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let path = Self::found_loops_path(item);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let scores = &self.deck_found_scores[deck.index()];
         let mut text = String::new();
         for (index, span) in state.found_loops.iter().enumerate() {
             let score = scores.get(index).copied().unwrap_or(0.0);
             text.push_str(&format!("{} {} {}\n", span.start_secs, span.end_secs, score));
         }
-        let _ = std::fs::write(path, text);
+        let _ = crate::durable::write_file(&path, text);
     }
 
     fn load_found_loops(
@@ -11014,14 +11000,14 @@ p2 {}
         for line in text.lines() {
             let mut parts = line.split_whitespace();
             let (Some(start), Some(end)) = (parts.next(), parts.next()) else { continue };
-            let (Ok(start), Ok(end)) = (start.parse::<f64>(), end.parse::<f64>()) else { continue };
             // A corrupted sidecar (truncated write, disk fault) can hand back
             // NaN/inf text that parses fine and then poisons every span math
-            // downstream — the same guard read_loop_scan_config puts on its
-            // own text fields.
-            if !start.is_finite() || !end.is_finite() {
+            // downstream.
+            let (Some(start), Some(end)) =
+                (crate::durable::seconds(start), crate::durable::seconds(end))
+            else {
                 continue;
-            }
+            };
             spans.push(crate::decks::LoopSpan { start_secs: start, end_secs: end });
             scores.push(parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0));
         }
@@ -18170,7 +18156,7 @@ p2 {}
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     /// Read the dialog back, and put its cache root in force before anything
@@ -18199,9 +18185,6 @@ p2 {}
     /// are live monitoring state and deliberately absent.
     fn save_phones_settings(&self) {
         let path = Self::phones_settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let body = format!(
             "{}\n{}\n{}\n{}\n",
             self.phones_device_name.as_deref().unwrap_or(""),
@@ -18209,7 +18192,7 @@ p2 {}
             self.phones_placement.index(),
             self.phones_cue_mode.index(),
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     fn load_phones_settings(&mut self) {
@@ -18920,10 +18903,7 @@ p2 {}
     /// scans with have to travel with it.
     fn save_loop_scan_settings(&self) {
         let path = Self::loop_scan_settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, self.scan_settings().to_text());
+        let _ = crate::durable::write_file(&path, self.scan_settings().to_text());
     }
 
     fn load_loop_scan_settings(&mut self) {
@@ -18962,10 +18942,7 @@ p2 {}
             u8::from(self.decks.shuffle),
         );
         let path = Self::autopilot_settings_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     fn load_autopilot_settings(&mut self) {
@@ -19034,10 +19011,7 @@ p2 {}
             self.gen.size_index(),
         ) + &format!("{}\n", self.gen.image_model_index());
         let path = Self::gen_panel_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     fn load_gen_panel(&mut self, cx: &mut Cx) {
