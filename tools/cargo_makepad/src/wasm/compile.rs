@@ -4,6 +4,7 @@ use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
 use crate::server_manager::WasmServerOwnershipGuard;
 use crate::utils::*;
+use super::size_report::print_package_size_report;
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_micro_serde::{SerJson, SerJsonState};
 use std::{
@@ -33,6 +34,10 @@ pub struct WasmConfig {
     pub threads: bool,
     pub optimize_size: bool,
     pub wasm_opt: bool,
+    pub production: bool,
+    pub no_location_detail: bool,
+    pub size_report: bool,
+    pub keep_names: bool,
     pub split: bool,
     pub split_auto: bool,
     pub split_functions: bool,
@@ -119,9 +124,65 @@ fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: u
     println!("  split total:     {} bytes", primary_bytes + split_bytes);
 }
 
-/// Run Binaryen wasm-opt -Os on the given wasm bytes if the tool is installed.
+const MIN_BINARYEN_VERSION: u32 = 116;
+
+fn parse_binaryen_version(output: &str) -> Option<u32> {
+    let version = output.split_once("version")?.1;
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
+}
+
+/// Run pinned-compatible Binaryen wasm-opt -Oz on the given wasm bytes.
 /// Returns the optimized bytes on success, or the original bytes on failure (with a note).
 fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
+    let version_output = match Command::new("wasm-opt")
+        .arg("--version")
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "wasm-opt: skipped (version check failed{})",
+                if stderr.trim().is_empty() {
+                    "".to_string()
+                } else {
+                    format!(": {}", stderr.lines().next().unwrap_or(stderr.trim()))
+                }
+            );
+            return data.to_vec();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "wasm-opt: skipped (not found on PATH; optional Binaryen >= {MIN_BINARYEN_VERSION})"
+            );
+            return data.to_vec();
+        }
+        Err(error) => {
+            println!("wasm-opt: skipped (version check failed: {error})");
+            return data.to_vec();
+        }
+    };
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&version_output.stdout),
+        String::from_utf8_lossy(&version_output.stderr)
+    );
+    let Some(version) = parse_binaryen_version(&version_text) else {
+        println!("wasm-opt: skipped (unrecognized Binaryen version output)");
+        return data.to_vec();
+    };
+    if version < MIN_BINARYEN_VERSION {
+        println!(
+            "wasm-opt: skipped (Binaryen {version} is older than pinned minimum {MIN_BINARYEN_VERSION})"
+        );
+        return data.to_vec();
+    }
+
     let build_dir = cwd.join("target/makepad-wasm-opt-tmp");
     if fs::create_dir_all(&build_dir).is_err() {
         println!("wasm-opt: skipped (cannot create temp dir)");
@@ -133,9 +194,10 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         println!("wasm-opt: skipped (cannot write temp file)");
         return data.to_vec();
     }
+    let _ = fs::remove_file(&out_path);
     let args = vec![
         "--all-features".into(),
-        "-Os".into(),
+        "-Oz".into(),
         "-o".into(),
         out_path.to_string_lossy().into_owned(),
         in_path.to_string_lossy().into_owned(),
@@ -149,7 +211,11 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
             Ok(optimized) => {
                 let _ = fs::remove_file(&in_path);
                 let _ = fs::remove_file(&out_path);
-                println!("wasm-opt: {} -> {} bytes", data.len(), optimized.len());
+                println!(
+                    "wasm-opt: Binaryen {version} -Oz, {} -> {} bytes",
+                    data.len(),
+                    optimized.len()
+                );
                 return optimized;
             }
             Err(_) => {
@@ -159,7 +225,7 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.trim().is_empty() {
-                println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
+                println!("wasm-opt: skipped (Binaryen wasm-opt -Oz failed)");
             } else {
                 println!(
                     "wasm-opt: skipped ({})",
@@ -629,13 +695,24 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     }
     let args_out_refs: Vec<&str> = args_out.iter().map(|arg| arg.as_str()).collect();
 
-    let rustflags = if config.threads {
+    let mut rustflags = if config.threads {
         WASM_RUSTFLAGS_THREADED
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
-    };
-    let mut env = vec![("RUSTFLAGS", rustflags)];
-    // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
+    }
+    .to_string();
+    if config.no_location_detail {
+        rustflags.push_str(" -Zlocation-detail=none");
+    }
+    let mut env = vec![("RUSTFLAGS", rustflags.as_str())];
+    // Let Makepad's explicit strip pass see custom sections so `--keep-names` can retain the
+    // analysis module before the shipping module is stripped. The emitted production wasm is
+    // still stripped below, and its standard code/data section bytes are unchanged.
+    if profile == "small" && config.strip {
+        env.push(("CARGO_PROFILE_SMALL_STRIP", "none"));
+    }
+    // Production selects `profile.small` only for threaded builds. If a caller explicitly uses
+    // it with `--no-threads`, disable LTO: it is known to miscompile the script VM in wasm.
     if profile == "small" && !config.threads {
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
@@ -859,10 +936,18 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let wasm_dest = app_dir.join(format!("{}.wasm", build_bin));
+    let named_wasm_dest = app_dir.join(format!("{}.names.wasm", build_bin));
+    let data = fs::read(&wasm_source)
+        .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+    if config.keep_names {
+        fs::write(&named_wasm_dest, &data)
+            .map_err(|error| format!("Can't write named wasm {:?}: {error}", named_wasm_dest))?;
+        println!("Kept named analysis wasm: {:?}", named_wasm_dest);
+    } else {
+        let _ = fs::remove_file(&named_wasm_dest);
+        remove_brotli_artifact(&named_wasm_dest);
+    }
     let mut output = if config.optimize_size || config.strip {
-        let data = fs::read(&wasm_source)
-            .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
-
         if config.optimize_size {
             let report = wasm_size_report(&data)
                 .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
@@ -873,7 +958,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         }
     } else {
-        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
+        data
     };
 
     if config.wasm_opt {
@@ -1043,6 +1128,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             split_data_bytes,
             split_brotli_bytes,
         );
+    }
+    if config.size_report {
+        let config_id = if config.production {
+            format!("production/{profile}")
+        } else {
+            profile.to_string()
+        };
+        print_package_size_report(&build_bin, &config_id, &wasm_dest)?;
     }
     println!("Created wasm package: {:?}", app_dir);
     if config.threads {
@@ -2195,5 +2288,14 @@ mod tests {
             Some("IBMPlexSans-Text.ttf")
         );
         assert_eq!(small_font_fallback_target("IBMPlexSans-Text.ttf"), None);
+    }
+
+    #[test]
+    fn parses_binaryen_version_output() {
+        assert_eq!(
+            parse_binaryen_version("wasm-opt version 123 (git deadbeef)"),
+            Some(123)
+        );
+        assert_eq!(parse_binaryen_version("unexpected output"), None);
     }
 }
