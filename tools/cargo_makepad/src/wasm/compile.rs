@@ -2,6 +2,7 @@ use crate::makepad_network::http_server::*;
 use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
+use crate::font_assets::{no_skip, remove_existing_fonts, FontAssetManifest, FontPackage};
 use crate::server_manager::WasmServerOwnershipGuard;
 use crate::utils::*;
 use super::size_report::print_package_size_report;
@@ -28,7 +29,6 @@ pub struct WasmConfig {
     pub strip: bool,
     pub lan: bool,
     pub port: Option<u16>,
-    pub small_fonts: bool,
     pub brotli: bool,
     pub bindgen: bool,
     pub threads: bool,
@@ -371,12 +371,6 @@ pub fn generate_html(
     } else {
         ""
     };
-    let small_font_aliases = if config.small_fonts {
-        "\n            window.makepad_small_font_aliases = true;"
-    } else {
-        ""
-    };
-
     let preloads = if config.bindgen {
         "
         <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
@@ -444,7 +438,6 @@ pub fn generate_html(
             }});
 
             try {{
-                {small_font_aliases}
                 {init}
                 class MyWasmApp {{
                     constructor(wasm) {{
@@ -508,17 +501,6 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
         None => return,
     };
     let _ = fs::remove_file(dest_path_br);
-}
-
-fn small_font_fallback_target(file_name: &str) -> Option<&'static str> {
-    match file_name {
-        "GoNotoKurrent-Bold.ttf" => Some("IBMPlexSans-SemiBold.ttf"),
-        "GoNotoKurrent-Regular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiBold.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiRegular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "NotoColorEmoji.ttf" => Some("IBMPlexSans-Text.ttf"),
-        _ => None,
-    }
 }
 
 fn minify_js(input: &str) -> String {
@@ -771,27 +753,26 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    // Read and validate the application contract immediately after linking. Later size/strip
+    // passes intentionally remove custom sections from the shipping wasm.
+    let linked_wasm = build_dir.join(format!("{}.wasm", build_bin));
+    let font_manifest = FontAssetManifest::from_wasm_file(&linked_wasm)?;
+    remove_existing_fonts(&app_dir)?;
+    let mut font_package = FontPackage::new(&font_manifest);
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        // if we have an index.html in src/ copy that one
         let underscore_build_crate = build_crate.replace('-', "_");
         let dst_dir = app_dir.join(underscore_build_crate).join("resources");
-        mkdir(&dst_dir)?;
-        //cp_all(&local_resources_path, &dst_dir, false) ?;
-        walk_all(
+        font_package.copy_tree_filtered(
             &local_resources_path,
             &dst_dir,
-            &mut |source_path, dest_dir| {
-                let source_file_name = source_path
-                    .file_name()
-                    .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                    .to_string_lossy()
-                    .to_string();
-                let dest_path = dest_dir.join(&source_file_name);
-                cp(&source_path, &dest_path, false)?;
+            &format!("{}/resources", build_crate.replace('-', "_")),
+            no_skip,
+            |dest_path| {
+                let dest_path = dest_path.to_path_buf();
                 if config.brotli {
                     brotli_compress(&dest_path);
                 } else {
@@ -882,40 +863,24 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
         if resources_path.is_dir() {
             let dst_dir = app_dir.join(&name).join("resources");
-            mkdir(&dst_dir)?;
-            if config.small_fonts {
-                for file_name in [
-                    "GoNotoKurrent-Bold.ttf",
-                    "GoNotoKurrent-Regular.ttf",
-                    "LXGWWenKaiBold.ttf",
-                    "LXGWWenKaiRegular.ttf",
-                    "NotoColorEmoji.ttf",
-                ] {
-                    let stale_path = dst_dir.join(file_name);
-                    let _ = fs::remove_file(&stale_path);
-                    remove_brotli_artifact(&stale_path);
-                }
-            }
-            walk_all(&resources_path, &dst_dir, &mut |source_path, dest_dir| {
-                let source_file_name = source_path
-                    .file_name()
-                    .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                    .to_string_lossy()
-                    .to_string();
-                if config.small_fonts && small_font_fallback_target(&source_file_name).is_some() {
-                    return Ok(());
-                }
-                let dest_path = dest_dir.join(&source_file_name);
-                cp(source_path, &dest_path, false)?;
-                if config.brotli {
-                    brotli_compress(&dest_path);
-                } else {
-                    remove_brotli_artifact(&dest_path);
-                }
-                Ok(())
-            })?;
+            font_package.copy_tree_filtered(
+                &resources_path,
+                &dst_dir,
+                &format!("{name}/resources"),
+                no_skip,
+                |dest_path| {
+                    let dest_path = dest_path.to_path_buf();
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    } else {
+                        remove_brotli_artifact(&dest_path);
+                    }
+                    Ok(())
+                },
+            )?;
         }
     }
+    font_package.finish()?.print();
     let wasm_source = if config.bindgen {
         shell(
             build_dir.as_path(),
@@ -2316,31 +2281,6 @@ mod tests {
         assert!(!client_accepts_brotli(Some("gzip, br;q=0")));
         assert!(!client_accepts_brotli(Some("gzip, deflate")));
         assert!(!client_accepts_brotli(None));
-    }
-
-    #[test]
-    fn small_font_fallbacks_cover_heavy_widget_fonts() {
-        assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Bold.ttf"),
-            Some("IBMPlexSans-SemiBold.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Regular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiBold.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiRegular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("NotoColorEmoji.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(small_font_fallback_target("IBMPlexSans-Text.ttf"), None);
     }
 
     #[test]

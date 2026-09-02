@@ -10,6 +10,8 @@ mod check;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
+mod font_assets;
+#[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_manager;

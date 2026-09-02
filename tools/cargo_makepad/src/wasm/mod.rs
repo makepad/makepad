@@ -3,10 +3,6 @@ mod sdk;
 mod size_report;
 use compile::WasmConfig;
 
-fn should_default_to_small_fonts(config: &WasmConfig) -> bool {
-    config.optimize_size || config.brotli || config.split || !config.threads
-}
-
 fn enable_strip_pipeline(config: &mut WasmConfig) {
     config.strip = true;
     config.optimize_size = true;
@@ -62,7 +58,9 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
         enable_split_pipeline(config, Some(threshold.parse::<usize>().unwrap_or(200)));
         true
     } else if v == "--small-fonts" {
-        config.small_fonts = true;
+        eprintln!(
+            "warning: --small-fonts is ignored; the application's makepad.font-assets.v1 manifest selects fonts"
+        );
         true
     } else if v == "--brotli" {
         config.brotli = true;
@@ -132,7 +130,6 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         lan: false,
         brotli: false,
         port: None,
-        small_fonts: false,
         bindgen: false,
         threads: true,
         optimize_size: false,
@@ -164,18 +161,12 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         "build" => {
             let build_args = strip_wasm_options(&mut config, &args[1..]);
             let build_args = apply_production_profile(&config, build_args);
-            if should_default_to_small_fonts(&config) && !config.small_fonts {
-                config.small_fonts = true;
-            }
             compile::build(config, &build_args)?;
             Ok(())
         }
         "run" => {
             let run_args = strip_wasm_options(&mut config, &args[1..]);
             let run_args = apply_production_profile(&config, run_args);
-            if should_default_to_small_fonts(&config) && !config.small_fonts {
-                config.small_fonts = true;
-            }
             compile::run(config, &run_args)?;
             Ok(())
         }
@@ -191,92 +182,12 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
-    #[test]
-    fn packaged_build_defaults_to_small_fonts() {
-        for args in [
-            args(&["build", "--strip", "-p", "app"]),
-            args(&["build", "--brotli", "-p", "app"]),
-            args(&["build", "--split", "-p", "app"]),
-            args(&["build", "--no-threads", "-p", "app"]),
-        ] {
-            let mut config = WasmConfig {
-                strip: false,
-                lan: false,
-                brotli: false,
-                port: None,
-                small_fonts: false,
-                bindgen: false,
-                threads: true,
-                optimize_size: false,
-                wasm_opt: false,
-                production: false,
-                lto: false,
-                no_location_detail: false,
-                size_report: false,
-                keep_names: false,
-                split: false,
-                split_auto: false,
-                split_functions: false,
-                split_functions_threshold: 200,
-                hot_reload: false,
-            };
-
-            let build_args = strip_wasm_options(&mut config, &args[1..]);
-            assert!(!build_args.is_empty());
-            if should_default_to_small_fonts(&config) && !config.small_fonts {
-                config.small_fonts = true;
-            }
-            assert!(config.small_fonts, "expected small fonts for {:?}", args);
-        }
-    }
-
-    #[test]
-    fn packaged_run_defaults_to_small_fonts() {
-        for args in [
-            args(&["run", "--strip", "-p", "app"]),
-            args(&["run", "--brotli", "-p", "app"]),
-            args(&["run", "--split", "-p", "app"]),
-            args(&["run", "--no-threads", "-p", "app"]),
-        ] {
-            let mut config = WasmConfig {
-                strip: false,
-                lan: false,
-                brotli: false,
-                port: None,
-                small_fonts: false,
-                bindgen: false,
-                threads: true,
-                optimize_size: false,
-                wasm_opt: false,
-                production: false,
-                lto: false,
-                no_location_detail: false,
-                size_report: false,
-                keep_names: false,
-                split: false,
-                split_auto: false,
-                split_functions: false,
-                split_functions_threshold: 200,
-                hot_reload: false,
-            };
-
-            let run_args = strip_wasm_options(&mut config, &args[1..]);
-            assert!(!run_args.is_empty());
-            if should_default_to_small_fonts(&config) && !config.small_fonts {
-                config.small_fonts = true;
-            }
-            assert!(config.small_fonts, "expected small fonts for {:?}", args);
-        }
-    }
-
-    #[test]
-    fn profile_small_alone_keeps_full_fonts() {
-        let mut config = WasmConfig {
+    fn default_config() -> WasmConfig {
+        WasmConfig {
             strip: false,
             lan: false,
             brotli: false,
             port: None,
-            small_fonts: false,
             bindgen: false,
             threads: true,
             optimize_size: false,
@@ -291,39 +202,34 @@ mod tests {
             split_functions: false,
             split_functions_threshold: 200,
             hot_reload: false,
-        };
-
-        let build_args = strip_wasm_options(&mut config, &args(&["-p", "app", "--profile=small"]));
-        assert_eq!(build_args, vec!["-p", "app", "--profile=small"]);
-        if should_default_to_small_fonts(&config) && !config.small_fonts {
-            config.small_fonts = true;
         }
-        assert!(!config.small_fonts);
+    }
+
+    #[test]
+    fn delivery_options_are_consumed_without_a_font_policy_side_effect() {
+        for option in ["--strip", "--brotli", "--split", "--no-threads"] {
+            let mut config = default_config();
+            let cargo_args = strip_wasm_options(
+                &mut config,
+                &args(&[option, "--release", "-p", "app"]),
+            );
+            assert_eq!(cargo_args, vec!["--release", "-p", "app"]);
+        }
+    }
+
+    #[test]
+    fn deprecated_small_fonts_flag_is_consumed_and_ignored() {
+        let mut config = default_config();
+        let cargo_args = strip_wasm_options(
+            &mut config,
+            &args(&["--small-fonts", "--release", "-p", "app"]),
+        );
+        assert_eq!(cargo_args, vec!["--release", "-p", "app"]);
     }
 
     #[test]
     fn production_and_reporting_flags_are_parsed_and_not_forwarded() {
-        let mut config = WasmConfig {
-            strip: false,
-            lan: false,
-            brotli: false,
-            port: None,
-            small_fonts: false,
-            bindgen: false,
-            threads: true,
-            optimize_size: false,
-            wasm_opt: false,
-            production: false,
-            lto: false,
-            no_location_detail: false,
-            size_report: false,
-            keep_names: false,
-            split: false,
-            split_auto: false,
-            split_functions: false,
-            split_functions_threshold: 200,
-            hot_reload: false,
-        };
+        let mut config = default_config();
         let cargo_args = strip_wasm_options(
             &mut config,
             &args(&[
@@ -352,27 +258,7 @@ mod tests {
 
     #[test]
     fn production_lto_opts_into_small_profile() {
-        let mut config = WasmConfig {
-            strip: false,
-            lan: false,
-            brotli: false,
-            port: None,
-            small_fonts: false,
-            bindgen: false,
-            threads: true,
-            optimize_size: false,
-            wasm_opt: false,
-            production: false,
-            lto: false,
-            no_location_detail: false,
-            size_report: false,
-            keep_names: false,
-            split: false,
-            split_auto: false,
-            split_functions: false,
-            split_functions_threshold: 200,
-            hot_reload: false,
-        };
+        let mut config = default_config();
         let cargo_args = strip_wasm_options(
             &mut config,
             &args(&["--production", "--lto", "--release", "-p", "app"]),
@@ -387,27 +273,7 @@ mod tests {
 
     #[test]
     fn production_lto_does_not_force_small_profile_without_threads() {
-        let mut config = WasmConfig {
-            strip: false,
-            lan: false,
-            brotli: false,
-            port: None,
-            small_fonts: false,
-            bindgen: false,
-            threads: true,
-            optimize_size: false,
-            wasm_opt: false,
-            production: false,
-            lto: false,
-            no_location_detail: false,
-            size_report: false,
-            keep_names: false,
-            split: false,
-            split_auto: false,
-            split_functions: false,
-            split_functions_threshold: 200,
-            hot_reload: false,
-        };
+        let mut config = default_config();
         let cargo_args = strip_wasm_options(
             &mut config,
             &args(&[
