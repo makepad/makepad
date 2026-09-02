@@ -3400,6 +3400,8 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 0.5}
                         auto_why := MusicLabel{width: Fill text: ""}
+                        auto_good := MusicButton{width: 30 height: 22 text: "+"}
+                        auto_bad := MusicButton{width: 30 height: 22 text: "-"}
                         auto_go := MusicButton{width: 42 height: 22 text: "GO"}
                         auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
                     }

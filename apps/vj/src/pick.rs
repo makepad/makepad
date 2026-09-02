@@ -266,7 +266,12 @@ mod tests {
     }
 
     fn played(key: &str, artist: &str, at: u64) -> Played {
-        Played { key: key.to_string(), artist: artist.to_string(), at_secs: at }
+        Played {
+            key: key.to_string(),
+            artist: artist.to_string(),
+            at_secs: at,
+            rated: None,
+        }
     }
 
     fn order<'a>(scored: &[Scored], candidates: &'a [Candidate]) -> Vec<&'a str> {

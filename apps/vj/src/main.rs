@@ -24517,6 +24517,16 @@ p2 {}
             self.autopilot.set_suggest_only(on);
             self.save_autopilot_settings();
         }
+        for (id, good) in [(live_id!(auto_good), true), (live_id!(auto_bad), false)] {
+            if self.ui.button(cx, &[id]).clicked(actions) {
+                // A remark about the transition that just happened, not a
+                // form to fill in: most of a night goes unrated, and the
+                // log is read afterwards rather than by the planner.
+                if self.set_history.rate_last(good) {
+                    self.save_set_history();
+                }
+            }
+        }
         if self.ui.button(cx, ids!(auto_go)).clicked(actions) {
             // The one operator touch that must NOT go through the
             // hands-on funnel: that drops the plan, and accepting a
@@ -25005,6 +25015,9 @@ p2 {}
             key: item.asset.to_string(),
             artist,
             at_secs: Self::now_secs(),
+            // The transition into it has not been judged yet, and most
+            // never will be.
+            rated: None,
         });
         self.save_set_history();
     }

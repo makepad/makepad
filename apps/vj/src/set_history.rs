@@ -20,6 +20,10 @@ pub struct Played {
     pub artist: String,
     /// Wall clock, seconds. The host's, not ours.
     pub at_secs: u64,
+    /// What the operator thought of the transition INTO this record, when
+    /// they said. Most of a night goes unrated and that is the normal
+    /// case: a rating is a remark, not a form to fill in.
+    pub rated: Option<bool>,
 }
 
 /// The night so far, oldest first.
@@ -73,12 +77,30 @@ impl SetHistory {
             .any(|play| play.artist == artist && play.at_secs >= since_secs)
     }
 
-    /// One record per line: when, then the key, then the artist, which is
-    /// the only field that can hold a space and so goes last.
+    /// Mark what the operator thought of the last transition.
+    pub fn rate_last(&mut self, good: bool) -> bool {
+        match self.plays.last_mut() {
+            Some(play) => {
+                play.rated = Some(good);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One record per line: when, then a mark for the transition into it,
+    /// then the key, then the artist, which is the only field that can hold
+    /// a space and so goes last.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         for play in &self.plays {
             out.push_str(&play.at_secs.to_string());
+            out.push(' ');
+            out.push(match play.rated {
+                Some(true) => '+',
+                Some(false) => '-',
+                None => '.',
+            });
             out.push(' ');
             out.push_str(&play.key);
             out.push(' ');
@@ -96,17 +118,44 @@ impl SetHistory {
     pub fn from_text(text: &str) -> SetHistory {
         let mut log = SetHistory::new();
         for line in text.lines() {
-            let mut fields = line.trim_end().splitn(3, ' ');
-            let Some(Ok(at_secs)) = fields.next().map(str::parse) else {
+            let line = line.trim_end();
+            let Some((when, rest)) = line.split_once(' ') else {
                 continue;
             };
-            let Some(key) = fields.next().filter(|key| !key.is_empty()) else {
+            let Ok(at_secs) = when.parse() else {
                 continue;
             };
+            let (mark, rest) = match rest.split_once(' ') {
+                Some((first, rest)) => (first, rest),
+                None => (rest, ""),
+            };
+            // The mark was added after the first nights were written, so a
+            // line without one is still a line: an asset id is never a
+            // single mark character, which is what tells the two apart.
+            let (rated, key, artist) = match mark {
+                "+" | "-" | "." => {
+                    let rated = match mark {
+                        "+" => Some(true),
+                        "-" => Some(false),
+                        _ => None,
+                    };
+                    match rest.split_once(' ') {
+                        Some((key, artist)) => (rated, key, artist),
+                        None => (rated, rest, ""),
+                    }
+                }
+                key => (None, key, rest),
+            };
+            if key.is_empty() {
+                continue;
+            }
+            // The artist is whatever is left, so a name with spaces in it
+            // arrives whole.
             log.note(Played {
                 key: key.to_string(),
-                artist: fields.next().unwrap_or_default().to_string(),
+                artist: artist.to_string(),
                 at_secs,
+                rated,
             });
         }
         log
@@ -118,7 +167,12 @@ mod tests {
     use super::*;
 
     fn played(key: &str, artist: &str, at: u64) -> Played {
-        Played { key: key.to_string(), artist: artist.to_string(), at_secs: at }
+        Played {
+            key: key.to_string(),
+            artist: artist.to_string(),
+            at_secs: at,
+            rated: None,
+        }
     }
 
     #[test]
@@ -158,6 +212,32 @@ mod tests {
         let mut log = SetHistory::new();
         log.note(played("ast_a", "", 1_000));
         assert!(!log.artist_since("", 0));
+    }
+
+    #[test]
+    fn a_rating_lands_on_the_record_it_was_about_and_survives_the_file() {
+        let mut log = SetHistory::new();
+        assert!(!log.rate_last(true), "nothing has played to rate");
+
+        log.note(played("ast_a", "Someone", 100));
+        log.note(played("ast_b", "Another", 200));
+        assert!(log.rate_last(false), "the last record takes the mark");
+        assert_eq!(log.plays()[0].rated, None, "and only that one");
+        assert_eq!(log.plays()[1].rated, Some(false));
+
+        let back = SetHistory::from_text(&log.to_text());
+        assert_eq!(back.plays(), log.plays());
+    }
+
+    #[test]
+    fn a_night_written_before_ratings_existed_still_reads() {
+        // The mark was added later. An asset id cannot be one character, so
+        // the two shapes of line tell themselves apart.
+        let log = SetHistory::from_text("1000 ast_a Someone Else\n");
+        assert_eq!(log.plays().len(), 1);
+        assert_eq!(log.plays()[0].key, "ast_a");
+        assert_eq!(log.plays()[0].artist, "Someone Else");
+        assert_eq!(log.plays()[0].rated, None);
     }
 
     #[test]
