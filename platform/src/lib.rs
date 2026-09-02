@@ -26,6 +26,7 @@ mod shared_bytes;
 
 pub mod action;
 pub mod game_input;
+pub mod frame_trace;
 
 pub mod audio;
 pub mod midi;

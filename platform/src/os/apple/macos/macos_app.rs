@@ -340,6 +340,8 @@ pub struct MacosApp {
     /// NSTimer pacing stays). Entries are (cocoa window, link).
     display_links: Vec<(ObjcId, ObjcId)>,
     display_links_paused: bool,
+    /// The frame clock, measured (`MAKEPAD_TRACE=frames`).
+    pub frame_trace: crate::frame_trace::FrameTrace,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
     /// Exact framework-to-Cocoa lookup for bridge-injected pointer activation.
@@ -411,6 +413,7 @@ impl MacosApp {
                 timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
                 display_links: Vec::new(),
                 display_links_paused: false,
+                frame_trace: crate::frame_trace::FrameTrace::new(),
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
