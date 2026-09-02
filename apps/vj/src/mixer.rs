@@ -1233,6 +1233,8 @@ pub struct Mixer {
     transition: Arc<TransitionAtomics>,
     device_frames: Arc<AtomicU64>,
     device_rate_bits: Arc<AtomicU64>,
+    /// One-shot proof that transport, PCM and the output callback met.
+    first_non_silent: Arc<AtomicBool>,
     /// Callbacks that found the state lock held and went out SILENT — every
     /// count here is an audible gap in the programme. The pump reports
     /// growth, so a dropout heard in the room can be told apart from a
@@ -1290,6 +1292,7 @@ impl Mixer {
             transition: Arc::new(TransitionAtomics::new()),
             device_frames: Arc::new(AtomicU64::new(0)),
             device_rate_bits: Arc::new(AtomicU64::new(0)),
+            first_non_silent: Arc::new(AtomicBool::new(false)),
             contended_callbacks: Arc::new(AtomicU64::new(0)),
             render_max_nanos: Arc::new(AtomicU64::new(0)),
             cue_ring: Arc::new(CueRing::new()),
@@ -1417,6 +1420,10 @@ impl Mixer {
     pub fn output_sample_rate(&self) -> Option<f64> {
         let rate = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
         (rate.is_finite() && rate > 0.0).then_some(rate)
+    }
+
+    pub fn has_produced_non_silent(&self) -> bool {
+        self.first_non_silent.load(Ordering::Acquire)
     }
 
     /// Arm a video transition at an absolute audio-device output frame.
@@ -2748,6 +2755,19 @@ impl Mixer {
         }
         for (i, p) in deck_peaks.iter().enumerate() {
             self.deck_meters[i].store(p.to_bits(), Ordering::Relaxed);
+        }
+        if peaks[METER_MASTER] > f32::EPSILON
+            && self
+                .first_non_silent
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            crate::log!(
+                "audio: mixer first non-silent buffer sample_rate={} frames={} channels={}",
+                device_rate,
+                frames,
+                channels
+            );
         }
         self.transition
             .publish_rendered_frame(self.device_frames.load(Ordering::Acquire));

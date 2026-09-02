@@ -113,6 +113,7 @@ impl WebAudioAccess {
         // we can however only use one so we'll use the first one
         // and then we'll send over the device we want to the other side
         if devices.len() == 0 {
+            crate::log!("web audio: no output device; output stopped");
             os.from_wasm(FromWasmStopAudioOutput {});
             return;
         }
@@ -123,8 +124,10 @@ impl WebAudioAccess {
             if let Some(device) = self.devices.iter().find(|v| v.desc.device_id == devices[0]) {
                 device.web_device_id.clone()
             } else {
+                crate::log!("web audio: requested output device is unavailable; using browser default");
                 "".to_string()
             };
+        self.output_device_id = devices[0];
         os.from_wasm(FromWasmStartAudioOutput {
             web_device_id,
             context_ptr: self.self_arc as u32,
@@ -146,6 +149,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     context_ptr: u32,
     frames: u32,
     channels: u32,
+    sample_rate: f64,
 ) -> u32 {
     let wa = context_ptr as *const Mutex<WebAudioAccess>;
     let (output_fn, mut output_buffer, device_id) = {
@@ -167,7 +171,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
             AudioInfo {
                 device_id,
                 time: None,
-                sample_rate: 48000.0,
+                sample_rate,
             },
             &mut output_buffer,
         );
