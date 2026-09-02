@@ -53,6 +53,10 @@ pub enum Preview {
     NoViewer(String),
 }
 
+pub(crate) fn demo_preview(fs: &dyn crate::vfs::Vfs) -> Option<Preview> {
+    fs.is_demo().then(|| Preview::NoViewer("External previews are not in this demo".to_string()))
+}
+
 /// The one preview this window has open, if any.
 #[derive(Default)]
 pub struct PreviewHost {
@@ -113,11 +117,12 @@ impl PreviewHost {
     /// RealVfs-only integration; demo files fall back to the in-app preview.
     pub fn open(&mut self, cx: &Cx, path: &Path) -> Preview {
         let name = crate::model::display_name(path);
-        if crate::vfs::vfs().is_demo() {
-            return Preview::NoViewer("External previews are not in this demo".to_string());
+        let fs = crate::vfs::vfs();
+        if let Some(preview) = demo_preview(fs.as_ref()) {
+            return preview;
         }
         let app = viewer_for(path);
-        let real = crate::vfs::vfs().real_path(path);
+        let real = fs.real_path(path);
         let path = real.as_path();
         if makepad_wm_api::hosted(cx) {
             // No `close` first: the WM keeps the viewer warm and retargets it,

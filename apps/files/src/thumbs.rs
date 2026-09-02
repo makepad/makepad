@@ -223,11 +223,11 @@ trait ThumbSource {
     fn decode(&self, path: &Path) -> Option<ThumbPixels>;
 }
 
-struct NativeThumbSource;
+struct NativeThumbSource<'a>(&'a dyn crate::vfs::Vfs);
 
-impl ThumbSource for NativeThumbSource {
+impl ThumbSource for NativeThumbSource<'_> {
     fn decode(&self, path: &Path) -> Option<ThumbPixels> {
-        let real = crate::vfs::vfs().real_path(path);
+        let real = self.0.real_path(path);
         if crate::model::is_playable_video(path) {
             #[cfg(not(target_arch = "wasm32"))]
             return decode_video_thumb(&real);
@@ -287,10 +287,14 @@ fn decode_image_bytes(data: &[u8]) -> Option<ThumbPixels> {
 /// Dispatch at the filesystem seam: a demo path never becomes a host path,
 /// and a video in the closed demo is just one embedded still.
 fn decode_thumb(path: &Path) -> Option<ThumbPixels> {
-    if crate::vfs::vfs().is_demo() {
+    decode_thumb_from(crate::vfs::vfs().as_ref(), path)
+}
+
+pub(crate) fn decode_thumb_from(fs: &dyn crate::vfs::Vfs, path: &Path) -> Option<ThumbPixels> {
+    if fs.is_demo() {
         DemoThumbSource.decode(path)
     } else {
-        NativeThumbSource.decode(path)
+        NativeThumbSource(fs).decode(path)
     }
 }
 
@@ -516,13 +520,16 @@ mod tests {
     #[test]
     fn demo_source_pool_is_distinct_decodable_and_uses_one_video_still() {
         let mut seen = std::collections::HashSet::new();
+        let mut decoded = std::collections::HashSet::new();
         assert_eq!(DemoThumbSource::IMAGES.len() + 1, 9);
         for (slot, bytes) in DemoThumbSource::IMAGES.iter().copied().enumerate() {
             assert!(seen.insert(bytes), "demo picture slots contain duplicate bytes at slot {slot}");
-            assert!(decode_image_from_data(bytes).is_ok(), "demo picture slot {slot} did not decode");
+            let image = decode_image_from_data(bytes).unwrap_or_else(|_| panic!("demo picture slot {slot} did not decode"));
+            assert!(decoded.insert(image.data), "demo picture slots decode to duplicate pixels at slot {slot}");
         }
         assert!(seen.insert(DemoThumbSource::VIDEO_STILL), "the designated video still duplicates a picture slot");
-        assert!(decode_image_from_data(DemoThumbSource::VIDEO_STILL).is_ok(), "the designated video still did not decode");
+        let video = decode_image_from_data(DemoThumbSource::VIDEO_STILL).expect("the designated video still did not decode");
+        assert!(decoded.insert(video.data), "the designated video still decodes to duplicate picture pixels");
 
         for path in [Path::new("/Demo/Videos/clip-0001.mp4"), Path::new("/Demo/Videos/camera-0003.mkv")] {
             assert_eq!(DemoThumbSource::bytes(path), DemoThumbSource::VIDEO_STILL);

@@ -447,7 +447,7 @@ fn memory_prefs() -> &'static std::sync::Mutex<String> {
 /// One saved preference, by key. The file is `key=value` lines, nothing
 /// more; a missing file is simply no preferences.
 pub fn pref_get(key: &str) -> Option<String> {
-    if cfg!(feature = "demo") || crate::vfs::is_demo() {
+    if cfg!(test) || cfg!(feature = "demo") || crate::vfs::is_demo() {
         let text = memory_prefs().lock().unwrap_or_else(|e| e.into_inner());
         return pref_find(&text, key);
     }
@@ -458,7 +458,7 @@ pub fn pref_get(key: &str) -> Option<String> {
 /// Save one preference, leaving every other key exactly as it was — the
 /// file is shared by whatever small choices the app remembers.
 pub fn pref_set(key: &str, value: &str) {
-    if cfg!(feature = "demo") || crate::vfs::is_demo() {
+    if cfg!(test) || cfg!(feature = "demo") || crate::vfs::is_demo() {
         let mut text = memory_prefs().lock().unwrap_or_else(|e| e.into_inner());
         *text = pref_replace(&text, key, value);
         return;
@@ -507,11 +507,11 @@ fn pref_replace(old: &str, key: &str, value: &str) -> String {
 /// Only ever consulted for directories, and only for the ones directly under
 /// the user's home — a `Library` folder inside a project is a project's
 /// library and gets measured like anything else.
-pub fn skip_for_scan(path: &Path) -> bool {
-    if scan_all() {
-        return false;
-    }
-    let home = home_dir();
+pub fn skip_for_scan(path: &Path, home: &Path) -> bool {
+    !scan_all() && home_scan_exclusion(path, home)
+}
+
+pub(crate) fn home_scan_exclusion(path: &Path, home: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
@@ -849,17 +849,17 @@ mod tests {
     // protected folder: those folders are never entered at all.
     #[test]
     fn the_map_leaves_apples_folders_alone_and_touches_nothing_else() {
-        let home = home_dir();
-        assert!(skip_for_scan(&home.join("Library")));
-        assert!(skip_for_scan(&home.join(".Trash")));
+        let home = Path::new("/active-home");
+        assert!(home_scan_exclusion(&home.join("Library"), home));
+        assert!(home_scan_exclusion(&home.join(".Trash"), home));
         // The user's own files, which is the entire point.
-        assert!(!skip_for_scan(&home.join("Documents")));
-        assert!(!skip_for_scan(&home.join("Pictures")));
-        assert!(!skip_for_scan(&home.join("Downloads")));
+        assert!(!home_scan_exclusion(&home.join("Documents"), home));
+        assert!(!home_scan_exclusion(&home.join("Pictures"), home));
+        assert!(!home_scan_exclusion(&home.join("Downloads"), home));
         // Only *directly* under home. A project's own `Library` folder is the
         // project's, and gets measured like anything else in it.
-        assert!(!skip_for_scan(&home.join("code/thing/Library")));
-        assert!(!skip_for_scan(Path::new("/tmp/Library")));
+        assert!(!home_scan_exclusion(&home.join("code/thing/Library"), home));
+        assert!(!home_scan_exclusion(Path::new("/tmp/Library"), home));
         // Whatever it leaves out, it says so.
         assert!(scan_exclusions().is_some());
     }
