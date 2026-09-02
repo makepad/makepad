@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// First byte of the reserved locking region (1 GiB).
 pub const PENDING_BYTE: u64 = 0x4000_0000;
@@ -61,6 +63,7 @@ impl FileLock {
 
     /// Move to `want`, retrying until `timeout` elapses. Returns false when the
     /// lock could not be taken in time (SQLITE_BUSY).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn acquire(&mut self, file: &dyn PageStore, want: LockLevel, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -72,6 +75,14 @@ impl FileLock {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// In the browser a store has exactly one owner, so there is nobody to
+    /// wait for: one attempt is the whole story (and the web has no clock or
+    /// sleep to wait with).
+    #[cfg(target_arch = "wasm32")]
+    pub fn acquire(&mut self, file: &dyn PageStore, want: LockLevel, _timeout: Duration) -> Result<bool> {
+        self.try_acquire(file, want)
     }
 
     /// One attempt at reaching `want`.
@@ -298,12 +309,24 @@ impl ProcessLock {
         }
     }
 
+    /// One owner in the browser: the slot is free or it is not, nobody to wait for.
+    #[cfg(target_arch = "wasm32")]
+    pub fn acquire_write(&self, _timeout: Duration) -> bool {
+        let mut held = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if *held {
+            return false;
+        }
+        *held = true;
+        true
+    }
+
     /// True while some connection in this process holds the write slot.
     pub fn is_write_held(&self) -> bool {
         *self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Take the in-process write slot, waiting up to `timeout`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn acquire_write(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut held = self.state.lock().unwrap_or_else(|e| e.into_inner());
