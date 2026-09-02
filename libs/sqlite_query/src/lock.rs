@@ -247,6 +247,25 @@ mod sys {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod sys {
+    use super::Kind;
+    use std::fs::File;
+
+    pub fn is_write_locked(_file: &File, _start: u64, _len: u64) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    pub fn lock(
+        _file: &File,
+        _kind: Kind,
+        _start: u64,
+        _len: u64,
+    ) -> std::io::Result<bool> {
+        Ok(true)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The protocol
 // ---------------------------------------------------------------------------
