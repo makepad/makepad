@@ -2684,12 +2684,15 @@ script_mod! {
                         }
 
                     }
-                    // F3: frame-time overlay (Cx perf monitor).
+                    // F3: frame-time overlay (Cx perf monitor). Pinned to the
+                    // bottom LEFT: the bottom right is where the pre-listen
+                    // player parks, and a developer overlay has no business
+                    // sitting on top of a control the operator is using.
                     perf_box := View{
                         visible: false
                         width: Fill
                         height: Fill
-                        perf_graph := PerfGraph{}
+                        perf_graph := PerfGraph{ panel_anchor: vec2(0.0, 1.0) }
                     }
                     // The FLOATING home of the pre-listen player: parked at
                     // the window's bottom-right, above the panels, below
