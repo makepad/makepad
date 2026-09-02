@@ -968,9 +968,13 @@ impl DrawVars {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -983,7 +987,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -1054,7 +1058,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -1104,7 +1108,7 @@ impl DrawVars {
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
