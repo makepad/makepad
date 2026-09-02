@@ -26,8 +26,8 @@ use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft::{
     self, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MF_E_BUFFERTOOSMALL, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY,
+    CODECAPI_AV_LOW_LATENCY_MODE, MF_E_BUFFERTOOSMALL, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY,
 };
 use crate::VideoFileError;
 use std::collections::VecDeque;
@@ -102,6 +102,7 @@ pub struct WindowsStreamDecoder {
     pending_pts: VecDeque<i64>,
     packets_in: u64,
     frames_out: u64,
+    pumps: u64,
 }
 
 impl WindowsStreamDecoder {
@@ -118,6 +119,8 @@ impl WindowsStreamDecoder {
                 }
                 Err(e) => dbg::log(|| format!("h264dec: GetAttributes failed {e:?} (no low-latency mode)")),
             }
+            let codec_api = windows_mft::set_codec_api_bool(&transform, &CODECAPI_AV_LOW_LATENCY_MODE, true);
+            dbg::log(|| format!("h264dec: CODECAPI_AVLowLatencyMode set -> {codec_api:?}"));
             let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType(in)", e))?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| hr_err("set in major type", e))?;
             in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| hr_err("set in subtype", e))?;
@@ -133,6 +136,7 @@ impl WindowsStreamDecoder {
             pending_pts: VecDeque::new(),
             packets_in: 0,
             frames_out: 0,
+            pumps: 0,
         };
         // Committing an output type up front is what makes the first
         // ProcessOutput answer NEED_MORE_INPUT / STREAM_CHANGE instead of
@@ -210,6 +214,7 @@ impl WindowsStreamDecoder {
         // this type is `Send` and may be called from a different thread
         // than the one that constructed it; re-assert MTA membership here.
         ensure_media_foundation()?;
+        dbg::dump_packet(self.packets_in, annex_b_data);
         self.packets_in += 1;
         let sample = make_input_sample(annex_b_data, pts_100ns)?;
         let mut hr = unsafe { windows_mft::process_input(&self.transform, &sample) };
@@ -244,12 +249,15 @@ impl WindowsStreamDecoder {
         let mut renegotiations = 0;
         loop {
             let provided = if self.provides_samples { None } else { Some(make_output_sample(self.output_buffer_size)?) };
-            let (hr, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
+            let (hr, status, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
+            self.pumps += 1;
+            if self.pumps <= 40 || hr.0 != MF_E_TRANSFORM_NEED_MORE_INPUT {
+                dbg::log(|| format!("h264dec: ProcessOutput #{} {} status 0x{status:x}", self.pumps, hex_hr(hr.0)));
+            }
             if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
                 break;
             }
             if hr.0 == MF_E_TRANSFORM_STREAM_CHANGE || hr.0 == MF_E_TRANSFORM_TYPE_NOT_SET || hr.0 == MF_E_BUFFERTOOSMALL {
-                dbg::log(|| format!("h264dec: ProcessOutput {} -> renegotiate", hex_hr(hr.0)));
                 renegotiations += 1;
                 if renegotiations > MAX_RENEGOTIATIONS {
                     return Err(VideoFileError::with_code("IMFTransform::ProcessOutput (type never settles)", hr.0));
@@ -258,7 +266,6 @@ impl WindowsStreamDecoder {
                 continue;
             }
             if hr.is_err() {
-                dbg::log(|| format!("h264dec: ProcessOutput failed {}", hex_hr(hr.0)));
                 return Err(VideoFileError::with_code("IMFTransform::ProcessOutput", hr.0));
             }
             let Some(sample) = sample else { break };
