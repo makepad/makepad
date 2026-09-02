@@ -190,7 +190,9 @@ impl Vfs for RealVfs {
         progress: &dyn Fn(ScanProgress),
     ) -> Option<Node> {
         let classify = |p: &Path, is_dir: bool| model::kind_for(p, is_dir) as u8;
-        treemap::scan(root, &treemap::ScanRules { classify: &classify, skip: &model::skip_for_scan }, cancel, progress)
+        let home = self.home();
+        let skip = |path: &Path| model::skip_for_scan(path, &home);
+        treemap::scan(root, &treemap::ScanRules { classify: &classify, skip: &skip }, cancel, progress)
     }
 
     fn scan_stream(
@@ -199,12 +201,12 @@ impl Vfs for RealVfs {
         cancel: &AtomicBool,
         sink: &(dyn Fn(ScanStep) + Sync),
     ) -> bool {
-        // Closures with nothing captured, so the walk's threads can all share
-        // them without any synchronisation of their own.
         let classify = |p: &Path, is_dir: bool| model::kind_for(p, is_dir) as u8;
+        let home = self.home();
+        let skip = |path: &Path| model::skip_for_scan(path, &home);
         let rules = ScanRules {
             classify: &classify,
-            skip: &model::skip_for_scan,
+            skip: &skip,
         };
         treemap::scan_stream(root, &rules, cancel, sink)
     }

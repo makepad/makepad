@@ -81,6 +81,16 @@ impl Rng {
     fn range(&mut self, lo: u64, hi: u64) -> u64 {
         lo + self.next_u64() % (hi - lo)
     }
+
+    /// A bounded Pareto variate. Most results sit near `minimum`, while a
+    /// power-law tail supplies progressively rarer large files up to `maximum`.
+    fn pareto(&mut self, minimum: u64, maximum: u64, shape: f64) -> u64 {
+        debug_assert!(minimum > 0 && minimum < maximum && shape > 0.0);
+        let unit = (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+        let truncated_tail = 1.0 - (minimum as f64 / maximum as f64).powf(shape);
+        let sample = minimum as f64 / (1.0 - unit * truncated_tail).powf(1.0 / shape);
+        (sample as u64).clamp(minimum, maximum)
+    }
 }
 
 /// A modified/created pair somewhere in the last two years, never in the
@@ -220,27 +230,31 @@ impl Profile {
         const MIB: u64 = 1024 * 1024;
         const GIB: u64 = 1024 * MIB;
         match self {
-            Profile::Pictures if index % 17 == 0 => rng.range(25 * MIB, 40 * MIB),
-            Profile::Pictures => rng.range(2 * MIB, 9 * MIB),
-            Profile::Projects if index % 97 == 0 => rng.range(MIB, 3 * MIB),
-            Profile::Projects => rng.range(1024, 40 * 1024),
-            Profile::Library => rng.range(128 * 1024, 12 * MIB),
-            Profile::Mail => rng.range(4 * 1024, 180 * 1024),
-            Profile::Music if index % 23 == 0 => rng.range(25 * MIB, 60 * MIB),
-            Profile::Music => rng.range(3 * MIB, 12 * MIB),
-            Profile::Documents => rng.range(8 * 1024, 18 * MIB),
+            Profile::Pictures if index % 17 == 0 => rng.pareto(8 * MIB, 40 * MIB, 1.15),
+            Profile::Pictures => rng.pareto(512 * 1024, 12 * MIB, 1.1),
+            Profile::Projects if index % 97 == 0 => rng.pareto(MIB, 3 * MIB, 1.2),
+            Profile::Projects => rng.pareto(1024, 256 * 1024, 1.1),
+            Profile::Library => rng.pareto(128 * 1024, 12 * MIB, 1.05),
+            Profile::Mail => rng.pareto(4 * 1024, 180 * 1024, 1.1),
+            Profile::Music if index % 23 == 0 => rng.pareto(25 * MIB, 60 * MIB, 1.2),
+            Profile::Music => rng.pareto(3 * MIB, 12 * MIB, 1.1),
+            Profile::Documents => rng.pareto(8 * 1024, 18 * MIB, 0.9),
             Profile::Videos if index < 5 => rng.range(2 * GIB, 6 * GIB),
             Profile::Videos if index < 85 => rng.range(100 * MIB, 900 * MIB),
-            Profile::Videos => rng.range(8 * MIB, 100 * MIB),
+            Profile::Videos => rng.pareto(8 * MIB, 100 * MIB, 1.1),
             Profile::Downloads if index < 40 => rng.range(80 * MIB, 4 * GIB),
-            Profile::Downloads => rng.range(64 * 1024, 160 * MIB),
-            Profile::Desktop => rng.range(1024, 20 * MIB),
-            Profile::Network => rng.range(32 * 1024, 50 * MIB),
-            Profile::Trash if index < 5 => rng.range(500 * MIB, 3 * GIB),
-            Profile::Trash => rng.range(MIB, 200 * MIB),
+            Profile::Downloads => rng.pareto(64 * 1024, 160 * MIB, 1.0),
+            Profile::Desktop => rng.pareto(1024, 20 * MIB, 0.9),
+            Profile::Network => rng.pareto(32 * 1024, 50 * MIB, 0.9),
+            Profile::Trash => rng.pareto(MIB, 3 * GIB, 0.85),
         }
     }
 }
+
+/// Depth is measured from the generated category root. The public tree adds
+/// `/Demo` above it and files add one leaf level, so nine here means an
+/// inclusive whole-tree maximum of eleven (`/Demo` is depth zero).
+const MAX_CATEGORY_FOLDER_DEPTH: usize = 9;
 
 struct TempFolder {
     name: String,
@@ -305,6 +319,7 @@ fn build_category(
         files: Vec::new(),
     }];
     for path in special_paths {
+        assert!(path.len() <= MAX_CATEGORY_FOLDER_DEPTH, "special demo path exceeds the depth bound");
         add_path(&mut folders, path, rng);
     }
     if profile == Profile::Pictures {
@@ -326,6 +341,7 @@ fn build_category(
         }
     }
 
+    let max_depth = max_depth.min(MAX_CATEGORY_FOLDER_DEPTH);
     let mut parent = 0usize;
     while folders.len() < folder_count {
         while folders[parent].depth >= max_depth || folders[parent].children.len() >= 4 {
@@ -611,6 +627,25 @@ fn refuse_into_self(sources: &[PathBuf], dest_dir: &Path) -> Option<String> {
     None
 }
 
+fn reserved_trash_path() -> PathBuf {
+    Path::new(VIRTUAL_HOME).join(TRASH_NAME)
+}
+
+fn reject_reserved_trash_source(request: &OpRequest) -> Result<(), String> {
+    let trash = reserved_trash_path();
+    if request.sources.iter().any(|source| source == &trash) {
+        let action = match request.kind {
+            OpKind::Rename => "rename",
+            OpKind::Move => "move",
+            OpKind::Trash => "trash",
+            OpKind::Delete => "delete",
+            _ => "modify",
+        };
+        return Err(format!("Can't {action} the reserved demo Trash folder"));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------
 // Operations
 // ---------------------------------------------------------------------
@@ -746,7 +781,11 @@ fn perform_move(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, Stri
 }
 
 fn perform_trash(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, String> {
-    let trash_path = Path::new(VIRTUAL_HOME).join(TRASH_NAME);
+    let trash_path = reserved_trash_path();
+    let trash = resolve(tree, &trash_path).ok_or_else(|| "The demo Trash folder is missing".to_string())?;
+    if !trash.is_dir {
+        return Err("The demo Trash path is not a folder".to_string());
+    }
     let mut pairs = Vec::new();
     let mut touched = Vec::new();
     for source in &request.sources {
@@ -756,9 +795,7 @@ fn perform_trash(tree: &mut VNode, request: &OpRequest) -> Result<OpOutcome, Str
                 .ok_or_else(|| format!("No such folder: {}", parent_path.display()))?;
             take_child(parent, &name).ok_or_else(|| format!("No such file: {}", source.display()))?
         };
-        // Seeded at construction and never removed by any operation this
-        // module supports, so the trash folder always exists here.
-        let dest = resolve_mut(tree, &trash_path).expect("the demo trash always exists");
+        let dest = resolve_mut(tree, &trash_path).ok_or_else(|| "The demo Trash folder is missing".to_string())?;
         let unique = unique_name(&dest.children, &name);
         let mut item = node;
         item.name = unique.clone();
@@ -843,6 +880,7 @@ fn scan_vnode(
     progress: &dyn Fn(ScanProgress),
     total: &mut ScanProgress,
     since_report: &mut u64,
+    skip: &dyn Fn(&Path) -> bool,
 ) -> Option<Node> {
     if cancel.load(Ordering::Relaxed) {
         return None;
@@ -853,7 +891,10 @@ fn scan_vnode(
         let mut size = 0u64;
         for child in &node.children {
             let child_path = path.join(&child.name);
-            let child_node = scan_vnode(child, &child_path, cancel, progress, total, since_report)?;
+            if child.is_dir && skip(&child_path) {
+                continue;
+            }
+            let child_node = scan_vnode(child, &child_path, cancel, progress, total, since_report, skip)?;
             size += child_node.size;
             children.push(child_node);
         }
@@ -900,6 +941,25 @@ impl DemoVfs {
     /// in-memory lookup.
     pub fn new() -> Self {
         DemoVfs { root: Mutex::new(build_root()) }
+    }
+
+    fn scan_with_skip(
+        &self,
+        root: &Path,
+        cancel: &AtomicBool,
+        progress: &dyn Fn(ScanProgress),
+        skip: &dyn Fn(&Path) -> bool,
+    ) -> Option<Node> {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let tree = self.root.lock().unwrap();
+        let node = resolve(&tree, root)?;
+        let mut total = ScanProgress::default();
+        let mut since_report = 0u64;
+        let result = scan_vnode(node, root, cancel, progress, &mut total, &mut since_report, skip)?;
+        progress(total);
+        Some(result)
     }
 }
 
@@ -979,23 +1039,15 @@ impl Vfs for DemoVfs {
     }
 
     fn scan(&self, root: &Path, cancel: &AtomicBool, progress: &dyn Fn(ScanProgress)) -> Option<Node> {
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
-        let tree = self.root.lock().unwrap();
-        let node = resolve(&tree, root)?;
-        let mut total = ScanProgress::default();
-        let mut since_report = 0u64;
-        let result = scan_vnode(node, root, cancel, progress, &mut total, &mut since_report)?;
-        // One last report so a caller that only reads the callback's
-        // argument after the walk returns still sees the true final tally
-        // — same guarantee `treemap::scan` makes.
-        progress(total);
-        Some(result)
+        let home = self.home();
+        self.scan_with_skip(root, cancel, progress, &|path| model::skip_for_scan(path, &home))
     }
 
     fn perform(&self, request: &OpRequest) -> Result<OpOutcome, String> {
         let mut tree = self.root.lock().unwrap();
+        if matches!(request.kind, OpKind::Rename | OpKind::Move | OpKind::Trash | OpKind::Delete) {
+            reject_reserved_trash_source(request)?;
+        }
         match request.kind {
             OpKind::Rename => perform_rename(&mut tree, request),
             OpKind::NewFolder => perform_new_folder(&mut tree, request),
@@ -1022,6 +1074,7 @@ impl Vfs for DemoVfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn listing(vfs: &DemoVfs, path: &str) -> Vec<FileEntry> {
         vfs.read_dir(Path::new(path), true).unwrap()
@@ -1031,9 +1084,37 @@ mod tests {
         ["Desktop", "Documents", "Downloads", "Library", "Mail", "Music", "Network", "Pictures", "Projects", "Videos"]
     }
 
+    fn full_scan(vfs: &DemoVfs) -> Node {
+        vfs.scan_with_skip(Path::new(VIRTUAL_HOME), &AtomicBool::new(false), &|_| {}, &|_| false)
+            .expect("full demo scan should complete")
+    }
+
     #[test]
     fn the_tree_is_deterministic() {
         assert_eq!(build_root_with_seed(SEED), build_root_with_seed(SEED));
+    }
+
+    #[test]
+    fn fixed_seed_pareto_sizes_have_a_power_law_tail() {
+        let mut rng = Rng::new(SEED);
+        let minimum = 1024;
+        let mut sizes: Vec<u64> = (0..10_000)
+            .map(|_| rng.pareto(minimum, 1024 * 1024, 1.1))
+            .collect();
+        let tail_counts: Vec<usize> = [2, 4, 8, 16]
+            .into_iter()
+            .map(|multiple| sizes.iter().filter(|&&size| size >= minimum * multiple).count())
+            .collect();
+        assert!(tail_counts.windows(2).all(|pair| pair[0] > pair[1]), "tail buckets: {tail_counts:?}");
+        assert!((4_000..=5_200).contains(&tail_counts[0]), "tail buckets: {tail_counts:?}");
+        assert!((1_700..=2_700).contains(&tail_counts[1]), "tail buckets: {tail_counts:?}");
+        assert!((750..=1_350).contains(&tail_counts[2]), "tail buckets: {tail_counts:?}");
+        assert!((300..=700).contains(&tail_counts[3]), "tail buckets: {tail_counts:?}");
+
+        sizes.sort_unstable();
+        assert!((1_700..=2_100).contains(&sizes[5_000]), "median: {}", sizes[5_000]);
+        assert!((6_500..=10_000).contains(&sizes[9_000]), "p90: {}", sizes[9_000]);
+        assert!((40_000..=100_000).contains(&sizes[9_900]), "p99: {}", sizes[9_900]);
     }
 
     #[test]
@@ -1187,6 +1268,28 @@ mod tests {
     }
 
     #[test]
+    fn reserved_trash_root_rejects_every_destructive_operation() {
+        let vfs = DemoVfs::new();
+        let trash = reserved_trash_path();
+        for kind in [OpKind::Rename, OpKind::Move, OpKind::Trash, OpKind::Delete] {
+            let result = vfs.perform(&OpRequest {
+                id: 1,
+                kind,
+                sources: vec![trash.clone()],
+                dest_dir: PathBuf::from(VIRTUAL_HOME).join("Documents"),
+                new_name: (kind == OpKind::Rename).then(|| "Old Trash".to_string()),
+                home: vfs.home(),
+            });
+            let error = match result {
+                Ok(_) => panic!("reserved Trash operation must fail"),
+                Err(error) => error,
+            };
+            assert!(error.contains("reserved demo Trash"), "{kind:?}: {error}");
+            assert!(vfs.stat(&trash).unwrap().is_dir, "{kind:?} removed the Trash root");
+        }
+    }
+
+    #[test]
     fn total_bytes_matches_the_scans_own_size() {
         let vfs = DemoVfs::new();
         let home = PathBuf::from(VIRTUAL_HOME);
@@ -1194,7 +1297,7 @@ mod tests {
         let total = vfs.total_bytes(&home, &cancel);
         assert!(total > 0);
 
-        let scanned = vfs.scan(&home, &cancel, &|_| {}).expect("scan should complete");
+        let scanned = full_scan(&vfs);
         assert_eq!(scanned.size, total);
 
         // And the scan's own count should agree with a manual walk.
@@ -1210,6 +1313,24 @@ mod tests {
             }
         }
         assert_eq!(file_total, total);
+    }
+
+    #[test]
+    fn scan_scope_excludes_library_and_trash_beneath_the_demo_home() {
+        let vfs = DemoVfs::new();
+        let full = full_scan(&vfs);
+        let home = vfs.home();
+        let scoped = vfs
+            .scan_with_skip(&home, &AtomicBool::new(false), &|_| {}, &|path| {
+                model::home_scan_exclusion(path, &home)
+            })
+            .unwrap();
+        assert!(full.child_named("Library").is_some());
+        assert!(full.child_named(TRASH_NAME).is_some());
+        assert!(scoped.child_named("Library").is_none());
+        assert!(scoped.child_named(TRASH_NAME).is_none());
+        assert!(scoped.files < full.files);
+        assert!(scoped.size < full.size);
     }
 
     fn scan_stats(node: &Node, depth: usize, stats: &mut (usize, usize, usize, usize)) -> u64 {
@@ -1234,14 +1355,14 @@ mod tests {
         let vfs = DemoVfs::new();
         let generation = makepad_widgets::Cx::time_now() - generated_at;
         let scan_at = makepad_widgets::Cx::time_now();
-        let node = vfs.scan(Path::new(VIRTUAL_HOME), &AtomicBool::new(false), &|_| {}).unwrap();
+        let node = full_scan(&vfs);
         let scan = makepad_widgets::Cx::time_now() - scan_at;
         let mut stats = (0usize, 0usize, 0usize, 0usize);
         let total = scan_stats(&node, 0, &mut stats);
         eprintln!("files demo generator: {generation:.3}s; full inline scan: {scan:.3}s");
-        assert!((30_000..=45_000).contains(&stats.0), "file count: {}", stats.0);
-        assert!((2_000..=3_500).contains(&stats.1), "folder count: {}", stats.1);
-        assert!(stats.2 >= 9, "max depth: {}", stats.2);
+        assert_eq!(stats.0, 38_006, "file count");
+        assert_eq!(stats.1, 2_026, "folder count");
+        assert!((9..=11).contains(&stats.2), "max depth (root is zero and leaf files count): {}", stats.2);
         assert!(stats.3 >= 3, "only {} files are at least 2 GiB", stats.3);
         assert!(total >= 150 * 1024 * 1024 * 1024, "tree is only {total} bytes");
         assert!(generation < 0.150, "generation took {generation:.3}s");
@@ -1284,5 +1405,159 @@ mod tests {
         // hidden entries too) but is hidden from a normal listing.
         assert!(root.iter().any(|e| e.name == ".Trash"), "the trash folder should still exist when hidden entries are shown");
         assert!(vfs.read_dir(Path::new(VIRTUAL_HOME), false).unwrap().iter().all(|e| !e.name.starts_with('.')));
+    }
+
+    #[test]
+    fn sibling_names_are_unique_and_child_counts_match_listings() {
+        let vfs = DemoVfs::new();
+        let mut stack = vec![PathBuf::from(VIRTUAL_HOME)];
+        while let Some(dir) = stack.pop() {
+            let entries = vfs.read_dir(&dir, true).unwrap();
+            let mut names = HashSet::with_capacity(entries.len());
+            for entry in entries {
+                assert!(names.insert(entry.name.clone()), "duplicate sibling {} in {}", entry.name, dir.display());
+                if entry.is_dir {
+                    let actual = vfs.read_dir(&entry.path, true).unwrap().len() as u32;
+                    assert_eq!(entry.child_count, Some(actual), "child count for {}", entry.path.display());
+                    stack.push(entry.path);
+                } else {
+                    assert_eq!(entry.child_count, None, "file child count for {}", entry.path.display());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn network_has_shared_design_and_engineering_teams() {
+        let vfs = DemoVfs::new();
+        let shared = Path::new(VIRTUAL_HOME).join("Network").join("shared");
+        let entries = vfs.read_dir(&shared, true).unwrap();
+        for team in ["Design Team", "Engineering"] {
+            let entry = entries.iter().find(|entry| entry.name == team).unwrap_or_else(|| panic!("missing Network/{team}"));
+            assert!(entry.is_dir);
+            assert!(!vfs.read_dir(&entry.path, true).unwrap().is_empty(), "Network/{team} is empty");
+        }
+    }
+
+    struct SpyDemoVfs(DemoVfs);
+
+    impl SpyDemoVfs {
+        fn dispatch_listing(&self) -> Result<Vec<FileEntry>, String> {
+            panic!("demo listing was dispatched to a thread")
+        }
+
+        fn dispatch_scan(&self) -> bool {
+            panic!("demo scan was dispatched to a thread")
+        }
+
+        fn dispatch_thumbnail(&self) -> Option<crate::thumbs::ThumbPixels> {
+            panic!("demo thumbnail was dispatched to a thread")
+        }
+
+        fn dispatch_preview(&self) -> Option<crate::preview::Preview> {
+            panic!("demo preview reached an external dispatcher")
+        }
+
+        fn dispatch_operation(&self) -> Result<OpOutcome, String> {
+            panic!("demo operation was dispatched to a thread")
+        }
+    }
+
+    impl Vfs for SpyDemoVfs {
+        fn home(&self) -> PathBuf {
+            self.0.home()
+        }
+
+        fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
+            self.0.read_dir(path, show_hidden)
+        }
+
+        fn stat(&self, path: &Path) -> Result<FileEntry, String> {
+            self.0.stat(path)
+        }
+
+        fn read_bytes(&self, path: &Path, max: usize) -> Result<Vec<u8>, String> {
+            self.0.read_bytes(path, max)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.0.is_dir(path)
+        }
+
+        fn real_path(&self, _path: &Path) -> PathBuf {
+            panic!("a demo path was resolved onto the host")
+        }
+
+        fn total_bytes(&self, path: &Path, cancel: &AtomicBool) -> u64 {
+            self.0.total_bytes(path, cancel)
+        }
+
+        fn scan(&self, root: &Path, cancel: &AtomicBool, progress: &dyn Fn(ScanProgress)) -> Option<Node> {
+            self.0.scan(root, cancel, progress)
+        }
+
+        fn perform(&self, request: &OpRequest) -> Result<OpOutcome, String> {
+            self.0.perform(request)
+        }
+
+        fn perform_undo(&self, undo: &Undo) -> Result<OpOutcome, String> {
+            self.0.perform_undo(undo)
+        }
+
+        fn is_instant(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn demo_routes_never_resolve_host_paths_or_dispatch_threads() {
+        let spy = SpyDemoVfs(DemoVfs::new());
+        let home = spy.home();
+
+        let listing = if spy.is_instant() {
+            spy.read_dir(&home, false)
+        } else {
+            spy.dispatch_listing()
+        }
+        .unwrap();
+        assert!(!listing.is_empty());
+
+        let scan_ok = if spy.is_instant() {
+            spy.scan_stream(&home, &AtomicBool::new(false), &|_| {})
+        } else {
+            spy.dispatch_scan()
+        };
+        assert!(scan_ok);
+
+        let picture = home.join("Pictures/wallpaper-sunrise.jpg");
+        let thumb = if spy.is_instant() {
+            crate::thumbs::decode_thumb_from(&spy, &picture)
+        } else {
+            spy.dispatch_thumbnail()
+        };
+        assert!(thumb.is_some());
+
+        let preview = if spy.is_demo() {
+            crate::preview::demo_preview(&spy)
+        } else {
+            spy.dispatch_preview()
+        };
+        assert!(matches!(preview, Some(crate::preview::Preview::NoViewer(_))));
+
+        let request = OpRequest {
+            id: 1,
+            kind: OpKind::NewFolder,
+            sources: Vec::new(),
+            dest_dir: home.clone(),
+            new_name: Some("Inline Operation".to_string()),
+            home: home.clone(),
+        };
+        let outcome = if spy.is_instant() {
+            spy.perform(&request)
+        } else {
+            spy.dispatch_operation()
+        }
+        .unwrap();
+        assert_eq!(outcome.touched, vec![home.join("Inline Operation")]);
     }
 }

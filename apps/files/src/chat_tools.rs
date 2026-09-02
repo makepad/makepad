@@ -456,7 +456,7 @@ fn measure(path: &Path, deadline: Instant, budget: &mut usize, depth: usize) -> 
     if !vfs().is_demo() && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return (0, 0, true);
     }
-    if model::skip_for_scan(path) {
+    if model::skip_for_scan(path, &vfs().home()) {
         return (0, 0, true);
     }
     let Ok(entries) = vfs().read_dir(path, true) else {
