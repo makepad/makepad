@@ -18,8 +18,12 @@ compile_error!("enable either feature `native` or feature `demo`");
 
 #[cfg(feature = "native")]
 use makepad_converse::agent_seam::*;
+#[cfg(feature = "native")]
+use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_widgets::*;
 
+#[cfg(feature = "native")]
+mod ai;
 #[cfg(feature = "native")]
 mod broker;
 #[cfg(feature = "native")]
@@ -701,6 +705,12 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    /// Route's tools toward the WM assistant (or a parked in-process host).
+    #[rust]
+    ai_port: Option<AiServicePort>,
+    /// Last volatile map/trip context sent over the AI bus.
+    #[rust]
+    ai_context: String,
     #[rust]
     panel: PanelController,
     #[rust]
@@ -909,6 +919,7 @@ impl App {
             return;
         }
         self.started = true;
+        self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.assistant.configure_ui(cx, &self.ui);
         start_memory_watchdog(None);
         // Civil-twilight default (route.md follow-up): night 19:00-06:59,
@@ -932,6 +943,72 @@ impl App {
         self.speech = Some(speech);
         self.init_agent(cx);
         self.update_ai_status(cx);
+    }
+
+    fn ai_context_line(&self, cx: &mut Cx) -> String {
+        let map = self.ui.map_view(cx, ids!(map));
+        let (lon, lat) = map.center().unwrap_or(AMSTERDAM_CENTER);
+        let zoom = map.map_zoom().unwrap_or(13.0);
+        let trip = match (self.trip.stops.first(), self.trip.stops.last()) {
+            (Some(from), Some(to)) if self.trip.is_routed() => format!(
+                "Current trip: {} → {}, {:.1} km, ETA {}.",
+                from.name,
+                to.name,
+                self.trip.total_distance_m() / 1000.0,
+                trip::fmt_duration(self.trip.total_duration_s()),
+            ),
+            (Some(from), Some(to)) => {
+                format!("Current trip: {} → {} (not routed yet).", from.name, to.name)
+            }
+            _ => "No trip is planned.".to_string(),
+        };
+        format!("Map centre: {lon:.5}, {lat:.5}; zoom {zoom:.1}. {trip}")
+    }
+
+    fn refresh_ai_context(&mut self, cx: &mut Cx) {
+        if self.ai_port.is_none() {
+            return;
+        }
+        let text = self.ai_context_line(cx);
+        if text == self.ai_context {
+            return;
+        }
+        self.ai_context = text.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&text);
+        }
+    }
+
+    fn drain_ai_port(&mut self, cx: &mut Cx, event: &Event) {
+        let events = match self.ai_port.as_mut() {
+            Some(port) => port.handle_event(cx, event),
+            None => return,
+        };
+        for event in events {
+            match event {
+                PortEvent::Registered(endpoint) => {
+                    log!("route: AI service registered as {}", endpoint.as_str());
+                    self.ai_context.clear();
+                    self.refresh_ai_context(cx);
+                }
+                PortEvent::Call(call) => {
+                    let result = ai::answer(cx, self, &call);
+                    if let Some(port) = self.ai_port.as_ref() {
+                        port.reply(result);
+                    }
+                }
+                // Calls are synchronous, so there is no worker to cancel.
+                PortEvent::Cancel { .. } => {}
+                PortEvent::ChatOpen { open } => {
+                    if open && self.assistant_panel_open {
+                        self.assistant_panel_open = false;
+                        self.ui
+                            .widget(cx, ids!(assistant_panel))
+                            .set_visible(cx, false);
+                    }
+                }
+            }
+        }
     }
 
     /// Point the map and the nav plane at whatever this machine has:
@@ -2190,6 +2267,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        self.drain_ai_port(cx, event);
         // The Space-warp row tracks the camera live: grayed (but visible,
         // so it stays discoverable) outside the near-first-person regime,
         // re-enabled the moment tilt + zoom qualify. Cached so the
@@ -2367,6 +2445,9 @@ impl AppMain for App {
         self.chat.tilt_strength = ((tilt - 5.0) / 50.0).clamp(0.0, 1.0);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
+        // Camera animations, direct manipulation and trip tools all arrive
+        // through this event loop; the cached comparison publishes changes.
+        self.refresh_ai_context(cx);
     }
 }
 
