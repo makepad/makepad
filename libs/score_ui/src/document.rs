@@ -38,29 +38,8 @@ pub fn with_native_extension(path: &Path) -> PathBuf {
 }
 
 const ACTOR: u64 = 0x5c0e;
-const NOTE_SEMANTIC_TAG: u64 = 0x1000_0000_0000_0000;
-const MEASURE_SEMANTIC_TAG: u64 = 0x2000_0000_0000_0000;
-pub(crate) const DECORATION_TAG: u64 = 0x8000_0000_0000_0000;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SemanticKind {
-    Note,
-    Measure,
-}
-
-#[derive(Clone, Debug)]
-pub struct SemanticElement {
-    pub semantic: SemanticId,
-    pub kind: SemanticKind,
-    pub note: Option<makepad_score::model::NoteId>,
-    pub event: Option<EventId>,
-    pub measure: MeasureId,
-    pub staff: StaffId,
-    pub voice: VoiceId,
-    pub page: usize,
-    pub bounds: makepad_score_render::Rect,
-    pub midi: Option<u8>,
-}
+pub use makepad_score_view::document::{SemanticElement, SemanticKind};
+use makepad_score_view::document::semantic_for_note;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationVisual {
@@ -1461,7 +1440,8 @@ impl ScoreDocument {
         for page in 0..self.spacing.page_count() {
             let (list, elements) = {
                 let placement = &self.spacing.pages()[page];
-                crate::engrave::make_page(self.workspace.score(), placement, page, self.frame)?
+                crate::engrave::make_page(self.workspace.score(), placement, page, self.frame)
+                    .map_err(|error| DocumentError::Native(error.to_string()))?
             };
             let list = Arc::new(list);
             self.cache.insert(list.clone(), self.frame);
@@ -1483,7 +1463,8 @@ impl ScoreDocument {
             .retain(|_, semantic| self.elements.contains_key(semantic));
         let (list, elements) = {
             let placement = &self.spacing.pages()[page];
-            crate::engrave::make_page(self.workspace.score(), placement, page, self.frame)?
+            crate::engrave::make_page(self.workspace.score(), placement, page, self.frame)
+                .map_err(|error| DocumentError::Native(error.to_string()))?
         };
         let list = Arc::new(list);
         self.cache.insert(list.clone(), self.frame);
@@ -1504,16 +1485,6 @@ impl ScoreDocument {
             self.elements.insert(element.semantic, element);
         }
     }
-}
-
-pub(crate) fn semantic_for_note(id: makepad_score::model::NoteId) -> SemanticId {
-    let (actor, counter) = id.raw();
-    SemanticId(NOTE_SEMANTIC_TAG | counter ^ actor.rotate_left(17))
-}
-
-pub(crate) fn semantic_for_measure(id: MeasureId) -> SemanticId {
-    let (actor, counter) = id.raw();
-    SemanticId(MEASURE_SEMANTIC_TAG | counter ^ actor.rotate_left(11))
 }
 
 /// Written duration as a musician reads it.

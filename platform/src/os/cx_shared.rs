@@ -758,7 +758,7 @@ impl Cx {
                 self.call_event_handler(&Event::KeyUp(e));
             }
             StudioToApp::TextInput(e) => {
-                #[cfg(target_vendor = "apple")]
+                #[cfg(all(target_vendor = "apple", not(headless)))]
                 crate::os::apple::metal::note_input_event();
                 self.call_event_handler(&Event::TextInput(e));
             }
