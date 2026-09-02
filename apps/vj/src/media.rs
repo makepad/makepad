@@ -265,7 +265,11 @@ impl PlayMode {
 /// is the true worst case. 16 GB holds ~9 s of a Retina screen capture
 /// (3034×1882, 22.8 MB/frame), ~30 s of 1920×1080, minutes of 1280×704.
 /// Bigger clips fall through to the seek-bounce tier below.
-const MAX_PINGPONG_CACHE_BYTES: usize = 16 * 1024 * 1024 * 1024;
+const MAX_PINGPONG_CACHE_BYTES: usize = if usize::BITS >= 64 {
+    17_179_869_184_u64
+} else {
+    usize::MAX as u64
+} as usize;
 
 /// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
 /// is a typical GOP, so most of what the in-seek discard walk decodes is
@@ -280,7 +284,11 @@ const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 /// a frame, ~57-frame GOP ≈ 1.3 GB decoded) used to hit the old 96 MB cap
 /// after FOUR frames, so every 1.6 s GOP decode served 4 frames and reverse
 /// ran at 1/25 speed. 4 GB holds several such GOPs — and ~2 s of 4K60.
-const REVERSE_WINDOW_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+const REVERSE_WINDOW_MAX_BYTES: usize = if usize::BITS >= 64 {
+    4_294_967_296_u64
+} else {
+    usize::MAX as u64
+} as usize;
 
 struct SlotShared {
     stop: AtomicBool,

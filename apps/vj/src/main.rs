@@ -5592,7 +5592,11 @@ fn start_loop_worker() -> (
 // must hold the WHOLE library (~3GB) or scrolling a lane end to end cycles
 // eviction forever. A VJ rig has the unified memory; re-decode mid-set does
 // not have the time.
-const THUMB_CACHE_BYTES: usize = 4096 * 1024 * 1024;
+const THUMB_CACHE_BYTES: usize = if usize::BITS >= 64 {
+    4_294_967_296_u64
+} else {
+    usize::MAX as u64
+} as usize;
 /// One thumb texture's resident bytes (128x80 BGRA).
 // Derived from the bake's actual cell size — hardcoded 128x80 undercounted
 // residency 9.2x once cells grew to the measured-4K spec, letting ~3GB of
