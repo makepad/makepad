@@ -1,0 +1,36 @@
+use makepad_widgets::{Cx, MapViewRef, TileSourceConfig};
+
+pub const PROFILE: super::ProvisioningProfile = super::ProvisioningProfile::Demo;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostedConfig {
+    pub tiles: &'static str,
+    pub api: &'static str,
+}
+
+pub const HOSTED_CONFIG: HostedConfig = HostedConfig {
+    tiles: "https://makepad.nl/maps/world.mkmap",
+    api: "https://makepad.nl/api",
+};
+
+/// Hosted demo provisioning has no modal, filesystem probes, or bake state.
+#[derive(Default)]
+pub struct MapProvisioner {
+    installed: bool,
+}
+
+impl MapProvisioner {
+    pub fn ensure_source(&mut self, cx: &mut Cx, map: &MapViewRef) {
+        if self.installed {
+            return;
+        }
+        self.installed = true;
+        map.set_source_config(cx, TileSourceConfig::http_archive(HOSTED_CONFIG.tiles));
+    }
+
+    pub fn handle_event(&mut self) {}
+
+    pub fn api_url(&self) -> &'static str {
+        HOSTED_CONFIG.api
+    }
+}

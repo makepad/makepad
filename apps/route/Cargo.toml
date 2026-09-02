@@ -5,19 +5,34 @@ edition = "2021"
 description = "AI-driven voice route/trip planner on MapView (see route.md)"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["native"]
+native = [
+    "makepad-widgets/voice",
+    "dep:makepad-map-build",
+    "dep:makepad-geodata",
+    "dep:makepad-mbtile-reader",
+    "dep:serde_json",
+    "dep:makepad-ai-hub",
+    "dep:makepad-strict-json",
+    "dep:makepad-converse",
+]
+demo = []
+
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps", "voice"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
-makepad-map-build = { path = "../../libs/map_build", features = ["faces"] } # first run: download + bake a test map
-makepad-geodata = { path = "../../libs/geodata" }          # M1: geo.* corridor queries, rain radar
-makepad-mbtile-reader = { path = "../../libs/mbtile_reader" } # terrain drape landcover source
-serde_json      = "1"                                      # geodata FeatureHit attrs
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+makepad-map-build = { path = "../../libs/map_build", features = ["faces"], optional = true } # first run: download + bake a test map
+makepad-geodata = { path = "../../libs/geodata", optional = true }          # M1: geo.* corridor queries, rain radar
+makepad-mbtile-reader = { path = "../../libs/mbtile_reader", optional = true } # terrain drape landcover source
+serde_json      = { version = "1", optional = true }                                      # geodata FeatureHit attrs
 
-makepad-ai-hub  = { path = "../../libs/ai/hub", default-features = false, features = ["llm"] } # M2: local dispatcher LLM
+makepad-ai-hub  = { path = "../../libs/ai/hub", default-features = false, features = ["llm"], optional = true } # M2: local dispatcher LLM
 
-makepad-strict-json = { path = "../../libs/strict_json" }  # claude_agent tool schemas
-makepad-converse = { path = "../../libs/converse", features = ["local-llm"] } # M3: attention-gate filter
+makepad-strict-json = { path = "../../libs/strict_json", optional = true }  # claude_agent tool schemas
+makepad-converse = { path = "../../libs/converse", features = ["local-llm"], optional = true } # M3: attention-gate filter
 
 # Planned wiring (see route.md milestones) — enable as each phase lands:
 # makepad-tesla   = { path = "../../libs/tesla" }          # M5: vehicle SoC / charge state
