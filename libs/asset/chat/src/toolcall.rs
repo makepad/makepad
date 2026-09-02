@@ -99,6 +99,23 @@ pub fn extract(text: &str) -> Extract {
     match extract_line_start(&split.visible) {
         Extract::None => match extract_native(&split.visible) {
             Extract::None if !split.think_closed => extract_last_line_start(text),
+            // A synthetic `<think>` opener (qwen3.8) wraps the model's WHOLE
+            // reply: it writes its prose, its trained <tool_call> block, and
+            // only then closes the think — so the visible half is empty and
+            // the call sits in the reasoning half (observed 2026-09-02: a
+            // complete world.set_source carrying a world.plan, never
+            // executed, the turn hanging on "Talking to Qwen"). A tool call
+            // is never reasoning — take it from there; the prose before it
+            // is the clean text.
+            Extract::None if split.visible.trim().is_empty() => {
+                if split.thinking.contains(TOOL_MARKER) {
+                    extract_line_start(&split.thinking)
+                } else if split.thinking.contains("<tool_call>") {
+                    extract_native(&split.thinking)
+                } else {
+                    Extract::None
+                }
+            }
             other => other,
         },
         other => other,
@@ -515,6 +532,20 @@ pub fn render_attachments(attachments: &[AttachmentBinding]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_tool_call_wrapped_in_a_synthetic_think_block_still_executes() {
+        let raw = "<think>I'll build that now — rolling terrain and a town.\n\n<tool_call>\n<function=world.set_source>\n<parameter=source>\nlet p = world.plan({seed: 11})\n</parameter>\n<parameter=note>\nrolling hills\n</parameter>\n</function>\n</tool_call></think>";
+        match super::extract(raw) {
+            super::Extract::Call { name, args, clean } => {
+                assert_eq!(name, "world.set_source");
+                let src = args.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(src.contains("world.plan("), "{src}");
+                assert!(clean.contains("build that now"), "{clean}");
+            }
+            other => panic!("expected the wrapped call to extract, got {other:?}"),
+        }
+    }
+
     use super::*;
 
     #[test]
