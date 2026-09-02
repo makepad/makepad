@@ -482,12 +482,6 @@ mod exec {
             if !gpu_device_available() {
                 return Err("CUDA unavailable".into());
             }
-            if std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() == Ok("1") {
-                std::env::set_var("FLUX_VAE_CONV_GEMM", "0");
-                std::env::set_var("FLUX_VAE_CONV_IM2COL", "0");
-                // Composite attn defaults to f16 GEMM; 40 layers accumulate past 1e-3.
-                std::env::set_var("FLUX_ATTN_F16", "0");
-            }
             let st = if path.is_dir() {
                 path.join("model.safetensors")
             } else {
@@ -608,8 +602,8 @@ mod exec {
             let k = block.k.apply(&n1)?;
             let v = block.v.apply(&n1)?;
             // f32 QK/PV/softmax always. DINOv2-giant carries massive-activation
-            // outlier tokens (|x| in the hundreds by mid-depth); the default
-            // FLUX_ATTN_F16 composite path saturates them and the error grows
+            // outlier tokens (|x| in the hundreds by mid-depth); f16 composite
+            // attention saturates them and the error grows
             // 0.25 -> 280 max_abs across layers 16..39 (oracle bisect on the
             // elf reference), which starves the paint UNet of reference
             // structure. HF fp16 SDPA accumulates in f32; so must we.

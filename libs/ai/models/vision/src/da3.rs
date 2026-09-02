@@ -11,7 +11,7 @@
 //! alternate model fallback.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_attention_packed_flash_bf16,
+    gpu_add, gpu_attention_packed_f32, gpu_attention_packed_flash_bf16,
     gpu_birefnet_image_to_patches, gpu_birefnet_relu,
     gpu_birefnet_resize_bilinear, gpu_birefnet_tokens_to_planar, gpu_concat_cols,
     gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download, gpu_gelu_erf, gpu_graph_capture,
@@ -63,9 +63,7 @@ pub enum Da3Precision {
     /// while beating its warm latency.
     FullBf16,
     /// Explicit validation / high-accuracy mode: true f32 linears and f32
-    /// attention (conv GEMM operands remain f16).  Requires
-    /// `FLUX_ATTN_F16=0` in the environment and refuses to load otherwise;
-    /// never selected automatically.
+    /// attention (conv GEMM operands remain f16). Never selected automatically.
     StrictF32,
 }
 
@@ -86,30 +84,19 @@ impl Da3Precision {
             },
         }
     }
+
+    fn attention_operands(self) -> Da3AttentionOperands {
+        match self {
+            Self::FullBf16 => Da3AttentionOperands::Bf16,
+            Self::StrictF32 => Da3AttentionOperands::F32,
+        }
+    }
 }
 
-/// Environment preconditions for a mode, checked fail-closed at load time.
-/// The attention composite and the conv im2col path read these process-wide
-/// switches inside the shared CUDA backend, so a misconfigured environment
-/// must refuse to load rather than silently change compute.
-fn precision_env_error(precision: Da3Precision) -> Option<&'static str> {
-    if std::env::var("FLUX_VAE_CONV_GEMM").as_deref() == Ok("0") {
-        return Some(
-            "DA3 requires the conv GEMM path; unset FLUX_VAE_CONV_GEMM or set it to 1",
-        );
-    }
-    match precision {
-        Da3Precision::StrictF32 => {
-            if std::env::var("FLUX_ATTN_F16").as_deref() != Ok("0") {
-                return Some(
-                    "DA3 strict-f32 requires FLUX_ATTN_F16=0 in the service environment; \
-                     refusing to run with f16 attention operands",
-                );
-            }
-            None
-        }
-        Da3Precision::FullBf16 => None,
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Da3AttentionOperands {
+    Bf16,
+    F32,
 }
 
 #[derive(Clone, Debug)]
@@ -651,9 +638,6 @@ impl Da3MetricLarge {
         mut progress: Option<ProgressHook>,
         precision: Da3Precision,
     ) -> Result<Self> {
-        if let Some(error) = precision_env_error(precision) {
-            return Err(DiffusionError::workflow(error));
-        }
         let patch_dim = 3 * DA3_PATCH * DA3_PATCH;
         let patch_w = tensor(
             weights,
@@ -1136,14 +1120,14 @@ impl Da3MetricLarge {
                 .map_err(DiffusionError::model)?;
             timer.mark("block_qkv_slice");
             let scale = 1.0 / (DA3_HEAD_DIM as f32).sqrt();
-            let attention = match self.precision {
+            let attention = match self.precision.attention_operands() {
                 // Head-dim-64 flash kernel: bf16 operands, f32 accumulation.
-                Da3Precision::FullBf16 => {
+                Da3AttentionOperands::Bf16 => {
                     gpu_attention_packed_flash_bf16(&q, &k, &v, DA3_HEADS, scale)
                 }
-                // Composite path; the load-time guard pinned FLUX_ATTN_F16=0,
-                // so operands stay f32.
-                Da3Precision::StrictF32 => gpu_attention_packed(&q, &k, &v, DA3_HEADS, scale),
+                Da3AttentionOperands::F32 => {
+                    gpu_attention_packed_f32(&q, &k, &v, DA3_HEADS, scale)
+                }
             }
             .map_err(DiffusionError::model)?;
             timer.mark("block_attention");
@@ -2109,20 +2093,14 @@ mod tests {
     }
 
     #[test]
-    fn precision_modes_report_identity_and_fail_closed() {
+    fn precision_modes_report_identity_and_arithmetic_path() {
         let bf16 = Da3Precision::FullBf16.execution_info();
         assert!(bf16.weight_precision.contains("bf16"));
         assert_eq!(bf16.accumulation_precision, "f32");
         let f32_info = Da3Precision::StrictF32.execution_info();
         assert!(f32_info.weight_precision.starts_with("f32"));
-        // Fail-closed: strict-f32 refuses to load unless the process
-        // environment pins f32 attention operands.
-        std::env::remove_var("FLUX_ATTN_F16");
-        assert!(precision_env_error(Da3Precision::StrictF32).is_some());
-        assert!(precision_env_error(Da3Precision::FullBf16).is_none());
-        std::env::set_var("FLUX_ATTN_F16", "0");
-        assert!(precision_env_error(Da3Precision::StrictF32).is_none());
-        std::env::remove_var("FLUX_ATTN_F16");
+        assert_eq!(Da3Precision::StrictF32.attention_operands(), Da3AttentionOperands::F32);
+        assert_eq!(Da3Precision::FullBf16.attention_operands(), Da3AttentionOperands::Bf16);
     }
 
     #[test]

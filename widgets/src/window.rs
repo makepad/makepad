@@ -28,6 +28,7 @@ script_mod! {
     use mod.widgets.NavControl
     use mod.widgets.ScreenCap
     use mod.widgets.Tweaker
+    use mod.widgets.AiChatSlot
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
@@ -255,6 +256,10 @@ script_mod! {
             width: Fill height: Fill
             keyboard_min_shift: 30
         }
+        // The AI chat overlay (widgets/src/ai_slot.rs): F10 in every
+        // standalone app, filled by name from the aichat crate when the
+        // app links it, inert under the window manager, zero cost while off.
+        ai_chat := AiChatSlot {}
         // The design-feedback overlay (widgets/src/tweaker.rs): hardcoded
         // like the caption bar, inert unless --remote, zero cost while off.
         tweaker := Tweaker {}
@@ -1672,7 +1677,11 @@ impl Widget for Window {
             // Tweak mode swallows pointer events over the body before
             // ordinary dispatch (picking must never fire a Button); all the
             // logic lives in widgets/src/tweaker.rs.
-            if !crate::tweaker::window_intercept(cx, event, &mut self.view, self.window.window_id())
+            // The AI overlay does the same for F10 and for the pointer over
+            // its open pane (widgets/src/ai_slot.rs).
+            let window_id = self.window.window_id();
+            if !crate::tweaker::window_intercept(cx, event, &mut self.view, window_id)
+                && !crate::ai_slot::window_intercept(cx, event, &mut self.view, window_id)
             {
                 self.view.handle_event(cx, event, scope);
             }

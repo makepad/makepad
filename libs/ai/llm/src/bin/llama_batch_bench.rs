@@ -35,12 +35,8 @@
 //!     [--verify-tokens N]     tokens to generate per verify width (default 64)
 //!     [--csv PATH]            also write the rows as csv
 //!     [--label TEXT]          tag printed with every row (which build this was)
+//!     [--host-split]          report host/GPU timing components
 //! ```
-//!
-//! Route A/Bs are environment, not flags, so the same binary measures them:
-//! `MKLLM_DISABLE_Q81_MMVQ=1` forces the quantised mat-vec path off,
-//! `MKLLM_DISABLE_CUDA_GRAPH=1` measures eager dispatch,
-//! `MAKEPAD_LLAMA_PER_LEN_GRAPHS=1` keys graphs by exact length.
 
 use std::time::{Duration, Instant};
 
@@ -59,6 +55,7 @@ struct Args {
     verify_tokens: usize,
     csv: Option<String>,
     label: String,
+    host_split: bool,
 }
 
 fn parse_list(text: &str) -> Vec<usize> {
@@ -74,7 +71,7 @@ fn parse_args() -> Args {
         eprintln!(
             "usage: llama-batch-bench <model.gguf> [--fill N] [--cols 1,2,4,...] [--reps N]\n\
              \x20      [--warmup N] [--max-context N] [--verify-widths 2,3,5]\n\
-             \x20      [--verify-tokens N] [--csv PATH] [--label TEXT]"
+             \x20      [--verify-tokens N] [--csv PATH] [--label TEXT] [--host-split]"
         );
         std::process::exit(2);
     };
@@ -89,6 +86,7 @@ fn parse_args() -> Args {
         verify_tokens: 64,
         csv: None,
         label: String::new(),
+        host_split: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -106,6 +104,7 @@ fn parse_args() -> Args {
             "--verify-tokens" => args.verify_tokens = take(&mut i).parse().unwrap_or(64),
             "--csv" => args.csv = Some(take(&mut i)),
             "--label" => args.label = take(&mut i),
+            "--host-split" => args.host_split = true,
             other => {
                 eprintln!("llama-batch-bench: unknown argument {other:?}");
                 std::process::exit(2);
@@ -180,6 +179,7 @@ struct Row {
 
 fn main() {
     let args = parse_args();
+    makepad_ai_llm::cuda_exec::host_split_set_enabled(args.host_split);
     println!(
         "llama-batch-bench{}{}",
         if args.label.is_empty() { "" } else { " " },
@@ -189,17 +189,6 @@ fn main() {
         "model={} fill={} max_context={} reps={} warmup={}",
         args.model, args.fill, args.max_context, args.reps, args.warmup
     );
-    for key in [
-        "MKLLM_DISABLE_Q81_MMVQ",
-        "MKLLM_DISABLE_CUDA_GRAPH",
-        "MAKEPAD_LLAMA_PER_LEN_GRAPHS",
-        "MKLLM_MTP_FULL_DRAFT_VOCAB",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            println!("env {key}={}", value.to_string_lossy());
-        }
-    }
-
     let widest = args.cols.iter().copied().max().unwrap_or(1);
     let config = LlamaSessionConfig {
         max_context: Some(args.max_context as u32),
@@ -362,7 +351,7 @@ fn report_columns(rows: &[Row], args: &Args) {
 /// Two windows are then measured and both printed: the second is the one to
 /// quote, and a first window that disagrees with it is the compile showing.
 fn measure_verify_widths(args: &Args) {
-    let split = std::env::var_os("MAKEPAD_LLAMA_HOST_SPLIT").is_some();
+    let split = args.host_split;
     println!("\nn_outputs=B verify-shape curve  (fill {} tok)", args.fill);
     println!(
         "{:>5}  {:>3}  {:>10}  {:>12}  {:>10}  {:>8}  {:>9}  {:>9}  {:>10}{}",
@@ -501,4 +490,3 @@ fn measure_verify_widths(args: &Args) {
         }
     }
 }
-

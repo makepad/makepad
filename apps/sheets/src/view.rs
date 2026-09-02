@@ -607,6 +607,39 @@ impl MpSheets {
         out
     }
 
+    /// What the assistant is told about the sheet on screen (`sheets.summary`):
+    /// its name, its used range, the header row and the selection.
+    pub fn ai_summary(&self, cx: &Cx) -> String {
+        let sheet = self.wb.sheet();
+        let mut out = format!(
+            "Sheet \"{}\" ({} of {})",
+            sheet.name,
+            self.wb.active + 1,
+            self.wb.sheets.len()
+        );
+        match sheet.used_range() {
+            Some(((r0, c0), (r1, c1))) => {
+                out.push_str(&format!(
+                    ", used {}:{} ({} rows × {} columns).",
+                    sheet::pos_name((r0, c0)),
+                    sheet::pos_name((r1, c1)),
+                    r1 - r0 + 1,
+                    c1 - c0 + 1
+                ));
+                let header: Vec<String> = (c0..=c1).take(26).map(|c| sheet.display((r0, c))).collect();
+                out.push_str(&format!(" Header row: {}.", header.join(" | ")));
+            }
+            None => out.push_str(", empty."),
+        }
+        let ((sr0, sc0), (sr1, sc1)) = self.selection_rect(cx);
+        out.push_str(&format!(
+            " Selection: {}:{}.",
+            sheet::pos_name((sr0, sc0)),
+            sheet::pos_name((sr1, sc1))
+        ));
+        out
+    }
+
     fn selection_rect(&self, cx: &Cx) -> (Pos, Pos) {
         match self.grid(cx).selection() {
             Some(sel) => {

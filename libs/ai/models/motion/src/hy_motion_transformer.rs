@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_attention_packed_motion_text, gpu_concat_cols,
-    gpu_concat_rows, gpu_download, gpu_gated_residual_mod, gpu_gelu,
+    gpu_add, gpu_attention_packed, gpu_attention_packed_f32, gpu_attention_packed_motion_text,
+    gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_gated_residual_mod, gpu_gelu,
     gpu_layer_norm_mod, gpu_layer_norm_mul_add, gpu_layer_norm_mul_add_grouped,
     gpu_linear_f32_resident, gpu_rms_norm_mul, gpu_rope_interleaved, gpu_silu,
     gpu_slice_cols, gpu_slice_rows, gpu_upload, GpuTensor,
@@ -53,6 +53,7 @@ pub struct HyMotionPreparedShape {
     rope_sin: GpuTensor,
     motion_tokens: usize,
     text_tokens: usize,
+    f16_attention_operands: bool,
 }
 
 /// Fully resident shape and both classifier-free-guidance branches. The
@@ -217,6 +218,7 @@ impl HyMotionDeviceWeights {
         context_projected: &GpuTensor,
         context_mean: &[f32],
         timestep: f32,
+        f16_attention_operands: bool,
     ) -> Result<GpuTensor> {
         if context_projected.cols() != HY_MOTION_HIDDEN
             || context_mean.len() != HY_MOTION_HIDDEN
@@ -284,13 +286,11 @@ impl HyMotionDeviceWeights {
                 &format!("{prefix}.self_attn_k_norm"),
                 HY_MOTION_HEAD_DIM,
             )?;
-            let attention = gpu_attention_packed(
-                &q,
-                &k,
-                &v,
-                HY_MOTION_HEADS,
-                attention_scale,
-            )
+            let attention = if f16_attention_operands {
+                gpu_attention_packed(&q, &k, &v, HY_MOTION_HEADS, attention_scale)
+            } else {
+                gpu_attention_packed_f32(&q, &k, &v, HY_MOTION_HEADS, attention_scale)
+            }
             .map_err(DiffusionError::model)?;
             let attention = self.linear(&attention, &format!("{prefix}.self_attn_proj"))?;
             hidden = gpu_gated_residual_mod(&hidden, &attention, &mods, 0)
@@ -380,6 +380,7 @@ impl HyMotionDeviceWeights {
     pub fn prepare_shape(
         motion_tokens: usize,
         text_tokens: usize,
+        f16_attention_operands: bool,
     ) -> Result<HyMotionPreparedShape> {
         let packed_shape = HyMotionPackedShape::new(motion_tokens, text_tokens)?;
         let (rope_cos, rope_sin) = hy_motion_rope_tables(
@@ -402,6 +403,7 @@ impl HyMotionDeviceWeights {
             .map_err(DiffusionError::model)?,
             motion_tokens,
             text_tokens,
+            f16_attention_operands,
         })
     }
 
@@ -412,6 +414,7 @@ impl HyMotionDeviceWeights {
         context: &[f32],
         vtxt: &[f32],
         motion_tokens: usize,
+        f16_attention_operands: bool,
     ) -> Result<HyMotionPreparedCfg> {
         if context.is_empty() || context.len() % HY_MOTION_CONTEXT_DIM != 0 {
             return Err(DiffusionError::workflow(
@@ -419,7 +422,7 @@ impl HyMotionDeviceWeights {
             ));
         }
         let text_tokens = context.len() / HY_MOTION_CONTEXT_DIM;
-        let shape = Self::prepare_shape(motion_tokens, text_tokens)?;
+        let shape = Self::prepare_shape(motion_tokens, text_tokens, f16_attention_operands)?;
         let conditioned = self.prepare_branch(context, vtxt, text_tokens)?;
         let null_context = self.vector("null_ctxt_input")?.repeat(text_tokens);
         let basic = self.prepare_branch(
@@ -520,6 +523,7 @@ impl HyMotionDeviceWeights {
         adapter: &GpuTensor,
         rope_cos: &GpuTensor,
         rope_sin: &GpuTensor,
+        f16_attention_operands: bool,
     ) -> Result<(GpuTensor, GpuTensor)> {
         if layer >= HY_MOTION_DOUBLE_LAYERS {
             return Err(DiffusionError::model("HY-Motion double block out of range"));
@@ -569,6 +573,7 @@ impl HyMotionDeviceWeights {
             1.0 / (HY_MOTION_HEAD_DIM as f32).sqrt(),
             motion.rows(),
             HY_MOTION_NARROWBAND_FRAMES,
+            f16_attention_operands,
         )
         .map_err(DiffusionError::model)?;
         let motion_attention = gpu_slice_rows(&attention, 0, motion.rows())
@@ -637,6 +642,7 @@ impl HyMotionDeviceWeights {
         adapter: &GpuTensor,
         rope_cos: &GpuTensor,
         rope_sin: &GpuTensor,
+        f16_attention_operands: bool,
     ) -> Result<GpuTensor> {
         if layer >= HY_MOTION_SINGLE_LAYERS || motion_tokens >= joint.rows() {
             return Err(DiffusionError::model("HY-Motion single block shape mismatch"));
@@ -675,6 +681,7 @@ impl HyMotionDeviceWeights {
             1.0 / (HY_MOTION_HEAD_DIM as f32).sqrt(),
             motion_tokens,
             HY_MOTION_NARROWBAND_FRAMES,
+            f16_attention_operands,
         )
         .map_err(DiffusionError::model)?;
         let mlp = gpu_gelu(&mlp).map_err(DiffusionError::model)?;
@@ -712,6 +719,7 @@ impl HyMotionDeviceWeights {
         timestep: f32,
         motion_tokens: usize,
         text_tokens: usize,
+        f16_attention_operands: bool,
     ) -> Result<Vec<f32>> {
         if latent.len() != motion_tokens * HY_MOTION_INPUT_DIM
             || context.len() != text_tokens * HY_MOTION_CONTEXT_DIM
@@ -719,7 +727,7 @@ impl HyMotionDeviceWeights {
         {
             return Err(DiffusionError::model("HY-Motion forward input shape mismatch"));
         }
-        let shape = Self::prepare_shape(motion_tokens, text_tokens)?;
+        let shape = Self::prepare_shape(motion_tokens, text_tokens, f16_attention_operands)?;
         let branch = self.prepare_branch(context, vtxt, text_tokens)?;
         self.forward_prepared(latent, timestep, &branch, &shape)
     }
@@ -747,6 +755,7 @@ impl HyMotionDeviceWeights {
             &branch.context_projected,
             &branch.context_mean,
             timestep,
+            shape.f16_attention_operands,
         )?;
         let time = self.timestep_projection(timestep)?;
         let adapter = gpu_add(&time, &branch.vector_projected).map_err(DiffusionError::model)?;
@@ -759,6 +768,7 @@ impl HyMotionDeviceWeights {
                 &adapter,
                 &shape.rope_cos,
                 &shape.rope_sin,
+                shape.f16_attention_operands,
             )?;
         }
         let mut joint = gpu_concat_rows(&motion, &text).map_err(DiffusionError::model)?;
@@ -770,6 +780,7 @@ impl HyMotionDeviceWeights {
                 &adapter,
                 &shape.rope_cos,
                 &shape.rope_sin,
+                shape.f16_attention_operands,
             )?;
         }
         let motion = gpu_slice_rows(&joint, 0, shape.motion_tokens).map_err(DiffusionError::model)?;

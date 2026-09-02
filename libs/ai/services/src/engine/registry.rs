@@ -15,6 +15,7 @@ use crate::port::ServiceLink;
 use crate::state::ServiceInfo;
 use crate::wire::*;
 use crate::engine::ToolDefinition;
+use makepad_platform::thread::SignalToUI;
 use std::collections::HashMap;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -391,13 +392,19 @@ impl ServiceRegistry {
         out
     }
 
-    /// Send one frame down to an instance. False when it is gone.
+    /// Send one frame down to an instance. False when it is gone. An
+    /// in-process port drains its link on the app's events, so the UI is
+    /// woken: a call must not wait for the next mouse move.
     pub fn send(&self, endpoint: &EndpointId, msg: ServiceDown) -> bool {
         let inner = self.inner.lock().unwrap();
-        match inner.entries.get(endpoint) {
+        let sent = match inner.entries.get(endpoint) {
             Some(e) => e.link.down.send(HostedDown { to: Some(endpoint.clone()), msg }).is_ok(),
             None => false,
+        };
+        if sent {
+            SignalToUI::set_ui_signal();
         }
+        sent
     }
 
     /// Tell every instance whether the chat pane is showing.
@@ -406,6 +413,7 @@ impl ServiceRegistry {
         for (endpoint, e) in &inner.entries {
             let _ = e.link.down.send(HostedDown { to: Some(endpoint.clone()), msg: ServiceDown::ChatOpen { open } });
         }
+        SignalToUI::set_ui_signal();
     }
 
     /// Drain every link. Registrations are answered, contexts stored,
