@@ -1095,9 +1095,14 @@ impl CueRing {
         }
     }
 
+    /// Publish one frame. The samples pass the same guard the master sum
+    /// does: this bus ends at an operator's ears, and a value that is not a
+    /// number would sit in the ring for its whole depth of history and go on
+    /// poisoning the consumer's smoothed volume after that.
     #[inline]
     fn push(&self, pos: u64, left: f32, right: f32) {
-        let packed = (left.to_bits() as u64) | ((right.to_bits() as u64) << 32);
+        let packed =
+            (audible(left).to_bits() as u64) | ((audible(right).to_bits() as u64) << 32);
         self.buf[(pos as usize) & (CUE_RING_FRAMES - 1)].store(packed, Ordering::Relaxed);
     }
 
@@ -3579,6 +3584,35 @@ mod tests {
         assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
         let (position, duration, playing) = mixer.deck_position(DeckId::A);
         assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
+    }
+
+    #[test]
+    fn the_phones_never_carry_a_sample_that_is_not_a_number() {
+        // The master sum is guarded at the mix point; the cue sum is the
+        // other bus out of this callback, and it reaches an operator's ears
+        // directly. A filter driven past stability on a cued deck must cost
+        // that deck, not the monitor for the rest of the night.
+        let ring = CueRing::new();
+        ring.armed.store(true, Ordering::Relaxed);
+        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
+        let filled = CUE_TARGET_FRAMES as u64 + 2_048;
+        for pos in 0..filled {
+            let bad = pos % 37 == 0;
+            let (l, r) = if bad { (f32::NAN, f32::INFINITY) } else { (0.5, -0.5) };
+            ring.push(pos, l, r);
+        }
+        ring.write_pos.store(filled, Ordering::Release);
+        let mut state = CueReadState::default();
+        let mut out = AudioBuffer::new_with_size(1_024, 2);
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert!(
+            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
+            "every phones sample must be one the device can carry"
+        );
+        assert!(
+            out.channel(0).iter().any(|s| s.abs() > 0.01),
+            "and the good samples still get through"
+        );
     }
 
     #[test]

@@ -18221,7 +18221,13 @@ p2 {}
         let mut lines = body.lines();
         let name = lines.next().unwrap_or("").trim();
         self.phones_device_name = (!name.is_empty()).then(|| name.to_string());
-        if let Some(volume) = lines.next().and_then(|line| line.trim().parse::<f32>().ok()) {
+        // `"NaN"` and `"inf"` both parse, so a hand-edited or half-written
+        // file could otherwise hand the monitor a level it can never leave.
+        if let Some(volume) = lines
+            .next()
+            .and_then(|line| line.trim().parse::<f32>().ok())
+            .filter(|volume| volume.is_finite())
+        {
             self.phones_volume = volume.clamp(0.0, 1.0);
         }
         if let Some(place) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
