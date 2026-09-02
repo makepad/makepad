@@ -84,6 +84,61 @@ pub struct FromWasmTextCopyResponse {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmStorageGet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageSet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub value: WasmDataU8,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageDelete {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageList {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub prefix: String,
+    pub after: String,
+    pub has_after: bool,
+    pub limit: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageGetRange {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub offset_lo: u32,
+    pub offset_hi: u32,
+    pub len: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageStat {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmOpenUrl {
     pub url: String,
     pub in_place: bool,

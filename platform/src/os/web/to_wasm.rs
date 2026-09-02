@@ -511,6 +511,21 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
 
+#[derive(ToWasm)]
+pub struct ToWasmStorageResult {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub op: u32,
+    pub found: bool,
+    pub value: WasmDataU8,
+    pub keys: Vec<String>,
+    pub has_next: bool,
+    pub next: String,
+    pub length_lo: u32,
+    pub length_hi: u32,
+    pub error: String,
+}
+
 // Keyboard API
 
 #[derive(ToWasm)]

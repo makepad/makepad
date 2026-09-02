@@ -362,6 +362,15 @@ pub enum CxOsOp {
     CancelHttpRequest {
         request_id: LiveId,
     },
+    #[cfg(target_arch = "wasm32")]
+    #[allow(private_interfaces)]
+    StorageRequest(crate::storage::StorageRequest),
+    #[cfg(target_arch = "wasm32")]
+    StorageRequestError {
+        request_id: crate::storage::StorageRequestId,
+        op: crate::storage::StorageOp,
+        error: crate::storage::StorageError,
+    },
 
     PrepareVideoPlayback(
         LiveId,
@@ -501,6 +510,10 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::HttpRequest { .. } => write!(f, "HttpRequest"),
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequest(..) => write!(f, "StorageRequest"),
+            #[cfg(target_arch = "wasm32")]
+            Self::StorageRequestError { .. } => write!(f, "StorageRequestError"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
             Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),

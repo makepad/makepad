@@ -26,6 +26,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.network_web_sockets = {};
         this.network_http_requests = new Map();
+        this.storage_db_promise = null;
         this.window_info = {}
         this.xr_capabilities = {
             vr_supported: false,
@@ -453,6 +454,183 @@ export class WasmWebBrowser extends WasmBridge {
 
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
+    }
+
+    storage_database() {
+        if (this.storage_db_promise !== null) {
+            return this.storage_db_promise;
+        }
+        this.storage_db_promise = new Promise((resolve, reject) => {
+            const request = indexedDB.open("makepad-storage", 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                const store = db.objectStoreNames.contains("values")
+                    ? request.transaction.objectStore("values")
+                    : db.createObjectStore("values", { keyPath: "id" });
+                if (!store.indexNames.contains("namespace")) {
+                    store.createIndex("namespace", "namespace", { unique: false });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("could not open IndexedDB"));
+            request.onblocked = () => reject(new Error("IndexedDB upgrade was blocked"));
+        });
+        return this.storage_db_promise;
+    }
+
+    storage_id(namespace, key) {
+        return namespace + "\u0000" + key;
+    }
+
+    storage_error_text(error) {
+        if (error && error.message) {
+            return error.message;
+        }
+        return String(error || "unknown IndexedDB error");
+    }
+
+    storage_send_result(args, op, result = {}) {
+        this.to_wasm.ToWasmStorageResult({
+            request_id_lo: args.request_id_lo,
+            request_id_hi: args.request_id_hi,
+            op,
+            found: result.found === true,
+            value: result.value || new Uint8Array(0),
+            keys: result.keys || [],
+            has_next: result.next !== undefined,
+            next: result.next || "",
+            length_lo: result.length === undefined ? 0 : result.length >>> 0,
+            length_hi: result.length === undefined ? 0 : Math.floor(result.length / 0x100000000),
+            error: result.error || ""
+        });
+        this.do_wasm_pump();
+    }
+
+    storage_request(request) {
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+        });
+    }
+
+    FromWasmStorageGet(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            this.storage_send_result(args, 0, record === undefined
+                ? { found: false }
+                : { found: true, value: record.value });
+        }).catch(error => {
+            this.storage_send_result(args, 0, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageSet(args) {
+        const value = this.clone_data_u8(args.value);
+        this.free_data_u8(args.value);
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction("values", "readwrite");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error("IndexedDB write failed"));
+            transaction.onabort = () => reject(transaction.error || new Error("IndexedDB write aborted"));
+            transaction.objectStore("values").put({
+                id: this.storage_id(args.namespace, args.key),
+                namespace: args.namespace,
+                key: args.key,
+                value: value.buffer
+            });
+        })).then(() => {
+            this.storage_send_result(args, 1);
+        }).catch(error => {
+            this.storage_send_result(args, 1, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageDelete(args) {
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction("values", "readwrite");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error("IndexedDB delete failed"));
+            transaction.onabort = () => reject(transaction.error || new Error("IndexedDB delete aborted"));
+            transaction.objectStore("values").delete(this.storage_id(args.namespace, args.key));
+        })).then(() => {
+            this.storage_send_result(args, 2);
+        }).catch(error => {
+            this.storage_send_result(args, 2, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageList(args) {
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const keys = [];
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").index("namespace")
+                .openCursor(IDBKeyRange.only(args.namespace));
+            request.onerror = () => reject(request.error || new Error("IndexedDB cursor failed"));
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (cursor === null) {
+                    resolve(keys);
+                    return;
+                }
+                const key = cursor.value.key;
+                if (key.startsWith(args.prefix) && (!args.has_after || key > args.after)) {
+                    keys.push(key);
+                    if (keys.length > args.limit) {
+                        resolve(keys);
+                        return;
+                    }
+                }
+                cursor.continue();
+            };
+        })).then(keys => {
+            let next;
+            if (keys.length > args.limit) {
+                keys.length = args.limit;
+                next = keys[keys.length - 1];
+            }
+            this.storage_send_result(args, 3, { keys, next });
+        }).catch(error => {
+            this.storage_send_result(args, 3, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageGetRange(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            if (record === undefined) {
+                this.storage_send_result(args, 4, { found: false });
+                return;
+            }
+            const value = new Uint8Array(record.value);
+            const offset = args.offset_hi > 0x1fffff
+                ? Number.MAX_SAFE_INTEGER
+                : args.offset_lo + args.offset_hi * 0x100000000;
+            const end = Math.min(value.length, offset + args.len);
+            const range = offset >= value.length ? new Uint8Array(0) : value.slice(offset, end);
+            this.storage_send_result(args, 4, { found: true, value: range });
+        }).catch(error => {
+            this.storage_send_result(args, 4, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageStat(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            this.storage_send_result(args, 5, record === undefined
+                ? { found: false }
+                : { found: true, length: record.value.byteLength });
+        }).catch(error => {
+            this.storage_send_result(args, 5, { error: this.storage_error_text(error) });
+        });
     }
 
     FromWasmShowTextIME(args) {
