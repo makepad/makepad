@@ -8,10 +8,12 @@ use makepad_mbtile_reader::{
     compress_tile, read_pb_len_slice, read_pb_varint, skip_pb_field, MkmapReader, MkmapTileRef,
     TileCodec, TileCompression, DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS,
 };
-use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc::sync_channel, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub const DETAIL_LAYERS: &[&str] = &[
     "osm_points",
@@ -823,13 +825,25 @@ fn verify_kept_sections(before: &[u8], after: &[u8]) -> Result<(), String> {
 }
 
 pub const TILE_BROTLI_QUALITY: u32 = 11;
-const MANIFEST_MAGIC: &[u8; 8] = b"MKRPMF01";
+const MANIFEST_MAGIC: &[u8; 8] = b"MKRPMF02";
 
 #[derive(Clone, Debug)]
 pub enum TileSelection {
     All,
     HilbertRange { start: u64, end: u64 },
     Explicit(BTreeSet<u64>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShardRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl ShardRange {
+    fn contains(self, shard: usize) -> bool {
+        (self.start..self.end).contains(&shard)
+    }
 }
 
 impl TileSelection {
@@ -869,6 +883,10 @@ pub struct RepackOptions {
     pub dry_run: bool,
     pub verify: bool,
     pub resume: bool,
+    pub jobs: usize,
+    pub brotli_quality: u32,
+    pub verify_shards: Option<ShardRange>,
+    pub log: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -904,6 +922,7 @@ struct ShardManifest {
     selection_hash: u128,
     input_record: u32,
     output_shard: u32,
+    brotli_quality: u32,
     file_len: u64,
     tile_count: u64,
     unique_blobs: u64,
@@ -935,6 +954,7 @@ fn encode_manifest(manifest: &ShardManifest) -> Vec<u8> {
     out.extend_from_slice(&manifest.selection_hash.to_le_bytes());
     out.extend_from_slice(&manifest.input_record.to_le_bytes());
     out.extend_from_slice(&manifest.output_shard.to_le_bytes());
+    out.extend_from_slice(&manifest.brotli_quality.to_le_bytes());
     for value in [
         manifest.file_len,
         manifest.tile_count,
@@ -959,7 +979,7 @@ fn encode_manifest(manifest: &ShardManifest) -> Vec<u8> {
 }
 
 fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
-    let expected_len = 8 + 16 + 16 + 4 + 4 + 11 * 8 + DATA_POLICY.len() * 8 + 2;
+    let expected_len = 8 + 16 + 16 + 4 + 4 + 4 + 11 * 8 + DATA_POLICY.len() * 8 + 2;
     if bytes.len() != expected_len || bytes.get(..8) != Some(MANIFEST_MAGIC) {
         return Err("invalid repack shard manifest".to_string());
     }
@@ -983,6 +1003,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
     let selection_hash = take_u128(&mut pos);
     let input_record = take_u32(&mut pos);
     let output_shard = take_u32(&mut pos);
+    let brotli_quality = take_u32(&mut pos);
     let file_len = take_u64(&mut pos);
     let tile_count = take_u64(&mut pos);
     let unique_blobs = take_u64(&mut pos);
@@ -1005,6 +1026,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<ShardManifest, String> {
         selection_hash,
         input_record,
         output_shard,
+        brotli_quality,
         file_len,
         tile_count,
         unique_blobs,
@@ -1076,15 +1098,17 @@ fn load_completed_manifest(
     selection_hash: u128,
     input_record: u32,
     output_shard: u32,
+    brotli_quality: u32,
 ) -> Result<Option<ShardManifest>, String> {
     let path = manifest_path(output, output_shard);
     let shard = shard_path(output, output_shard);
     if !path.exists() || !shard.exists() {
         return Ok(None);
     }
-    let manifest = decode_manifest(
-        &fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?,
-    )?;
+    let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let Ok(manifest) = decode_manifest(&bytes) else {
+        return Ok(None);
+    };
     let actual_len = fs::metadata(&shard)
         .map_err(|err| format!("stat {}: {err}", shard.display()))?
         .len();
@@ -1092,12 +1116,48 @@ fn load_completed_manifest(
         || manifest.selection_hash != selection_hash
         || manifest.input_record != input_record
         || manifest.output_shard != output_shard
+        || manifest.brotli_quality != brotli_quality
         || manifest.file_len != actual_len
         || manifest.dir_offset.checked_add(manifest.dir_len) != Some(actual_len)
     {
         return Ok(None);
     }
     Ok(Some(manifest))
+}
+
+struct ProgressLog {
+    file: Option<BufWriter<File>>,
+}
+
+impl ProgressLog {
+    fn open(path: Option<&Path>) -> Result<Self, String> {
+        let file = path
+            .map(|path| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map(BufWriter::new)
+                    .map_err(|err| format!("open progress log {}: {err}", path.display()))
+            })
+            .transpose()?;
+        Ok(Self { file })
+    }
+
+    fn line(&mut self, line: &str) -> Result<(), String> {
+        println!("{line}");
+        if let Some(file) = &mut self.file {
+            writeln!(file, "{line}")
+                .and_then(|_| file.flush())
+                .map_err(|err| format!("write progress log: {err}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn display_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
 
 fn process_shard(
@@ -1110,7 +1170,8 @@ fn process_shard(
     output: Option<&Path>,
     input_root_hash: u128,
     selection_hash: u128,
-    verify: bool,
+    jobs: usize,
+    brotli_quality: u32,
 ) -> Result<ShardManifest, String> {
     if refs.is_empty() {
         return Err("cannot write an empty output shard".to_string());
@@ -1131,9 +1192,6 @@ fn process_shard(
         None => None,
     };
     let mut writer = file.map(|file| BufWriter::with_capacity(4 * 1024 * 1024, file));
-    let compression = TileCompression::Brotli {
-        quality: TILE_BROTLI_QUALITY,
-    };
     let mut offset = 0_u64;
     let mut entries = Vec::with_capacity(refs.len());
     let mut dedup: HashMap<u128, BlobRef> = HashMap::new();
@@ -1142,59 +1200,155 @@ fn process_shard(
     let mut compressed_after = 0_u64;
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0_u8;
-    for tile in refs {
-        let source = reader
-            .read_tile_ref(tile)
-            .map_err(|err| format!("read z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
-        let decoded = codec
-            .decode(&source)
-            .map_err(|err| format!("decode z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
-        let (rewritten, stats) = rewrite_tile(&decoded)
-            .map_err(|err| format!("rewrite z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
-        if verify {
-            verify_rewritten_tile(&decoded, &rewritten)
-                .map_err(|err| format!("verify z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
-        }
-        let compressed = compress_tile(&compression, dict, &rewritten)
-            .map_err(|err| format!("compress z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y))?;
-        let hash = content_hash(&compressed);
-        let blob = if let Some(blob) = dedup.get(&hash) {
-            *blob
-        } else {
-            let blob = BlobRef {
-                shard: output_shard,
-                offset,
-                len: compressed.len() as u64,
-            };
-            if let Some(writer) = writer.as_mut() {
-                writer.write_all(&compressed).map_err(|err| {
-                    format!("write output shard {output_shard}: {err}")
-                })?;
-            }
-            offset += compressed.len() as u64;
-            dedup.insert(hash, blob);
-            blob
-        };
-        entries.push(LeafEntry {
-            tile_id: tile.tile_id,
-            blob,
-        });
-        println!(
-            "  shard {output_shard:03} tile {}/{}/{} decoded {} -> {} compressed {} -> {}",
-            tile.zoom,
-            tile.x,
-            tile.y,
-            decoded.len(),
-            rewritten.len(),
-            source.len(),
-            compressed.len()
-        );
-        tile_stats.add_assign(&stats);
-        compressed_before += source.len() as u64;
-        compressed_after += compressed.len() as u64;
-        min_zoom = min_zoom.min(tile.zoom);
-        max_zoom = max_zoom.max(tile.zoom);
+
+    struct TileOutput {
+        tile: MkmapTileRef,
+        source_len: u64,
+        compressed: Vec<u8>,
+        stats: TileRewriteStats,
     }
+
+    let jobs = jobs.max(1);
+    let window = jobs.saturating_mul(2).max(1);
+    let pipeline_result = std::thread::scope(|scope| -> Result<(), String> {
+        let (job_tx, job_rx) = sync_channel::<(usize, MkmapTileRef, Vec<u8>)>(jobs);
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        let (result_tx, result_rx) =
+            sync_channel::<(usize, Result<TileOutput, String>)>(jobs);
+        let (permit_tx, permit_rx) = sync_channel::<()>(window);
+        for _ in 0..window {
+            permit_tx.send(()).unwrap();
+        }
+
+        let producer = scope.spawn(move || -> Result<(), String> {
+            for (seq, tile) in refs.iter().copied().enumerate() {
+                permit_rx
+                    .recv()
+                    .map_err(|_| "tile pipeline stopped before input was read".to_string())?;
+                let source = reader.read_tile_ref(&tile).map_err(|err| {
+                    format!("read z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
+                })?;
+                job_tx
+                    .send((seq, tile, source))
+                    .map_err(|_| "tile pipeline stopped before input was queued".to_string())?;
+            }
+            Ok(())
+        });
+
+        let mut workers = Vec::with_capacity(jobs);
+        for _ in 0..jobs {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            workers.push(scope.spawn(move || -> Result<(), String> {
+                loop {
+                    let job = job_rx
+                        .lock()
+                        .map_err(|_| "tile job queue mutex poisoned".to_string())?
+                        .recv();
+                    let Ok((seq, tile, source)) = job else {
+                        return Ok(());
+                    };
+                    let result = (|| {
+                        let decoded = codec.decode(&source).map_err(|err| {
+                            format!("decode z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
+                        })?;
+                        let (rewritten, stats) = rewrite_tile(&decoded).map_err(|err| {
+                            format!("rewrite z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
+                        })?;
+                        let compressed = compress_tile(
+                            &TileCompression::Brotli {
+                                quality: brotli_quality,
+                            },
+                            dict,
+                            &rewritten,
+                        )
+                        .map_err(|err| {
+                            format!("compress z{}/{}/{}: {err}", tile.zoom, tile.x, tile.y)
+                        })?;
+                        Ok(TileOutput {
+                            tile,
+                            source_len: source.len() as u64,
+                            compressed,
+                            stats,
+                        })
+                    })();
+                    result_tx
+                        .send((seq, result))
+                        .map_err(|_| "tile result writer stopped".to_string())?;
+                }
+            }));
+        }
+        drop(result_tx);
+
+        let mut next = 0_usize;
+        let mut pending = BTreeMap::new();
+        let mut first_error = None;
+        for (seq, result) in result_rx {
+            pending.insert(seq, result);
+            while let Some(result) = pending.remove(&next) {
+                match result {
+                    Ok(result) if first_error.is_none() => {
+                        let hash = content_hash(&result.compressed);
+                        let blob = if let Some(blob) = dedup.get(&hash) {
+                            *blob
+                        } else {
+                            let blob = BlobRef {
+                                shard: output_shard,
+                                offset,
+                                len: result.compressed.len() as u64,
+                            };
+                            if let Some(writer) = writer.as_mut() {
+                                writer.write_all(&result.compressed).map_err(|err| {
+                                    format!("write output shard {output_shard}: {err}")
+                                })?;
+                            }
+                            offset += result.compressed.len() as u64;
+                            dedup.insert(hash, blob);
+                            blob
+                        };
+                        entries.push(LeafEntry {
+                            tile_id: result.tile.tile_id,
+                            blob,
+                        });
+                        tile_stats.add_assign(&result.stats);
+                        compressed_before += result.source_len;
+                        compressed_after += result.compressed.len() as u64;
+                        min_zoom = min_zoom.min(result.tile.zoom);
+                        max_zoom = max_zoom.max(result.tile.zoom);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                next += 1;
+                let _ = permit_tx.send(());
+            }
+        }
+
+        let producer_result = producer
+            .join()
+            .map_err(|_| "tile input thread panicked".to_string())?;
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|_| "tile worker thread panicked".to_string())??;
+        }
+        producer_result?;
+        if next != refs.len() {
+            return Err(format!(
+                "tile pipeline returned {next} of {} results",
+                refs.len()
+            ));
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    });
+    pipeline_result?;
     let directory = encode_leaf_directory(&entries)?;
     let dir_offset = offset;
     let dir_len = directory.len() as u64;
@@ -1216,11 +1370,6 @@ fn process_shard(
         drop(writer);
         let partial = partial_path.as_ref().unwrap();
         let final_path = final_path.as_ref().unwrap();
-        match fs::remove_file(final_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(format!("remove {}: {err}", final_path.display())),
-        }
         fs::rename(partial, final_path).map_err(|err| {
             format!("rename {} to {}: {err}", partial.display(), final_path.display())
         })?;
@@ -1230,6 +1379,7 @@ fn process_shard(
         selection_hash,
         input_record: input_record as u32,
         output_shard,
+        brotli_quality,
         file_len,
         tile_count: entries.len() as u64,
         unique_blobs: dedup.len() as u64,
@@ -1248,15 +1398,6 @@ fn process_shard(
     if let Some(output) = output {
         write_atomic(&manifest_path(output, output_shard), &encode_manifest(&manifest))?;
     }
-    println!(
-        "shard {output_shard:03}: {} tiles decoded {} -> {} compressed {} -> {} ({} unique blobs)",
-        manifest.tile_count,
-        manifest.decoded_before,
-        manifest.decoded_after,
-        manifest.compressed_before,
-        manifest.compressed_after,
-        manifest.unique_blobs
-    );
     Ok(manifest)
 }
 
@@ -1264,6 +1405,7 @@ fn verify_archives(
     input: &Path,
     output: &Path,
     selection: &TileSelection,
+    shard_range: Option<ShardRange>,
 ) -> Result<u64, String> {
     let mut source = MkmapReader::open(input)
         .map_err(|err| format!("open input {}: {err}", input.display()))?;
@@ -1281,15 +1423,45 @@ fn verify_archives(
             .map_err(|err| format!("output metadata: {err}"))?,
     )
     .map_err(|err| format!("output codec: {err}"))?;
-    let mut selected_count = 0_u64;
-    for record in 0..source.root_record_count() {
-        let refs = selected_refs(&mut source, record, selection)?;
-        selected_count += refs.len() as u64;
-        for tile in &refs {
-            let output_ref = repacked
-                .resolve_tile(tile.zoom, tile.x, tile.y)
-                .map_err(|err| format!("resolve output tile {}: {err}", tile.tile_id))?
-                .ok_or_else(|| format!("output root does not resolve tile {}", tile.tile_id))?;
+    let records = selection_records(&mut source, selection)?;
+    if repacked.root_record_count() != records.len() {
+        return Err(format!(
+            "output root record count {} differs from selected input count {}",
+            repacked.root_record_count(),
+            records.len()
+        ));
+    }
+    if let Some(range) = shard_range {
+        if range.start >= range.end || range.end > records.len() {
+            return Err(format!(
+                "--shards range {}..{} is outside 0..{}",
+                range.start,
+                range.end,
+                records.len()
+            ));
+        }
+    }
+    let mut verified_count = 0_u64;
+    for (output_record, input_record) in records.into_iter().enumerate() {
+        if shard_range.is_some_and(|range| !range.contains(output_record)) {
+            continue;
+        }
+        let input_refs = selected_refs(&mut source, input_record, selection)?;
+        let output_refs = selected_refs(&mut repacked, output_record, &TileSelection::All)?;
+        if input_refs.len() != output_refs.len() {
+            return Err(format!(
+                "shard {output_record} tile count differs: input {} output {}",
+                input_refs.len(),
+                output_refs.len()
+            ));
+        }
+        for (tile, output_ref) in input_refs.iter().zip(&output_refs) {
+            if tile.tile_id != output_ref.tile_id {
+                return Err(format!(
+                    "shard {output_record} tile order differs: input {} output {}",
+                    tile.tile_id, output_ref.tile_id
+                ));
+            }
             let before_blob = source
                 .read_tile_ref(tile)
                 .map_err(|err| format!("read input tile {}: {err}", tile.tile_id))?;
@@ -1302,23 +1474,103 @@ fn verify_archives(
             let after = output_codec
                 .decode(&after_blob)
                 .map_err(|err| format!("decode output tile {}: {err}", tile.tile_id))?;
-            verify_rewritten_tile(&before, &after)
+            let expected = rewrite_tile(&before)
+                .map_err(|err| format!("verify rewrite tile {}: {err}", tile.tile_id))?
+                .0;
+            if expected != after {
+                return Err(format!(
+                    "verify tile {}: repacked tile differs from the deterministic policy rewrite",
+                    tile.tile_id
+                ));
+            }
+            verify_kept_sections(&before, &after)
                 .map_err(|err| format!("verify tile {}: {err}", tile.tile_id))?;
+            verified_count += 1;
         }
     }
-    let mut output_count = 0_u64;
-    repacked
-        .for_each_tile_ref(|_| output_count += 1)
-        .map_err(|err| format!("enumerate output: {err}"))?;
-    if output_count != selected_count {
-        return Err(format!(
-            "output tile count {output_count} differs from selected input count {selected_count}"
-        ));
+    Ok(verified_count)
+}
+
+fn write_root_index_atomic(output: &Path, index: &RootIndex<'_>) -> Result<u64, String> {
+    let final_path = output.join("root.mkidx");
+    let partial_path = output.join("root.partial");
+    match fs::remove_file(&partial_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("remove {}: {err}", partial_path.display())),
     }
-    Ok(output_count)
+    let len = write_root_index(&partial_path, index)?;
+    File::open(&partial_path)
+        .and_then(|file| file.sync_all())
+        .map_err(|err| format!("sync {}: {err}", partial_path.display()))?;
+    fs::rename(&partial_path, &final_path).map_err(|err| {
+        format!(
+            "rename {} to {}: {err}",
+            partial_path.display(),
+            final_path.display()
+        )
+    })?;
+    Ok(len)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepackStatus {
+    pub completed_shards: usize,
+    pub total_shards: usize,
+    pub compressed_before: u64,
+    pub compressed_after: u64,
+}
+
+pub fn repack_status(options: &RepackOptions) -> Result<RepackStatus, String> {
+    if options.brotli_quality > 11 {
+        return Err("--brotli-quality must be in 0..=11".to_string());
+    }
+    let root_path = options.input.join("root.mkidx");
+    let root_bytes = fs::read(&root_path)
+        .map_err(|err| format!("read {}: {err}", root_path.display()))?;
+    let input_root_hash = content_hash(&root_bytes);
+    let selection_hash = options.selection.fingerprint();
+    let mut reader = MkmapReader::open(&options.input)
+        .map_err(|err| format!("open {}: {err}", options.input.display()))?;
+    let records = selection_records(&mut reader, &options.selection)?;
+    let mut status = RepackStatus {
+        total_shards: records.len(),
+        ..Default::default()
+    };
+    if !options.output.exists() {
+        return Ok(status);
+    }
+    for (output_shard, input_record) in records.into_iter().enumerate() {
+        if let Some(manifest) = load_completed_manifest(
+            &options.output,
+            input_root_hash,
+            selection_hash,
+            input_record as u32,
+            output_shard as u32,
+            options.brotli_quality,
+        )? {
+            status.completed_shards += 1;
+            status.compressed_before += manifest.compressed_before;
+            status.compressed_after += manifest.file_len;
+        }
+    }
+    Ok(status)
 }
 
 pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
+    if options.jobs == 0 {
+        return Err("--jobs must be at least 1".to_string());
+    }
+    if options.brotli_quality > 11 {
+        return Err("--brotli-quality must be in 0..=11".to_string());
+    }
+    if options.verify_shards.is_some() && !options.verify {
+        return Err("--shards requires --verify".to_string());
+    }
+    if options.dry_run && options.verify {
+        return Err("--verify requires an output archive and cannot be combined with --dry-run"
+            .to_string());
+    }
     let same_path = options.input == options.output
         || (options.output.exists()
             && fs::canonicalize(&options.input).ok() == fs::canonicalize(&options.output).ok());
@@ -1361,6 +1613,22 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
         fs::create_dir_all(&options.output)
             .map_err(|err| format!("create {}: {err}", options.output.display()))?;
     }
+    if let Some(range) = options.verify_shards {
+        if range.start >= range.end || range.end > records.len() {
+            return Err(format!(
+                "--shards range {}..{} is outside 0..{}",
+                range.start,
+                range.end,
+                records.len()
+            ));
+        }
+    }
+    let mut progress = ProgressLog::open(options.log.as_deref())?;
+    let total_shards = records.len();
+    let run_start = Instant::now();
+    let mut run_shards = 0_u32;
+    let mut run_tiles = 0_u64;
+    let mut run_output_bytes = 0_u64;
     let mut manifests = Vec::with_capacity(records.len());
     let mut report = RepackReport::default();
     for (output_index, input_record) in records.into_iter().enumerate() {
@@ -1372,17 +1640,22 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
                 selection_hash,
                 input_record as u32,
                 output_shard,
+                options.brotli_quality,
             )? {
-                println!(
-                    "shard {output_shard:03}: resume skip ({} tiles, {} bytes)",
-                    manifest.tile_count, manifest.file_len
-                );
+                progress.line(&format!(
+                    "{}/{total_shards} shard {output_shard:03} {} bytes → {} bytes, {} tiles, resumed, running 0.00 MB/s, ETA --:--:--",
+                    output_index + 1,
+                    manifest.compressed_before,
+                    manifest.file_len,
+                    manifest.tile_count,
+                ))?;
                 report.add_manifest(&manifest);
                 manifests.push(manifest);
                 continue;
             }
         }
         let refs = selected_refs(&mut reader, input_record, &options.selection)?;
+        let shard_start = Instant::now();
         let manifest = process_shard(
             &mut reader,
             input_record,
@@ -1393,9 +1666,33 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
             (!options.dry_run).then_some(options.output.as_path()),
             input_root_hash,
             selection_hash,
-            options.verify,
+            options.jobs,
+            options.brotli_quality,
         )?;
+        let shard_elapsed = shard_start.elapsed();
+        run_shards += 1;
+        run_tiles += manifest.tile_count;
+        run_output_bytes += manifest.file_len;
         report.add_manifest(&manifest);
+        let remaining = total_shards - output_index - 1;
+        let eta = if run_shards == 0 {
+            None
+        } else {
+            Some(run_start.elapsed().mul_f64(remaining as f64 / f64::from(run_shards)))
+        };
+        let mib_per_second = run_output_bytes as f64
+            / 1_048_576.0
+            / run_start.elapsed().as_secs_f64().max(f64::EPSILON);
+        progress.line(&format!(
+            "{}/{total_shards} shard {output_shard:03} {} bytes → {} bytes, {} tiles, {}, running {:.2} MB/s, ETA {}",
+            output_index + 1,
+            manifest.compressed_before,
+            manifest.file_len,
+            manifest.tile_count,
+            display_duration(shard_elapsed),
+            mib_per_second,
+            eta.map(display_duration).unwrap_or_else(|| "--:--:--".to_string()),
+        ))?;
         manifests.push(manifest);
     }
     if !options.dry_run {
@@ -1411,8 +1708,8 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
             .collect();
         let min_zoom = manifests.iter().map(|manifest| manifest.min_zoom).min().unwrap();
         let max_zoom = manifests.iter().map(|manifest| manifest.max_zoom).max().unwrap();
-        write_root_index(
-            &options.output.join("root.mkidx"),
+        write_root_index_atomic(
+            &options.output,
             &RootIndex {
                 metadata: &metadata,
                 dict: dict.as_deref(),
@@ -1425,19 +1722,28 @@ pub fn repack_archive(options: &RepackOptions) -> Result<RepackReport, String> {
             },
         )?;
         if options.verify {
-            let verified = verify_archives(&options.input, &options.output, &options.selection)?;
-            println!("verify: OK — {verified} input tile ids resolved and policy-checked");
+            let verified = verify_archives(
+                &options.input,
+                &options.output,
+                &options.selection,
+                options.verify_shards,
+            )?;
+            progress.line(&format!(
+                "verify: OK — {verified} tiles decoded once per archive and policy-checked"
+            ))?;
         }
     }
-    println!(
-        "total: {} shards {} tiles decoded {} -> {} compressed {} -> {}",
+    progress.line(&format!(
+        "total: {} shards, {} tiles, {} bytes in → {} bytes out, elapsed {}, running {:.2} tiles/s, {:.2} MB/s; {}",
         report.shards,
         report.tiles,
-        report.decoded_before,
-        report.decoded_after,
         report.compressed_before,
-        report.compressed_after
-    );
+        manifests.iter().map(|manifest| manifest.file_len).sum::<u64>(),
+        display_duration(run_start.elapsed()),
+        run_tiles as f64 / run_start.elapsed().as_secs_f64().max(f64::EPSILON),
+        run_output_bytes as f64 / 1_048_576.0 / run_start.elapsed().as_secs_f64().max(f64::EPSILON),
+        if options.dry_run { "root.mkidx not written (dry run)" } else { "root.mkidx written at end" },
+    ))?;
     println!("action | data | decoded bytes saved | reader / reason");
     for (row, saved) in DATA_POLICY.iter().zip(report.savings) {
         println!(
@@ -1626,6 +1932,10 @@ mod tests {
             dry_run: false,
             verify: true,
             resume: false,
+            jobs: 2,
+            brotli_quality: TILE_BROTLI_QUALITY,
+            verify_shards: None,
+            log: None,
         })
         .unwrap();
         let mut reader = MkmapReader::open(&output_dir).unwrap();
@@ -1635,6 +1945,134 @@ mod tests {
         let codec = TileCodec::from_metadata(&reader.get_metadata().unwrap()).unwrap();
         assert_eq!(codec.metadata_value(), "br:dict-v1");
         assert_eq!(codec.decode(&stored).unwrap(), tile);
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn two_shard_partial_resume_finishes_a_readable_archive() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/map-repack-resume-test-{}",
+            std::process::id()
+        ));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        let input_dir = scratch.join("input.mkmap");
+        let output_dir = scratch.join("output.mkmap");
+        fs::create_dir_all(&input_dir).unwrap();
+        let mut tiles = Vec::new();
+        for name in [b"water".as_slice(), b"landuse"] {
+            let mut layer = Vec::new();
+            write_len_field(1, name, &mut layer);
+            let mut tile = Vec::new();
+            write_len_field(3, &layer, &mut tile);
+            tiles.push(tile);
+        }
+        let compression = TileCompression::Brotli { quality: 1 };
+        let mut records = Vec::new();
+        for (shard_index, tile) in tiles.iter().enumerate() {
+            let tile_id = shard_index as u64;
+            let compressed = compress_tile(&compression, None, tile).unwrap();
+            let entry = LeafEntry {
+                tile_id,
+                blob: BlobRef {
+                    shard: shard_index as u32,
+                    offset: 0,
+                    len: compressed.len() as u64,
+                },
+            };
+            let directory = encode_leaf_directory(&[entry]).unwrap();
+            let dir_offset = compressed.len() as u64;
+            let mut shard = compressed;
+            shard.extend_from_slice(&directory);
+            fs::write(
+                input_dir.join(format!("tiles-{shard_index:03}.mkshard")),
+                shard,
+            )
+            .unwrap();
+            records.push(RootRecord {
+                start_tile_id: tile_id,
+                end_tile_id: tile_id,
+                shard: shard_index as u32,
+                dir_offset,
+                dir_len: directory.len() as u64,
+            });
+        }
+        let metadata = [("compression".to_string(), "br".to_string())]
+            .into_iter()
+            .collect();
+        write_root_index(
+            &input_dir.join("root.mkidx"),
+            &RootIndex {
+                metadata: &metadata,
+                dict: None,
+                shard_cap: SHARD_HARD_CAP,
+                tile_count: 2,
+                unique_blobs: 2,
+                min_zoom: 0,
+                max_zoom: 1,
+                records: &records,
+            },
+        )
+        .unwrap();
+        let options = RepackOptions {
+            input: input_dir,
+            output: output_dir.clone(),
+            selection: TileSelection::All,
+            dry_run: false,
+            verify: true,
+            resume: false,
+            jobs: 2,
+            brotli_quality: 1,
+            verify_shards: None,
+            log: Some(output_dir.join("repack.log")),
+        };
+        repack_archive(&options).unwrap();
+        assert_eq!(repack_status(&options).unwrap().completed_shards, 2);
+        let first_shard = fs::read(output_dir.join("tiles-000.mkshard")).unwrap();
+
+        fs::remove_file(output_dir.join("tiles-001.mkrepack")).unwrap();
+        fs::remove_file(output_dir.join("root.mkidx")).unwrap();
+        fs::write(output_dir.join("tiles-001.partial"), b"interrupted").unwrap();
+        let mut resumed = options.clone();
+        resumed.resume = true;
+        assert_eq!(repack_status(&resumed).unwrap().completed_shards, 1);
+        let mut changed_quality = resumed.clone();
+        changed_quality.brotli_quality = 2;
+        assert_eq!(
+            repack_status(&changed_quality).unwrap().completed_shards,
+            0
+        );
+        repack_archive(&resumed).unwrap();
+        let status = repack_status(&resumed).unwrap();
+        assert_eq!((status.completed_shards, status.total_shards), (2, 2));
+        assert_eq!(
+            verify_archives(
+                &resumed.input,
+                &resumed.output,
+                &resumed.selection,
+                Some(ShardRange { start: 1, end: 2 }),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            fs::read(output_dir.join("tiles-000.mkshard")).unwrap(),
+            first_shard
+        );
+        let mut reader = MkmapReader::open(&output_dir).unwrap();
+        let codec = TileCodec::from_metadata(&reader.get_metadata().unwrap()).unwrap();
+        let mut decoded = Vec::new();
+        let mut refs = Vec::new();
+        reader.for_each_tile_ref(|tile| refs.push(tile)).unwrap();
+        for tile in refs {
+            decoded.push(codec.decode(&reader.read_tile_ref(&tile).unwrap()).unwrap());
+        }
+        assert_eq!(decoded, tiles);
+        let log = fs::read_to_string(output_dir.join("repack.log")).unwrap();
+        assert!(log.contains("1/2 shard 000"));
+        assert!(log.contains("2/2 shard 001"));
+        assert!(log.contains("root.mkidx written at end"));
         fs::remove_dir_all(scratch).unwrap();
     }
 
@@ -1680,6 +2118,105 @@ mod tests {
         );
     }
 
+    fn write_repeated_amsterdam_archive(output: &Path, tile_count: usize) {
+        fs::create_dir_all(output).unwrap();
+        let mut paths: Vec<_> = fs::read_dir(fixture_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "decoded"))
+            .collect();
+        paths.sort();
+        let compression = TileCompression::Brotli { quality: 1 };
+        let mut shard = Vec::new();
+        let mut blobs = Vec::new();
+        for path in paths {
+            let decoded = fs::read(path).unwrap();
+            let compressed = compress_tile(&compression, None, &decoded).unwrap();
+            let blob = BlobRef {
+                shard: 0,
+                offset: shard.len() as u64,
+                len: compressed.len() as u64,
+            };
+            shard.extend_from_slice(&compressed);
+            blobs.push(blob);
+        }
+        let first_id = makepad_mbtile_reader::mkmap_tile_id(14, 0, 0);
+        let entries: Vec<_> = (0..tile_count)
+            .map(|index| LeafEntry {
+                tile_id: first_id + index as u64,
+                blob: blobs[index % blobs.len()],
+            })
+            .collect();
+        let directory = encode_leaf_directory(&entries).unwrap();
+        let dir_offset = shard.len() as u64;
+        shard.extend_from_slice(&directory);
+        fs::write(output.join("tiles-000.mkshard"), shard).unwrap();
+        let metadata = [("compression".to_string(), "br".to_string())]
+            .into_iter()
+            .collect();
+        write_root_index(
+            &output.join("root.mkidx"),
+            &RootIndex {
+                metadata: &metadata,
+                dict: None,
+                shard_cap: SHARD_HARD_CAP,
+                tile_count: tile_count as u64,
+                unique_blobs: blobs.len() as u64,
+                min_zoom: 14,
+                max_zoom: 14,
+                records: &[RootRecord {
+                    start_tile_id: entries.first().unwrap().tile_id,
+                    end_tile_id: entries.last().unwrap().tile_id,
+                    shard: 0,
+                    dir_offset,
+                    dir_len: directory.len() as u64,
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "acceptance benchmark: six q11 archive repacks"]
+    fn benchmark_parallel_amsterdam_repack() {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/map-repack-benchmark-{}",
+            std::process::id()
+        ));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        for tile_count in [25_usize, 500] {
+            let input = scratch.join(format!("input-{tile_count}.mkmap"));
+            write_repeated_amsterdam_archive(&input, tile_count);
+            for jobs in [1_usize, 4, 16] {
+                let output = scratch.join(format!("output-{tile_count}-{jobs}.mkmap"));
+                let start = Instant::now();
+                let report = repack_archive(&RepackOptions {
+                    input: input.clone(),
+                    output,
+                    selection: TileSelection::All,
+                    dry_run: false,
+                    verify: false,
+                    resume: false,
+                    jobs,
+                    brotli_quality: TILE_BROTLI_QUALITY,
+                    verify_shards: None,
+                    log: None,
+                })
+                .unwrap();
+                let elapsed = start.elapsed().as_secs_f64();
+                println!(
+                    "BENCH tiles={tile_count} jobs={jobs} elapsed={elapsed:.3}s tiles/s={:.3} output-MiB/s={:.3}",
+                    tile_count as f64 / elapsed,
+                    report.compressed_after as f64 / 1_048_576.0 / elapsed,
+                );
+            }
+        }
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
     #[test]
     fn manifest_roundtrip_is_fixed_and_deterministic() {
         let manifest = ShardManifest {
@@ -1687,6 +2224,7 @@ mod tests {
             selection_hash: 2,
             input_record: 3,
             output_shard: 4,
+            brotli_quality: 11,
             file_len: 5,
             tile_count: 6,
             unique_blobs: 7,
@@ -1787,6 +2325,10 @@ mod tests {
             dry_run: false,
             verify: true,
             resume: false,
+            jobs: 4,
+            brotli_quality: TILE_BROTLI_QUALITY,
+            verify_shards: None,
+            log: None,
         };
         let report = repack_archive(&options).unwrap();
         assert_eq!(report.tiles, 25);
@@ -1861,6 +2403,11 @@ mod tests {
                 );
             )+ };
         }
+        macro_rules! same_bytes {
+            ($($field:ident),+ $(,)?) => {$ (
+                assert_eq!(&left.$field, &right.$field, "{context} {}", stringify!($field));
+            )+ };
+        }
         same_indices!(
             fill_indices,
             fill_misc_indices,
@@ -1879,15 +2426,10 @@ mod tests {
             road_icon_indices,
         );
         same_floats!(
-            fill_vertices,
             fill_misc_vertices,
-            casing_vertices,
-            stroke_vertices,
             icon_vertices,
             icon_high_vertices,
             shadow_disc_instances,
-            fringe_vertices,
-            fill_3d_vertices,
             fill_3d_misc_vertices,
             wall_vertices,
             wall_instances,
@@ -1897,6 +2439,13 @@ mod tests {
             tree_cross_template_vertices,
             tree_instances,
             road_icon_vertices,
+        );
+        same_bytes!(
+            fill_vertices,
+            casing_vertices,
+            stroke_vertices,
+            fringe_vertices,
+            fill_3d_vertices,
         );
         for (name, left, right) in [
             ("icon_instances", &left.icon_instances, &right.icon_instances),
@@ -1974,6 +2523,7 @@ mod tests {
                         render_zoom,
                         buildings_3d,
                         true,
+                        false,
                     )
                     .unwrap();
                     let right = build_tile_buffers_from_mvt(
@@ -1987,6 +2537,7 @@ mod tests {
                         render_zoom,
                         buildings_3d,
                         true,
+                        false,
                     )
                     .unwrap();
                     assert_tile_buffers_byte_equal(
