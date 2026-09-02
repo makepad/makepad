@@ -114,11 +114,14 @@ impl Geometry {
 
     pub fn new(cx: &mut Cx) -> Self {
         let geometry = cx.geometries.alloc();
-        cx.geometries[geometry.geometry_id()].indices.clear();
-        cx.geometries[geometry.geometry_id()].vertices.clear();
-        cx.geometries[geometry.geometry_id()].dirty = true;
-        cx.geometries[geometry.geometry_id()].dirty_vertices = true;
-        cx.geometries[geometry.geometry_id()].dirty_indices = true;
+        let cxgeom = &mut cx.geometries[geometry.geometry_id()];
+        cxgeom.indices.clear();
+        cxgeom.vertices.clear();
+        cxgeom.index_count = 0;
+        cxgeom.vertex_count = 0;
+        cxgeom.dirty = true;
+        cxgeom.dirty_vertices = true;
+        cxgeom.dirty_indices = true;
         geometry
     }
 
@@ -126,6 +129,8 @@ impl Geometry {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = indices;
         cxgeom.vertices = vertices;
+        cxgeom.index_count = cxgeom.indices.len();
+        cxgeom.vertex_count = cxgeom.vertices.len();
         cxgeom.dirty = true;
         cxgeom.dirty_vertices = true;
         cxgeom.dirty_indices = true;
@@ -144,6 +149,8 @@ impl Geometry {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         std::mem::swap(&mut cxgeom.indices, indices);
         std::mem::swap(&mut cxgeom.vertices, vertices);
+        cxgeom.index_count = cxgeom.indices.len();
+        cxgeom.vertex_count = cxgeom.vertices.len();
         indices.clear();
         vertices.clear();
         cxgeom.dirty = true;
@@ -154,8 +161,47 @@ impl Geometry {
     pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = indices;
+        cxgeom.index_count = cxgeom.indices.len();
         cxgeom.dirty = true;
         cxgeom.dirty_indices = true;
+    }
+
+    /// Release the CPU staging vectors once the backend has consumed them.
+    /// The resident GPU buffers remain authoritative. Calling this before an
+    /// upload is harmless and leaves the vectors intact.
+    pub fn discard_cpu_buffers_if_uploaded(&self, cx: &mut Cx) -> usize {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        if cxgeom.dirty_vertices || cxgeom.dirty_indices {
+            return 0;
+        }
+        Self::discard_cpu_buffers_inner(cxgeom)
+    }
+
+    /// Drop staging for geometry that is itself being evicted, including a
+    /// buffer which never became visible and therefore was never uploaded.
+    pub fn discard_cpu_buffers(&self, cx: &mut Cx) -> usize {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        Self::discard_cpu_buffers_inner(cxgeom)
+    }
+
+    fn discard_cpu_buffers_inner(cxgeom: &mut CxGeometry) -> usize {
+        let bytes = cxgeom
+            .vertices
+            .capacity()
+            .saturating_add(cxgeom.indices.capacity())
+            .saturating_mul(4);
+        cxgeom.vertices = Vec::new();
+        cxgeom.indices = Vec::new();
+        bytes
+    }
+
+    pub fn cpu_buffer_bytes(&self, cx: &Cx) -> usize {
+        let cxgeom = &cx.geometries[self.geometry_id()];
+        cxgeom
+            .vertices
+            .capacity()
+            .saturating_add(cxgeom.indices.capacity())
+            .saturating_mul(4)
     }
 }
 
@@ -163,9 +209,30 @@ impl Geometry {
 pub struct CxGeometry {
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
+    /// Element counts survive releasing the CPU staging vectors so resident
+    /// GPU buffers remain drawable.
+    pub index_count: usize,
+    pub vertex_count: usize,
     pub dirty: bool,
     pub dirty_vertices: bool,
     pub dirty_indices: bool,
     #[allow(unused)]
     pub os: CxOsGeometry,
+}
+
+#[cfg(test)]
+#[test]
+fn discarded_staging_preserves_resident_geometry_counts() {
+    let mut geometry = CxGeometry {
+        indices: vec![0, 1, 2],
+        vertices: vec![0.0; 12],
+        index_count: 3,
+        vertex_count: 12,
+        ..Default::default()
+    };
+    Geometry::discard_cpu_buffers_inner(&mut geometry);
+    assert!(geometry.indices.is_empty());
+    assert!(geometry.vertices.is_empty());
+    assert_eq!(geometry.index_count, 3);
+    assert_eq!(geometry.vertex_count, 12);
 }

@@ -179,6 +179,11 @@ impl Cx {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
                     self.cpu_cores = (tw.cpu_cores as usize).max(1);
+                    // A browser may accept a 4 GiB wasm maximum, but elastic
+                    // caches must still target the 1 GiB deployment class.
+                    self.memory_budget_bytes = (tw.wasm_memory_max_pages as usize)
+                        .saturating_mul(64 * 1024)
+                        .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024);
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,

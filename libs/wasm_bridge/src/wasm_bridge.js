@@ -311,6 +311,7 @@ export class WasmBridge {
             used_maximum = maximum;
             try {
                 mem = new WebAssembly.Memory({ initial, maximum, shared: true });
+                mem._makepad_maximum_pages = maximum;
                 break;
             } catch (_e) {
                 mem = null;
@@ -738,6 +739,7 @@ export class WasmBridge {
             set_wasm(wasm);
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory ? env.memory : wasm.exports.memory;
+            wasm._memory_max_pages = wasm._memory._makepad_maximum_pages || 16384;
             wasm._module = module;
             wasm._env = env;
             return wasm
@@ -759,6 +761,7 @@ export class WasmBridge {
                     set_wasm(wasm);
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
+                    wasm._memory_max_pages = env.memory._makepad_maximum_pages || 16384;
                     wasm._module = module;
                     wasm._env = env;
                     return wasm

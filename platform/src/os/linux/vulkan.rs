@@ -5587,7 +5587,7 @@ impl CxVulkan {
             };
 
             let geometry = &mut cx.geometries[packet.geometry_id];
-            if geometry.indices.is_empty() || geometry.vertices.is_empty() {
+            if geometry.index_count == 0 || geometry.vertex_count == 0 {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
             }
@@ -5602,7 +5602,7 @@ impl CxVulkan {
                         packet.geometry_id
                     )
                 })?;
-            let index_count = geometry.indices.len() as u32;
+            let index_count = geometry.index_count as u32;
             draw_stats.indices += index_count as u64;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
@@ -6479,7 +6479,7 @@ impl CxVulkan {
         geometry_id: GeometryId,
         geometry: &mut crate::geometry::CxGeometry,
     ) -> Result<(), String> {
-        if geometry.vertices.is_empty() || geometry.indices.is_empty() {
+        if geometry.vertex_count == 0 || geometry.index_count == 0 {
             if let Some(old) = self.geometries.remove(&geometry_id) {
                 self.destroy_geometry_resource(old);
             }

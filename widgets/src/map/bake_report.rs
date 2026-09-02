@@ -80,6 +80,18 @@ fn mib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
+/// Vertex bytes of a packed stream by (shape id, material): the icon pass
+/// and the fill stream carry several kinds of geometry each, and the split
+/// says which kind pays.
+fn classify_packed(vertices: &[f32], into: &mut std::collections::BTreeMap<(i32, i32), usize>) {
+    use crate::makepad_draw::vector::unpack_pair_f16;
+    for record in vertices.chunks_exact(12) {
+        let shape_id = unpack_pair_f16(record[6]).1.round() as i32;
+        let material = unpack_pair_f16(record[8]).0.round() as i32;
+        *into.entry((shape_id, material)).or_default() += 12 * 4;
+    }
+}
+
 #[test]
 #[ignore = "needs local/maps/world.mkmap; run with --ignored --nocapture"]
 fn amsterdam_start_view_bake_report() {
@@ -107,6 +119,9 @@ fn amsterdam_start_view_bake_report() {
     let mut stream_totals = [0usize; 11];
     let mut total_icon_instance_bytes = 0usize;
     let mut total_wall_instance_bytes = 0usize;
+    let mut icon_kinds = std::collections::BTreeMap::new();
+    let mut fill_kinds = std::collections::BTreeMap::new();
+    let mut casing_kinds = std::collections::BTreeMap::new();
     let mut baked = 0usize;
     for key in &keys {
         let tms_row = (1_i64 << key.z) - 1 - key.y as i64;
@@ -143,7 +158,7 @@ fn amsterdam_start_view_bake_report() {
         };
         let b = &tile.buffers;
         let per_stream = streams(b);
-        let bytes = b.byte_size();
+        let bytes = b.gpu_byte_size();
         let verts: usize = per_stream.iter().map(|(_, v, _)| v / 12).sum();
         for (slot, (_, v, i)) in per_stream.iter().enumerate() {
             stream_totals[slot] += (v + i) * 4;
@@ -165,6 +180,9 @@ fn amsterdam_start_view_bake_report() {
             .sum();
         total_icon_instance_bytes += b.icon_instance_floats() * 4;
         total_wall_instance_bytes += b.wall_instances.len() * 4;
+        classify_packed(&b.icon_vertices, &mut icon_kinds);
+        classify_packed(&b.fill_vertices, &mut fill_kinds);
+        classify_packed(&b.casing_vertices, &mut casing_kinds);
         println!(
             "{:>14} {:>8} {:>8} {:>7} {:>9.1} {:>8} {:>7} {:>8} {:>8.0} | {} + {} / {:.0}",
             format!("{}/{}/{}", key.z, key.x, key.y),
@@ -218,4 +236,12 @@ fn amsterdam_start_view_bake_report() {
         mib(total_wall_instance_bytes),
         total_wall_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
     );
+    for (name, kinds) in [("icon", &icon_kinds), ("fill", &fill_kinds), ("casing", &casing_kinds)] {
+        println!("== {name} stream vertex bytes by (shape, material) ==");
+        let mut rows: Vec<_> = kinds.iter().collect();
+        rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(**bytes));
+        for ((shape, material), bytes) in rows.into_iter().take(8) {
+            println!("  shape {shape:>3} mat {material:>2}  {:>8.1} MiB", mib(*bytes));
+        }
+    }
 }
