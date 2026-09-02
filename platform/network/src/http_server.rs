@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, mpsc::RecvTimeoutError, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Sockets whose peer vanished (a client retry storm timing out and
 /// abandoning connects, a NAT dropping the flow) used to pin their
@@ -19,7 +19,7 @@ use std::time::Duration;
 /// threads eventually slow `thread::spawn` on the ACCEPT loop itself, the
 /// listen backlog fills, and new SYNs get dropped: the service looks dead
 /// from outside while established flows stay fine. Bound every socket wait.
-const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+const SOCKET_TIMEOUT: Duration = HTTP_READ_TIMEOUT;
 /// How long a request thread waits for the app side to answer before 504.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent connection threads (process-wide). Over the cap, new
@@ -53,6 +53,9 @@ pub struct HttpServer {
     pub listen_address: SocketAddr,
     pub request: mpsc::Sender<HttpServerRequest>,
     pub post_max_size: u64,
+    /// Exact-path POST limits checked before the request body is allocated.
+    /// The smallest matching limit wins over `post_max_size`.
+    pub post_max_size_overrides: Vec<(String, u64)>,
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
@@ -167,10 +170,7 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                 // Shed over the cap INLINE (no thread): the pile of leaked
                 // connection threads is what used to stall this accept loop.
                 let Some(guard) = ConnGuard::try_acquire() else {
-                    let _ = tcp_stream.write_all(
-                        b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
-                    );
-                    let _ = tcp_stream.shutdown(Shutdown::Both);
+                    http_error_out(tcp_stream, 503);
                     continue;
                 };
                 // Bounded socket waits, so an abandoned peer can never pin
@@ -180,13 +180,17 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                 let _ = tcp_stream.set_write_timeout(Some(SOCKET_TIMEOUT));
                 let _read_thread = std::thread::spawn(move || {
                     let _guard = guard;
-                    let head = HttpServerHeaders::from_tcp_stream(&mut tcp_stream);
-                    if head.is_none() {
-                        return http_error_out(tcp_stream, 500);
-                    }
+                    let head_deadline = Instant::now() + SOCKET_TIMEOUT;
+                    let head = match HttpServerHeaders::from_tcp_stream_until(
+                        &mut tcp_stream,
+                        head_deadline,
+                    ) {
+                        Ok(head) => head,
+                        Err(error) => return http_error_out(tcp_stream, error.status()),
+                    };
                     // Whatever arrived in the same segment as the headers is
                     // already off the socket and has to be handed onward.
-                    let (headers, body_prefix) = head.unwrap();
+                    let (headers, body_prefix) = head;
 
                     if headers.sec_websocket_key.is_some() {
                         return handle_web_socket(
@@ -200,10 +204,13 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     if headers.verb == "POST" {
                         return handle_post(http_server, tcp_stream, headers, body_prefix);
                     }
-                    if matches!(headers.verb.as_str(), "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE") {
+                    if matches!(headers.verb.as_str(), "GET" | "HEAD" | "OPTIONS") {
                         return handle_get(http_server, tcp_stream, headers);
                     }
-                    http_error_out(tcp_stream, 500)
+                    if matches!(headers.verb.as_str(), "PUT" | "DELETE") {
+                        return http_error_out(tcp_stream, 405);
+                    }
+                    http_error_out(tcp_stream, 400)
                 });
             }
         })
@@ -218,14 +225,24 @@ fn handle_post(
     body_prefix: Vec<u8>,
 ) {
     // we have to have a content-length or bust
-    if headers.content_length.is_none() {
-        return http_error_out(tcp_stream, 500);
-    }
-    let content_length = headers.content_length.unwrap();
-    if content_length > http_server.post_max_size {
-        return http_error_out(tcp_stream, 500);
+    let Some(content_length) = headers.content_length else {
+        return http_error_out(tcp_stream, 411);
+    };
+    let path_limit = http_server
+        .post_max_size_overrides
+        .iter()
+        .filter(|(path, _)| path == &headers.path)
+        .map(|(_, limit)| *limit)
+        .min()
+        .unwrap_or(http_server.post_max_size);
+    if content_length > path_limit {
+        return http_error_out(tcp_stream, 413);
     }
     let bytes_total = content_length as usize;
+    if body_prefix.len() > bytes_total {
+        return http_error_out(tcp_stream, 400);
+    }
+    let body_deadline = Instant::now() + SOCKET_TIMEOUT;
     let mut body = Vec::new();
     body.resize(bytes_total, 0u8);
 
@@ -236,14 +253,30 @@ fn handle_post(
 
     let mut bytes_left = bytes_total - prefix_len;
     while bytes_left > 0 {
-        let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
-        let bytes_read = tcp_stream.read(buf);
-        if bytes_read.is_err() {
-            return http_error_out(tcp_stream, 500);
+        let Some(remaining) = body_deadline.checked_duration_since(Instant::now()) else {
+            return http_error_out(tcp_stream, 408);
+        };
+        if remaining.is_zero() {
+            return http_error_out(tcp_stream, 408);
         }
-        let bytes_read = bytes_read.unwrap();
+        if tcp_stream.set_read_timeout(Some(remaining)).is_err() {
+            return http_error_out(tcp_stream, 400);
+        }
+        let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
+        let bytes_read = match tcp_stream.read(buf) {
+            Ok(bytes_read) => bytes_read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return http_error_out(tcp_stream, 408)
+            }
+            Err(_) => return http_error_out(tcp_stream, 400),
+        };
         if bytes_read == 0 {
-            return http_error_out(tcp_stream, 500);
+            return http_error_out(tcp_stream, 400);
         }
         bytes_left -= bytes_read;
     }

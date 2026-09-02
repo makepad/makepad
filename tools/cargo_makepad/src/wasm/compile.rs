@@ -1851,6 +1851,7 @@ fn start_wasm_server(
     let _listen_thread = net.start_http_server(HttpServer {
         listen_address: addr,
         post_max_size: 1024 * 1024,
+        post_max_size_overrides: Vec::new(),
         request: tx_request,
     });
     if _listen_thread.is_none() {

@@ -749,6 +749,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let server = HttpServer {
                 listen_address: options.listen.parse().unwrap(),
                 post_max_size: 1024 * 1024 * 10,
+                post_max_size_overrides: Vec::new(),
                 request: server_tx,
             };
 

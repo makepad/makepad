@@ -10,6 +10,11 @@ use makepad_mbtile_reader::{MbtilesReader, Value};
 use makepad_map_nav::geo::{haversine_m, LonLat};
 use std::path::Path;
 
+/// Prevent callers on the interactive app path from accidentally scanning an
+/// unbounded dense cell. Services with a whole-request budget use
+/// `query_radius_with_budget` directly.
+pub const DEFAULT_RADIUS_SCAN_BUDGET: usize = 50_000;
+
 #[derive(Debug)]
 pub struct FeatureHit {
     pub layer: String,
@@ -97,24 +102,99 @@ impl LayerDb {
         radius_m: f64,
         limit: usize,
     ) -> Result<Vec<FeatureHit>, String> {
+        let mut budget = DEFAULT_RADIUS_SCAN_BUDGET;
+        self.query_radius_with_budget(lon, lat, radius_m, limit, &mut budget)
+    }
+
+    /// Bounded nearest-neighbor selection. At most `candidate_budget` feature
+    /// rows are decoded across all calls sharing that mutable budget, and only
+    /// the nearest `limit` hits are retained in memory.
+    pub fn query_radius_with_budget(
+        &mut self,
+        lon: f64,
+        lat: f64,
+        radius_m: f64,
+        limit: usize,
+        candidate_budget: &mut usize,
+    ) -> Result<Vec<FeatureHit>, String> {
+        if limit == 0 || *candidate_budget == 0 {
+            return Ok(Vec::new());
+        }
         // Convert the radius to a degree bbox (safe overestimate at NL lat).
         let dlat = radius_m / 111_320.0;
         let dlon = radius_m / (111_320.0 * lat.to_radians().cos().max(0.2));
-        let mut hits = self.query_bbox(
-            lon - dlon,
-            lat - dlat,
-            lon + dlon,
-            lat + dlat,
-            usize::MAX,
-        )?;
+        let min_lon = lon - dlon;
+        let min_lat = lat - dlat;
+        let max_lon = lon + dlon;
+        let max_lat = lat + dlat;
+        let (nx0, ny0) = crate::geo::wgs84_to_norm(min_lon, max_lat);
+        let (nx1, ny1) = crate::geo::wgs84_to_norm(max_lon, min_lat);
+        let clamp = |value: f64| (value * f64::from(CELL_AXIS)) as i64;
+        let cx0 = clamp(nx0).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cx1 = clamp(nx1).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cy0 = clamp(ny0).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cy1 = clamp(ny1).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
         let origin = LonLat::new(lon, lat);
-        for hit in &mut hits {
-            let distance = haversine_m(origin, LonLat::new(hit.center.0, hit.center.1));
-            hit.distance_m = Some(distance);
+        let mut hits: Vec<FeatureHit> = Vec::with_capacity(limit);
+        'cells: for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                if *candidate_budget == 0 {
+                    break 'cells;
+                }
+                let lo = (i64::from(cy * CELL_AXIS + cx)) << 24;
+                let hi = lo | ((*candidate_budget - 1).min(0x00ff_ffff) as i64);
+                let mut scan_error = None;
+                self.db
+                    .for_each_row_in_range(FEATURES_TABLE, lo, hi, |_rowid, values| {
+                        if *candidate_budget == 0 {
+                            return;
+                        }
+                        *candidate_budget -= 1;
+                        let mut hit = match parse_hit(&values) {
+                            Ok(hit) => hit,
+                            Err(error) => {
+                                scan_error = Some(error);
+                                return;
+                            }
+                        };
+                        let bbox = hit.bbox;
+                        if bbox.0 > max_lon
+                            || bbox.2 < min_lon
+                            || bbox.1 > max_lat
+                            || bbox.3 < min_lat
+                        {
+                            return;
+                        }
+                        let distance = haversine_m(
+                            origin,
+                            LonLat::new(hit.center.0, hit.center.1),
+                        );
+                        if distance > radius_m {
+                            return;
+                        }
+                        hit.distance_m = Some(distance);
+                        if hits.len() < limit {
+                            hits.push(hit);
+                        } else if let Some((farthest, farthest_distance)) = hits
+                            .iter()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| {
+                                a.distance_m.unwrap().total_cmp(&b.distance_m.unwrap())
+                            })
+                            .map(|(index, hit)| (index, hit.distance_m.unwrap()))
+                        {
+                            if distance < farthest_distance {
+                                hits[farthest] = hit;
+                            }
+                        }
+                    })
+                    .map_err(|error| format!("range scan: {error:?}"))?;
+                if let Some(error) = scan_error {
+                    return Err(error);
+                }
+            }
         }
-        hits.retain(|h| h.distance_m.unwrap_or(f64::MAX) <= radius_m);
         hits.sort_by(|a, b| a.distance_m.unwrap().total_cmp(&b.distance_m.unwrap()));
-        hits.truncate(limit);
         Ok(hits)
     }
 

@@ -30,6 +30,7 @@ pub fn run_with_registry(
     let Some(_listen_thread) = runtime.start_http_server(HttpServer {
         listen_address: listen,
         post_max_size: 2 * 1024 * 1024,
+        post_max_size_overrides: vec![("/$report_error".into(), crate::static_files::REPORT_BODY_LIMIT as u64)],
         request: request_sender,
     }) else {
         return Err(format!("failed to bind {listen}"));
@@ -50,9 +51,9 @@ pub fn run_with_registry(
                 }
             }
             HttpServerRequest::Post { headers, body, response } => {
-                if !registry.handle_post(&headers, &body, &response)
-                    && !static_handler.handle_post(&headers, &body, &response)
-                {
+                if headers.path.starts_with("/api/") {
+                    registry.handle_post(&headers, body, &response);
+                } else if !static_handler.handle_post(&headers, &body, &response) {
                     static_handler.handle_get(&headers, &response);
                 }
             }
@@ -96,10 +97,21 @@ mod tests {
         let root = base.join("site");
         let data = root.join("private");
         fs::create_dir_all(&data).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        }
         let mut config = Config::parse([root.to_string_lossy().as_ref()]).unwrap();
         config.data_dir = Some(data);
         let static_handler = StaticHandler::new(&root).unwrap();
         assert!(canonical_data_root(&config, static_handler.root()).is_err());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         fs::remove_dir_all(base).unwrap();
     }
 }

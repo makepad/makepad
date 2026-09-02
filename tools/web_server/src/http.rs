@@ -89,6 +89,16 @@ pub fn json_string(value: &str) -> String {
 }
 
 pub fn percent_decode(input: &str, max_len: usize) -> Result<String, ()> {
+    percent_decode_inner(input, max_len, true)
+}
+
+/// Percent-decodes a URL path without applying HTML form semantics. A literal
+/// `+` is a legal path byte and must not silently name a space-containing file.
+pub fn percent_decode_path(input: &str, max_len: usize) -> Result<String, ()> {
+    percent_decode_inner(input, max_len, false)
+}
+
+fn percent_decode_inner(input: &str, max_len: usize, plus_as_space: bool) -> Result<String, ()> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len().min(max_len));
     let mut i = 0;
@@ -101,7 +111,7 @@ pub fn percent_decode(input: &str, max_len: usize) -> Result<String, ()> {
                 (hi << 4) | lo
             }
             b'%' => return Err(()),
-            b'+' => {
+            b'+' if plus_as_space => {
                 i += 1;
                 b' '
             }
@@ -155,6 +165,7 @@ mod tests {
     #[test]
     fn percent_decodes_form_components() {
         assert_eq!(percent_decode("Oude%20Gracht+1", 100), Ok("Oude Gracht 1".into()));
+        assert_eq!(percent_decode_path("a+b%20c", 100), Ok("a+b c".into()));
         assert!(percent_decode("%zz", 100).is_err());
     }
 }

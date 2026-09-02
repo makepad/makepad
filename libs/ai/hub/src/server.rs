@@ -348,6 +348,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         listen_address: addr,
         request: request_tx,
         post_max_size: POST_MAX_SIZE,
+        post_max_size_overrides: Vec::new(),
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {addr}")))?;
 
@@ -2530,6 +2531,10 @@ mod lifecycle_tests {
             addr: "127.0.0.1:1".parse().unwrap(),
             addr_text: "127.0.0.1:1".to_string(),
             lines,
+            parsed_headers: bearer
+                .map(|value| ("authorization".to_string(), format!("Bearer {value}")))
+                .into_iter()
+                .collect(),
             verb: verb.to_string(),
             path: path.to_string(),
             path_no_slash: path.trim_start_matches('/').to_string(),
