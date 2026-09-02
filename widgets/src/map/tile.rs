@@ -100,6 +100,11 @@ pub enum TileLoadState {
         wall_instances: Vec<f32>,
         tree_geometry: Option<Geometry>,
         tree_cross_geometry: Option<Geometry>,
+        /// The tile's street-tree templates (near ring / mid ring) and the
+        /// per-tree records placing them.
+        tree_template_geometry: Option<Geometry>,
+        tree_cross_template_geometry: Option<Geometry>,
+        tree_instances: Vec<f32>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -119,18 +124,15 @@ pub struct TileEntry {
     /// never replace live stale geometry with a gray placeholder; the
     /// backoff lives here instead of in TileLoadState::Failed.
     pub retry_after: u64,
-    /// Total post-upload footprint: GPU geometry plus the compact CPU data
-    /// that remains for labels, hits, and mode-only road-icon rebuilds.
+    /// Geometry buffer footprint (CPU-side floats at bake time; the GPU
+    /// copy is the same order of magnitude). Drives byte-budget eviction —
+    /// 3D building tiles reach 60-90 MB each, so a tile-count cap alone
+    /// lets the cache take the machine out.
     pub bytes: usize,
-    pub gpu_bytes: usize,
-    pub cpu_bytes: usize,
-    /// Casing + stroke GPU bytes retained across a mode-overlay rebuild.
-    pub road_core_bytes: usize,
     /// View-zoom bucket the geometry was styled for; stale buckets stay
     /// drawable while a rebuild is in flight.
     pub bucket: u32,
-    /// Camera 2D/3D mode this bake satisfies. Overview profiles may satisfy
-    /// a tilted camera with flat geometry by design.
+    /// This bake carries 3D extrusions (buildings/trees/signals).
     pub baked_3d: bool,
     /// Whether casing/stroke GPU geometry and the CPU road-arrow subset are
     /// available for a same-bucket 2D/3D overlay-only rebake.
@@ -315,6 +317,12 @@ pub const ICON_INSTANCE_FLOATS: usize = 8;
 /// bake no longer writes four 48-byte vertices per footprint edge.
 pub const WALL_INSTANCE_FLOATS: usize = 11;
 
+/// Floats per street-tree instance: anchor xy and the zbias shift. Every
+/// tree in a tile is the same mesh (`tree_template` near, `tree_cross_template`
+/// at the mid LOD ring), drawn once per record with the anchor added in the
+/// vertex shader.
+pub const TREE_INSTANCE_FLOATS: usize = 3;
+
 /// One symbol mesh drawn N times: the mesh lives once on the GPU (per
 /// registry slot), every placement is an 8-float instance record instead of
 /// a copy of the tessellated SVG at 48 bytes a vertex.
@@ -372,6 +380,13 @@ pub struct TileBuffers {
     /// Crossed-quad tree stand-ins for the mid/far rings.
     pub tree_cross_indices: Vec<u32>,
     pub tree_cross_vertices: Vec<f32>,
+    /// One street tree at the origin (trunk + canopy ball, GPU-packed) and
+    /// its crossed-quad stand-in; `tree_instances` places them.
+    pub tree_template_indices: Vec<u32>,
+    pub tree_template_vertices: Vec<f32>,
+    pub tree_cross_template_indices: Vec<u32>,
+    pub tree_cross_template_vertices: Vec<f32>,
+    pub tree_instances: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -391,9 +406,8 @@ pub struct TileBuffers {
 }
 
 impl TileBuffers {
-    /// GPU geometry footprint after upload (the road-icon rebuild subset is
-    /// not a separate GPU stream).
-    pub fn gpu_byte_size(&self) -> usize {
+    /// Geometry byte footprint (vertex + index data).
+    pub fn byte_size(&self) -> usize {
         (self.fill_indices.len()
             + self.fill_vertices.len()
             + self.casing_indices.len()
@@ -401,7 +415,6 @@ impl TileBuffers {
             + self.stroke_indices.len()
             + self.stroke_vertices.len()
             + self.icon_indices.len()
-            + self.icon_vertices.len()
             + self.icon_high_indices.len()
             + self.icon_high_vertices.len()
             + self.fringe_indices.len()
@@ -414,6 +427,14 @@ impl TileBuffers {
             + self.tree_vertices.len()
             + self.tree_cross_indices.len()
             + self.tree_cross_vertices.len()
+            + self.icon_vertices.len()
+            + self.road_icon_indices.len()
+            + self.road_icon_vertices.len()
+            + self.tree_template_indices.len()
+            + self.tree_template_vertices.len()
+            + self.tree_cross_template_indices.len()
+            + self.tree_cross_template_vertices.len()
+            + self.tree_instances.len()
             + self.wall_instances.len()
             + self.icon_instance_floats())
             * 4
@@ -426,81 +447,6 @@ impl TileBuffers {
             .chain(self.icon_high_instances.iter())
             .map(|group| group.data.len())
             .sum()
-    }
-
-    pub fn road_core_gpu_byte_size(&self) -> usize {
-        (self.casing_indices.len()
-            + self.casing_vertices.len()
-            + self.stroke_indices.len()
-            + self.stroke_vertices.len())
-            * 4
-    }
-
-    /// CPU data intentionally retained after upload: the road-arrow rebake
-    /// cache, labels, pin hits, and the instance records (walls and symbols
-    /// are re-sent from these each frame).
-    pub fn retained_cpu_byte_size(&self) -> usize {
-        let labels = self.labels.capacity() * std::mem::size_of::<TileLabel>()
-            + self
-                .labels
-                .iter()
-                .map(|label| {
-                    label.text.capacity()
-                        + label.source_layer.capacity()
-                        + label.road_kind.capacity()
-                        + label.name_key.capacity()
-                        + label.path_points.capacity() * std::mem::size_of::<(f32, f32)>()
-                })
-                .sum::<usize>();
-        let pins = self.pin_hits.capacity() * std::mem::size_of::<PinHit>()
-            + self
-                .pin_hits
-                .iter()
-                .map(|pin| {
-                    pin.info.capacity() * std::mem::size_of::<(String, String)>()
-                        + pin
-                            .info
-                            .iter()
-                            .map(|(key, value)| key.capacity() + value.capacity())
-                            .sum::<usize>()
-                })
-                .sum::<usize>();
-        let instances = self.wall_instances.capacity()
-            + self
-                .icon_instances
-                .iter()
-                .chain(self.icon_high_instances.iter())
-                .map(|group| group.data.capacity())
-                .sum::<usize>();
-        (self.road_icon_indices.capacity() + self.road_icon_vertices.capacity() + instances) * 4
-            + labels
-            + pins
-    }
-
-    /// Peak bytes owned by the finished bake while it waits for upload.
-    pub fn allocated_byte_size(&self) -> usize {
-        let geometry = (self.fill_indices.capacity()
-            + self.fill_vertices.capacity()
-            + self.casing_indices.capacity()
-            + self.casing_vertices.capacity()
-            + self.stroke_indices.capacity()
-            + self.stroke_vertices.capacity()
-            + self.icon_indices.capacity()
-            + self.icon_vertices.capacity()
-            + self.icon_high_indices.capacity()
-            + self.icon_high_vertices.capacity()
-            + self.fringe_indices.capacity()
-            + self.fringe_vertices.capacity()
-            + self.fill_3d_indices.capacity()
-            + self.fill_3d_vertices.capacity()
-            + self.wall_indices.capacity()
-            + self.wall_vertices.capacity()
-            + self.tree_indices.capacity()
-            + self.tree_vertices.capacity()
-            + self.tree_cross_indices.capacity()
-            + self.tree_cross_vertices.capacity())
-            * 4;
-        geometry + self.retained_cpu_byte_size() + self.stage_summary.capacity()
     }
 
     /// Restore the cached road decals after a mode-only overlay bake. Road
@@ -1903,60 +1849,16 @@ pub fn build_tile_buffers_from_body(
 
 /// Local mbtiles path: decode the MVT protobuf STRAIGHT into tile-local
 /// coordinates — no lon/lat round trip, no generated-JSON detour.
-/// Explicit memory/visual contract for each render-zoom band. Overview
-/// bakes are flat, bucket 16 is the first 3D band but carries only symbols
-/// visible in that band, and detail buckets include the complete z18 icon
-/// horizon. The route start frame is bucket 16 at view z15.6, where the
-/// removed high icon stream was not drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TileBakeProfile {
-    Overview,
-    Street,
-    Detail,
-}
-
-impl TileBakeProfile {
-    pub fn for_render_zoom(render_zoom: u32, buildings_3d: bool) -> Self {
-        if !buildings_3d || render_zoom <= 15 {
-            Self::Overview
-        } else if render_zoom == 16 {
-            Self::Street
-        } else {
-            Self::Detail
-        }
-    }
-
-    pub fn buildings_3d(self) -> bool {
-        !matches!(self, Self::Overview)
-    }
-
-    pub fn icon_inclusion_zoom(self, render_zoom: u32) -> f32 {
-        if matches!(self, Self::Detail) {
-            18.0
-        } else {
-            render_zoom as f32
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Overview => 0,
-            Self::Street => 1,
-            Self::Detail => 2,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Overview => "overview",
-            Self::Street => "street",
-            Self::Detail => "detail",
-        }
-    }
-}
-
 /// Render buckets from which 2.5D buildings are baked.
-pub const BUILDING_3D_MIN_ZOOM: u32 = 16;
+pub const BUILDING_3D_MIN_ZOOM: u32 = 15;
+
+/// Icon INCLUSION horizon: from the high keyframe bucket (16) tiles carry
+/// every icon through z18 with its real zoom floor encoded per icon; the
+/// shader's live `icon_zoom` uniform reveals them per frame. Inclusion
+/// stays bucket-gated below the keyframe so mid-zoom buffers stay lean.
+fn icon_inclusion_zoom(render_zoom: u32) -> f32 {
+    if render_zoom >= 16 { 18.0 } else { render_zoom as f32 }
+}
 
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
@@ -1970,8 +1872,6 @@ pub fn build_tile_buffers_from_mvt(
     buildings_3d: bool,
     build_road_core: bool,
 ) -> Result<TileBuffers, String> {
-    let bake_profile = TileBakeProfile::for_render_zoom(render_zoom, buildings_3d);
-    let buildings_3d = bake_profile.buildings_3d();
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
     let mut profiler = TileProfiler::new();
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
@@ -2045,7 +1945,7 @@ pub fn build_tile_buffers_from_mvt(
     let mut bridge_corridors = Vec::<BridgeCorridor>::new();
     // Bridge corridors want the detail archive from bucket 14 in 3D.
     let want_detail_points = !faces_bake_sink_armed()
-        && bake_profile.icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
+        && icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
     let want_detail_platforms = render_zoom >= 16;
     // Road elevation is camera-independent. Outside solved bridge-dz
     // coverage collect the heuristic corridors in flat mode too, making
@@ -2449,9 +2349,9 @@ fn merge_detail_features(
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
-    let render_bucket = render_zoom.round() as u32;
-    let icon_horizon = TileBakeProfile::for_render_zoom(render_bucket, want_buildings)
-        .icon_inclusion_zoom(render_bucket);
+    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
+    // buffers carry all street icons; the shader reveals by live zoom.
+    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     // Combined archives carry base AND detail layers in one tile; this
     // pass only consumes the raw osm_* layers, and of those only the
     // geometry classes the flags below reach:
@@ -3507,25 +3407,6 @@ fn profile_clock_elapsed_is_non_negative() {
     assert!(clock.elapsed_seconds() >= 0.0);
 }
 
-#[cfg(test)]
-#[test]
-fn bake_profiles_keep_bucket_16_visuals_without_hidden_icon_horizon() {
-    let overview = TileBakeProfile::for_render_zoom(15, true);
-    assert_eq!(overview, TileBakeProfile::Overview);
-    assert!(!overview.buildings_3d());
-    assert_eq!(overview.icon_inclusion_zoom(15), 15.0);
-
-    let start = TileBakeProfile::for_render_zoom(16, true);
-    assert_eq!(start, TileBakeProfile::Street);
-    assert!(start.buildings_3d());
-    assert_eq!(start.icon_inclusion_zoom(16), 16.0);
-
-    let detail = TileBakeProfile::for_render_zoom(17, true);
-    assert_eq!(detail, TileBakeProfile::Detail);
-    assert!(detail.buildings_3d());
-    assert_eq!(detail.icon_inclusion_zoom(17), 18.0);
-}
-
 struct TileProfiler {
     on: bool,
     last: ProfileClock,
@@ -3764,10 +3645,7 @@ fn build_tile_buffers_from_features_profiled(
             "stops" => 13,
             _ => ICON_MIN_ZOOM,
         };
-        if TileBakeProfile::for_render_zoom(render_zoom, buildings_3d)
-            .icon_inclusion_zoom(render_zoom)
-            >= icon_zoom_floor as f32
-        {
+        if icon_inclusion_zoom(render_zoom) >= icon_zoom_floor as f32 {
             if let Some((icon_name, color_class)) = icon_for_tags(tags) {
                 if let Some(mesh) = icon_mesh(icon_name) {
                     // Doors and generic dots yield to real symbols in the
@@ -4033,6 +3911,12 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_vertices = Vec::<f32>::new();
     // Building walls as instance records; see WALL_INSTANCE_FLOATS.
     let mut wall_instances = Vec::<f32>::new();
+    // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
+    let mut tree_template_vertices = Vec::<f32>::new();
+    let mut tree_template_indices = Vec::<u32>::new();
+    let mut tree_cross_template_vertices = Vec::<f32>::new();
+    let mut tree_cross_template_indices = Vec::<u32>::new();
+    let mut tree_instances = Vec::<f32>::new();
     let mut road_icon_indices = Vec::<u32>::new();
     let mut road_icon_vertices = Vec::<f32>::new();
     let mut fill_zbias = 0.0_f32;
@@ -5379,57 +5263,62 @@ fn build_tile_buffers_from_features_profiled(
                 &mut template_indices,
                 &mut template_zbias,
             );
-            // Mid/far-ring stand-in: two crossed vertical quads per tree
-            // (canopy color, canopy material) — 8 verts vs ~70.
+            // Mid/far-ring stand-in: the trunk plus two crossed vertical
+            // quads (canopy color, canopy material) — 8 verts vs ~70. Both
+            // templates sit at the origin; the GPU adds the anchor per
+            // instance (TREE_INSTANCE_FLOATS), so a park tile carries one
+            // tree mesh, not thousands.
             let cross_r = 2.6 * units_per_m;
-            for (x, y) in tree_points_3d.iter() {
+            let mut cross_zbias = 0.0f32;
+            for (a, b, normal) in [
+                ((-arm, 0.0), (arm, 0.0), (0.0, 0.0)),
+                ((0.0, -arm), (0.0, arm), (0.0, 0.0)),
+            ] {
                 append_wall_quad(
-                    (*x - cross_r, *y),
-                    (*x + cross_r, *y),
-                    1.5,
-                    11.0,
-                    canopy_color,
+                    a,
+                    b,
+                    0.0,
+                    7.5,
+                    trunk_color,
                     trunk_ao,
-                    (0.0, 1.0),
-                    MAT_CANOPY,
-                    &mut tree_cross_vertices,
-                    &mut tree_cross_indices,
-                    &mut fill_zbias,
-                );
-                append_wall_quad(
-                    (*x, *y - cross_r),
-                    (*x, *y + cross_r),
-                    1.5,
-                    11.0,
-                    canopy_color,
-                    trunk_ao,
-                    (1.0, 0.0),
-                    MAT_CANOPY,
-                    &mut tree_cross_vertices,
-                    &mut tree_cross_indices,
-                    &mut fill_zbias,
+                    normal,
+                    MAT_NONE,
+                    &mut tree_cross_template_vertices,
+                    &mut tree_cross_template_indices,
+                    &mut cross_zbias,
                 );
             }
-            let floats = template_verts.len();
-            fill_vertices.reserve(floats * tree_points_3d.len());
-            fill_indices.reserve(template_indices.len() * tree_points_3d.len());
+            for (a, b, normal) in [
+                ((-cross_r, 0.0), (cross_r, 0.0), (0.0, 1.0)),
+                ((0.0, -cross_r), (0.0, cross_r), (1.0, 0.0)),
+            ] {
+                append_wall_quad(
+                    a,
+                    b,
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    normal,
+                    MAT_CANOPY,
+                    &mut tree_cross_template_vertices,
+                    &mut tree_cross_template_indices,
+                    &mut cross_zbias,
+                );
+            }
+            let template_step = template_zbias.max(cross_zbias);
+            tree_instances.reserve(tree_points_3d.len() * TREE_INSTANCE_FLOATS);
             for (instance, (x, y)) in tree_points_3d.iter().enumerate() {
-                let base_vert =
-                    (fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-                let zbias_shift = fill_zbias + instance as f32 * template_zbias;
-                let start = fill_vertices.len();
-                fill_vertices.extend_from_slice(&template_verts);
-                for record in fill_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX)
-                {
-                    record[0] += *x;
-                    record[1] += *y;
-                    record[18] += zbias_shift;
-                }
-                fill_indices
-                    .extend(template_indices.iter().map(|i| i + base_vert));
+                tree_instances.extend_from_slice(&[
+                    *x,
+                    *y,
+                    fill_zbias + instance as f32 * template_step,
+                ]);
                 feature_count += 1;
             }
-            fill_zbias += tree_points_3d.len() as f32 * template_zbias;
+            fill_zbias += tree_points_3d.len() as f32 * template_step;
+            tree_template_vertices = template_verts;
+            tree_template_indices = template_indices;
         }
     }
 
@@ -6491,6 +6380,11 @@ fn build_tile_buffers_from_features_profiled(
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),
             tree_cross_vertices: Vec::new(),
+            tree_template_indices: Vec::new(),
+            tree_template_vertices: Vec::new(),
+            tree_cross_template_indices: Vec::new(),
+            tree_cross_template_vertices: Vec::new(),
+            tree_instances: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -7499,6 +7393,11 @@ fn build_tile_buffers_from_features_profiled(
         tree_vertices,
         tree_cross_indices,
         tree_cross_vertices,
+        tree_template_indices,
+        tree_template_vertices: pack_vector_vertices(&tree_template_vertices),
+        tree_cross_template_indices,
+        tree_cross_template_vertices: pack_vector_vertices(&tree_cross_template_vertices),
+        tree_instances,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
@@ -10688,6 +10587,11 @@ mod bridge_probe_tests {
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),
             tree_cross_vertices: Vec::new(),
+            tree_template_indices: Vec::new(),
+            tree_template_vertices: Vec::new(),
+            tree_cross_template_indices: Vec::new(),
+            tree_cross_template_vertices: Vec::new(),
+            tree_instances: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
@@ -10705,8 +10609,6 @@ mod bridge_probe_tests {
         );
         assert_eq!(buffers.road_icon_indices, vec![0, 1]);
         assert_eq!(buffers.road_icon_vertices, road_vertices);
-        assert!(buffers.allocated_byte_size() > buffers.retained_cpu_byte_size());
-        assert!(buffers.gpu_byte_size() > 0);
     }
 
     #[test]

@@ -119,6 +119,7 @@ fn amsterdam_start_view_bake_report() {
     let mut stream_totals = [0usize; 11];
     let mut total_icon_instance_bytes = 0usize;
     let mut total_wall_instance_bytes = 0usize;
+    let mut total_tree_instance_bytes = 0usize;
     let mut icon_kinds = std::collections::BTreeMap::new();
     let mut fill_kinds = std::collections::BTreeMap::new();
     let mut casing_kinds = std::collections::BTreeMap::new();
@@ -158,7 +159,7 @@ fn amsterdam_start_view_bake_report() {
         };
         let b = &tile.buffers;
         let per_stream = streams(b);
-        let bytes = b.gpu_byte_size();
+        let bytes = b.byte_size();
         let verts: usize = per_stream.iter().map(|(_, v, _)| v / 12).sum();
         for (slot, (_, v, i)) in per_stream.iter().enumerate() {
             stream_totals[slot] += (v + i) * 4;
@@ -180,6 +181,12 @@ fn amsterdam_start_view_bake_report() {
             .sum();
         total_icon_instance_bytes += b.icon_instance_floats() * 4;
         total_wall_instance_bytes += b.wall_instances.len() * 4;
+        total_tree_instance_bytes += (b.tree_instances.len()
+            + b.tree_template_indices.len()
+            + b.tree_template_vertices.len()
+            + b.tree_cross_template_indices.len()
+            + b.tree_cross_template_vertices.len())
+            * 4;
         classify_packed(&b.icon_vertices, &mut icon_kinds);
         classify_packed(&b.fill_vertices, &mut fill_kinds);
         classify_packed(&b.casing_vertices, &mut casing_kinds);
@@ -235,6 +242,12 @@ fn amsterdam_start_view_bake_report() {
         "wall_inst",
         mib(total_wall_instance_bytes),
         total_wall_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
+    );
+    println!(
+        "  {:<10} {:>8.1} MiB {:>5.1}%",
+        "tree_inst",
+        mib(total_tree_instance_bytes),
+        total_tree_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
     );
     for (name, kinds) in [("icon", &icon_kinds), ("fill", &fill_kinds), ("casing", &casing_kinds)] {
         println!("== {name} stream vertex bytes by (shape, material) ==");
