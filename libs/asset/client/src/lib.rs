@@ -36,6 +36,9 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod api;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/api.rs"]
+pub mod api;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,11 +62,23 @@ pub mod transport;
 pub mod cache_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod side_channels;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/side_channels.rs"]
+pub mod side_channels;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod publish;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/publish.rs"]
 pub mod publish;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod resolver;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/resolver.rs"]
+pub mod resolver;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod runtime;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/runtime.rs"]
 pub mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod session;
@@ -71,6 +86,9 @@ pub mod session;
 #[path = "portable/session.rs"]
 pub mod session;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod subscriber;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/subscriber.rs"]
 pub mod subscriber;
 pub mod util;
 pub mod wire;
@@ -84,6 +102,12 @@ pub use api::{
     PipelineStageSpec, SourceCollectionRegistered, default_stage_weight, stage_ref,
     DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT, NEUTRAL_STAGE_WEIGHT,
 };
+#[cfg(target_arch = "wasm32")]
+pub use api::{
+    default_stage_weight, stage_ref, AnnotationUpload, Api, CatalogQuery, ChatAttachment,
+    PipelineStageSpec, DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,
+    NEUTRAL_STAGE_WEIGHT,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
 #[cfg(not(target_arch = "wasm32"))]
@@ -92,13 +116,17 @@ pub use client::{
     PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
 };
 #[cfg(target_arch = "wasm32")]
-pub use client::{AssetClient, CacheBudgets, CacheStats, ClientConfig, HttpLimits};
+pub use client::{
+    AssetClient, CacheBudgets, CacheStats, CatalogPage, ClientConfig, HttpLimits, PageCursor,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
 #[cfg(target_arch = "wasm32")]
-pub use discovery::{content_client_caps, Beacon};
+pub use discovery::{
+    bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener,
+};
 pub use dto::{
     ChatProviderLocality,
     AliasDto, AliasStatusDto, AnnotateBacklogDto, AnnotateSummaryDto, AnnotationDto,
@@ -145,15 +173,30 @@ pub use publish::{
     PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
     PublishedFile,
 };
+#[cfg(target_arch = "wasm32")]
+pub use publish::{
+    PublishBundle, PublishBundleFile, PublishFile, PublishProvenance, PublishRequest,
+    PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
+    PublishedFile,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::{
     SessionConfig, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
 #[cfg(target_arch = "wasm32")]
 pub use session::{
-    CatalogSubscriberConfig, RuntimeConfig, SessionConfig, SessionConnector, SessionMsg,
-    SessionStatus,
+    CatalogSubscriberConfig, RuntimeConfig, SessionConfig, SessionConnector, SessionHandles,
+    SessionMsg, SessionStatus,
 };
+#[cfg(target_arch = "wasm32")]
+pub use resolver::{select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference};
+#[cfg(target_arch = "wasm32")]
+pub use runtime::{
+    ClientEvent, ClientOutput, ClientRequest, ClientRuntime, Lane, RequestId, ResourceSlot,
+    ResourceState, StageEvent, SubmitOptions,
+};
+#[cfg(target_arch = "wasm32")]
+pub use subscriber::{CatalogSubscriber, CatalogSubscriptionEvent};
 #[cfg(not(target_arch = "wasm32"))]
 pub use resolver::{
     select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference,
