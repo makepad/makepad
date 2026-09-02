@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use crate::host;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -362,7 +362,7 @@ pub const WARM_ENV: (&str, &str) = ("MAKEPAD_WM_WARM_START", "1");
 /// switch the pool off for anyone who opens four terminals in a minute,
 /// which is exactly who it exists for.
 pub const WARM_CRASH_LIMIT: usize = 3;
-pub const WARM_CRASH_WINDOW: Duration = Duration::from_secs(60);
+pub const WARM_CRASH_WINDOW: f64 = 60.0;
 
 /// What the WM knows about one pooled instance right now, handed to
 /// `WarmPool::adopt` so the pool itself stays free of WM state.
@@ -389,8 +389,8 @@ pub struct WarmPool {
     enabled: bool,
     /// app id -> the warm clients of that app, oldest first.
     ready: HashMap<String, Vec<ClientId>>,
-    /// app id -> when its warm instances died unexpectedly, newest last.
-    crashes: HashMap<String, Vec<Instant>>,
+    /// app id -> when (platform seconds) its warm instances died unexpectedly, newest last.
+    crashes: HashMap<String, Vec<f64>>,
 }
 
 impl Default for WarmPool {
@@ -411,7 +411,8 @@ pub fn warm_enabled(no_warm: Option<&str>) -> bool {
 
 impl WarmPool {
     pub fn from_env() -> Self {
-        Self::new(warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
+        // A build without processes has nothing to keep warm.
+        Self::new(host::processes_available() && warm_enabled(std::env::var("MAKEPAD_WM_NO_WARM").ok().as_deref()))
     }
 
     pub fn new(enabled: bool) -> Self {
@@ -459,7 +460,7 @@ impl WarmPool {
 
     /// True while this app is under capacity and inside its crash budget:
     /// the WM may spawn one more standby instance now.
-    pub fn wants(&self, app: &str, now: Instant) -> bool {
+    pub fn wants(&self, app: &str, now: f64) -> bool {
         self.enabled
             && self.held(app) < Self::capacity(app)
             && self.recent_crashes(app, now) < WARM_CRASH_LIMIT
@@ -468,7 +469,7 @@ impl WarmPool {
     /// The next app that is short an instance, in table order — the tick
     /// tops the pool up ONE spawn at a time so a cold start never forks
     /// five cargo builds into the same target-dir lock at once.
-    pub fn next_missing(&self, now: Instant) -> Option<String> {
+    pub fn next_missing(&self, now: f64) -> Option<String> {
         WARM_CAPACITY
             .iter()
             .map(|(app, _)| *app)
@@ -483,16 +484,16 @@ impl WarmPool {
 
     /// A warm instance died on its own. Counted against the crash budget;
     /// a DELIBERATE close (WM shutdown, close-all) calls `forget` instead.
-    pub fn note_crash(&mut self, app: &str, now: Instant) {
+    pub fn note_crash(&mut self, app: &str, now: f64) {
         self.crashes.entry(app.to_string()).or_default().push(now);
     }
 
-    fn recent_crashes(&self, app: &str, now: Instant) -> usize {
+    fn recent_crashes(&self, app: &str, now: f64) -> usize {
         self.crashes
             .get(app)
             .map(|v| {
                 v.iter()
-                    .filter(|t| now.saturating_duration_since(**t) < WARM_CRASH_WINDOW)
+                    .filter(|t| now - **t < WARM_CRASH_WINDOW)
                     .count()
             })
             .unwrap_or(0)
@@ -585,7 +586,7 @@ pub struct ClientSlot {
     /// adopted out of the pool) and whether that open was the warm path —
     /// the pair behind the "first frame in Nms" log line that measures the
     /// pool honestly.
-    pub open_at: Option<Instant>,
+    pub open_at: Option<f64>,
     pub opened_warm: bool,
     /// FOCUS RULE: a Quick-Look preview never takes key focus — keys keep
     /// flowing to the requesting tile (files). `focus_client` refuses to
@@ -601,10 +602,10 @@ pub struct ClientSlot {
     /// cargo has finished linking and handed over: the child's first exec
     /// is the one macOS scans.
     pub linked: bool,
-    pub linked_at: Option<std::time::Instant>,
+    pub linked_at: Option<f64>,
     /// A polite close was sent at this instant (omarchy's
     /// `hl.dsp.window.close()`); the hard kill is only the fallback.
-    pub closing: Option<std::time::Instant>,
+    pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
 }
@@ -626,7 +627,7 @@ impl ClientSlot {
             pwd: None,
             is_preview: false,
             warm: false,
-            open_at: Some(Instant::now()),
+            open_at: Some(host::now()),
             opened_warm: false,
             takes_focus: true,
             via_cargo: false,
@@ -887,7 +888,7 @@ pub fn spawn_client(
     // Child output (and cargo's "Compiling …") goes to a per-client log —
     // silent children are undebuggable — and every line also reaches the
     // UI so the tile can show what the build is doing.
-    let log_path = std::env::temp_dir().join(format!("wm-client-{}.log", id));
+    let log_path = host::homeless_root().join(format!("wm-client-{}.log", id));
     let log = std::fs::File::create(&log_path).ok();
     if let Some(out) = child.stdout.take() {
         pump(id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
@@ -907,7 +908,7 @@ pub fn spawn_client(
         pwd: None,
         is_preview: false,
         warm,
-        open_at: (!warm).then(Instant::now),
+        open_at: (!warm).then(host::now),
         opened_warm: false,
         // A warm instance is not a window yet: nothing may focus it until
         // adoption hands it a tile.
@@ -1136,14 +1137,14 @@ mod tests {
         pool.note_spawned("terminal", 2);
         pool.note_spawned("files", 3);
         pool.note_spawned("task", 4);
-        assert!(!pool.wants("browser", Instant::now()), "already full");
-        assert_eq!(pool.next_missing(Instant::now()), None, "nothing missing");
+        assert!(!pool.wants("browser", host::now()), "already full");
+        assert_eq!(pool.next_missing(host::now()), None, "nothing missing");
         assert_eq!(pool.adopt("browser", false, &status), Some(7));
         // Out of the pool, and the pool now wants its replacement.
         assert_eq!(pool.held("browser"), 0);
         assert!(!pool.holds(7));
-        assert!(pool.wants("browser", Instant::now()));
-        assert_eq!(pool.next_missing(Instant::now()).as_deref(), Some("browser"));
+        assert!(pool.wants("browser", host::now()));
+        assert_eq!(pool.next_missing(host::now()).as_deref(), Some("browser"));
         // The same instance can never be adopted twice.
         assert_eq!(pool.adopt("browser", false, &status), None);
     }
@@ -1152,7 +1153,7 @@ mod tests {
     fn two_terminals_stand_by_and_both_open_instantly() {
         let (mut pool, status) = pool_with("terminal", &[3, 4]);
         assert_eq!(pool.held("terminal"), 2);
-        assert!(!pool.wants("terminal", Instant::now()));
+        assert!(!pool.wants("terminal", host::now()));
         // Back-to-back opens: both are swaps, oldest first.
         assert_eq!(pool.adopt("terminal", false, &status), Some(3));
         assert_eq!(pool.held("terminal"), 1);
@@ -1161,12 +1162,12 @@ mod tests {
         // A third open in the same breath falls back to cold, and the pool
         // is two short — one spawn per tick, so it tops up twice.
         assert_eq!(pool.adopt("terminal", false, &status), None);
-        assert!(pool.wants("terminal", Instant::now()));
+        assert!(pool.wants("terminal", host::now()));
         pool.note_spawned("terminal", 9);
-        assert!(pool.wants("terminal", Instant::now()));
+        assert!(pool.wants("terminal", host::now()));
         pool.note_spawned("terminal", 10);
-        assert!(!pool.wants("terminal", Instant::now()));
-        assert_eq!(pool.next_missing(Instant::now()).as_deref(), Some("browser"));
+        assert!(!pool.wants("terminal", host::now()));
+        assert_eq!(pool.next_missing(host::now()).as_deref(), Some("browser"));
     }
 
     #[test]
@@ -1189,7 +1190,7 @@ mod tests {
         let starting = [WarmStatus { client: 5, alive: true, connected: false }];
         assert_eq!(pool.adopt("browser", false, &starting), None);
         assert_eq!(pool.held("browser"), 1);
-        assert!(!pool.wants("browser", Instant::now()));
+        assert!(!pool.wants("browser", host::now()));
 
         // An app with nothing standing by: cold, quietly.
         let mut empty = WarmPool::new(true);
@@ -1220,8 +1221,8 @@ mod tests {
         let mut off = WarmPool::new(false);
         assert!(!off.enabled());
         // Nothing is ever spawned…
-        assert!(!off.wants("terminal", Instant::now()));
-        assert_eq!(off.next_missing(Instant::now()), None);
+        assert!(!off.wants("terminal", host::now()));
+        assert_eq!(off.next_missing(host::now()), None);
         // …and even a hand-fed instance is never adopted.
         off.note_spawned("terminal", 1);
         let status = [WarmStatus { client: 1, alive: true, connected: true }];
@@ -1230,7 +1231,7 @@ mod tests {
 
     #[test]
     fn a_crash_loop_gives_up_quietly_after_three_a_minute() {
-        let now = Instant::now();
+        let now = host::now();
         let mut pool = WarmPool::new(true);
         for i in 0..WARM_CRASH_LIMIT {
             assert!(pool.wants("browser", now), "attempt {}", i);
@@ -1244,7 +1245,7 @@ mod tests {
         // The budget is per app…
         assert!(pool.wants("terminal", now));
         // …and it is a WINDOW: a minute later the app is tried again.
-        assert!(pool.wants("browser", now + WARM_CRASH_WINDOW + Duration::from_secs(1)));
+        assert!(pool.wants("browser", now + WARM_CRASH_WINDOW + 1.0));
     }
 
     #[test]
@@ -1252,7 +1253,7 @@ mod tests {
         // CTRL+ALT+DELETE closes the warm instances with everything else;
         // that is not a crash, so the pool refills at once instead of
         // spending the loop budget on the user's own gesture.
-        let now = Instant::now();
+        let now = host::now();
         let mut pool = WarmPool::new(true);
         for id in 0..6 {
             pool.note_spawned("terminal", id);

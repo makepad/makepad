@@ -109,6 +109,11 @@ impl TileHost for MpModuleView {
         // A module has no build, no exec scan, no stdout: nothing to show.
     }
 
+    /// The WM's focus lands here: keys may reach the root from now on.
+    /// The widget INSIDE that holds the keyboard is the root's own affair
+    /// — a cell the person clicked, a text field — so this never moves
+    /// the key focus itself (a process tile must, to forward keys; a
+    /// module's widgets are in this very tree and claim it themselves).
     fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
         if !self.takes_key_focus {
             return true;
@@ -117,15 +122,14 @@ impl TileHost for MpModuleView {
             return false;
         }
         self.focused = true;
-        cx.set_key_focus(self.area);
         true
     }
 
     fn release_keyboard(&mut self, cx: &mut Cx) {
         self.focused = false;
-        if self.area != Area::Empty && cx.has_key_focus(self.area) {
-            cx.set_key_focus(Area::Empty);
-        }
+        // Whatever inside held the keyboard must let go too, or a field in
+        // a tile behind the pane would keep eating keys.
+        cx.set_key_focus(Area::Empty);
     }
 
     fn set_takes_key_focus(&mut self, on: bool) {

@@ -1,19 +1,29 @@
-//! The AI pane: a right-side slide-in that hosts the aichat child.
+//! The AI pane: a right-side slide-in that hosts the assistant.
 //!
-//! The chat is NOT the window manager's — it is a child app like any
-//! other (`apps/aichat`), launched on first use and seated here instead of
-//! in a tile. This widget owns nothing but the slot: the pane rect under
-//! the bar, the slide (easeOutQuint, 260 ms in, 200 ms out), an opaque
-//! card with a 2 px edge on its left, and one `MpRunView` that presents
-//! the child's frames and forwards its input. Open, the pane takes the
-//! pointer inside its rect and the keyboard (the run view's own key
-//! focus); closed, it draws nothing — but the run view keeps ticking the
-//! child, so a turn in flight finishes behind a hidden pane and the next
-//! slide-in shows a live picture, not a stale one.
+//! The chat is NOT the window manager's — it is an app of its own
+//! (`apps/aichat`), seated here instead of in a tile, in one of two
+//! bodies. On a desktop it is the aichat CHILD PROCESS, launched on first
+//! use and presented by one `MpRunView` that forwards its input. Where
+//! the chat is linked in as a MODULE — the web superbuild, or a desktop
+//! that switched `aichat` to module hosting — the body is the chat's own
+//! root, `mod.widgets.AiChatOverlay{}`, instantiated BY NAME on first open
+//! exactly as a Window's F10 slot does; the WM's services reach it as
+//! in-process links (`pane_links.rs`), never as frames.
+//!
+//! This widget owns nothing but the slot: the pane rect under the bar,
+//! the slide (easeOutQuint, 260 ms in, 200 ms out), an opaque card with a
+//! 2 px edge on its left, and the body. Open, the pane takes the pointer
+//! inside its rect and the keyboard; closed, it draws its body just off
+//! the desk's right edge and keeps it ticking (the child's 8 ms tick, the
+//! module's engine), so the assistant — started with the desktop, never
+//! on the first F10 — is configured, presenting and answering before the
+//! pane ever slides in, and a turn in flight finishes behind a hidden one.
 
 use crate::desk::ease_out_quint;
 use crate::hub::ClientId;
 use crate::run_view::MpRunView;
+use makepad_widgets::makepad_script::script_eval;
+use makepad_widgets::makepad_script::trap::NoTrap;
 use makepad_widgets::*;
 
 script_mod! {
@@ -69,15 +79,56 @@ pub struct ShellAiPane {
     gap: f64,
     #[rust]
     next_frame: NextFrame,
-    /// The keyboard was asked for while the run view had no live area;
+    /// The keyboard was asked for while the body had no live area;
     /// claimed right after its next draw.
     #[rust]
     focus_pending: bool,
+    /// The chat's module root, when the chat runs in-process: made by
+    /// name on the first open, kept for the life of the desk.
+    #[rust]
+    overlay: Option<WidgetRef>,
 }
 
 impl ShellAiPane {
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// The chat runs in this process: the body is its module root.
+    pub fn is_local(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    /// Seat the chat's module root here, made BY NAME: `mod.widgets.
+    /// AiChatOverlay{}` exists when this build links `makepad-aichat` and
+    /// called its `script_mod`. False, with one log line, when it does not.
+    pub fn ensure_overlay(&mut self, cx: &mut Cx) -> bool {
+        if self.overlay.is_some() {
+            return true;
+        }
+        let overlay = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let ty = vm.bx.heap.value_path(widgets, ids!(AiChatOverlay), NoTrap);
+            if ty.as_object().is_none() {
+                return None;
+            }
+            let value = script_eval!(vm, {
+                use mod.widgets.*
+                AiChatOverlay {}
+            });
+            Some(WidgetRef::script_from_value(vm, value))
+        });
+        match overlay {
+            Some(overlay) => {
+                cx.widget_tree_insert_child(self.widget_uid(), live_id!(overlay), overlay.clone());
+                self.overlay = Some(overlay);
+                true
+            }
+            None => {
+                log!("wm: this build does not link the assistant (no mod.widgets.AiChatOverlay); nothing to seat in the pane");
+                false
+            }
+        }
     }
 
     pub fn client(&self) -> Option<ClientId> {
@@ -130,7 +181,11 @@ impl ShellAiPane {
             // A hidden pane must not keep the keyboard: typing would go on
             // reaching the chat behind nothing.
             self.focus_pending = false;
-            self.with_run_view(cx, |cx, v| v.release_keyboard(cx));
+            if self.overlay.is_some() {
+                cx.set_key_focus(Area::Empty);
+            } else {
+                self.with_run_view(cx, |cx, v| v.release_keyboard(cx));
+            }
         }
         self.redraw(cx);
     }
@@ -163,12 +218,22 @@ impl ShellAiPane {
         Some(f(cx, &mut view))
     }
 
-    /// Claim the keyboard for the child. The run view is not drawn at all
-    /// while the pane is hidden, so at open time its area is stale (or,
-    /// the first time, empty): the claim is then kept pending and made
-    /// right after the pane's next draw, when the area is live again.
+    /// Claim the keyboard for the body. It is not drawn at all while the
+    /// pane is hidden, so at open time its area is stale (or, the first
+    /// time, empty): the claim is then kept pending and made right after
+    /// the pane's next draw, when the area is live again.
     pub fn focus_keyboard(&mut self, cx: &mut Cx) {
-        let ok = self.with_run_view(cx, |cx, v| v.focus_keyboard(cx)).unwrap_or(false);
+        let ok = match &self.overlay {
+            Some(overlay) => {
+                let input = overlay.text_input(cx, ids!(panel.input));
+                let live = input.area().is_valid(cx);
+                if live {
+                    input.set_key_focus(cx);
+                }
+                live
+            }
+            None => self.with_run_view(cx, |cx, v| v.focus_keyboard(cx)).unwrap_or(false),
+        };
         self.focus_pending = !ok;
         if !ok {
             self.redraw(cx);
@@ -185,29 +250,44 @@ impl Widget for ShellAiPane {
             }
             self.redraw(cx);
         }
-        // The child is ticked whether or not the pane shows (its 8 ms
-        // tick timer is what makes it run at all); pointer and keys reach
-        // the run view only while the pane is on screen, so a hidden
-        // pane's stale area can never swallow a click meant for a tile.
+        // The body is ticked whether or not the pane shows (the child's
+        // 8 ms tick timer is what makes it run at all; the module's engine
+        // pumps on every event); pointer and keys reach it only while the
+        // pane is on screen, so a hidden pane's stale area can never
+        // swallow a click meant for a tile.
+        if let Some(overlay) = self.overlay.clone() {
+            let pointer = matches!(event, Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_));
+            let keys = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+            if (!pointer && !keys) || self.showing() {
+                overlay.handle_event(cx, event, scope);
+            }
+            return;
+        }
         if self.showing() || matches!(event, Event::Timer(_)) {
             self.view.handle_event(cx, event, scope);
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        if !self.showing() {
-            return DrawStep::done();
-        }
+        // Drawn even while hidden: at slide position zero the body sits
+        // just off the desk's right edge, where a child process keeps a
+        // real rect (so it is configured, gets a swapchain and presents
+        // its frames) and a module root keeps a live picture — the pane's
+        // first slide-in shows the assistant already running, not a
+        // "starting…" wash. One off-screen quad is what that costs.
         let r = self.slid_rect();
         self.draw_card.draw_abs(cx, r);
         self.draw_edge.draw_abs(cx, Rect { pos: r.pos, size: dvec2(EDGE, r.size.y) });
         let inner = Rect { pos: dvec2(r.pos.x + EDGE, r.pos.y), size: dvec2(r.size.x - EDGE, r.size.y) };
-        while self.view.draw_walk(cx, scope, Walk::abs_rect(inner)).is_step() {}
-        if self.focus_pending && self.open {
-            // The run view just drew: its area is live, the claim can land.
-            if self.with_run_view(cx, |cx, v| v.focus_keyboard(cx)).unwrap_or(false) {
-                self.focus_pending = false;
+        match self.overlay.clone() {
+            Some(overlay) => overlay.draw_walk_all(cx, scope, Walk::abs_rect(inner)),
+            None => {
+                while self.view.draw_walk(cx, scope, Walk::abs_rect(inner)).is_step() {}
             }
+        }
+        if self.focus_pending && self.open {
+            // The body just drew: its area is live, the claim can land.
+            self.focus_keyboard(cx);
         }
         DrawStep::done()
     }
