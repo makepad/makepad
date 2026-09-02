@@ -8,8 +8,9 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, RwLock,
     },
-    time::Instant,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 pub const XR_TSDF_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.02;
 
