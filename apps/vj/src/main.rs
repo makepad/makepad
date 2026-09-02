@@ -120,6 +120,7 @@ mod columns;
 mod console;
 mod dsp_math;
 mod marks;
+mod settings;
 #[macro_use]
 mod verify;
 // What may be worked out about a track before anyone asks to play it, and
@@ -19191,34 +19192,30 @@ p2 {}
             AutoStyle::Outro => 0,
             AutoStyle::Body => 1,
         };
-        let body = format!(
-            "{}
-{}
-{}
-{}
-{}
-{}
-",
-            brain,
-            style,
-            u8::from(self.autopilot.vocal_guard),
-            u8::from(self.autopilot.phrase_snap),
-            u8::from(self.decks.repeat),
-            u8::from(self.decks.shuffle),
-        );
+        let mut store = crate::settings::Settings::new();
+        store.set_usize("auto.brain", brain);
+        store.set_usize("auto.style", style);
+        store.set_bool("auto.vocal_guard", self.autopilot.vocal_guard);
+        store.set_bool("auto.phrase_snap", self.autopilot.phrase_snap);
+        store.set_bool("queue.repeat", self.decks.repeat);
+        store.set_bool("queue.shuffle", self.decks.shuffle);
         let path = Self::autopilot_settings_path();
-        let _ = crate::durable::write_file(&path, body);
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_autopilot_settings(&mut self) {
         let Ok(body) = std::fs::read_to_string(Self::autopilot_settings_path()) else {
             return;
         };
-        let mut lines = body.lines();
-        let mut next = |fallback: u8| -> u8 {
-            lines.next().and_then(|l| l.parse().ok()).unwrap_or(fallback)
+        // Six bare numbers before the store existed; keys since. A file with
+        // no version line is the old one, whatever else it looks like.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::autopilot(&body)
+        } else {
+            store
         };
-        match next(2) {
+        match store.usize("auto.brain", 2) {
             0 => self.autopilot.brain = MixBrain::Fade,
             1 => self.autopilot.brain = MixBrain::Eq,
             2 => self.autopilot.brain = MixBrain::Stems,
@@ -19226,15 +19223,15 @@ p2 {}
             // first plan rolls one.
             _ => self.autopilot.brain_random = true,
         };
-        self.autopilot.set_style(if next(0) == 1 {
+        self.autopilot.set_style(if store.usize("auto.style", 0) == 1 {
             AutoStyle::Body
         } else {
             AutoStyle::Outro
         });
-        self.autopilot.vocal_guard = next(1) == 1;
-        self.autopilot.phrase_snap = next(1) == 1;
-        self.decks.repeat = next(0) == 1;
-        self.decks.shuffle = next(0) == 1;
+        self.autopilot.vocal_guard = store.bool("auto.vocal_guard", true);
+        self.autopilot.phrase_snap = store.bool("auto.phrase_snap", true);
+        self.decks.repeat = store.bool("queue.repeat", false);
+        self.decks.shuffle = store.bool("queue.shuffle", false);
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
