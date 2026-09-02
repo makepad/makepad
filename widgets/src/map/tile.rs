@@ -7612,6 +7612,7 @@ pub fn build_local_tile_from_archive_bytes(
     tile_key: TileKey,
     base: Option<Vec<u8>>,
     detail: Option<Vec<u8>>,
+    detail_mbtiles_path: Option<&Path>,
     bridge_dz_mbtiles_path: Option<&Path>,
     overlay_paths: &[String],
     theme: &CompiledMapTheme,
@@ -7619,6 +7620,57 @@ pub fn build_local_tile_from_archive_bytes(
     buildings_3d: bool,
     build_road_core: bool,
 ) -> Result<Option<LoadedLocalTile>, String> {
+    let mut overlay_tiles = Vec::new();
+    for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
+        let (file, filter) = match path.split_once('?') {
+            Some((file, "fast")) => (file, 1_u8),
+            Some((file, "slow")) => (file, 2),
+            Some((file, _)) => (file, 0),
+            None => (path.as_str(), 0),
+        };
+        let Ok(mut reader) = MbtilesReader::open(Path::new(file)) else {
+            continue;
+        };
+        let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
+        if tile_key.z < min_zoom {
+            continue;
+        }
+        let shift = tile_key.z.saturating_sub(max_zoom);
+        let fetch_z = tile_key.z - shift;
+        let fetch_x = (tile_key.x as u32 >> shift) as i64;
+        let fetch_y = (tile_key.y as u32 >> shift) as i64;
+        let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
+        if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
+            overlay_tiles.push(OverlayTileData {
+                raw,
+                shift,
+                quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
+                quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
+                filter,
+                has_chargers: file.contains("chargers"),
+            });
+        }
+    }
+
+    let Some(base) = base else {
+        if overlay_tiles.is_empty() {
+            return Ok(None);
+        }
+        let buffers = build_tile_buffers_from_mvt(
+            tile_key,
+            &[],
+            None,
+            None,
+            false,
+            &overlay_tiles,
+            theme,
+            render_zoom,
+            buildings_3d,
+            build_road_core,
+        )?;
+        return Ok(Some(LoadedLocalTile { tile_key, buffers }));
+    };
+
     let mut bridge_dz = bridge_dz_mbtiles_path
         .filter(|path| path.is_file())
         .and_then(|path| MbtilesReader::open(path).ok())
@@ -7669,46 +7721,24 @@ pub fn build_local_tile_from_archive_bytes(
     } else {
         (None, false)
     };
-
-    let mut overlay_tiles = Vec::new();
-    for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
-        let (file, filter) = match path.split_once('?') {
-            Some((file, "fast")) => (file, 1_u8),
-            Some((file, "slow")) => (file, 2),
-            Some((file, _)) => (file, 0),
-            None => (path.as_str(), 0),
-        };
-        let Ok(mut reader) = MbtilesReader::open(Path::new(file)) else {
-            continue;
-        };
-        let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
-        if tile_key.z < min_zoom {
-            continue;
-        }
-        let shift = tile_key.z.saturating_sub(max_zoom);
-        let fetch_z = tile_key.z - shift;
-        let fetch_x = (tile_key.x as u32 >> shift) as i64;
-        let fetch_y = (tile_key.y as u32 >> shift) as i64;
-        let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
-        if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
-            overlay_tiles.push(OverlayTileData {
-                raw,
-                shift,
-                quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
-                quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
-                filter,
-                has_chargers: file.contains("chargers"),
-            });
-        }
-    }
-
-    let Some(base) = base.or_else(|| (!overlay_tiles.is_empty()).then(Vec::new)) else {
-        return Ok(None);
-    };
     let detail_needed = render_zoom >= ICON_MIN_ZOOM
         || render_zoom >= 16
         || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
         || !bridge_dz_covered;
+    let detail = if detail.is_none() && detail_needed {
+        detail_mbtiles_path
+            .filter(|path| path.is_file())
+            .and_then(|path| MbtilesReader::open(path).ok())
+            .and_then(|mut reader| {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                reader
+                    .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                    .ok()
+                    .flatten()
+            })
+    } else {
+        detail
+    };
     let buffers = build_tile_buffers_from_mvt(
         tile_key,
         &base,
@@ -8150,6 +8180,96 @@ pub fn load_local_tile_batch(
     }
 
     Ok((loaded, decode_failed))
+}
+
+#[cfg(test)]
+mod local_archive_regression_tests {
+    use super::*;
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn test_mbtiles(name: &str, with_tile: bool) -> std::path::PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", "0");
+        writer.set_metadata("maxzoom", "0");
+        if with_tile {
+            writer.write_tile_encoded(0, 0, 0, &[]).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn legacy_mbtiles_still_uses_the_original_reader_batch_path() {
+        let path = test_mbtiles("legacy-map-source", true);
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        let (loaded, failed) = load_local_tile_batch(
+            &path,
+            None,
+            None,
+            &[],
+            &[key],
+            &CompiledMapTheme::default(),
+            0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(failed.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn archive_overlay_only_build_ignores_detail_like_legacy_branch() {
+        let base = test_mbtiles("archive-missing-base", false);
+        let overlay = test_mbtiles("archive-overlay", true);
+        let overlay_paths = vec![overlay.to_string_lossy().into_owned()];
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        let build = |detail| {
+            build_local_tile_from_archive_bytes(
+                key,
+                None,
+                detail,
+                None,
+                None,
+                &overlay_paths,
+                &CompiledMapTheme::default(),
+                0,
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap()
+            .buffers
+        };
+        let (mut legacy, failed) = load_local_tile_batch(
+            &base,
+            None,
+            None,
+            &overlay_paths,
+            &[key],
+            &CompiledMapTheme::default(),
+            0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(failed.is_empty());
+        let legacy = legacy.pop().unwrap().buffers;
+        let archive = build(None);
+        let with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff]));
+        assert_eq!(legacy.feature_count, archive.feature_count);
+        assert_eq!(legacy.byte_size(), archive.byte_size());
+        assert_eq!(archive.feature_count, with_unusable_detail.feature_count);
+        assert_eq!(archive.byte_size(), with_unusable_detail.byte_size());
+        std::fs::remove_file(base).unwrap();
+        std::fs::remove_file(overlay).unwrap();
+    }
 }
 
 // --- MVT (Mapbox Vector Tile) parsing ---

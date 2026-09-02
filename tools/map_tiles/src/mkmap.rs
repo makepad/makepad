@@ -1784,4 +1784,37 @@ mod tests {
         assert_eq!(a, c);
         assert_ne!(content_hash(b""), content_hash(b"\0"));
     }
+
+    #[test]
+    fn writer_deduplicates_equal_tile_blobs_to_one_blob_ref() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = PathBuf::from(format!("target/mkmap-dedup-{nonce}"));
+        fs::create_dir_all(&scratch).unwrap();
+        let source = scratch.join("source.mbtiles");
+        let mut writer = MbtilesWriter::create(&source).unwrap();
+        writer.write_tile_encoded(1, 0, 0, b"same tile").unwrap();
+        writer.write_tile_encoded(1, 0, 1, b"same tile").unwrap();
+        writer.finish().unwrap();
+
+        let output = scratch.join("output.mkmap");
+        transmux(TransmuxOptions {
+            source,
+            extra_sources: Vec::new(),
+            output: output.clone(),
+            shard_cap: SHARD_HARD_CAP,
+            sample_stride: 1,
+        })
+        .unwrap();
+        let mut reader = MkmapReader::open(&output).unwrap();
+        let first = reader.resolve_tile(1, 0, 0).unwrap().unwrap();
+        let second = reader.resolve_tile(1, 0, 1).unwrap().unwrap();
+        assert_eq!(
+            (first.shard, first.offset, first.len),
+            (second.shard, second.offset, second.len)
+        );
+        fs::remove_dir_all(scratch).unwrap();
+    }
 }
