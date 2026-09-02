@@ -861,6 +861,32 @@
    ]
   },
   {
+   "id": "qwen3.5-4b",
+   "domain": "text",
+   "backend": "llm",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.5-4B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 4.5,
+   "note": "The small text model, for work that asks one short question at a time and has to leave the card free for everything else: the DJ tab's optional advisor, and the spoken-input gate. Dense Qwen3.5 architecture (general.architecture=qwen35 in GGUF), so it matches the in-repo Makepad-Llama model contract. Q5_K_M is 3.14 GB decimal, which sits on an 11 GB card alongside a stem separator and a beat model; the 27B entry wants 19 GB and cannot. Apache-2.0.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.5-4B-GGUF",
+     "path": "Qwen3.5-4B-Q5_K_M.gguf",
+     "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+     "cache_as": "llm/Qwen3.5-4B-Q5_K_M.gguf",
+     "size": 3143656608,
+     "sha256": "8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39"
+    }
+   ]
+  },
+  {
    "id": "qwen3.8-27b",
    "domain": "text",
    "backend": "llm",

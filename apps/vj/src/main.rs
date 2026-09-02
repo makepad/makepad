@@ -20479,6 +20479,12 @@ p2 {}
         "salamander-drumkit",
     ];
 
+    /// The auto DJ's optional advisor. Deliberately NOT in the list above,
+    /// so the tab never asks anyone to install it: the DJ page is complete
+    /// without one, and nothing about the mix degrades when it is absent.
+    #[cfg(feature = "advisor")]
+    const ADVISOR_MODEL: &'static str = "qwen3.5-4b";
+
     fn hub_models_missing(&mut self) -> bool {
         let Some(models) = self.hub_models() else { return false };
         Self::DJ_HUB_MODELS.iter().any(|model_id| {
