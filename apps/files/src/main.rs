@@ -4952,7 +4952,7 @@ impl MatchEvent for App {
         self.projection = match model::pref_get("projection").as_deref() {
             Some("ortho") => MapProjection::Ortho,
             Some("persp") => MapProjection::Persp,
-            _ => MapProjection::Flat,
+            _ => MapProjection::default(),
         };
         self.filter_popup_open = model::pref_get("filter_side").as_deref() == Some("1");
         self.style_projection_buttons(cx);
