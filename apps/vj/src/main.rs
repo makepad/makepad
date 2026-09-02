@@ -4259,7 +4259,13 @@ impl LatchPaint {
 /// What a catalog-runtime request was for.
 #[derive(Clone, Debug)]
 enum CatPurpose {
-    Page { surface: Surface, gen: CatGen, slot: usize, first: bool },
+    Page {
+        surface: Surface,
+        gen: CatGen,
+        slot: usize,
+        first: bool,
+        namespace: Option<String>,
+    },
     Detail { surface: Surface, gen: CatGen, asset: AssetId },
     Manifest { surface: Surface, gen: CatGen, asset: AssetId, revision: AssetRevisionId },
     Thumb { revision: AssetRevisionId },
@@ -12586,12 +12592,20 @@ p2 {}
                     // pages behind them, and a page outranks a thumbnail
                     // blob: an empty tile with no title is worse than a tile
                     // waiting for its picture.
+                    let namespace = query.namespace.clone();
+                    let kind = query.kind;
                     if let Ok(id) = up.catalog.submit_with(
                         ClientRequest::CatalogSearch { query, cursor },
                         makepad_asset_client::SubmitOptions::newest_first(),
                     ) {
-                        self.cat_reqs
-                            .insert(id, CatPurpose::Page { surface, gen, slot, first });
+                        log!(
+                            "catalog request: id={id} namespace={} kind={kind:?}",
+                            namespace.as_deref().unwrap_or("*")
+                        );
+                        self.cat_reqs.insert(
+                            id,
+                            CatPurpose::Page { surface, gen, slot, first, namespace },
+                        );
                     }
                 }
                 CatCmd::FetchDetail { gen, asset } => {
@@ -14266,7 +14280,7 @@ p2 {}
                 ClientEvent::Done { output, .. } => {
                     self.note_session_ok();
                     let Some(purpose) = self.cat_reqs.remove(&id) else { continue };
-                    self.catalog_done(cx, purpose, output);
+                    self.catalog_done(cx, id, purpose, output);
                 }
                 ClientEvent::Failed { error, .. } => {
                     if is_session_loss(&error) {
@@ -14358,12 +14372,23 @@ p2 {}
         }
     }
 
-    fn catalog_done(&mut self, cx: &mut Cx, purpose: CatPurpose, output: ClientOutput) {
+    fn catalog_done(
+        &mut self,
+        cx: &mut Cx,
+        request_id: RequestId,
+        purpose: CatPurpose,
+        output: ClientOutput,
+    ) {
         match (purpose, output) {
             (
-                CatPurpose::Page { surface, gen, slot, first },
+                CatPurpose::Page { surface, gen, slot, first, namespace },
                 ClientOutput::CatalogPage(page),
             ) => {
+                log!(
+                    "catalog response: id={request_id} namespace={} hits={}",
+                    namespace.as_deref().unwrap_or("*"),
+                    page.hits.len()
+                );
                 let hits = page
                     .hits
                     .into_iter()
@@ -19326,6 +19351,10 @@ p2 {}
             }
             self.ui.label(cx, label).set_text(cx, &text);
         }
+        // The DJ explorer is a table over the music browse model, not the
+        // tile grid above. Refresh it on the same catalog-dirty edge so a
+        // page completion cannot wait on unrelated deck animation/state.
+        self.refresh_music_rows(cx);
         self.rebuild_gen_rows(cx);
     }
 
@@ -21723,9 +21752,14 @@ p2 {}
     fn refresh_music_rows(&mut self, cx: &mut Cx) {
         let rows = self.music_row_entries();
         if rows != self.music_rows {
-            self.music_rows = rows.clone();
             if let Some(mut list) = self.music_refs.tracks.borrow_mut::<VjTrackList>() {
-                list.set_entries(cx, rows);
+                list.set_entries(cx, rows.clone());
+                // Cache only a state the widget actually received. During
+                // first-page startup the catalog can beat the lazy music
+                // subtree into existence; caching before this borrow made
+                // every later refresh mistake an empty widget for an
+                // up-to-date one.
+                self.music_rows = rows;
             };
         }
         let queue: Vec<TrackRowEntry> = self
@@ -26810,7 +26844,9 @@ mod sync_tests {
         let mut pending = PendingSideChannels::new(4, true);
         for slot in 0..4 {
             assert!(!pending.complete(), "slot {slot} is still missing");
-            pending.stems[slot] = Some(PathBuf::from(format!("/tmp/{slot}.ogg")));
+            pending.stems[slot] = Some(FetchedSource::Path(PathBuf::from(format!(
+                "/tmp/{slot}.ogg"
+            ))));
         }
         assert!(!pending.complete(), "the lyrics were asked for and are not here");
         pending.want_lyrics = false;
@@ -26821,7 +26857,9 @@ mod sync_tests {
             .is_some());
         // A set that never wanted lyrics is complete without them.
         let mut bare = PendingSideChannels::new(4, false);
-        bare.stems = std::array::from_fn(|slot| Some(PathBuf::from(format!("/tmp/{slot}.ogg"))));
+        bare.stems = std::array::from_fn(|slot| {
+            Some(FetchedSource::Path(PathBuf::from(format!("/tmp/{slot}.ogg"))))
+        });
         assert!(bare.complete());
     }
 
