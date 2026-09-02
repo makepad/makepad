@@ -204,6 +204,7 @@ pub struct ClientRuntime {
     active: HashMap<StaticFetchId, Active>,
     cancelled: RefCell<HashSet<RequestId>>,
     events: VecDeque<ClientEvent>,
+    ready_events: usize,
     next_id: RequestId,
     config: RuntimeConfig,
 }
@@ -224,7 +225,7 @@ impl ClientRuntime {
     pub fn start_static_store(store: StaticStore, config: RuntimeConfig) -> ClientResult<Self> {
         config.validate()?;
         Ok(Self { store, queue: VecDeque::new(), active: HashMap::new(), cancelled: RefCell::new(HashSet::new()),
-            events: VecDeque::new(), next_id: 1, config })
+            events: VecDeque::new(), ready_events: 0, next_id: 1, config })
     }
     pub fn submit(&mut self, request: ClientRequest) -> ClientResult<RequestId> { self.submit_with(request, SubmitOptions::default()) }
     pub fn submit_with(&mut self, request: ClientRequest, options: SubmitOptions) -> ClientResult<RequestId> {
@@ -250,13 +251,21 @@ impl ClientRuntime {
     }
     pub fn location(&self) -> Option<crate::location::ClientLocation> { Some(self.store.location()) }
     pub fn server_id(&self) -> Option<[u8; 16]> { self.store.server_id() }
+    /// Consume one static-index readiness edge. The session connector keeps
+    /// this edge when it hands the runtime to its host, so the host can issue
+    /// its initial browse only after the verified index is actually usable.
+    pub fn take_ready_event(&mut self) -> bool {
+        if self.ready_events == 0 { return false; }
+        self.ready_events -= 1;
+        true
+    }
     pub fn poll_stages(&mut self) -> Vec<StageEvent> { Vec::new() }
     pub fn shutdown(self) {}
 
     pub fn poll(&mut self) -> Vec<ClientEvent> {
         for event in self.store.poll() {
             match event {
-                StaticStoreEvent::Ready => {}
+                StaticStoreEvent::Ready => self.ready_events = self.ready_events.saturating_add(1),
                 StaticStoreEvent::Failed(error) => for (id, _) in self.queue.drain(..) {
                     self.events.push_back(ClientEvent::Failed { id, error: error.clone() });
                 },
