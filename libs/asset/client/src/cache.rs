@@ -660,13 +660,18 @@ impl ContentCache {
     }
 
     fn sweep_partials_for_budget(&self, keep: &[u8; 32]) -> ClientResult<()> {
-        let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let mut entries: Vec<(PathBuf, u64, u128)> = Vec::new();
         let mut total = 0u64;
         for entry in fs::read_dir(&self.partial).map_err(io_err("cache read partial"))? {
             let entry = entry.map_err(io_err("cache read partial entry"))?;
             let meta = entry.metadata().map_err(io_err("cache stat partial"))?;
             total = total.saturating_add(meta.len());
-            let modified = meta.modified().map_err(io_err("cache stat partial"))?;
+            let modified = meta
+                .modified()
+                .map_err(io_err("cache stat partial"))?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
             entries.push((entry.path(), meta.len(), modified));
         }
         if total <= self.budgets.max_partial_bytes {

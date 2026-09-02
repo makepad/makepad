@@ -4,6 +4,9 @@
 //! states. The fixture serves REAL canonical manifests; every digest the
 //! client checks is a genuine SHA-256 of genuine bytes.
 
+// Native socket integration test: std deadlines cannot enter the wasm library.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod common;
 
 use common::{

@@ -1,0 +1,9 @@
+disallowed-types = [
+    { path = "std::time::Instant", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::time::SystemTime", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
+]
+
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::time::SystemTime::now", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
+]

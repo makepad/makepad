@@ -1,6 +1,9 @@
 //! Cache semantics: atomic verified commits, resumable partials, pinning,
 //! deterministic eviction under injected time, and fail-closed refusals.
 
+// Native filesystem test uses wall time only to verify metadata aging.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod common;
 
 use common::{payload, test_root};

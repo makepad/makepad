@@ -22,7 +22,6 @@
 use std::{
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
 };
 #[cfg(feature = "chat")]
 use std::{
@@ -49,7 +48,7 @@ const READ_LIMIT: usize = 16 * 1024;
 const SUMMARY_TOP: usize = 12;
 /// How long one `treemap_summary` may spend walking before it answers with
 /// what it has and says the numbers are a floor.
-const MEASURE_BUDGET: Duration = Duration::from_secs(4);
+const MEASURE_BUDGET_SECS: f64 = 4.0;
 /// How deep that walk goes, and how many entries it will look at.
 const MEASURE_DEPTH: usize = 10;
 const MEASURE_ENTRIES: usize = 400_000;
@@ -336,7 +335,13 @@ fn arg<'a>(args: &'a [(String, String)], key: &str) -> &'a str {
 #[cfg(test)]
 pub fn measure_for_test(path: &Path, cancel: &AtomicBool) -> (u64, u32, bool) {
     let mut budget = MEASURE_ENTRIES;
-    measure(path, Instant::now() + MEASURE_BUDGET, &mut budget, 0, cancel)
+    measure(
+        path,
+        makepad_widgets::Cx::monotonic_now() + MEASURE_BUDGET_SECS,
+        &mut budget,
+        0,
+        cancel,
+    )
 }
 
 fn number(text: &str) -> Option<usize> {
@@ -467,7 +472,7 @@ fn summary(
         return stat(path);
     }
     let entries = vfs().read_dir(path, false)?;
-    let deadline = Instant::now() + MEASURE_BUDGET;
+    let deadline = makepad_widgets::Cx::monotonic_now() + MEASURE_BUDGET_SECS;
     let mut budget = MEASURE_ENTRIES;
     let mut measured: Vec<(String, u64, u32, bool)> = Vec::new();
     let mut complete = true;
@@ -525,14 +530,14 @@ fn summary(
 /// it off as the answer.
 fn measure(
     path: &Path,
-    deadline: Instant,
+    deadline: f64,
     budget: &mut usize,
     depth: usize,
     cancel: &AtomicBool,
 ) -> (u64, u32, bool) {
     if depth >= MEASURE_DEPTH
         || *budget == 0
-        || Instant::now() >= deadline
+        || makepad_widgets::Cx::monotonic_now() >= deadline
         || cancel.load(Ordering::Relaxed)
     {
         return (0, 0, false);
@@ -562,7 +567,10 @@ fn measure(
             bytes += entry.size;
             files += 1;
         }
-        if *budget == 0 || Instant::now() >= deadline || cancel.load(Ordering::Relaxed) {
+        if *budget == 0
+            || makepad_widgets::Cx::monotonic_now() >= deadline
+            || cancel.load(Ordering::Relaxed)
+        {
             return (bytes, files, false);
         }
     }
@@ -698,9 +706,12 @@ mod tests {
             cwd: home.clone(),
             home,
         };
-        let started = Instant::now();
+        let started = makepad_widgets::Cx::monotonic_now();
         let outcome = run_with(&job, &cancel, &|_| {});
-        assert!(started.elapsed() < Duration::from_secs(2), "the flag must be honoured at once");
+        assert!(
+            makepad_widgets::Cx::monotonic_now() - started < 2.0,
+            "the flag must be honoured at once"
+        );
         assert!(!outcome.is_error, "{}", outcome.text);
         assert!(outcome.text.contains("cut short"), "{}", outcome.text);
     }

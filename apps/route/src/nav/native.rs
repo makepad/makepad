@@ -66,7 +66,7 @@ pub fn nav_basename() -> Option<String> {
 
 pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
     std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
+        let t0 = Cx::monotonic_now();
         let nh_search = match std::fs::read(format!("{basename}.search"))
             .map_err(|e| e.to_string())
             .and_then(|d| SearchIndex::deserialize(&d).map_err(|e| format!("{e:?}")))
@@ -103,7 +103,7 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
 
         let stats = format!(
             "nav ready in {:.1}s: {} docs, {} edges{}{}{}",
-            t0.elapsed().as_secs_f64(),
+            Cx::monotonic_now() - t0,
             nh_search.doc_count(),
             nh_graph.edges.len(),
             if searchdb.is_some() { ", europe searchdb" } else { "" },
@@ -149,14 +149,14 @@ impl NavData {
         }
         if self.major_graph.is_none() && !self.major_graph_attempted {
             self.major_graph_attempted = true;
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             self.major_graph = std::fs::read(EUROPE_MAJOR_GRAPH_PATH)
                 .ok()
                 .and_then(|d| RouteGraph::deserialize(&d).ok());
             if self.major_graph.is_some() {
                 makepad_widgets::log!(
                     "nav: europe-major graph loaded on demand in {:.1}s",
-                    t0.elapsed().as_secs_f64()
+                    Cx::monotonic_now() - t0
                 );
             }
         }

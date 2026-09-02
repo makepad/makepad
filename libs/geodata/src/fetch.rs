@@ -17,7 +17,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 pub const USER_AGENT: &str =
     "makepad-geodata/0.1 (bulk open-data fetcher; contact: rik@n4.io)";
@@ -87,10 +87,7 @@ fn write_meta(cache_dir: &Path, spec: &SourceSpec, bytes: u64) -> std::io::Resul
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    makepad_platform::Cx::time_now().max(0.0) as u64
 }
 
 /// Fetch one source into the cache directory, politely. Returns the cached

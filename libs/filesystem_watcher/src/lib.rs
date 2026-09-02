@@ -1,3 +1,6 @@
+// Filesystem watching is an OS-only service and is never linked into wasm builds.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -55,11 +55,11 @@ impl VoiceGate {
                 // QwenFilter is !Send — construct on this thread. Eager
                 // warm-up: the model otherwise loads on the FIRST spoken
                 // utterance, which is the worst moment for a 3s stall.
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let mut filter = QwenFilter::new(FILTER_MODEL, APP_CONTEXT);
                 let _ = filter.judge("warmup", &[]);
                 let _ = result_tx.send(GateResult::Ready {
-                    secs: t0.elapsed().as_secs_f64(),
+                    secs: Cx::monotonic_now() - t0,
                 });
                 worker_signal.set();
                 while let Ok(job) = job_rx.recv() {

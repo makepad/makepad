@@ -36,7 +36,7 @@ use crate::flow::FlowMap;
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use makepad_widgets::*;
 use std::path::Path;
-use std::time::Instant;
+use crate::clock::Instant;
 
 /// Decoded-endpoint cache ceiling (BGRA bytes). A VJ deck lives or dies by
 /// this ceiling: a clip UNDER it gets the whole warp instrument (any-rate

@@ -1,3 +1,6 @@
+// Native-only research CLI: standard clocks are used only for offline profiling.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 //! Karaoke word-alignment research harness.
 //!
 //! The tight loop the timing work iterates in — no UI, no app, no decks:

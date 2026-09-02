@@ -13,6 +13,8 @@
 //! 122) so every effect pulses like it would on the VJ's beat bus.
 
 #![allow(dead_code)] // borrows the app's effects modules wholesale and uses a subset
+// Native preview rig uses std profiling clocks outside the web application.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use makepad_widgets::*;
 
 #[path = "../src/effects/mod.rs"]

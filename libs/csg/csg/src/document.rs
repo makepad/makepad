@@ -751,12 +751,11 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     let handle = vm.bx.heap.new_handle(api_type, Box::new(CsgApiGc));
     vm.set_injected_global(id!(csg), handle.into());
     vm.bx.captured_errors = Some(Vec::new());
-    vm.bx.run_budget = Some(ScriptRunBudget {
-        soft_deadline: deadline,
-        hard_deadline: deadline,
-        sample_interval_instructions: 1_024,
-        instructions_until_sample: 1_024,
-    });
+    vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+        budgets.max_eval_time,
+        budgets.max_eval_time,
+        1_024,
+    ));
     let script = ScriptMod { file: "model.csg.splash".into(), line: 0, column: 1, code: format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{source}\n;"), ..Default::default() };
     let _ = vm.with_heap_allocation_limit(budgets.max_heap_bytes, |vm| vm.with_instruction_limit(budgets.max_instructions, |vm| vm.eval(script)));
     let interpreter_instructions = budgets

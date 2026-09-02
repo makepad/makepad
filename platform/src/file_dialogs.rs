@@ -439,6 +439,8 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    // Native dialog test uses wall time only to make its temporary path unique.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn native_file_loading_runs_on_a_worker_and_preserves_bytes() {
         use std::{
             sync::mpsc::channel,

@@ -167,6 +167,8 @@ pub fn flat_args(args: &str) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
+// Native worker tests use std deadlines while exercising blocking threads.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use makepad_ai_services::wire::ToolOutcome as Outcome;

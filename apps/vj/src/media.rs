@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 const RING_FRAMES: usize = 3;
 
@@ -2414,7 +2415,7 @@ fn build_level(
     };
     // The nav grid is the expensive part (a capsule probe per cell, a wall
     // probe per edge) and the reason this whole function is off-thread.
-    let started = std::time::Instant::now();
+    let started = crate::clock::Instant::now();
     let nav = NavGrid::build(&level, &cfg);
     let (nx, nz) = nav.dims();
     use makepad_widgets::log;
@@ -4092,7 +4093,7 @@ mod tests {
         let warm = decode_thumb(&path, Some((cells, 30.0)), false).expect("decodes");
         assert_eq!(warm.frames.len(), n, "the full declared sheet");
         let runs = 5;
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         for _ in 0..runs {
             let p = decode_thumb(&path, Some((cells, 30.0)), false).unwrap();
             assert_eq!(p.frames.len(), n);
@@ -4102,13 +4103,13 @@ mod tests {
         // The split, so the LRU budget can be sized against the part that
         // scales: session open (codec setup, fixed) vs frame pull (hw
         // decode) vs conversion+placement (CPU, ours).
-        let t_open = std::time::Instant::now();
+        let t_open = crate::clock::Instant::now();
         for _ in 0..runs {
             let d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
             drop(d);
         }
         let open_ms = t_open.elapsed().as_secs_f64() * 1000.0 / runs as f64;
-        let t_pull = std::time::Instant::now();
+        let t_pull = crate::clock::Instant::now();
         for _ in 0..runs {
             let mut d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
             let mut got = 0;
@@ -4207,9 +4208,9 @@ mod tests {
             path: bad,
             media: MediaType::Wav,
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = crate::clock::Instant::now() + Duration::from_secs(10);
         let mut results = Vec::new();
-        while results.len() < 2 && std::time::Instant::now() < deadline {
+        while results.len() < 2 && crate::clock::Instant::now() < deadline {
             results.extend(pool.poll());
             std::thread::sleep(Duration::from_millis(10));
         }

@@ -503,8 +503,7 @@ impl ScriptHeap {
     }
 
     pub fn sweep(&mut self, log_stats: bool) {
-        #[cfg(not(target_arch = "wasm32"))]
-        let start = std::time::Instant::now();
+        let start = crate::clock::monotonic_now();
 
         // GC stats: (static, alive, removed)
         let (mut obj_static, mut obj_alive, mut obj_removed) = (0usize, 0usize, 0usize);
@@ -666,10 +665,7 @@ impl ScriptHeap {
         }
 
         // Print compact GC stats: S=static A=alive R=removed
-        #[cfg(not(target_arch = "wasm32"))]
-        let elapsed_us = start.elapsed().as_micros();
-        #[cfg(target_arch = "wasm32")]
-        let elapsed_us = 0u128;
+        let elapsed_us = ((crate::clock::monotonic_now() - start) * 1_000_000.0) as u128;
         if log_stats {
             log!("GC {}us: obj[S:{} A:{} R:{}] arr[S:{} A:{} R:{}] str[S:{} A:{} R:{}] hdl[S:{} A:{} R:{}] pod[S:{} A:{} R:{}] rex[S:{} A:{} R:{}]",
                 elapsed_us,

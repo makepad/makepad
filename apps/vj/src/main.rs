@@ -34,6 +34,7 @@ mod blend;
 mod billboard;
 mod catalog;
 mod chat;
+mod clock;
 mod console_scale;
 mod cue;
 mod deck_sections;
@@ -199,7 +200,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 app_main!(App);
 
@@ -4434,10 +4436,7 @@ fn nav_anchor(a: &Anchor) -> makepad_render::player_nav::NavAnchor {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    (Cx::time_now().max(0.0) * 1000.0) as u64
 }
 
 fn select_visual_file(manifest: &AssetManifest) -> Option<TileMedia> {
@@ -6849,10 +6848,10 @@ pub struct App {
     hub_model_panel_ready: bool,
     /// Thumb-load profile: (boot instant, last print, decoded at last print).
     #[rust]
-    thumb_prof: Option<(std::time::Instant, std::time::Instant, u64)>,
+    thumb_prof: Option<(crate::clock::Instant, crate::clock::Instant, u64)>,
     /// Frame-loop hang detector: the previous pump's instant.
     #[rust]
-    frame_watch: Option<std::time::Instant>,
+    frame_watch: Option<crate::clock::Instant>,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -7015,8 +7014,8 @@ pub struct App {
 #[derive(Default)]
 struct ThumbStats {
     on: bool,
-    t0: Option<std::time::Instant>,
-    last_report: Option<std::time::Instant>,
+    t0: Option<crate::clock::Instant>,
+    last_report: Option<crate::clock::Instant>,
     /// Store blob fetches submitted / landed.
     fetch_submitted: u64,
     fetch_landed: u64,
@@ -7038,11 +7037,11 @@ struct ThumbStats {
     rebuild_ms: f64,
     last_decoded: u64,
     /// submit -> blob-landed, per store fetch.
-    fetch_at: HashMap<AssetRevisionId, std::time::Instant>,
+    fetch_at: HashMap<AssetRevisionId, crate::clock::Instant>,
     fetch_wait_ms: f64,
     fetch_wait_max: f64,
     /// decode-submit -> DecodeDone, per thumb.
-    dec_at: HashMap<AssetRevisionId, std::time::Instant>,
+    dec_at: HashMap<AssetRevisionId, crate::clock::Instant>,
     dec_wait_ms: f64,
     dec_wait_max: f64,
     dec_n: u64,
@@ -7060,21 +7059,21 @@ struct ThumbStats {
 impl ThumbStats {
     fn start(&mut self) {
         self.on = std::env::var_os("VJ_THUMB_STATS").is_some();
-        self.t0 = Some(std::time::Instant::now());
+        self.t0 = Some(crate::clock::Instant::now());
         self.last_report = self.t0;
     }
 
     /// Note when a stage started for `revision`; nothing is recorded, and no
     /// map grows, unless the stats are on.
-    fn stage_begin(map: &mut HashMap<AssetRevisionId, std::time::Instant>, on: bool, revision: AssetRevisionId) {
+    fn stage_begin(map: &mut HashMap<AssetRevisionId, crate::clock::Instant>, on: bool, revision: AssetRevisionId) {
         if on {
-            map.insert(revision, std::time::Instant::now());
+            map.insert(revision, crate::clock::Instant::now());
         }
     }
 
     /// Close a stage for `revision`, folding its wall time into `(sum, max)`.
     fn stage_end(
-        map: &mut HashMap<AssetRevisionId, std::time::Instant>,
+        map: &mut HashMap<AssetRevisionId, crate::clock::Instant>,
         revision: &AssetRevisionId,
         sum: &mut f64,
         max: &mut f64,
@@ -7099,7 +7098,7 @@ impl ThumbStats {
         if !due {
             return;
         }
-        self.last_report = Some(std::time::Instant::now());
+        self.last_report = Some(crate::clock::Instant::now());
         let rate = self.decoded.saturating_sub(self.last_decoded);
         self.last_decoded = self.decoded;
         let fetch_avg = if self.fetch_landed > 0 {
@@ -13648,7 +13647,7 @@ p2 {}
         // pipeline compile, a synchronous readback. Log the gap and let the
         // thumbprof timeline say what was in flight when it happened.
         {
-            let t = std::time::Instant::now();
+            let t = crate::clock::Instant::now();
             if let Some(last) = self.frame_watch {
                 let gap = t.duration_since(last).as_secs_f64() * 1e3;
                 if gap > 200.0 {
@@ -13749,7 +13748,7 @@ p2 {}
             return;
         }
         self.grids_dirty = false;
-        let t = std::time::Instant::now();
+        let t = crate::clock::Instant::now();
         self.rebuild_grids(cx);
         self.thumb_stats.rebuild_ms += t.elapsed().as_secs_f64() * 1000.0;
         self.thumb_stats.rebuilds += 1;
@@ -15599,11 +15598,11 @@ p2 {}
     /// queue behind a screenful of thumbnails. Thumbnails then fill what is
     /// left of the frame budget and the rest waits for the next frame — the
     /// grid fills a beat later instead of the whole app stuttering.
-    fn next_decode_result(&mut self, deadline: std::time::Instant) -> Option<DecodeDone> {
+    fn next_decode_result(&mut self, deadline: crate::clock::Instant) -> Option<DecodeDone> {
         if let Some(done) = self.decode_ready.pop_front() {
             return Some(done);
         }
-        if std::time::Instant::now() < deadline {
+        if crate::clock::Instant::now() < deadline {
             return self.decode_backlog.pop_front();
         }
         None
@@ -15636,7 +15635,7 @@ p2 {}
                 done => self.decode_ready.push_back(done),
             }
         }
-        let deadline = std::time::Instant::now()
+        let deadline = crate::clock::Instant::now()
             + std::time::Duration::from_micros((media::UI_STEP_BUDGET_MS * 1000.0) as u64);
         while let Some(done) = self.next_decode_result(deadline) {
             match done {
@@ -15939,7 +15938,7 @@ p2 {}
                     }
                 }
                 DecodeDone::Thumb { revision, result } => {
-                    let t_up = std::time::Instant::now();
+                    let t_up = crate::clock::Instant::now();
                     self.thumb_stats.decoded += 1;
                     let (mut sum, mut max) =
                         (self.thumb_stats.dec_wait_ms, self.thumb_stats.dec_wait_max);
@@ -16238,7 +16237,7 @@ p2 {}
         // stream, sub = cache decodes dispatched, done = decoder output,
         // backlog = decoded-but-not-yet-uploaded, out = jobs in flight).
         {
-            let t = std::time::Instant::now();
+            let t = crate::clock::Instant::now();
             let t0 = *self.thumb_prof.get_or_insert((t, t, 0));
             let busy = self.thumb_decodes_out > 0
                 || !self.decode_backlog.is_empty()
@@ -16463,7 +16462,7 @@ p2 {}
                 if !cache.exists() {
                     continue;
                 }
-                let t_read = std::time::Instant::now();
+                let t_read = crate::clock::Instant::now();
                 let layout = std::fs::read(&cache)
                     .ok()
                     .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
@@ -16532,7 +16531,7 @@ p2 {}
             if cache.exists() {
                 // A relaunch must not re-render: decode the digest-keyed
                 // sheet straight off disk, bounded per tick.
-                let t_read = std::time::Instant::now();
+                let t_read = crate::clock::Instant::now();
                 let layout = std::fs::read(&cache)
                     .ok()
                     .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
@@ -22232,13 +22231,19 @@ p2 {}
                         if ahead_cut {
                             continue;
                         }
+                        // RIFE's worker API is native-only until its deadline is migrated.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
                         if let (Some(service), Some(start)) =
                             (self.rife_service[i].as_ref(), self.app_start_instant)
                         {
                             let (pw, ph) = rife_proxy_dims(width, height);
-                            let deadline = start + std::time::Duration::from_secs_f64(
-                                (now + depth as f64 / step.pace).max(0.0),
-                            );
+                            let target = start
+                                + std::time::Duration::from_secs_f64(
+                                    (now + depth as f64 / step.pace).max(0.0),
+                                );
+                            let remaining = target.saturating_duration_since(Instant::now());
+                            let deadline = std::time::Instant::now() + remaining;
                             let _ = service.offer_next(flow_tween::RifeJob {
                                 generation,
                                 a: ahead.a,
@@ -23993,10 +23998,7 @@ impl MatchEvent for App {
         self.thumb_stats.start();
         // The shuffle draw is deterministic from its seed; the host is the
         // only party with a clock, so it seeds once here.
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1);
+        let seed = Cx::time_now().to_bits().max(1);
         self.decks.seed_shuffle(seed);
         // A sync landing is computed from playheads that keep moving while
         // the seek crosses to the audio thread — place it where the lock

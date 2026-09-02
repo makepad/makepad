@@ -21,7 +21,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Public anonymous key from developer.dataplatform.knmi.nl (shared quota).
 pub const KNMI_ANONYMOUS_KEY: &str = "eyJvcmciOiI1ZTU1NGUxOTI3NGE5NjAwMDEyYTNlYjEiLCJpZCI6IjUzYTg1ZDBhMmQ5YzRkYzJiYWNlNzQ4NTQ2Zjk4ODExIiwiaCI6Im11cm11cjEyOCJ9";
@@ -355,10 +354,7 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    makepad_platform::Cx::time_now().max(0.0) as u64
 }
 
 /// Parse "2026-07-28T12:00:00+00:00" (KNMI `created`) to unix seconds.

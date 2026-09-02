@@ -552,10 +552,10 @@ struct Found {
     keep: bool,
 }
 
-/// A SystemTime as whole minutes since the epoch, saturating; 0 for a time
-/// the filesystem would not say.
-fn minutes_since_epoch(time: std::io::Result<std::time::SystemTime>) -> u32 {
-    time.ok()
+/// A file mtime as whole minutes since the epoch, saturating; 0 when the
+/// filesystem would not say.
+fn modified_minutes(metadata: &fs::Metadata) -> u32 {
+    metadata.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| (d.as_secs() / 60).min(u32::MAX as u64) as u32)
         .unwrap_or(0)
@@ -576,7 +576,7 @@ fn stat_all(slice: &mut [Found], device: Option<u64>) {
             item.size = meta.len();
             // Free with the stat already in hand — this is what lets the map
             // answer "show me only what's new".
-            item.modified = minutes_since_epoch(meta.modified());
+            item.modified = modified_minutes(&meta);
         }
     }
 }
@@ -2745,7 +2745,7 @@ mod tests {
         // Written moments ago: the minutes-since-epoch must be recent and
         // must have reached the root through the roll-up.
         assert!(tree.modified > 0);
-        let now = super::minutes_since_epoch(Ok(std::time::SystemTime::now()));
+        let now = (Cx::time_now().max(0.0) as u64 / 60).min(u32::MAX as u64) as u32;
         assert!(now - tree.modified < 5, "root mtime {} vs now {}", tree.modified, now);
         fs::remove_dir_all(&root).ok();
     }

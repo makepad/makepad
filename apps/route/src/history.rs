@@ -8,7 +8,7 @@
 //! those extensions without migration.
 
 use crate::trip::haversine_m;
-use makepad_widgets::LocationUpdateEvent;
+use makepad_widgets::{Cx, LocationUpdateEvent};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -26,10 +26,7 @@ pub struct DriveLog {
 }
 
 fn now_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    Cx::time_now().max(0.0)
 }
 
 impl DriveLog {

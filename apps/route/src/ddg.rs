@@ -37,7 +37,7 @@ pub struct DdgSearch {
 #[derive(Default)]
 pub struct DdgState {
     pub active: Option<DdgSearch>,
-    last_search: Option<std::time::Instant>,
+    last_search: Option<f64>,
 }
 
 pub enum DdgEvent {
@@ -84,7 +84,7 @@ impl DdgState {
             return Err("an image search is already running".into());
         }
         if let Some(last) = self.last_search {
-            let since = last.elapsed().as_secs_f64();
+            let since = Cx::monotonic_now() - last;
             if since < MIN_SEARCH_GAP_S {
                 return Err(format!(
                     "image search rate limit — retry in {:.0}s",
@@ -92,7 +92,7 @@ impl DdgState {
                 ));
             }
         }
-        self.last_search = Some(std::time::Instant::now());
+        self.last_search = Some(Cx::monotonic_now());
         let encoded = url_encode(query.trim());
         let request = get(
             cx,

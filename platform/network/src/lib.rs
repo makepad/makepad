@@ -1,12 +1,20 @@
 pub mod backend;
+// The blocking client is a native socket API; wasm uses the async web backend.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod blocking_http;
 pub mod digest;
+// The embedded TCP server is native-only; browsers cannot listen on sockets.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod http_server;
+// The blocking TCP websocket is native-only; wasm uses backend::web.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod plain_web_socket;
 pub mod runtime;
 pub mod socket_stream;
 pub mod types;
 pub mod ui_signal;
+// TCP parsing helpers expose native socket deadlines alongside pure parsers.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod utils;
 pub mod web_socket_parser;
 

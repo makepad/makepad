@@ -29,10 +29,7 @@ static STDIN_LAST_HOST_MSG_UNIX: AtomicU64 = AtomicU64::new(0);
 const STDIN_HOST_SILENCE_LIMIT_S: u64 = 300;
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::Cx::time_now().max(0.0) as u64
 }
 
 /// Called by the stdin event loop on every received host message.
@@ -136,8 +133,8 @@ pub fn start_stdin_orphan_watchdog() {
 }
 
 fn watchdog_main(limits: MemoryLimits) {
-    let mut last_warn = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-    let mut prev_sample: Option<(std::time::Instant, u64)> = None;
+    let mut last_warn = crate::Cx::monotonic_now() - 3600.0;
+    let mut prev_sample: Option<(f64, u64)> = None;
     let mut peak: u64 = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -165,11 +162,11 @@ fn watchdog_main(limits: MemoryLimits) {
         peak = peak.max(footprint);
         let rate_gb_min = prev_sample
             .map(|(t, b)| {
-                let dt = t.elapsed().as_secs_f64().max(0.001);
+                let dt = (crate::Cx::monotonic_now() - t).max(0.001);
                 (footprint as f64 - b as f64) / 1e9 / (dt / 60.0)
             })
             .unwrap_or(0.0);
-        prev_sample = Some((std::time::Instant::now(), footprint));
+        prev_sample = Some((crate::Cx::monotonic_now(), footprint));
 
         if footprint >= limits.hard_bytes {
             crate::error!(
@@ -180,8 +177,8 @@ fn watchdog_main(limits: MemoryLimits) {
             std::thread::sleep(std::time::Duration::from_millis(300));
             std::process::abort();
         }
-        if footprint >= limits.soft_bytes && last_warn.elapsed().as_secs() >= 30 {
-            last_warn = std::time::Instant::now();
+        if footprint >= limits.soft_bytes && crate::Cx::monotonic_now() - last_warn >= 30.0 {
+            last_warn = crate::Cx::monotonic_now();
             crate::log!(
                 "memory watchdog: footprint {:.1} GB over soft limit {:.1} GB (hard {:.1} GB, growing {:+.2} GB/min)",
                 gb(footprint), gb(limits.soft_bytes), gb(limits.hard_bytes), rate_gb_min

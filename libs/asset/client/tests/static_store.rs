@@ -1,3 +1,6 @@
+// Native static-store integration test uses blocking socket deadlines.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
     BaseUrl, BlobContent, ClientConfig, ClientError, ClientEvent, ClientOutput, ClientRequest,

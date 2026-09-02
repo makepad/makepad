@@ -176,29 +176,18 @@ pub(crate) fn log_with_level_makepad_platform(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn profile_start() -> Instant {
-    Instant::now()
-}
-
-#[cfg(target_arch = "wasm32")]
 pub struct ProfileStart {
     started_at: f64,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl ProfileStart {
     pub fn elapsed(&self) -> Duration {
         Duration::from_secs_f64((Cx::monotonic_now() - self.started_at).max(0.0))
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 pub fn profile_start() -> ProfileStart {
     ProfileStart {
         started_at: Cx::monotonic_now(),

@@ -959,7 +959,7 @@ mod tests {
             stems_root: None,
             digest: None,
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = crate::clock::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let done = pool.poll();
             if let Some(done) = done.into_iter().next() {
@@ -968,7 +968,7 @@ mod tests {
                 assert!(!done.loops.is_empty());
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "worker never answered");
+            assert!(crate::clock::Instant::now() < deadline, "worker never answered");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }

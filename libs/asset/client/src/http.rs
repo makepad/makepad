@@ -33,7 +33,7 @@ use crate::wire::{target_byte_ok, MAX_TARGET_BYTES};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Idle keep-alive sockets, keyed by peer. One pool belongs to ONE worker:
 /// [`crate::api::Api`] gives every clone its own, so two lanes never
@@ -249,7 +249,7 @@ pub struct Response<'a> {
     buffered: Vec<u8>,
     pos: usize,
     remaining: u64,
-    deadline: Instant,
+    deadline: f64,
     read_timeout: Duration,
     /// Where a fully consumed, cleanly framed socket goes back to.
     pool: Option<&'a ConnPool>,
@@ -309,12 +309,16 @@ impl Response<'_> {
             return Ok(n);
         }
         loop {
-            let now = Instant::now();
+            let now = makepad_platform::Cx::monotonic_now();
             if now >= self.deadline {
                 self.reusable = false;
                 return Err(ClientError::Timeout { op: "http body" });
             }
-            let timeout = (self.deadline - now).min(self.read_timeout).max(Duration::from_millis(1));
+            let timeout = Duration::from_secs_f64(
+                (self.deadline - now)
+                    .min(self.read_timeout.as_secs_f64())
+                    .max(0.001),
+            );
             let remaining = self.remaining;
             let want = (out.len() as u64).min(remaining) as usize;
             let stream = self.stream_mut()?;
@@ -555,7 +559,8 @@ fn call_once<'a>(
 
     // ---- response head ----
     let head_ms = req.head_deadline_ms.unwrap_or(limits.head_deadline_ms).max(1);
-    let head_deadline = Instant::now() + Duration::from_millis(head_ms);
+    let head_deadline =
+        makepad_platform::Cx::monotonic_now() + Duration::from_millis(head_ms).as_secs_f64();
     let read_timeout = Duration::from_millis(limits.read_timeout_ms.max(1));
     let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
     let head_end = loop {
@@ -565,7 +570,7 @@ fn call_once<'a>(
         if buf.len() > MAX_HEAD_BYTES {
             return Err(ClientError::Protocol { what: "response head too large" }.into());
         }
-        let now = Instant::now();
+        let now = makepad_platform::Cx::monotonic_now();
         if now >= head_deadline {
             if buf.is_empty() {
                 if let Some(e) = write_err {
@@ -574,7 +579,11 @@ fn call_once<'a>(
             }
             return Err(ClientError::Timeout { op: "http response head" }.into());
         }
-        let timeout = (head_deadline - now).min(read_timeout).max(Duration::from_millis(1));
+        let timeout = Duration::from_secs_f64(
+            (head_deadline - now)
+                .min(read_timeout.as_secs_f64())
+                .max(0.001),
+        );
         if let Err(e) = stream.set_read_timeout(Some(timeout)) {
             // Same rule as an EOF here: on a pooled socket that has said
             // nothing yet, the socket is the problem, not the request.
@@ -650,7 +659,8 @@ fn call_once<'a>(
         buffered,
         pos: 0,
         remaining,
-        deadline: Instant::now() + Duration::from_millis(body_ms),
+        deadline: makepad_platform::Cx::monotonic_now()
+            + Duration::from_millis(body_ms).as_secs_f64(),
         read_timeout,
         pool,
         addr,

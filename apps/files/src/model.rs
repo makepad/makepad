@@ -6,7 +6,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 /// What a file *is*, as far as the browser is concerned: it picks the icon,
@@ -551,8 +550,8 @@ pub(crate) fn real_entry_at(path: &Path) -> Option<FileEntry> {
         kind: kind_for(path, is_dir),
         is_dir,
         size: if is_dir { 0 } else { metadata.len() },
-        modified_secs: epoch_secs(metadata.modified().ok()),
-        created_secs: epoch_secs(metadata.created().ok()),
+        modified_secs: modified_secs(&metadata),
+        created_secs: created_secs(&metadata),
         permissions: permissions_text(&metadata),
         child_count: is_dir.then(|| count_children(path)).flatten(),
         path: path.to_path_buf(),
@@ -581,8 +580,8 @@ pub fn read_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, 
             name,
             is_dir,
             size: if is_dir { 0 } else { metadata.len() },
-            modified_secs: epoch_secs(metadata.modified().ok()),
-            created_secs: epoch_secs(metadata.created().ok()),
+            modified_secs: modified_secs(&metadata),
+            created_secs: created_secs(&metadata),
             permissions: permissions_text(&metadata),
             // One extra `read_dir` per folder, on this worker thread — never
             // on the UI thread, and never past the cap.
@@ -595,8 +594,16 @@ pub fn read_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, 
     Ok(order.into_iter().map(|i| entries[i].clone()).collect())
 }
 
-fn epoch_secs(time: Option<SystemTime>) -> u64 {
-    time.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+fn modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata.modified().ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn created_secs(metadata: &fs::Metadata) -> u64 {
+    metadata.created().ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -662,17 +669,7 @@ pub fn format_size(bytes: u64, is_dir: bool) -> String {
 }
 
 pub fn real_now_secs() -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        return SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(std::time::Duration::ZERO)
-            .as_secs();
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        makepad_widgets::Cx::time_now().max(0.0) as u64
-    }
+    makepad_widgets::Cx::time_now().max(0.0) as u64
 }
 
 /// The machine's UTC offset in seconds, read once. The platform has no
