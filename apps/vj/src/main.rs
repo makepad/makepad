@@ -6195,14 +6195,15 @@ pub struct App {
     /// catalog paging in the way).
     #[rust]
     fx_bundle_rx: Option<std::sync::mpsc::Receiver<Vec<crate::effects::seed::BundleHead>>>,
-    /// alias -> (head revision, transition), retained from that feed. This
+    /// alias -> (head asset, revision, transition, compiled source), retained
+    /// from that feed. This
     /// is what unhooks the WARM path from catalog resolution: a cached
     /// sheet decodes against the head revision and the boot grid's prefab
     /// tile paints it BY ALIAS, seconds before the tile's catalog row has
     /// resolved (the store's control plane is busy at boot — the observer
     /// reconcile — and a visible grid must not wait behind it).
     #[rust]
-    fx_heads: HashMap<String, (AssetId, AssetRevisionId, bool)>,
+    fx_heads: HashMap<String, (AssetId, AssetRevisionId, bool, &'static str)>,
     /// Revisions whose thumbnail bake FAILED — terminal per revision,
     /// mirrored from the render bank so the tile paints the failure.
     #[rust]
@@ -8543,7 +8544,10 @@ impl App {
     /// An FX tile was clicked with slot `kind` armed: fetch its splash
     /// source and load it into that slot.
     fn fx_effect_tile_clicked(&mut self, cx: &mut Cx, kind: FxSlotKind, asset: AssetId) {
-        let Some(tile) = self.video_model.tile(&asset) else { return };
+        let Some(tile) = self.video_model.tile(&asset) else {
+            log!("fx slot {kind:?}: click stopped — catalog tile {asset} is missing");
+            return;
+        };
         let (Some(revision), Some(media)) = (tile.revision, tile.media.clone()) else {
             // Manifest still resolving: the click fires the moment it lands
             // (the same latch the cue path uses).
@@ -8561,8 +8565,11 @@ impl App {
         }
         let title = tile.title.clone();
         let alias = tile.alias.clone();
-        let Some(up) = self.up.as_mut() else { return };
-        if let Ok(id) = up.catalog.submit_with(
+        let Some(up) = self.up.as_mut() else {
+            log!("fx slot {kind:?}: {title} source fetch not submitted — catalog is unavailable");
+            return;
+        };
+        let id = match up.catalog.submit_with(
             ClientRequest::FetchBlob {
                 blob: media.blob,
                 expected_len: Some(media.len),
@@ -8570,22 +8577,80 @@ impl App {
             },
             makepad_asset_client::SubmitOptions::newest_first(),
         ) {
-            self.cat_reqs
-                .insert(id, CatPurpose::FxSlotSource { slot: kind, revision, title });
-            livecode::remember(&revision.to_string(), alias.as_deref());
-            // HOT RELOAD: which ASSET is in this slot, so a republish of it
-            // can re-fetch and re-load the same slot in place.
-            self.fx_slot_asset[kind.index()] = Some(asset);
-            self.fx_slot_inflight[kind.index()] = Some(revision);
-            self.fx_slots.slot_mut(kind).note = Some("loading…".to_string());
-            // ONE-SHOT ARM: the accepted click consumes it. A latched arm
-            // silently owning every later effect click was the "auto-drop
-            // into the channel stopped working" wedge — armed once, loaded
-            // once, and the arm kept eating (or type-refusing) clicks.
-            self.fx_slots.consume_armed(kind);
-            self.sync_fx_slots_ui(cx);
-            self.grids_dirty = true;
+            Ok(id) => id,
+            Err(error) => {
+                log!("fx slot {kind:?}: {title} source fetch not submitted: {error}");
+                return;
+            }
+        };
+        self.cat_reqs
+            .insert(id, CatPurpose::FxSlotSource { slot: kind, revision, title });
+        livecode::remember(&revision.to_string(), alias.as_deref());
+        // HOT RELOAD: which ASSET is in this slot, so a republish of it
+        // can re-fetch and re-load the same slot in place.
+        self.fx_slot_asset[kind.index()] = Some(asset);
+        self.fx_slot_inflight[kind.index()] = Some(revision);
+        self.fx_slots.slot_mut(kind).note = Some("loading…".to_string());
+        // ONE-SHOT ARM: the accepted click consumes it. A latched arm
+        // silently owning every later effect click was the "auto-drop
+        // into the channel stopped working" wedge — armed once, loaded
+        // once, and the arm kept eating (or type-refusing) clicks.
+        self.fx_slots.consume_armed(kind);
+        self.sync_fx_slots_ui(cx);
+        self.grids_dirty = true;
+    }
+
+    /// A compiled web effect never visits the catalog: its asset/revision
+    /// identity and source were installed together before the first frame.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_fx_effect_tile_clicked(
+        &mut self,
+        cx: &mut Cx,
+        asset: AssetId,
+        as_content: bool,
+    ) -> bool {
+        if as_content {
+            return false;
         }
+        let head = self
+            .fx_heads
+            .iter()
+            .find_map(|(alias, (head_asset, revision, transition, source))| {
+                (*head_asset == asset)
+                    .then_some((alias.as_str(), *head_asset, *revision, *transition, *source))
+            })
+            .or_else(|| {
+                // A typed search uses the static catalog's row identity
+                // instead of the boot wall's browser-local one. Match that
+                // row by alias, but still load the compiled source/identity.
+                let alias = self.video_model.tile(&asset)?.alias.as_deref()?;
+                let (head_asset, revision, transition, source) = *self.fx_heads.get(alias)?;
+                Some((alias, head_asset, revision, transition, source))
+            });
+        let Some((alias, head_asset, revision, transition, source)) = head else {
+            return false;
+        };
+        let name = alias.strip_prefix("vjfx/").unwrap_or(alias);
+        let title = crate::effects::seed::preset_title(name, source);
+        self.last_clicked = Some(head_asset);
+        let kind = if let Some(kind) = self.fx_slots.armed {
+            kind
+        } else if transition {
+            FxSlotKind::Transition
+        } else {
+            self.standby_fx_slot()
+        };
+        if let Err(message) = FxSlots::accepts(kind, true, transition) {
+            self.refuse_fx_slot(cx, kind, message);
+            return true;
+        }
+        self.pending_click = None;
+        self.fx_slot_asset[kind.index()] = Some(head_asset);
+        self.fx_slot_inflight[kind.index()] = None;
+        self.fx_slots.consume_armed(kind);
+        self.grids_dirty = true;
+        self.load_fx_slot(cx, kind, &title, Some(revision), source, true);
+        true
     }
 
     /// A relaunch restores slots from a persisted revision id, which is not
@@ -8707,7 +8772,9 @@ impl App {
                 log!("fx slot {kind:?}: load failed — {error}");
                 self.fx_slots.slot_mut(kind).note = Some("load failed".to_string());
             }
-            None => {}
+            None => {
+                log!("fx slot {kind:?}: load stopped — slot host widget is missing");
+            }
         }
         self.sync_fx_slots_ui(cx);
         self.video_pump = cx.new_next_frame();
@@ -17021,8 +17088,10 @@ p2 {}
                     for head in heads.into_iter().rev() {
                         let alias = crate::effects::seed::preset_alias(head.name);
                         let transition = Self::alias_is_transition(Some(&alias));
-                        self.fx_heads
-                            .insert(alias, (head.asset, head.revision, transition));
+                        self.fx_heads.insert(
+                            alias,
+                            (head.asset, head.revision, transition, head.source),
+                        );
                         thumbs.enqueue(
                             cx,
                             fx_thumbs::FxThumbJob {
@@ -17062,7 +17131,7 @@ p2 {}
                     .get(pad)
                     .and_then(|alias| alias.as_ref())
                     .and_then(|alias| self.fx_heads.get(alias))
-                    .map(|(_, revision, _)| *revision)
+                    .map(|(_, revision, _, _)| *revision)
             })
             .collect();
         let open_tab = if self.grid_lane.is_effect_lane() {
@@ -19368,8 +19437,19 @@ p2 {}
             // store's control plane is busy at boot). Without this, a fully
             // baked, fully cached library still trickled onto the grid at
             // catalog-resolve pace.
-            if entry.frames.is_empty() {
-                if let Some((_, revision, _)) = self.fx_heads.get(&alias) {
+            if let Some((_asset, revision, _, _)) = self.fx_heads.get(&alias) {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // The browser's compiled document is the actionable
+                    // row. Its identity is deliberately absent from the
+                    // remote/static catalog, so it must not remain a
+                    // paint-only prefab or inherit a server-side asset id.
+                    entry.asset = *_asset;
+                    entry.pending = false;
+                    entry.active = self.last_clicked == Some(*_asset);
+                    entry.live = entry.active;
+                }
+                if entry.frames.is_empty() {
                     if let Some(texture) = self.thumbs.get(revision) {
                         entry.texture = Some(texture.clone());
                     }
@@ -23494,6 +23574,12 @@ p2 {}
                     }
                     if let Some(entry) = entry {
                         down.push((entry.asset, fe.modifiers));
+                    } else if let Some(title) = widget.borrow::<VjPadMatrix>().and_then(|grid| {
+                        grid.paint_at(pad)
+                            .filter(|entry| entry.fx)
+                            .map(|entry| entry.title.clone())
+                    }) {
+                        log!("fx tile click stopped before handler: {title} has no actionable source identity");
                     }
                 }
                 if cell.finger_up(actions).is_some() {
@@ -23520,7 +23606,14 @@ p2 {}
     ///     slot is armed is a VISIBLE refusal on that slot — never a
     ///     silent accept, never a surprise cue.
     fn video_tile_clicked(&mut self, cx: &mut Cx, asset: AssetId, as_content: bool) {
-        let Some(tile) = self.video_model.tile(&asset) else { return };
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_fx_effect_tile_clicked(cx, asset, as_content) {
+            return;
+        }
+        let Some(tile) = self.video_model.tile(&asset) else {
+            log!("video tile click stopped — source identity {asset} is not in the catalog");
+            return;
+        };
         // The ring follows the hand, not the cue: it marks the tile the
         // operator last touched even while its manifest is still resolving.
         self.last_clicked = Some(asset);
@@ -24955,7 +25048,19 @@ impl MatchEvent for App {
             // static web session cannot seed a server, so hand the same
             // compiled sources to the browser-local render/cache pipeline.
             let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
-            let _ = bundle_tx.send(crate::effects::seed::browser_bundle_heads());
+            let heads = crate::effects::seed::browser_bundle_heads();
+            // Install click identities synchronously: the very first painted
+            // grid is already actionable, even before the thumbnail pump has
+            // drained its copy of this feed.
+            for head in &heads {
+                let alias = crate::effects::seed::preset_alias(head.name);
+                let transition = Self::alias_is_transition(Some(&alias));
+                self.fx_heads.insert(
+                    alias,
+                    (head.asset, head.revision, transition, head.source),
+                );
+            }
+            let _ = bundle_tx.send(heads);
             drop(bundle_tx);
             self.fx_bundle_rx = Some(bundle_rx);
         }
