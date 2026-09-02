@@ -148,6 +148,119 @@ pub fn choreography(
     steps
 }
 
+/// Where a transition could leave the outgoing record, and how good the
+/// moment is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exit {
+    /// Source seconds, on a bar line.
+    pub at_secs: f64,
+    /// 0..=1. Higher is a better place to go.
+    pub score: f32,
+    /// The longest fade this exit can carry before it runs into whatever
+    /// happens next in the outgoing record.
+    pub allowance_secs: f64,
+    /// Why, for the panel and the log.
+    pub reason: String,
+}
+
+/// How far into a record the earliest allowed exit sits. A record that has
+/// played a third of itself has said what it came to say; leaving before
+/// that is cutting it off, whatever the energy is doing.
+const LISTENED: f64 = 0.35;
+
+/// Where the lateness penalty starts to bite, as a share of the record.
+const LATE: f64 = 0.80;
+
+/// Rank the places this record could be left.
+///
+/// The candidate set is the bar grid, not the detected change points: the
+/// analysis keeps at most a couple of dozen of those, four seconds apart at
+/// the closest, which over a six-minute record is one every fifteen seconds
+/// and far too coarse to choose an exit from. The changes anchor the grid
+/// instead — a bar that lands on one scores for it — and a record that
+/// yielded no changes at all still has every bar to offer.
+///
+/// Empty only when there are no bars, which means no grid.
+pub fn exits(
+    bars: &[crate::mix_facts::BarRow],
+    changes_secs: &[f64],
+    duration_secs: f64,
+    bar_secs: f64,
+) -> Vec<Exit> {
+    if bars.is_empty() || !(duration_secs > 0.0) || !(bar_secs > 0.0) {
+        return Vec::new();
+    }
+    let floor = duration_secs * LISTENED;
+    let mut out: Vec<Exit> = Vec::new();
+    for (index, bar) in bars.iter().enumerate() {
+        if bar.start_secs < floor || bar.start_secs >= duration_secs {
+            continue;
+        }
+        let mut why: Vec<&str> = Vec::new();
+        let mut score = 0.5f32;
+
+        // Where the record lets go is where a hand would leave. Comparing
+        // against the bar behind rather than an absolute level keeps this
+        // about the shape of the arrangement and not the mastering.
+        let previous = bars[index.saturating_sub(1)].energy;
+        let drop = previous - bar.energy;
+        if drop > 0.15 {
+            score += 0.30 * (drop / 0.5).clamp(0.0, 1.0);
+            why.push("the energy lets go");
+        } else if drop < -0.15 {
+            // Leaving as it climbs throws away the build the record just
+            // spent its time on.
+            score -= 0.20;
+            why.push("still climbing");
+        }
+
+        // A bar that lands on something the analysis heard change is worth
+        // more than one that merely counts.
+        if changes_secs
+            .iter()
+            .any(|change| (change - bar.start_secs).abs() <= bar_secs * 0.5)
+        {
+            score += 0.25;
+            why.push("on a change the record makes");
+        }
+
+        // Late is a risk, not a rule: the further past the point of no
+        // return, the less room whatever comes next has to breathe.
+        let through = bar.start_secs / duration_secs;
+        if through > LATE {
+            score -= 0.40 * ((through - LATE) / (1.0 - LATE)) as f32;
+            why.push("late in the record");
+        }
+
+        if why.is_empty() {
+            why.push("nothing in the way");
+        }
+        out.push(Exit {
+            at_secs: bar.start_secs,
+            score: score.clamp(0.0, 1.0),
+            allowance_secs: allowance(bars, index, duration_secs),
+            reason: why.join(", "),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.score.total_cmp(&a.score).then(a.at_secs.total_cmp(&b.at_secs))
+    });
+    out
+}
+
+/// How long a fade from this bar can run before the record does something
+/// else — the next bar whose energy moves against what it is doing now, or
+/// the end of the record.
+fn allowance(bars: &[crate::mix_facts::BarRow], from: usize, duration_secs: f64) -> f64 {
+    let here = bars[from].energy;
+    for bar in bars.iter().skip(from + 1) {
+        if (bar.energy - here).abs() > 0.25 {
+            return (bar.start_secs - bars[from].start_secs).max(0.0);
+        }
+    }
+    (duration_secs - bars[from].start_secs).max(0.0)
+}
+
 /// Move a fire point onto the track's phrase structure: the nearest
 /// detected change within two bars wins; failing that, the nearest 8-bar
 /// grid line within the same slack; failing both, the point stands.
@@ -395,5 +508,101 @@ mod tests {
             vocal_guard(100.0, 8.0, &SungMap::default(), &sung, 0.0, 2.0, (0.0, 300.0));
         assert!((fire - 100.0).abs() < 1e-9);
         assert!(duck.is_none());
+    }
+
+    fn bars(energies: &[f32], bar_secs: f64) -> Vec<crate::mix_facts::BarRow> {
+        energies
+            .iter()
+            .enumerate()
+            .map(|(index, energy)| crate::mix_facts::BarRow {
+                start_secs: index as f64 * bar_secs,
+                energy: *energy,
+                low: 0.5,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_record_is_never_left_before_it_has_been_heard() {
+        // Sixteen bars of two seconds: half a minute of record. Nothing
+        // before a third of the way in is on offer, however quiet it is.
+        let quiet_then_loud: Vec<f32> =
+            (0..16).map(|bar| if bar < 6 { 0.1 } else { 0.9 }).collect();
+        let found = exits(&bars(&quiet_then_loud, 2.0), &[], 32.0, 2.0);
+        assert!(!found.is_empty());
+        let floor = 32.0 * 0.35;
+        assert!(
+            found.iter().all(|exit| exit.at_secs >= floor),
+            "left too early: {:?}",
+            found.iter().map(|e| e.at_secs).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_place_the_energy_drops_away_beats_the_middle_of_a_loud_run() {
+        // A record that runs hard and then falls: the fall is where a hand
+        // would leave, so it has to outrank the plateau before it.
+        let shape: Vec<f32> =
+            (0..24).map(|bar| if bar < 16 { 0.9 } else { 0.2 }).collect();
+        let found = exits(&bars(&shape, 2.0), &[], 48.0, 2.0);
+        let best = found.first().expect("a record this long has exits");
+        assert!(
+            (best.at_secs - 32.0).abs() < 2.5,
+            "the fall is at 32 s, best was {} ({})",
+            best.at_secs,
+            best.reason
+        );
+        assert!(best.reason.to_lowercase().contains("energy"), "{}", best.reason);
+    }
+
+    #[test]
+    fn an_exit_carries_the_room_it_has_before_the_record_moves_again() {
+        // Eight quiet bars after the fall: a fade may run into them, and
+        // the allowance says how far.
+        let shape: Vec<f32> =
+            (0..24).map(|bar| if bar < 8 { 0.9 } else { 0.2 }).collect();
+        let found = exits(&bars(&shape, 2.0), &[], 48.0, 2.0);
+        let best = found.first().unwrap();
+        assert!(best.allowance_secs > 0.0, "an exit with no room is not an exit");
+        assert!(
+            best.at_secs + best.allowance_secs <= 48.0 + 1e-6,
+            "the allowance runs off the end: {} + {}",
+            best.at_secs,
+            best.allowance_secs
+        );
+    }
+
+    #[test]
+    fn a_bar_on_a_detected_change_is_preferred_to_its_neighbours() {
+        // A flat record gives the scorer nothing but the change list.
+        let flat = bars(&[0.6f32; 24], 2.0);
+        let found = exits(&flat, &[30.0], 48.0, 2.0);
+        let best = found.first().unwrap();
+        assert!(
+            (best.at_secs - 30.0).abs() <= 2.0,
+            "the change at 30 s should win a flat record, got {} ({})",
+            best.at_secs,
+            best.reason
+        );
+    }
+
+    #[test]
+    fn leaving_it_very_late_is_worse_than_leaving_it_in_good_time() {
+        let flat = bars(&[0.6f32; 40], 2.0);
+        let found = exits(&flat, &[], 80.0, 2.0);
+        let last = found.iter().max_by(|a, b| a.at_secs.total_cmp(&b.at_secs)).unwrap();
+        let best = found.first().unwrap();
+        assert!(last.at_secs > 80.0 * 0.8, "there is a late candidate to compare");
+        assert!(
+            last.score < best.score,
+            "late {} should score under best {}",
+            last.score,
+            best.score
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_bars_offers_nothing_rather_than_guessing() {
+        assert!(exits(&[], &[], 48.0, 2.0).is_empty());
     }
 }

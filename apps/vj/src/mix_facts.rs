@@ -88,6 +88,80 @@ pub fn grid_trust(grid: &TrackGrid, tempo: &TempoMap) -> f32 {
     confidence * steady
 }
 
+/// One bar of a record, as a planner reads it.
+///
+/// Bars, not seconds: every rule downstream is written in bars, and a bar
+/// is the smallest unit a transition is allowed to land on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarRow {
+    /// Where the bar starts, in source seconds.
+    pub start_secs: f64,
+    /// How loud this bar runs against this record's own loud end, 0..=1.
+    /// Relative by construction — the band bytes carry no cross-track
+    /// scale, and [`comparable_energy`] is the number for that job.
+    pub energy: f32,
+    /// How much of the bar sits in the low band, 0..=1. A bar with the
+    /// drums in reads high; a breakdown that has lost them reads low.
+    pub low: f32,
+}
+
+/// Fold the zoom tiles into one row per bar.
+///
+/// Empty without a grid: bars are the unit, and a record with no grid has
+/// none. The last partial bar is dropped rather than reported short, so a
+/// caller never reasons about a bar that is not there.
+pub fn bar_rows(zoom: &[[u8; 4]], grid: &TrackGrid, duration_secs: f64) -> Vec<BarRow> {
+    if !grid.has_grid() || zoom.is_empty() || !(duration_secs > 0.0) {
+        return Vec::new();
+    }
+    let bar_secs = grid.beat_secs * 4.0;
+    if !(bar_secs > 0.0) {
+        return Vec::new();
+    }
+    // Start at the first whole bar at or after zero: a record whose grid
+    // begins mid-bar has no bar before it to report.
+    let first = grid.bar_at(0.0).ceil();
+    let mut raw: Vec<(f64, f64, f64)> = Vec::new();
+    let mut bar = first;
+    loop {
+        let start = grid.secs_at_beat(bar * 4.0 - grid.downbeat_phase as f64);
+        let end = start + bar_secs;
+        if end > duration_secs + 1e-9 {
+            break;
+        }
+        let (from, to) = (column_at(start), column_at(end).min(zoom.len()));
+        if from >= to {
+            break;
+        }
+        let mut level = 0.0f64;
+        let mut low = 0.0f64;
+        let mut all = 0.0f64;
+        for column in &zoom[from..to] {
+            level += column[3] as f64;
+            low += column[0] as f64;
+            all += column[0] as f64 + column[1] as f64 + column[2] as f64;
+        }
+        let span = (to - from) as f64;
+        raw.push((start, level / span, if all > 0.0 { low / all } else { 0.0 }));
+        bar += 1.0;
+    }
+    // The energy is relative to this record's own loud end, because the
+    // band and level bytes carry no cross-track scale to be absolute with.
+    let loudest = raw.iter().map(|(_, level, _)| *level).fold(0.0f64, f64::max);
+    raw.into_iter()
+        .map(|(start_secs, level, low)| BarRow {
+            start_secs,
+            energy: if loudest > 0.0 { (level / loudest) as f32 } else { 0.0 },
+            low: low as f32,
+        })
+        .collect()
+}
+
+/// Which zoom column covers `secs`.
+fn column_at(secs: f64) -> usize {
+    (secs * crate::wave_analysis::ZOOM_COLS_PER_SEC).max(0.0) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +249,55 @@ mod tests {
         assert!(wandering < steady, "{wandering} should sit under {steady}");
         // Far enough gone and there is nothing left to lean on.
         assert_eq!(grid_trust(&grid(1.0), &tempo(&[0.5, 0.75])), 0.0);
+    }
+
+    /// Zoom columns at 100 per second: `loud` everywhere, with the band
+    /// bytes set so `low_share` of the energy sits in the low band.
+    fn zoom(secs: f64, level: u8, low: u8, high: u8) -> Vec<[u8; 4]> {
+        let columns = (secs * crate::wave_analysis::ZOOM_COLS_PER_SEC) as usize;
+        vec![[low, 0, high, level]; columns]
+    }
+
+    #[test]
+    fn bars_land_on_the_grid_and_the_short_last_one_is_dropped() {
+        // 120 BPM: a bar is two seconds. Nine seconds of record is four
+        // whole bars and a stub, and the stub is not a bar.
+        let rows = bar_rows(&zoom(9.0, 200, 100, 100), &grid(1.0), 9.0);
+        assert_eq!(rows.len(), 4, "{:?}", rows.iter().map(|r| r.start_secs).collect::<Vec<_>>());
+        for (index, row) in rows.iter().enumerate() {
+            assert!(
+                (row.start_secs - index as f64 * 2.0).abs() < 1e-6,
+                "bar {index} at {}",
+                row.start_secs
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_with_no_grid_has_no_bars() {
+        assert!(bar_rows(&zoom(9.0, 200, 100, 100), &TrackGrid::default(), 9.0).is_empty());
+        assert!(bar_rows(&[], &grid(1.0), 9.0).is_empty());
+    }
+
+    #[test]
+    fn the_loud_bars_read_hotter_than_the_quiet_ones_of_the_same_record() {
+        // Four bars: quiet, quiet, loud, loud. The energy is relative to
+        // this record, so the loud pair must sit near the top whatever the
+        // absolute level was.
+        let mut columns = zoom(4.0, 40, 100, 100);
+        columns.extend(zoom(4.0, 220, 100, 100));
+        let rows = bar_rows(&columns, &grid(1.0), 8.0);
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].energy < rows[3].energy, "{:?}", rows);
+        assert!(rows[3].energy > 0.9, "the loudest bar is the top: {}", rows[3].energy);
+        assert!(rows[0].energy < 0.5, "the quiet bar is well under it: {}", rows[0].energy);
+    }
+
+    #[test]
+    fn a_bar_with_the_drums_in_reads_low_heavy() {
+        let bassy = bar_rows(&zoom(2.0, 200, 220, 20), &grid(1.0), 2.0);
+        let bright = bar_rows(&zoom(2.0, 200, 20, 220), &grid(1.0), 2.0);
+        assert!(bassy[0].low > bright[0].low, "{} vs {}", bassy[0].low, bright[0].low);
+        assert!(bassy[0].low > 0.5 && bright[0].low < 0.5);
     }
 }
