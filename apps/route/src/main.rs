@@ -1402,7 +1402,7 @@ impl App {
             .set_text(cx, "Starting navigation…");
         self.ui.label(cx, ids!(banner_dist)).set_text(cx, "");
         if simulate {
-            nav.sim_last_tick = Some(std::time::Instant::now());
+            nav.sim_last_tick = Some(Cx::monotonic_now());
             self.nav_frame = cx.new_next_frame();
         }
         self.drive_log.log_trip(&format!(
@@ -2231,10 +2231,10 @@ impl AppMain for App {
                     if nav.simulate {
                         return None;
                     }
-                    let now = std::time::Instant::now();
+                    let now = Cx::monotonic_now();
                     let dt = nav
                         .sim_last_tick
-                        .map(|last| now.duration_since(last).as_secs_f64())
+                        .map(|last| now - last)
                         .unwrap_or(1.0)
                         .clamp(0.05, 5.0);
                     nav.sim_last_tick = Some(now);
