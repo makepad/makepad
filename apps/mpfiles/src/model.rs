@@ -6,7 +6,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 /// What a file *is*, as far as the browser is concerned: it picks the icon,
@@ -661,11 +661,18 @@ pub fn format_size(bytes: u64, is_dir: bool) -> String {
     }
 }
 
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
+pub fn real_now_secs() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_secs();
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        makepad_widgets::Cx::time_now().max(0.0) as u64
+    }
 }
 
 /// The machine's UTC offset in seconds, read once. The platform has no

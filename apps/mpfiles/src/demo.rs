@@ -914,6 +914,10 @@ impl Vfs for DemoVfs {
         PathBuf::from(VIRTUAL_HOME)
     }
 
+    fn now_secs(&self) -> u64 {
+        DEMO_NOW_SECS
+    }
+
     fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
         let tree = self.root.lock().unwrap();
         let node = resolve(&tree, path).ok_or_else(|| format!("No such folder: {}", path.display()))?;
@@ -1226,22 +1230,22 @@ mod tests {
 
     #[test]
     fn generator_shape_sizes_and_timings_meet_the_demo_contract() {
-        let generated_at = std::time::Instant::now();
+        let generated_at = makepad_widgets::Cx::time_now();
         let vfs = DemoVfs::new();
-        let generation = generated_at.elapsed();
-        let scan_at = std::time::Instant::now();
+        let generation = makepad_widgets::Cx::time_now() - generated_at;
+        let scan_at = makepad_widgets::Cx::time_now();
         let node = vfs.scan(Path::new(VIRTUAL_HOME), &AtomicBool::new(false), &|_| {}).unwrap();
-        let scan = scan_at.elapsed();
+        let scan = makepad_widgets::Cx::time_now() - scan_at;
         let mut stats = (0usize, 0usize, 0usize, 0usize);
         let total = scan_stats(&node, 0, &mut stats);
-        eprintln!("mpfiles demo generator: {generation:?}; full inline scan: {scan:?}");
+        eprintln!("mpfiles demo generator: {generation:.3}s; full inline scan: {scan:.3}s");
         assert!((30_000..=45_000).contains(&stats.0), "file count: {}", stats.0);
         assert!((2_000..=3_500).contains(&stats.1), "folder count: {}", stats.1);
         assert!(stats.2 >= 9, "max depth: {}", stats.2);
         assert!(stats.3 >= 3, "only {} files are at least 2 GiB", stats.3);
         assert!(total >= 150 * 1024 * 1024 * 1024, "tree is only {total} bytes");
-        assert!(generation.as_millis() < 150, "generation took {generation:?}");
-        assert!(scan.as_millis() < 100, "inline scan took {scan:?}");
+        assert!(generation < 0.150, "generation took {generation:.3}s");
+        assert!(scan < 0.100, "inline scan took {scan:.3}s");
     }
 
     #[test]

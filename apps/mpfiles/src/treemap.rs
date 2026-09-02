@@ -30,8 +30,10 @@ use std::{
         Condvar, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use makepad_widgets::Cx;
 
 /// A rectangle in treemap space. Plain `f64` so this module stays free of
 /// any UI vector type — the view converts to its own types at the boundary.
@@ -605,8 +607,8 @@ struct Growth<'a> {
     at: Vec<u32>,
     size: u64,
     files: u32,
-    due: Instant,
-    pace_due: Instant,
+    due: f64,
+    pace_due: f64,
 }
 
 impl<'a> Growth<'a> {
@@ -617,8 +619,8 @@ impl<'a> Growth<'a> {
             at: Vec::new(),
             size: 0,
             files: 0,
-            due: Instant::now() + GROW_EVERY,
-            pace_due: Instant::now(),
+            due: Cx::time_now() + GROW_EVERY.as_secs_f64(),
+            pace_due: Cx::time_now(),
         }
     }
 
@@ -635,9 +637,9 @@ impl<'a> Growth<'a> {
     /// second in a build tree and the number on screen does not need to.
     fn pace(&mut self) {
         let folders_left = self.open.load(Ordering::Relaxed);
-        let now = Instant::now();
+        let now = Cx::time_now();
         if now >= self.pace_due || folders_left == 0 {
-            self.pace_due = now + GROW_EVERY;
+            self.pace_due = now + GROW_EVERY.as_secs_f64();
             (self.sink)(ScanStep::Pace { folders_left });
         }
     }
@@ -645,11 +647,11 @@ impl<'a> Growth<'a> {
     fn add(&mut self, size: u64) {
         self.size += size;
         self.files += 1;
-        let now = Instant::now();
+        let now = Cx::time_now();
         if now < self.due {
             return;
         }
-        self.due = now + GROW_EVERY;
+        self.due = now + GROW_EVERY.as_secs_f64();
         // The queue depth rides along on the same clock, so it keeps moving
         // even while this thread is stuck inside one huge directory.
         self.pace();
@@ -2000,7 +2002,7 @@ mod tests {
         // Near: 64x in, anchored inside the crowd so its files fill the panel.
         let near = Rect { x: -20_000.0, y: -20_000.0, w: 1200.0 * 64.0, h: 800.0 * 64.0 };
         for (name, area) in [("far", far), ("near", near)] {
-            let t = std::time::Instant::now();
+            let t = Cx::time_now();
             let mut cells = 0usize;
             const RUNS: u32 = 20;
             for _ in 0..RUNS {
@@ -2008,7 +2010,7 @@ mod tests {
             }
             println!(
                 "200k-folder {name}: {:.2}ms per layout, {cells} cells",
-                t.elapsed().as_secs_f64() * 1000.0 / RUNS as f64
+                (Cx::time_now() - t) * 1000.0 / RUNS as f64
             );
         }
     }

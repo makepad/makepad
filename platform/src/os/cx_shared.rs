@@ -942,6 +942,19 @@ impl Cx {
 
     // event handler wrappers
 
+    fn invoke_event_handler(&mut self, event: &Event) {
+        let mut event_handler = self.event_handler.take().expect(
+            "call_event_handler re-entered synchronously while an event handler was running; platform callbacks must defer nested dispatch",
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            event_handler(self, event);
+        }));
+        self.event_handler = Some(event_handler);
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
         // PerfMonitor "event" channel: time only the OUTERMOST dispatch —
@@ -951,15 +964,13 @@ impl Cx {
             self.perf_monitor.event_depth += 1;
         }
         let perf_t0 = (perf_timing && self.perf_monitor.event_depth == 1)
-            .then(std::time::Instant::now);
+            .then(|| self.seconds_since_app_start());
         if (Cx::has_studio_web_socket()
             && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
             || Cx::local_profile_capture_enabled()
         {
             let start = self.seconds_since_app_start();
-            let mut event_handler = self.event_handler.take().unwrap();
-            event_handler(self, event);
-            self.event_handler = Some(event_handler);
+            self.invoke_event_handler(event);
             let end = self.seconds_since_app_start();
             Cx::send_studio_message(AppToStudio::EventSample(EventSample {
                 event_u32: event.to_u32(),
@@ -972,16 +983,14 @@ impl Cx {
                 end: end,
             }))
         } else {
-            let mut event_handler = self.event_handler.take().unwrap();
-            event_handler(self, event);
-            self.event_handler = Some(event_handler);
+            self.invoke_event_handler(event);
         }
         if perf_timing {
             self.perf_monitor.event_depth -= 1;
             if let Some(t0) = perf_t0 {
                 self.perf_monitor.add(
                     crate::perf_monitor::PERF_CHANNEL_EVENT,
-                    t0.elapsed().as_micros() as u64,
+                    ((self.seconds_since_app_start() - t0).max(0.0) * 1_000_000.0) as u64,
                 );
             }
         }
@@ -1181,5 +1190,52 @@ impl Cx {
             time: time,
             frame: self.repaint_id,
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn platform_time_moves_forward() {
+        let start = Cx::time_now();
+        assert!(start > 0.0);
+
+        let mut previous = start;
+        let mut later = start;
+        for _ in 0..1_000_000 {
+            std::hint::spin_loop();
+            later = Cx::time_now();
+            assert!(later >= previous);
+            previous = later;
+            if later > start {
+                break;
+            }
+        }
+        assert!(later - start > 0.0);
+    }
+
+    #[test]
+    fn panicking_event_handler_is_restored() {
+        let calls = Rc::new(Cell::new(0));
+        let panic_once = Rc::new(Cell::new(true));
+        let handler_calls = calls.clone();
+        let handler_panic_once = panic_once.clone();
+        let mut cx = Cx::new(Box::new(move |_cx, _event| {
+            handler_calls.set(handler_calls.get() + 1);
+            if handler_panic_once.replace(false) {
+                panic!("intentional event-handler panic");
+            }
+        }));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cx.call_event_handler(&Event::Signal);
+        }));
+        assert!(result.is_err());
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 2);
     }
 }

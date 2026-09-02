@@ -938,6 +938,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
+        self.os.start_time = Self::time_now();
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
@@ -1040,7 +1041,7 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
-        0.0
+        (Self::time_now() - self.os.start_time).max(0.0)
     }
 
     #[cfg(target_feature = "atomics")]
@@ -1172,6 +1173,7 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 pub struct CxOs {
     pub(crate) window_geom: WindowGeom,
     pub(crate) native_window_geom: WindowGeom,
+    pub(crate) start_time: f64,
 
     pub from_wasm: Option<FromWasmMsg>,
 
@@ -1190,6 +1192,7 @@ impl Default for CxOs {
         Self {
             window_geom: WindowGeom::default(),
             native_window_geom: WindowGeom::default(),
+            start_time: 0.0,
 
             from_wasm: Some(FromWasmMsg::new()),
 

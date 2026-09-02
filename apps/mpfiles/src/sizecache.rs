@@ -24,7 +24,6 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::treemap::Node;
@@ -61,10 +60,7 @@ pub struct Cached {
 
 /// Seconds since the epoch, or 0 when the clock cannot say.
 pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::vfs::now_secs()
 }
 
 /// "2h ago", "just now" — how a person reads an age.

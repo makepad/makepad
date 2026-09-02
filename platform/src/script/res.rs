@@ -511,7 +511,7 @@ impl Cx {
                 .collect::<Vec<_>>()
         };
 
-        let _mp_t0 = std::time::Instant::now();
+        let _mp_t0 = self.seconds_since_app_start();
         let _mp_n = handles.len();
         for handle in handles {
             self.load_script_resource_impl(
@@ -536,7 +536,7 @@ impl Cx {
                 "load_all_script_resources ({} files, {:.2} MB, {:.2} ms)",
                 _mp_n,
                 bytes as f64 / (1024.0 * 1024.0),
-                _mp_t0.elapsed().as_secs_f64() * 1000.0
+                (self.seconds_since_app_start() - _mp_t0).max(0.0) * 1000.0
             ));
         }
     }

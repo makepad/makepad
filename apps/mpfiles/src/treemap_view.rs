@@ -31,7 +31,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::{
@@ -348,7 +348,7 @@ pub struct TreemapView {
     #[rust]
     stale: bool,
     #[rust]
-    last_layout: Option<Instant>,
+    last_layout: Option<f64>,
     #[rust]
     frame: NextFrame,
 
@@ -444,7 +444,7 @@ pub struct TreemapView {
     zoom_glide: Option<ZoomGlide>,
     /// Q/E's glide: the yaw the orbit is headed for, and the last tick.
     #[rust]
-    yaw_glide: Option<(f64, Instant)>,
+    yaw_glide: Option<(f64, f64)>,
 
     /// The filter tween: where each surviving path was, the cells that are
     /// leaving (with the rect they were last seen at), and when it started.
@@ -453,7 +453,7 @@ pub struct TreemapView {
     #[rust]
     tween_leavers: Vec<(Cell, MapRect, f64)>,
     #[rust]
-    tween_start: Option<Instant>,
+    tween_start: Option<f64>,
     /// A snapshot of the map as it looks right now, taken when the filter
     /// changes, consumed by the next relayout to aim the tween.
     #[rust]
@@ -530,7 +530,7 @@ struct CrumbHit {
 struct ZoomGlide {
     target: f64,
     anchor: DVec2,
-    last: Instant,
+    last: f64,
 }
 
 /// How fast a glide closes on its target: the ease-out's time constant.
@@ -839,7 +839,7 @@ impl TreemapView {
             // and the signal clock live behind one lock. Waking the UI is the
             // expensive half and is what gets rate-limited; the steps
             // themselves queue as fast as the disk produces them.
-            let gate = Mutex::new(Instant::now());
+            let gate = Mutex::new(Cx::time_now());
             let sink = |step: ScanStep| {
                 if sender
                     .send(ScanMessage {
@@ -852,9 +852,9 @@ impl TreemapView {
                     return;
                 }
                 let mut due = gate.lock().unwrap_or_else(|e| e.into_inner());
-                let now = Instant::now();
+                let now = Cx::time_now();
                 if now >= *due {
-                    *due = now + SIGNAL_EVERY;
+                    *due = now + SIGNAL_EVERY.as_secs_f64();
                     SignalToUI::set_ui_signal();
                 }
             };
@@ -1001,7 +1001,7 @@ impl TreemapView {
         }
         // While the walk is running the tree changes far faster than the
         // picture needs to; a finished scan always redraws at once.
-        if finished || self.layout_is_due() {
+        if finished || self.layout_is_due(cx.seconds_since_app_start()) {
             self.redraw(cx);
         } else {
             // Nothing gets lost: the trailing update is picked up on the next
@@ -1016,12 +1016,12 @@ impl TreemapView {
     /// second; once nothing is feeding it any more there is nothing to
     /// throttle, and a map still showing a mid-scan snapshot after the walk
     /// has finished would be quietly, plausibly wrong.
-    fn layout_is_due(&self) -> bool {
+    fn layout_is_due(&self, now: f64) -> bool {
         if !self.scanning {
             return true;
         }
         match self.last_layout {
-            Some(at) => at.elapsed() >= RELAYOUT_EVERY,
+            Some(at) => now - at >= RELAYOUT_EVERY.as_secs_f64(),
             None => true,
         }
     }
@@ -1260,7 +1260,7 @@ impl TreemapView {
             // Calm unless the tree itself changed underneath the gesture —
             // a camera settle re-derives the same picture at more detail.
             self.tween_calm = !self.stale;
-            self.tween_capture = Some(self.visual_snapshot());
+            self.tween_capture = Some(self.visual_snapshot(cx.seconds_since_app_start()));
         }
         self.stale = true;
         self.last_layout = None;
@@ -1270,12 +1270,12 @@ impl TreemapView {
     /// Mid-gesture, whether the coarse layout refresh may run: something to
     /// refresh — the layout spent, or the tree changed under the scan — and
     /// the cadence has passed.
-    fn motion_refresh_due(&self) -> bool {
+    fn motion_refresh_due(&self, now: f64) -> bool {
         if !self.layout_spent() && !self.stale {
             return false;
         }
         match self.last_layout {
-            Some(at) => at.elapsed() >= MOTION_RELAYOUT,
+            Some(at) => now - at >= MOTION_RELAYOUT.as_secs_f64(),
             None => true,
         }
     }
@@ -1405,7 +1405,7 @@ impl TreemapView {
         }
         if dpitch == 0.0 {
             let base = self.yaw_glide.map_or(self.yaw, |(target, _)| target);
-            self.yaw_glide = Some((wrap_angle(base + dyaw), Instant::now()));
+            self.yaw_glide = Some((wrap_angle(base + dyaw), cx.seconds_since_app_start()));
             self.frame = cx.new_next_frame();
             return;
         }
@@ -1416,8 +1416,8 @@ impl TreemapView {
     /// keep the frame clock alive until both arrive.
     fn step_glides(&mut self, cx: &mut Cx) {
         if let Some(mut glide) = self.zoom_glide.take() {
-            let now = Instant::now();
-            let dt = now.duration_since(glide.last).as_secs_f64().min(0.1);
+            let now = cx.seconds_since_app_start();
+            let dt = (now - glide.last).clamp(0.0, 0.1);
             glide.last = now;
             let current = self.cam_scale.max(1.0);
             // Zoom lives in ratio space: equal glide time closes an equal
@@ -1438,8 +1438,8 @@ impl TreemapView {
             }
         }
         if let Some((target, last)) = self.yaw_glide.take() {
-            let now = Instant::now();
-            let dt = now.duration_since(last).as_secs_f64().min(0.1);
+            let now = cx.seconds_since_app_start();
+            let dt = (now - last).clamp(0.0, 0.1);
             let remaining = wrap_angle(target - self.yaw);
             if remaining.abs() < 0.002 {
                 self.set_orbit(cx, target, self.pitch);
@@ -1477,7 +1477,7 @@ impl TreemapView {
         }
         // Aim the tween from wherever things visually are right now — a
         // slider mid-drag retargets smoothly instead of jumping.
-        self.tween_capture = Some(self.visual_snapshot());
+        self.tween_capture = Some(self.visual_snapshot(cx.seconds_since_app_start()));
         self.tween_calm = false;
         self.filter = filter;
         self.stale = true;
@@ -1503,9 +1503,9 @@ impl TreemapView {
     }
 
     /// Eased tween progress, or None when nothing is morphing.
-    fn tween_t(&self) -> Option<f64> {
+    fn tween_t(&self, now: f64) -> Option<f64> {
         let start = self.tween_start?;
-        let t = start.elapsed().as_secs_f64() / TWEEN.as_secs_f64();
+        let t = (now - start).max(0.0) / TWEEN.as_secs_f64();
         if t >= 1.0 {
             return None;
         }
@@ -1517,8 +1517,8 @@ impl TreemapView {
     /// mid-tween and mid-gesture alike, and its fractional depth — plus the
     /// leavers still fading out. Remapped through the live camera, so a
     /// tween aimed from here starts exactly where the eye left off.
-    fn visual_snapshot(&self) -> Vec<(Cell, MapRect, f64)> {
-        let t = self.tween_t();
+    fn visual_snapshot(&self, now: f64) -> Vec<(Cell, MapRect, f64)> {
+        let t = self.tween_t(now);
         let (rk, rb) = self.cam_remap();
         let mut out: Vec<(Cell, MapRect, f64)> = Vec::with_capacity(self.cells.len());
         for cell in &self.cells {
@@ -1722,7 +1722,7 @@ impl TreemapView {
         self.redraw(cx);
     }
 
-    fn relayout(&mut self, rect: Rect) {
+    fn relayout(&mut self, rect: Rect, now: f64) {
         let base = self.focus_path();
         // The region the *outgoing* layout covered, before it is replaced —
         // the line between a camera reveal and data actually appearing.
@@ -1898,7 +1898,7 @@ impl TreemapView {
         // there to the layout just built.
         if let Some(snapshot) = self.tween_capture.take() {
             let calm = std::mem::take(&mut self.tween_calm);
-            if calm && self.tween_t().is_none() {
+            if calm && self.tween_t(now).is_none() {
                 // A camera-asked settle with nothing already morphing runs
                 // no animation at all. With zoom-invariant packing a
                 // survivor's fresh rect IS its remapped old rect, and the
@@ -1975,7 +1975,7 @@ impl TreemapView {
                         })
                         .collect();
                 }
-                self.tween_start = Some(Instant::now());
+                self.tween_start = Some(now);
             }
         }
         self.laid_out = rect;
@@ -1987,7 +1987,7 @@ impl TreemapView {
         self.layout_yaw = self.yaw;
         self.layout_pitch = self.pitch;
         self.stale = false;
-        self.last_layout = Some(Instant::now());
+        self.last_layout = Some(now);
         // The cell list is new, so the hovered index means nothing any more.
         self.hover = None;
         // The selection is a path, not an index, so it survives — but its
@@ -2083,7 +2083,7 @@ impl TreemapView {
         (scale_rgb(base, depth_shade), 0.62)
     }
 
-    fn draw_map(&mut self, cx: &mut Cx2d, palette: &Palette, clip: Rect) -> Vec<Label> {
+    fn draw_map(&mut self, cx: &mut Cx2d, palette: &Palette, clip: Rect, now: f64) -> Vec<Label> {
         let border_ink = Palette::vec4(&palette.bg_dark);
         let accent = Palette::vec4(&palette.accent);
         let bright = Palette::vec4(&palette.fg_bright);
@@ -2094,7 +2094,7 @@ impl TreemapView {
         // The x-extent and row of every floating name placed so far, for the
         // collision stagger — group names only, so this stays tens long.
         let mut placed_names: Vec<(f64, f64, f64)> = Vec::new();
-        let t = self.tween_t();
+        let t = self.tween_t(now);
         let raised = self.projection != MapProjection::Flat;
         // The flat map's printed names are frozen per relayout and drawn by
         // draw_frozen_labels, riding the remap untouched. Deriving them here,
@@ -2924,6 +2924,7 @@ impl Widget for TreemapView {
                 rect.size.y - CRUMB_H - FOOT_H - 2.0,
             ),
         };
+        let now = cx.seconds_since_app_start();
 
         // Layout before the chrome: the footer reads the pick's numbers and
         // the relayout is what refreshes them, so a frame that did both in
@@ -2931,7 +2932,7 @@ impl Widget for TreemapView {
         // the right one.
         if !self.tree.children.is_empty() {
             if self.laid_out != body {
-                self.relayout(body);
+                self.relayout(body, now);
             } else if self.cam_in_motion() {
                 // A camera gesture owns the picture: it rides the remap,
                 // visually rigid, and the layout underneath only refreshes
@@ -2941,17 +2942,17 @@ impl Widget for TreemapView {
                 // cull. A coarse picture can wait 150ms; bare background
                 // cannot wait one frame — the relayout runs here, before
                 // this same frame paints, so unlaid ground is never shown.
-                if self.view_escaped_cull() || self.motion_refresh_due() {
+                if self.view_escaped_cull() || self.motion_refresh_due(now) {
                     if self.tween_capture.is_none() {
                         self.tween_calm = !self.stale;
-                        self.tween_capture = Some(self.visual_snapshot());
+                        self.tween_capture = Some(self.visual_snapshot(now));
                     }
-                    self.relayout(body);
+                    self.relayout(body, now);
                 } else if self.stale {
                     self.frame = cx.new_next_frame();
                 }
-            } else if self.stale && self.layout_is_due() {
-                self.relayout(body);
+            } else if self.stale && self.layout_is_due(now) {
+                self.relayout(body, now);
             } else if self.stale {
                 // Drawn from a picture the scan has already moved past. The
                 // throttle says not yet, so come back for it — a skipped
@@ -2979,8 +2980,8 @@ impl Widget for TreemapView {
             return DrawStep::done();
         }
 
-        let labels = self.draw_map(cx, palette, body);
-        if self.projection == MapProjection::Flat && self.tween_t().is_none() {
+        let labels = self.draw_map(cx, palette, body, now);
+        if self.projection == MapProjection::Flat && self.tween_t(now).is_none() {
             // Outside a tween the flat map's names are frozen against the
             // layout and merely ride the remap — nothing about them changes
             // frame to frame, which is what keeps a glide quiet.
@@ -2993,7 +2994,7 @@ impl Widget for TreemapView {
 
         // A running tween owns the frame clock; the frame after it ends
         // draws the exact target state, and only then is it let go of.
-        if self.tween_t().is_some() {
+        if self.tween_t(now).is_some() {
             self.frame = cx.new_next_frame();
         } else if self.tween_start.is_some() {
             self.tween_start = None;
@@ -3006,13 +3007,14 @@ impl Widget for TreemapView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let now = cx.seconds_since_app_start();
         if self.frame.is_event(event).is_some() {
             self.step_glides(cx);
-            if self.tween_t().is_some() {
+            if self.tween_t(now).is_some() {
                 self.redraw(cx);
             }
             if self.stale {
-                if self.layout_is_due() {
+                if self.layout_is_due(now) {
                     self.redraw(cx);
                 } else {
                     self.frame = cx.new_next_frame();
@@ -3132,7 +3134,7 @@ impl Widget for TreemapView {
                 self.zoom_glide = Some(ZoomGlide {
                     target: (base * factor).clamp(1.0, 512.0),
                     anchor,
-                    last: Instant::now(),
+                    last: cx.seconds_since_app_start(),
                 });
                 self.frame = cx.new_next_frame();
             }
