@@ -177,6 +177,35 @@ impl Geometry {
         Self::discard_cpu_buffers_inner(cxgeom)
     }
 
+    /// Hand the uploaded staging vectors to the caller instead of freeing
+    /// them here: on the threaded web build a large `free` on the UI thread
+    /// contends the allocator lock with the workers and a contended lock
+    /// there is `Atomics.wait`, which the main thread may not call. The
+    /// caller drops them on a worker (or gives them back with
+    /// [`Geometry::restore_cpu_buffers`]). `None` when not uploaded yet or
+    /// already released.
+    pub fn take_cpu_buffers_if_uploaded(&self, cx: &mut Cx) -> Option<(Vec<u32>, Vec<f32>)> {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        if cxgeom.dirty_vertices || cxgeom.dirty_indices {
+            return None;
+        }
+        if cxgeom.vertices.capacity() == 0 && cxgeom.indices.capacity() == 0 {
+            return None;
+        }
+        Some((
+            std::mem::take(&mut cxgeom.indices),
+            std::mem::take(&mut cxgeom.vertices),
+        ))
+    }
+
+    /// Put staging taken by [`Geometry::take_cpu_buffers_if_uploaded`] back
+    /// (nothing could take the drop); the GPU copy is untouched.
+    pub fn restore_cpu_buffers(&self, cx: &mut Cx, indices: Vec<u32>, vertices: Vec<f32>) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        cxgeom.indices = indices;
+        cxgeom.vertices = vertices;
+    }
+
     /// Drop staging for geometry that is itself being evicted, including a
     /// buffer which never became visible and therefore was never uploaded.
     pub fn discard_cpu_buffers(&self, cx: &mut Cx) -> usize {

@@ -3023,7 +3023,11 @@ impl Widget for MapView {
                 // Once a backend has uploaded a stream, its CPU staging is
                 // dead weight: the GPU copy is the resident one. A tile can
                 // always be rebaked from the archive, so nothing needs the
-                // vectors back.
+                // vectors back. The free itself happens on a pool worker:
+                // on the threaded web build a large free on the UI thread
+                // contends the allocator lock with the bakes, and a
+                // contended lock there is an `Atomics.wait` the main thread
+                // may not make. No pool: the staging simply stays.
                 if pass == 0 {
                     for geometry in [
                         fill_geometry,
@@ -3042,7 +3046,22 @@ impl Widget for MapView {
                     .into_iter()
                     .flatten()
                     {
-                        geometry.discard_cpu_buffers_if_uploaded(cx.cx);
+                        let Some(pool) = self.tile_thread_pool.as_ref() else {
+                            break;
+                        };
+                        let Some((indices, vertices)) =
+                            geometry.take_cpu_buffers_if_uploaded(cx.cx)
+                        else {
+                            continue;
+                        };
+                        match pool.submit(QueueOrder::Fifo, move || drop((indices, vertices))) {
+                            Ok(handle) => handle.detach(),
+                            Err(_) => {
+                                // The pool is full: keep the staging until a
+                                // later frame can hand it over.
+                                break;
+                            }
+                        }
                     }
                 }
                 // Stale higher-bucket tiles keep their baked symbols until
