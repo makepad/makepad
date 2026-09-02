@@ -6967,6 +6967,9 @@ pub struct App {
     audio_contended_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
+    /// The monitor's own dropout count, as last reported.
+    #[rust]
+    audio_phones_starved_seen: u64,
     /// Last lit/unlit state pushed into each chrome button.
     #[rust]
     lit_state: HashMap<u64, bool>,
@@ -13737,21 +13740,44 @@ p2 {}
         // with a cause attached: contended = a UI-thread lock hold silenced
         // a whole callback; render high-water = the render itself is the
         // threat. Atomic reads, so this costs nothing when all is well.
-        let (contended, render_max) = self.mixer.audio_health();
-        if contended != self.audio_contended_seen {
+        let health = self.mixer.audio_health();
+        if health.contended != self.audio_contended_seen {
             log!(
                 "audio: {} SILENT callback(s) from lock contention (+{} since last)",
-                contended,
-                contended - self.audio_contended_seen
+                health.contended,
+                health.contended - self.audio_contended_seen
             );
-            self.audio_contended_seen = contended;
+            self.audio_contended_seen = health.contended;
         }
-        if render_max > self.audio_render_max_seen && render_max > 2_000_000 {
+        // The monitor's own dropout: heard in the cans, invisible in the
+        // room, and until now counted nowhere at all.
+        if health.phones_starved != self.audio_phones_starved_seen {
             log!(
-                "audio: render high-water {:.2}ms",
-                render_max as f64 / 1_000_000.0
+                "audio: phones ran dry {} time(s) (+{} since last)",
+                health.phones_starved,
+                health.phones_starved - self.audio_phones_starved_seen
             );
-            self.audio_render_max_seen = render_max;
+            self.audio_phones_starved_seen = health.phones_starved;
+        }
+        if health.render_max_nanos > self.audio_render_max_seen
+            && health.render_max_nanos > 2_000_000
+        {
+            // The share of the buffer's own playing time this cost is what
+            // says whether the machine is keeping up; the millisecond figure
+            // alone means nothing without the buffer length beside it.
+            match health.budget_used() {
+                Some(share) => log!(
+                    "audio: render high-water {:.2}ms, {:.0}% of a {} frame buffer",
+                    health.render_max_nanos as f64 / 1_000_000.0,
+                    share * 100.0,
+                    health.buffer_frames,
+                ),
+                None => log!(
+                    "audio: render high-water {:.2}ms",
+                    health.render_max_nanos as f64 / 1_000_000.0
+                ),
+            }
+            self.audio_render_max_seen = health.render_max_nanos;
         }
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.

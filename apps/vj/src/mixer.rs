@@ -347,6 +347,47 @@ pub struct SplatFrames {
     pub cells: [[Option<SplatFrameCell>; SPLAT_COLS]; SPLAT_ROWS],
 }
 
+/// What the audio callback has to say about the machine it is running on.
+///
+/// The two failure classes stay apart on purpose. `contended` counts whole
+/// buffers this app silenced by holding the state lock against its own
+/// callback — something the operator can act on by closing a panel.
+/// `render_nanos` against `buffer_frames` and `device_rate` is what the
+/// render actually cost as a fraction of the time it had, which is the
+/// number that says whether the machine is keeping up at all. The lifetime
+/// worst is kept beside it, because a stall that happened once still
+/// happened; but it cannot stand in for the live figure, which is what
+/// having only a high-water meant.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioHealth {
+    /// Whole buffers silenced by lock contention, since the app started.
+    pub contended: u64,
+    /// Buffers the monitor could not fill from the cue ring, since the app
+    /// started. Priming a fresh or re-opened phones device does not count.
+    pub phones_starved: u64,
+    /// What the last rendered buffer cost.
+    pub render_nanos: u64,
+    /// The worst any buffer has cost since the app started.
+    pub render_max_nanos: u64,
+    /// Frames in the last rendered buffer, and the rate it plays at: the
+    /// denominator of the budget.
+    pub buffer_frames: u64,
+    pub device_rate: f64,
+}
+
+impl AudioHealth {
+    /// The share of the last buffer's own playing time that rendering it
+    /// took. Above one the render cannot keep up. `None` before the first
+    /// buffer, or from a device that reports no rate.
+    pub fn budget_used(&self) -> Option<f64> {
+        if self.buffer_frames == 0 || !(self.device_rate > 0.0) {
+            return None;
+        }
+        let available_nanos = self.buffer_frames as f64 / self.device_rate * 1e9;
+        (available_nanos > 0.0).then(|| self.render_nanos as f64 / available_nanos)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DeckSnapshot {
     pub position_secs: f64,
@@ -1070,6 +1111,8 @@ impl ScorePreviewVoice {
 /// (in [`CueRing::consume`]) absorbs both the nominal mismatch and the
 /// drift.
 pub struct CueRing {
+    /// Buffers the monitor could not fill. Priming is not starvation.
+    starved: AtomicU64,
     /// L,R f32 bit patterns packed into one word: a frame is one atomic,
     /// so a frame can never tear.
     buf: Box<[AtomicU64]>,
@@ -1087,6 +1130,7 @@ pub struct CueRing {
 impl CueRing {
     fn new() -> CueRing {
         CueRing {
+            starved: AtomicU64::new(0),
             buf: (0..CUE_RING_FRAMES).map(|_| AtomicU64::new(0)).collect(),
             write_pos: AtomicU64::new(0),
             main_rate_bits: AtomicU64::new(0),
@@ -1161,7 +1205,10 @@ impl CueRing {
             let index = state.cursor_fp >> 32;
             if index + 1 >= wp {
                 // Ran dry: the rest of the buffer stays silent and the
-                // next callback re-primes at depth.
+                // next callback re-primes at depth. Counted, because this is
+                // a dropout the operator hears in the cans and would
+                // otherwise have no name for.
+                self.starved.fetch_add(1, Ordering::Relaxed);
                 state.priming = true;
                 break;
             }
@@ -1254,6 +1301,11 @@ pub struct Mixer {
     /// render that outruns its buffer starves the device with the lock
     /// UNCONTENDED.
     render_max_nanos: Arc<AtomicU64>,
+    /// What the LAST buffer cost, its length, and the monitor's own dropout
+    /// count: the live half of [`AudioHealth`], which a lifetime high-water
+    /// cannot give.
+    render_nanos: Arc<AtomicU64>,
+    buffer_frames: Arc<AtomicU64>,
     /// The headphone cue bus, written by `render`, drained by the phones
     /// device callback (slot 1).
     cue_ring: Arc<CueRing>,
@@ -1309,6 +1361,8 @@ impl Mixer {
             device_rate_bits: Arc::new(AtomicU64::new(0)),
             contended_callbacks: Arc::new(AtomicU64::new(0)),
             render_max_nanos: Arc::new(AtomicU64::new(0)),
+            render_nanos: Arc::new(AtomicU64::new(0)),
+            buffer_frames: Arc::new(AtomicU64::new(0)),
             cue_ring: Arc::new(CueRing::new()),
             deck_snapshots: Arc::new([
                 Published::new(DeckSnapshot::default()),
@@ -1335,13 +1389,19 @@ impl Mixer {
         self.deck_snapshots[index].publish(snapshot);
     }
 
-    /// `(silent contended callbacks, high-water render nanos)` — the two
-    /// distinguishable causes of a heard dropout, for the pump to report.
-    pub fn audio_health(&self) -> (u64, u64) {
-        (
-            self.contended_callbacks.load(Ordering::Relaxed),
-            self.render_max_nanos.load(Ordering::Relaxed),
-        )
+    /// What the callback has to say about this machine, for the pump to
+    /// report and the console to show.
+    pub fn audio_health(&self) -> AudioHealth {
+        AudioHealth {
+            contended: self.contended_callbacks.load(Ordering::Relaxed),
+            // The monitor counts its own: the ring is the only thing that
+            // knows it could not fill a buffer.
+            phones_starved: self.cue_ring.starved.load(Ordering::Relaxed),
+            render_nanos: self.render_nanos.load(Ordering::Relaxed),
+            render_max_nanos: self.render_max_nanos.load(Ordering::Relaxed),
+            buffer_frames: self.buffer_frames.load(Ordering::Relaxed),
+            device_rate: f64::from_bits(self.device_rate_bits.load(Ordering::Relaxed)),
+        }
     }
 
     // ---- video slot buses --------------------------------------------------
@@ -2802,8 +2862,10 @@ impl Mixer {
         self.publish_deck(s, 1);
         self.transition
             .publish_rendered_frame(self.device_frames.load(Ordering::Acquire));
-        self.render_max_nanos
-            .fetch_max(render_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let cost = render_started.elapsed().as_nanos() as u64;
+        self.render_nanos.store(cost, Ordering::Relaxed);
+        self.buffer_frames.store(frames as u64, Ordering::Relaxed);
+        self.render_max_nanos.fetch_max(cost, Ordering::Relaxed);
     }
 }
 
@@ -3584,6 +3646,81 @@ mod tests {
         assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
         let (position, duration, playing) = mixer.deck_position(DeckId::A);
         assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
+    }
+
+    #[test]
+    fn a_rendered_buffer_reports_what_it_cost_and_how_long_it_was() {
+        // A lifetime worst tells an operator nothing about the machine they
+        // are on right now: one stall while the app was starting pins it
+        // for the session. The budget wants the LAST buffer's cost against
+        // that buffer's own length.
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        let health = mixer.audio_health();
+        assert_eq!(health.buffer_frames, 512, "the buffer that was just rendered");
+        assert!(health.render_nanos > 0, "and what it cost");
+        assert_eq!(health.device_rate, 48_000.0);
+        assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
+        render(&mixer, 48_000.0, 256);
+        assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_silenced_buffer_is_counted_and_never_charged_for_time_it_did_not_spend() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        render(&mixer, 48_000.0, 512);
+        let before = mixer.audio_health();
+        let held = mixer.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = held.state.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        render(&mixer, 48_000.0, 512);
+        let after = mixer.audio_health();
+        assert_eq!(after.contended, before.contended + 1, "the silence is counted");
+        assert_eq!(
+            after.render_nanos, before.render_nanos,
+            "and a callback that rendered nothing reports no cost"
+        );
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn the_phones_say_when_they_have_run_dry() {
+        // A programme dropout is counted; a monitor dropout was invisible,
+        // which is the one an operator hears first and can least explain.
+        let mixer = Mixer::new();
+        let ring = mixer.cue_ring();
+        mixer.set_cue_armed(true);
+        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
+        let mut state = CueReadState::default();
+        let mut out = AudioBuffer::new_with_size(256, 2);
+        // Priming with nothing in the ring is not starvation: it is the
+        // monitor waiting to start.
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert_eq!(mixer.audio_health().phones_starved, 0, "priming is not a dropout");
+        // Now fill it and let the monitor start.
+        let filled = CUE_TARGET_FRAMES + 64;
+        for pos in 0..filled {
+            ring.push(pos, 0.5, 0.5);
+        }
+        ring.write_pos.store(filled, Ordering::Release);
+        ring.consume(&mut state, 48_000.0, &mut out);
+        assert_eq!(mixer.audio_health().phones_starved, 0, "a fed monitor is quiet about it");
+        // The programme device stalls: nothing more is pushed, and the
+        // phones device keeps asking until it has drained the ring.
+        for _ in 0..16 {
+            ring.consume(&mut state, 48_000.0, &mut out);
+        }
+        assert!(
+            mixer.audio_health().phones_starved >= 1,
+            "running out mid-buffer is a dropout, and is counted"
+        );
     }
 
     #[test]
