@@ -95,8 +95,8 @@ pub const DEFAULT_INACTIVE_BORDER: Stop = Stop {
     },
     alpha: 0.85,
 };
-const OMARCHY_RAW: &str = "https://raw.githubusercontent.com/basecamp/omarchy/quattro/themes";
-const OMARCHY_API: &str = "https://api.github.com/repos/basecamp/omarchy/contents/themes";
+const OMARCHY_RAW: &str = "https://raw.githubusercontent.com/omacom/omarchy/quattro/themes";
+const OMARCHY_API: &str = "https://api.github.com/repos/omacom/omarchy/contents/themes";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb {

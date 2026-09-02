@@ -23,3 +23,5 @@ path = "src/main.rs"
 makepad-widgets = { path = "../../widgets", features = ["cef"] }
 makepad-cef = { path = "../../libs/cef" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+# The window manager's vocabulary: the bar's title, the polite close.
+makepad-wm-api = { path = "../../libs/wm_api" }

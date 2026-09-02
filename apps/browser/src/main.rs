@@ -265,6 +265,8 @@ impl App {
             format!("{} — browser", info.title)
         };
         self.ui.window(cx, ids!(main_window)).set_title(cx, &title);
+        // The bar shows the page title too when the window manager hosts us.
+        makepad_wm_api::set_title(cx, &title);
 
         if info.render_mode != self.reported_mode && info.render_mode != "None" {
             self.reported_mode = info.render_mode.clone();
@@ -536,6 +538,15 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // The window manager asked politely (SUPER+W): go now, ahead of the
+        // kill that follows its grace. A warm-pool browser needs no waking —
+        // CEF paints nothing until a tile presents it.
+        if let Event::Custom(json) = event {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
+                cx.quit();
+                return;
+            }
+        }
         if let Event::KeyDown(ke) = event {
             if self.handle_shortcut(cx, ke) {
                 return;
