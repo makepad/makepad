@@ -18,6 +18,9 @@ default-run = "makepad-vj"
 [dependencies]
 makepad-app-asset-server = { path = "../asset-server" }
 makepad-widgets = { path = "../../widgets" }
+makepad-score-view = { path = "../../libs/score_view" }
+makepad-piano-model = { path = "../../libs/piano_model" }
+makepad-drumkit = { path = "../../libs/drumkit" }
 makepad-asset-data = { path = "../../libs/asset/data" }
 # Own MP3 / Ogg Vorbis decoders for the music decks and SFX pads.
 makepad-audio-decode = { path = "../../libs/audio_decode" }
@@ -35,7 +38,13 @@ makepad-asset-client = { path = "../../libs/asset/client" }
 # First-use model install (stem splitter + whisper): the asset-ai service's
 # resumable, sha256-verified downloader. Featureless — the same slice the
 # asset UI links — so none of the model backends come along.
-makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["local"] }
+# Hub-installed local models the DJ page runs in-process: Basic Pitch for
+# the bass/melody scores, Beat This! for beats and downbeats; the shared
+# install panel does download + licence acknowledgement.
+makepad-ai-hub-ui = { path = "../../libs/ai/hub_ui" }
+makepad-ai-notes = { path = "../../libs/ai/models/notes" }
+makepad-ai-beats = { path = "../../libs/ai/models/beats" }
 makepad-asset-creator = { path = "../../libs/asset/creator" }  # DREAM runs execute here now
 # The chat pane itself — ONE component, shared with the asset UI and the
 # game sandbox: the session on the server's chat broker, the worker thread,

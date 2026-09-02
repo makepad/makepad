@@ -114,31 +114,6 @@ pub fn console_scale(physical_width: f64, physical_height: f64, native_dpi: f64)
     console_dpi(physical_width, physical_height, native_dpi) / native_dpi
 }
 
-/// The window width, in layout points, below which the explorer and the
-/// queue stop standing side by side and take turns behind tabs.
-///
-/// The queue is a fixed 320 points at every width, so the explorer gets
-/// whatever is left; 560 is where its columns are already down to the narrow
-/// set and the titles start losing their tails. 880 is the two together.
-///
-/// On a 1.5x display with the console at its 0.75 floor that is about 990
-/// device pixels.
-pub const LISTS_TAB_POINTS: f64 = 880.0;
-
-/// Whether the explorer and the queue have to take turns.
-///
-/// `physical_width` is the width the LISTS get, not the window's — see
-/// [`lists_span`]. Standing beside the decks they have about a third of it,
-/// and the queue's fixed 320 points would eat almost all of that: the
-/// explorer came out 36 points wide before this took the lists' own share
-/// as its input.
-pub fn console_lists_tabbed(physical_width: f64, physical_height: f64, native_dpi: f64) -> bool {
-    if !physical_width.is_finite() || !native_dpi.is_finite() || native_dpi <= 0.0 {
-        return false;
-    }
-    physical_width / console_dpi(physical_width, physical_height, native_dpi) < LISTS_TAB_POINTS
-}
-
 /// The physical width the LISTS get: the window, or their share of it once
 /// they stand beside the decks.
 pub fn lists_span(physical_width: f64, physical_height: f64, native_dpi: f64) -> f64 {
@@ -727,32 +702,6 @@ mod tests {
     }
 
     #[test]
-    fn the_lists_take_turns_only_once_they_cannot_stand_side_by_side() {
-        let px = |points: f64, native: f64| points * native * MIN_SCALE;
-        for dpi in [1.0, 1.5, 2.0] {
-            let at = px(LISTS_TAB_POINTS, dpi);
-            assert!(!console_lists_tabbed(at + 1.0, TALL, dpi), "room for both");
-            assert!(!console_lists_tabbed(at, TALL, dpi), "exactly enough is enough");
-            assert!(console_lists_tabbed(at - 1.0, TALL, dpi), "not any more");
-            assert!(console_lists_tabbed(300.0, TALL, dpi));
-        }
-        // The lists give up side-by-side BEFORE the mixer joins the deck
-        // tabs: a console narrow enough to tab its mixer has long since had
-        // to choose between its two lists.
-        let native = 1.5;
-        let lists = px(LISTS_TAB_POINTS, native);
-        let mixer = px(
-            FLANKS_POINTS / 2.0
-                + crate::music_view::STRIP_SWEEP_MIN
-                + crate::music_view::STRIP_ROW_SLACK,
-            native,
-        );
-        assert!(mixer < lists, "{mixer} should come after {lists}");
-        // And on the display this was specified against, about 990 pixels.
-        assert!((lists - 990.0).abs() < 1.0, "{lists} should be about 990 device pixels");
-    }
-
-    #[test]
     fn the_status_bar_takes_a_second_line_only_when_its_controls_will_not_fit() {
         let px = |points: f64, native: f64| points * native * MIN_SCALE;
         for dpi in [1.0, 1.5, 2.0] {
@@ -837,22 +786,6 @@ mod tests {
         assert!(lists >= LISTS_MIN_POINTS, "lists: {lists}");
         // And the decks tab rather than squeeze the middle.
         assert_ne!(console_tabs_for(span), TabStage::None);
-    }
-
-    #[test]
-    fn the_lists_take_turns_once_they_are_down_to_their_share() {
-        // The window that prompted this: standing beside the decks, the
-        // lists get about a third — far too little for a 320-point queue and
-        // a readable explorer side by side, so they tab.
-        let native = 1.5;
-        let (w, h) = (1077.0 * native, 490.0 * native);
-        assert!(console_lists_beside(w, h, native));
-        let span = lists_span(w, h, native);
-        assert!(console_lists_tabbed(span, TALL, native), "their share is {span}px");
-        // Stacked, they have the window and the same call says otherwise.
-        let tall = 900.0 * native;
-        assert_eq!(lists_span(w, tall, native), w);
-        assert!(!console_lists_tabbed(w, TALL, native), "the whole window is plenty");
     }
 
     #[test]

@@ -19,11 +19,17 @@
 
 use crate::cue::SlotId;
 use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
+use crate::loop_splat::{
+    SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
+};
 use crate::music_dsp::{
     DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
+use crate::score_preview::{PreviewEvent, PreviewSequence};
+use makepad_drumkit::{DrumKit, SampleBank};
+use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimedEvent};
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -52,6 +58,10 @@ const LOOP_XFADE_SECS: f64 = 0.010;
 /// than the wrap's: a jump is a deliberate cut and should feel like one,
 /// just not sound like a spark.
 const SEEK_XFADE_SECS: f64 = 0.005;
+/// A launch arriving this far after a downbeat still belongs to that
+/// downbeat instead of waiting almost a full bar.
+const LATE_LAUNCH_BEATS: f64 = 1.0 / 16.0;
+const SPLAT_XFADE_SECS: f64 = 0.005;
 /// Explicit beat-sync (N beats per loop) may ask for wide rates; the
 /// automatic loop-fit keeps its own ≤8% guard (`fit_loop_to_grid`).
 pub const MIN_VIDEO_PLAYBACK_RATE: f64 = 0.25;
@@ -62,6 +72,10 @@ pub const MAX_VIDEO_PLAYBACK_RATE: f64 = 4.0;
 const CUE_TARGET_FRAMES: u64 = 2_048;
 /// Cue ring capacity in frames; a power of two, so the index is a mask.
 const CUE_RING_FRAMES: usize = 16_384;
+/// Platform device callbacks are at most 4096 frames; preview storage is
+/// built once with the instruments and never resized by the callback.
+const SCORE_PREVIEW_MAX_BLOCK: usize = 4_096;
+const SCORE_PREVIEW_GAIN: f32 = 0.72;
 
 /// Which point of the deck chain the headphone cue listens to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -315,6 +329,185 @@ impl TrackStems {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplatFrameCell {
+    pub col: u8,
+    pub start_frames: f64,
+    pub len_frames: f64,
+}
+
+/// The frame-domain form sent to the audio state. Conversion happens on the
+/// caller/UI thread; the callback only indexes fixed arrays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplatFrames {
+    pub bar_frames: f64,
+    pub first_bar_frames: f64,
+    pub cells: [[Option<SplatFrameCell>; SPLAT_COLS]; SPLAT_ROWS],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckSnapshot {
+    pub position_secs: f64,
+    pub duration_secs: f64,
+    pub playing: bool,
+    pub scratching: bool,
+    pub splat: Option<SplatSnapshot>,
+}
+
+impl SplatFrames {
+    pub fn from_grid(grid: &SplatGrid, source_rate: f64) -> Self {
+        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+        for row in SplatRow::ALL {
+            for col in 0..SPLAT_COLS {
+                cells[row.index()][col] = grid.cells[row.index()][col]
+                    .filter(|cell| !cell.silent)
+                    .map(|cell| SplatFrameCell {
+                        col: col as u8,
+                        start_frames: cell.span.start_secs * source_rate,
+                        len_frames: cell.span.len_secs() * source_rate,
+                    });
+            }
+        }
+        Self {
+            bar_frames: grid.bar_secs * source_rate,
+            first_bar_frames: grid.first_bar_secs * source_rate,
+            cells,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowCell {
+    col: u8,
+    part: SplatPart,
+    start_frames: f64,
+    len_frames: f64,
+    anchor_frames: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Queued {
+    cell: Option<RowCell>,
+    at_frames: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SplatFade {
+    outgoing: Option<RowCell>,
+    incoming: Option<RowCell>,
+    start_frames: f64,
+    len_frames: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SplatRowVoice {
+    cell: Option<RowCell>,
+    queued: Option<Queued>,
+    fade: Option<SplatFade>,
+}
+
+struct SplatState {
+    grid: Arc<SplatGrid>,
+    frames: SplatFrames,
+    active: bool,
+    master_frames: f64,
+    rows: [SplatRowVoice; SPLAT_ROWS],
+}
+
+impl SplatState {
+    fn new(grid: Arc<SplatGrid>, frames: SplatFrames, master_frames: f64) -> Self {
+        Self {
+            grid,
+            frames,
+            active: false,
+            master_frames,
+            rows: [SplatRowVoice::default(); SPLAT_ROWS],
+        }
+    }
+
+    fn bar_start_at_or_before(&self, master: f64) -> f64 {
+        if self.frames.bar_frames <= 0.0 || master < self.frames.first_bar_frames {
+            return self.frames.first_bar_frames;
+        }
+        let index = ((master - self.frames.first_bar_frames) / self.frames.bar_frames).floor();
+        self.frames.first_bar_frames + index * self.frames.bar_frames
+    }
+
+    fn next_bar_after(&self, master: f64) -> f64 {
+        let boundary = self.bar_start_at_or_before(master);
+        if master <= boundary {
+            return boundary;
+        }
+        let forgiveness = self.frames.bar_frames * 0.25 * LATE_LAUNCH_BEATS;
+        if master - boundary <= forgiveness {
+            boundary
+        } else {
+            boundary + self.frames.bar_frames
+        }
+    }
+
+    fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart) {
+        if !self.active || col >= SPLAT_COLS || !part.is_valid() {
+            return;
+        }
+        let at_frames = self.next_bar_after(self.master_frames);
+        let Some(cell) = self.frames.cells[row.index()][col] else { return };
+        let denominator = f64::from(part.den);
+        let part_len = cell.len_frames / denominator;
+        self.rows[row.index()].queued = Some(Queued {
+            cell: Some(RowCell {
+                col: cell.col,
+                part,
+                start_frames: cell.start_frames + f64::from(part.num) * part_len,
+                len_frames: part_len.max(1.0),
+                anchor_frames: at_frames,
+            }),
+            at_frames,
+        });
+    }
+
+    /// A plain stop is immediate: the loop goes quiet on the next rendered
+    /// frame through the same equal-power fade a swap uses. A timed stop
+    /// (shift-click) waits for the next bar like a launch does.
+    fn queue_stop(&mut self, row: SplatRow, timed: bool) {
+        if !self.active {
+            return;
+        }
+        let at_frames = if timed {
+            self.next_bar_after(self.master_frames)
+        } else {
+            self.master_frames
+        };
+        self.rows[row.index()].queued = Some(Queued { cell: None, at_frames });
+    }
+
+    fn snapshot(&self) -> SplatSnapshot {
+        let bar = if self.frames.bar_frames > 0.0 {
+            (self.master_frames - self.frames.first_bar_frames) / self.frames.bar_frames
+        } else {
+            0.0
+        };
+        let mut snapshot = SplatSnapshot {
+            active: self.active,
+            bar_index: bar.floor() as i64,
+            bar_phase: bar.rem_euclid(1.0) as f32,
+            ..SplatSnapshot::default()
+        };
+        for row in SplatRow::ALL {
+            let voice = self.rows[row.index()];
+            snapshot.playing[row.index()] = voice.cell.map(|cell| (cell.col, cell.part));
+            snapshot.queued[row.index()] = voice
+                .queued
+                .and_then(|queued| queued.cell.map(|cell| (cell.col, cell.part)));
+            snapshot.row_phase[row.index()] = voice.cell.map_or(0.0, |cell| {
+                ((self.master_frames - cell.anchor_frames).rem_euclid(cell.len_frames)
+                    / cell.len_frames) as f32
+            });
+        }
+        snapshot
+    }
+}
+
 /// What a deck's DSP chain reads from: the full mix, or the stem lanes
 /// summed under their current gains.
 struct DeckSource<'a> {
@@ -438,6 +631,7 @@ struct SeekFade {
 struct DeckVoice {
     pcm: Option<Arc<TrackPcm>>,
     stems: Option<Arc<TrackStems>>,
+    splat: Option<SplatState>,
     /// Playhead in SOURCE frames. Fractional, and free to run backwards
     /// under a hand on the waveform.
     pos: f64,
@@ -476,6 +670,7 @@ impl DeckVoice {
         DeckVoice {
             pcm: None,
             stems: None,
+            splat: None,
             pos: 0.0,
             playing: false,
             loop_span: None,
@@ -512,6 +707,9 @@ impl DeckVoice {
     fn seek_frames(&mut self, frames: f64) {
         let len = self.frame_count() as f64;
         self.pos = frames.clamp(0.0, len);
+        if let Some(splat) = self.splat.as_mut().filter(|splat| splat.active) {
+            splat.master_frames = self.pos;
+        }
         self.stretch.reset_to(self.pos);
         self.reader.reset();
         self.ended = false;
@@ -519,6 +717,9 @@ impl DeckVoice {
 
     /// Where the playhead really is, whichever path is driving it.
     fn playhead_frames(&self) -> f64 {
+        if let Some(splat) = self.splat.as_ref().filter(|splat| splat.active) {
+            return splat.master_frames;
+        }
         if self.stretching {
             self.stretch.position()
         } else {
@@ -537,6 +738,105 @@ impl DeckVoice {
         let total = (SEEK_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
         self.seek_fade = Some(SeekFade { pos: from, left: total, total });
     }
+}
+
+#[inline]
+fn splat_stem_frame(stems: Option<&TrackStems>, stem: usize, index: usize) -> [f32; 2] {
+    let Some(stems) = stems else { return [0.0, 0.0] };
+    let chunk = index / stems.chunk_frames;
+    let offset = index - chunk * stems.chunk_frames;
+    let Some(Some(block)) = stems.lanes[stem].get(chunk) else { return [0.0, 0.0] };
+    let Some(frame) = block.get(offset) else { return [0.0, 0.0] };
+    let scale = STEM_CHUNK_HEADROOM / 32768.0;
+    [frame[0] as f32 * scale, frame[1] as f32 * scale]
+}
+
+#[inline]
+fn splat_cell_frame(
+    row: SplatRow,
+    cell: RowCell,
+    master_frames: f64,
+    pcm: &TrackPcm,
+    stems: Option<&TrackStems>,
+    stem_gain: [f32; STEM_COUNT],
+) -> [f32; 2] {
+    let offset = (master_frames - cell.anchor_frames).rem_euclid(cell.len_frames.max(1.0));
+    let position = cell.start_frames + offset;
+    let index = position.floor().max(0.0) as usize;
+    let fraction = (position - index as f64) as f32;
+    let next_offset = (offset + 1.0).rem_euclid(cell.len_frames.max(1.0));
+    let next = (cell.start_frames + next_offset).floor().max(0.0) as usize;
+    let read = |at| match row.stem() {
+        Some(stem) => {
+            let mut frame = splat_stem_frame(stems, stem.index(), at);
+            let gain = stem_gain[stem.index()];
+            frame[0] *= gain;
+            frame[1] *= gain;
+            frame
+        }
+        None => pcm.frame_f32(at),
+    };
+    let a = read(index);
+    let b = read(next);
+    [
+        a[0] + (b[0] - a[0]) * fraction,
+        a[1] + (b[1] - a[1]) * fraction,
+    ]
+}
+
+/// Splat reads bypass the stretcher and rate reader: every source position is
+/// a pure function of the shared master clock, so feeding discontinuous row
+/// loops to a stateful monotonic reader would weaken the phase guarantee.
+fn render_splat_source(
+    splat: &mut SplatState,
+    pcm: &TrackPcm,
+    stems: Option<&TrackStems>,
+    stem_gain: [f32; STEM_COUNT],
+    source_step: f64,
+) -> [f32; 2] {
+    let master = splat.master_frames;
+    let fade_frames = (SPLAT_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
+    let mut sum = [0.0f32; 2];
+    for row in SplatRow::ALL {
+        let voice = &mut splat.rows[row.index()];
+        if let Some(queued) = voice.queued.filter(|queued| master >= queued.at_frames) {
+            voice.queued = None;
+            voice.fade = Some(SplatFade {
+                outgoing: voice.cell,
+                incoming: queued.cell,
+                start_frames: queued.at_frames,
+                len_frames: fade_frames,
+            });
+            voice.cell = queued.cell;
+        }
+        let frame = if let Some(fade) = voice.fade {
+            let phase = ((master - fade.start_frames) / fade.len_frames).clamp(0.0, 1.0) as f32;
+            let outgoing = fade.outgoing.map_or([0.0, 0.0], |cell| {
+                splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
+            });
+            let incoming = fade.incoming.map_or([0.0, 0.0], |cell| {
+                splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
+            });
+            let angle = phase * std::f32::consts::FRAC_PI_2;
+            let out_gain = angle.cos();
+            let in_gain = angle.sin();
+            if phase >= 1.0 {
+                voice.fade = None;
+            }
+            [
+                outgoing[0] * out_gain + incoming[0] * in_gain,
+                outgoing[1] * out_gain + incoming[1] * in_gain,
+            ]
+        } else {
+            voice.cell.map_or([0.0, 0.0], |cell| {
+                splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
+            })
+        };
+        sum[0] += frame[0];
+        sum[1] += frame[1];
+    }
+    splat.master_frames += source_step;
+    sum
 }
 
 struct SfxVoice {
@@ -570,6 +870,186 @@ impl PreviewVoice {
             playing: false,
             gain: Ramp::at(0.0),
             ended: false,
+        }
+    }
+}
+
+struct ScorePreviewVoice {
+    piano: Box<Piano>,
+    kit: DrumKit,
+    drum_bank: Option<Arc<SampleBank>>,
+    sequence: Option<Arc<PreviewSequence>>,
+    pos: u64,
+    playing: bool,
+    gain: ParamRamp,
+    scratch: Vec<[f32; 2]>,
+    piano_left: Vec<f32>,
+    piano_right: Vec<f32>,
+    piano_events: Vec<PianoTimedEvent>,
+    sample_rate: u32,
+}
+
+impl ScorePreviewVoice {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            piano: Box::new(Piano::new(sample_rate as f32)),
+            kit: DrumKit::new(sample_rate as f32),
+            drum_bank: None,
+            sequence: None,
+            pos: 0,
+            playing: false,
+            gain: ParamRamp::at(SCORE_PREVIEW_GAIN),
+            scratch: vec![[0.0; 2]; SCORE_PREVIEW_MAX_BLOCK],
+            piano_left: vec![0.0; SCORE_PREVIEW_MAX_BLOCK],
+            piano_right: vec![0.0; SCORE_PREVIEW_MAX_BLOCK],
+            piano_events: Vec::new(),
+            sample_rate,
+        }
+    }
+
+    fn replace_instruments(&mut self, piano: Box<Piano>, sample_rate: u32) -> Box<Piano> {
+        let retired = std::mem::replace(&mut self.piano, piano);
+        let mut kit = DrumKit::new(sample_rate as f32);
+        if let Some(bank) = &self.drum_bank {
+            kit.set_bank(bank.clone());
+        }
+        self.kit = kit;
+        self.sample_rate = sample_rate;
+        retired
+    }
+
+    fn set_drum_bank(&mut self, bank: Arc<SampleBank>) -> Option<Arc<SampleBank>> {
+        self.kit.set_bank(bank.clone());
+        self.drum_bank.replace(bank)
+    }
+
+    fn silence_piano(&mut self) {
+        let mut left = [0.0];
+        let mut right = [0.0];
+        self.piano.process(
+            &[PianoTimedEvent { offset: 0, event: PianoEvent::AllSoundOff }],
+            &mut left,
+            &mut right,
+        );
+    }
+
+    fn stop(&mut self, reset_position: bool) {
+        self.playing = false;
+        if reset_position {
+            self.pos = 0;
+        }
+        self.silence_piano();
+        self.kit.all_off();
+    }
+
+    fn required_event_capacity(sequence: &PreviewSequence) -> usize {
+        // One host block can cross several very short synthetic loops. Size
+        // for every possible repeat here on the UI thread so `push` below
+        // retains its no-allocation contract even for such test sequences.
+        let repeats = (SCORE_PREVIEW_MAX_BLOCK as u64 / sequence.len_frames.max(1))
+            .saturating_add(2) as usize;
+        sequence
+            .events
+            .len()
+            .saturating_add(1)
+            .saturating_mul(repeats)
+            .saturating_add(2)
+    }
+
+    fn play(&mut self, sequence: Arc<PreviewSequence>) -> Option<Arc<PreviewSequence>> {
+        self.stop(true);
+        debug_assert!(
+            self.piano_events.capacity() >= Self::required_event_capacity(&sequence),
+            "score preview event storage must be prepared off the audio thread"
+        );
+        let retired = self.sequence.replace(sequence);
+        self.pos = 0;
+        self.playing = true;
+        self.gain.jump(SCORE_PREVIEW_GAIN);
+        retired
+    }
+
+    /// Fill the pre-master preview block. Trigger discovery is sample-based
+    /// so kit hits and loop resets land exactly; the piano receives the same
+    /// offsets in one allocation-free timed-event call.
+    fn render_block(&mut self, frames: usize, device_rate: f64) {
+        let frames = frames.min(SCORE_PREVIEW_MAX_BLOCK);
+        self.scratch[..frames].fill([0.0; 2]);
+        self.piano_left[..frames].fill(0.0);
+        self.piano_right[..frames].fill(0.0);
+        self.piano_events.clear();
+        if frames == 0 || !self.playing {
+            return;
+        }
+        let Some(sequence) = self.sequence.as_ref() else {
+            self.playing = false;
+            return;
+        };
+        if sequence.sample_rate != self.sample_rate
+            || (device_rate - sequence.sample_rate as f64).abs() >= 0.5
+        {
+            self.playing = false;
+            self.kit.all_off();
+            self.silence_piano();
+            return;
+        }
+
+        let len = sequence.len_frames.max(1);
+        let mut event_index = sequence.events.partition_point(|event| event.0 < self.pos);
+        let mut reset_after_block = false;
+        for frame in 0..frames {
+            while let Some((at, event)) = sequence.events.get(event_index) {
+                if *at != self.pos {
+                    break;
+                }
+                match *event {
+                    PreviewEvent::Piano(event) => self.piano_events.push(PianoTimedEvent {
+                        offset: frame as u32,
+                        event,
+                    }),
+                    PreviewEvent::Drum { voice, velocity } => self.kit.trigger(voice, velocity),
+                }
+                event_index += 1;
+            }
+            self.kit.process(std::slice::from_mut(&mut self.scratch[frame]));
+            self.pos = self.pos.saturating_add(1);
+            if self.pos < len {
+                continue;
+            }
+
+            self.kit.all_off();
+            if frame + 1 < frames {
+                self.piano_events.push(PianoTimedEvent {
+                    offset: (frame + 1) as u32,
+                    event: PianoEvent::AllSoundOff,
+                });
+            } else {
+                reset_after_block = true;
+            }
+            if sequence.looped {
+                self.pos = 0;
+                event_index = 0;
+            } else {
+                self.pos = len;
+                self.playing = false;
+                break;
+            }
+        }
+
+        self.piano.process(
+            &self.piano_events,
+            &mut self.piano_left[..frames],
+            &mut self.piano_right[..frames],
+        );
+        for frame in 0..frames {
+            let gain = self.gain.tick(self.sample_rate as f32);
+            self.scratch[frame][0] += self.piano_left[frame];
+            self.scratch[frame][1] += self.piano_right[frame];
+            self.scratch[frame][0] *= gain;
+            self.scratch[frame][1] *= gain;
+        }
+        if reset_after_block {
+            self.silence_piano();
         }
     }
 }
@@ -733,6 +1213,7 @@ struct MixState {
     cue_deck: [bool; 2],
     cue_mode: CueMode,
     preview: PreviewVoice,
+    score_preview: ScorePreviewVoice,
 }
 
 /// Peak meters (f32 bits): master, video, deck A, deck B, sfx.
@@ -765,6 +1246,12 @@ pub struct Mixer {
     cue_ring: Arc<CueRing>,
 }
 
+/// Infrequent UI-to-audio-state handoffs that carry prepared immutable
+/// resources rather than scalar deck controls.
+pub enum MixCmd {
+    SetDrumBank(Arc<SampleBank>),
+}
+
 impl Default for Mixer {
     fn default() -> Self {
         Self::new()
@@ -789,6 +1276,7 @@ impl Mixer {
                 cue_deck: [false; 2],
                 cue_mode: CueMode::default(),
                 preview: PreviewVoice::new(),
+                score_preview: ScorePreviewVoice::new(48_000),
             })),
             meters: Arc::new([
                 AtomicU32::new(0),
@@ -1144,6 +1632,7 @@ impl Mixer {
         let d = &mut s.decks[deck.index()];
         d.pcm = Some(pcm);
         d.stems = None;
+        d.splat = None;
         d.playing = false;
         d.seek_frames(0.0);
         d.eq.reset();
@@ -1157,6 +1646,7 @@ impl Mixer {
         let d = &mut s.decks[deck.index()];
         d.pcm = None;
         d.stems = None;
+        d.splat = None;
         d.playing = false;
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
@@ -1184,12 +1674,87 @@ impl Mixer {
         let d = &mut s.decks[deck.index()];
         if playing {
             // Playing from the end restarts.
-            if d.pos >= d.frame_count() as f64 {
+            if d.playhead_frames() >= d.frame_count() as f64
+                && !d.splat.as_ref().is_some_and(|splat| splat.active)
+            {
                 d.seek_frames(0.0);
             }
             d.ended = false;
         }
         d.playing = playing;
+    }
+
+    /// Install or replace a grid. Frame conversion is deliberately done
+    /// here, on the caller thread, before the callback sees the state.
+    pub fn set_deck_splat(&self, deck: DeckId, grid: Arc<SplatGrid>) {
+        let mut state = self.state.lock().unwrap();
+        let voice = &mut state.decks[deck.index()];
+        let Some(pcm) = voice.pcm.as_ref() else { return };
+        let frames = SplatFrames::from_grid(&grid, pcm.sample_rate.max(1) as f64);
+        match voice.splat.as_mut() {
+            Some(splat) => {
+                splat.grid = grid;
+                splat.frames = frames;
+            }
+            None => voice.splat = Some(SplatState::new(grid, frames, voice.pos)),
+        }
+    }
+
+    pub fn set_deck_splat_enabled(&self, deck: DeckId, on: bool) {
+        let mut state = self.state.lock().unwrap();
+        let voice = &mut state.decks[deck.index()];
+        let frame_count = voice.frame_count() as f64;
+        let Some(splat) = voice.splat.as_mut() else { return };
+        if on == splat.active {
+            return;
+        }
+        if on {
+            splat.master_frames = splat.bar_start_at_or_before(voice.pos).clamp(0.0, frame_count);
+            splat.active = true;
+            voice.stretching = false;
+            voice.reader.reset();
+        } else {
+            let master = splat.master_frames.clamp(0.0, frame_count);
+            splat.active = false;
+            voice.seek_frames(master);
+        }
+    }
+
+    pub fn splat_launch(&self, deck: DeckId, row: SplatRow, col: u8, part: SplatPart) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
+            splat.queue_cell(row, col as usize, part);
+        }
+    }
+
+    pub fn splat_stop_row(&self, deck: DeckId, row: SplatRow, timed: bool) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
+            splat.queue_stop(row, timed);
+        }
+    }
+
+    /// Launch a whole section: every STEM row of the column. The mix row is
+    /// the undemixed track and never plays under its own stems.
+    pub fn splat_launch_scene(&self, deck: DeckId, col: u8) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
+            for row in SplatRow::ALL {
+                if row == SplatRow::Mix {
+                    continue;
+                }
+                splat.queue_cell(row, col as usize, SplatPart::WHOLE);
+            }
+        }
+    }
+
+    pub fn splat_stop_all(&self, deck: DeckId, timed: bool) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
+            for row in SplatRow::ALL {
+                splat.queue_stop(row, timed);
+            }
+        }
     }
 
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
@@ -1379,19 +1944,28 @@ impl Mixer {
         }
     }
 
-    /// `(position_secs, duration_secs, playing, scratching)` in ONE lock.
-    /// The per-frame UI path uses this: the audio callback only `try_lock`s,
-    /// so every extra grab from the UI is a chance of a silent buffer.
-    pub fn deck_snapshot(&self, deck: DeckId) -> (f64, f64, bool, bool) {
+    /// Position, transport and splat state in one lock. The per-frame UI path
+    /// uses this because every extra grab competes with the callback's
+    /// `try_lock`.
+    pub fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
         let s = self.state.lock().unwrap();
         let d = &s.decks[deck.index()];
         let scratching = d.scratch.active();
         match &d.pcm {
-            None => (0.0, 0.0, false, scratching),
-            Some(pcm) => {
-                let position = d.playhead_frames() / pcm.sample_rate.max(1) as f64;
-                (position, pcm.seconds(), d.playing, scratching)
-            }
+            None => DeckSnapshot {
+                position_secs: 0.0,
+                duration_secs: 0.0,
+                playing: false,
+                scratching,
+                splat: None,
+            },
+            Some(pcm) => DeckSnapshot {
+                position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
+                duration_secs: pcm.seconds(),
+                playing: d.playing,
+                scratching,
+                splat: d.splat.as_ref().map(SplatState::snapshot),
+            },
         }
     }
 
@@ -1561,6 +2135,60 @@ impl Mixer {
         Some((position, pcm.seconds(), p.playing, p.ended))
     }
 
+    // ---- loop-score preview ------------------------------------------------
+
+    /// Deliver a prepared resource to the state owned by the audio callback.
+    /// The short mutex handoff is the same path used by deck commands; the
+    /// callback itself still only `try_lock`s and never blocks.
+    pub fn run_cmd(&self, command: MixCmd) {
+        let retired = {
+            let mut state = self.state.lock().unwrap();
+            match command {
+                MixCmd::SetDrumBank(bank) => state.score_preview.set_drum_bank(bank),
+            }
+        };
+        // A replaced sample bank may own large buffers. Release its last Arc
+        // outside the shared audio-state lock.
+        drop(retired);
+    }
+
+    /// Install and start a score preview. Instrument construction and event
+    /// capacity growth happen here on the caller/UI thread, never in render.
+    pub fn score_preview_play(&self, sequence: Arc<PreviewSequence>) {
+        let sample_rate = sequence.sample_rate.max(1);
+        let needed = ScorePreviewVoice::required_event_capacity(&sequence);
+        let (rebuild, grow_events) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.score_preview.sample_rate != sample_rate,
+                state.score_preview.piano_events.capacity() < needed,
+            )
+        };
+        let piano = rebuild.then(|| Box::new(Piano::new(sample_rate as f32)));
+        let events = grow_events.then(|| Vec::with_capacity(needed));
+        let mut state = self.state.lock().unwrap();
+        let retired_piano = piano.map(|piano| {
+            state.score_preview.replace_instruments(piano, sample_rate)
+        });
+        let retired_events = events.map(|events| {
+            std::mem::replace(&mut state.score_preview.piano_events, events)
+        });
+        let retired_sequence = state.score_preview.play(sequence);
+        drop(state);
+        drop(retired_piano);
+        drop(retired_events);
+        drop(retired_sequence);
+    }
+
+    pub fn score_preview_stop(&self) {
+        self.state.lock().unwrap().score_preview.stop(true);
+    }
+
+    pub fn score_preview_state(&self) -> (bool, u64) {
+        let state = self.state.lock().unwrap();
+        (state.score_preview.playing, state.score_preview.pos)
+    }
+
     // ---- the device callback ------------------------------------------------
 
     /// Mix one device buffer. The buffer must already be zeroed; on lock
@@ -1637,6 +2265,7 @@ impl Mixer {
             voice.eq.set_sample_rate(rate);
             voice.eq.prepare_block();
         }
+        s.score_preview.render_block(frames, device_rate);
 
         // The headphone cue bus. `buffer_start` keeps the ring's write
         // position monotonic across contended-silent buffers: a skipped
@@ -1727,6 +2356,36 @@ impl Mixer {
                 if pcm.frames.is_empty() {
                     continue;
                 }
+                let natural_step = pcm.sample_rate as f64 / device_rate;
+                if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
+                    // Splat owns source time. Rate, key lock and scratch are
+                    // intentionally ignored; the shared master advances at
+                    // the track's natural rate and every row derives from it.
+                    if !d.playing {
+                        continue;
+                    }
+                    let frame = render_splat_source(
+                        splat,
+                        pcm,
+                        deck_stems[i].as_deref(),
+                        stem_gain,
+                        natural_step,
+                    );
+                    let toned = d.eq.process(frame, rate);
+                    let pre = [toned[0] * gain, toned[1] * gain];
+                    deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
+                    deck_out[i] = (pre[0] * side, pre[1] * side);
+                    if cue_armed && cue_deck_on[i] {
+                        let (cue_left, cue_right) = match cue_mode {
+                            CueMode::Raw => (frame[0], frame[1]),
+                            CueMode::Pfl => (toned[0], toned[1]),
+                            CueMode::PostFader => (deck_out[i].0, deck_out[i].1),
+                        };
+                        cue.0 += cue_left;
+                        cue.1 += cue_right;
+                    }
+                    continue;
+                }
                 // A hand on the record plays even a paused deck; that is the
                 // whole point of scrubbing.
                 if !scratching && (!d.playing || d.ended) {
@@ -1737,7 +2396,6 @@ impl Mixer {
                     stems: deck_stems[i].as_deref(),
                     stem_gain,
                 };
-                let natural_step = pcm.sample_rate as f64 / device_rate;
                 let length = pcm.frames.len();
 
                 // Tempo and pitch, split into the two stages that can each
@@ -2027,10 +2685,11 @@ impl Mixer {
                 cue_pos = cue_pos.saturating_add(1);
             }
 
+            let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
             let master = s.master.tick(rate);
-            let l = ((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0) * master)
+            let l = ((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master)
                 .clamp(-CLAMP, CLAMP);
-            let r = ((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1) * master)
+            let r = ((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master)
                 .clamp(-CLAMP, CLAMP);
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
@@ -2097,6 +2756,16 @@ impl Mixer {
 mod tests {
     use super::*;
 
+    fn local_drum_bank() -> Option<Arc<SampleBank>> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/score-corpus/drums/OH");
+        if !dir.is_dir() {
+            eprintln!("skipping score preview drum test: {} is absent", dir.display());
+            return None;
+        }
+        Some(Arc::new(SampleBank::load(&dir).expect("load local Salamander corpus")))
+    }
+
     fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
         Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
     }
@@ -2116,6 +2785,97 @@ mod tests {
         let mut buffer = AudioBuffer::new_with_size(frames, 2);
         mixer.render(rate, &mut buffer);
         buffer
+    }
+
+    #[test]
+    fn score_preview_enters_program_before_master_and_stops_at_end() {
+        let Some(bank) = local_drum_bank() else { return };
+        let mixer = Mixer::new();
+        mixer.run_cmd(MixCmd::SetDrumBank(bank));
+        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        let sequence = Arc::new(PreviewSequence {
+            sample_rate: 48_000,
+            events: vec![(
+                0,
+                PreviewEvent::Drum { voice: makepad_drumkit::DrumVoice::Kick, velocity: 1.0 },
+            )],
+            len_frames: 512,
+            looped: false,
+        });
+        mixer.score_preview_play(sequence.clone());
+        let first = render(&mixer, 48_000.0, 256);
+        assert!(first.channel(0).iter().any(|sample| sample.abs() > 1.0e-5));
+        assert_eq!(mixer.score_preview_state(), (true, 256));
+        let _ = render(&mixer, 48_000.0, 256);
+        assert_eq!(mixer.score_preview_state(), (false, 512));
+        mixer.score_preview_stop();
+        assert_eq!(mixer.score_preview_state(), (false, 0));
+
+        mixer.state.lock().unwrap().master = Ramp::at(0.0);
+        mixer.score_preview_play(sequence);
+        let muted = render(&mixer, 48_000.0, 256);
+        assert!(muted.channel(0).iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn score_preview_is_block_size_deterministic() {
+        let Some(bank) = local_drum_bank() else { return };
+        let run = |block: usize| {
+            let mixer = Mixer::new();
+            mixer.run_cmd(MixCmd::SetDrumBank(bank.clone()));
+            mixer.state.lock().unwrap().master = Ramp::at(1.0);
+            mixer.score_preview_play(Arc::new(PreviewSequence {
+                sample_rate: 48_000,
+                events: vec![
+                    (
+                        0,
+                        PreviewEvent::Drum {
+                            voice: makepad_drumkit::DrumVoice::Kick,
+                            velocity: 0.8,
+                        },
+                    ),
+                    (
+                        317,
+                        PreviewEvent::Drum {
+                            voice: makepad_drumkit::DrumVoice::HiHatClosed,
+                            velocity: 0.6,
+                        },
+                    ),
+                ],
+                len_frames: 1_024,
+                looped: false,
+            }));
+            let mut rendered = Vec::new();
+            let mut left = 1_024;
+            while left > 0 {
+                let count = block.min(left);
+                let out = render(&mixer, 48_000.0, count);
+                rendered.extend(out.channel(0).iter().map(|sample| sample.to_bits()));
+                left -= count;
+            }
+            rendered
+        };
+        assert_eq!(run(64), run(256));
+    }
+
+    #[test]
+    fn score_preview_piano_receives_sample_timed_events() {
+        let mixer = Mixer::new();
+        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        mixer.score_preview_play(Arc::new(PreviewSequence {
+            sample_rate: 48_000,
+            events: vec![
+                (0, PreviewEvent::Piano(PianoEvent::Sustain { value: 0.0 })),
+                (17, PreviewEvent::Piano(PianoEvent::NoteOn { key: 60, velocity: 96 })),
+                (1_024, PreviewEvent::Piano(PianoEvent::NoteOff { key: 60 })),
+            ],
+            len_frames: 2_048,
+            looped: false,
+        }));
+        let out = render(&mixer, 48_000.0, 2_048);
+        assert!(out.channel(0).iter().all(|sample| sample.is_finite()));
+        assert!(out.channel(0).iter().any(|sample| sample.abs() > 1.0e-5));
+        assert_eq!(mixer.score_preview_state(), (false, 2_048));
     }
 
     #[test]
@@ -3370,6 +4130,240 @@ mod tests {
             underruns == 0,
             "steady mismatched rates must never underrun: {underruns}"
         );
+    }
+
+    fn splat_fixture(missing_drums: bool) -> (Mixer, u32) {
+        use crate::loop_splat::{SplatCell, SplatSection};
+
+        let rate = 1_000u32;
+        let frame_count = rate as usize * 16;
+        let pcm = const_pcm(12_000, frame_count, rate);
+        let mut stems = TrackStems::new(frame_count, 1);
+        for stem in 0..STEM_COUNT {
+            if missing_drums && stem == crate::music_dsp::StemKind::Drums.index() {
+                continue;
+            }
+            let samples = (0..frame_count)
+                .map(|frame| {
+                    let col = (frame / 2_000).min(7);
+                    let amplitude = match stem {
+                        1 => {
+                            0.08
+                                + col as f32 * 0.025
+                                + (frame % 2_000) as f32 / 2_000.0 * 0.02
+                        }
+                        2 => 0.06,
+                        0 => 0.04,
+                        _ => 0.02,
+                    };
+                    let value = encode_stem_sample(amplitude);
+                    [value, value]
+                })
+                .collect();
+            stems.lanes[stem][0] = Some(Arc::new(samples));
+        }
+        let sections = (0..SPLAT_COLS)
+            .map(|col| SplatSection {
+                start_secs: col as f64 * 2.0,
+                end_secs: (col + 1) as f64 * 2.0,
+                bars: 1,
+            })
+            .collect();
+        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+        for row in SplatRow::ALL {
+            for col in 0..SPLAT_COLS {
+                cells[row.index()][col] = Some(SplatCell {
+                    span: crate::decks::LoopSpan {
+                        start_secs: col as f64 * 2.0,
+                        end_secs: (col + 1) as f64 * 2.0,
+                    },
+                    bars: 1,
+                    energy: 1.0,
+                    silent: false,
+                });
+            }
+        }
+        let grid = Arc::new(SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs: 0.0,
+            sections,
+            cells,
+            bars_per_col: [1; SPLAT_COLS],
+        });
+        let mixer = Mixer::new();
+        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        mixer.install_deck(DeckId::A, pcm);
+        mixer.install_deck_stems(DeckId::A, Arc::new(stems));
+        mixer.set_deck_splat(DeckId::A, grid);
+        mixer.set_deck_splat_enabled(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::A, true);
+        (mixer, rate)
+    }
+
+    fn render_count(mixer: &Mixer, rate: u32, mut frames: usize, block: usize) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(frames);
+        while frames > 0 {
+            let count = frames.min(block);
+            let output = render(mixer, rate as f64, count);
+            samples.extend_from_slice(output.channel(0));
+            frames -= count;
+        }
+        samples
+    }
+
+    #[test]
+    fn splat_launch_swap_phase_stop_and_transport_return_are_quantized() {
+        let (mixer, rate) = splat_fixture(false);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, SplatPart::WHOLE);
+        let before = render_count(&mixer, rate, 1_700, 256);
+        assert!(before.iter().all(|sample| sample.abs() < 1e-7));
+        // The equal-power fade begins on source frame 2000. Its first sample
+        // has zero incoming gain; the immediately following sample is live.
+        let onset = render_count(&mixer, rate, 2, 64);
+        assert!(onset[0].abs() < 1e-7 && onset[1].abs() > 1e-5);
+
+        render_count(&mixer, rate, 500, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 3, SplatPart::WHOLE);
+        render_count(&mixer, rate, 1_504, 256);
+        {
+            let state = mixer.state.lock().unwrap();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            let cell = splat.rows[SplatRow::Drums.index()].cell.unwrap();
+            assert_eq!(cell.col, 3);
+            assert!((cell.anchor_frames - 4_000.0).abs() <= 1.0);
+            let derived = cell.start_frames
+                + (splat.master_frames - cell.anchor_frames).rem_euclid(cell.len_frames);
+            assert!((derived - 6_006.0).abs() <= 1.0, "derived read: {derived}");
+        }
+
+        mixer.splat_launch(DeckId::A, SplatRow::Bass, 0, SplatPart::WHOLE);
+        render_count(&mixer, rate, 2_000, 1_024);
+        let snapshot = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+        assert_eq!(
+            snapshot.playing[SplatRow::Bass.index()],
+            Some((0, SplatPart::WHOLE))
+        );
+        assert!(
+            (snapshot.row_phase[SplatRow::Drums.index()]
+                - snapshot.row_phase[SplatRow::Bass.index()])
+                .abs()
+                < 1e-6
+        );
+
+        mixer.splat_stop_all(DeckId::A, true);
+        render_count(&mixer, rate, 2_010, 256);
+        let stopped = render(&mixer, rate as f64, 32);
+        assert!(stopped.channel(0).iter().all(|sample| sample.abs() < 1e-7));
+
+        let master = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.set_deck_splat_enabled(DeckId::A, false);
+        let normal = mixer.deck_snapshot(DeckId::A);
+        assert!((normal.position_secs - master).abs() <= 1.0 / rate as f64);
+        assert!(normal.splat.is_some_and(|splat| !splat.active));
+    }
+
+    #[test]
+    fn splat_render_is_identical_across_block_sizes() {
+        let run = |block| {
+            let (mixer, rate) = splat_fixture(false);
+            render_count(&mixer, rate, 300, block);
+            mixer.splat_launch(
+                DeckId::A,
+                SplatRow::Drums,
+                2,
+                SplatPart { num: 1, den: 2 },
+            );
+            mixer.splat_launch(
+                DeckId::A,
+                SplatRow::Bass,
+                4,
+                SplatPart { num: 3, den: 4 },
+            );
+            render_count(&mixer, rate, 5_000, block)
+        };
+        assert_eq!(run(64), run(256));
+        assert_eq!(run(64), run(1_024));
+    }
+
+    #[test]
+    fn splat_quarter_reads_and_wraps_only_the_selected_source_subspan() {
+        let (mixer, rate) = splat_fixture(false);
+        let part = SplatPart { num: 2, den: 4 };
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, part);
+        render_count(&mixer, rate, 1, 1);
+
+        let state = mixer.state.lock().unwrap();
+        let deck = &state.decks[DeckId::A.index()];
+        let splat = deck.splat.as_ref().unwrap();
+        let cell = splat.rows[SplatRow::Drums.index()].cell.unwrap();
+        assert_eq!(cell.part, part);
+        assert_eq!(cell.start_frames, 1_000.0);
+        assert_eq!(cell.len_frames, 500.0);
+        assert_eq!(
+            splat.snapshot().playing[SplatRow::Drums.index()],
+            Some((0, part))
+        );
+
+        let pcm = deck.pcm.as_ref().unwrap();
+        let stems = deck.stems.as_deref();
+        let gains = [1.0; STEM_COUNT];
+        let first = splat_cell_frame(
+            SplatRow::Drums,
+            cell,
+            cell.anchor_frames,
+            pcm,
+            stems,
+            gains,
+        );
+        let last = splat_cell_frame(
+            SplatRow::Drums,
+            cell,
+            cell.anchor_frames + cell.len_frames - 1.0,
+            pcm,
+            stems,
+            gains,
+        );
+        let wrapped = splat_cell_frame(
+            SplatRow::Drums,
+            cell,
+            cell.anchor_frames + cell.len_frames,
+            pcm,
+            stems,
+            gains,
+        );
+        assert_ne!(first, last);
+        assert_eq!(first, wrapped);
+    }
+
+    #[test]
+    fn splat_missing_stem_chunk_is_silence_without_mix_fallback() {
+        let (mixer, rate) = splat_fixture(true);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, SplatPart::WHOLE);
+        render_count(&mixer, rate, 2_010, 256);
+        let output = render(&mixer, rate as f64, 64);
+        assert!(output.channel(0).iter().all(|sample| sample.abs() < 1e-7));
+    }
+
+    #[test]
+    fn splat_late_launch_forgiveness_uses_the_just_passed_bar() {
+        let (mixer, rate) = splat_fixture(false);
+        render_count(&mixer, rate, 10, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, SplatPart::WHOLE);
+        render_count(&mixer, rate, 1, 64);
+        let snapshot = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+        assert_eq!(
+            snapshot.playing[SplatRow::Drums.index()],
+            Some((0, SplatPart::WHOLE))
+        );
+        let state = mixer.state.lock().unwrap();
+        let anchor = state.decks[0].splat.as_ref().unwrap().rows[SplatRow::Drums.index()]
+            .cell
+            .unwrap()
+            .anchor_frames;
+        assert_eq!(anchor, 0.0);
     }
 
 }

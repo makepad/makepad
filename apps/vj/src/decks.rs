@@ -22,8 +22,10 @@
 //! [`DeckEngine::observe`], so every sync decision in the tests is exactly
 //! the decision the running app makes.
 
+use crate::loop_splat::{SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS};
 use crate::wave_analysis::TrackGrid;
 use makepad_asset_data::{AssetId, AssetRevisionId, BlobId, MediaType};
+use std::sync::Arc;
 
 pub type DeckGen = u64;
 
@@ -476,6 +478,13 @@ pub struct LoopSpan {
     pub end_secs: f64,
 }
 
+#[derive(Clone, Debug)]
+pub struct SplatUiState {
+    pub grid: Arc<SplatGrid>,
+    pub enabled: bool,
+    pub last: SplatSnapshot,
+}
+
 impl LoopSpan {
     pub fn len_secs(&self) -> f64 {
         self.end_secs - self.start_secs
@@ -505,6 +514,9 @@ pub enum SyncMode {
 pub struct DeckState {
     pub load: DeckLoad,
     pub playing: bool,
+    /// The operator flipped the grid onto the other pulse (see
+    /// [`DeckEngine::flip_beat_phase`]); a second flip undoes the first.
+    pub phase_flipped: bool,
     /// Armed loop length in beats; 0 = MAN, free placement. This says what
     /// `[` and `]` will do NEXT and nothing else — a running manual span
     /// has no beat count to describe it.
@@ -539,6 +551,7 @@ pub struct DeckState {
     pub duration_secs: f64,
     /// Analysed beat grid, once the worker has one.
     pub grid: Option<TrackGrid>,
+    pub splat: Option<SplatUiState>,
     /// Source-time playhead, mirrored from the mixer.
     pub position_secs: f64,
     /// Playback rate multiplier; 1.0 = the track's own tempo.
@@ -594,6 +607,7 @@ impl Default for DeckState {
             load: DeckLoad::Empty,
             playing: false,
             loop_beats: 4,
+            phase_flipped: false,
             loop_span: None,
             loop_armed: None,
             loop_memory: None,
@@ -606,6 +620,7 @@ impl Default for DeckState {
             norm_gain: 1.0,
             duration_secs: 0.0,
             grid: None,
+            splat: None,
             position_secs: 0.0,
             rate: 1.0,
             pitch: 0.0,
@@ -750,6 +765,13 @@ pub enum DeckCmd {
     SetFilter { deck: DeckId, position: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
+    SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
+    SplatEnable { deck: DeckId, on: bool },
+    SplatLaunch { deck: DeckId, row: SplatRow, col: u8, part: SplatPart },
+    /// `timed`: wait for the next bar; otherwise stop at once.
+    SplatStopRow { deck: DeckId, row: SplatRow, timed: bool },
+    SplatLaunchScene { deck: DeckId, col: u8 },
+    SplatStopAll { deck: DeckId, timed: bool },
     /// Drop the deck's track entirely: mixer voice cleared, host mirrors
     /// wiped. The channel strip stands, exactly as it does across a load.
     UnloadTrack { deck: DeckId },
@@ -837,8 +859,80 @@ impl DeckEngine {
         &self.decks[id.index()]
     }
 
+    pub fn splat(&self, deck: DeckId) -> Option<&SplatUiState> {
+        self.deck(deck).splat.as_ref()
+    }
+
     fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
         &mut self.decks[id.index()]
+    }
+
+    pub fn splat_set(&mut self, deck: DeckId, grid: Arc<SplatGrid>) -> Vec<DeckCmd> {
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        let enabled = self.splat(deck).is_some_and(|splat| splat.enabled);
+        let last = self.splat(deck).map(|splat| splat.last).unwrap_or_default();
+        self.deck_mut(deck).splat = Some(SplatUiState {
+            grid: grid.clone(),
+            enabled,
+            last,
+        });
+        vec![DeckCmd::SplatSet { deck, grid }]
+    }
+
+    pub fn splat_enable(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        let Some(splat) = self.deck_mut(deck).splat.as_mut() else { return Vec::new() };
+        splat.enabled = on;
+        vec![DeckCmd::SplatEnable { deck, on }]
+    }
+
+    pub fn splat_launch(
+        &mut self,
+        deck: DeckId,
+        row: SplatRow,
+        col: u8,
+        part: SplatPart,
+    ) -> Vec<DeckCmd> {
+        let Some(splat) = self.splat(deck) else { return Vec::new() };
+        let col_index = col as usize;
+        if !part.is_valid()
+            || col_index >= SPLAT_COLS
+            || splat.grid.cells[row.index()][col_index].is_none_or(|cell| cell.silent)
+        {
+            return Vec::new();
+        }
+        vec![DeckCmd::SplatLaunch { deck, row, col, part }]
+    }
+
+    pub fn splat_stop_row(&mut self, deck: DeckId, row: SplatRow, timed: bool) -> Vec<DeckCmd> {
+        self.splat(deck)
+            .is_some()
+            .then_some(DeckCmd::SplatStopRow { deck, row, timed })
+            .into_iter()
+            .collect()
+    }
+
+    pub fn splat_scene(&mut self, deck: DeckId, col: u8) -> Vec<DeckCmd> {
+        if self.splat(deck).is_none() || col as usize >= SPLAT_COLS {
+            return Vec::new();
+        }
+        vec![DeckCmd::SplatLaunchScene { deck, col }]
+    }
+
+    pub fn splat_stop_all(&mut self, deck: DeckId, timed: bool) -> Vec<DeckCmd> {
+        self.splat(deck)
+            .is_some()
+            .then_some(DeckCmd::SplatStopAll { deck, timed })
+            .into_iter()
+            .collect()
+    }
+
+    pub fn observe_splat(&mut self, deck: DeckId, snapshot: Option<SplatSnapshot>) {
+        if let (Some(state), Some(snapshot)) = (self.deck_mut(deck).splat.as_mut(), snapshot) {
+            state.enabled = snapshot.active;
+            state.last = snapshot;
+        }
     }
 
     /// The deck a new track should land on when the caller says `Auto`:
@@ -909,6 +1003,7 @@ impl DeckEngine {
         // sync the next load to a tempo it never had. Tone and stem knobs
         // stay where the operator left them, like a real channel strip.
         state.grid = None;
+        state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
         state.auto_opt_out = false;
@@ -931,6 +1026,7 @@ impl DeckEngine {
         state.playing = false;
         state.duration_secs = duration_secs;
         state.position_secs = 0.0;
+        state.splat = None;
         // A span was measured against the OUTGOING track's beats and means
         // nothing on this one, so it goes — along with anything half-placed
         // or remembered. The armed LENGTH is the operator's, and stays.
@@ -1526,6 +1622,7 @@ impl DeckEngine {
         state.playing = false;
         state.duration_secs = 0.0;
         state.grid = None;
+        state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
         state.ext_sync = false;
@@ -2119,6 +2216,66 @@ impl DeckEngine {
         let mut cmds = vec![DeckCmd::SeekSeconds { deck, secs }];
         cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
         cmds
+    }
+
+    /// Beat jump: move the playhead by whole beats of the deck's own grid.
+    /// A whole-beat move keeps the deck's phase, so the beat-quantized
+    /// re-lock that follows every seek lands it exactly where it was put.
+    pub fn beat_jump(&mut self, deck: DeckId, beats: f64) -> Vec<DeckCmd> {
+        let state = self.deck(deck);
+        if !state.is_loaded() || !beats.is_finite() {
+            return Vec::new();
+        }
+        let beat_secs = state
+            .grid
+            .filter(|grid| grid.has_grid())
+            .map(|grid| grid.beat_secs)
+            .unwrap_or(0.5);
+        let secs = state.position_secs + beats * beat_secs;
+        self.seek_secs(deck, secs)
+    }
+
+    /// Flip the deck's grid half a beat. The analyser's known failure mode
+    /// is a perfectly steady grid on the OFF pulse: same tempo, every ruling
+    /// on a real transient, and sync then holds the two tracks exactly half
+    /// a beat apart. Moving every ruling by half a beat puts the grid on the
+    /// other pulse; the caller re-publishes the flipped grid wherever else
+    /// it lives (analysis, loop grid, cache). Returns the flipped grid.
+    pub fn flip_beat_phase(&mut self, deck: DeckId) -> Option<(TrackGrid, Vec<DeckCmd>)> {
+        let state = self.deck_mut(deck);
+        let grid = state.grid.as_mut()?;
+        if !grid.has_grid() {
+            return None;
+        }
+        // The rulings land in the same places either way; which way the
+        // DOWNBEAT moves is the choice. Forward the first time, back the
+        // second, so two presses are exactly no presses.
+        let half = grid.beat_secs * 0.5;
+        if state.phase_flipped {
+            grid.first_beat_secs -= half;
+            if grid.first_beat_secs < 0.0 {
+                // The first ruling at or after zero is now the old first
+                // beat's successor, one beat later in the bar.
+                grid.first_beat_secs += grid.beat_secs;
+                grid.downbeat_phase = (grid.downbeat_phase + 1) % 4;
+            }
+        } else {
+            grid.first_beat_secs += half;
+            if grid.first_beat_secs >= grid.beat_secs {
+                // The first ruling at or after zero is now the one BEFORE
+                // the old first beat, one beat earlier in the bar.
+                grid.first_beat_secs -= grid.beat_secs;
+                grid.downbeat_phase = (grid.downbeat_phase + 3) % 4;
+            }
+        }
+        state.phase_flipped = !state.phase_flipped;
+        let flipped = *grid;
+        let cmds = if self.deck(deck).synced || self.auto_sync {
+            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
+        } else {
+            Vec::new()
+        };
+        Some((flipped, cmds))
     }
 
     /// The phase a snapped landing must preserve: the one that SURVIVES.
@@ -3268,6 +3425,55 @@ mod tests {
         // And the other way round.
         let plan = sync_plan(&follower, &leader, SyncQuantize::Beat).expect("plan");
         assert!((plan.rate - 1.0).abs() < 1e-9, "rate {}", plan.rate);
+    }
+
+    #[test]
+    fn flipping_the_pulse_moves_every_ruling_half_a_beat_and_keeps_the_bars() {
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck, gen, 240.0);
+        // 120 BPM, first beat at 0.4 s and it is beat 2 of its bar.
+        let grid = TrackGrid {
+            bpm: 120.0,
+            beat_secs: 0.5,
+            first_beat_secs: 0.4,
+            downbeat_phase: 2,
+            confidence: 0.9,
+        };
+        engine.grid_ready(DeckId::A, gen, grid);
+        let (flipped, _) = engine.flip_beat_phase(DeckId::A).expect("a grid to flip");
+        // 0.4 + 0.25 = 0.65 wraps to 0.15: the ruling before the old first
+        // beat, one beat earlier in the bar.
+        assert!((flipped.first_beat_secs - 0.15).abs() < 1e-9, "{flipped:?}");
+        assert_eq!(flipped.downbeat_phase, 1);
+        // The downbeat's absolute time moved by exactly half a beat.
+        let old_downbeat: f64 = 0.4 + 2.0 * 0.5;
+        let new_downbeat = 0.15 + 3.0 * 0.5;
+        assert!((new_downbeat - old_downbeat).abs() - 0.25 < 1e-9);
+        // Flipping again goes BACK half a beat: exactly the original grid,
+        // bars included.
+        let (again, _) = engine.flip_beat_phase(DeckId::A).unwrap();
+        assert!((again.first_beat_secs - 0.4).abs() < 1e-9, "{again:?}");
+        assert_eq!(again.downbeat_phase, 2);
+        assert!(!engine.deck(DeckId::A).phase_flipped);
+    }
+
+    #[test]
+    fn a_beat_jump_moves_by_whole_beats_of_the_decks_grid() {
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck, gen, 240.0);
+        engine.grid_ready(
+            DeckId::A,
+            gen,
+            TrackGrid { bpm: 120.0, beat_secs: 0.5, first_beat_secs: 0.0, downbeat_phase: 0, confidence: 0.9 },
+        );
+        engine.seek_secs(DeckId::A, 10.0);
+        let cmds = engine.beat_jump(DeckId::A, 16.0);
+        assert!(cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekSeconds { secs, .. } if (*secs - 18.0).abs() < 1e-9)), "{cmds:?}");
+        assert!((engine.deck(DeckId::A).position_secs - 18.0).abs() < 1e-9);
+        engine.beat_jump(DeckId::A, -64.0);
+        assert_eq!(engine.deck(DeckId::A).position_secs, 0.0, "clamped at the start");
     }
 
     #[test]
