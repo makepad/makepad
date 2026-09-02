@@ -18,6 +18,21 @@ pub struct GameInputInfo {
 pub enum GameInputState {
     Gamepad(GamepadState),
     Wheel(WheelState),
+    Joystick(JoystickState),
+}
+
+/// A flight stick / HOTAS: X/Y are the stick (−1..1, HID convention: pushed
+/// forward = y −1, right = x +1), `twist` the Rz yaw axis, `throttle` the
+/// slider or Z lever 0..1, `hat` the POV direction 0..7 clockwise from
+/// up (0xf = centred), `buttons` bit n−1 = HID button usage n.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JoystickState {
+    pub x: f32,
+    pub y: f32,
+    pub twist: f32,
+    pub throttle: f32,
+    pub hat: u8,
+    pub buttons: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -54,7 +69,45 @@ pub struct WheelState {
     pub brake: f32,
     pub clutch: f32,
     pub steer_force: f32,
-    // Add other common wheel inputs like gear shifter buttons if needed, keeping it simple for now
+    /// Button bitmask: bit n-1 = HID button usage n (paddles, face buttons,
+    /// shifter). Which bit is which paddle is per device; the app maps it.
+    pub buttons: u32,
+}
+
+/// A handle that writes OUTPUT reports to one game-input device — the way a
+/// force-feedback wheel is driven. Platform-neutral so an app's FFB loop can
+/// live on its own thread: the closure is `Send + Sync` and owns whatever the
+/// platform needs (macOS: the IOHID device ref behind a mutex). Platforms
+/// without raw HID output hand out none.
+#[derive(Clone)]
+pub struct GameInputOutput {
+    pub id: LiveId,
+    pub vendor_id: u32,
+    pub product_id: u32,
+    send: std::sync::Arc<dyn Fn(u8, &[u8]) -> bool + Send + Sync>,
+}
+
+impl GameInputOutput {
+    pub fn new(
+        id: LiveId,
+        vendor_id: u32,
+        product_id: u32,
+        send: std::sync::Arc<dyn Fn(u8, &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
+        Self { id, vendor_id, product_id, send }
+    }
+
+    /// Write one output report; `report_id` 0 means the device has none.
+    /// False when the device is gone or the write failed.
+    pub fn send_report(&self, report_id: u8, data: &[u8]) -> bool {
+        (self.send)(report_id, data)
+    }
+}
+
+impl std::fmt::Debug for GameInputOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GameInputOutput({:04x}:{:04x})", self.vendor_id, self.product_id)
+    }
 }
 
 /// Conversion to and from the Studio wire form.
@@ -66,7 +119,7 @@ pub struct WheelState {
 /// impossible rather than merely unlikely.
 impl From<&GameInputState> for makepad_studio_protocol::RemoteGameInput {
     fn from(state: &GameInputState) -> Self {
-        use makepad_studio_protocol::{RemoteGameInput, RemoteGamepad, RemoteWheel};
+        use makepad_studio_protocol::{RemoteGameInput, RemoteGamepad, RemoteJoystick, RemoteWheel};
         match state {
             GameInputState::Gamepad(p) => RemoteGameInput::Gamepad(RemoteGamepad {
                 a: p.a,
@@ -97,6 +150,15 @@ impl From<&GameInputState> for makepad_studio_protocol::RemoteGameInput {
                 brake: w.brake,
                 clutch: w.clutch,
                 steer_force: w.steer_force,
+                buttons: w.buttons,
+            }),
+            GameInputState::Joystick(j) => RemoteGameInput::Joystick(RemoteJoystick {
+                x: j.x,
+                y: j.y,
+                twist: j.twist,
+                throttle: j.throttle,
+                hat: j.hat,
+                buttons: j.buttons,
             }),
         }
     }
@@ -134,6 +196,15 @@ impl From<makepad_studio_protocol::RemoteGameInput> for GameInputState {
                 brake: w.brake,
                 clutch: w.clutch,
                 steer_force: w.steer_force,
+                buttons: w.buttons,
+            }),
+            RemoteGameInput::Joystick(j) => GameInputState::Joystick(JoystickState {
+                x: j.x,
+                y: j.y,
+                twist: j.twist,
+                throttle: j.throttle,
+                hat: j.hat,
+                buttons: j.buttons,
             }),
         }
     }
@@ -200,6 +271,22 @@ mod tests {
             brake: 0.33,
             clutch: 0.34,
             steer_force: 0.35,
+            buttons: 0b1011,
+        });
+        let wire: RemoteGameInput = (&original).into();
+        let returned: GameInputState = wire.into();
+        assert_eq!(original, returned);
+    }
+
+    #[test]
+    fn a_joystick_survives_the_trip_to_studio_and_back() {
+        let original = GameInputState::Joystick(JoystickState {
+            x: -0.4,
+            y: 0.9,
+            twist: 0.2,
+            throttle: 0.75,
+            hat: 6,
+            buttons: 0b10_0101,
         });
         let wire: RemoteGameInput = (&original).into();
         let returned: GameInputState = wire.into();
