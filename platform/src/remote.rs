@@ -1126,6 +1126,7 @@ mod imp {
             "/k" | "/key" => route_key(p),
             "/t" | "/text" => route_text(p),
             "/log" => route_log(p),
+            "/trace" => route_trace(p),
             "/d" | "/dump" => match ask(|tx| Cmd::Dump(tx), 4) {
                 Reply::Text(text) => Out::Text(200, text),
                 other => reply_to_out(other),
@@ -1279,6 +1280,7 @@ mod imp {
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\
              /log?n=50         {{\"n\":lastseq,\"l\":[lines]}}; /log?since=N for everything after seq N\n\
+             /trace             get topics; ?topics=gpu.pass,wm sets them; ?off=1 clears them\n\
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
@@ -1301,6 +1303,21 @@ mod imp {
             status.pid,
             status.windows.len(),
             dir,
+        )
+    }
+
+    fn route_trace(p: &Params) -> Out {
+        if p.flag(&["off"]) {
+            crate::makepad_error_log::set_trace_topics("");
+        } else if let Some(topics) = p.get(&["topics"]) {
+            crate::makepad_error_log::set_trace_topics(topics);
+        }
+        Out::Json(
+            200,
+            format!(
+                "{{\"topics\":{}}}",
+                json_str(&crate::makepad_error_log::trace_topics())
+            ),
         )
     }
 

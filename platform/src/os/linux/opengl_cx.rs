@@ -389,7 +389,7 @@ impl Cx {
 
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
 
-        if std::env::var_os("MAKEPAD_GL_READBACK").is_some() {
+        if crate::makepad_error_log::trace_enabled("gl.readback") {
             let mut pixel = [0u8; 4];
             let cx = (pix_width.floor() as i32) / 2;
             let cy = (pix_height.floor() as i32) / 2;
@@ -405,7 +405,8 @@ impl Cx {
                     pixel.as_mut_ptr() as *mut _,
                 );
             }
-            crate::log!(
+            crate::trace!(
+                "gl.readback",
                 "GL readback size={}x{} center=({}, {}) rgba=({}, {}, {}, {})",
                 pix_width.floor() as i32,
                 pix_height.floor() as i32,

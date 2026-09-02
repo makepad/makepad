@@ -2037,10 +2037,10 @@ impl MaterialMirror {
         }
         many.instances.extend_from_slice(&inst);
         let area = cx.end_many_instances(many);
-        if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
+        if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
             if let Area::Instance(ia) = area {
                 if let Some(dc) = cx.draw_lists[ia.draw_list_id].draw_items[ia.draw_item_id].draw_call() {
-                    log!("TWEAK trace swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
+                    trace!("tweak", "swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
                 }
             }
         }
@@ -2065,9 +2065,10 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
     if stride == 0 || inst.instance_offset + stride > buf.len() {
         return None;
     }
-    if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
-        log!(
-            "TWEAK trace swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
+    if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
+        trace!(
+            "tweak",
+            "swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
             widget.widget_uid().0,
             draw_call.draw_shader_id,
             stride,

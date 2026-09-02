@@ -3877,10 +3877,10 @@ impl CxOsDrawShader {
             for item in &layout_debug {
                 crate::error!("  {}", item);
             }
-            if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                crate::error!("HLSL source\n{}", split_source(hlsl));
+            if crate::makepad_error_log::trace_enabled("shader.hlsl") {
+                crate::trace!("shader.hlsl", "HLSL source\n{}", split_source(hlsl));
             } else {
-                crate::error!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
+                crate::error!("Set MAKEPAD_TRACE=shader.hlsl to dump full HLSL source.");
             }
             d3d11_cx.note_error("ID3D11Device::CreateInputLayout", &err);
             return None;

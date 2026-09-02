@@ -68,7 +68,7 @@ impl Cx {
                             height: (pass_rect.size.y * dpi_factor) as u32,
                         };
 
-                        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
+                        if crate::makepad_error_log::trace_enabled("runview.dpi") {
                             let trace_draw = (
                                 presentable_draw.width,
                                 presentable_draw.height,
@@ -79,7 +79,8 @@ impl Cx {
                             let should_log = window.last_trace_draw != Some(trace_draw);
                             window.last_trace_draw = Some(trace_draw);
                             if should_log {
-                                crate::log!(
+                                crate::trace!(
+                                    "runview.dpi",
                                     "runview child draw window={} logical=({}, {}) dpi={} frame_px=({}, {}) swapchain_alloc=({}, {})",
                                     window_id.id(),
                                     pass_rect.size.x,
@@ -345,8 +346,9 @@ impl Cx {
                 let geom_changed = old_geom.dpi_factor != new_geom.dpi_factor
                     || old_geom.inner_size != new_geom.inner_size
                     || old_geom.position != new_geom.position;
-                if geom_changed && std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
-                    crate::log!(
+                if geom_changed && crate::makepad_error_log::trace_enabled("runview.dpi") {
+                    crate::trace!(
+                        "runview.dpi",
                         "runview child geom window={} logical=({}, {}) dpi={} px=({}, {}) old_logical=({}, {}) old_dpi={}",
                         window_id.id(),
                         width,

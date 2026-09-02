@@ -755,10 +755,9 @@ impl Cx {
                                             crate::startup_trace_flush("cumulative at first present");
                                         }
                                     }
-                                    // RIG (MAKEPAD_PRESENT_TRACE=1): actual
-                                    // GLASS times — the CPU trace's blind
+                                    // Actual GLASS times — the CPU trace's blind
                                     // spot where dropped/slipped frames live.
-                                    if std::env::var_os("MAKEPAD_PRESENT_TRACE").is_some() {
+                                    if crate::makepad_error_log::trace_enabled("present") {
                                         let t: f64 = unsafe { msg_send![drawable_, presentedTime] };
                                         static LAST: std::sync::atomic::AtomicU64 =
                                             std::sync::atomic::AtomicU64::new(0);
@@ -767,7 +766,7 @@ impl Cx {
                                             std::sync::atomic::Ordering::AcqRel,
                                         ));
                                         if prev > 0.0 && t > prev {
-                                            eprintln!("presenttrace {:.2}ms", (t - prev) * 1000.0);
+                                            crate::trace!("present", "glass gap {:.2}ms", (t - prev) * 1000.0);
                                         }
                                     }
                                     if is_metal_link_drawable {
@@ -961,10 +960,10 @@ impl Cx {
                     self.redraw_all();
                 }
                 if te.timer_id == 0 || te.timer_id == POINTER_CAPTURE_TIMER_ID {
-                    // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
+                    // Catch paint-clock stalls in the
                     // act — was the gap a LATE FIRE (runloop starved / OS
                     // deferred the NSTimer) or a SLOW CALLBACK (our work)?
-                    let trace_t0 = if std::env::var_os("MAKEPAD_TIMER_TRACE").is_some() {
+                    let trace_t0 = if crate::makepad_error_log::trace_enabled("timer") {
                         thread_local! {
                             static LAST_FIRE: std::cell::Cell<Option<std::time::Instant>> =
                                 const { std::cell::Cell::new(None) };
@@ -974,7 +973,7 @@ impl Cx {
                             if let Some(prev) = last.replace(Some(now)) {
                                 let gap_ms = prev.elapsed().as_secs_f64() * 1000.0;
                                 if gap_ms > 20.0 {
-                                    eprintln!("[timer-trace] fire-to-fire gap {:.1}ms", gap_ms);
+                                    crate::trace!("timer", "fire-to-fire gap {:.1}ms", gap_ms);
                                 }
                             }
                         });
@@ -1088,8 +1087,9 @@ impl Cx {
                     if let Some(t0) = trace_t0 {
                         let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
                         if took_ms > 10.0 {
-                            eprintln!(
-                                "[timer-trace] slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
+                            crate::trace!(
+                                "timer",
+                                "slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
                                 took_ms,
                                 live_edit_ms.unwrap_or(0.0),
                                 net_ms.unwrap_or(0.0),
