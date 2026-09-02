@@ -1,0 +1,34 @@
+# aichat — the assistant, as an app.
+#
+# One conversation that drives every application through the AI services
+# layer. It is hosted three ways with one code base: under the window
+# manager as a special child seated in the pane slot (this binary,
+# `--stdin-loop`), standalone as its own window (this binary), and inside
+# any app's Window as the F10 overlay or inside the mobile/web superbuild
+# (this crate's lib, `makepad_aichat::script_mod` + `AiChatPanel{}`).
+#
+# The panel widget OWNS the engine: the service registry, the model, the
+# transcript. Hosts only feed it links (in-process) or bus frames (the
+# window manager's studio Custom frames) and give it a place to draw.
+#
+# Plan of record: repo-root aicontrol.md.
+
+[package]
+name = "makepad-aichat"
+version = "0.1.0"
+edition = "2021"
+default-run = "aichat"
+
+[lib]
+name = "makepad_aichat"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aichat"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-ai-services = { path = "../../libs/ai/services", features = ["engine"] }
