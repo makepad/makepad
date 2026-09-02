@@ -1,5 +1,6 @@
 use super::sdk::{AndroidSDKUrls, BUILD_TOOLS_DIR, BUNDLETOOL_JAR_REL, PLATFORMS_DIR};
 use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs, ManifestArgs};
+use crate::font_assets::{is_font_path, remove_existing_fonts, FontAssetManifest, FontPackage};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use makepad_zip_file::*;
@@ -282,14 +283,6 @@ pub struct BuildResult {
     dst_apk: PathBuf,
     java_url: String,
 }
-
-const SMALL_FONT_REPLACEMENTS: [(&str, &str); 5] = [
-    ("GoNotoKurrent-Bold.ttf", "IBMPlexSans-SemiBold.ttf"),
-    ("GoNotoKurrent-Regular.ttf", "IBMPlexSans-Text.ttf"),
-    ("LXGWWenKaiBold.ttf", "IBMPlexSans-Text.ttf"),
-    ("LXGWWenKaiRegular.ttf", "IBMPlexSans-Text.ttf"),
-    ("NotoColorEmoji.ttf", "IBMPlexSans-Text.ttf"),
-];
 
 fn main_java(url: &str) -> String {
     format!(
@@ -580,7 +573,7 @@ fn rust_build(
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
     prefer_dynamic: bool,
-) -> Result<(), String> {
+) -> Result<FontAssetManifest, String> {
     let cwd = std::env::current_dir().unwrap();
     let target_root = cargo_target_root(&cwd);
     let target_dir = cargo_target_dir(&cwd);
@@ -615,6 +608,7 @@ fn rust_build(
         .parent()
         .unwrap() // ndk root
         .to_path_buf();
+    let mut font_manifest = None;
     for android_target in android_targets {
         let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
         let clangpp_filename = format!("{}{}-clang++", android_target.clang(), urls.sdk_version);
@@ -746,9 +740,27 @@ fn rust_build(
             .collect::<Vec<_>>();
 
         shell_env(&env_refs, &cargo_cwd, "rustup", &args_out)?;
+
+        // Consume the native metadata immediately after each Cargo link, before any packaging
+        // step can transform or discard the artifact.
+        let profile = get_profile_from_args(args);
+        let artifact = target_dir.join(format!(
+            "{toolchain}/{profile}/lib{}.so",
+            build_crate.replace('-', "_")
+        ));
+        let current = FontAssetManifest::from_native_file(&artifact)?;
+        if let Some(previous) = &font_manifest {
+            if previous != &current {
+                return Err(format!(
+                    "font manifests differ between Android targets; {toolchain} does not match the first target"
+                ));
+            }
+        } else {
+            font_manifest = Some(current);
+        }
     }
 
-    Ok(())
+    font_manifest.ok_or_else(|| "cannot package Android resources without a target font manifest".to_string())
 }
 
 /// Builds the `RUSTFLAGS` value for an Android `cargo rustc` invocation.
@@ -1702,10 +1714,13 @@ fn add_resources(
     build_dir: &Path,
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
-    config: &AndroidConfig,
+    font_manifest: &FontAssetManifest,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
     let mut assets_to_add: Vec<String> = Vec::new();
+    let package_root = build_paths.out_dir.join("assets/makepad");
+    remove_existing_fonts(&package_root)?;
+    let mut font_package = FontPackage::new(font_manifest);
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     add_assets_dir_to_apk(
@@ -1714,7 +1729,7 @@ fn add_resources(
         build_crate,
         &build_crate_dir.join("resources"),
         "resources",
-        config,
+        &mut font_package,
     )?;
     add_font_assets_dir_to_apk(
         &build_paths.out_dir,
@@ -1722,7 +1737,7 @@ fn add_resources(
         build_crate,
         &build_crate_dir.join("fonts"),
         &build_crate_dir.join("resources"),
-        config,
+        &mut font_package,
     )?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
@@ -1733,7 +1748,7 @@ fn add_resources(
             name,
             &dep_dir.join("resources"),
             "resources",
-            config,
+            &mut font_package,
         )?;
         add_font_assets_dir_to_apk(
             &build_paths.out_dir,
@@ -1741,29 +1756,11 @@ fn add_resources(
             name,
             &dep_dir.join("fonts"),
             &dep_dir.join("resources"),
-            config,
+            &mut font_package,
         )?;
     }
-    // FIX THIS PROPER
-    // On quest remove most of the widget resourcse
-    if let AndroidVariant::Quest = variant {
-        let dst_dir = build_paths
-            .out_dir
-            .join(format!("assets/makepad/makepad_widgets/resources"));
-        let remove = [
-            "fa-solid-900.ttf",
-            //"LXGWWenKaiBold.ttf",
-            "LiberationMono-Regular.ttf",
-            //"GoNotoKurrent-Bold.ttf",
-            // "NotoColorEmoji.ttf",
-            //"IBMPlexSans-SemiBold.ttf",
-            "NotoSans-Regular.ttf",
-        ];
-        for remove in remove {
-            assets_to_add.retain(|v| !v.contains(remove));
-            rm(&dst_dir.join(remove))?;
-        }
-    }
+    let _ = variant;
+    font_package.finish()?.print();
 
     let mut aapt_args = vec!["add", build_paths.dst_unaligned_apk.to_str().unwrap()];
     for asset in &assets_to_add {
@@ -1782,15 +1779,41 @@ fn add_resources(
 
 // resources/ios is iOS-only; resources/android ships as runtime assets minus
 // the packaging inputs (manifest template, res/) already compiled into the package
-fn cp_android_runtime_assets(source_dir: &Path, dst_dir: &Path) -> Result<(), String> {
-    cp_all_skip_top(source_dir, dst_dir, &["android", "ios"], false)?;
+fn is_supported_font_asset(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "woff" | "woff2"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn cp_android_runtime_assets(
+    source_dir: &Path,
+    dst_dir: &Path,
+    logical_prefix: &str,
+    font_package: &mut FontPackage<'_>,
+) -> Result<(), String> {
+    font_package.copy_tree_filtered(
+        source_dir,
+        dst_dir,
+        logical_prefix,
+        |relative| relative.starts_with("android") || relative.starts_with("ios"),
+        |_| Ok(()),
+    )?;
     let android_src = source_dir.join("android");
     if android_src.is_dir() {
-        cp_all_skip_top(
+        font_package.copy_tree_filtered(
             &android_src,
             &dst_dir.join("android"),
-            &["AndroidManifest.xml.template", "res"],
-            false,
+            &format!("{logical_prefix}/android"),
+            |relative| {
+                relative.starts_with("AndroidManifest.xml.template") || relative.starts_with("res")
+            },
+            |_| Ok(()),
         )?;
     }
     Ok(())
@@ -1802,7 +1825,7 @@ fn add_assets_dir_to_apk(
     crate_name: &str,
     source_dir: &Path,
     asset_subdir: &str,
-    config: &AndroidConfig,
+    font_package: &mut FontPackage<'_>,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
@@ -1810,17 +1833,12 @@ fn add_assets_dir_to_apk(
 
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/{asset_subdir}"));
-    mkdir(&dst_dir)?;
-    cp_android_runtime_assets(source_dir, &dst_dir)?;
-    if config.small_fonts && asset_subdir == "resources" {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
-            let replacement = source_dir.join(replacement_name);
-            let target = dst_dir.join(target_name);
-            if replacement.is_file() && target.is_file() {
-                cp(&replacement, &target, false)?;
-            }
-        }
-    }
+    cp_android_runtime_assets(
+        source_dir,
+        &dst_dir,
+        &format!("{crate_name}/{asset_subdir}"),
+        font_package,
+    )?;
 
     let assets = ls(&dst_dir)?;
     for path in &assets {
@@ -1836,7 +1854,7 @@ fn add_font_assets_dir_to_apk(
     crate_name: &str,
     source_dir: &Path,
     resource_dir: &Path,
-    config: &AndroidConfig,
+    font_package: &mut FontPackage<'_>,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
@@ -1844,47 +1862,19 @@ fn add_font_assets_dir_to_apk(
 
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/fonts"));
-    let assets = ls(source_dir)?;
-    for path in &assets {
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
-        if !matches!(
-            ext.as_deref(),
-            Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
-        ) {
-            continue;
-        }
-        // Skip files that already ship from the sibling `resources/` dir —
-        // otherwise the same TTF lands in the APK twice. The widgets crate
-        // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
-        if resource_dir.join(path).is_file() {
-            continue;
-        }
-        cp(&source_dir.join(path), &dst_dir.join(path), false)?;
+    font_package.copy_tree_filtered(
+        source_dir,
+        &dst_dir,
+        &format!("{crate_name}/fonts"),
+        |relative| {
+            !is_supported_font_asset(relative)
+                || (!is_font_path(relative) && resource_dir.join(relative).is_file())
+        },
+        |_| Ok(()),
+    )?;
+    for path in ls(&dst_dir)? {
         let path = path.display().to_string().replace("\\", "/");
         assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
-    }
-    if config.small_fonts {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
-            let replacement = source_dir
-                .join(replacement_name)
-                .is_file()
-                .then(|| source_dir.join(replacement_name))
-                .or_else(|| {
-                    resource_dir
-                        .join(replacement_name)
-                        .is_file()
-                        .then(|| resource_dir.join(replacement_name))
-                });
-            let target = dst_dir.join(target_name);
-            if let Some(replacement) = replacement {
-                if target.is_file() {
-                    cp(&replacement, &target, false)?;
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -2000,25 +1990,19 @@ fn stage_makepad_assets_subdir(
     crate_name: &str,
     source_dir: &Path,
     asset_subdir: &str,
-    config: &AndroidConfig,
+    font_package: &mut FontPackage<'_>,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
     }
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = assets_root.join(format!("makepad/{crate_name}/{asset_subdir}"));
-    mkdir(&dst_dir)?;
-    cp_android_runtime_assets(source_dir, &dst_dir)?;
-    if config.small_fonts && asset_subdir == "resources" {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
-            let replacement = source_dir.join(replacement_name);
-            let target = dst_dir.join(target_name);
-            if replacement.is_file() && target.is_file() {
-                cp(&replacement, &target, false)?;
-            }
-        }
-    }
-    Ok(())
+    cp_android_runtime_assets(
+        source_dir,
+        &dst_dir,
+        &format!("{crate_name}/{asset_subdir}"),
+        font_package,
+    )
 }
 
 /// Mirror of `add_font_assets_dir_to_apk` that only stages files into a directory tree.
@@ -2027,51 +2011,23 @@ fn stage_makepad_font_subdir(
     crate_name: &str,
     source_dir: &Path,
     resource_dir: &Path,
-    config: &AndroidConfig,
+    font_package: &mut FontPackage<'_>,
 ) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Ok(());
     }
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = assets_root.join(format!("makepad/{crate_name}/fonts"));
-    let assets = ls(source_dir)?;
-    for path in &assets {
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase());
-        if !matches!(
-            ext.as_deref(),
-            Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
-        ) {
-            continue;
-        }
-        if resource_dir.join(path).is_file() {
-            continue;
-        }
-        cp(&source_dir.join(path), &dst_dir.join(path), false)?;
-    }
-    if config.small_fonts {
-        for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
-            let replacement = source_dir
-                .join(replacement_name)
-                .is_file()
-                .then(|| source_dir.join(replacement_name))
-                .or_else(|| {
-                    resource_dir
-                        .join(replacement_name)
-                        .is_file()
-                        .then(|| resource_dir.join(replacement_name))
-                });
-            let target = dst_dir.join(target_name);
-            if let Some(replacement) = replacement {
-                if target.is_file() {
-                    cp(&replacement, &target, false)?;
-                }
-            }
-        }
-    }
-    Ok(())
+    font_package.copy_tree_filtered(
+        source_dir,
+        &dst_dir,
+        &format!("{crate_name}/fonts"),
+        |relative| {
+            !is_supported_font_asset(relative)
+                || (!is_font_path(relative) && resource_dir.join(relative).is_file())
+        },
+        |_| Ok(()),
+    )
 }
 
 fn stage_aab_assets(
@@ -2080,22 +2036,24 @@ fn stage_aab_assets(
     build_dir: &Path,
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
-    config: &AndroidConfig,
+    font_manifest: &FontAssetManifest,
 ) -> Result<(), String> {
+    remove_existing_fonts(&assets_root.join("makepad"))?;
+    let mut font_package = FontPackage::new(font_manifest);
     let build_crate_dir = get_crate_dir(build_crate)?;
     stage_makepad_assets_subdir(
         assets_root,
         build_crate,
         &build_crate_dir.join("resources"),
         "resources",
-        config,
+        &mut font_package,
     )?;
     stage_makepad_font_subdir(
         assets_root,
         build_crate,
         &build_crate_dir.join("fonts"),
         &build_crate_dir.join("resources"),
-        config,
+        &mut font_package,
     )?;
 
     let deps = get_crate_dep_dirs(build_crate, build_dir, &android_targets[0].toolchain());
@@ -2105,29 +2063,18 @@ fn stage_aab_assets(
             name,
             &dep_dir.join("resources"),
             "resources",
-            config,
+            &mut font_package,
         )?;
         stage_makepad_font_subdir(
             assets_root,
             name,
             &dep_dir.join("fonts"),
             &dep_dir.join("resources"),
-            config,
+            &mut font_package,
         )?;
     }
-
-    if let AndroidVariant::Quest = variant {
-        let dst_dir = assets_root.join("makepad/makepad_widgets/resources");
-        let remove = [
-            "fa-solid-900.ttf",
-            "LiberationMono-Regular.ttf",
-            "NotoSans-Regular.ttf",
-        ];
-        for r in remove {
-            let _ = rm(&dst_dir.join(r));
-        }
-    }
-
+    let _ = variant;
+    font_package.finish()?.print();
     Ok(())
 }
 
@@ -2552,7 +2499,7 @@ pub fn build_aab(
     args: &[String],
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
-    config: &AndroidConfig,
+    _config: &AndroidConfig,
     urls: &AndroidSDKUrls,
     signing: Option<AabSigningOpts>,
 ) -> Result<BuildAabResult, String> {
@@ -2586,7 +2533,7 @@ pub fn build_aab(
         }
     }
 
-    rust_build(
+    let font_manifest = rust_build(
         sdk_dir,
         host_os,
         build_crate,
@@ -2651,7 +2598,7 @@ pub fn build_aab(
         &build_dir,
         android_targets,
         variant,
-        config,
+        &font_manifest,
     )?;
 
     // aapt2 compile + link --proto-format. Assets are picked up via -A.
@@ -2716,7 +2663,7 @@ pub fn build(
     args: &[String],
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
-    config: &AndroidConfig,
+    _config: &AndroidConfig,
     urls: &AndroidSDKUrls,
 ) -> Result<BuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
@@ -2747,7 +2694,7 @@ pub fn build(
         }
     }
 
-    rust_build(
+    let font_manifest = rust_build(
         sdk_dir,
         host_os,
         build_crate,
@@ -2804,7 +2751,7 @@ pub fn build(
         &build_dir,
         android_targets,
         variant,
-        config,
+        &font_manifest,
         urls,
     )?;
     build_zipaligned_apk(sdk_dir, &build_paths, urls)?;
@@ -3149,7 +3096,58 @@ pub fn adb_tcp(
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_android_rustflags, parse_adb_devices, parse_ip_addr_show, parse_ip_route};
+    use super::{
+        compose_android_rustflags, parse_adb_devices, parse_ip_addr_show, parse_ip_route,
+        stage_makepad_assets_subdir,
+    };
+    use crate::font_assets::{FontAssetManifest, FontPackage};
+    use std::{fs, sync::atomic::{AtomicU64, Ordering}};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cargo-makepad-android-fonts-{}-{name}-{serial}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn mobile_asset_staging_packages_only_manifest_fonts() {
+        let manifest = FontAssetManifest::parse(
+            b"format=makepad.font-assets.v1\nset=Latin\nasset=demo_app/resources/latin.ttf\n",
+        )
+        .unwrap();
+        let root = temp_dir("allowlist");
+        let source = root.join("source");
+        let assets = root.join("assets");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("latin.ttf"), b"latin bytes").unwrap();
+        fs::write(source.join("international.ttf"), b"international bytes").unwrap();
+        fs::write(source.join("theme.ron"), b"theme").unwrap();
+
+        let mut package = FontPackage::new(&manifest);
+        stage_makepad_assets_subdir(
+            &assets,
+            "demo-app",
+            &source,
+            "resources",
+            &mut package,
+        )
+        .unwrap();
+        let inventory = package.finish().unwrap();
+
+        let packaged = assets.join("makepad/demo_app/resources");
+        assert!(packaged.join("latin.ttf").is_file());
+        assert!(!packaged.join("international.ttf").exists());
+        assert!(packaged.join("theme.ron").is_file());
+        assert_eq!(inventory.fonts["demo_app/resources/latin.ttf"], 11);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn parse_adb_devices_filters_ready_targets() {

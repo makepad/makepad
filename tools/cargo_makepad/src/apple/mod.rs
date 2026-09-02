@@ -151,6 +151,7 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
                 build_crate,
                 &result.build_dir,
                 apple_target,
+                &result.font_manifest,
             )?;
             Ok(())
         }
