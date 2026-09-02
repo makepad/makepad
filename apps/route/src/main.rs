@@ -32,14 +32,12 @@ mod history;
 mod layers;
 #[cfg(feature = "native")]
 mod local_agent;
-#[cfg(feature = "native")]
 mod nav;
 #[cfg(any(feature = "demo", test))]
 mod nav_api;
-#[cfg(feature = "native")]
-mod nav_data;
 mod provisioner;
 mod side_panel;
+mod assistant;
 #[cfg(feature = "native")]
 mod testmap;
 #[cfg(feature = "native")]
@@ -50,11 +48,10 @@ mod voice;
 
 #[cfg(feature = "demo")]
 mod clock;
-#[cfg(feature = "demo")]
-mod demo_app;
-
 #[cfg(feature = "native")]
 use broker::{MarkerLegend, ToolCtx};
+#[cfg(feature = "native")]
+use assistant::{AssistantController, AssistantService};
 #[cfg(feature = "native")]
 use ddg::{DdgEvent, DdgState};
 #[cfg(feature = "native")]
@@ -64,7 +61,7 @@ use layers::{LayerState, TerrainUpdate, WindUpdate};
 #[cfg(feature = "native")]
 use nav::{ActiveNav, NavAction, NavTick};
 #[cfg(feature = "native")]
-use nav_data::{NavData, NavLoad, RadarData};
+use nav::native::{self as nav_data, NavData, NavLoad, RadarData};
 #[cfg(feature = "native")]
 use makepad_converse::SpeechOutput;
 #[cfg(feature = "native")]
@@ -73,7 +70,6 @@ use provisioner::MapProvisioner;
 use side_panel::{PanelAction, PanelController};
 #[cfg(feature = "native")]
 use testmap::Stage as TestMapStage;
-#[cfg(feature = "native")]
 use trip::TripModel;
 #[cfg(feature = "native")]
 use voice::{GateResult, VoiceGate};
@@ -81,9 +77,9 @@ use voice::{GateResult, VoiceGate};
 #[cfg(feature = "native")]
 app_main!(App, font_set: International);
 #[cfg(feature = "demo")]
-use demo_app::App as DemoApp;
+pub use nav::api::App;
 #[cfg(feature = "demo")]
-app_main!(DemoApp, font_set: International);
+app_main!(App, font_set: International);
 
 /// Dam square, the point the map opens on and where a fresh test map
 /// lands.
@@ -105,7 +101,6 @@ digests are already shown in the transcript — summarize outcomes, don't repeat
 - Each user message ends with an [app state] block (map center, trip digest) — trust it.
 - If a tool reports data still loading or out of coverage, say so briefly; don't guess.";
 
-#[cfg(feature = "native")]
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
@@ -408,8 +403,7 @@ script_mod! {
                             }
                         }
 
-                        // Selected at the feature seam: AI/voice on native,
-                        // hosted trip planner in the demo profile.
+                        // One side panel in every profile; only its services differ.
                         RouteSidePanel{}
 
                         // --- First-run test map (centered, over everything) ---
@@ -497,7 +491,6 @@ script_mod! {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-#[cfg(feature = "native")]
 pub enum EntryKind {
     User,
     Assistant,
@@ -507,7 +500,6 @@ pub enum EntryKind {
 
 /// One transcript row; `trip` indexes into `ChatState::trips` and renders
 /// with a `>` re-apply button.
-#[cfg(feature = "native")]
 pub struct ChatEntry {
     pub kind: EntryKind,
     pub text: String,
@@ -516,7 +508,6 @@ pub struct ChatEntry {
 
 /// Shared with `TranscriptList`/`TiltShiftLayer` via `Scope::with_data`.
 #[derive(Default)]
-#[cfg(feature = "native")]
 pub struct ChatState {
     pub entries: Vec<ChatEntry>,
     pub trips: Vec<TripModel>,
@@ -536,7 +527,6 @@ pub struct ChatState {
 /// the top/bottom edges. Hoists into the overlay draw list (like glass),
 /// so panels drawn as glass stay sharp above it.
 #[derive(Script, ScriptHook, Widget)]
-#[cfg(feature = "native")]
 pub struct TiltShiftLayer {
     #[uid]
     uid: WidgetUid,
@@ -553,7 +543,6 @@ pub struct TiltShiftLayer {
     draw_bg: DrawQuad,
 }
 
-#[cfg(feature = "native")]
 impl TiltShiftLayer {
     fn bind_snapshot(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
         let draw = &mut self.draw_bg.draw_vars;
@@ -577,7 +566,6 @@ impl TiltShiftLayer {
     }
 }
 
-#[cfg(feature = "native")]
 impl Widget for TiltShiftLayer {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
@@ -618,7 +606,6 @@ impl Widget for TiltShiftLayer {
 }
 
 /// Per-kind transcript text color for the current UI theme.
-#[cfg(feature = "native")]
 fn entry_color(kind: EntryKind, is_trip: bool, dark: bool) -> Vec4 {
     if is_trip {
         return if dark { vec4(0.38, 0.65, 0.98, 1.0) } else { vec4(0.11, 0.31, 0.85, 1.0) };
@@ -638,7 +625,6 @@ fn entry_color(kind: EntryKind, is_trip: bool, dark: bool) -> Vec4 {
 /// PortalList-backed chat transcript; rows come from the `ChatState` in
 /// the event/draw scope.
 #[derive(Script, ScriptHook, Widget)]
-#[cfg(feature = "native")]
 pub struct TranscriptList {
     #[source]
     source: ScriptObjectRef,
@@ -646,7 +632,6 @@ pub struct TranscriptList {
     view: View,
 }
 
-#[cfg(feature = "native")]
 impl Widget for TranscriptList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
@@ -718,6 +703,8 @@ pub struct App {
     started: bool,
     #[rust]
     panel: PanelController,
+    #[rust]
+    assistant: AssistantService,
     /// Last pushed disabled-state of the Space-warp row (None = never
     /// pushed): the row grays out whenever the camera leaves the
     /// near-first-person regime and re-enables when it returns.
@@ -922,6 +909,7 @@ impl App {
             return;
         }
         self.started = true;
+        self.assistant.configure_ui(cx, &self.ui);
         start_memory_watchdog(None);
         // Civil-twilight default (route.md follow-up): night 19:00-06:59,
         // light 07:00-18:59, local wall clock, no location lookup. Same
@@ -1192,6 +1180,11 @@ impl App {
     }
 
     fn send_user_prompt(&mut self, cx: &mut Cx, text: &str) {
+        if let Some(reply) = self.assistant.unavailable_reply(text) {
+            self.push_entry(cx, EntryKind::User, text);
+            self.push_entry(cx, EntryKind::Assistant, reply);
+            return;
+        }
         if text.starts_with('/') {
             self.run_local_command(cx, text);
             return;
@@ -2014,10 +2007,9 @@ impl MatchEvent for App {
             }
         }
         for panel_action in self.panel.actions(cx, &self.ui, actions) {
-            if let PanelAction::Search(text) = panel_action {
-                self.ui.text_input(cx, ids!(prompt_input)).set_text(cx, "");
-                self.send_user_prompt(cx, &text);
-            }
+            let PanelAction::Search(text) = panel_action;
+            self.ui.text_input(cx, ids!(prompt_input)).set_text(cx, "");
+            self.send_user_prompt(cx, &text);
         }
         if self.ui.button(cx, ids!(mic_button)).clicked(actions) {
             self.toggle_mic(cx);
@@ -2375,6 +2367,47 @@ impl AppMain for App {
         self.chat.tilt_strength = ((tilt - 5.0) / 50.0).clamp(0.0, 1.0);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
+    }
+}
+
+#[cfg(test)]
+mod ui_parity_tests {
+    use super::*;
+
+    #[test]
+    fn selected_profile_registers_native_chrome_widget_ids() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let app = cx.with_vm(|vm| {
+            crate::makepad_widgets::script_mod(vm);
+            makepad_wm_theme::apply(vm);
+            crate::side_panel::script_mod(vm);
+            App::from_script_mod(vm, crate::script_mod)
+        });
+        #[cfg(feature = "native")]
+        let ui = &app.ui;
+        #[cfg(feature = "demo")]
+        let ui = app.ui_ref();
+        for id in [
+            ids!(map),
+            ids!(tilt_shift),
+            ids!(layers_panel),
+            ids!(layers_button),
+            ids!(tilt_check),
+            ids!(layer_rain),
+            ids!(layer_wind),
+            ids!(theme_night),
+            ids!(theme_circuit),
+            ids!(assistant_panel),
+            ids!(assistant_button),
+            ids!(transcript_list),
+            ids!(prompt_input),
+            ids!(mic_button),
+            ids!(speaker_button),
+            ids!(testmap_panel),
+        ] {
+            assert!(!ui.widget(&cx, id).is_empty(), "missing shared UI id {id:?}");
+        }
     }
 }
 

@@ -1,4 +1,5 @@
-//! Data plane: search indexes, route graphs, charger layer, rain radar.
+//! Native data plane: filesystem search indexes, route graphs, charger layer,
+//! weather, rain radar, and wind/terrain sources.
 //!
 //! Heavy loads happen on background threads; results cross to the UI thread
 //! via `ToUISender` (same pattern as examples/map). Once loaded, tool

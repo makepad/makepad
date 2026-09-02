@@ -264,6 +264,7 @@ pub struct MbtilesReader {
 
 impl MbtilesReader {
     /// Open an MBTiles file and locate its tables.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: &Path) -> Result<Self> {
         let mut reader = MbtilesReader::open_sqlite(path)?;
         for entry in reader.schema_entries()? {
@@ -297,10 +298,19 @@ impl MbtilesReader {
         Ok(reader)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn open(_path: &Path) -> Result<Self> {
+        Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "local MBTiles are unavailable on wasm",
+        )))
+    }
+
     /// Open any SQLite database (e.g. a GeoPackage) for generic table access.
     /// The tile-specific methods will not find their tables on such a file, but
     /// [`MbtilesReader::schema_entries`] and [`MbtilesReader::for_each_row`]
     /// work on any table.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_sqlite(path: &Path) -> Result<Self> {
         Ok(MbtilesReader {
             pager: Pager::open(path)?,
@@ -310,6 +320,14 @@ impl MbtilesReader {
             makepad_block_rowids: false,
             tile_codec: TileCodec::gzip(),
         })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_sqlite(_path: &Path) -> Result<Self> {
+        Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "local SQLite files are unavailable on wasm",
+        )))
     }
 
     /// Access the database header info.

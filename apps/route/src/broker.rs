@@ -12,7 +12,7 @@ use makepad_widgets::*;
 use makepad_converse::agent_seam::*;
 use makepad_widgets::makepad_micro_serde::*;
 
-use crate::nav_data::NavData;
+use crate::nav::native::NavData;
 use crate::tools;
 use crate::trip::TripModel;
 
@@ -57,7 +57,7 @@ pub struct ToolCtx<'a> {
     pub map: &'a MapViewRef,
     pub trip: &'a mut TripModel,
     pub nav: Option<&'a mut NavData>,
-    pub radar: Option<&'a crate::nav_data::RadarData>,
+    pub radar: Option<&'a crate::nav::native::RadarData>,
     pub markers: &'a mut MarkerLegend,
     /// Latest GPS fix (lon, lat) from the platform geo service, if any.
     pub position: Option<(f64, f64)>,
