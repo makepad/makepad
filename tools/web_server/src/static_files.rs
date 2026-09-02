@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, VecDeque},
     ffi::{CString, OsString},
     fs::{self, File, Metadata, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{mpsc::{self, SyncSender, TrySendError}, Mutex},
@@ -32,6 +32,8 @@ const REPORT_WINDOW: Duration = Duration::from_secs(60);
 const MAX_REPORT_CLIENTS: usize = 4_096;
 const LOG_QUEUE_CAPACITY: usize = 256;
 const CRASH_LOG_LIMIT: u64 = 64 * 1024 * 1024;
+const SNAPSHOT_MANIFEST_LIMIT: u64 = 16 * 1024 * 1024;
+const SNAPSHOT_ROUTE_LIMIT: usize = 100_000;
 
 #[derive(Clone, Copy)]
 struct ReportWindow {
@@ -122,10 +124,17 @@ struct ReportLogJob {
     response: Option<HttpServerResponseSender>,
 }
 
+struct SnapshotManifest {
+    modified: SystemTime,
+    len: u64,
+    routes: HashMap<String, String>,
+}
+
 pub struct StaticHandler {
     root: PathBuf,
     root_fd: File,
     reports: Mutex<ReportRateLimiter>,
+    snapshot_manifests: Mutex<HashMap<String, SnapshotManifest>>,
     log_tx: SyncSender<ReportLogJob>,
 }
 
@@ -176,6 +185,7 @@ impl StaticHandler {
             root,
             root_fd,
             reports: Mutex::new(ReportRateLimiter::new(MAX_REPORT_CLIENTS)),
+            snapshot_manifests: Mutex::new(HashMap::new()),
             log_tx,
         })
     }
@@ -318,7 +328,10 @@ impl StaticHandler {
             send_response(sender, static_error(404, "not found"));
             return;
         }
-        let Some(mime) = mime_for_path(Path::new(relative)) else {
+        let mime = mime_for_path(Path::new(relative))
+            .map(str::to_owned)
+            .or_else(|| Path::new(relative).extension().is_none().then(|| self.snapshot_mime(relative)).flatten());
+        let Some(mime) = mime else {
             send_response(sender, static_error(404, "not found"));
             return;
         };
@@ -457,6 +470,84 @@ impl StaticHandler {
         validate_relative_components(relative)?;
         open_beneath(&self.root_fd, &self.root, relative)
     }
+
+    fn snapshot_mime(&self, relative: &str) -> Option<String> {
+        let components = relative.split('/').collect::<Vec<_>>();
+        for v1_index in (0..components.len()).rev().filter(|index| components[*index] == "v1") {
+            let v1_dir = components[..=v1_index].join("/");
+            let manifest_path = format!("{v1_dir}/static/manifest.json");
+            let mut manifest = match self.open_beneath(&manifest_path) {
+                Ok(manifest) => manifest,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            let metadata = manifest.metadata().ok()?;
+            if !metadata.is_file() || metadata.len() > SNAPSHOT_MANIFEST_LIMIT {
+                return None;
+            }
+            let modified = metadata.modified().ok()?;
+            let route = format!("/{}", components[v1_index..].join("/"));
+            let mut cache = self
+                .snapshot_manifests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.get(&v1_dir) {
+                if cached.modified == modified && cached.len == metadata.len() {
+                    return cached.routes.get(&route).cloned();
+                }
+            }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            if manifest.read_to_end(&mut bytes).is_err() || bytes.len() as u64 != metadata.len() {
+                return None;
+            }
+            let routes = parse_snapshot_routes(&bytes).unwrap_or_default();
+            let mime = routes.get(&route).cloned();
+            cache.insert(
+                v1_dir,
+                SnapshotManifest {
+                    modified,
+                    len: metadata.len(),
+                    routes,
+                },
+            );
+            return mime;
+        }
+        None
+    }
+}
+
+fn parse_snapshot_routes(bytes: &[u8]) -> Option<HashMap<String, String>> {
+    let value = makepad_strict_json::parse(bytes).ok()?;
+    let files = value.get("files")?.as_arr()?;
+    if files.len() > SNAPSHOT_ROUTE_LIMIT {
+        return None;
+    }
+    let mut routes = HashMap::with_capacity(files.len());
+    for file in files {
+        let path = file.get("path")?.as_str()?;
+        let content_type = file.get("content_type")?.as_str()?;
+        if !valid_snapshot_route(path) || !valid_content_type(content_type) {
+            return None;
+        }
+        if routes.insert(path.to_owned(), content_type.to_owned()).is_some() {
+            return None;
+        }
+    }
+    Some(routes)
+}
+
+fn valid_snapshot_route(path: &str) -> bool {
+    path.starts_with("/v1/")
+        && path.len() <= 8_192
+        && !path.contains('\0')
+        && !path.contains('\\')
+        && validate_relative_components(path.trim_start_matches('/')).is_ok()
+}
+
+fn valid_content_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
 }
 
 fn validate_relative_components(relative: &str) -> std::io::Result<()> {
@@ -1185,6 +1276,45 @@ mod tests {
             assert!(validate_relative_components(path).is_err(), "accepted {path:?}");
         }
         assert!(validate_relative_components("dir/file.js").is_ok());
+        assert!(validate_relative_components("v1/blobs/sha256:abc@!$&'()*+,;=").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_walk_resolves_colon_in_snapshot_blob_name() {
+        let base = std::env::temp_dir().join(format!(
+            "makepad-web-pchar-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(base.join("v1/blobs")).unwrap();
+        fs::write(base.join("v1/blobs/sha256:abc"), b"blob").unwrap();
+        let root_fd = File::open(&base).unwrap();
+        let mut file = open_beneath_components(&root_fd, "v1/blobs/sha256:abc").unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "blob");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_manifest_extracts_route_content_types() {
+        let routes = parse_snapshot_routes(
+            br#"{"files":[{"path":"/v1/health","content_type":"application/json"},{"path":"/v1/blobs/sha256:abc","content_type":"application/octet-stream"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(routes.get("/v1/health").map(String::as_str), Some("application/json"));
+        assert_eq!(
+            routes.get("/v1/blobs/sha256:abc").map(String::as_str),
+            Some("application/octet-stream")
+        );
+        assert!(parse_snapshot_routes(
+            br#"{"files":[{"path":"/v1/health","content_type":"application/json\r\nx: y"}]}"#,
+        )
+        .is_none());
     }
 
     #[test]
