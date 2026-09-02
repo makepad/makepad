@@ -9,6 +9,14 @@
 //! [`AiServicePort::reply`] whenever the work is done — the same frame or
 //! many frames later, from the main thread or a worker's channel.
 //!
+//! Identity. A port has no address until the host answers its `Register`
+//! with [`ServiceDown::Registered`]; the port matches that answer on the
+//! nonce it sent (`port_tag`), keeps the endpoint, and from then on takes
+//! only frames addressed to that endpoint — so several ports in one
+//! process, or several instances of one app, never see each other's
+//! calls. A port never claims an address on the way up: the host stamps
+//! senders itself.
+//!
 //! A port never executes anything. What a call does is the app's closed
 //! match over its own tool names; the port only carries it.
 
@@ -16,11 +24,14 @@ use crate::wire::*;
 use makepad_platform::studio::AppToStudio;
 use makepad_platform::thread::SignalToUI;
 use makepad_platform::{Cx, Event};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
 /// What the engine wants from the service, as the app reads it each frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PortEvent {
+    /// The host accepted the registration; the port now has an address.
+    Registered(EndpointId),
     Call(ServiceCall),
     /// Stop this call if you can; no reply is expected.
     Cancel { call_id: String },
@@ -29,19 +40,20 @@ pub enum PortEvent {
 }
 
 /// The engine's end of an in-process service: what the registry holds.
+/// The registry issues the endpoint and answers `Registered` itself.
 pub struct ServiceLink {
     pub manifest: ServiceManifest,
     /// Engine → service.
-    pub down: Sender<ServiceDown>,
+    pub down: Sender<HostedDown>,
     /// Service → engine.
-    pub up: Receiver<ServiceUp>,
+    pub up: Receiver<HostedUp>,
 }
 
 /// The transport's end of a link the HOST bridges itself — the window
 /// manager feeds `up` from the child's frames and forwards `down` to it.
 pub struct ServiceLinkHost {
-    pub up: Sender<ServiceUp>,
-    pub down: Receiver<ServiceDown>,
+    pub up: Sender<HostedUp>,
+    pub down: Receiver<HostedDown>,
 }
 
 impl ServiceLink {
@@ -58,14 +70,19 @@ impl ServiceLink {
 }
 
 enum Transport {
-    InProcess { up: Sender<ServiceUp>, down: Receiver<ServiceDown> },
+    InProcess { up: Sender<HostedUp>, down: Receiver<HostedDown> },
     Hosted,
 }
+
+static NEXT_PORT_TAG: AtomicU32 = AtomicU32::new(1);
 
 /// One app's service, open to its host.
 pub struct AiServicePort {
     manifest: ServiceManifest,
     transport: Transport,
+    /// The nonce this port registers with; how `Registered` finds it.
+    port_tag: u32,
+    endpoint: Option<EndpointId>,
     chat_open: bool,
 }
 
@@ -84,21 +101,30 @@ impl AiServicePort {
             makepad_platform::error!("ai service manifest refused: {e}");
             return None;
         }
-        let port = AiServicePort { manifest, transport: Transport::Hosted, chat_open: false };
+        let port = AiServicePort {
+            manifest,
+            transport: Transport::Hosted,
+            port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
+            endpoint: None,
+            chat_open: false,
+        };
         port.register();
         Some(port)
     }
 
     /// Open the port in-process. The returned link goes to the embedding
-    /// app's own `ServiceRegistry`.
+    /// host's own `ServiceRegistry`, which issues the endpoint.
     pub fn in_process(manifest: ServiceManifest) -> Result<(AiServicePort, ServiceLink), String> {
         manifest.validate()?;
         let (link, host) = ServiceLink::pair(manifest.clone());
         let port = AiServicePort {
             manifest,
             transport: Transport::InProcess { up: host.up, down: host.down },
+            port_tag: NEXT_PORT_TAG.fetch_add(1, Ordering::Relaxed),
+            endpoint: None,
             chat_open: false,
         };
+        port.register();
         Ok((port, link))
     }
 
@@ -106,47 +132,81 @@ impl AiServicePort {
         &self.manifest
     }
 
+    /// The address the host gave this port; `None` until `Registered` came.
+    pub fn endpoint(&self) -> Option<&EndpointId> {
+        self.endpoint.as_ref()
+    }
+
     /// Whether the host's chat pane is showing, as last told.
     pub fn chat_open(&self) -> bool {
         self.chat_open
     }
 
-    /// Announce (or re-announce) the manifest. Hosted ports do this when
-    /// opened; a warm-pool instance does it again on `Adopted`, and any app
-    /// may after a reload changed its tools.
+    /// Announce (or re-announce) the manifest. Done when opened; a
+    /// warm-pool instance does it again on `Adopted`, and any app may
+    /// after a reload changed its tools. The host answers `Registered`.
     pub fn register(&self) {
-        self.send(ServiceUp::Register(self.manifest.clone()));
+        self.send(ServiceUp::Register { manifest: self.manifest.clone(), port_tag: self.port_tag });
     }
 
     /// Drain what the host wants. Hosted: the studio `Custom` frames under
     /// our envelope; in-process: the channel, checked on every event.
+    /// Frames for another endpoint are ignored.
     pub fn handle_event(&mut self, _cx: &mut Cx, event: &Event) -> Vec<PortEvent> {
-        let mut out = Vec::new();
+        let mut frames = Vec::new();
         match &mut self.transport {
             Transport::Hosted => {
                 if let Event::Custom(json) = event {
-                    if let Some(down) = ServiceDown::parse_hosted(json) {
-                        out.push(down);
+                    if let Some(down) = HostedDown::parse(json) {
+                        frames.push(down);
                     }
                 }
             }
             Transport::InProcess { down, .. } => loop {
                 match down.try_recv() {
-                    Ok(msg) => out.push(msg),
+                    Ok(msg) => frames.push(msg),
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
             },
         }
-        out.into_iter()
-            .map(|down| match down {
-                ServiceDown::Call(call) => PortEvent::Call(call),
-                ServiceDown::Cancel { call_id } => PortEvent::Cancel { call_id },
-                ServiceDown::ChatOpen { open } => {
-                    self.chat_open = open;
-                    PortEvent::ChatOpen { open }
+        let mut out = Vec::new();
+        for frame in frames {
+            if let Some(ev) = self.accept(frame) {
+                out.push(ev);
+            }
+        }
+        out
+    }
+
+    /// One frame through the address filter.
+    fn accept(&mut self, frame: HostedDown) -> Option<PortEvent> {
+        match frame.msg {
+            ServiceDown::Registered { port_tag, endpoint } => {
+                if port_tag != self.port_tag {
+                    return None;
                 }
-            })
-            .collect()
+                self.endpoint = Some(endpoint.clone());
+                Some(PortEvent::Registered(endpoint))
+            }
+            msg => {
+                let mine = match (&frame.to, &self.endpoint) {
+                    (Some(to), Some(me)) => to == me,
+                    _ => false,
+                };
+                if !mine {
+                    return None;
+                }
+                Some(match msg {
+                    ServiceDown::Registered { .. } => unreachable!(),
+                    ServiceDown::Call(call) => PortEvent::Call(call),
+                    ServiceDown::Cancel { call_id } => PortEvent::Cancel { call_id },
+                    ServiceDown::ChatOpen { open } => {
+                        self.chat_open = open;
+                        PortEvent::ChatOpen { open }
+                    }
+                })
+            }
+        }
     }
 
     /// Answer a call. Bounded here so an app cannot flood the model.
@@ -182,13 +242,15 @@ impl AiServicePort {
         self.send(ServiceUp::Unregister);
     }
 
-    fn send(&self, up: ServiceUp) {
+    fn send(&self, msg: ServiceUp) {
+        // Never a claim of identity on the way up: `from` is the host's.
+        let frame = HostedUp { from: None, msg };
         match &self.transport {
             Transport::Hosted => {
-                Cx::send_studio_message(AppToStudio::Custom(up.to_hosted_json()));
+                Cx::send_studio_message(AppToStudio::Custom(frame.to_json()));
             }
             Transport::InProcess { up: tx, .. } => {
-                if tx.send(up).is_ok() {
+                if tx.send(frame).is_ok() {
                     // The engine polls on events; make sure one comes.
                     SignalToUI::set_ui_signal();
                 }
@@ -210,34 +272,63 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn an_in_process_port_carries_calls_down_and_results_up() {
-        let (port, link) = AiServicePort::in_process(files()).unwrap();
-        assert_eq!(link.manifest.id, "files");
-        link.down
-            .send(ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into() }))
-            .unwrap();
-        link.down.send(ServiceDown::ChatOpen { open: true }).unwrap();
-        // Drain the channel the way handle_event does, without a Cx.
-        let mut port = port;
-        let events: Vec<PortEvent> = match &mut port.transport {
-            Transport::InProcess { down, .. } => down.try_iter().collect::<Vec<_>>(),
+    fn ep(s: &str) -> EndpointId {
+        EndpointId(s.to_string())
+    }
+
+    /// Drain the in-process channel the way `handle_event` does, without a Cx.
+    fn pump(port: &mut AiServicePort) -> Vec<PortEvent> {
+        let frames: Vec<HostedDown> = match &mut port.transport {
+            Transport::InProcess { down, .. } => down.try_iter().collect(),
             _ => unreachable!(),
-        }
-        .into_iter()
-        .map(|d| match d {
-            ServiceDown::Call(c) => PortEvent::Call(c),
-            ServiceDown::Cancel { call_id } => PortEvent::Cancel { call_id },
-            ServiceDown::ChatOpen { open } => PortEvent::ChatOpen { open },
-        })
-        .collect();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], PortEvent::Call(c) if c.tool == "stat"));
+        };
+        frames.into_iter().filter_map(|f| port.accept(f)).collect()
+    }
+
+    #[test]
+    fn a_port_registers_learns_its_endpoint_and_then_takes_only_its_own_frames() {
+        let (mut port, link) = AiServicePort::in_process(files()).unwrap();
+        // The registration went up, unstamped, with the port's nonce.
+        let reg = link.up.try_recv().unwrap();
+        assert_eq!(reg.from, None);
+        let tag = match reg.msg {
+            ServiceUp::Register { port_tag, ref manifest } => {
+                assert_eq!(manifest.id, "files");
+                port_tag
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(port.endpoint().is_none());
+        // A call before registration, and one for someone else, are ignored.
+        link.down.send(HostedDown { to: Some(ep("other")), msg: ServiceDown::Call(ServiceCall { call_id: "c0".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
+        link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag + 100, endpoint: ep("not-me") } }).unwrap();
+        link.down.send(HostedDown { to: None, msg: ServiceDown::Registered { port_tag: tag, endpoint: ep("e1") } }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e2")), msg: ServiceDown::Call(ServiceCall { call_id: "c2".into(), tool: "stat".into(), args: "{}".into() }) }).unwrap();
+        link.down.send(HostedDown { to: Some(ep("e1")), msg: ServiceDown::ChatOpen { open: true } }).unwrap();
+        let events = pump(&mut port);
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert_eq!(events[0], PortEvent::Registered(ep("e1")));
+        assert!(matches!(&events[1], PortEvent::Call(c) if c.call_id == "c1"));
+        assert_eq!(events[2], PortEvent::ChatOpen { open: true });
+        assert_eq!(port.endpoint(), Some(&ep("e1")));
+        assert!(port.chat_open());
         port.reply(ToolResult::ok("c1", "a file, 12 bytes", "stat ~/x"));
         port.set_context("[files] cwd=~");
-        let up: Vec<ServiceUp> = link.up.try_iter().collect();
-        assert!(matches!(&up[0], ServiceUp::Result(r) if r.call_id == "c1" && r.outcome.is_ok()));
-        assert!(matches!(&up[1], ServiceUp::Context(c) if c.text == "[files] cwd=~"));
+        let up: Vec<HostedUp> = link.up.try_iter().collect();
+        assert!(matches!(&up[0].msg, ServiceUp::Result(r) if r.call_id == "c1" && r.outcome.is_ok()));
+        assert!(matches!(&up[1].msg, ServiceUp::Context(c) if c.text == "[files] cwd=~"));
+        assert!(up.iter().all(|f| f.from.is_none()), "a port never stamps itself");
+    }
+
+    #[test]
+    fn two_ports_in_one_process_get_distinct_tags() {
+        let (a, la) = AiServicePort::in_process(files()).unwrap();
+        let (b, lb) = AiServicePort::in_process(files()).unwrap();
+        let ta = match la.up.try_recv().unwrap().msg { ServiceUp::Register { port_tag, .. } => port_tag, _ => unreachable!() };
+        let tb = match lb.up.try_recv().unwrap().msg { ServiceUp::Register { port_tag, .. } => port_tag, _ => unreachable!() };
+        assert_ne!(ta, tb);
+        assert_ne!(a.port_tag, b.port_tag);
     }
 
     #[test]
@@ -250,8 +341,9 @@ mod tests {
     #[test]
     fn a_reply_is_bounded_on_the_way_out() {
         let (port, link) = AiServicePort::in_process(files()).unwrap();
+        let _reg = link.up.try_recv().unwrap();
         port.reply(ToolResult::ok("c1", "x".repeat(MAX_RESULT_BYTES * 2), "n"));
-        match link.up.try_recv().unwrap() {
+        match link.up.try_recv().unwrap().msg {
             ServiceUp::Result(r) => assert!(r.text.len() <= MAX_RESULT_BYTES),
             other => panic!("{other:?}"),
         }
