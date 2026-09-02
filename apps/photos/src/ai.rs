@@ -1,16 +1,28 @@
-//! photos on the AI bus: two read tools over the wall on screen.
+//! photos on the AI bus: three read tools over the wall on screen, and one
+//! that adds to it.
 //!
 //! `search{query}` finds pictures by the words they carry (for the comic
 //! archive: the date and the hover text), `show{item}` glides the wall
-//! onto one. Both only look and move the camera; nothing is written.
-//! Under the window manager the port is the bus, standalone it is the
-//! F10 overlay's in-process link, as a module it is the executor — the
-//! same `answer` in every case.
+//! onto one, `summary` says what is open. `add{path}` bakes one picture
+//! from disk into the open library — the way a generated image lands on
+//! the wall — and answers LATER, when the bake thread reports; the view
+//! carries that answer through its reply hook, so `answer` says
+//! [`Answered::Later`] and the caller (the port, the module executor)
+//! waits. Under the window manager the port is the bus, standalone it is
+//! the F10 overlay's in-process link, as a module it is the executor —
+//! the same `answer` in every case.
 
 use crate::view::PhotosView;
 use makepad_ai_services::wire::{Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult};
 use makepad_strict_json as json;
 use makepad_widgets::*;
+use std::path::{Path, PathBuf};
+
+/// A call's answer: now, or later through the view's reply hook.
+pub enum Answered {
+    Now(ToolResult),
+    Later,
+}
 
 /// The manifest: who the app is and the tools it exposes.
 pub fn manifest() -> ServiceManifest {
@@ -21,7 +33,9 @@ pub fn manifest() -> ServiceManifest {
          collection (the SMBC comic archive by default: each picture's title \
          is its date and the hover text the author wrote). Its tools only \
          look: search the words the pictures carry, and show one picture by \
-         its id from a search.",
+         its id from a search. `add` puts a picture file from this machine \
+         on the wall — a generated image saved under the makepad home, or \
+         a file in the person's home — and shows it.",
     )
     .with_tool(ToolDef::new(
         "search",
@@ -36,10 +50,22 @@ pub fn manifest() -> ServiceManifest {
         Risk::Read,
     ))
     .with_tool(ToolDef::new(
+        "filter",
+        "Filter the wall on screen to the pictures whose title or link holds every word, best first — the pictures fly to their new places; an empty query shows everything again. Use search to LIST matches, filter to SHOW them.",
+        r#"{"type":"object","properties":{"query":{"type":"string","description":"words to keep on the wall; empty clears"}},"required":["query"]}"#,
+        Risk::Act,
+    ))
+    .with_tool(ToolDef::new(
         "summary",
         "How many pictures the wall shows and from which library.",
         r#"{"type":"object","properties":{}}"#,
         Risk::Read,
+    ))
+    .with_tool(ToolDef::new(
+        "add",
+        "Add a picture file from this machine to the wall and show it: an absolute path to a PNG/JPEG/WebP/GIF under the makepad home's gen folder or under the person's home. Bakes it into the open library; answers when done.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"absolute path of the image file"},"title":{"type":"string","description":"a caption for the wall, optional"}},"required":["path"]}"#,
+        Risk::Act,
     ))
 }
 
@@ -69,7 +95,70 @@ fn int_arg(call: &ServiceCall, key: &str) -> Option<i64> {
 
 /// Answer one call against the wall. Every branch answers; unknown names
 /// are refused with the names that exist.
-pub fn answer(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> ToolResult {
+pub fn answer(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> Answered {
+    Answered::Now(match call.tool.as_str() {
+        "add" => {
+            let id = call.call_id.as_str();
+            let Some(path) = str_arg(call, "path").filter(|p| !p.is_empty()) else {
+                return Answered::Now(ToolResult::refused(id, "add needs an absolute `path` to an image file"));
+            };
+            let path = PathBuf::from(&path);
+            if let Err(why) = addable(&path) {
+                return Answered::Now(ToolResult::refused(id, why));
+            }
+            let title = str_arg(call, "title").filter(|t| !t.is_empty()).unwrap_or_else(|| {
+                path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            });
+            return match view.start_add(id, &path, &title) {
+                Ok(()) => Answered::Later,
+                Err(why) => Answered::Now(ToolResult::failed(id, why)),
+            };
+        }
+        _ => answer_now(cx, view, call),
+    })
+}
+
+/// The jail for `add`: an existing image file under the makepad home's
+/// `gen` folder (where the assistant's pictures land) or under the
+/// person's own home. Never a relative path, never anything else.
+pub fn addable(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("refused: the path must be absolute".to_string());
+    }
+    let ext_ok = path
+        .extension()
+        .map(|e| matches!(e.to_string_lossy().to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err("refused: only png, jpg, jpeg, webp or gif files go on the wall".to_string());
+    }
+    let inside = allowed_roots().iter().any(|root| path.starts_with(root));
+    if !inside {
+        return Err("refused: only files under the makepad home's gen folder or the person's home".to_string());
+    }
+    if !path.is_file() {
+        return Err(format!("refused: {} is not a file on this machine", path.display()));
+    }
+    Ok(())
+}
+
+/// Where an added picture may come from. Mirrors the hub's home rule
+/// (`MAKEPAD_HOME`, else `~/.makepad`) without linking the hub: the
+/// photos lib is a web pilot and must stay light.
+pub fn allowed_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
+        roots.push(PathBuf::from(home).join("gen"));
+    }
+    if let Some(user_home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let user_home = PathBuf::from(user_home);
+        roots.push(user_home.join(".makepad").join("gen"));
+        roots.push(user_home);
+    }
+    roots
+}
+
+fn answer_now(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> ToolResult {
     let id = call.call_id.as_str();
     match call.tool.as_str() {
         "search" => {
@@ -105,8 +194,21 @@ pub fn answer(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> ToolRes
                 ToolResult::failed(id, format!("no picture {item} on the wall"))
             }
         }
+        "filter" => {
+            let query = str_arg(call, "query").unwrap_or_default();
+            view.set_query(cx, &query);
+            let shown = view.visible(cx);
+            let total = view.pictures();
+            if query.is_empty() {
+                ToolResult::ok(id, format!("the wall shows all {total} pictures again"), "cleared")
+            } else if shown == 0 {
+                ToolResult::ok(id, format!("nothing on the wall matches \"{query}\""), "no matches")
+            } else {
+                ToolResult::ok(id, format!("the wall shows the {shown} of {total} pictures matching \"{query}\""), format!("{shown} shown"))
+            }
+        }
         "summary" => ToolResult::ok(id, view.summary(), "the wall"),
-        other => ToolResult::refused(id, format!("photos has no tool `{other}`; it has search, show, summary")),
+        other => ToolResult::refused(id, format!("photos has no tool `{other}`; it has search, show, filter, summary, add")),
     }
 }
 
@@ -119,8 +221,10 @@ mod tests {
         let m = manifest();
         assert_eq!(m.id, "photos");
         m.validate().expect("a manifest the wire accepts");
-        assert_eq!(m.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["search", "show", "summary"]);
-        assert!(m.tools.iter().all(|t| t.risk == Risk::Read));
+        assert_eq!(m.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["search", "show", "filter", "summary", "add"]);
+        assert!(m.tools.iter().filter(|t| t.name != "add" && t.name != "filter").all(|t| t.risk == Risk::Read));
+        assert_eq!(m.tool("filter").unwrap().risk, Risk::Act);
+        assert_eq!(m.tool("add").unwrap().risk, Risk::Act);
     }
 
     #[test]
@@ -133,5 +237,16 @@ mod tests {
         assert_eq!(int_arg(&call, "nope"), None);
         let bad = ServiceCall { call_id: "c".into(), tool: "show".into(), args: "[]".into() };
         assert_eq!(int_arg(&bad, "item"), None);
+    }
+
+    #[test]
+    fn add_takes_only_image_files_inside_the_allowed_roots() {
+        assert!(addable(Path::new("relative.png")).unwrap_err().contains("absolute"));
+        assert!(addable(Path::new("/etc/passwd")).unwrap_err().contains("only png"));
+        assert!(addable(Path::new("/etc/hosts.png")).unwrap_err().contains("only files under"));
+        let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
+        let missing = home.join("surely-not-here-zz.png");
+        assert!(addable(&missing).unwrap_err().contains("not a file"));
+        assert!(allowed_roots().iter().any(|r| r.ends_with("gen")));
     }
 }

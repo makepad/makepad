@@ -38,7 +38,7 @@ impl AppModule for PhotosModule {
         OpenSchema::new(1).arg("collection", OpenArgKind::Text, false)
     }
 
-    fn create(&self, vm: &mut ScriptVm, open: ValidatedOpen, _handles: InstanceHandles) -> InstanceParts {
+    fn create(&self, vm: &mut ScriptVm, open: ValidatedOpen, handles: InstanceHandles) -> InstanceParts {
         let value = script_eval!(vm, {
             use mod.widgets.*
             PhotosView {}
@@ -47,6 +47,10 @@ impl AppModule for PhotosModule {
         let collection = open.text("collection").filter(|c| crate::library::is_collection_name(c)).map(String::from);
         if let Some(mut view) = root.borrow_mut::<PhotosView>() {
             view.set_collection(collection);
+            // An `add` answers later, from the wall itself: through the
+            // host's reply sink, the way any pending executor result does.
+            let sink = handles.replies.clone();
+            view.set_reply(Box::new(move |result| sink.reply(result)));
         }
         InstanceParts {
             root: root.clone(),
@@ -71,11 +75,14 @@ impl ServiceExecutor for PhotosExecutor {
     }
 
     fn execute(&mut self, cx: &mut Cx, call: &ServiceCall) -> ExecOutcome {
-        let result = match self.root.borrow_mut::<PhotosView>() {
+        let answered = match self.root.borrow_mut::<PhotosView>() {
             Some(mut view) => crate::ai::answer(cx, &mut view, call),
-            None => makepad_ai_services::wire::ToolResult::unavailable(&call.call_id, "the wall is gone"),
+            None => crate::ai::Answered::Now(makepad_ai_services::wire::ToolResult::unavailable(&call.call_id, "the wall is gone")),
         };
-        ExecOutcome::Done(result)
+        match answered {
+            crate::ai::Answered::Now(result) => ExecOutcome::Done(result),
+            crate::ai::Answered::Later => ExecOutcome::Pending,
+        }
     }
 }
 
