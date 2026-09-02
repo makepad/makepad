@@ -1181,7 +1181,13 @@ pub fn road_ribbon_rings(
                     continue;
                 }
                 ring.push(point);
-                ring_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+                ring_dz.push(
+                    ribbon
+                        .dz
+                        .and_then(|dz| dz.get(index))
+                        .copied()
+                        .unwrap_or(0.0),
+                );
             }
             if ring.len() >= 2 && ring.first() == ring.last() {
                 ring.pop();
@@ -1202,7 +1208,13 @@ pub fn road_ribbon_rings(
                 continue;
             }
             center.push(point);
-            center_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+            center_dz.push(
+                ribbon
+                    .dz
+                    .and_then(|dz| dz.get(index))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
         }
         if center.len() < 2 {
             continue;
@@ -3190,6 +3202,56 @@ mod overlay_tests {
             },
         );
         assert_eq!(rings, vec![(points[..4].to_vec(), deck[..4].to_vec())]);
+    }
+
+    #[test]
+    fn malformed_short_deck_profile_falls_back_instead_of_panicking() {
+        // A damaged/degenerate overlay can collapse its deck samples while
+        // leaving the source line intact. This was the only unchecked index
+        // in the face-bake road-ring path.
+        let points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let short_deck = [4.0];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: Some(&short_deck),
+            closed_ring: false,
+            start_disc: false,
+            end_disc: false,
+        }];
+        let rings = road_ribbon_rings(
+            &ribbon,
+            1.0,
+            GeoBounds {
+                min: GeoPoint { x: -5.0, y: -5.0 },
+                max: GeoPoint { x: 25.0, y: 5.0 },
+            },
+        );
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].0.len(), rings[0].1.len());
+        assert!(rings[0].1.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn empty_and_degenerate_rings_never_reach_the_face_boolean() {
+        assert!(normalize_polygon_ring(&[]).is_none());
+        assert!(normalize_polygon_ring(&[(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)]).is_none());
+        let group = PaintGroup {
+            color: [1.0; 4],
+            emissive: 0.0,
+            phase: 0,
+            rank: 0,
+            depth_micro: 0.0,
+            field: 0,
+            skirt_joints: Vec::new(),
+            half_width: 1.0,
+            rings: vec![(Vec::new(), 0.0, 0.0), (vec![(0.0, 0.0); 3], 0.0, 0.0)],
+        };
+        let regions = compute_visible_regions(&[group]);
+        assert!(regions.iter().all(|region| {
+            region.main.is_empty()
+                && region.sunk.is_empty()
+                && region.lifted_outlines.is_empty()
+        }));
     }
 
     #[test]

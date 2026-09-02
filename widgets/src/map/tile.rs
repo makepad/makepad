@@ -1922,6 +1922,11 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
     profiler.lap("overlay-merge", "");
+    if faces_bake_sink_armed() {
+        // Field 101 contains road regions and dissolved building groups,
+        // never labels, POIs, trees, signals, or their contact shadows.
+        collector.points.clear();
+    }
     Ok(build_tile_buffers_from_features_profiled(
         profiler,
         tile_key,
@@ -4056,6 +4061,11 @@ fn build_tile_buffers_from_features_profiled(
 
     for (order_pos, group_index) in fill_order.into_iter().enumerate() {
         let group = &fill_groups[group_index];
+        if faces_bake_sink_armed() {
+            // Plaza rings were captured above; all other fill meshes are
+            // runtime output and are not part of the face stream.
+            continue;
+        }
         // A same-bucket 2D/3D switch reuses the resident road core. Its
         // deckable street-area fills already live in the stable stroke
         // geometry and must not be emitted a second time.
@@ -4425,11 +4435,8 @@ fn build_tile_buffers_from_features_profiled(
                 .atan();
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
         };
-        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
-        // The one SceneSun: walls shade by their outward normal against its
-        // horizontal direction (defaults reproduce the legacy NW sun).
+        // The one SceneSun also drives the legacy baked-shadow projection.
         let sun_2d = theme.shiny.sun.dir_2d();
-        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // T3 building shadows: no shadow map, no second scene pass —
         // project each exterior roof ring along the sun's ground direction
         // by height * shadow_len, dissolve footprint + projection +
@@ -4877,6 +4884,19 @@ fn build_tile_buffers_from_features_profiled(
                 profiler.lap("b-dissolved", &format!("groups={}", bake.buildings.len()));
             }
         }
+        // The offline sink consumes only the dissolved building groups
+        // above. Walls, roofs and their AO are derived again by the renderer
+        // and must not be tessellated into throwaway TileBuffers here.
+        let derived_building_jobs: &[BuildingJob] = if faces_bake_sink_armed() {
+            &[]
+        } else {
+            &building_jobs
+        };
+        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
+        // The one SceneSun: walls shade by their outward normal against its
+        // horizontal direction (defaults reproduce the legacy NW sun).
+        let sun_2d = theme.shiny.sun.dir_2d();
+        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -4893,7 +4913,7 @@ fn build_tile_buffers_from_features_profiled(
         // wall rings for courtyards under ~5 px; roofs keep full detail.
         let wall_min_edge = 1.2 / render_scale;
         let wall_min_hole_extent = 5.0 / render_scale;
-        for job in &building_jobs {
+        for job in derived_building_jobs {
             // Building-age layer tints the 3D model itself (walls shade
             // from the same hue via the normal lighting math).
             let roof_color = hex_to_premul_rgba(job.tint.unwrap_or(base_color), 1.0);
@@ -5189,7 +5209,9 @@ fn build_tile_buffers_from_features_profiled(
     // icons x groups x rings, and the icon horizon multiplied the icon
     // side by ~10 (75ms on center tiles). A point query now touches one
     // cell's candidates.
-    let lift_grid: CellMap<Vec<u32>> = {
+    let lift_grid: CellMap<Vec<u32>> = if faces_bake_sink_armed() {
+        CellMap::default()
+    } else {
         const LIFT_CELL: f32 = 24.0;
         let mut grid: CellMap<Vec<u32>> = CellMap::default();
         for (group_index, group) in building_groups.iter().enumerate() {
@@ -5433,8 +5455,10 @@ fn build_tile_buffers_from_features_profiled(
     let mut arrow_jobs = Vec::<ArrowDrawJob>::new();
     for prepared_way in &prepared {
         let way = &tile_ways[prepared_way.way_index];
-        if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
-            labels.push(label);
+        if !faces_bake_sink_armed() {
+            if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
+                labels.push(label);
+            }
         }
         // Detail building footprints are a mode-specific fill overlay. A
         // handful inherit highway-like OSM tags; letting those fall through
@@ -8690,6 +8714,31 @@ pub fn bake_tile_paint_faces(
     theme: &CompiledMapTheme,
     bucket: u32,
 ) -> Option<BakedFacesBucket> {
+    try_bake_tile_paint_faces(
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        theme,
+        bucket,
+    )
+    .ok()
+    .flatten()
+}
+
+/// Fallible face-bake entry used by the offline worker. The Option wrapper
+/// above remains convenient for probes; production baking must retain the
+/// tile-build error text so it can skip and report that tile.
+pub fn try_bake_tile_paint_faces(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    theme: &CompiledMapTheme,
+    bucket: u32,
+) -> Result<Option<BakedFacesBucket>, String> {
     FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(None));
     let result = build_tile_buffers_from_mvt(
         tile_key,
@@ -8707,10 +8756,8 @@ pub fn bake_tile_paint_faces(
         true,
     );
     let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
-    match (result, captured) {
-        (Ok(_), Some(bucket)) => bucket,
-        _ => None,
-    }
+    result?;
+    Ok(captured.flatten())
 }
 
 const BAKED_FACES_FIELD: u32 = 101;
@@ -8890,11 +8937,9 @@ pub struct BakedFacesBucket {
     pub bucket: u32,
     pub signature: u64,
     pub regions: Vec<VisibleRegions>,
-    /// Baked T3 building-shadow output (v3): the dissolved+opened shadow
-    /// shapes and the grounded footprints the deck-shadow pass subtracts.
-    /// Guarded by their own input signature — buildings and roads change
-    /// independently. Night themes leave shadows unsubmitted; the shapes
-    /// bake once under the standard sun.
+    /// Reserved v3 compatibility slots. Building and deck shadows are now
+    /// derived by the draw-time shadow mask, so v4 writers leave these
+    /// fields empty and the parser accepts them only for old archives.
     pub shadow_signature: u64,
     pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
     pub shadow_footprints: Vec<Vec<[f64; 2]>>,
@@ -8964,6 +9009,39 @@ pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
     write_faces_varint(blob.len() as u64, &mut field);
     field.extend_from_slice(&blob);
     field
+}
+
+#[cfg(test)]
+#[test]
+fn trimmed_v4_and_legacy_v3_face_streams_parse_with_empty_shadow_sections() {
+    let bucket = BakedFacesBucket {
+        bucket: 16,
+        signature: 7,
+        regions: Vec::new(),
+        shadow_signature: 0,
+        shadow_shapes: Vec::new(),
+        shadow_footprints: Vec::new(),
+        building_signature: 11,
+        buildings: Vec::new(),
+    };
+    let v4 = encode_baked_faces_field(&[bucket]);
+    let parsed = parse_baked_faces(&v4, 16).expect("trimmed v4 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert!(parsed.shadow_footprints.is_empty());
+    assert_eq!(parsed.building_signature, 11);
+
+    // A v3 body ends after the same empty shadow sections. Reuse the v4
+    // encoder with an empty v4 extension; v3 ignores that zero-valued tail
+    // and validates the same coordinate checksum.
+    let mut v3 = v4;
+    let mut pos = 0;
+    let _field_key = read_pb_varint(&v3, &mut pos).unwrap();
+    let _blob_len = read_pb_varint(&v3, &mut pos).unwrap();
+    v3[pos] = 3;
+    let parsed = parse_baked_faces(&v3, 16).expect("legacy v3 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert_eq!(parsed.building_signature, 0);
+    assert!(parsed.buildings.is_empty());
 }
 
 fn read_shapes(

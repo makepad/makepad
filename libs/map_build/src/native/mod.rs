@@ -14,7 +14,7 @@ use geom::{
     project_path, PolygonPart, SourcePath,
 };
 use makepad_mbtile_reader::MbtilesWriter;
-use mvt::{encode_tile, Layer, OsmType, TagPair};
+use mvt::{encode_tile_with_profile, Layer, OsmType, TagPair};
 use osmpbf::{BlobDecode, BlobReader, Element, RelMemberType};
 use smallvec::SmallVec;
 use spool::{records_to_tiles, BlockSpoolWriter, SortedBlock};
@@ -75,6 +75,8 @@ pub struct DetailOptions {
     /// complete and consumable after pass 4 — pbf-base and the fleet
     /// never read the pass-5 output.
     pub no_tiles: bool,
+    /// Preserve all source tags and __makepad_osm_* provenance in pass 5.
+    pub full: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1549,10 +1551,21 @@ fn finish_tiles(
 ) -> Result<makepad_mbtile_reader::MbtilesWriterStats, String> {
     let mut writer = MbtilesWriter::create(&options.output)
         .map_err(|err| format!("create {}: {err}", options.output.display()))?;
-    writer.set_metadata("name", "Makepad native all-tag OSM detail");
+    writer.set_metadata(
+        "name",
+        if options.full {
+            "Makepad native all-tag OSM detail"
+        } else {
+            "Makepad native renderer-detail OSM"
+        },
+    );
     writer.set_metadata(
         "description",
-        "All tagged spatial OSM elements with original tags and IDs",
+        if options.full {
+            "All tagged spatial OSM elements with original tags and IDs"
+        } else {
+            "Spatial OSM elements with renderer-consumed tags"
+        },
     );
     writer.set_metadata("type", "overlay");
     writer.set_metadata("version", "1");
@@ -1579,13 +1592,24 @@ fn finish_tiles(
     );
     writer.set_metadata("attribution", "OpenStreetMap contributors");
     writer.set_metadata("license", "Open Database License 1.0");
-    writer.set_metadata("makepad_source_kind", "osm-all-tags-native-detail-v1");
+    writer.set_metadata(
+        "makepad_source_kind",
+        if options.full {
+            "osm-all-tags-native-detail-v1"
+        } else {
+            "osm-renderer-detail-native-v1"
+        },
+    );
     writer.set_metadata("makepad_source_file", options.source.display().to_string());
-    writer.set_metadata("makepad_all_osm_tags", "true");
+    writer.set_metadata("makepad_all_osm_tags", options.full.to_string());
     writer.set_metadata("makepad_detail_zoom", options.zoom.to_string());
     writer.set_metadata(
         "makepad_2_5d_tags",
-        "building,building:part,height,min_height,building:levels,building:min_level,roof:shape,roof:height,roof:levels,roof:direction,roof:orientation,roof:angle,building:material,building:colour,roof:material,roof:colour",
+        if options.full {
+            "building,building:part,height,min_height,building:levels,building:min_level,roof:shape,roof:height,roof:levels,roof:direction,roof:orientation,roof:angle,building:material,building:colour,roof:material,roof:colour"
+        } else {
+            "building,building:part,height,min_height,building:levels,building:min_level"
+        },
     );
     writer.set_metadata(
         "json",
@@ -1600,7 +1624,7 @@ fn finish_tiles(
     for &block in &spool.blocks {
         let sorted = SortedBlock::prepare(&spool.dir, block, Some(sort_memory), false)?;
         let mut sorted = records_to_tiles(sorted, block, |x, y, features| {
-            let pbf = encode_tile(features)?;
+            let pbf = encode_tile_with_profile(features, options.full)?;
             let tile = gzip_compress(&pbf, 1);
             writer
                 .write_tile_xyz(options.zoom, x, y, &tile)
@@ -1693,6 +1717,7 @@ pub fn default_detail_options(source: PathBuf, output: PathBuf, store: PathBuf) 
         zoom: DEFAULT_ZOOM,
         sort_memory_mib: 256,
         no_tiles: false,
+        full: false,
     }
 }
 
