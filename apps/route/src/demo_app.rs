@@ -1,4 +1,5 @@
 use crate::{
+    clock,
     nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest},
     provisioner::MapProvisioner,
     side_panel::{AlongKind, PanelAction, PanelController},
@@ -65,7 +66,7 @@ pub struct App {
     #[rust]
     nav_session: Option<NavSession>,
     #[rust]
-    nav_started: Option<std::time::Instant>,
+    nav_started: Option<f64>,
     #[rust]
     reroute_in_flight: bool,
     #[rust]
@@ -193,6 +194,9 @@ impl App {
             self.ui
                 .map_view(cx, ids!(map))
                 .set_rain_frames(cx, Vec::new(), 0, 0, bbox);
+            self.ui
+                .map_view(cx, ids!(map))
+                .set_rain_now_hires(cx, None);
         }
     }
 
@@ -250,7 +254,7 @@ impl App {
                     ],
                 );
                 self.nav_session = Some(NavSession::new(route.clone()));
-                self.nav_started = Some(std::time::Instant::now());
+                self.nav_started = Some(clock::monotonic_now(cx));
                 self.route = Some(route);
                 self.panel.set_search_status(
                     cx,
@@ -306,6 +310,9 @@ impl App {
                     .set_weather(cx, &self.ui, &format!("Weather now: {text}"));
             }
             NavApiEvent::RadarManifest(manifest) => {
+                if !self.rain_enabled {
+                    return;
+                }
                 self.radar_frames.clear();
                 for minute in manifest.minutes.iter().copied() {
                     self.api.radar_frame(cx, &manifest.stamp, minute, false);
@@ -321,6 +328,9 @@ impl App {
                 hires,
                 png,
             } => {
+                if !self.rain_enabled {
+                    return;
+                }
                 let Some(manifest) = self
                     .radar_manifest
                     .as_ref()
@@ -357,15 +367,45 @@ impl App {
                 status,
                 message,
             } => {
-                if operation == ApiOperation::Route {
+                if operation == ApiOperation::Route && status != Some(503) {
                     self.reroute_in_flight = false;
+                }
+                if (matches!(operation, ApiOperation::RadarManifest | ApiOperation::RadarFrame)
+                    && !self.rain_enabled)
+                    || (operation == ApiOperation::Wind && !self.wind_enabled)
+                {
+                    return;
                 }
                 let unavailable_live_layer = matches!(
                     operation,
-                    ApiOperation::Weather | ApiOperation::RadarManifest | ApiOperation::RadarFrame | ApiOperation::Wind
-                ) && matches!(status, Some(404 | 503));
-                let text = if unavailable_live_layer {
-                    format!("{operation:?}: temporarily unavailable")
+                    ApiOperation::Weather
+                        | ApiOperation::RadarManifest
+                        | ApiOperation::RadarFrame
+                        | ApiOperation::Wind
+                ) && status == Some(404);
+                if unavailable_live_layer {
+                    match operation {
+                        ApiOperation::Weather => self.panel.hide_weather(cx, &self.ui),
+                        ApiOperation::RadarManifest | ApiOperation::RadarFrame => {
+                            self.set_rain(cx, false);
+                            self.ui
+                                .check_box(cx, ids!(rain_toggle))
+                                .set_active(cx, false, Animate::No);
+                        }
+                        ApiOperation::Wind => {
+                            self.set_wind(cx, false);
+                            self.ui
+                                .check_box(cx, ids!(wind_toggle))
+                                .set_active(cx, false, Animate::No);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                let text = if matches!(operation, ApiOperation::Search | ApiOperation::Route | ApiOperation::Along)
+                    && status == Some(503)
+                {
+                    format!("{operation:?} service is starting; retrying automatically…")
                 } else {
                     format!("{operation:?}: {message}")
                 };
@@ -389,7 +429,7 @@ impl App {
         if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started) {
             let status = session.update(
                 LonLat::new(fix.lon, fix.lat),
-                started.elapsed().as_secs_f64(),
+                (clock::monotonic_now(cx) - started).max(0.0),
             );
             let route = session.route();
             let progress = route
@@ -434,7 +474,7 @@ impl AppMain for App {
         if self.wind_enabled && self.wind_timer.is_event(event).is_some() {
             self.api.wind_current(cx);
         }
-        let api_events = self.api.handle_event(event);
+        let api_events = self.api.handle_event(cx, event);
         for api_event in api_events {
             self.handle_api_event(cx, api_event);
         }

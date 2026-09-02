@@ -49,6 +49,8 @@ mod trip;
 mod voice;
 
 #[cfg(feature = "demo")]
+mod clock;
+#[cfg(feature = "demo")]
 mod demo_app;
 
 #[cfg(feature = "native")]

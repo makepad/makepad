@@ -13,6 +13,9 @@ use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::collections::HashMap;
 
+const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
+const MAX_RETRY_SECONDS: f64 = 30.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiOperation {
     Search,
@@ -103,6 +106,20 @@ enum PendingRequest {
     Wind,
 }
 
+struct PendingCall {
+    request: HttpRequest,
+    request_kind: PendingRequest,
+    attempt: u8,
+    timeout: Timer,
+}
+
+struct RetryCall {
+    request: HttpRequest,
+    request_kind: PendingRequest,
+    attempt: u8,
+    timer: Timer,
+}
+
 impl PendingRequest {
     fn operation(&self) -> ApiOperation {
         match self {
@@ -120,7 +137,8 @@ impl PendingRequest {
 pub struct NavApi {
     base_url: String,
     next_request_id: u64,
-    pending: HashMap<LiveId, PendingRequest>,
+    pending: HashMap<LiveId, PendingCall>,
+    retries: Vec<RetryCall>,
 }
 
 impl Default for NavApi {
@@ -135,19 +153,72 @@ impl NavApi {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             next_request_id: 0x524f_5554_4500_0001,
             pending: HashMap::new(),
+            retries: Vec::new(),
         }
     }
 
     fn send(&mut self, cx: &mut Cx, pending: PendingRequest, request: HttpRequest) {
         let operation = pending.operation();
         if operation != ApiOperation::RadarFrame {
-            self.pending
-                .retain(|_, older| older.operation() != operation);
+            self.cancel_operation(cx, operation);
         }
+        self.dispatch(cx, pending, request, 0);
+    }
+
+    fn dispatch(
+        &mut self,
+        cx: &mut Cx,
+        request_kind: PendingRequest,
+        request: HttpRequest,
+        attempt: u8,
+    ) {
         let request_id = LiveId(self.next_request_id);
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        self.pending.insert(request_id, pending);
+        let timeout = cx.start_timeout(REQUEST_TIMEOUT_SECONDS);
+        self.pending.insert(
+            request_id,
+            PendingCall {
+                request: request.clone(),
+                request_kind,
+                attempt,
+                timeout,
+            },
+        );
         cx.http_request(request_id, request);
+    }
+
+    fn cancel_operation(&mut self, cx: &mut Cx, operation: ApiOperation) {
+        let stale = self
+            .pending
+            .iter()
+            .filter(|(_, call)| call.request_kind.operation() == operation)
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        for request_id in stale {
+            if let Some(call) = self.pending.remove(&request_id) {
+                cx.stop_timer(call.timeout);
+            }
+        }
+        let mut index = 0;
+        while index < self.retries.len() {
+            if self.retries[index].request_kind.operation() == operation {
+                let retry = self.retries.swap_remove(index);
+                cx.stop_timer(retry.timer);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn schedule_retry(&mut self, cx: &mut Cx, call: &PendingCall) {
+        let attempt = call.attempt.saturating_add(1);
+        let delay = retry_delay_seconds(attempt);
+        self.retries.push(RetryCall {
+            request: call.request.clone(),
+            request_kind: call.request_kind.clone(),
+            attempt,
+            timer: cx.start_timeout(delay),
+        });
     }
 
     pub fn search(&mut self, cx: &mut Cx, query: &str, near: Option<LonLat>, limit: usize) {
@@ -240,25 +311,61 @@ impl NavApi {
         );
     }
 
-    pub fn handle_event(&mut self, event: &Event) -> Vec<NavApiEvent> {
-        let Event::NetworkResponses(responses) = event else {
-            return Vec::new();
-        };
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<NavApiEvent> {
+        let timed_out = self
+            .pending
+            .iter()
+            .filter(|(_, call)| call.timeout.is_event(event).is_some())
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
         let mut events = Vec::new();
+        for request_id in timed_out {
+            if let Some(call) = self.pending.remove(&request_id) {
+                events.push(NavApiEvent::Failed {
+                    operation: call.request_kind.operation(),
+                    status: None,
+                    message: "request timed out".to_string(),
+                });
+            }
+        }
+
+        let ready_retries = self
+            .retries
+            .iter()
+            .enumerate()
+            .filter(|(_, retry)| retry.timer.is_event(event).is_some())
+            .map(|(index, _)| index)
+            .rev()
+            .collect::<Vec<_>>();
+        for index in ready_retries {
+            let retry = self.retries.swap_remove(index);
+            self.dispatch(cx, retry.request_kind, retry.request, retry.attempt);
+        }
+
+        let Event::NetworkResponses(responses) = event else {
+            return events;
+        };
         for response in responses {
             match response {
                 NetworkResponse::HttpResponse { request_id, response } => {
-                    let Some(pending) = self.pending.remove(request_id) else {
+                    let Some(call) = self.pending.remove(request_id) else {
                         continue;
                     };
-                    events.push(parse_response(pending, response));
+                    cx.stop_timer(call.timeout);
+                    if response.status_code == 503
+                        && retryable_operation(call.request_kind.operation())
+                    {
+                        self.schedule_retry(cx, &call);
+                    }
+                    events.push(parse_response(call.request_kind, response));
                 }
                 NetworkResponse::HttpError { request_id, error } => {
-                    let Some(pending) = self.pending.remove(request_id) else {
+                    let Some(call) = self.pending.remove(request_id) else {
                         continue;
                     };
+                    cx.stop_timer(call.timeout);
                     events.push(NavApiEvent::Failed {
-                        operation: pending.operation(),
+                        operation: call.request_kind.operation(),
                         status: None,
                         message: error.message.clone(),
                     });
@@ -268,6 +375,16 @@ impl NavApi {
         }
         events
     }
+}
+
+fn retryable_operation(operation: ApiOperation) -> bool {
+    matches!(operation, ApiOperation::Search | ApiOperation::Route | ApiOperation::Along)
+}
+
+fn retry_delay_seconds(attempt: u8) -> f64 {
+    2.0_f64
+        .powi(attempt.saturating_sub(1).min(5) as i32)
+        .min(MAX_RETRY_SECONDS)
 }
 
 fn json_request(url: String, method: HttpMethod) -> HttpRequest {
@@ -707,5 +824,13 @@ mod tests {
         let wind = parse_wind(r#"{"stamp_unix":1788350400,"bbox":[2.0,48.0,9.0,56.0],"nx":2,"ny":1,"u":[-2.15,-2.05],"v":[0.01,0.03]}"#).unwrap();
         assert_eq!(wind.nx, 2);
         assert_eq!(wind.u.len(), 2);
+    }
+
+    #[test]
+    fn hosted_service_retry_backoff_is_bounded() {
+        assert_eq!(retry_delay_seconds(1), 1.0);
+        assert_eq!(retry_delay_seconds(2), 2.0);
+        assert_eq!(retry_delay_seconds(6), 30.0);
+        assert_eq!(retry_delay_seconds(u8::MAX), 30.0);
     }
 }

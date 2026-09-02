@@ -135,7 +135,7 @@ pub struct TileEntry {
 
 #[derive(Debug)]
 pub struct TileFade {
-    pub started: std::time::Instant,
+    pub started: f64,
     /// Render bucket the outgoing geometry was styled for, so its stroke
     /// widths can be corrected while it fades out.
     pub bucket: u32,
@@ -1804,9 +1804,13 @@ pub fn build_tile_buffers_from_mvt(
     // features. 3D/terrain ignores the stream — drape and extrusion re-grid
     // from the rings. MAKEPAD_NO_BAKED_FILLS=1 is the kill switch (also the
     // A/B lever for benchmarks).
+    #[cfg(not(target_arch = "wasm32"))]
     static NO_BAKED_FILLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(not(target_arch = "wasm32"))]
     let no_baked =
         *NO_BAKED_FILLS.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FILLS").is_ok());
+    #[cfg(target_arch = "wasm32")]
+    let no_baked = false;
     let baked_fills: Vec<BakedFillFeature> = if buildings_3d || no_baked {
         Vec::new()
     } else {
@@ -1818,9 +1822,13 @@ pub fn build_tile_buffers_from_mvt(
     // A bucket missing from the stream or any signature mismatch falls
     // back to the runtime cascade. MAKEPAD_NO_BAKED_FACES=1 is the kill
     // switch / A/B lever.
+    #[cfg(not(target_arch = "wasm32"))]
     static NO_BAKED_FACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(not(target_arch = "wasm32"))]
     let no_baked_faces =
         *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
+    #[cfg(target_arch = "wasm32")]
+    let no_baked_faces = false;
     let baked_faces = if !no_baked_faces
         && (10..=18).contains(&render_zoom)
         && !faces_bake_sink_armed()
@@ -3266,10 +3274,40 @@ pub struct TileWay {
 
 /// Stage clock for `map.tile_profile`: per-stage wall time, so the
 /// generator's cost distribution is measurable headless and in-app alike.
+#[cfg(not(target_arch = "wasm32"))]
+struct ProfileClock(std::time::Instant);
+
+#[cfg(target_arch = "wasm32")]
+struct ProfileClock;
+
+impl ProfileClock {
+    fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self(std::time::Instant::now())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self
+        }
+    }
+
+    fn elapsed_seconds(&self) -> f64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.0.elapsed().as_secs_f64()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0.0
+        }
+    }
+}
+
 struct TileProfiler {
     on: bool,
-    last: std::time::Instant,
-    start: std::time::Instant,
+    last: ProfileClock,
+    start: ProfileClock,
     /// Always recorded (cheap): fuels the SLOW-tile replay log even when
     /// stage printing is off.
     laps: Vec<(&'static str, f64)>,
@@ -3277,17 +3315,16 @@ struct TileProfiler {
 
 impl TileProfiler {
     fn new() -> TileProfiler {
-        let now = std::time::Instant::now();
         TileProfiler {
             on: crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile"),
-            last: now,
-            start: now,
+            last: ProfileClock::now(),
+            start: ProfileClock::now(),
             laps: Vec::new(),
         }
     }
     fn lap(&mut self, name: &'static str, extra: &str) {
-        let now = std::time::Instant::now();
-        let ms = (now - self.last).as_secs_f64() * 1000.0;
+        let now = ProfileClock::now();
+        let ms = self.last.elapsed_seconds() * 1000.0;
         self.laps.push((name, ms));
         if self.on {
             trace!("map.tile_profile", "{name} {ms:.1}ms {extra}");
@@ -3319,7 +3356,7 @@ impl TileProfiler {
             tile_key.z,
             tile_key.x,
             tile_key.y,
-            self.start.elapsed().as_secs_f64() * 1000.0
+            self.start.elapsed_seconds() * 1000.0
         );
     }
 }
@@ -6348,7 +6385,7 @@ fn build_tile_buffers_from_features_profiled(
     let cap_eps = 0.05_f32;
     // Sort key gains a level-class prefix: sunk faces (tunnels) paint
     // before ALL surface content — under plazas, casings, everything.
-    let events_build_clock = std::time::Instant::now();
+    let events_build_clock = ProfileClock::now();
     let mut events: Vec<((u8, u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
     for (face_index, face) in faces.iter().enumerate() {
         let level_class = if face.level < 0 { 0u8 } else { 1 };
@@ -6497,12 +6534,12 @@ fn build_tile_buffers_from_features_profiled(
     let mut prof_fringe_ms = 0.0f64;
     let mut prof_stroke_arm_ms = 0.0f64;
     let mut prof_face_arm_ms = 0.0f64;
-    let prof_events_build_ms = events_build_clock.elapsed().as_secs_f64() * 1e3;
-    let events_loop_clock = std::time::Instant::now();
+    let prof_events_build_ms = events_build_clock.elapsed_seconds() * 1e3;
+    let events_loop_clock = ProfileClock::now();
     for ((_, phase, _, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(face_index) => {
-                let whole_face_clock = std::time::Instant::now();
+                let whole_face_clock = ProfileClock::now();
                 let face = &faces[*face_index];
                 let face_param5 =
                     road_semantic_param5(face.level, face.phase, face.depth_micro);
@@ -6536,7 +6573,7 @@ fn build_tile_buffers_from_features_profiled(
                                 field.active_near(min_x, min_y, max_x, max_y)
                             } =>
                         {
-                            let clock = std::time::Instant::now();
+                            let clock = ProfileClock::now();
                             sub_verts = face.verts.clone();
                             sub_indices = face.indices.clone();
                             if face.morph_offsets.len() == face.verts.len()
@@ -6554,20 +6591,20 @@ fn build_tile_buffers_from_features_profiled(
                                 sub_offsets = Vec::new();
                                 subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
                             }
-                            prof_subdiv_ms += clock.elapsed().as_secs_f64() * 1000.0;
-                            let clock = std::time::Instant::now();
+                            prof_subdiv_ms += clock.elapsed_seconds() * 1000.0;
+                            let clock = ProfileClock::now();
                             let deck: Vec<f32> = sub_verts
                                 .iter()
                                 .map(|v| field.sample(v.x, v.y))
                                 .collect();
-                            prof_sample_ms += clock.elapsed().as_secs_f64() * 1000.0;
+                            prof_sample_ms += clock.elapsed_seconds() * 1000.0;
                             prof_face_verts_out += sub_verts.len();
                             let displaced = deck.iter().any(|&d| d.abs() > 0.05);
                             (&sub_verts, &sub_indices, displaced.then_some(deck))
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
-                let face_clock = std::time::Instant::now();
+                let face_clock = ProfileClock::now();
                 // Deck side walls first (under the face): top verts (v=0)
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
@@ -6633,8 +6670,8 @@ fn build_tile_buffers_from_features_profiled(
                         }
                     }
                 }
-                prof_skirt_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                let face_clock = std::time::Instant::now();
+                prof_skirt_ms += face_clock.elapsed_seconds() * 1e3;
+                let face_clock = ProfileClock::now();
                 // Morphable body: non-emissive faces whose offsets are
                 // 1:1 with the emitted verts — the dz-subdivided path
                 // carries them through midpoint averaging, so decked city
@@ -6646,11 +6683,15 @@ fn build_tile_buffers_from_features_profiled(
                 } else {
                     &face.morph_offsets
                 };
+                #[cfg(not(target_arch = "wasm32"))]
                 static FACE_MORPH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                #[cfg(not(target_arch = "wasm32"))]
                 let face_morph_on = *FACE_MORPH.get_or_init(|| {
                     std::env::var_os("MAKEPAD_FACE_MORPH").is_some()
                         || std::path::Path::new("/tmp/mp_face_morph").exists()
                 });
+                #[cfg(target_arch = "wasm32")]
+                let face_morph_on = false;
                 let body_morph = face_morph_on
                     && face.emissive <= 0.001
                     && body_offsets.len() == verts.len()
@@ -6702,8 +6743,8 @@ fn build_tile_buffers_from_features_profiled(
                     );
                 }
                 casing_zbias += VECTOR_ZBIAS_STEP;
-                prof_body_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                let face_clock = std::time::Instant::now();
+                prof_body_ms += face_clock.elapsed_seconds() * 1e3;
+                let face_clock = ProfileClock::now();
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
                 if !face.fringe_verts.is_empty() {
@@ -6808,8 +6849,8 @@ fn build_tile_buffers_from_features_profiled(
                     }
                     casing_zbias += VECTOR_ZBIAS_STEP;
                 }
-                prof_fringe_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                prof_face_arm_ms += whole_face_clock.elapsed().as_secs_f64() * 1e3;
+                prof_fringe_ms += face_clock.elapsed_seconds() * 1e3;
+                prof_face_arm_ms += whole_face_clock.elapsed_seconds() * 1e3;
                 feature_count += 1;
             }
             RoadPaintEvent::Stroke {
@@ -6818,7 +6859,7 @@ fn build_tile_buffers_from_features_profiled(
                 start_cap,
                 end_cap,
             } => {
-                let arm_clock = std::time::Instant::now();
+                let arm_clock = ProfileClock::now();
                 let near_corridor = stroke_corridors_available && part_near_corridor(part);
                 let param5 = if pass.deck_m < 0.0 {
                     // Patterned tunnels have no physical sunk mesh; keep
@@ -6851,13 +6892,13 @@ fn build_tile_buffers_from_features_profiled(
                     &mut casing_zbias,
                     param5,
                 );
-                prof_stroke_arm_ms += arm_clock.elapsed().as_secs_f64() * 1e3;
+                prof_stroke_arm_ms += arm_clock.elapsed_seconds() * 1e3;
                 feature_count += 1;
             }
         }
     }
 
-    let prof_events_loop_ms = events_loop_clock.elapsed().as_secs_f64() * 1e3;
+    let prof_events_loop_ms = events_loop_clock.elapsed_seconds() * 1e3;
     let sp = crate::map::geometry::stroke_prof_take();
     profiler.lap(
         "emit",
@@ -7139,7 +7180,7 @@ fn build_tile_buffers_from_features_profiled(
         ),
     );
 
-    let stage_summary = if profiler.start.elapsed().as_secs_f64() * 1e3 > 100.0 {
+    let stage_summary = if profiler.start.elapsed_seconds() * 1e3 > 100.0 {
         profiler.summary()
     } else {
         String::new()
@@ -7950,7 +7991,7 @@ pub fn load_local_tile_batch(
                     }
                     continue;
                 };
-                let t_build = std::time::Instant::now();
+                let t_build = ProfileClock::now();
                 let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
                 let detail_needed = render_zoom >= ICON_MIN_ZOOM
                     || render_zoom >= 16
@@ -7992,7 +8033,7 @@ pub fn load_local_tile_batch(
                     Ok(buffers) => {
                         // Slow-tile forensics: anything over 150ms is worth a
                         // line — which tile, how many bytes, what it holds.
-                        let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
+                        let build_ms = t_build.elapsed_seconds() * 1e3;
                         if build_ms > 150.0 {
                             // Everything needed to replay this exact build
                             // headlessly, plus the ready-to-paste command.
@@ -8406,10 +8447,14 @@ impl MvtSink for MvtLocalCollector {
             "operator", "shop", "osm_layer", "kerb", "bus", "shelter",
         ];
         static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        #[cfg(not(target_arch = "wasm32"))]
         static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *NO_WHITELIST
-            .get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some())
-        {
+        #[cfg(not(target_arch = "wasm32"))]
+        let no_whitelist =
+            *NO_WHITELIST.get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some());
+        #[cfg(target_arch = "wasm32")]
+        let no_whitelist = false;
+        if no_whitelist {
             return None;
         }
         match self.layer_filter {
