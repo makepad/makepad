@@ -6593,6 +6593,19 @@ pub struct App {
     /// Why the picker chose what it chose, for the panel.
     #[rust]
     auto_pick_reason: String,
+    /// The optional advisor, when one was built in AND a model was found.
+    /// `None` covers both, and both mean the same thing downstream.
+    #[cfg(feature = "advisor")]
+    #[rust]
+    advisor: Option<crate::advisor::Advisor>,
+    /// Its last answer, already checked against what it was offered, and
+    /// spent on the next choice.
+    #[rust]
+    advised: Option<crate::advisor::Accepted>,
+    /// What the last question offered, so an answer can be checked against
+    /// the world it was actually asked about.
+    #[rust]
+    advisor_offered: Vec<String>,
     /// Records the operator has turned down for THIS decision. Cleared the
     /// moment one is actually loaded: a veto is "not that one, now" rather
     /// than a ban, and a record turned down at midnight is fair game at two.
@@ -13868,6 +13881,7 @@ p2 {}
         // deck-to-deck lock is a continuous rate servo, not a one-shot.
         let cmds = self.decks.hold_deck_sync();
         self.run_deck_cmds(cx, cmds);
+        self.poll_advisor();
         self.pump_autopilot(cx);
         self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
@@ -14145,6 +14159,7 @@ p2 {}
                         self.load_gen_panel(cx);
                         self.load_autopilot_settings();
         self.load_set_history();
+        self.start_advisor();
                         self.load_loop_scan_settings();
                         self.sync_autopilot_panel(cx);
                         // Dev/automation hook: VJ_IMPORT_PATH=<dir|file>
@@ -25022,6 +25037,70 @@ p2 {}
         self.save_set_history();
     }
 
+    /// Bring the advisor up, if one was built in and a model is on disk.
+    ///
+    /// The path comes from the environment rather than the model hub for
+    /// now: the hub's only text model is far larger than most cards, and
+    /// pointing at a file is what lets this be tried at all before one that
+    /// fits is chosen and pinned there.
+    #[cfg(feature = "advisor")]
+    fn start_advisor(&mut self) {
+        let Some(path) = std::env::var_os("VJ_ADVISOR_MODEL").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        if !path.is_file() {
+            log!("auto dj advisor: no model at {}", path.display());
+            return;
+        }
+        self.advisor = Some(crate::advisor::Advisor::start(path));
+    }
+
+    #[cfg(not(feature = "advisor"))]
+    fn start_advisor(&mut self) {}
+
+    /// Take whatever the advisor has said since last time.
+    ///
+    /// Checked against what it was actually offered before it is believed,
+    /// so an answer about a queue that has since changed is dropped rather
+    /// than acted on.
+    #[cfg(feature = "advisor")]
+    fn poll_advisor(&mut self) {
+        let Some(advisor) = self.advisor.as_ref() else {
+            return;
+        };
+        for (_gen, proposal) in advisor.poll() {
+            let eligible = crate::blend::Route::ALL.to_vec();
+            self.advised =
+                crate::advisor::validate(&proposal, &self.advisor_offered, &eligible);
+        }
+    }
+
+    #[cfg(not(feature = "advisor"))]
+    fn poll_advisor(&mut self) {}
+
+    /// Ask about the choice AFTER this one, so the answer is never on the
+    /// critical path: by the time it matters the model has had a whole
+    /// record to think, and if it has not answered the planner has already
+    /// decided anyway.
+    #[cfg(feature = "advisor")]
+    fn ask_advisor(&mut self, offered: Vec<String>, described: Vec<String>) {
+        let Some(advisor) = self.advisor.as_ref() else {
+            return;
+        };
+        let question = crate::advisor::Question {
+            offered: offered.clone(),
+            described,
+            eligible: crate::blend::Route::ALL.to_vec(),
+            mood: String::new(),
+        };
+        self.advisor_offered = offered;
+        advisor.ask(Self::now_secs(), &question);
+    }
+
+    #[cfg(not(feature = "advisor"))]
+    fn ask_advisor(&mut self, _offered: Vec<String>, _described: Vec<String>) {}
+
     /// Turn down what the picker is offering and take its next answer.
     ///
     /// The record stays in the set list — it is the operator's, and the
@@ -25115,6 +25194,16 @@ p2 {}
         let Some(index) = crate::pick::choose(&ranked, Self::now_secs().max(1)) else {
             return;
         };
+        // The advisor gets to move the choice among the ones that already
+        // passed every gate — never to name one of its own, and never to
+        // hold anything up. It has had a record's length to answer.
+        let index = self
+            .advised
+            .take()
+            .and_then(|advice| advice.pick)
+            .and_then(|wanted| candidates.iter().position(|c| c.key == wanted))
+            .filter(|advised| ranked.iter().any(|scored| scored.index == *advised))
+            .unwrap_or(index);
         let queue_index = from_queue[index];
         if let Some(pick) = ranked.iter().find(|scored| scored.index == index) {
             let mut reason = pick.reason.clone();
@@ -25129,6 +25218,19 @@ p2 {}
         if self.decks.move_queued(queue_index, 0) {
             self.queue_rows_dirty = true;
         }
+        // And now ask about the one after this, with the same descriptions
+        // the scorer read, so its answer is about the same records.
+        let described: Vec<String> = ranked
+            .iter()
+            .take(8)
+            .map(|scored| scored.reason.clone())
+            .collect();
+        let offered: Vec<String> = ranked
+            .iter()
+            .take(8)
+            .map(|scored| candidates[scored.index].key.clone())
+            .collect();
+        self.ask_advisor(offered, described);
     }
 
     fn run_auto_cmd(&mut self, cx: &mut Cx, cmd: AutoCmd) {

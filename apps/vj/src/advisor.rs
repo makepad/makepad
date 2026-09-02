@@ -115,6 +115,173 @@ pub fn validate(
     })
 }
 
+// ---------------------------------------------------------------------------
+// the model, when there is one
+// ---------------------------------------------------------------------------
+
+/// A question for the advisor, and the state it is about.
+///
+/// Everything measured is already computed and simply stated: the model is
+/// asked to CHOOSE, never to work anything out. A number it invented is a
+/// number nobody checked.
+#[derive(Clone, Debug)]
+pub struct Question {
+    /// The records on offer, in the planner's own order, each already
+    /// described by its measurements.
+    pub offered: Vec<String>,
+    /// The lines describing them, one per offered record.
+    pub described: Vec<String>,
+    /// The shapes the engine says it can perform for this pair.
+    pub eligible: Vec<Route>,
+    /// What the operator asked for, in their words. Empty when they have
+    /// not said anything.
+    pub mood: String,
+}
+
+impl Question {
+    /// The prompt, in the plainest form that can be answered wrongly and
+    /// still be safe. Every id it may name is in front of it, every shape
+    /// it may pick is listed, and it is told what "no opinion" looks like.
+    pub fn prompt(&self) -> String {
+        let mut out = String::from(
+            "You are helping choose the next record in a DJ set.\n\n",
+        );
+        if !self.mood.is_empty() {
+            out.push_str("The operator asks for: ");
+            out.push_str(&self.mood);
+            out.push_str("\n\n");
+        }
+        out.push_str("Records on offer:\n");
+        for (key, described) in self.offered.iter().zip(&self.described) {
+            out.push_str("  ");
+            out.push_str(key);
+            out.push_str("  ");
+            out.push_str(described);
+            out.push('\n');
+        }
+        out.push_str("\nTransition shapes available: ");
+        for (index, route) in self.eligible.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(match route {
+                Route::Handover => "handover",
+                Route::Pickup => "pickup",
+                Route::Short => "short",
+            });
+        }
+        out.push_str(
+            "\n\nAnswer with these lines and nothing else:\n\
+             pick: <one id from the list above>\n\
+             route: <one shape from the list above>\n\
+             reason: <one short sentence>\n\
+             Leave out any line you have no opinion about.\n",
+        );
+        out
+    }
+}
+
+#[cfg(feature = "advisor")]
+mod runner {
+    use super::*;
+    use makepad_widgets::log;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    /// Context the model is given. Small on purpose: the whole question
+    /// fits in a page, and a big window costs load time and memory for
+    /// nothing.
+    const CONTEXT: u32 = 2048;
+    /// A sentence, not an essay.
+    const ANSWER_TOKENS: usize = 96;
+
+    /// The advisor on its own thread.
+    ///
+    /// The model is `!Send`, so it is built on the worker and never leaves
+    /// it. A failure to load is latched: a missing file, a card that cannot
+    /// run it or a refused licence are asked about once and then never
+    /// again, because retrying every transition would be a stall a room
+    /// can hear.
+    pub struct Advisor {
+        ask: Sender<(u64, String)>,
+        answered: Receiver<(u64, Proposal)>,
+    }
+
+    impl Advisor {
+        /// Start the worker. Cheap: nothing is loaded until the first
+        /// question, so an advisor that is never asked costs a thread.
+        pub fn start(model: std::path::PathBuf) -> Advisor {
+            let (ask, questions) = std::sync::mpsc::channel::<(u64, String)>();
+            let (replies, answered) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("vj-advisor".to_string())
+                .spawn(move || {
+                    let mut session = None;
+                    let mut failed = false;
+                    for (gen, prompt) in questions {
+                        if failed {
+                            continue;
+                        }
+                        if session.is_none() {
+                            match makepad_ai_llm::LlamaSession::load(
+                                &model,
+                                makepad_ai_llm::LlamaSessionConfig {
+                                    max_context: Some(CONTEXT),
+                                    ..Default::default()
+                                },
+                            ) {
+                                Ok(loaded) => session = Some(loaded),
+                                Err(error) => {
+                                    log!("auto dj advisor: no model ({error})");
+                                    failed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                        let Some(session) = session.as_mut() else { continue };
+                        // Every question stands alone: the state of the room
+                        // has moved on since the last one, and carrying it
+                        // over would only invite an answer about the past.
+                        if session.reset().is_err() {
+                            continue;
+                        }
+                        let Ok(tokens) = session.vocab().tokenize(&prompt, true, true)
+                        else {
+                            continue;
+                        };
+                        if session.append_tokens(&tokens).is_err() {
+                            continue;
+                        }
+                        match session.continue_greedy(ANSWER_TOKENS) {
+                            Ok(generated) => {
+                                let _ = replies.send((gen, super::parse(&generated.text)));
+                            }
+                            Err(error) => {
+                                log!("auto dj advisor: no answer ({error})");
+                            }
+                        }
+                    }
+                })
+                .ok();
+            Advisor { ask, answered }
+        }
+
+        /// Ask, and carry on. Never waits: the answer is wanted minutes
+        /// before it is needed, and an advisor that has not replied by the
+        /// time the fire point arrives has simply said nothing.
+        pub fn ask(&self, gen: u64, question: &Question) {
+            let _ = self.ask.send((gen, question.prompt()));
+        }
+
+        /// Whatever has come back since last time, oldest first.
+        pub fn poll(&self) -> Vec<(u64, Proposal)> {
+            self.answered.try_iter().collect()
+        }
+    }
+}
+
+#[cfg(feature = "advisor")]
+pub use runner::Advisor;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +357,32 @@ mod tests {
             let p = parse(text);
             assert_eq!(validate(&p, &offered(), &Route::ALL), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn the_question_names_every_id_and_shape_it_will_accept() {
+        // The model can only get a choice wrong if it was offered it, so
+        // the prompt and the gate have to agree about what is on the table.
+        let q = Question {
+            offered: vec!["ast_one".to_string(), "ast_two".to_string()],
+            described: vec!["128 BPM, 8A".to_string(), "126 BPM, 9A".to_string()],
+            eligible: vec![Route::Handover, Route::Short],
+            mood: "keep it moving".to_string(),
+        };
+        let prompt = q.prompt();
+        for id in &q.offered {
+            assert!(prompt.contains(id), "the id has to be in front of it: {id}");
+        }
+        assert!(prompt.contains("128 BPM"), "and what is known about it");
+        assert!(prompt.contains("keep it moving"), "and what was asked for");
+        assert!(prompt.contains("handover") && prompt.contains("short"));
+        assert!(!prompt.contains("pickup"), "a shape not on offer is not named");
+        // An answer in the shape the prompt asks for has to survive the gate
+        // it will be judged by — the two cannot drift apart.
+        let answer = parse("pick: ast_two\nroute: short\nreason: it keeps moving\n");
+        let ok = validate(&answer, &q.offered, &q.eligible).expect("its own form");
+        assert_eq!(ok.pick.as_deref(), Some("ast_two"));
+        assert_eq!(ok.route, Some(Route::Short));
     }
 
     #[test]

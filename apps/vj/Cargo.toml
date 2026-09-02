@@ -45,6 +45,10 @@ makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, feature
 makepad-ai-hub-ui = { path = "../../libs/ai/hub_ui" }
 makepad-ai-notes = { path = "../../libs/ai/models/notes" }
 makepad-ai-beats = { path = "../../libs/ai/models/beats" }
+# The auto DJ's optional advisor. OFF by default and the tab is complete
+# without it: the deterministic planner decides and executes either way,
+# and a missing model is the same answer as a model that said nothing.
+makepad-ai-llm = { path = "../../libs/ai/llm", optional = true }
 makepad-asset-creator = { path = "../../libs/asset/creator" }  # DREAM runs execute here now
 # The chat pane itself — ONE component, shared with the asset UI and the
 # game sandbox: the session on the server's chat broker, the worker thread,
@@ -83,3 +87,9 @@ makepad-video-flow = { path = "../../libs/video_flow" }
 makepad-archive-org = { path = "../../libs/archive_org" }
 # The streaming swatch's MP4 index: per-sample byte ranges for range play.
 makepad-mp4-index = { path = "../../libs/mp4_index" }
+
+[features]
+# Build the auto DJ advisor in. Costs compile time and nothing else: the
+# CUDA kernels it needs are already pulled in by the beat, stem and note
+# models, so this is not a new toolchain requirement.
+advisor = ["dep:makepad-ai-llm"]
