@@ -51,7 +51,8 @@ pub fn scene_state(
                 -yaw.cos() * pitch.cos(),
             )
             .normalize();
-            let boom = camera_boom_limit(world, pivot, forward * -1.0, world.cam_boom);
+            // The filmed body is never its own obstruction.
+            let boom = camera_boom_limit(world, pivot, forward * -1.0, world.cam_boom, world.cam_third);
             let mut camera_pos = pivot - forward * boom;
             camera_pos = camera_pos + camera_shake_offset(world, in_test);
             let view = Mat4f::look_at(camera_pos, pivot, vec3f(0.0, 1.0, 0.0));
