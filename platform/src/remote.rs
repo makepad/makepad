@@ -46,11 +46,14 @@ mod imp {
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-    /// True when this process was started with `--remote` (any form). Pure
-    /// argv scan, usable before the bridge itself is up — the platform's
-    /// focus policy reads it while the first window is being created.
+    /// True when this process asked for the remote bridge, in any of the forms
+    /// [`requested_bind`] accepts — including `MAKEPAD_REMOTE`, which a plain
+    /// argv scan used to miss, so `MAKEPAD_REMOTE=1` started the bridge while
+    /// everything keyed off this said no. Pure argv + env, usable before the
+    /// bridge itself is up: the platform's focus policy reads it while the
+    /// first window is being created.
     pub fn requested() -> bool {
-        std::env::args().any(|a| a == "--remote" || a.starts_with("--remote="))
+        requested_bind().is_some()
     }
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
@@ -458,9 +461,14 @@ mod imp {
     /// "the user dismissed this" apart from "the app crashed", and remember it
     /// so requests aimed at that window get the real reason.
     pub fn note_user_closed_window(window_id: usize, title: &str) {
+        // Only chatter when the bridge is actually up: this line is for the
+        // agent driving the app, and a shipped app should not print
+        // `[makepad-remote] ...` to stdout every time a window closes.
         let line = format!("[makepad-remote] user closed window {window_id} ({title:?})");
-        println!("{line}");
-        let _ = std::io::stdout().flush();
+        if is_active() {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
         push_log_line(line);
         if let Ok(mut closed) = closed_windows().lock() {
             if !closed.iter().any(|(id, _)| *id == window_id) {
@@ -473,8 +481,10 @@ mod imp {
     /// away. Not a crash.
     pub fn note_user_closed_last_window() {
         let line = "[makepad-remote] app exit: user closed the last window".to_string();
-        println!("{line}");
-        let _ = std::io::stdout().flush();
+        if is_active() {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
         push_log_line(line);
     }
 
@@ -2128,6 +2138,10 @@ mod imp {
     use crate::cx::Cx;
 
     pub fn start_if_requested() {}
+    /// There is no remote bridge on these targets, so nothing ever asked for one.
+    pub fn requested() -> bool {
+        false
+    }
     pub fn is_active() -> bool {
         false
     }

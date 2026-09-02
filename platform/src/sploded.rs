@@ -11,7 +11,8 @@
 //! scrollbar thumb by dragging is therefore deliberately NOT possible while
 //! exploded — a drag is the orbit — and that is the coexistence rule.
 //!
-//! F10 tilts the window into an isometric stack that renders **the component
+//! F10 — once the dev overlays are switched on ([`crate::devtools`]) — tilts
+//! the window into an isometric stack that renders **the component
 //! nesting structure**: one plane per nesting level, siblings sharing a plane,
 //! children lifting toward the viewer and their parents staying at the bottom
 //! of the stack. The point is to see — and click — the fully-covered parent
@@ -727,7 +728,12 @@ impl Cx {
         }
         match event {
             Event::KeyDown(e) => {
-                if e.key_code == KeyCode::F10 {
+                // F10 is only ours when the app opted into the dev overlays
+                // (`--devtools` / `MAKEPAD_DEVTOOLS=1` / `--remote`). Otherwise
+                // it is the app's key like any other. `sploded_toggle` still
+                // works either way, so an app can put the mode on a key of its
+                // own choosing.
+                if e.key_code == KeyCode::F10 && crate::devtools::enabled() {
                     if e.is_repeat {
                         return true;
                     }

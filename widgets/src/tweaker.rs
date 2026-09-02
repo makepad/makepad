@@ -1,7 +1,10 @@
 //! The TWEAKER — the design-feedback overlay every `--remote` app grows.
 //!
 //! Hardcoded into `Window` (like the caption bar: zero app wiring), inert
-//! unless the remote bridge is live, zero cost while off. Turned on (F12 or
+//! unless the remote bridge is live, zero cost while off. The F12 key needs
+//! the dev overlays switched on (`makepad_platform::devtools`: `--devtools`,
+//! `MAKEPAD_DEVTOOLS=1`, or `--remote`); [`set_tweak_on`] is always there for
+//! an app that wants to open the panel itself. Turned on (F12 or
 //! `GET /tweak?on=1`), a person points at the UI and live-edits it while the
 //! AI watches the same session through the bridge:
 //!
@@ -29,6 +32,7 @@
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
     fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     file_tree::{FileTree, FileTreeAction},
     label::Label,
@@ -616,13 +620,19 @@ pub fn window_intercept(
     // F12 toggles the mode, bridge or no bridge: the design surface is
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
-    // there, and the panel still is.
+    // there, and the panel still is. It does need the dev overlays to be
+    // switched on though (`--devtools` / `MAKEPAD_DEVTOOLS=1` / `--remote`) —
+    // in a shipped app F12 belongs to the app, and `set_tweak_on` is still
+    // there for one that wants to open the panel itself.
     //
     // SHIFT+F12 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.key_code == KeyCode::F12 && !key_event.modifiers.shift {
+        if key_event.key_code == KeyCode::F12
+            && !key_event.modifiers.shift
+            && devtools::enabled()
+        {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
