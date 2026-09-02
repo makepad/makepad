@@ -64,7 +64,7 @@ fn start_view_tiles() -> Vec<TileKey> {
 
 /// Every vertex/index stream of a bake, in the order the tile struct lists
 /// them: (name, vertex floats, index count, vertex stride).
-fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 12] {
+fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
     [
         ("fill", b.fill_vertices.len(), b.fill_indices.len(), FILL_PACKED_FLOATS_PER_VERTEX),
         (
@@ -78,6 +78,7 @@ fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 12] {
         ("fringe", b.fringe_vertices.len(), b.fringe_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("icon", b.icon_vertices.len(), b.icon_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("icon_high", b.icon_high_vertices.len(), b.icon_high_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
+        ("shadow_disc", b.shadow_disc_vertices.len(), b.shadow_disc_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("road_icon", b.road_icon_vertices.len(), b.road_icon_indices.len(), VECTOR_FLOATS_PER_VERTEX),
         ("fill_3d", b.fill_3d_vertices.len(), b.fill_3d_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("wall", b.wall_vertices.len(), b.wall_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
@@ -135,14 +136,14 @@ fn amsterdam_start_view_bake_report() {
         RENDER_ZOOM
     );
     println!(
-        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc casing stroke fringe icon icon_hi road_ic fill3d wall tree treeX) + icon instances (count / KiB)",
+        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc casing stroke fringe icon icon_hi shadow_disc road_ic fill3d wall tree treeX) + icon instances (count / KiB)",
         "tile", "raw KiB", "mvt KiB", "feats", "bake MiB", "verts", "labels", "icons", "ms"
     );
     let mut total_raw = 0usize;
     let mut total_mvt = 0usize;
     let mut total_bytes = 0usize;
     let mut total_ms = 0.0f64;
-    let mut stream_totals = [0usize; 12];
+    let mut stream_totals = [0usize; 13];
     let mut total_icon_instance_bytes = 0usize;
     let mut total_wall_instance_bytes = 0usize;
     let mut total_tree_instance_bytes = 0usize;
@@ -256,7 +257,7 @@ fn amsterdam_start_view_bake_report() {
         total_ms / baked.max(1) as f64
     );
     let names = [
-        "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "road_icon",
+        "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "shadow_disc", "road_icon",
         "fill_3d", "wall", "tree", "tree_cross",
     ];
     for (name, bytes) in names.iter().zip(stream_totals.iter()) {

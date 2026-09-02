@@ -152,6 +152,14 @@ script_mod! {
         // 3D terrain displacement: terrarium-packed elevation texture over
         // a pre-rotation screen rect; span zero = disabled.
         terrain_tex: texture_2d(float)
+        shadow_mask: texture_2d(float)
+        shadow_mask_on: uniform(0.0)
+        shadow_mask_size: uniform(vec2(1.0, 1.0))
+        shadow_mask_flip: uniform(0.0)
+        shadow_dir: uniform(vec2(0.0, 0.0))
+        shadow_cast: uniform(0.0)
+        v_screen: varying(vec2f)
+        v_lift: varying(float)
         terrain_org: uniform(vec2(0.0, 0.0))
         terrain_span: uniform(vec2(0.0, 0.0))
         // Texel-center remap for the elevation texture (half-texel inset),
@@ -184,8 +192,34 @@ script_mod! {
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
 
         fragment: fn(){
+            if self.shadow_cast > 0.5 {
+                if self.shadow_cast < 1.5 {
+                    if self.v_lift < 0.05 {
+                        discard()
+                    }
+                    self.fb0 = vec4(1.0, 1.0, 1.0, 1.0)
+                    return
+                }
+                if self.shadow_cast < 2.5 {
+                    self.fb0 = vec4(0.0, 0.0, 0.0, 1.0)
+                    return
+                }
+                let c = self.v_color.w
+                self.fb0 = vec4(c, c, c, c)
+                return
+            }
             var color = self.pixel() * self.tile_fade * self.fill_pattern()
             color = self.material_fx(color)
+            if self.shadow_mask_on > 0.5 && self.v_lift < 0.05 {
+                if self.v_shape_id < 19.5 || self.v_shape_id > 20.5 {
+                    var uv = self.v_screen / self.shadow_mask_size
+                    if self.shadow_mask_flip > 0.5 {
+                        uv.y = 1.0 - uv.y
+                    }
+                    let m = self.shadow_mask.sample(uv).x
+                    color = color * (1.0 - m * self.shiny_gates2.y)
+                }
+            }
             // Dashed tunnel gaps and the zero-coverage tails of analytic
             // vectors are transparent. Discard them before depth_clip so an
             // invisible carrier cannot occlude the road above it in 3D.
@@ -251,11 +285,6 @@ script_mod! {
             let mat = self.v_param3;
             if mat < 0.5 {
                 return color
-            }
-            // 6: baked shadow decal — alpha rides the live shadow uniform
-            // so time-of-day fades don't need a rebake.
-            if mat > 5.5 && mat < 6.5 {
-                return color * self.shiny_gates2.y
             }
             // 7: emissive road (Circuit City) — push the theme's line
             // color toward white-hot by the baked class strength; the
@@ -532,6 +561,20 @@ script_mod! {
                 terrain_pos = terrain_pos + off;
                 surface_decal = 1.0;
             }
+            var feature_lift = self.geom.param4 * self.height_grow;
+            if shape_id > 19.5 && shape_id < 20.5 {
+                if surface_decal > 0.5 {
+                    feature_lift = self.geom.param4 * self.height_grow;
+                } else {
+                    let icon_floor = modf(self.geom.param4, 100.0);
+                    feature_lift = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow;
+                }
+            }
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                let delta = self.shadow_dir * feature_lift * self.map_scale;
+                transformed = transformed + delta;
+                terrain_pos = terrain_pos + delta;
+            }
             // 3D terrain: every vertex lifts by the ground elevation under
             // it, so roads/fills/buildings ride the displaced surface.
             // Sampled at the centerline anchor (pre width-expansion): the
@@ -568,20 +611,12 @@ script_mod! {
             if expanded < 0.5 {
                 ground_fill = ground_m * self.terrain_fill_lift;
             }
-            var lift_m = self.geom.param4 * self.height_grow + ground_fill;
+            var lift_m = feature_lift + ground_fill;
             if shape_id > 19.5 && shape_id < 20.5 {
-                if surface_decal > 0.5 {
-                    // Surface-decal param4 is exact signed deck meters per
-                    // vertex. No 0.25m icon-height quantization: the two
-                    // triangles follow a ramp's local slope continuously.
-                    lift_m = self.geom.param4 * self.height_grow + ground_m;
-                } else {
-                    // Icon param4 = zoom_floor + pin_lift_m*100: markers fly
-                    // at their encoded height (0 for grounded icons).
-                    let icon_floor = modf(self.geom.param4, 100.0);
-                    lift_m = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow
-                        + ground_m;
-                }
+                lift_m = feature_lift + ground_m;
+            }
+            if self.shadow_cast > 0.5 {
+                lift_m = ground_fill;
             }
             // The Inception mode: fold + perspective camera (CPU twin:
             // overlay.rs SpaceWarp::project — keep in LOCKSTEP). Ground
@@ -729,6 +764,8 @@ script_mod! {
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = feature_lift;
 
             let cr = (g_p3c.y + expand_slack) * max(self.map_scale.x, self.map_scale.y);
             let clip = vec4(
@@ -1013,6 +1050,8 @@ script_mod! {
 
             let shifted = transformed + self.draw_list.view_shift
             self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = 0.0
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
@@ -1133,6 +1172,8 @@ script_mod! {
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = 1000.0;
 
             // Clip radius of a symbol (ICON_INSTANCE_CLIP_RADIUS) in view px.
             let cr = 24.0 * max(self.map_scale.x, self.map_scale.y);
@@ -1262,6 +1303,8 @@ script_mod! {
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = h;
 
             // Clip radius of a wall vertex (90 units) in view px.
             let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
@@ -1290,6 +1333,125 @@ script_mod! {
             );
             self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced building-wall shadow casters: the same 11-float wall
+    // records, extruded along the sun on the ground (no building lift).
+    mod.draw.DrawMapShadow = mod.std.set_type_default() do #(DrawMapShadow::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let along = self.geom.pos.x;
+            let up = self.geom.pos.y;
+            let pos = mix(self.inst_a, self.inst_b, along)
+                + self.shadow_dir * self.inst_heights.y * self.height_grow * up;
+            var transformed = pos * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            let lift_m = ground_m * self.terrain_fill_lift;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+
+            self.v_tcoord = vec2(0.5, 1.0);
+            self.v_color = vec4(1.0, 1.0, 1.0, 1.0);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = 0.0;
+            self.v_shape_id = 0.0;
+            self.v_param0 = 0.0;
+            self.v_param1 = 0.0;
+            self.v_param2 = 0.0;
+            self.v_param3 = 0.0;
+            self.v_param4 = 0.0;
+            self.v_param5 = 0.0;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = 0.0;
+
+            let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.draw_call.zbias + self.inst_zbias
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+
+        fragment: fn() {
+            self.fb0 = vec4(1.0, 1.0, 1.0, 1.0)
         }
     }
 
@@ -1869,6 +2031,22 @@ pub struct DrawMapVector {
     /// theme; draw_geometry feeds them to the shader uniforms.
     #[rust(ShinyConfig::default())]
     pub shiny: ShinyConfig,
+    #[rust]
+    shadow_mask: Option<Texture>,
+    #[rust([0.0, 0.0])]
+    shadow_dir: [f32; 2],
+    #[rust(0.0)]
+    shadow_cast: f32,
+    #[rust(0.0)]
+    shadow_mask_on: f32,
+    #[rust([1.0, 1.0])]
+    shadow_mask_size: [f32; 2],
+    #[rust(0.0)]
+    shadow_mask_flip: f32,
+    #[rust([0.0, 0.0, 0.0, 0.0])]
+    space_warp_u: [f32; 4],
+    #[rust([0.0, 0.0, 0.0, 0.0])]
+    space_warp2_u: [f32; 4],
     #[deref]
     pub draw_super: DrawVector,
     /// Per-instance placement of a shared mesh (street trees): added to
@@ -1924,9 +2102,17 @@ impl DrawMapVector {
                 terrain_span,
                 terrain_uvfit,
                 terrain_fill_lift,
+                shadow_dir: self.shadow_dir,
+                shadow_cast: self.shadow_cast,
+                shadow_mask_on: self.shadow_mask_on,
+                shadow_mask_size: self.shadow_mask_size,
+                shadow_mask_flip: self.shadow_mask_flip,
+                space_warp: self.space_warp_u,
+                space_warp2: self.space_warp2_u,
             },
             &self.shiny,
             terrain_tex,
+            self.shadow_mask.as_ref(),
         );
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
@@ -1964,6 +2150,7 @@ impl DrawMapVector {
             uniforms,
             &self.shiny,
             terrain_tex,
+            self.shadow_mask.as_ref(),
         );
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
@@ -2003,6 +2190,24 @@ pub(crate) struct MapDrawUniforms {
     pub terrain_span: [f32; 2],
     pub terrain_uvfit: [f32; 4],
     pub terrain_fill_lift: f32,
+    pub shadow_dir: [f32; 2],
+    pub shadow_cast: f32,
+    pub shadow_mask_on: f32,
+    pub shadow_mask_size: [f32; 2],
+    pub shadow_mask_flip: f32,
+    pub space_warp: [f32; 4],
+    pub space_warp2: [f32; 4],
+}
+
+/// Orientation of the shadow-mask pass texture when the ground shader samples
+/// it by screen position. The pass is a child pass at the window's dpi over
+/// the map rect; on Metal it comes back bottom-up (grab-verified: unflipped,
+/// every shadow lands on the far side of its building and hides behind it).
+fn shadow_mask_y_flip_for_os(os_type: &OsType) -> f32 {
+    match os_type {
+        OsType::Macos | OsType::Ios(_) => 1.0,
+        _ => 0.0,
+    }
 }
 
 fn stamp_map_uniforms(
@@ -2011,6 +2216,7 @@ fn stamp_map_uniforms(
     u: &MapDrawUniforms,
     shiny: &ShinyConfig,
     terrain_tex: &Texture,
+    shadow_mask: Option<&Texture>,
 ) {
     draw_vars.set_uniform(cx, live_id!(tile_fade), &[u.fade]);
     draw_vars.set_uniform(cx, live_id!(map_scale), &[u.map_scale.x, u.map_scale.y]);
@@ -2068,7 +2274,15 @@ fn stamp_map_uniforms(
     draw_vars.set_uniform(cx, live_id!(sun_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
     draw_vars.set_uniform(cx, live_id!(sun_color), &[sun.color.x, sun.color.y, sun.color.z]);
     draw_vars.set_uniform(cx, live_id!(sun_sky), &[sun.sky.x, sun.sky.y, sun.sky.z]);
+    draw_vars.set_uniform(cx, live_id!(shadow_dir), &u.shadow_dir);
+    draw_vars.set_uniform(cx, live_id!(shadow_cast), &[u.shadow_cast]);
+    draw_vars.set_uniform(cx, live_id!(shadow_mask_on), &[u.shadow_mask_on]);
+    draw_vars.set_uniform(cx, live_id!(shadow_mask_size), &u.shadow_mask_size);
+    draw_vars.set_uniform(cx, live_id!(shadow_mask_flip), &[u.shadow_mask_flip]);
+    draw_vars.set_uniform(cx, live_id!(space_warp), &u.space_warp);
+    draw_vars.set_uniform(cx, live_id!(space_warp2), &u.space_warp2);
     draw_vars.set_texture(1, terrain_tex);
+    draw_vars.set_texture(2, shadow_mask.unwrap_or(terrain_tex));
 }
 
 /// Compact ground fills. Unlike the generic vector drawer this has no
@@ -2079,6 +2293,9 @@ fn stamp_map_uniforms(
 pub struct DrawMapFill {
     #[rust(ShinyConfig::default())]
     pub shiny: ShinyConfig,
+    /// The frame's shadow mask (ground fills are what the shadows darken).
+    #[rust]
+    shadow_mask: Option<Texture>,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -2099,7 +2316,14 @@ impl DrawMapFill {
         pass_depth: f32,
     ) {
         self.draw_depth = pass_depth;
-        stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+        stamp_map_uniforms(
+            &mut self.draw_vars,
+            cx.cx,
+            uniforms,
+            &self.shiny,
+            terrain_tex,
+            self.shadow_mask.as_ref(),
+        );
         self.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
@@ -2118,6 +2342,8 @@ impl DrawMapFill {
 pub struct DrawMapIcon {
     #[rust(ShinyConfig::default())]
     pub shiny: ShinyConfig,
+    #[rust]
+    shadow_mask: Option<Texture>,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -2171,7 +2397,14 @@ impl DrawMapIcon {
                 );
                 geometry
             });
-            stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+            stamp_map_uniforms(
+                &mut self.draw_vars,
+                cx.cx,
+                uniforms,
+                &self.shiny,
+                terrain_tex,
+                self.shadow_mask.as_ref(),
+            );
             self.draw_vars.geometry_id = Some(geometry.geometry_id());
             cx.new_draw_call(&self.draw_vars);
             let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
@@ -2201,6 +2434,8 @@ impl DrawMapIcon {
 pub struct DrawMapWall {
     #[rust(ShinyConfig::default())]
     pub shiny: ShinyConfig,
+    #[rust]
+    shadow_mask: Option<Texture>,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -2240,7 +2475,87 @@ impl DrawMapWall {
             return;
         }
         self.draw_depth = pass_depth;
-        stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+        stamp_map_uniforms(
+            &mut self.draw_vars,
+            cx.cx,
+            uniforms,
+            &self.shiny,
+            terrain_tex,
+            self.shadow_mask.as_ref(),
+        );
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+        for record in records.chunks_exact(WALL_INSTANCE_FLOATS) {
+            self.inst_a = vec2(record[0], record[1]);
+            self.inst_b = vec2(record[2], record[3]);
+            self.inst_heights = vec2(record[4], record[5]);
+            self.inst_normal = vec2(record[6], record[7]);
+            self.inst_ao = record[8];
+            self.inst_color = record[9];
+            self.inst_zbias = record[10];
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        let new_area = cx.end_many_instances(instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+    }
+}
+
+/// Instanced wall-edge shadows: same records as `DrawMapWall`, projected
+/// along the sun onto the ground in the vertex shader.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapShadow {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[rust]
+    shadow_mask: Option<Texture>,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_a: Vec2f,
+    #[live]
+    pub inst_b: Vec2f,
+    #[live]
+    pub inst_heights: Vec2f,
+    #[live]
+    pub inst_normal: Vec2f,
+    #[live(1.0)]
+    pub inst_ao: f32,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapShadow {
+    fn draw_edges(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[f32],
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(
+            &mut self.draw_vars,
+            cx.cx,
+            uniforms,
+            &self.shiny,
+            terrain_tex,
+            self.shadow_mask.as_ref(),
+        );
         cx.new_draw_call(&self.draw_vars);
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
@@ -2293,10 +2608,19 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_wall: DrawMapWall,
+    #[redraw]
+    #[live]
+    draw_shadow: DrawMapShadow,
     /// One GPU copy of every symbol mesh the resident tiles reference,
     /// keyed by registry slot; instanced draws bind these.
     #[rust]
     icon_mesh_geometries: HashMap<u16, Geometry>,
+    #[rust]
+    shadow_mask_pass: Option<DrawPass>,
+    #[rust]
+    shadow_mask_texture: Option<Texture>,
+    #[rust]
+    shadow_mask_list: Option<DrawList2d>,
     #[redraw]
     #[live]
     draw_label: DrawRotatedText,
@@ -3045,6 +3369,8 @@ impl Widget for MapView {
         ];
         // One uniform set for the whole frame: every draw_geometry call
         // below shares draw_map's draw_vars.
+        self.draw_map.space_warp_u = warp_uniform;
+        self.draw_map.space_warp2_u = warp2_uniform;
         self.draw_map
             .draw_super
             .draw_vars
@@ -3091,6 +3417,7 @@ impl Widget for MapView {
         self.draw_fill.shiny = self.draw_map.shiny;
         self.draw_icon.shiny = self.draw_map.shiny;
         self.draw_wall.shiny = self.draw_map.shiny;
+        self.draw_shadow.shiny = self.draw_map.shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
         // relief actually in view: the margin exists to beat interpolation
         // twist (which grows with relief), but a flat-city boost lets
@@ -3151,6 +3478,42 @@ impl Widget for MapView {
         });
         let draw_tiles = draw_tiles;
 
+        let shadow_mask_live = self.buildings_3d
+            && self.tilt > 0.0
+            && self.active_style().shiny.bake_shadows;
+        self.draw_map.shadow_mask_size = [rect.size.x as f32, rect.size.y as f32];
+        self.draw_map.shadow_cast = 0.0;
+        self.draw_map.shadow_dir = [0.0, 0.0];
+        if shadow_mask_live {
+            self.draw_shadow_mask_pass(
+                cx,
+                &draw_tiles,
+                view_zoom,
+                map_offset,
+                view_rot_uniform,
+                rot_pivot_uniform,
+                tilt_uniform,
+                terrain_org,
+                terrain_span,
+                terrain_uvfit,
+                &terrain_tex,
+                terrain_fill_lift,
+                rect,
+            );
+            self.draw_map.shadow_mask = self.shadow_mask_texture.clone();
+            self.draw_icon.shadow_mask = self.shadow_mask_texture.clone();
+            self.draw_wall.shadow_mask = self.shadow_mask_texture.clone();
+            self.draw_fill.shadow_mask = self.shadow_mask_texture.clone();
+            self.draw_map.shadow_mask_on = 1.0;
+            self.draw_map.shadow_mask_flip = shadow_mask_y_flip_for_os(cx.os_type());
+        } else {
+            self.draw_map.shadow_mask = None;
+            self.draw_icon.shadow_mask = None;
+            self.draw_wall.shadow_mask = None;
+            self.draw_fill.shadow_mask = None;
+            self.draw_map.shadow_mask_on = 0.0;
+        }
+
         // Four global passes (carto layer order): every tile's fills, then
         // every tile's road casings, then road centers, then POI symbols.
         // Casings interleaved per tile would stamp over neighbor tiles' road
@@ -3171,6 +3534,7 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    shadow_disc_geometry,
                     fringe_geometry,
                     fill_3d_geometry,
                     wall_geometry,
@@ -3201,6 +3565,7 @@ impl Widget for MapView {
                         stroke_geometry,
                         icon_geometry,
                         icon_high_geometry,
+                        shadow_disc_geometry,
                         fringe_geometry,
                         fill_3d_geometry,
                         wall_geometry,
@@ -3283,6 +3648,13 @@ impl Widget for MapView {
                             terrain_span,
                             terrain_uvfit,
                             terrain_fill_lift,
+                            shadow_dir: self.draw_map.shadow_dir,
+                            shadow_cast: self.draw_map.shadow_cast,
+                            shadow_mask_on: self.draw_map.shadow_mask_on,
+                            shadow_mask_size: self.draw_map.shadow_mask_size,
+                            shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                            space_warp: self.draw_map.space_warp_u,
+                            space_warp2: self.draw_map.space_warp2_u,
                         };
                         if let Some(outgoing) = &fade.fill_geometry {
                             self.draw_fill.draw_geometry(
@@ -3380,6 +3752,13 @@ impl Widget for MapView {
                         terrain_span,
                         terrain_uvfit,
                         terrain_fill_lift,
+                        shadow_dir: self.draw_map.shadow_dir,
+                        shadow_cast: self.draw_map.shadow_cast,
+                        shadow_mask_on: self.draw_map.shadow_mask_on,
+                        shadow_mask_size: self.draw_map.shadow_mask_size,
+                        shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                        space_warp: self.draw_map.space_warp_u,
+                        space_warp2: self.draw_map.space_warp2_u,
                     };
                     if let Some(geometry) = fill_geometry {
                         self.draw_fill.draw_geometry(
@@ -3545,6 +3924,13 @@ impl Widget for MapView {
                                     terrain_span,
                                     terrain_uvfit,
                                     terrain_fill_lift,
+                                    shadow_dir: self.draw_map.shadow_dir,
+                                    shadow_cast: self.draw_map.shadow_cast,
+                                    shadow_mask_on: self.draw_map.shadow_mask_on,
+                                    shadow_mask_size: self.draw_map.shadow_mask_size,
+                                    shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                                    space_warp: self.draw_map.space_warp_u,
+                                    space_warp2: self.draw_map.space_warp2_u,
                                 },
                                 &terrain_tex,
                                 0.0,
@@ -3575,6 +3961,13 @@ impl Widget for MapView {
                                 terrain_span,
                                 terrain_uvfit,
                                 terrain_fill_lift,
+                                shadow_dir: self.draw_map.shadow_dir,
+                                shadow_cast: self.draw_map.shadow_cast,
+                                shadow_mask_on: self.draw_map.shadow_mask_on,
+                                shadow_mask_size: self.draw_map.shadow_mask_size,
+                                shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                                space_warp: self.draw_map.space_warp_u,
+                                space_warp2: self.draw_map.space_warp2_u,
                             },
                             &terrain_tex,
                             0.0,
@@ -3743,6 +4136,13 @@ impl Widget for MapView {
                         terrain_span,
                         terrain_uvfit,
                         terrain_fill_lift,
+                        shadow_dir: self.draw_map.shadow_dir,
+                        shadow_cast: self.draw_map.shadow_cast,
+                        shadow_mask_on: self.draw_map.shadow_mask_on,
+                        shadow_mask_size: self.draw_map.shadow_mask_size,
+                        shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                        space_warp: self.draw_map.space_warp_u,
+                        space_warp2: self.draw_map.space_warp2_u,
                     };
                     if pass == 3 {
                         if let Some(fade) = &entry.fade {
@@ -4309,6 +4709,221 @@ impl MapView {
         self.draw_bg.redraw(cx);
     }
 
+    fn tile_units_per_m(key: TileKey) -> f32 {
+        let n = (1u32 << key.z) as f64;
+        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (key.y as f64 + 0.5) / n))
+            .sinh()
+            .atan();
+        (TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
+    }
+
+    fn draw_shadow_mask_pass(
+        &mut self,
+        cx: &mut Cx2d,
+        draw_tiles: &[TileKey],
+        view_zoom: f64,
+        map_offset: Vec2d,
+        view_rot: [f32; 2],
+        rot_pivot: [f32; 2],
+        tilt_params: [f32; 4],
+        terrain_org: [f32; 2],
+        terrain_span: [f32; 2],
+        terrain_uvfit: [f32; 4],
+        terrain_tex: &Texture,
+        terrain_fill_lift: f32,
+        rect: Rect,
+    ) {
+        if self.shadow_mask_pass.is_none() {
+            let pass = DrawPass::new(cx);
+            let tex = Texture::new_with_format(
+                cx,
+                TextureFormat::RenderBGRAu8 {
+                    size: TextureSize::Auto,
+                    initial: true,
+                },
+            );
+            pass.set_color_texture(
+                cx,
+                &tex,
+                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+            );
+            self.shadow_mask_pass = Some(pass);
+            self.shadow_mask_texture = Some(tex);
+            self.shadow_mask_list = Some(DrawList2d::new(cx));
+        }
+        let pass = self.shadow_mask_pass.as_ref().unwrap();
+        pass.set_size(cx, rect.size);
+        cx.set_pass_area(pass, self.draw_bg.area());
+        cx.make_child_pass(pass);
+        let dpi = cx.current_dpi_factor();
+        cx.begin_pass(pass, Some(dpi));
+        self.shadow_mask_list.as_mut().unwrap().begin_always(cx);
+
+        // Nothing drawn into the mask may sample it: binding the target
+        // texture as a sampler is a feedback loop (a WebGL error flood and
+        // a blank map; undefined on Metal).
+        self.draw_map.shadow_mask = None;
+        self.draw_shadow.shadow_mask = None;
+        self.draw_map.shadow_mask_on = 0.0;
+        self.draw_map.shadow_mask_size = [rect.size.x as f32, rect.size.y as f32];
+        let shadow_mask_size = self.draw_map.shadow_mask_size;
+        let space_warp = self.draw_map.space_warp_u;
+        let space_warp2 = self.draw_map.space_warp2_u;
+        let sun_2d = self.draw_map.shiny.sun.dir_2d();
+        let len_per_m = self.draw_map.shiny.sun.shadow_len_per_m();
+        let (sx, sy) = (-sun_2d.x, -sun_2d.y);
+
+        for key in draw_tiles {
+            let Some(entry) = self.tiles.get(key) else {
+                continue;
+            };
+            let TileLoadState::Ready {
+                fill_3d_geometry,
+                casing_geometry,
+                stroke_geometry,
+                shadow_disc_geometry,
+                wall_instances,
+                ..
+            } = &entry.state
+            else {
+                continue;
+            };
+            let scale = 2.0_f64.powf(view_zoom - key.z as f64);
+            let tile_offset = map_offset
+                + dvec2(
+                    key.x as f64 * TILE_SIZE * scale,
+                    key.y as f64 * TILE_SIZE * scale,
+                );
+            let map_scale = Vec2f {
+                x: scale as f32,
+                y: scale as f32,
+            };
+            let screen_offset = Vec2f {
+                x: tile_offset.x as f32,
+                y: tile_offset.y as f32,
+            };
+            let units_per_m = Self::tile_units_per_m(*key);
+            let shadow_dir = [sx * len_per_m * units_per_m, sy * len_per_m * units_per_m];
+            self.draw_map.shadow_dir = shadow_dir;
+            let width_correction = stroke_width_correction(entry.bucket, view_zoom);
+            let uniforms = |height_grow: f32, shadow_cast: f32| MapDrawUniforms {
+                map_scale,
+                map_offset: screen_offset,
+                fade: 1.0,
+                width_correction,
+                view_rot,
+                rot_pivot,
+                tilt_params,
+                icon_zoom: view_zoom as f32,
+                height_grow,
+                terrain_org,
+                terrain_span,
+                terrain_uvfit,
+                terrain_fill_lift,
+                shadow_dir,
+                shadow_cast,
+                shadow_mask_on: 0.0,
+                shadow_mask_size,
+                shadow_mask_flip: 0.0,
+                space_warp,
+                space_warp2,
+            };
+
+            // a. Wall silhouette quads along the sun.
+            if !wall_instances.is_empty() {
+                self.draw_shadow.draw_edges(
+                    cx,
+                    wall_instances,
+                    &uniforms(1.0, 0.0),
+                    terrain_tex,
+                    0.0,
+                );
+            }
+
+            // b. Roof / deck projections of lifted geometry.
+            self.draw_map.shadow_cast = 1.0;
+            for geometry in [fill_3d_geometry, casing_geometry, stroke_geometry]
+                .into_iter()
+                .flatten()
+            {
+                self.draw_map.draw_geometry(
+                    cx,
+                    geometry.geometry_id(),
+                    map_scale,
+                    screen_offset,
+                    1.0,
+                    width_correction,
+                    view_rot,
+                    rot_pivot,
+                    tilt_params,
+                    view_zoom as f32,
+                    1.0,
+                    terrain_org,
+                    terrain_span,
+                    terrain_uvfit,
+                    terrain_tex,
+                    0.0,
+                    terrain_fill_lift,
+                );
+            }
+
+            // c. Footprint cut-out at ground.
+            self.draw_map.shadow_cast = 2.0;
+            if let Some(geometry) = fill_3d_geometry {
+                self.draw_map.draw_geometry(
+                    cx,
+                    geometry.geometry_id(),
+                    map_scale,
+                    screen_offset,
+                    1.0,
+                    width_correction,
+                    view_rot,
+                    rot_pivot,
+                    tilt_params,
+                    view_zoom as f32,
+                    0.0,
+                    terrain_org,
+                    terrain_span,
+                    terrain_uvfit,
+                    terrain_tex,
+                    0.0,
+                    terrain_fill_lift,
+                );
+            }
+
+            // d. Tree / signal contact discs.
+            self.draw_map.shadow_cast = 3.0;
+            if let Some(geometry) = shadow_disc_geometry {
+                self.draw_map.draw_geometry(
+                    cx,
+                    geometry.geometry_id(),
+                    map_scale,
+                    screen_offset,
+                    1.0,
+                    width_correction,
+                    view_rot,
+                    rot_pivot,
+                    tilt_params,
+                    view_zoom as f32,
+                    0.0,
+                    terrain_org,
+                    terrain_span,
+                    terrain_uvfit,
+                    terrain_tex,
+                    0.0,
+                    terrain_fill_lift,
+                );
+            }
+            let _ = uniforms;
+        }
+
+        self.draw_map.shadow_cast = 0.0;
+        self.draw_map.shadow_dir = [0.0, 0.0];
+        self.shadow_mask_list.as_mut().unwrap().end(cx);
+        let pass = self.shadow_mask_pass.as_ref().unwrap();
+        cx.end_pass(pass);
+    }
+
     fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
         // An overlay-only result has no roads of its own. Never accept it if
         // eviction, a zoom restyle, or another transition replaced the exact
@@ -4508,6 +5123,15 @@ impl MapView {
         } else {
             None
         };
+        let shadow_disc_geometry = if !buffers.shadow_disc_indices.is_empty()
+            && !buffers.shadow_disc_vertices.is_empty()
+        {
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, buffers.shadow_disc_indices, buffers.shadow_disc_vertices);
+            Some(geometry)
+        } else {
+            None
+        };
         let fringe_geometry = if !buffers.fringe_indices.is_empty()
             && !buffers.fringe_vertices.is_empty()
         {
@@ -4610,6 +5234,7 @@ impl MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    shadow_disc_geometry,
                     icon_instances: buffers.icon_instances,
                     icon_high_instances: buffers.icon_high_instances,
                     fringe_geometry,
