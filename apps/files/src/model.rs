@@ -1062,7 +1062,12 @@ pub fn makepad_home() -> PathBuf {
     if let Some(home) = std::env::var_os("MAKEPAD_HOME") {
         return PathBuf::from(home);
     }
-    // USERPROFILE on Windows, HOME elsewhere; temp dir as a last resort.
+    // USERPROFILE on Windows, HOME elsewhere; temp dir as a last resort. The web has no
+    // environment and no temp dir (std's temp_dir panics there): its home is a fixed
+    // virtual path that only ever names browser-storage keys.
+    #[cfg(target_arch = "wasm32")]
+    return PathBuf::from("/.makepad");
+    #[cfg(not(target_arch = "wasm32"))]
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
