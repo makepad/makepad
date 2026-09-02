@@ -15,6 +15,7 @@ use {
             CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
             WindowGeomChangeEvent,
         },
+        file_dialogs::FileDialogState,
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -108,6 +109,7 @@ pub struct Cx {
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
+    pub(crate) file_dialogs: FileDialogState,
 
     pub(crate) platform_ops: VecDeque<CxOsOp>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
@@ -516,6 +518,7 @@ impl Cx {
             keyboard: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
+            file_dialogs: Default::default(),
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),

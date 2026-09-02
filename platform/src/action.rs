@@ -1,4 +1,9 @@
 use crate::cx::Cx;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{
+    cx_api::CxOsApi,
+    file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialogLoadAction},
+};
 use crate::thread::SignalToUI;
 use std::any::TypeId;
 use std::fmt;
@@ -104,9 +109,54 @@ impl<T: ActionTrait + ActionDefaultRef> ActionCastRef<T>
 impl Cx {
     pub fn handle_action_receiver(&mut self) {
         while let Ok(action) = self.action_receiver.try_recv() {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(completed) = (&*action as &dyn ActionTrait)
+                .downcast_ref::<FileDialogLoadAction>()
+                .cloned()
+            {
+                self.new_actions.push(Box::new(completed.0));
+                continue;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.handle_native_file_dialog_action(&action) {
+                continue;
+            }
             self.new_actions.push(action);
         }
         self.handle_actions();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_native_file_dialog_action(&mut self, action: &ActionSend) -> bool {
+        let Some(action) = (&**action as &dyn ActionTrait)
+            .downcast_ref::<FileDialogAction>()
+            .cloned()
+        else {
+            return false;
+        };
+        match action {
+            FileDialogAction::FileSelected { id, paths } => {
+                let Some(pending) = self.file_dialogs.finish(id) else {
+                    return false;
+                };
+                if !pending.want_bytes {
+                    return false;
+                }
+                self.spawn_thread(move || {
+                    Cx::post_action(FileDialogLoadAction(load_virtual_files_action(
+                        id,
+                        paths,
+                        pending.limits,
+                    )));
+                });
+                true
+            }
+            FileDialogAction::FileCancelled { id } => {
+                self.file_dialogs.finish(id);
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Enqueues an action from a background thread context.

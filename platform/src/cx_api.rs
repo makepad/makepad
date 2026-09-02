@@ -1,4 +1,4 @@
-use crate::file_dialogs::FileDialog;
+use crate::file_dialogs::{FileDialog, VirtualFileLimits};
 
 use {
     crate::{
@@ -1915,17 +1915,39 @@ impl Cx {
     }
 
     pub fn open_system_openfile_dialog(&mut self) {
-        self.platform_ops
-            .push_back(CxOsOp::SelectFileDialog(FileDialog::new()));
+        self.open_select_file_dialog(FileDialog::new());
     }
 
-    /// Open the platform's native file picker, configured (title, start
+    /// Open the platform file picker, configured (title, start
     /// location, type filters, multi-select, id) by `dialog`. The answer
     /// arrives later as a [`crate::file_dialogs::FileDialogAction`] in the
-    /// actions pass — `FileSelected` with the chosen paths, or
-    /// `FileCancelled`; both carry the dialog's id back.
+    /// actions pass. Native dialogs return `FileSelected` paths by default;
+    /// `want_bytes(true)` and every web dialog return `FileLoaded` instead.
+    /// On web this should be called directly from a user input handler:
+    /// browsers may reject a picker requested after that activation expires.
     pub fn open_select_file_dialog(&mut self, dialog: FileDialog) {
+        self.file_dialogs.begin(&dialog);
         self.platform_ops.push_back(CxOsOp::SelectFileDialog(dialog));
+    }
+
+    /// Set the maximum bytes accepted for one virtual file and for one
+    /// multi-file selection/drop. Both limits default to 512 MiB.
+    pub fn set_virtual_file_limits(&mut self, max_file_size: u64, max_total_size: u64) {
+        let limits = VirtualFileLimits {
+            max_file_size,
+            max_total_size,
+        };
+        self.file_dialogs.set_limits(limits);
+        #[cfg(target_arch = "wasm32")]
+        self.os
+            .from_wasm(crate::os::web::from_wasm::FromWasmSetVirtualFileLimits {
+                max_file_size: max_file_size as f64,
+                max_total_size: max_total_size as f64,
+            });
+    }
+
+    pub fn virtual_file_limits(&self) -> VirtualFileLimits {
+        self.file_dialogs.limits()
     }
 
     /// Open the platform's native save panel. The OS asks about

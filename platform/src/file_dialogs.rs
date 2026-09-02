@@ -1,4 +1,4 @@
-//! Native file and folder dialogs.
+//! Cross-platform file and folder dialogs.
 //!
 //! One shape for every OS: an app fills in a [`FileDialog`], hands it to
 //! `Cx`, and the answer arrives later as a [`FileDialogAction`] — because
@@ -8,7 +8,160 @@
 //! "attach receipt" picker can tell the two answers apart.
 
 use crate::makepad_live_id::LiveId;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+
+pub const DEFAULT_VIRTUAL_FILE_SIZE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Bytes accepted from a file picker or browser drop before they enter the
+/// application. Both limits default to 512 MiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtualFileLimits {
+    pub max_file_size: u64,
+    pub max_total_size: u64,
+}
+
+impl Default for VirtualFileLimits {
+    fn default() -> Self {
+        Self {
+            max_file_size: DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
+            max_total_size: DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
+        }
+    }
+}
+
+/// A user-selected file whose contents are already resident in the app.
+/// Browser files never leave the page unless application code sends them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualFile {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Arc<[u8]>,
+    pub size: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct VirtualFileData {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+pub(crate) fn assemble_virtual_files(
+    files: Vec<VirtualFileData>,
+    limits: VirtualFileLimits,
+) -> Result<Vec<VirtualFile>, String> {
+    let mut total = 0u64;
+    let mut out = Vec::with_capacity(files.len());
+    for file in files {
+        let size = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
+        if size > limits.max_file_size {
+            return Err(format!(
+                "file '{}' is {} bytes, exceeding the per-file limit of {} bytes",
+                file.name, size, limits.max_file_size
+            ));
+        }
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| "combined file size overflowed u64".to_string())?;
+        if total > limits.max_total_size {
+            return Err(format!(
+                "selected files total {} bytes, exceeding the per-drop limit of {} bytes",
+                total, limits.max_total_size
+            ));
+        }
+        out.push(VirtualFile {
+            name: file.name,
+            mime: file.mime,
+            bytes: Arc::from(file.bytes),
+            size,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn load_virtual_files(
+    paths: Vec<PathBuf>,
+    limits: VirtualFileLimits,
+) -> Result<Vec<VirtualFile>, String> {
+    let mut total = 0u64;
+    let mut data = Vec::with_capacity(paths.len());
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let size = std::fs::metadata(&path)
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?
+            .len();
+        if size > limits.max_file_size {
+            return Err(format!(
+                "file '{}' is {} bytes, exceeding the per-file limit of {} bytes",
+                name, size, limits.max_file_size
+            ));
+        }
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| "combined file size overflowed u64".to_string())?;
+        if total > limits.max_total_size {
+            return Err(format!(
+                "selected files total {} bytes, exceeding the per-drop limit of {} bytes",
+                total, limits.max_total_size
+            ));
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
+        data.push(VirtualFileData {
+            mime: mime_from_path(&path).to_string(),
+            name,
+            bytes,
+        });
+    }
+    assemble_virtual_files(data, limits)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn load_virtual_files_action(
+    id: LiveId,
+    paths: Vec<PathBuf>,
+    limits: VirtualFileLimits,
+) -> FileDialogAction {
+    match load_virtual_files(paths, limits) {
+        Ok(files) => FileDialogAction::FileLoaded { id, files },
+        Err(error) => {
+            crate::error!("file dialog byte load failed: {error}");
+            FileDialogAction::FileCancelled { id }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mime_from_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "txt" | "log" | "rs" | "toml" | "yaml" | "yml" | "ini" | "cfg" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "zip" => "application/zip",
+        _ => "",
+    }
+}
 
 /// Represents a set of file extensions and their description.
 #[derive(Debug, PartialEq)]
@@ -30,6 +183,9 @@ pub struct FileDialog {
     /// Echoed back on the action, so an app can tell which of its dialogs
     /// answered. `LiveId(0)` when the app never set one.
     pub id: LiveId,
+    /// Load selected files into [`VirtualFile`] values on a worker instead
+    /// of returning filesystem paths. Web always behaves as if this is true.
+    pub want_bytes: bool,
 }
 
 impl FileDialog {
@@ -42,6 +198,7 @@ impl FileDialog {
             title: None,
             multiple: false,
             id: LiveId(0),
+            want_bytes: false,
         }
     }
 
@@ -107,6 +264,12 @@ impl FileDialog {
         self.id = id;
         self
     }
+
+    /// Choose whether an open dialog returns file contents instead of paths.
+    pub fn want_bytes(mut self, want_bytes: bool) -> Self {
+        self.want_bytes = want_bytes;
+        self
+    }
 }
 
 impl Default for FileDialog {
@@ -115,7 +278,7 @@ impl Default for FileDialog {
     }
 }
 
-/// The outcome of a native file/folder dialog, delivered back to the app as a
+/// The outcome of a file/folder dialog, delivered back to the app as a
 /// plain [`crate::action::Action`] (via `Cx::post_action`) on the next actions
 /// pass — a dialog is answered by the user long after the call that opened it,
 /// so there is no return value to wait on.
@@ -127,6 +290,9 @@ pub enum FileDialogAction {
     /// The user chose these files. One path unless the dialog asked for
     /// [`FileDialog::multiple`]; never empty.
     FileSelected { id: LiveId, paths: Vec<PathBuf> },
+    /// The selected files, loaded away from the UI thread. This is the only
+    /// successful file-open result on web.
+    FileLoaded { id: LiveId, files: Vec<VirtualFile> },
     /// The user dismissed a file-open dialog without choosing.
     FileCancelled { id: LiveId },
     /// The user named this file to save to. The file may or may not exist
@@ -144,11 +310,18 @@ pub enum FileDialogAction {
     None,
 }
 
+/// Marks a worker completion so it cannot be mistaken for a fresh native
+/// dialog result when applications reuse the default dialog id.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+pub(crate) struct FileDialogLoadAction(pub FileDialogAction);
+
 impl FileDialogAction {
     /// The dialog this answers, for apps that route by id.
     pub fn id(&self) -> LiveId {
         match self {
             FileDialogAction::FileSelected { id, .. }
+            | FileDialogAction::FileLoaded { id, .. }
             | FileDialogAction::FileCancelled { id }
             | FileDialogAction::SaveFileSelected { id, .. }
             | FileDialogAction::SaveFileCancelled { id } => *id,
@@ -164,5 +337,144 @@ impl FileDialogAction {
             FileDialogAction::FolderSelected(path) => Some(path),
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingFileDialog {
+    pub id: LiveId,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub want_bytes: bool,
+    pub limits: VirtualFileLimits,
+}
+
+#[derive(Default)]
+pub(crate) struct FileDialogState {
+    pending: Vec<PendingFileDialog>,
+    limits: VirtualFileLimits,
+}
+
+impl FileDialogState {
+    pub fn limits(&self) -> VirtualFileLimits {
+        self.limits
+    }
+
+    pub fn set_limits(&mut self, limits: VirtualFileLimits) {
+        self.limits = limits;
+    }
+
+    pub fn begin(&mut self, dialog: &FileDialog) {
+        self.pending.push(PendingFileDialog {
+            id: dialog.id,
+            want_bytes: dialog.want_bytes,
+            limits: self.limits,
+        });
+    }
+
+    pub fn finish(&mut self, id: LiveId) -> Option<PendingFileDialog> {
+        let index = self.pending.iter().position(|pending| pending.id == id)?;
+        Some(self.pending.remove(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(name: &str, bytes: &[u8]) -> VirtualFileData {
+        VirtualFileData {
+            name: name.to_string(),
+            mime: "application/octet-stream".to_string(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn pending_dialog_ids_are_finished_in_request_order() {
+        let mut state = FileDialogState::default();
+        state.begin(&FileDialog::new().set_id(LiveId(7)).want_bytes(true));
+        state.begin(&FileDialog::new().set_id(LiveId(9)));
+        state.begin(&FileDialog::new().set_id(LiveId(7)));
+
+        assert!(state.finish(LiveId(9)).is_some());
+        assert!(state.finish(LiveId(7)).unwrap().want_bytes);
+        assert!(!state.finish(LiveId(7)).unwrap().want_bytes);
+        assert!(state.finish(LiveId(7)).is_none());
+    }
+
+    #[test]
+    fn assembles_multiple_files_in_order() {
+        let files = assemble_virtual_files(
+            vec![data("one", &[1, 2]), data("two", &[3, 4, 5])],
+            VirtualFileLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "one");
+        assert_eq!(&*files[1].bytes, &[3, 4, 5]);
+        assert_eq!(files[1].size, 3);
+    }
+
+    #[test]
+    fn enforces_per_file_and_combined_caps() {
+        let per_file = VirtualFileLimits {
+            max_file_size: 2,
+            max_total_size: 10,
+        };
+        assert!(assemble_virtual_files(vec![data("large", &[0; 3])], per_file)
+            .unwrap_err()
+            .contains("per-file limit"));
+
+        let combined = VirtualFileLimits {
+            max_file_size: 10,
+            max_total_size: 4,
+        };
+        assert!(assemble_virtual_files(
+            vec![data("one", &[0; 2]), data("two", &[0; 3])],
+            combined,
+        )
+        .unwrap_err()
+        .contains("per-drop limit"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_file_loading_runs_on_a_worker_and_preserves_bytes() {
+        use std::{
+            sync::mpsc::channel,
+            thread,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let ui_thread = thread::current().id();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("makepad-virtual-file-{unique}.txt"));
+        std::fs::write(&path, b"local bytes").unwrap();
+        let dialog = FileDialog::new().set_id(LiveId(11)).want_bytes(true);
+        let mut state = FileDialogState::default();
+        state.begin(&dialog);
+        let pending = state.finish(dialog.id).unwrap();
+        assert!(pending.want_bytes);
+        let (send, recv) = channel();
+        let worker_path = path.clone();
+        thread::spawn(move || {
+            let action = load_virtual_files_action(
+                pending.id,
+                vec![worker_path],
+                pending.limits,
+            );
+            send.send((thread::current().id(), action)).unwrap();
+        });
+
+        let (worker_thread, action) = recv.recv().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_ne!(ui_thread, worker_thread);
+        let FileDialogAction::FileLoaded { files, .. } = action else {
+            unreachable!()
+        };
+        assert_eq!(&*files[0].bytes, b"local bytes");
     }
 }

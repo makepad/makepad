@@ -209,7 +209,10 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
-        file_dialogs::{FileDialog, FileDialogAction},
+        file_dialogs::{
+            FileDialog, FileDialogAction, VirtualFile, VirtualFileLimits,
+            DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
+        },
         game_input::*,
         geometry::{Geometry, GeometryId},
         gpu_info::GpuPerformance,

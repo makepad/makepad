@@ -5,10 +5,14 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent,
-            TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
+            DragEvent, DragItem, DragResponse, DropEvent, Event, KeyModifiers, MouseDownEvent,
+            MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
+            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
             VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
+        },
+        file_dialogs::{
+            assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
@@ -20,12 +24,58 @@ use {
         thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
-    std::cell::RefCell,
-    std::panic,
-    std::rc::Rc,
+    std::{
+        cell::RefCell,
+        panic,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    },
 };
 
 impl Cx {
+    fn web_key_modifiers(modifiers: u32) -> KeyModifiers {
+        KeyModifiers {
+            shift: modifiers & 1 != 0,
+            control: modifiers & 2 != 0,
+            alt: modifiers & 4 != 0,
+            logo: modifiers & 8 != 0,
+        }
+    }
+
+    fn web_virtual_files(
+        files: Vec<WVirtualFile>,
+        limits: crate::VirtualFileLimits,
+    ) -> Result<Vec<crate::VirtualFile>, String> {
+        assemble_virtual_files(
+            files
+                .into_iter()
+                .map(|file| VirtualFileData {
+                    name: file.name,
+                    mime: file.mime,
+                    bytes: file.bytes.into_vec_u8(),
+                })
+                .collect(),
+            limits,
+        )
+    }
+
+    fn web_file_dialog_accept(dialog: &FileDialog) -> String {
+        let mut accept = Vec::<String>::new();
+        for filter in &dialog.filters {
+            for extension in &filter.extensions {
+                let extension = extension.trim().trim_start_matches('*').trim_start_matches('.');
+                if extension.is_empty() {
+                    return String::new();
+                }
+                let extension = format!(".{extension}");
+                if !accept.iter().any(|item| item.eq_ignore_ascii_case(&extension)) {
+                    accept.push(extension);
+                }
+            }
+        }
+        accept.join(",")
+    }
+
     /// WebGL cannot blit a private render target to CPU without an extra
     /// readPixels path that this backend does not expose yet.
     pub fn debug_read_render_texture(
@@ -362,6 +412,103 @@ impl Cx {
                     if self.update_web_location_state(tw.pathname, tw.search, tw.hash) {
                         self.call_event_handler(&Event::Signal);
                     }
+                }
+
+                live_id!(ToWasmFileDrag) => {
+                    let tw = ToWasmFileDrag::read_to_wasm(&mut to_wasm);
+                    let mut abs = if tw.left {
+                        crate::dvec2(-100000.0, -100000.0)
+                    } else {
+                        crate::dvec2(tw.x, tw.y)
+                    };
+                    if let Some(window_id) = self.windows.current_id_zero() {
+                        self.dpi_override_scale(&mut abs, window_id);
+                    }
+                    let items = (0..tw.file_count)
+                        .map(|_| {
+                            DragItem::VirtualFile(crate::VirtualFile {
+                                name: String::new(),
+                                mime: String::new(),
+                                bytes: Arc::from(Vec::<u8>::new()),
+                                size: 0,
+                            })
+                        })
+                        .collect();
+                    self.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers: Self::web_key_modifiers(tw.modifiers),
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: Arc::new(items),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    self.drag_drop.cycle_drag();
+                    if tw.left {
+                        self.call_event_handler(&Event::DragEnd);
+                        self.drag_drop.cycle_drag();
+                    }
+                }
+
+                live_id!(ToWasmFileDrop) => {
+                    let tw = ToWasmFileDrop::read_to_wasm(&mut to_wasm);
+                    match Self::web_virtual_files(tw.files, self.file_dialogs.limits()) {
+                        Ok(files) => {
+                            let mut abs = crate::dvec2(tw.x, tw.y);
+                            if let Some(window_id) = self.windows.current_id_zero() {
+                                self.dpi_override_scale(&mut abs, window_id);
+                            }
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: Self::web_key_modifiers(tw.modifiers),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs,
+                                items: Arc::new(
+                                    files.into_iter().map(DragItem::VirtualFile).collect(),
+                                ),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                        Err(error) => crate::error!("web file drop rejected: {error}"),
+                    }
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDropError) => {
+                    let tw = ToWasmFileDropError::read_to_wasm(&mut to_wasm);
+                    crate::error!("web file drop rejected: {}", tw.error);
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDialogResult) => {
+                    let tw = ToWasmFileDialogResult::read_to_wasm(&mut to_wasm);
+                    let id = LiveId::from_lo_hi(tw.id_lo, tw.id_hi);
+                    let pending = self.file_dialogs.finish(id);
+                    let limits = pending
+                        .as_ref()
+                        .map(|pending| pending.limits)
+                        .unwrap_or_else(|| self.file_dialogs.limits());
+                    if pending.is_none() {
+                        crate::error!("web file dialog returned unknown id {:?}", id);
+                    }
+                    let action = if tw.cancelled || !tw.error.is_empty() {
+                        if !tw.error.is_empty() {
+                            crate::error!("web file dialog failed: {}", tw.error);
+                        }
+                        FileDialogAction::FileCancelled { id }
+                    } else {
+                        match Self::web_virtual_files(tw.files, limits) {
+                            Ok(files) if !files.is_empty() => {
+                                FileDialogAction::FileLoaded { id, files }
+                            }
+                            Ok(_) => FileDialogAction::FileCancelled { id },
+                            Err(error) => {
+                                crate::error!("web file dialog rejected: {error}");
+                                FileDialogAction::FileCancelled { id }
+                            }
+                        }
+                    };
+                    self.action(action);
+                    self.handle_actions();
                 }
 
                 live_id!(ToWasmHTTPResponse) => {
@@ -1037,6 +1184,27 @@ impl Cx {
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
+                CxOsOp::SelectFileDialog(dialog) => {
+                    if !dialog.want_bytes {
+                        crate::log!(
+                            "web file dialog has no filesystem paths; returning FileLoaded bytes"
+                        );
+                    }
+                    let limits = self.file_dialogs.limits();
+                    self.os.from_wasm(FromWasmSelectFileDialog {
+                        id_lo: dialog.id.lo(),
+                        id_hi: dialog.id.hi(),
+                        accept: Self::web_file_dialog_accept(&dialog),
+                        multiple: dialog.multiple,
+                        max_file_size: limits.max_file_size as f64,
+                        max_total_size: limits.max_total_size as f64,
+                    });
+                }
+                CxOsOp::SaveFileDialog(dialog) => {
+                    crate::error!("web save file dialogs are not supported; download support is pending");
+                    self.action(FileDialogAction::FileCancelled { id: dialog.id });
+                    self.handle_actions();
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -1104,6 +1272,10 @@ impl CxOsApi for Cx {
             ToWasmPermissionResult::to_js_code(),
             ToWasmLocationUpdate::to_js_code(),
             ToWasmLocationError::to_js_code(),
+            ToWasmFileDrag::to_js_code(),
+            ToWasmFileDrop::to_js_code(),
+            ToWasmFileDropError::to_js_code(),
+            ToWasmFileDialogResult::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -1137,6 +1309,8 @@ impl CxOsApi for Cx {
             FromWasmStorageStat::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
+            FromWasmSetVirtualFileLimits::to_js_code(),
+            FromWasmSelectFileDialog::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),

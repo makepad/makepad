@@ -163,6 +163,22 @@ pub struct FromWasmShowTextIME {
 
 #[derive(FromWasm)]
 pub struct FromWasmHideTextIME {}
+
+#[derive(FromWasm)]
+pub struct FromWasmSetVirtualFileLimits {
+    pub max_file_size: f64,
+    pub max_total_size: f64,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSelectFileDialog {
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub accept: String,
+    pub multiple: bool,
+    pub max_file_size: f64,
+    pub max_total_size: f64,
+}
 /*
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
