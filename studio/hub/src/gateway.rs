@@ -46,6 +46,7 @@ pub fn start_http_gateway(
         post_max_size_overrides: Vec::new(),
         pre_admit_posts: false,
         client_ip_resolver: None,
+        trusted_proxy: None,
     })
     .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
 
@@ -334,7 +335,7 @@ fn ok_response(body: Vec<u8>, content_type: &str) -> HttpServerResponse {
         content_type,
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 fn not_found_response() -> HttpServerResponse {
@@ -343,5 +344,5 @@ fn not_found_response() -> HttpServerResponse {
         "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }

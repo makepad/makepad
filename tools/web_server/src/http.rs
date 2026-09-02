@@ -41,13 +41,11 @@ pub fn response(
         reason(status),
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 pub fn send_response(sender: &HttpServerResponseSender, response: HttpServerResponse) {
-    if let Err(error) = sender.send(response) {
-        error.0.discard_file();
-    }
+    let _ = sender.send(response);
 }
 
 pub fn json_response(status: u16, cache_control: &str, json: String) -> HttpServerResponse {

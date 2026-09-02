@@ -258,6 +258,7 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
             post_max_size_overrides: Vec::new(),
             pre_admit_posts: false,
             client_ip_resolver: None,
+            trusted_proxy: None,
         })
         .expect("start HTTP server");
     let handler = std::thread::spawn(move || {
@@ -267,10 +268,10 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
         };
         assert_eq!(headers.verb, "HEAD");
         assert!(response_sender
-            .send(HttpServerResponse {
-                header: "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n".into(),
-                body: b"hidden!".to_vec(),
-            })
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n".into(),
+                b"hidden!".to_vec(),
+            ))
             .is_ok());
     });
     let mut stream = TcpStream::connect(listen_address).unwrap();
@@ -296,8 +297,92 @@ fn raw_server_request(address: SocketAddr, request: &[u8]) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn test_proxy_peer(ip: IpAddr) -> bool {
+    ip.is_loopback()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn test_forwarded_client(headers: &makepad_network::HttpServerHeaders) -> IpAddr {
+    headers
+        .header("X-Test-Client-IP")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| headers.addr.ip())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
+fn trusted_proxy_connections_are_capped_by_verified_forwarded_client() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 1024,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: Some(test_forwarded_client),
+            trusted_proxy: Some(test_proxy_peer),
+        })
+        .unwrap();
+
+    let mut streams = Vec::new();
+    let mut responders = Vec::new();
+    for octet in 1..=17 {
+        let mut stream = TcpStream::connect(listen_address).unwrap();
+        write!(
+            stream,
+            "GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: 192.0.2.{octet}\r\n\r\n"
+        )
+        .unwrap();
+        let HttpServerRequest::Get { response_sender, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("distinct forwarded client was starved by proxy-hop cap")
+        else {
+            panic!("unexpected proxy test request");
+        };
+        streams.push(stream);
+        responders.push(response_sender);
+    }
+
+    for _ in 0..16 {
+        let mut stream = TcpStream::connect(listen_address).unwrap();
+        stream
+            .write_all(
+                b"GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: ::ffff:198.51.100.7\r\n\r\n",
+            )
+            .unwrap();
+        let HttpServerRequest::Get { response_sender, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("forwarded client below cap")
+        else {
+            panic!("unexpected proxy test request");
+        };
+        streams.push(stream);
+        responders.push(response_sender);
+    }
+    let response = raw_server_request(
+        listen_address,
+        b"GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: 198.51.100.7\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 503"), "{response:?}");
+    assert!(request_receiver.try_recv().is_err());
+
+    for responder in responders {
+        let _ = responder.send(HttpServerResponse::new(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            Vec::new(),
+        ));
+    }
+    drop(streams);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_rejects_ambiguous_framing_and_unsupported_methods_before_get_consumer() {
     let _guard = test_guard();
     let port = find_free_port().expect("allocate local test port");
     let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -311,6 +396,7 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
             post_max_size_overrides: vec![("/small".into(), 2)],
             pre_admit_posts: false,
             client_ip_resolver: None,
+            trusted_proxy: None,
         })
         .unwrap();
 
@@ -327,31 +413,27 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
         assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp"));
     }
     let method_handler = std::thread::spawn(move || {
-        for _ in 0..2 {
-            let HttpServerRequest::Get { headers, response_sender } = request_receiver
-                .recv_timeout(Duration::from_secs(3))
-                .expect("method request reached dispatcher")
-            else {
-                panic!("unexpected request shape");
-            };
-            let allow = if headers.path == "/x" { "GET, HEAD, OPTIONS" } else { "OPTIONS" };
-            response_sender
-                .send(HttpServerResponse {
-                    header: format!(
-                        "HTTP/1.1 405 Method Not Allowed\r\nAllow: {allow}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    ),
-                    body: Vec::new(),
-                })
-                .unwrap();
-        }
+        let HttpServerRequest::Get { headers, response_sender } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("GET request reached dispatcher")
+        else {
+            panic!("unsupported method reached GET-only consumer");
+        };
+        assert_eq!(headers.verb, "GET");
+        response_sender
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                Vec::new(),
+            ))
+            .unwrap();
     });
-    for verb in ["PUT", "DELETE"] {
+    for verb in ["PUT", "DELETE", "PATCH", "TRACE", "CONNECT"] {
         let response = raw_server_request(
             listen_address,
             format!("{verb} /x HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
         );
         assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
-        assert!(response.contains("Allow: GET, HEAD, OPTIONS"), "{response:?}");
+        assert!(response.contains("Allow: GET, HEAD, POST, OPTIONS"), "{response:?}");
     }
     assert!(raw_server_request(
         listen_address,
@@ -363,6 +445,11 @@ fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
         b"POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"
     )
     .starts_with("HTTP/1.1 413"));
+    assert!(raw_server_request(
+        listen_address,
+        b"GET /x HTTP/1.1\r\nHost: x\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 200"));
     method_handler.join().unwrap();
 }
 
@@ -382,6 +469,7 @@ fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
             post_max_size_overrides: Vec::new(),
             pre_admit_posts: true,
             client_ip_resolver: None,
+            trusted_proxy: None,
         })
         .unwrap();
     let handler = std::thread::spawn(move || {
@@ -392,10 +480,10 @@ fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
             panic!("POST body was read before admission");
         };
         assert_eq!(body.content_length, 2 * 1024 * 1024);
-        body.reject(HttpServerResponse {
-            header: "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-            body: Vec::new(),
-        });
+        body.reject(HttpServerResponse::new(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            Vec::new(),
+        ));
     });
     let response = raw_server_request(
         listen_address,
@@ -421,6 +509,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         post_max_size_overrides: Vec::new(),
         pre_admit_posts: false,
         client_ip_resolver: None,
+        trusted_proxy: None,
     }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;
