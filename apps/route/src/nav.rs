@@ -6,6 +6,11 @@ use makepad_map_nav::geo::{bearing_deg, bearing_delta_deg, LonLat};
 use makepad_map_nav::graph::Route;
 use makepad_map_nav::nav::{NavSession, NavState};
 
+#[cfg(feature = "demo")]
+pub mod api;
+#[cfg(feature = "native")]
+pub mod native;
+
 pub const SIM_SPEED_MULT: f64 = 6.0;
 
 /// Requested by tools (executed by the app after the tool run).

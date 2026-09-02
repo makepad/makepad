@@ -1,4 +1,3 @@
-use makepad_map_nav::search::SearchResult;
 use makepad_widgets::*;
 
 script_mod! {
@@ -188,35 +187,15 @@ script_mod! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AlongKind {
-    Chargers,
-    Museums,
-}
-
 #[derive(Debug, PartialEq)]
 pub enum PanelAction {
     Search(String),
-    SelectResult(usize),
-    RouteHere(usize),
-    Along(AlongKind),
-    Rain(bool),
-    Wind(bool),
 }
 
 #[derive(Default)]
 pub struct PanelController;
 
 impl PanelController {
-    pub fn result(&self, _index: usize) -> Option<&SearchResult> {
-        None
-    }
-
-    pub fn set_results(&mut self, _cx: &mut Cx, _ui: &WidgetRef, _results: Vec<SearchResult>) {}
-    pub fn set_search_status(&self, _cx: &mut Cx, _ui: &WidgetRef, _text: &str) {}
-    pub fn set_along_status(&self, _cx: &mut Cx, _ui: &WidgetRef, _text: &str) {}
-    pub fn set_weather(&self, _cx: &mut Cx, _ui: &WidgetRef, _text: &str) {}
-
     pub fn actions(&mut self, cx: &mut Cx, ui: &WidgetRef, actions: &Actions) -> Vec<PanelAction> {
         ui.text_input(cx, ids!(prompt_input))
             .returned(actions)
