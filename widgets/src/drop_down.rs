@@ -5,6 +5,7 @@ use {
         makepad_draw::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         widget::*,
+        widget_async::CxSplashVmExt,
     },
     std::cell::RefCell,
     std::rc::Rc,
@@ -432,7 +433,15 @@ pub struct DropDown {
 
 #[derive(Default, Clone)]
 struct PopupMenuGlobal {
-    map: Rc<RefCell<ComponentMap<ScriptValue, PopupMenu>>>,
+    map: Rc<RefCell<ComponentMap<PopupMenuKey, PopupMenu>>>,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct PopupMenuKey {
+    // ScriptValue only identifies an object within one heap. Popup menus are
+    // Cx-global, so the heap is part of their identity too.
+    heap: usize,
+    template: ScriptValue,
 }
 
 #[derive(Script, ScriptHook)]
@@ -467,8 +476,14 @@ impl ScriptHook for DropDown {
             };
 
             let popup_menu_val = self.popup_menu;
-            map.get_or_insert(cx, popup_menu_val, |cx| {
-                cx.with_vm(|vm| PopupMenu::script_from_value(vm, popup_menu_val))
+            let key = self.popup_menu_key();
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
+            map.get_or_insert(cx, key, |cx| {
+                cx.with_script_vm_id(vm_id, |vm| {
+                    PopupMenu::script_from_value(vm, popup_menu_val)
+                })
             });
         });
     }
@@ -482,6 +497,13 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    fn popup_menu_key(&self) -> PopupMenuKey {
+        PopupMenuKey {
+            heap: self.source.heap_key(),
+            template: self.popup_menu,
+        }
+    }
+
     pub fn selected_item_index(&self) -> usize {
         self.selected_item
     }
@@ -498,7 +520,7 @@ impl DropDown {
         self.draw_bg.redraw(cx);
         let global = cx.global::<PopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
-        let lb = map.get_mut(&self.popup_menu).unwrap();
+        let lb = map.get_mut(&self.popup_menu_key()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
         cx.sweep_lock(self.draw_bg.area());
@@ -534,7 +556,7 @@ impl DropDown {
         if self.is_active && !self.popup_menu.is_nil() {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
-            let popup_menu = map.get_mut(&self.popup_menu).unwrap();
+            let popup_menu = map.get_mut(&self.popup_menu_key()).unwrap();
 
             // One menu instance serves every dropdown with the same template,
             // so claim its items for this dropdown while they draw.
@@ -612,7 +634,7 @@ impl WidgetNode for DropDown {
         let Ok(map) = self.popup_global.map.try_borrow() else {
             return;
         };
-        let Some(menu) = map.get(&self.popup_menu) else {
+        let Some(menu) = map.get(&self.popup_menu_key()) else {
             return;
         };
         for (id, item) in menu.item_refs() {
@@ -643,7 +665,7 @@ impl Widget for DropDown {
         if self.is_active && !self.popup_menu.is_nil() {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
-            let menu = map.get_mut(&self.popup_menu).unwrap();
+            let menu = map.get_mut(&self.popup_menu_key()).unwrap();
             let mut close = false;
             menu.handle_event_with(
                 cx,
