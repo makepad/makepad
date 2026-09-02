@@ -725,8 +725,8 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     let started = Instant::now();
     let deadline = started.checked_add(budgets.max_eval_time).unwrap_or(started);
     let state = Rc::new(RefCell::new(EvalState { budgets, ..Default::default() }));
-    let (mut host, mut std) = ((), ());
-    let mut vm = ScriptVm { host: &mut host, std: &mut std, bx: Box::new(ScriptVmBase::new()) };
+    let mut host = ScriptVmHost::new((), ());
+    let mut vm = ScriptVm { host: &mut host, bx: Box::new(ScriptVmBase::new()) };
     let api_type = vm.new_handle_type(id_lut!(csg));
     let dispatch = state.clone();
     vm.set_handle_call(api_type, move |vm, args, method| match method {

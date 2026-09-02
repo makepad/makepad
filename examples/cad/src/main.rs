@@ -737,11 +737,9 @@ fn eval_cad_script_in_vm(
 }
 
 fn eval_cad_script(source: &str, allow_progressive_preview: bool) -> Result<Solid, String> {
-    let mut host = ();
-    let mut std = ();
+    let mut host = ScriptVmHost::new((), ());
     let mut vm = ScriptVm {
         host: &mut host,
-        std: &mut std,
         bx: Box::new(ScriptVmBase::new()),
     };
     cad_script_mod(&mut vm);

@@ -355,16 +355,19 @@ impl CxSplashVmExt for Cx {
             id
         };
 
-        let mut std = if network_enabled {
+        let std = if network_enabled {
             ScriptStd::with_network_runtime(self.net.clone())
         } else {
             ScriptStd::new()
         };
+        let outer_std = std::mem::replace(&mut self.script_data.std, std);
+        let outer_vm = self.script_vm.take();
+        self.script_vm = Some(Box::new(ScriptVmBase::new()));
         let bx = {
+            let bx = self.script_vm.take().unwrap();
             let mut vm = ScriptVm {
                 host: self,
-                std: &mut std,
-                bx: Box::new(ScriptVmBase::new()),
+                bx,
             };
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
             crate::script_mod(&mut vm);
@@ -395,6 +398,8 @@ impl CxSplashVmExt for Cx {
             crate::splash_host::script_mod(&mut vm);
             vm.bx
         };
+        let std = std::mem::replace(&mut self.script_data.std, outer_std);
+        self.script_vm = outer_vm;
 
         // Record this isolate's heap identity so any ref minted here (widget
         // sources, templates, on_click fns) routes back to this VM.

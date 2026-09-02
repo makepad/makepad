@@ -2,7 +2,6 @@ use crate::{vm, ScriptStd, ScriptVmStdExt};
 use makepad_network::{FromUISender, ToUIReceiver};
 use makepad_script::*;
 use std::{
-    any::Any,
     collections::hash_map::HashMap,
     io::prelude::*,
     io::BufReader,
@@ -59,38 +58,79 @@ pub struct ScriptChildCmd {
     pub cwd: Option<String>,
 }
 
-pub fn handle_script_child_processes<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-) {
+pub fn handle_script_child_processes(host: &mut dyn ScriptHost) {
     let mut i = 0;
-    while i < std.data.child_processes.len() {
+    while i
+        < host
+            .script_std()
+            .downcast_ref::<ScriptStd>()
+            .unwrap()
+            .data
+            .child_processes
+            .len()
+    {
         let mut term = false;
 
-        while let Ok(value) = std.data.child_processes[i].child.out_recv.try_recv() {
+        loop {
+            let value = host
+                .script_std()
+                .downcast_mut::<ScriptStd>()
+                .unwrap()
+                .data
+                .child_processes[i]
+                .child
+                .out_recv
+                .try_recv();
+            let Ok(value) = value else {
+                break;
+            };
             match value {
                 ChildOut::StdOut(s) => {
-                    if let Some(handler) = std.data.child_processes[i].events.on_stdout.as_object()
-                    {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                    let handler = host
+                        .script_std()
+                        .downcast_ref::<ScriptStd>()
+                        .unwrap()
+                        .data
+                        .child_processes[i]
+                        .events
+                        .on_stdout
+                        .as_object();
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let str = vm.bx.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         });
                     }
                 }
                 ChildOut::StdErr(s) => {
-                    if let Some(handler) = std.data.child_processes[i].events.on_stderr.as_object()
-                    {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                    let handler = host
+                        .script_std()
+                        .downcast_ref::<ScriptStd>()
+                        .unwrap()
+                        .data
+                        .child_processes[i]
+                        .events
+                        .on_stderr
+                        .as_object();
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let str = vm.bx.heap.new_string_from_str(&s);
                             vm.call(handler.into(), &[str.into()]);
                         });
                     }
                 }
                 ChildOut::Term => {
-                    if let Some(handler) = std.data.child_processes[i].events.on_term.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                    let handler = host
+                        .script_std()
+                        .downcast_ref::<ScriptStd>()
+                        .unwrap()
+                        .data
+                        .child_processes[i]
+                        .events
+                        .on_term
+                        .as_object();
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             vm.call(handler.into(), &[]);
                         });
                     }
@@ -100,7 +140,12 @@ pub fn handle_script_child_processes<H: Any>(
             }
         }
         if term {
-            std.data.child_processes.remove(i);
+            host.script_std()
+                .downcast_mut::<ScriptStd>()
+                .unwrap()
+                .data
+                .child_processes
+                .remove(i);
         } else {
             i += 1;
         }

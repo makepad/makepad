@@ -217,9 +217,52 @@ impl ScriptCode {
     }
 }
 
+pub trait ScriptHost: Any {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn script_std(&mut self) -> &mut dyn Any;
+    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>>;
+}
+
+/// Small host container for standalone VMs that do not have an application
+/// host type of their own. Hosts without a standard library use `()` for
+/// `std`.
+pub struct ScriptVmHost<H: Any = (), S: Any = ()> {
+    pub host: H,
+    pub std: S,
+    pub script_vm: Option<Box<ScriptVmBase>>,
+}
+
+impl<H: Any, S: Any> ScriptVmHost<H, S> {
+    pub fn new(host: H, std: S) -> Self {
+        Self {
+            host,
+            std,
+            script_vm: None,
+        }
+    }
+}
+
+impl<H: Any, S: Any> ScriptHost for ScriptVmHost<H, S> {
+    fn as_any(&self) -> &dyn Any {
+        &self.host
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        &mut self.host
+    }
+
+    fn script_std(&mut self) -> &mut dyn Any {
+        &mut self.std
+    }
+
+    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>> {
+        &mut self.script_vm
+    }
+}
+
 pub struct ScriptVm<'a> {
-    pub host: &'a mut dyn Any,
-    pub std: &'a mut dyn Any,
+    pub host: &'a mut dyn ScriptHost,
     pub bx: Box<ScriptVmBase>,
 }
 
@@ -1622,11 +1665,9 @@ mod tests {
 
     #[test]
     fn script_apply_eval_refreshes_interpolated_values_on_reused_callsite() {
-        let mut host = ();
-        let mut std = ();
+        let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
             host: &mut host,
-            std: &mut std,
             bx: Box::new(ScriptVmBase::new()),
         };
 
