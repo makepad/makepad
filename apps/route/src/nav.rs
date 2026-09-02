@@ -1,6 +1,7 @@
 //! Turn-by-turn navigation (route.md M0/M4 of gps.md): NavSession over the
 //! planned trip, leg by leg. Position comes from real GPS fixes when they
 //! flow, or the simulated drive (examples/map pattern) for desk testing.
+use makepad_widgets::Cx;
 
 use makepad_map_nav::geo::{bearing_deg, bearing_delta_deg, LonLat};
 use makepad_map_nav::graph::Route;
@@ -28,8 +29,9 @@ pub struct ActiveNav {
     pub leg_point_offset: usize,
     pub simulate: bool,
     pub sim_progress_m: f64,
-    pub sim_last_tick: Option<std::time::Instant>,
-    pub started: std::time::Instant,
+    /// Platform-clock seconds (`Cx::monotonic_now()`): the std clock traps on wasm.
+    pub sim_last_tick: Option<f64>,
+    pub started: f64,
     pub map_rotation: f64,
     /// Latest position/heading fed to the session.
     pub position: Option<LonLat>,
@@ -59,7 +61,7 @@ impl ActiveNav {
             simulate,
             sim_progress_m: 0.0,
             sim_last_tick: None,
-            started: std::time::Instant::now(),
+            started: Cx::monotonic_now(),
             map_rotation: 0.0,
             position: None,
             heading: None,
@@ -79,10 +81,10 @@ impl ActiveNav {
         if !self.simulate {
             return None;
         }
-        let now = std::time::Instant::now();
+        let now = Cx::monotonic_now();
         let dt = self
             .sim_last_tick
-            .map(|last| now.duration_since(last).as_secs_f64())
+            .map(|last| now - last)
             .unwrap_or(0.05)
             .min(0.5);
         self.sim_last_tick = Some(now);
@@ -108,7 +110,7 @@ impl ActiveNav {
     pub fn feed(&mut self, pos: LonLat, heading: Option<f64>, dt: f64) -> NavTick {
         self.position = Some(pos);
         self.heading = heading;
-        let now_s = self.started.elapsed().as_secs_f64();
+        let now_s = Cx::monotonic_now() - self.started;
         let status = self.session.update(pos, now_s);
 
         // Heading-up camera: ease onto the travel bearing, shortest arc.
