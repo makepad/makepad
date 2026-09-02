@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   hy-motion-text-validate <Qwen3-8B-dir> <oracle-npy-dir>
-//!       [layer-oracle-dir] [latest.ckpt]
+//!       [layer-oracle-dir] [latest.ckpt] [--precision bf16|f16]
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -128,18 +128,24 @@ fn run() -> Result<(), String> {
     let oracle_dir = PathBuf::from(arguments.next().ok_or(
         "usage: hy-motion-text-validate <Qwen3-8B-dir> <oracle-npy-dir> [layer-oracle-dir] [latest.ckpt]",
     )?);
-    let layer_oracle_dir = arguments.next().map(PathBuf::from);
-    let checkpoint_path = arguments.next().map(PathBuf::from);
-    if arguments.next().is_some() {
-        return Err(
-            "usage: hy-motion-text-validate <Qwen3-8B-dir> <oracle-npy-dir> [layer-oracle-dir] [latest.ckpt]"
-                .to_string(),
-        );
+    let mut positionals = Vec::new();
+    let mut precision = HyMotionQwenPrecision::Bf16;
+    while let Some(argument) = arguments.next() {
+        if argument == "--precision" {
+            precision = match arguments.next().as_deref() {
+                Some("f16") => HyMotionQwenPrecision::F16,
+                Some("bf16") => HyMotionQwenPrecision::Bf16,
+                _ => return Err("--precision expects bf16 or f16".to_string()),
+            };
+        } else {
+            positionals.push(argument);
+        }
     }
-    let precision = match std::env::var("HY_MOTION_QWEN_PRECISION") {
-        Ok(value) if value.eq_ignore_ascii_case("f16") => HyMotionQwenPrecision::F16,
-        _ => HyMotionQwenPrecision::Bf16,
-    };
+    if positionals.len() > 2 {
+        return Err("usage: hy-motion-text-validate <Qwen3-8B-dir> <oracle-npy-dir> [layer-oracle-dir] [latest.ckpt] [--precision bf16|f16]".to_string());
+    }
+    let layer_oracle_dir = positionals.first().map(PathBuf::from);
+    let checkpoint_path = positionals.get(1).map(PathBuf::from);
     println!("qwen_precision={precision:?}");
 
     let tokenizer_started = Instant::now();

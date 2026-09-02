@@ -100,6 +100,8 @@ impl ClientProfile {
                     | C::WorldMove { .. }
                     | C::WorldList
                     | C::WorldGetSource
+                    | C::WorldGetPlan
+                    | C::WorldSetPlan { .. }
                     | C::WorldSetSource { .. }
                     | C::WorldNewLevel { .. }
                     | C::WorldSetPlayerModel { .. }

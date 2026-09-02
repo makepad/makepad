@@ -15,38 +15,3 @@ cuda-taps = ["dep:makepad-ai-common"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-common = { path = "../common", optional = true }
-
-[[bin]]
-name = "pbr-cuda-taps"
-path = "src/bin/cuda_taps.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-vae-canary"
-path = "src/bin/vae_canary.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-unet-canary"
-path = "src/bin/unet_canary.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-dino-canary"
-path = "src/bin/dino_canary.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-exec-canary"
-path = "src/bin/exec_canary.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-pipeline-canary"
-path = "src/bin/pipeline_canary.rs"
-required-features = ["cuda-taps"]
-
-[[bin]]
-name = "pbr-dino-bisect"
-path = "src/bin/dino_bisect.rs"
-required-features = ["cuda-taps"]

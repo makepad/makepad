@@ -12,16 +12,20 @@ use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 
 mod ai_bus;
+mod apps;
 mod binds;
 mod clients;
 mod demo_home;
 mod desk;
 mod hub;
 mod layout;
+mod module_host;
+mod module_view;
 mod preview;
 mod run_view;
 mod shell;
 mod theme;
+mod tile;
 
 use std::collections::HashMap;
 
@@ -42,7 +46,10 @@ use shell::bar::{BarData, BarModule, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
 use shell::panels::ShellPanelAction;
 use ai_bus::{AiBus, Route};
-use makepad_ai_services::wire::{ServiceCall, ToolResult};
+use apps::{AppRegistry, Hosting};
+use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
+use makepad_app_module::{AppModule, ExecOutcome};
+use module_host::ModuleHost;
 use shell::ai_pane::ShellAiPane;
 
 app_main!(
@@ -135,6 +142,8 @@ script_mod! {
                         }
                         desk := WmDesk{
                             Tile := MpRunView{}
+                            // An in-process module instance's tile (module_view.rs).
+                            ModuleTile := MpModuleView{}
                         }
                     }
                     // The shell's floating surfaces, over the desk: the
@@ -314,6 +323,14 @@ pub struct App {
     /// registration, the routing (see ai_bus.rs).
     #[rust]
     ai_bus: AiBus,
+    /// The instances this process hosts itself (module_host.rs): one
+    /// isolate each, seated in a `ModuleTile`.
+    #[rust]
+    module_host: ModuleHost,
+    /// Which apps are linked as modules and which the person switched to
+    /// module hosting (apps.rs).
+    #[rust]
+    apps: AppRegistry,
 }
 
 /// A warm instance's own swapchain: the host end of the frames a DORMANT
@@ -491,6 +508,16 @@ impl App {
             let existing = existing.first().copied();
             if let Some(client) = existing {
                 self.focus_client(cx, client);
+                return;
+            }
+        }
+
+        // In-process hosting (aicontrol §3): a linked module the person
+        // switched on (or a dev `--module` run) becomes an instance in an
+        // isolate of its own — never a process, never the pool.
+        if self.apps.hosting(app_id) == Hosting::Module {
+            if let Some(module) = self.apps.module(app_id) {
+                self.launch_module(cx, module);
                 return;
             }
         }
@@ -1256,6 +1283,13 @@ impl App {
     }
 
     fn request_close(&mut self, cx: &mut Cx, client: ClientId) {
+        // A module instance has no process to ask politely and nothing to
+        // reap later: it ends now, through the same removal as a death.
+        if self.module_host.is_module(client) {
+            self.remove_client(cx, client);
+            self.update_bar(cx);
+            return;
+        }
         let mut polite = false;
         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
             if slot.closing.is_some() {
@@ -1305,6 +1339,15 @@ impl App {
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("wm: removing client {}", client);
+        // A module instance: the tile lets go of the root FIRST, then the
+        // instance and its isolate go (module_host.rs). The bus hears an
+        // Unregister for it below, like for any client.
+        if self.module_host.is_module(client) {
+            self.desk(cx)
+                .borrow_mut::<WmDesk>()
+                .map(|mut d| d.with_module_view(cx, client, |cx, v| v.clear_root(cx)));
+            self.module_host.teardown(cx, client);
+        }
         // The bus: the pane's own death empties the slot (the next F10
         // launches afresh); anyone else's death is an `Unregister` the
         // pane hears on their behalf, so its tool table shrinks at once.
@@ -1395,7 +1438,7 @@ impl App {
         let focused = self
             .desk(cx)
             .borrow_mut::<WmDesk>()
-            .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.focus_keyboard(cx)))
+            .and_then(|mut d| d.with_tile(cx, client, |cx, v| v.focus_keyboard(cx)))
             .unwrap_or(false);
         self.pending_focus = if focused { None } else { Some(client) };
         self.update_bar(cx);
@@ -1547,7 +1590,7 @@ impl App {
         self.sync_ai_pane_geometry(cx);
         self.with_ai_pane(cx, |cx, p| p.set_open(cx, true));
         self.focus_pane(cx);
-        self.broadcast_chat_open(true);
+        self.broadcast_chat_open(cx, true);
         self.redraw_all(cx);
     }
 
@@ -1559,7 +1602,7 @@ impl App {
         }
         self.with_ai_pane(cx, |cx, p| p.set_open(cx, false));
         self.focus_after_layout(cx);
-        self.broadcast_chat_open(false);
+        self.broadcast_chat_open(cx, false);
         self.update_bar(cx);
         self.redraw_all(cx);
     }
@@ -1658,10 +1701,12 @@ impl App {
         }
     }
 
-    fn broadcast_chat_open(&mut self, open: bool) {
+    fn broadcast_chat_open(&mut self, cx: &mut Cx, open: bool) {
         for (client, json) in self.ai_bus.chat_open_frames(open) {
             self.send_custom(client, json);
         }
+        // In-process instances hear it from the host directly.
+        self.module_host.chat_open(cx, open);
     }
 
     /// The registry as the `os` brief names it: (id, label).
@@ -1721,6 +1766,7 @@ impl App {
                 let result = self.answer_os_call(cx, &call);
                 self.send_to_pane(AiBus::os_reply(result));
             }
+            Route::Local(client, msg) => self.on_local_frame(cx, client, msg),
             Route::Drop => {}
         }
     }
@@ -1736,6 +1782,78 @@ impl App {
                 log!("wm: shutdown kills the AI pane's child {}", client);
                 clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
             }
+        }
+    }
+
+    // ---- in-process instances (module_host.rs) ----
+
+    /// Open `module` as an instance of its own in this process: an isolate,
+    /// a tile in the layout, a local endpoint on the bus. The ordinary
+    /// launch path minus everything a process needs.
+    fn launch_module(&mut self, cx: &mut Cx, module: &'static dyn AppModule) {
+        let open = match module.open_schema().empty_open() {
+            Ok(open) => open,
+            Err(e) => {
+                log!("wm: {} cannot open without arguments: {}", module.id(), e);
+                return;
+            }
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let area = self.desk_area(cx);
+        if let Err(e) = self.module_host.create(cx, id, module, open, dvec2(area.w, area.h)) {
+            log!("wm: module {} failed to start: {}", module.id(), e);
+            return;
+        }
+        let (manifest, root, vm_id) = match self.module_host.get(id) {
+            Some(instance) => (instance.manifest(), instance.root.clone(), instance.vm_id),
+            None => return,
+        };
+        self.state_mut()
+            .clients
+            .insert(id, clients::ClientSlot::module(id, module.id(), module.label()));
+        let gap = self.state_mut().gap;
+        self.state_mut().layout.insert(id, area, gap);
+        // The tile is a module tile from its first draw; the root is seated
+        // in it before anything asks it to draw.
+        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+            d.mark_module(id);
+            d.with_module_view(cx, id, |cx, v| v.set_root(cx, id, vm_id, root));
+        });
+        // On the bus as a local endpoint: the pane learns its tools now, or
+        // at the replay when it connects later.
+        let frame = self.ai_bus.register_local(id, manifest);
+        self.send_to_pane(frame);
+        log!("wm: launched {} as client {} (in-process)", module.id(), id);
+        self.focus_client(cx, id);
+        self.update_bar(cx);
+        self.redraw_all(cx);
+    }
+
+    /// A frame the pane addressed to an in-process instance.
+    fn on_local_frame(&mut self, cx: &mut Cx, client: ClientId, msg: ServiceDown) {
+        match msg {
+            ServiceDown::Call(call) => {
+                let result = match self.module_host.execute(cx, client, &call) {
+                    Some(ExecOutcome::Done(result)) => result,
+                    // Answered later through the instance's reply sink.
+                    Some(ExecOutcome::Pending) => return,
+                    None => ToolResult::unavailable(&call.call_id, "that app is gone"),
+                };
+                let frame = self.ai_bus.local_reply(client, result);
+                self.send_to_pane(frame);
+            }
+            ServiceDown::Cancel { call_id } => self.module_host.cancel(cx, client, &call_id),
+            // The pane state reaches instances through `broadcast_chat_open`.
+            ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
+        }
+    }
+
+    /// Results in-process executors answered later, up to the pane.
+    fn drain_module_replies(&mut self) {
+        for (client, result) in self.module_host.drain_replies() {
+            let frame = self.ai_bus.local_reply(client, result);
+            self.send_to_pane(frame);
         }
     }
 
@@ -3310,6 +3428,11 @@ impl MatchEvent for App {
             drop_hint: None,
         });
         self.next_id = 1;
+        // The hosting registry: the linked modules, the person's overrides
+        // in ~/.makepad/wm/apps.splash, a dev run's `--module <id>` flags.
+        let args: Vec<String> = std::env::args().collect();
+        self.apps = AppRegistry::load(&theme::makepad_home().join("wm/apps.splash"), &args);
+        log!("wm: modules linked: {:?}", self.apps.linked_ids());
         self.tick = cx.start_interval(1.0);
         // The warm pool's pump. Started even when the pool is off: it
         // costs one no-op wakeup and keeps the timer id stable.
@@ -3495,6 +3618,7 @@ impl MatchEvent for App {
         if self.state.is_some() {
             self.drain_hub(cx);
             self.drain_client_lines(cx);
+            self.drain_module_replies();
         }
     }
 }
@@ -3564,6 +3688,7 @@ impl AppMain for App {
         }
 
         run_view::script_mod(vm);
+        module_view::script_mod(vm);
         desk::script_mod(vm);
         shell::script_mod(vm);
         self::script_mod(vm)

@@ -8,14 +8,16 @@
 //! 379ms, border color over 539ms, a new window popping in from 87% over
 //! 410ms, a closing one popping back out over 149ms while it fades.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use makepad_widgets::*;
 
 use crate::clients::ClientSlot;
 use crate::hub::ClientId;
 use crate::layout::{LRect, WmLayout};
+use crate::module_view::MpModuleView;
 use crate::run_view::{MpRunView, MpRunViewAction};
+use crate::tile::TileHost;
 use crate::theme;
 
 #[allow(unused_imports)]
@@ -772,6 +774,11 @@ pub struct WmDesk {
     templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust]
     items: HashMap<ClientId, WidgetRef>,
+    /// Clients hosted IN-PROCESS: their tile is the `ModuleTile` template
+    /// (module_view.rs), not a process run view. Marked by the WM before
+    /// the tile is first asked for.
+    #[rust]
+    module_clients: HashSet<ClientId>,
     #[rust]
     anims: HashMap<ClientId, TileAnim>,
     /// The last frame's draw order, back to front (closing tiles, then the
@@ -843,7 +850,12 @@ impl WmDesk {
         if let Some(item) = self.items.get(&client) {
             return Some(item.clone());
         }
-        let template_ref = self.templates.get(&live_id!(Tile))?;
+        let template_id = if self.module_clients.contains(&client) {
+            live_id!(ModuleTile)
+        } else {
+            live_id!(Tile)
+        };
+        let template_ref = self.templates.get(&template_id)?;
         let template_value: ScriptValue = template_ref.as_object().into();
         let vm_id = cx.script_ref_vm_id(template_ref)?;
         let widget_ref =
@@ -864,6 +876,39 @@ impl WmDesk {
         Some(f(cx, &mut view))
     }
 
+    /// The next tile asked for `client` is a module tile.
+    pub fn mark_module(&mut self, client: ClientId) {
+        self.module_clients.insert(client);
+    }
+
+    /// The tile as its host trait, whichever kind it is (tile.rs).
+    pub fn with_tile<R>(
+        &mut self,
+        cx: &mut Cx,
+        client: ClientId,
+        f: impl FnOnce(&mut Cx, &mut dyn TileHost) -> R,
+    ) -> Option<R> {
+        let item = self.item(cx, client)?;
+        if let Some(mut view) = item.borrow_mut::<MpRunView>() {
+            return Some(f(cx, &mut *view as &mut dyn TileHost));
+        }
+        if let Some(mut view) = item.borrow_mut::<MpModuleView>() {
+            return Some(f(cx, &mut *view as &mut dyn TileHost));
+        }
+        None
+    }
+
+    pub fn with_module_view<R>(
+        &mut self,
+        cx: &mut Cx,
+        client: ClientId,
+        f: impl FnOnce(&mut Cx, &mut MpModuleView) -> R,
+    ) -> Option<R> {
+        let item = self.item(cx, client)?;
+        let mut view = item.borrow_mut::<MpModuleView>()?;
+        Some(f(cx, &mut view))
+    }
+
     /// Start the close animation: the tile keeps its last frame while it
     /// pops back to 87% and fades, and is dropped when that finishes.
     pub fn remove_client(&mut self, client: ClientId) {
@@ -875,6 +920,7 @@ impl WmDesk {
             Some(_) => {}
             None => {
                 self.items.remove(&client);
+                self.module_clients.remove(&client);
             }
         }
     }
@@ -890,6 +936,7 @@ impl WmDesk {
         for client in done {
             self.anims.remove(&client);
             self.items.remove(&client);
+            self.module_clients.remove(&client);
         }
     }
 
@@ -961,10 +1008,7 @@ impl WmDesk {
         let (has_frame, arrival) = self
             .items
             .get(&client)
-            .and_then(|item| {
-                item.borrow::<MpRunView>()
-                    .map(|v| (v.has_frame(), v.arrival_fade()))
-            })
+            .and_then(|item| with_tile_host(item, |v| (v.has_frame(), v.arrival_fade())))
             .unwrap_or((false, 1.0));
         // The wash IS the terminal glass (same color, same focus
         // opacity), so a terminal's first frame changes nothing but
@@ -1033,11 +1077,11 @@ impl WmDesk {
         // no crop (that experiment read odd; git has it).
         let _ = (closing, unscaled_rect);
         if let Some(item) = self.item(cx, client) {
-            if let Some(mut view) = item.borrow_mut::<MpRunView>() {
+            with_tile_host(&item, |view| {
                 view.set_target_size(Some(settled_child.size));
                 view.set_close_crop(None);
                 view.set_fade(fade as f32);
-            }
+            });
             item.draw_walk_all(cx, scope, Walk::abs_rect(child_rect));
         }
     }
@@ -1830,4 +1874,15 @@ mod tests {
         // Everything closing and nothing else: unchanged.
         assert_eq!(compose_zorder(&[5, 6], &[], &[]), vec![5, 6]);
     }
+}
+
+/// Run `f` on a tile's host trait, whichever tile kind the widget is.
+pub fn with_tile_host<R>(item: &WidgetRef, f: impl FnOnce(&mut dyn TileHost) -> R) -> Option<R> {
+    if let Some(mut view) = item.borrow_mut::<MpRunView>() {
+        return Some(f(&mut *view as &mut dyn TileHost));
+    }
+    if let Some(mut view) = item.borrow_mut::<MpModuleView>() {
+        return Some(f(&mut *view as &mut dyn TileHost));
+    }
+    None
 }

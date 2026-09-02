@@ -8,6 +8,7 @@ workspace.members = [
     "apps/sheets",
     "libs/wm_theme",
     "libs/wm_api",
+    "libs/app_module",
     "apps/task",
     "apps/image",
     "apps/video",

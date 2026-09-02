@@ -162,6 +162,7 @@ fn run() -> Result<(), String> {
     let mut own_te = false;
     let mut warm_runs = 2usize;
     let mut teacher_forced = true;
+    let mut img2img_strength = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -187,6 +188,9 @@ fn run() -> Result<(), String> {
                     .next()
                     .and_then(|v| v.parse().ok())
                     .ok_or("--warm-runs value")?
+            }
+            "--img2img-strength" => {
+                img2img_strength = Some(args.next().and_then(|v| v.parse::<f32>().ok()).ok_or("--img2img-strength value")?)
             }
             other => return Err(format!("unknown arg {other}")),
         }
@@ -375,15 +379,12 @@ fn run() -> Result<(), String> {
         rows.push("decoded_image    SKIP (no vae_out.npy)".into());
     }
 
-    // --- img2img probe (FLUX2_IMG2IMG_STRENGTH=<0..1>) -------------------------
+    // --- optional img2img probe ------------------------------------------------
     // Start from the ORACLE's decoded image at the given strength: a correct
     // img2img path must land very close to that image at low strength (only
     // the last floor(strength*steps) steps are regenerated) and drift toward
     // the free t2i result as strength -> 1.
-    if let Some(strength) = std::env::var("FLUX2_IMG2IMG_STRENGTH")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-    {
+    if let Some(strength) = img2img_strength {
         if vae_out_path.is_file() {
             let oracle_img = load_npy(&vae_out_path)?;
             let oracle_values = oracle_img.as_f32()?; // (1, H, W, 3) in [0,1]

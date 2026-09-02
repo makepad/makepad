@@ -57,21 +57,6 @@ fn check_cancel(cancel: Option<Sam3Cancel<'_>>) -> Result<()> {
     }
 }
 
-fn tap_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("SAM3_TAP_DIR").map(std::path::PathBuf::from)
-}
-
-/// MAKEPAD_GPU_PROF=1 per-phase op-category attribution (profiling inserts
-/// stream syncs, so only trust the categories, not the totals).
-fn prof_phase(tag: &str) {
-    if makepad_ai_common::backend::prof::enabled() {
-        eprint!(
-            "{}",
-            makepad_ai_common::backend::prof::report_and_reset(&format!("sam3 prof {tag} "))
-        );
-    }
-}
-
 fn quick_gelu_tensor(x: &GpuTensor) -> Result<GpuTensor> {
     // quick_gelu(x) = silu(1.702 x) / 1.702. Stay on device to avoid 24 D2H syncs.
     let n = x.rows() * x.cols();
@@ -80,20 +65,6 @@ fn quick_gelu_tensor(x: &GpuTensor) -> Result<GpuTensor> {
     let silu = gpu_silu(&scaled).map_err(DiffusionError::model)?;
     let inv = gpu_upload(&vec![1.0 / 1.702; n], x.rows(), x.cols()).map_err(DiffusionError::model)?;
     gpu_mul(&silu, &inv).map_err(DiffusionError::model)
-}
-
-fn dump_tap_f32(name: &str, values: &[f32]) {
-    let Some(dir) = tap_dir() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(name);
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    if let Err(err) = std::fs::write(&path, bytes) {
-        eprintln!("sam3 tap {}: {err}", path.display());
-    } else {
-        eprintln!("sam3 tap {} n={}", path.display(), values.len());
-    }
 }
 
 fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
@@ -1368,7 +1339,6 @@ impl Sam3Model {
         let t0 = std::time::Instant::now();
         let (tokens_256, fpn) = self.encode_vision(&image.pixels, cancel, &mut progress)?;
         let vision_s = t0.elapsed().as_secs_f64();
-        prof_phase("vision");
         emit_progress(&mut progress, "sam3 detect", 0.55)?;
         let mut union = vec![0.0f32; image.src_width * image.src_height];
         let mut boxes = Vec::new();
@@ -1393,16 +1363,13 @@ impl Sam3Model {
             let t3 = std::time::Instant::now();
             let memory = self.fuse(&tokens_256, &text)?;
             let fuse_s = t3.elapsed().as_secs_f64();
-            prof_phase("fuse");
             let t4 = std::time::Instant::now();
             let (queries, presence, pred_boxes) = self.decode(&memory, &self.det_pos, &text)?;
             let dec_s = t4.elapsed().as_secs_f64();
-            prof_phase("decode");
             let t5 = std::time::Instant::now();
             let (phrase_scores, phrase_masks) =
                 self.heads(&queries, &presence, &text, &memory, &fpn, phrase.max_instances)?;
             let heads_s = t5.elapsed().as_secs_f64();
-            prof_phase("heads");
             let detect_s = vision_s + text_s + geo_s + fuse_s + dec_s + heads_s;
             eprintln!(
                 "sam3 phase vision={vision_s:.3} text={text_s:.3} geo={geo_s:.3} fuse={fuse_s:.3} decode={dec_s:.3} heads={heads_s:.3} detect_only={detect_s:.3}"
@@ -1438,7 +1405,6 @@ impl Sam3Model {
                 phrases.push(phrase.text.clone());
             }
             eprintln!("sam3 refine={:.3}", t6.elapsed().as_secs_f64());
-            prof_phase("refine");
         }
         emit_progress(&mut progress, "sam3 done", 1.0)?;
         Sam3Mask::with_raw(
@@ -1541,18 +1507,6 @@ impl Sam3Model {
     ) -> Result<(GpuTensor, [Planar; 3])> {
         let planar = self.encode_trunk(image, cancel, progress, true)?;
         let [s8, s16, s32] = self.detector_fpn(&planar)?;
-        if tap_dir().is_some() {
-            let trunk = gpu_download(&planar.tensor).map_err(DiffusionError::model)?;
-            dump_tap_f32("native_trunk.f32", &trunk);
-            for (name, level) in [
-                ("native_fpn0.f32", &s8),
-                ("native_fpn1.f32", &s16),
-                ("native_fpn2.f32", &s32),
-            ] {
-                let data = gpu_download(&level.tensor).map_err(DiffusionError::model)?;
-                dump_tap_f32(name, &data);
-            }
-        }
         let tokens_256 = planar_to_tokens(&s32)?;
         Ok((tokens_256, [s8, s16, s32]))
     }
@@ -1560,17 +1514,13 @@ impl Sam3Model {
     /// Warm-path CUDA graph replay for trunk + detector FPN (the DA3/flux
     /// pattern): persistent input tensor, two eager runs to settle the
     /// weight caches and activation pool, then one captured graph per model
-    /// generation. Returns Ok(None) when the eager path must run (taps,
-    /// first runs, capture failure).
+    /// generation. Returns Ok(None) for first runs or capture failure.
     fn vision_graph_forward(
         &self,
         pixels: &[f32],
         cancel: Option<Sam3Cancel<'_>>,
         progress: &mut Option<ProgressHook>,
     ) -> Result<Option<(GpuTensor, [Planar; 3])>> {
-        if tap_dir().is_some() {
-            return Ok(None);
-        }
         struct VisionGraphState {
             model: usize,
             image: GpuTensor,
@@ -1641,9 +1591,6 @@ impl Sam3Model {
     /// FPN. The input arrives as a device tensor (crop resize output), so
     /// replay feeds the persistent input with a device-to-device copy.
     fn interactive_graph_forward(&self, crop: &GpuTensor) -> Result<Option<[Planar; 3]>> {
-        if tap_dir().is_some() {
-            return Ok(None);
-        }
         struct InteractiveGraphState {
             model: usize,
             image: GpuTensor,
@@ -1816,15 +1763,7 @@ impl Sam3Model {
         }
         let hidden = gpu_layer_norm_mod(&hidden, &self.text_ln, 0, SAM3_TEXT_DIM, SAM3_LN_EPS)
             .map_err(DiffusionError::model)?;
-        if tap_dir().is_some() {
-            let text = gpu_download(&hidden).map_err(DiffusionError::model)?;
-            dump_tap_f32("native_text_1024.f32", &text);
-        }
         let resized = self.text_resize.forward(&hidden)?;
-        if tap_dir().is_some() {
-            let text = gpu_download(&resized).map_err(DiffusionError::model)?;
-            dump_tap_f32("native_text.f32", &text);
-        }
         Ok(resized)
     }
 
@@ -2075,9 +2014,6 @@ impl Sam3Model {
                 .map_err(DiffusionError::model)?;
             gpu_download(&self.presence_h2.forward(&presence)?).map_err(DiffusionError::model)?
         };
-        if tap_dir().is_some() {
-            dump_tap_f32("native_presence.f32", &_presence);
-        }
 
         let prompt = gpu_birefnet_relu(&self.prompt_mlp0.forward(text)?)
             .map_err(DiffusionError::model)?;
@@ -2114,9 +2050,6 @@ impl Sam3Model {
                 dot += hs[row + c] * pp[c];
             }
             scores.push((dot * scale).clamp(-12.0, 12.0));
-        }
-        if tap_dir().is_some() {
-            dump_tap_f32("native_scores.f32", &scores);
         }
 
         let mut fpn_levels = [
@@ -2173,9 +2106,6 @@ impl Sam3Model {
             let mut mask = vec![0.0f32; spatial];
             for pix in 0..spatial {
                 mask[pix] = mask_host[pix * kept.len() + i];
-            }
-            if tap_dir().is_some() && masks.is_empty() {
-                dump_tap_f32("native_mask288_best.f32", &mask);
             }
             masks.insert(q, mask);
         }

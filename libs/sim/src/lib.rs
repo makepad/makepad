@@ -22,6 +22,7 @@ pub mod heading;
 pub mod hud;
 pub mod landform;
 pub mod level_solid;
+pub mod meshfloor;
 pub mod nav;
 pub mod particles;
 pub mod player;
