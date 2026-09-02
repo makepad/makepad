@@ -10,6 +10,7 @@ const LEAF_CACHE_CAPACITY: usize = 32;
 const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
 const FILE_CACHE_CAPACITY: usize = 8;
 const MAX_ARCHIVE_WAITERS: usize = 64;
+const MAX_ARCHIVE_IN_FLIGHT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_COALESCE_MAX_GAP: u64 = 64 * 1024;
@@ -32,7 +33,7 @@ pub fn next_archive_task_token() -> ReadToken {
 #[derive(Debug)]
 pub struct ReadCompletion {
     pub token: ReadToken,
-    pub result: Result<Vec<u8>, String>,
+    pub result: Result<Arc<[u8]>, String>,
 }
 
 pub trait ByteSource {
@@ -55,14 +56,26 @@ struct ShardFileCache {
     lru: VecDeque<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileReadState {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+}
+
 /// Local `.mkmap` reads performed by Makepad workers, never by the UI thread.
 pub struct FileByteSource {
     dir: PathBuf,
     completions: ToUIReceiver<ReadCompletion>,
     workers: ArchiveWorkerPool,
     shard_files: Arc<Mutex<ShardFileCache>>,
-    cancelled: Arc<Mutex<HashSet<ReadToken>>>,
-    active: Arc<Mutex<HashSet<ReadToken>>>,
+    token_states: Arc<Mutex<HashMap<ReadToken, FileReadState>>>,
+    #[cfg(test)]
+    completion_barriers: Option<(
+        Arc<std::sync::Barrier>,
+        Arc<std::sync::Barrier>,
+    )>,
 }
 
 impl FileByteSource {
@@ -78,9 +91,51 @@ impl FileByteSource {
             completions: Default::default(),
             workers,
             shard_files: Default::default(),
-            cancelled: Default::default(),
-            active: Default::default(),
+            token_states: Default::default(),
+            #[cfg(test)]
+            completion_barriers: None,
         }
+    }
+}
+
+fn begin_file_read(
+    states: &Mutex<HashMap<ReadToken, FileReadState>>,
+    token: ReadToken,
+) -> bool {
+    let Ok(mut states) = states.lock() else {
+        return false;
+    };
+    match states.get_mut(&token) {
+        Some(state @ FileReadState::Queued) => {
+            *state = FileReadState::Running;
+            true
+        }
+        Some(FileReadState::Cancelled) => {
+            states.remove(&token);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn complete_file_read(
+    states: &Mutex<HashMap<ReadToken, FileReadState>>,
+    token: ReadToken,
+) -> bool {
+    let Ok(mut states) = states.lock() else {
+        return false;
+    };
+    match states.get_mut(&token) {
+        Some(state @ FileReadState::Running) => {
+            *state = FileReadState::Completed;
+            states.remove(&token);
+            true
+        }
+        Some(FileReadState::Cancelled) => {
+            states.remove(&token);
+            false
+        }
+        _ => false,
     }
 }
 
@@ -88,28 +143,30 @@ impl ByteSource for FileByteSource {
     fn request_root(&mut self, _cx: &mut Cx, token: ReadToken) {
         let path = self.dir.join("root.mkidx");
         let sender = self.completions.sender();
-        let cancelled = self.cancelled.clone();
-        let active = self.active.clone();
-        let _ = self.active.lock().map(|mut set| set.insert(token));
+        let token_states = self.token_states.clone();
+        let _ = self
+            .token_states
+            .lock()
+            .map(|mut states| states.insert(token, FileReadState::Queued));
+        #[cfg(test)]
+        let completion_barriers = self.completion_barriers.clone();
         self.workers.execute_rev(token, move |_| {
-            if cancelled.lock().is_ok_and(|set| set.contains(&token)) {
-                let _ = cancelled.lock().map(|mut set| set.remove(&token));
-                let _ = active.lock().map(|mut set| set.remove(&token));
+            if !begin_file_read(&token_states, token) {
                 return;
             }
             let result = std::fs::read(&path)
                 .map_err(|err| format!("read {}: {err}", path.display()))
                 .and_then(|bytes| {
                     (bytes.len() <= MAX_ROOT_BYTES)
-                        .then_some(bytes)
+                        .then(|| Arc::from(bytes))
                         .ok_or_else(|| "mkmap root exceeds byte limit".to_string())
                 });
-            let was_cancelled = cancelled
-                .lock()
-                .map(|mut set| set.remove(&token))
-                .unwrap_or(true);
-            let _ = active.lock().map(|mut set| set.remove(&token));
-            if !was_cancelled {
+            #[cfg(test)]
+            if let Some((reached, release)) = completion_barriers {
+                reached.wait();
+                release.wait();
+            }
+            if complete_file_read(&token_states, token) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
         });
@@ -133,39 +190,47 @@ impl ByteSource for FileByteSource {
         let path = self.dir.join(format!("tiles-{shard:03}.mkshard"));
         let sender = self.completions.sender();
         let shard_files = self.shard_files.clone();
-        let cancelled = self.cancelled.clone();
-        let active = self.active.clone();
-        let _ = self.active.lock().map(|mut set| set.insert(token));
+        let token_states = self.token_states.clone();
+        let _ = self
+            .token_states
+            .lock()
+            .map(|mut states| states.insert(token, FileReadState::Queued));
+        #[cfg(test)]
+        let completion_barriers = self.completion_barriers.clone();
         self.workers.execute_rev(token, move |_| {
-            if cancelled.lock().is_ok_and(|set| set.contains(&token)) {
-                let _ = cancelled.lock().map(|mut set| set.remove(&token));
-                let _ = active.lock().map(|mut set| set.remove(&token));
+            if !begin_file_read(&token_states, token) {
                 return;
             }
             let result = read_file_range(&path, shard, offset, len, &shard_files);
-            let was_cancelled = cancelled
-                .lock()
-                .map(|mut set| set.remove(&token))
-                .unwrap_or(true);
-            let _ = active.lock().map(|mut set| set.remove(&token));
-            if !was_cancelled {
+            #[cfg(test)]
+            if let Some((reached, release)) = completion_barriers {
+                reached.wait();
+                release.wait();
+            }
+            if complete_file_read(&token_states, token) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
         });
     }
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
-        let is_active = self
-            .active
-            .lock()
-            .is_ok_and(|active| active.contains(&token));
-        if is_active {
-            let _ = self.cancelled.lock().map(|mut set| set.insert(token));
-        }
+        let _ = self.token_states.lock().map(|mut states| {
+            if let Some(state @ (FileReadState::Queued | FileReadState::Running)) =
+                states.get_mut(&token)
+            {
+                *state = FileReadState::Cancelled;
+            }
+        });
         let dropped = self.workers.retain_queued(|queued| *queued != token);
         if !dropped.is_empty() {
-            let _ = self.cancelled.lock().map(|mut set| set.remove(&token));
-            let _ = self.active.lock().map(|mut set| set.remove(&token));
+            let _ = self.token_states.lock().map(|mut states| {
+                if matches!(
+                    states.get(&token),
+                    Some(FileReadState::Queued | FileReadState::Cancelled)
+                ) {
+                    states.remove(&token);
+                }
+            });
         }
     }
 
@@ -184,7 +249,7 @@ fn read_file_range(
     offset: u64,
     len: u64,
     shard_files: &Mutex<ShardFileCache>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Arc<[u8]>, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let len = usize::try_from(len).map_err(|_| "mkmap range is too large".to_string())?;
@@ -211,7 +276,7 @@ fn read_file_range(
     let mut bytes = vec![0; len];
     file.read_exact(&mut bytes)
         .map_err(|err| format!("read {}: {err}", path.display()))?;
-    Ok(bytes)
+    Ok(Arc::from(bytes))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -296,7 +361,7 @@ impl HttpRangeByteSource {
         &mut self,
         cx: &mut Cx,
         mut pending: PendingHttpRead,
-        result: Result<Vec<u8>, String>,
+        result: Result<Arc<[u8]>, String>,
     ) -> Option<ReadCompletion> {
         match result {
             Ok(bytes) => Some(ReadCompletion {
@@ -414,7 +479,10 @@ impl ByteSource for HttpRangeByteSource {
     }
 }
 
-fn validate_http_response(kind: &HttpReadKind, response: &HttpResponse) -> Result<Vec<u8>, String> {
+fn validate_http_response(
+    kind: &HttpReadKind,
+    response: &HttpResponse,
+) -> Result<Arc<[u8]>, String> {
     match *kind {
         HttpReadKind::Root => {
             if response.status_code != 200 {
@@ -423,7 +491,7 @@ fn validate_http_response(kind: &HttpReadKind, response: &HttpResponse) -> Resul
                     response.status_code
                 ));
             }
-            let body_len = response.body.as_ref().map_or(0, Vec::len);
+            let body_len = response.body.as_ref().map_or(0, |body| body.len());
             if !(112..=MAX_ROOT_BYTES).contains(&body_len) {
                 return Err(format!(
                     "mkmap root response length is invalid: {body_len}"
@@ -464,7 +532,7 @@ fn validate_http_response(kind: &HttpReadKind, response: &HttpResponse) -> Resul
                     "mkmap Content-Range mismatch: expected bytes {offset}-{end}/TOTAL, got {content_range}"
                 ));
             }
-            let body_len = response.body.as_ref().map_or(0, Vec::len);
+            let body_len = response.body.as_ref().map_or(0, |body| body.len());
             if body_len as u64 != len {
                 return Err(format!(
                     "mkmap shard response length mismatch: expected {len}, got {}",
@@ -473,12 +541,16 @@ fn validate_http_response(kind: &HttpReadKind, response: &HttpResponse) -> Resul
             }
         }
     }
-    Ok(response.body.clone().unwrap_or_default())
+    Ok(response
+        .body
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::from([])))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TileBytesResult {
-    Bytes(Vec<u8>),
+    Bytes(Arc<[u8]>),
     Missing,
     Error(String),
 }
@@ -512,6 +584,7 @@ enum PendingRead {
         shard_count: u32,
         start_tile_id: u64,
         end_tile_id: u64,
+        dir_len: u64,
     },
     Blob { generation: u64, blob: BlobRef },
 }
@@ -522,6 +595,14 @@ impl PendingRead {
             Self::Root { generation }
             | Self::Leaf { generation, .. }
             | Self::Blob { generation, .. } => generation,
+        }
+    }
+
+    fn byte_len(self) -> u64 {
+        match self {
+            Self::Root { .. } => 0,
+            Self::Leaf { dir_len, .. } => dir_len,
+            Self::Blob { blob, .. } => blob.len,
         }
     }
 }
@@ -535,7 +616,7 @@ struct BlobInFlight {
 enum ProcessedRead {
     Root(Result<MkmapRoot, String>),
     Leaf(Result<MkmapLeaf, String>),
-    Blob(Result<Vec<u8>, String>),
+    Blob(Result<Arc<[u8]>, String>),
 }
 
 struct ProcessedCompletion {
@@ -567,6 +648,7 @@ pub struct TileArchive<S: ByteSource> {
     pending_reads: HashMap<ReadToken, PendingRead>,
     ready: VecDeque<TileBytes>,
     generation: Option<u64>,
+    in_flight_bytes: u64,
 }
 
 impl<S: ByteSource> TileArchive<S> {
@@ -587,6 +669,7 @@ impl<S: ByteSource> TileArchive<S> {
             pending_reads: HashMap::new(),
             ready: VecDeque::new(),
             generation: None,
+            in_flight_bytes: 0,
         }
     }
 
@@ -652,7 +735,7 @@ impl<S: ByteSource> TileArchive<S> {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     self.processing.remove(&completion.token);
-                    self.pending_reads.remove(&completion.token);
+                    self.remove_pending_read(completion.token);
                     self.complete_error(pending, error);
                     self.advance_waiters(cx);
                     continue;
@@ -677,7 +760,8 @@ impl<S: ByteSource> TileArchive<S> {
                     )),
                     PendingRead::Blob { .. } => ProcessedRead::Blob(
                         root.ok_or_else(|| "mkmap root disappeared".to_string())
-                            .and_then(|root| root.decode_blob(&bytes)),
+                            .and_then(|root| root.decode_blob(&bytes))
+                            .map(Arc::from),
                     ),
                 };
                 let _ = sender.send(ProcessedCompletion { token, result });
@@ -685,7 +769,7 @@ impl<S: ByteSource> TileArchive<S> {
         }
         while let Ok(completion) = self.processed.try_recv() {
             self.processing.remove(&completion.token);
-            let Some(pending) = self.pending_reads.remove(&completion.token) else {
+            let Some(pending) = self.remove_pending_read(completion.token) else {
                 continue;
             };
             if self.generation != Some(pending.generation()) {
@@ -742,6 +826,7 @@ impl<S: ByteSource> TileArchive<S> {
         self.pending_reads.clear();
         self.processing.clear();
         self.ready.clear();
+        self.in_flight_bytes = 0;
         self.generation = Some(generation);
     }
 
@@ -758,6 +843,25 @@ impl<S: ByteSource> TileArchive<S> {
         self.pending_reads
             .insert(token, PendingRead::Root { generation });
         self.source.request_root(cx, token);
+    }
+
+    fn can_start_range(&self, len: u64) -> bool {
+        len <= MAX_ARCHIVE_IN_FLIGHT_BYTES
+            && self
+                .in_flight_bytes
+                .checked_add(len)
+                .is_some_and(|total| total <= MAX_ARCHIVE_IN_FLIGHT_BYTES)
+    }
+
+    fn insert_pending_read(&mut self, token: ReadToken, pending: PendingRead, byte_len: u64) {
+        self.in_flight_bytes = self.in_flight_bytes.saturating_add(byte_len);
+        self.pending_reads.insert(token, pending);
+    }
+
+    fn remove_pending_read(&mut self, token: ReadToken) -> Option<PendingRead> {
+        let pending = self.pending_reads.remove(&token)?;
+        self.in_flight_bytes = self.in_flight_bytes.saturating_sub(pending.byte_len());
+        Some(pending)
     }
 
     fn advance_waiters(&mut self, cx: &mut Cx) {
@@ -793,17 +897,19 @@ impl<S: ByteSource> TileArchive<S> {
             };
             match cached {
                 Some(Some(blob)) => {
-                    self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
                     if let Some(in_flight) = self.blob_in_flight.get_mut(&blob) {
+                        self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
                         in_flight.waiters.insert(key);
-                    } else {
+                    } else if self.can_start_range(blob.len) {
+                        self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
                         let token = next_archive_task_token();
-                        self.pending_reads.insert(
+                        self.insert_pending_read(
                             token,
                             PendingRead::Blob {
                                 generation: waiter.generation,
                                 blob,
                             },
+                            blob.len,
                         );
                         self.blob_in_flight.insert(
                             blob,
@@ -824,11 +930,13 @@ impl<S: ByteSource> TileArchive<S> {
                 }
                 Some(None) => self.finish(key, waiter.generation, TileBytesResult::Missing),
                 None => {
-                    self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
-                    if !self.leaf_in_flight.contains_key(&record.index) {
+                    if self.leaf_in_flight.contains_key(&record.index) {
+                        self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
+                    } else if self.can_start_range(record.dir_len) {
+                        self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
                         let token = next_archive_task_token();
                         self.leaf_in_flight.insert(record.index, token);
-                        self.pending_reads.insert(
+                        self.insert_pending_read(
                             token,
                             PendingRead::Leaf {
                                 generation: waiter.generation,
@@ -836,7 +944,9 @@ impl<S: ByteSource> TileArchive<S> {
                                 shard_count: self.root.as_ref().unwrap().shard_count(),
                                 start_tile_id: record.start_tile_id,
                                 end_tile_id: record.end_tile_id,
+                                dir_len: record.dir_len,
                             },
+                            record.dir_len,
                         );
                         self.source.request_range(
                             cx,
@@ -909,7 +1019,7 @@ impl<S: ByteSource> TileArchive<S> {
         &mut self,
         generation: u64,
         blob: BlobRef,
-        result: Result<Vec<u8>, String>,
+        result: Result<Arc<[u8]>, String>,
     ) {
         let Some(in_flight) = self.blob_in_flight.remove(&blob) else {
             return;
@@ -972,7 +1082,7 @@ impl<S: ByteSource> TileArchive<S> {
     fn cancel_token(&mut self, cx: &mut Cx, token: ReadToken) {
         self.source.cancel(cx, token);
         self.workers.retain_queued(|queued| *queued != token);
-        self.pending_reads.remove(&token);
+        self.remove_pending_read(token);
         self.processing.remove(&token);
     }
 
@@ -1115,6 +1225,22 @@ impl MapTileArchive {
             Self::Http(archive) => archive.zoom_range(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn source_request_count(&self) -> usize {
+        match self {
+            Self::File(_) => 0,
+            Self::Http(archive) => archive.source.requests.len(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        match self {
+            Self::File(archive) => archive.waiters.len(),
+            Self::Http(archive) => archive.waiters.len(),
+        }
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1194,6 +1320,14 @@ mod tests {
     }
 
     fn tiny_parts(keys: [TileKey; 2], shared_blob: bool) -> (Vec<u8>, Vec<u8>) {
+        tiny_parts_with_blob_len(keys, shared_blob, 3)
+    }
+
+    fn tiny_parts_with_blob_len(
+        keys: [TileKey; 2],
+        shared_blob: bool,
+        blob_len: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let ids = keys.map(|key| mkmap_tile_id(key.z as u8, key.x as u32, key.y as u32));
         assert!(ids[0] < ids[1]);
         let mut leaf_raw = Vec::new();
@@ -1201,11 +1335,11 @@ mod tests {
         write_varint(ids[0], &mut leaf_raw);
         write_varint(0, &mut leaf_raw);
         write_varint(200, &mut leaf_raw);
-        write_varint(3, &mut leaf_raw);
+        write_varint(blob_len, &mut leaf_raw);
         write_varint(ids[1] - ids[0], &mut leaf_raw);
         write_varint(0, &mut leaf_raw);
         write_varint(if shared_blob { 200 } else { 300 }, &mut leaf_raw);
-        write_varint(3, &mut leaf_raw);
+        write_varint(blob_len, &mut leaf_raw);
         let leaf = brotli(&leaf_raw);
 
         let metadata = [("compression", "gzip"), ("minzoom", "1"), ("maxzoom", "1")];
@@ -1258,7 +1392,7 @@ mod tests {
                     BTreeMap::from([("Content-Range".to_string(), vec![range.to_string()])])
                 })
                 .unwrap_or_default(),
-            body: Some(body.to_vec()),
+            body: Some(Arc::from(body)),
         }
     }
 
@@ -1318,7 +1452,10 @@ mod tests {
             response(206, Some("bytes 11-14/100"), b"abcd"),
             response(206, Some("bytes 10-13/100"), b"abc"),
         ] {
-            assert_eq!(retry_http_range(bad, good.clone()).result.unwrap(), b"abcd");
+            assert_eq!(
+                retry_http_range(bad, good.clone()).result.unwrap().as_ref(),
+                b"abcd"
+            );
         }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1448,7 +1585,7 @@ mod tests {
         };
         archive.source.completions.push_back(ReadCompletion {
             token: root_token,
-            result: Ok(root),
+            result: Ok(root.into()),
         });
         let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 2);
         assert_eq!(archive.source.requests.len(), 2);
@@ -1464,7 +1601,7 @@ mod tests {
         assert_eq!((shard, offset, len), (0, 100, leaf.len() as u64));
         archive.source.completions.push_back(ReadCompletion {
             token: leaf_token,
-            result: Ok(leaf),
+            result: Ok(leaf.into()),
         });
         let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 3);
         assert_eq!(archive.source.requests.len(), 3, "shared blob needs one range");
@@ -1474,12 +1611,60 @@ mod tests {
         assert_eq!(offset, 200);
         archive.source.completions.push_back(ReadCompletion {
             token,
-            result: Ok(b"one".to_vec()),
+            result: Ok(Arc::from(&b"one"[..])),
         });
         let done = poll_until(&mut archive, &mut cx, |archive| archive.waiters.is_empty());
         assert_eq!(done.len(), 2);
         assert!(done.iter().any(|tile| tile.key == keys[0]));
         assert!(done.iter().any(|tile| tile.key == keys[1]));
+        let blobs = done
+            .iter()
+            .map(|tile| match &tile.result {
+                TileBytesResult::Bytes(bytes) => bytes,
+                result => panic!("unexpected tile result: {result:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(blobs[0], blobs[1]));
+    }
+
+    #[test]
+    fn aggregate_in_flight_blob_bytes_are_bounded() {
+        let keys = [
+            TileKey { z: 1, x: 0, y: 0 },
+            TileKey { z: 1, x: 0, y: 1 },
+        ];
+        let blob_len = 40 * 1024 * 1024;
+        let (root, leaf) = tiny_parts_with_blob_len(keys, false, blob_len);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
+        for key in keys {
+            archive.request_tile(&mut cx, key, 1);
+        }
+        let MockRequest::Root(root_token) = archive.source.requests[0] else { unreachable!() };
+        archive.source.completions.push_back(ReadCompletion {
+            token: root_token,
+            result: Ok(root.into()),
+        });
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 2);
+        let MockRequest::Range { token: leaf_token, .. } = archive.source.requests[1] else {
+            unreachable!()
+        };
+        archive.source.completions.push_back(ReadCompletion {
+            token: leaf_token,
+            result: Ok(leaf.into()),
+        });
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 3);
+        let blob_requests = archive.source.requests[2..]
+            .iter()
+            .filter_map(|request| match request {
+                MockRequest::Range { len, .. } if *len == blob_len => Some(*len),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(blob_requests, [blob_len]);
+        assert_eq!(archive.in_flight_bytes, blob_len);
+        assert!(archive.in_flight_bytes <= MAX_ARCHIVE_IN_FLIGHT_BYTES);
     }
 
     #[test]
@@ -1497,7 +1682,7 @@ mod tests {
         let MockRequest::Root(root_token) = archive.source.requests[0] else { unreachable!() };
         archive.source.completions.push_back(ReadCompletion {
             token: root_token,
-            result: Ok(root),
+            result: Ok(root.into()),
         });
         let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 2);
         let MockRequest::Range { token: leaf_token, .. } = archive.source.requests[1] else {
@@ -1505,7 +1690,7 @@ mod tests {
         };
         archive.source.completions.push_back(ReadCompletion {
             token: leaf_token,
-            result: Ok(leaf),
+            result: Ok(leaf.into()),
         });
         let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 3);
         let MockRequest::Range { token: blob_token, .. } = archive.source.requests[2] else {
@@ -1535,7 +1720,7 @@ mod tests {
         assert!(archive.source.cancelled.contains(&stale_token));
         archive.source.completions.push_back(ReadCompletion {
             token: stale_token,
-            result: Ok(root),
+            result: Ok(root.into()),
         });
         assert!(archive.drain(&mut cx, &Event::Startup).is_empty());
         assert_eq!(archive.source.requests.len(), 2);
@@ -1594,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn file_source_is_async_bounded_and_shared_across_generations() {
+    fn file_source_is_async_and_bounded() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let workers = new_archive_worker_pool(&mut cx);
         let token = next_archive_task_token();
@@ -1606,8 +1791,6 @@ mod tests {
         }
 
         let mut first = FileByteSource::new(&dir, workers.clone());
-        let second = FileByteSource::new(&dir, workers.clone());
-        assert!(Arc::ptr_eq(&first.workers, &second.workers));
         first.request_root(&mut cx, token);
         for shard in 0..10_u32 {
             first.request_range(&mut cx, shard, 0, 1, next_archive_task_token());
@@ -1622,6 +1805,38 @@ mod tests {
         }
         assert_eq!(completions.len(), 11);
         assert!(first.shard_files.lock().unwrap().files.len() <= FILE_CACHE_CAPACITY);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_cancel_wins_completion_race_without_leaking_token_state() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let token = next_archive_task_token();
+        let dir = PathBuf::from(format!("target/map-archive-cancel-race-{}", token.0));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tiles-000.mkshard"), b"tile").unwrap();
+
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let mut source = FileByteSource::new(&dir, workers);
+        source.completion_barriers = Some((reached.clone(), release.clone()));
+        source.request_range(&mut cx, 0, 0, 4, token);
+        reached.wait();
+        source.cancel(&mut cx, token);
+        assert_eq!(
+            source.token_states.lock().unwrap().get(&token),
+            Some(&FileReadState::Cancelled)
+        );
+        release.wait();
+        for _ in 0..2_000 {
+            if source.token_states.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(source.poll(&mut cx, &Event::Startup).is_empty());
+        assert!(source.token_states.lock().unwrap().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

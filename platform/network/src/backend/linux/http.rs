@@ -111,7 +111,7 @@ fn run_http_request(
                     metadata_id: request.metadata_id,
                     status_code,
                     headers: Default::default(),
-                    body: Some(std::mem::take(&mut body_prefix)),
+                    body: Some(std::mem::take(&mut body_prefix).into()),
                 },
             });
         }
@@ -136,7 +136,7 @@ fn run_http_request(
                             metadata_id: request.metadata_id,
                             status_code,
                             headers: Default::default(),
-                            body: Some(buf[..n].to_vec()),
+                            body: Some(buf[..n].to_vec().into()),
                         },
                     });
                 }

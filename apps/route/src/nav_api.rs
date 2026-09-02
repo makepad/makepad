@@ -550,7 +550,7 @@ fn parse_response(
                 stamp,
                 minute,
                 hires,
-                png,
+                png: png.to_vec(),
             }),
         PendingRequest::Wind => parse_wind(body_text(response)).map(NavApiEvent::Wind),
     };

@@ -21,12 +21,13 @@
 //! table, which is what lets `mkmap-extract` reverse a weave.
 
 use crate::{Error, Result, TileCodec};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"MKMAPIX1";
+const SHARD_FILE_CACHE_CAPACITY: usize = 8;
 // v2: metadata section is varint KV (was JSON).
 const VERSION: u32 = 2;
 const HEADER_LEN: usize = 112;
@@ -454,6 +455,7 @@ pub struct MkmapReader {
     /// tiles are Hilbert-adjacent, so a handful of leaves covers a session.
     leaf_cache: HashMap<usize, MkmapLeaf>,
     shard_files: HashMap<u32, File>,
+    shard_file_lru: VecDeque<u32>,
 }
 
 impl MkmapReader {
@@ -471,6 +473,7 @@ impl MkmapReader {
             root,
             leaf_cache: HashMap::new(),
             shard_files: HashMap::new(),
+            shard_file_lru: VecDeque::new(),
         })
     }
 
@@ -505,9 +508,16 @@ impl MkmapReader {
     fn read_range(&mut self, shard: u32, offset: u64, len: u64) -> Result<Vec<u8>> {
         if !self.shard_files.contains_key(&shard) {
             let path = self.dir.join(format!("tiles-{shard:03}.mkshard"));
+            while self.shard_files.len() >= SHARD_FILE_CACHE_CAPACITY {
+                if let Some(oldest) = self.shard_file_lru.pop_front() {
+                    self.shard_files.remove(&oldest);
+                }
+            }
             self.shard_files
                 .insert(shard, File::open(path).map_err(Error::Io)?);
         }
+        self.shard_file_lru.retain(|cached| *cached != shard);
+        self.shard_file_lru.push_back(shard);
         let file = self.shard_files.get_mut(&shard).unwrap();
         file.seek(SeekFrom::Start(offset)).map_err(Error::Io)?;
         let mut bytes = vec![0_u8; len as usize];
@@ -672,6 +682,20 @@ impl TileArchiveReader {
         }
     }
 
+    /// Validated request zoom range. Mkmap uses its checked binary header;
+    /// legacy MBTiles metadata is accepted only when ordered and in bounds.
+    pub fn validated_zoom_range(&mut self) -> Option<(u32, u32)> {
+        match self {
+            TileArchiveReader::Mkmap(reader) => Some(reader.zoom_range()),
+            TileArchiveReader::Mbtiles(reader) => {
+                let metadata = reader.get_metadata().ok()?;
+                let min = metadata.get("minzoom")?.trim().parse().ok()?;
+                let max = metadata.get("maxzoom")?.trim().parse().ok()?;
+                (min <= max && max <= 30).then_some((min, max))
+            }
+        }
+    }
+
     pub fn get_tile_decoded(
         &mut self,
         zoom: i64,
@@ -743,6 +767,13 @@ mod tests {
     }
 
     fn tiny_archive_parts() -> (Vec<u8>, Vec<u8>, u64, u64) {
+        tiny_archive_parts_with_metadata("1", "1")
+    }
+
+    fn tiny_archive_parts_with_metadata(
+        metadata_min: &str,
+        metadata_max: &str,
+    ) -> (Vec<u8>, Vec<u8>, u64, u64) {
         let first = mkmap_tile_id(1, 0, 0);
         let second = mkmap_tile_id(1, 0, 1);
         let mut leaf_raw = Vec::new();
@@ -757,7 +788,11 @@ mod tests {
         write_varint(5, &mut leaf_raw);
         let leaf = brotli(&leaf_raw);
 
-        let metadata = [("compression", "gzip"), ("minzoom", "1"), ("maxzoom", "1")];
+        let metadata = [
+            ("compression", "gzip"),
+            ("minzoom", metadata_min),
+            ("maxzoom", metadata_max),
+        ];
         let mut metadata_raw = Vec::new();
         write_varint(metadata.len() as u64, &mut metadata_raw);
         for (key, value) in metadata {
@@ -954,6 +989,68 @@ mod tests {
             write_varint(1, &mut duplicate);
         }
         assert!(MkmapLeaf::parse_for_root(&brotli(&duplicate), 1, first, second).is_err());
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::fs::create_dir_all("target").unwrap();
+        PathBuf::from(format!("target/{name}-{nonce}"))
+    }
+
+    #[test]
+    fn validated_zoom_range_rejects_malformed_mbtiles_metadata() {
+        let path = temp_path("mkmap-invalid-zoom").with_extension("mbtiles");
+        let mut writer = crate::MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", "20");
+        writer.set_metadata("maxzoom", "3");
+        writer.finish().unwrap();
+        let mut reader = TileArchiveReader::open(&path).unwrap();
+        assert_eq!(reader.validated_zoom_range(), None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mkmap_zoom_range_uses_validated_header_not_disagreeing_metadata() {
+        let dir = temp_path("mkmap-header-zoom");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (root, _, _, _) = tiny_archive_parts_with_metadata("7", "9");
+        std::fs::write(dir.join("root.mkidx"), root).unwrap();
+        let mut reader = TileArchiveReader::open(&dir).unwrap();
+        assert_eq!(reader.validated_zoom_range(), Some((1, 1)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn synchronous_shard_file_cache_is_lru_bounded_and_reopens() {
+        let dir = temp_path("mkmap-shard-cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (root, _, _, _) = tiny_archive_parts();
+        std::fs::write(dir.join("root.mkidx"), root).unwrap();
+        for shard in 0..=SHARD_FILE_CACHE_CAPACITY as u32 {
+            std::fs::write(dir.join(format!("tiles-{shard:03}.mkshard")), [shard as u8])
+                .unwrap();
+        }
+        let mut reader = MkmapReader::open(&dir).unwrap();
+        for shard in 0..SHARD_FILE_CACHE_CAPACITY as u32 {
+            assert_eq!(&*reader.read_range(shard, 0, 1).unwrap(), [shard as u8]);
+        }
+        assert_eq!(&*reader.read_range(0, 0, 1).unwrap(), [0]);
+        assert_eq!(
+            &*reader
+                .read_range(SHARD_FILE_CACHE_CAPACITY as u32, 0, 1)
+                .unwrap(),
+            [SHARD_FILE_CACHE_CAPACITY as u8]
+        );
+        assert_eq!(reader.shard_files.len(), SHARD_FILE_CACHE_CAPACITY);
+        assert!(reader.shard_files.contains_key(&0));
+        assert!(!reader.shard_files.contains_key(&1));
+        assert_eq!(&*reader.read_range(1, 0, 1).unwrap(), [1]);
+        assert!(reader.shard_files.contains_key(&1));
+        assert!(!reader.shard_files.contains_key(&2));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A container walk recovers each tile's address from its id alone, so

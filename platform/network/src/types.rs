@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::fmt;
 use std::str;
 
@@ -197,7 +198,7 @@ pub struct HttpResponse {
     #[cfg_attr(feature = "script", live)]
     pub headers: BTreeMap<String, Vec<String>>,
     #[cfg_attr(feature = "script", live)]
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Arc<[u8]>>,
 }
 
 impl HttpResponse {
@@ -211,7 +212,7 @@ impl HttpResponse {
             metadata_id,
             status_code,
             headers,
-            body,
+            body: body.map(Arc::from),
         }
     }
 
@@ -225,7 +226,7 @@ impl HttpResponse {
             metadata_id,
             status_code,
             headers: parse_headers(headers),
-            body,
+            body: body.map(Arc::from),
         }
     }
 
@@ -241,17 +242,17 @@ impl HttpResponse {
     pub fn body_string(&self) -> Option<String> {
         self.body
             .as_ref()
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .and_then(|bytes| str::from_utf8(bytes).ok().map(str::to_string))
     }
 
-    pub fn get_body(&self) -> Option<&Vec<u8>> {
-        self.body.as_ref()
+    pub fn get_body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
     }
 
     pub fn get_string_body(&self) -> Option<String> {
         self.body
             .as_ref()
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .and_then(|bytes| str::from_utf8(bytes).ok().map(str::to_string))
     }
 
     pub fn get_json_body<T: DeJson>(&self) -> Result<T, DeJsonErr> {
