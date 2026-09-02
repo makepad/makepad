@@ -3,7 +3,7 @@ use crate::{
     cx_api::{CxOsApi, CxOsOp},
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
     event::Event,
-    event::{WindowGeom, WindowGeomChangeEvent},
+    event::{WindowGeom},
     makepad_math::*,
     makepad_micro_serde::*,
     os::{
@@ -261,7 +261,7 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
                 let tweak_ray = crate::event::TweakRayEvent {
-                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -295,19 +295,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {
