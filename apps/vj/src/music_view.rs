@@ -3375,6 +3375,7 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         auto_route := MusicButton{width: 110 height: 22 text: "PICK SHAPE"}
+                        auto_suggest := MusicButton{width: 110 height: 22 text: "ASK FIRST"}
                     }
                     // The arc: how long the night is and what shape it
                     // takes. Read only while CHOOSE NEXT is doing the
@@ -3399,6 +3400,7 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 0.5}
                         auto_why := MusicLabel{width: Fill text: ""}
+                        auto_go := MusicButton{width: 42 height: 22 text: "GO"}
                         auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
                     }
                     View{

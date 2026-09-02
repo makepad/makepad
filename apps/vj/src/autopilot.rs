@@ -146,6 +146,9 @@ struct Plan {
     deadline_src: f64,
     /// Cue + sync issued.
     prepped: bool,
+    /// The moment arrived and the operator was asked. Latched so the
+    /// status does not flicker between "soon" and "ready" across ticks.
+    offered: bool,
     /// The deadline passed: the track plays out and the hand-back rides on
     /// its end instead of a fade.
     abandoned: bool,
@@ -220,6 +223,11 @@ pub struct AutoPilot {
     /// Choose the SHAPE of the transition per pair, instead of always
     /// running the long blend.
     pub pick_route: bool,
+    /// Offer the transition and wait to be told, instead of running it.
+    pub suggest_only: bool,
+    /// A suggestion has been accepted and the next tick may fire it. Not a
+    /// setting: it is consumed by the fire it authorises.
+    accepted: bool,
     /// Bars per load generation, same lifecycle as the sung maps.
     bars: Vec<(DeckGen, Vec<crate::mix_facts::BarRow>)>,
     /// Sung intervals per load generation, same lifecycle as `shapes`.
@@ -255,6 +263,8 @@ impl AutoPilot {
             phrase_snap: true,
             pick_exit: false,
             pick_route: false,
+            suggest_only: false,
+            accepted: false,
             bars: Vec::new(),
             vocals: Vec::new(),
             changes: Vec::new(),
@@ -367,6 +377,31 @@ impl AutoPilot {
     pub fn set_pick_route(&mut self, on: bool) {
         self.pick_route = on;
         self.replan();
+    }
+
+    pub fn set_suggest_only(&mut self, on: bool) {
+        self.suggest_only = on;
+        self.accepted = false;
+        self.replan();
+    }
+
+    /// The operator said yes. The next tick fires the transition through
+    /// the ordinary path, with every clamp and every guard intact.
+    ///
+    /// Deliberately NOT routed through `hands_on`, which every other
+    /// operator touch is: that drops the plan, and accepting a suggestion
+    /// by cancelling it would be a poor joke.
+    pub fn accept(&mut self) {
+        if self.on && matches!(self.state, State::Planned(_)) {
+            self.accepted = true;
+        }
+    }
+
+    /// Whether a transition is sitting waiting to be told to go.
+    pub fn awaiting(&self) -> bool {
+        self.suggest_only
+            && !self.accepted
+            && matches!(&self.state, State::Planned(plan) if plan.offered)
     }
 
     /// Per-bar rows for a load, off the published analysis. Late arrivals
@@ -659,6 +694,7 @@ impl AutoPilot {
             fire_at_src,
             deadline_src,
             prepped: false,
+            offered: false,
             abandoned: false,
             duck_offset_src,
             route: route.route,
@@ -851,6 +887,17 @@ impl AutoPilot {
             self.state = State::Planned(plan);
             return cmds;
         }
+        // Asked to suggest rather than act: hold here and wait to be told.
+        // Nothing is latched — an offer nobody answers has to leave the
+        // record able to transition later, and the deck running out is
+        // still handled by the ended-deck arm as it always was.
+        if self.suggest_only && !self.accepted {
+            plan.offered = true;
+            self.status = format!("{} ready — go?", letter(plan.incoming));
+            self.state = State::Planned(plan);
+            return cmds;
+        }
+        self.accepted = false;
         // Wall fade length from the rates as they stand now. When prep
         // happened this same tick the observed IN rate predates the sync;
         // the error is bounded by sync's ±25% envelope and only stretches
@@ -1122,6 +1169,19 @@ mod tests {
             }
             (Vec::new(), max)
         }
+    }
+
+    /// Tick until the pilot is waiting to be told, or give up. `run_until_cmds`
+    /// is no good here: a suggestion emits NOTHING, so waiting for a command
+    /// runs the record off its end and the offer is never seen.
+    fn run_until_offered(w: &mut World, pilot: &mut AutoPilot, max: usize) -> bool {
+        for _ in 0..max {
+            w.tick(pilot);
+            if pilot.awaiting() {
+                return true;
+            }
+        }
+        false
     }
 
     fn shape(intro: f64, outro: f64) -> TrackShape {
@@ -1594,6 +1654,84 @@ mod tests {
             (fired_at - 280.0).abs() <= 0.5,
             "the envelope's outro is 280 s, fired at {fired_at}"
         );
+    }
+
+    #[test]
+    fn a_suggested_transition_waits_to_be_told_and_then_runs_normally() {
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        pilot.suggest_only = true;
+        w.obs.decks[0].position_secs = 270.0;
+
+        // Prep still happens: the incoming record is cued and ready, which
+        // is the whole point of offering rather than asking cold.
+        let (prep, _) = w.run_until_cmds(&mut pilot, 400);
+        assert!(matches!(prep[0], AutoCmd::CueIn { .. }), "{prep:?}");
+
+        // Then it holds at the moment, saying so, and does NOT fire.
+        assert!(run_until_offered(&mut w, &mut pilot, 200), "never offered");
+        assert!(pilot.status().contains("go?"), "status: {}", pilot.status());
+        assert!(w.obs.decks[0].position_secs >= 280.0, "past the fire point");
+        // And it goes on holding rather than talking itself into it.
+        for _ in 0..40 {
+            assert!(w.tick(&mut pilot).is_empty(), "it fired without being told");
+        }
+
+        // Told to go, it runs the ordinary transition.
+        pilot.accept();
+        let (cmds, _) = w.run_until_cmds(&mut pilot, 40);
+        assert!(
+            cmds.iter().any(|c| matches!(c, AutoCmd::PlayIn { .. })),
+            "{cmds:?}"
+        );
+        assert!(!pilot.awaiting(), "no longer waiting once it has gone");
+    }
+
+    #[test]
+    fn an_offer_that_was_ignored_can_be_made_again() {
+        // The trap: marking the outgoing record as "transitioned" when the
+        // offer is MADE rather than when it is taken. The record then never
+        // gets another one, so a suggestion the operator let pass — or
+        // answered with their own hands — silently ends the set on that
+        // record. The offer is a question, and asking is not doing.
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        pilot.suggest_only = true;
+        w.obs.decks[0].position_secs = 270.0;
+
+        assert!(run_until_offered(&mut w, &mut pilot, 400), "never offered");
+
+        // The operator does something else instead, which drops the plan.
+        pilot.hands_on();
+        assert!(!pilot.awaiting());
+
+        // The record is still playing and still deserves a transition.
+        assert!(
+            run_until_offered(&mut w, &mut pilot, 200),
+            "the record was never offered a transition again: {}",
+            pilot.status()
+        );
+    }
+
+    #[test]
+    fn a_suggestion_nobody_answers_still_lets_the_record_hand_over_at_its_end() {
+        // The trap: latching the outgoing load when the offer is made would
+        // mean an ignored suggestion leaves that record unable to
+        // transition ever again, and the set stops at the end of it.
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        pilot.suggest_only = true;
+        w.obs.decks[0].position_secs = 295.0;
+
+        let mut handed_back = false;
+        for _ in 0..400 {
+            for cmd in w.tick(&mut pilot) {
+                if matches!(cmd, AutoCmd::HandBack { .. }) {
+                    handed_back = true;
+                }
+            }
+        }
+        assert!(handed_back, "the record ran out and the set went on");
     }
 
     #[test]

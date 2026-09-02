@@ -19011,6 +19011,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -19023,6 +19024,7 @@ p2 {}
             u8::from(self.autopilot.pick_route),
             self.set_length_mins,
             Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0) as u32,
+            u8::from(self.autopilot.suggest_only) as u32,
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19061,10 +19063,14 @@ p2 {}
         self.auto_pick = next(0) == 1;
         self.autopilot.pick_exit = next(0) == 1;
         self.autopilot.pick_route = next(0) == 1;
-        // The arc: a length in minutes and which shape, both appended, so
-        // an older settings file reads as no length and the first curve.
+        // Everything below was APPENDED, in this order. A field inserted
+        // into the middle of this file shifts every value after it, and the
+        // settings an operator spent a night getting right come back as
+        // somebody else's — so new ones go on the end, always.
         self.set_length_mins = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
         let curve = lines.next().and_then(|l| l.parse::<usize>().ok()).unwrap_or(0);
+        self.autopilot.suggest_only =
+            lines.next().and_then(|l| l.parse::<u8>().ok()).unwrap_or(0) == 1;
         self.set_curve = Curve::ALL[curve.min(Curve::ALL.len() - 1)];
     }
 
@@ -22000,6 +22006,9 @@ p2 {}
         self.paint_lit(cx, ids!(auto_choose), self.auto_pick);
         self.paint_lit(cx, ids!(auto_exit), self.autopilot.pick_exit);
         self.paint_lit(cx, ids!(auto_route), self.autopilot.pick_route);
+        self.paint_lit(cx, ids!(auto_suggest), self.autopilot.suggest_only);
+        // GO only means anything while something is being offered.
+        self.paint_lit(cx, ids!(auto_go), self.autopilot.awaiting());
         self.paint_lit(cx, ids!(auto_length), self.set_length_mins > 0);
         self.ui.button(cx, ids!(auto_length)).set_text(
             cx,
@@ -24502,6 +24511,17 @@ p2 {}
         }
         if self.ui.button(cx, ids!(auto_veto)).clicked(actions) {
             self.veto_next();
+        }
+        if self.ui.button(cx, ids!(auto_suggest)).clicked(actions) {
+            let on = !self.autopilot.suggest_only;
+            self.autopilot.set_suggest_only(on);
+            self.save_autopilot_settings();
+        }
+        if self.ui.button(cx, ids!(auto_go)).clicked(actions) {
+            // The one operator touch that must NOT go through the
+            // hands-on funnel: that drops the plan, and accepting a
+            // suggestion by cancelling it would be a poor joke.
+            self.autopilot.accept();
         }
         if self.ui.button(cx, ids!(auto_curve)).clicked(actions) {
             let at = Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0);
