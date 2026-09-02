@@ -285,7 +285,11 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     let outer_vm = cx.script_vm.take();
     cx.script_vm = isolated.vm.take();
 
-    let out = f(cx);
+    // A panic inside isolate script must not skip the restore below, or the
+    // app VM stays swapped out and every later script access resolves against
+    // the wrong heap. Catch, restore, then let the panic continue to the
+    // containment layer at the entry funnel.
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *cx)));
 
     isolated.vm = cx.script_vm.take();
     cx.script_vm = outer_vm;
@@ -297,7 +301,30 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
         .vms
         .insert(vm_id, isolated);
 
-    out
+    match out {
+        Ok(out) => out,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// Runs isolate-side work and CONTAINS any panic it raises: the host app must
+/// survive anything a mini-app isolate does. Returns false when a panic was
+/// contained; the isolate is left degraded (a Force Stop cleans it up).
+pub fn contain_isolate_panic(what: &str, f: impl FnOnce()) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(()) => true,
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("(non-string panic)");
+            crate::makepad_platform::error!(
+                "contained a mini-app isolate panic in {what}: {msg}"
+            );
+            false
+        }
+    }
 }
 
 /// A Splash isolate runs untrusted-ish user script on the UI thread; cap how long any
@@ -428,10 +455,15 @@ impl CxSplashVmExt for Cx {
             return self.with_vm(f);
         }
         if vm_id == MAIN_SPLASH_VM_ID {
-            debug_assert_eq!(
-                current, MAIN_SPLASH_VM_ID,
-                "main-VM script call while isolate {current:?} is installed on Cx"
-            );
+            if current != MAIN_SPLASH_VM_ID {
+                // Running main-VM work here would execute against the
+                // installed ISOLATE's heap and plant its values there; the
+                // fault would only surface later, in a GC, with nothing left
+                // pointing at this call.
+                error!(
+                    "BUG: main-VM script call while isolate {current:?} is installed on Cx"
+                );
+            }
             return self.with_vm(f);
         }
 
@@ -449,10 +481,11 @@ impl CxSplashVmExt for Cx {
             return self.with_vm_thread(thread_id, f);
         }
         if vm_id == MAIN_SPLASH_VM_ID {
-            debug_assert_eq!(
-                current, MAIN_SPLASH_VM_ID,
-                "main-VM script call while isolate {current:?} is installed on Cx"
-            );
+            if current != MAIN_SPLASH_VM_ID {
+                error!(
+                    "BUG: main-VM script call while isolate {current:?} is installed on Cx"
+                );
+            }
             return self.with_vm_thread(thread_id, f);
         }
 
@@ -573,9 +606,19 @@ pub(crate) fn update_global_ui_handle(cx: &mut Cx, root_uid: WidgetUid) {
     if cx.global::<CxWidgetAsync>().global_ui_root_uid == root_uid {
         return;
     }
+    // `with_vm` below runs against whatever VM is installed; with an isolate
+    // installed this would mint the main `ui` handle in the isolate's heap
+    // and leave current_vm_id clobbered to MAIN for the rest of the isolate's
+    // execution. Defer to the next main-context call instead.
+    if cx.global::<CxWidgetAsync>().current_vm_id != MAIN_SPLASH_VM_ID {
+        error!(
+            "BUG: update_global_ui_handle while isolate {:?} is installed; deferred",
+            cx.global::<CxWidgetAsync>().current_vm_id
+        );
+        return;
+    }
     cx.global::<CxWidgetAsync>().global_ui_root_uid = root_uid;
     cx.with_vm(|vm| {
-        vm.cx_mut().global::<CxWidgetAsync>().current_vm_id = MAIN_SPLASH_VM_ID;
         let ui_handle = vm.build_ui_handle_for_uid(root_uid);
         vm.set_injected_global(id!(ui), ui_handle);
     });
@@ -921,9 +964,20 @@ impl CxWidgetToScriptCallExt for Cx {
         from_method: LiveId,
     ) -> ScriptAsyncResult {
         let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            error!(
+                "widget->script call {:?} dropped: widget {:?} source belongs to a reclaimed isolate heap",
+                from_method, target_uid
+            );
             return ScriptAsyncResult::MethodNotFound;
         };
         self.with_script_vm_id(vm_id, |vm| {
+            let src_key = source.heap_key();
+            if src_key != 0 && src_key != vm.bx.heap.heap_key() {
+                error!(
+                    "BUG: widget->script call {:?} for widget {:?} routed to vm {:?} whose heap does not own the widget's source",
+                    from_method, target_uid, vm_id
+                );
+            }
             vm.widget_to_script_async_call_fwd(
                 target_uid,
                 script_async,
@@ -971,9 +1025,20 @@ impl CxWidgetToScriptCallExt for Cx {
         args: ScriptValue,
     ) {
         let Some(vm_id) = self.script_ref_vm_id(&source) else {
+            error!(
+                "widget->script call dropped: widget {:?} source belongs to a reclaimed isolate heap",
+                target_uid
+            );
             return;
         };
         self.with_script_vm_id(vm_id, |vm| {
+            let src_key = source.heap_key();
+            if src_key != 0 && src_key != vm.bx.heap.heap_key() {
+                error!(
+                    "BUG: widget->script call for widget {:?} routed to vm {:?} whose heap does not own the widget's source",
+                    target_uid, vm_id
+                );
+            }
             vm.widget_to_script_call_fwd(target_uid, me, source, script_fn, args);
         });
     }
@@ -1175,22 +1240,24 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
             .pop_front();
         if let Some(req) = req {
             progressed = true;
-            cx.with_script_vm_id(req.vm_id, |vm| {
-                if req.script_fn.as_object() != ScriptObject::ZERO {
-                    let ui_handle = vm.build_ui_handle_for_uid(req.target_uid);
-                    let call_args = vm.make_call_args_object_with_context(
-                        req.source.as_object(),
-                        ui_handle,
-                        req.args,
-                    );
-                    let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
-                        vm.call_with_args_object_with_me(
-                            req.script_fn.clone().into(),
-                            call_args,
-                            req.me,
-                        )
-                    });
-                }
+            contain_isolate_panic("widget->script dispatch", || {
+                cx.with_script_vm_id(req.vm_id, |vm| {
+                    if req.script_fn.as_object() != ScriptObject::ZERO {
+                        let ui_handle = vm.build_ui_handle_for_uid(req.target_uid);
+                        let call_args = vm.make_call_args_object_with_context(
+                            req.source.as_object(),
+                            ui_handle,
+                            req.args,
+                        );
+                        let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                            vm.call_with_args_object_with_me(
+                                req.script_fn.clone().into(),
+                                call_args,
+                                req.me,
+                            )
+                        });
+                    }
+                });
             });
             continue;
         }
@@ -1201,8 +1268,15 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
             .pop_front();
         if let Some(req) = req {
             progressed = true;
+            contain_isolate_panic("script->widget dispatch", || {
             let ret = cx.with_script_vm_id_thread(req.vm_id, req.caller_thread, |vm| {
                 let widget_ref = vm.with_cx(|cx| cx.widget_tree().widget(req.target_uid));
+                if widget_ref.is_empty() {
+                    error!(
+                        "script->widget call {:?} dropped: widget {:?} not in the widget tree (vm {:?})",
+                        req.method, req.target_uid, req.vm_id
+                    );
+                }
                 match widget_ref.script_call(vm, req.method, req.args.as_object().into()) {
                     ScriptAsyncResult::Return(value) => value,
                     ScriptAsyncResult::Pending => NIL,
@@ -1232,15 +1306,24 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
             if !is_paused {
                 on_widget_script_thread_completed(cx, req.vm_id, req.caller_thread, result);
             }
+            });
             continue;
         }
 
         let done = cx.global::<CxWidgetAsync>().done.pop_front();
         if let Some(done) = done {
             progressed = true;
-            cx.with_script_vm_id(done.vm_id, |vm| {
-                let widget_ref = vm.with_cx(|cx| cx.widget_tree().widget(done.target_uid));
-                widget_ref.script_result(vm, done.id, done.result);
+            contain_isolate_panic("async result delivery", || {
+                cx.with_script_vm_id(done.vm_id, |vm| {
+                    let widget_ref = vm.with_cx(|cx| cx.widget_tree().widget(done.target_uid));
+                    if widget_ref.is_empty() {
+                        error!(
+                            "script_result dropped: widget {:?} not in the widget tree (vm {:?})",
+                            done.target_uid, done.vm_id
+                        );
+                    }
+                    widget_ref.script_result(vm, done.id, done.result);
+                });
             });
             continue;
         }
@@ -1268,8 +1351,10 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         if let Some(iso) = state.isolated_vms.vms.get_mut(&SplashVmId(next)) {
             if let Some(bx) = iso.vm.as_mut() {
                 if bx.heap.needs_gc() {
-                    bx.heap.mark(&bx.threads, &bx.code);
-                    bx.heap.sweep(false);
+                    contain_isolate_panic("isolate gc", || {
+                        bx.heap.mark(&bx.threads, &bx.code);
+                        bx.heap.sweep(false);
+                    });
                 }
             }
         }
@@ -1301,9 +1386,11 @@ fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptVa
         Some(vm_id) => {
             // Same budget/limit as any other isolate entry, so a runaway timer callback
             // can't hang the host.
-            cx.with_script_vm_id(vm_id, |vm| {
-                vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
-                    vm.call(timer.callback.as_object().into(), &[time]);
+            contain_isolate_panic("timer callback", || {
+                cx.with_script_vm_id(vm_id, |vm| {
+                    vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                        vm.call(timer.callback.as_object().into(), &[time]);
+                    });
                 });
             });
             true
@@ -1338,4 +1425,340 @@ fn pump_widget_async_hook(host: &mut dyn Any) -> bool {
     host.downcast_mut::<Cx>()
         .map(pump_widget_async)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod isolate_tests {
+    use super::*;
+    use crate::splash::Splash;
+    use crate::view::View;
+    use crate::widget_tree::set_ui_root;
+
+    const BODY: &str = r#"
+    let items = []
+    fn go(){ ui.item_list.render() }
+    fn load(){
+        host.request("matrix.room_threads", {limit: 20}, fn(r){
+            if r.is_ok {
+                items = r.data.threads
+                ui.header.set_text("" + items.len() + " threads")
+            } else {
+                items = []
+                ui.header.set_text(r.error)
+            }
+            ui.item_list.render()
+        })
+    }
+    header := Label{ text: "Loading" }
+    item_list := View{ height: Fit, on_render: || {
+        for it in items {
+            Label{text: it.body}
+        }
+    } }
+"#;
+
+    fn item_list_children(cx: &Cx, host: &WidgetRef) -> usize {
+        let w = host.widget(cx, &[live_id!(item_list)]);
+        w.borrow::<View>()
+            .map(|v| v.children.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    fn render_cycle(cx: &mut Cx, host: &WidgetRef, json: &'static str) -> usize {
+        let splash = host.widget(cx, &[live_id!(splash)]);
+        let item_list = host.widget(cx, &[live_id!(item_list)]);
+        render_cycle_no_heal(cx, &splash, &item_list, json)
+    }
+
+    // Triggers load()+respond via direct WidgetRefs, so no tree lookup can
+    // re-seed graph nodes; this is the app's own timer/callback view of the
+    // world, where ui.X resolution relies purely on the existing graph.
+    fn render_cycle_no_heal(
+        cx: &mut Cx,
+        splash: &WidgetRef,
+        item_list: &WidgetRef,
+        json: &'static str,
+    ) -> usize {
+        let called = splash
+            .borrow_mut::<Splash>()
+            .expect("splash widget")
+            .call_script_fn(cx, live_id!(load), &[]);
+        assert!(called, "load() not found in body scope");
+        pump_widget_async(cx);
+        let reqs = crate::splash_host::take_splash_host_requests();
+        assert_eq!(reqs.len(), 1, "expected one bridge request");
+        let req = &reqs[0];
+        let outcome =
+            crate::splash_host::splash_host_respond(cx, req.heap_key, req.req_id, Ok(json));
+        eprintln!("### respond outcome {outcome:?}");
+        pump_widget_async(cx);
+        item_list
+            .borrow::<View>()
+            .map(|v| v.children.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn force_stop_midflight_then_stale_respond() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let template = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{ splash := Splash{} }
+            });
+            let obj = v.as_object().expect("template did not eval to an object");
+            vm.bx.heap.new_object_ref(obj)
+        });
+        let pane = cx.with_vm(|vm| {
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View{ height: Fit }
+            });
+            WidgetRef::script_from_value(vm, v)
+        });
+        set_ui_root(&mut cx, &pane);
+        let pane_uid = pane.widget_uid();
+
+        // run 1: request made, ANSWERED, but force-stopped BEFORE the pump
+        // (paused callback thread + queued ui calls die with the isolate)
+        let host = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template.as_object().into()));
+        cx.widget_tree_insert_child_deep(pane_uid, live_id!(apphost), host.clone());
+        host.widget(&cx, &[live_id!(splash)]).set_text(&mut cx, BODY);
+        let hk1 = host
+            .widget(&cx, &[live_id!(splash)])
+            .borrow_mut::<Splash>()
+            .unwrap()
+            .isolate_heap_key(&mut cx)
+            .unwrap();
+        let _ = host.widget(&cx, &[live_id!(item_list)]);
+        assert!(host
+            .widget(&cx, &[live_id!(splash)])
+            .borrow_mut::<Splash>()
+            .unwrap()
+            .call_script_fn(&mut cx, live_id!(load), &[]));
+        pump_widget_async(&mut cx);
+        // a second request left UNANSWERED at force stop
+        assert!(host
+            .widget(&cx, &[live_id!(splash)])
+            .borrow_mut::<Splash>()
+            .unwrap()
+            .call_script_fn(&mut cx, live_id!(load), &[]));
+        pump_widget_async(&mut cx);
+        let reqs = crate::splash_host::take_splash_host_requests();
+        assert_eq!(reqs.len(), 2);
+        // answer the FIRST request but do NOT pump: callback ran, ui calls queued
+        let outcome = crate::splash_host::splash_host_respond(
+            &mut cx,
+            reqs[0].heap_key,
+            reqs[0].req_id,
+            Ok(r#"{"threads":[{"sender":"a","body":"one"}]}"#),
+        );
+        eprintln!("### run1 respond outcome {outcome:?}");
+        // force stop NOW, queues still full
+        drop(host);
+        gc_dead_splash_isolates(&mut cx);
+
+        // run 2
+        let host2 = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template.as_object().into()));
+        cx.widget_tree_insert_child_deep(pane_uid, live_id!(apphost), host2.clone());
+        host2.widget(&cx, &[live_id!(splash)]).set_text(&mut cx, BODY);
+        let hk2 = host2
+            .widget(&cx, &[live_id!(splash)])
+            .borrow_mut::<Splash>()
+            .unwrap()
+            .isolate_heap_key(&mut cx)
+            .unwrap();
+        eprintln!("### heap reuse: hk1={hk1} hk2={hk2} same={}", hk1 == hk2);
+
+        // stale respond for the dead isolate's outstanding request arrives late
+        let stale = crate::splash_host::splash_host_respond(
+            &mut cx,
+            reqs[1].heap_key,
+            reqs[1].req_id,
+            Ok(r#"{"threads":[{"sender":"z","body":"stale"}]}"#),
+        );
+        eprintln!("### stale respond outcome {stale:?}");
+
+        let n = render_cycle(
+            &mut cx,
+            &host2,
+            r#"{"threads":[{"sender":"a","body":"one"},{"sender":"b","body":"two"}]}"#,
+        );
+        eprintln!("### run2 children = {n}");
+
+        // GC everything hard, hunting the cross-heap panic
+        cx.with_vm(|vm| vm.gc());
+        let ids: Vec<SplashVmId> = cx
+            .global::<CxWidgetAsync>()
+            .isolated_vms
+            .vms
+            .keys()
+            .copied()
+            .collect();
+        for id in ids {
+            if let Some(iso) = cx.global::<CxWidgetAsync>().isolated_vms.vms.get_mut(&id) {
+                if let Some(bx) = iso.vm.as_mut() {
+                    bx.heap.mark(&bx.threads, &bx.code);
+                    bx.heap.sweep(false);
+                }
+            }
+        }
+        assert_eq!(n, 2, "run2 render did not commit");
+    }
+
+    #[test]
+    fn pane_refresh_drops_inserted_host() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let template = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{ splash := Splash{} }
+            });
+            let obj = v.as_object().expect("template did not eval to an object");
+            vm.bx.heap.new_object_ref(obj)
+        });
+        let pane = cx.with_vm(|vm| {
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View{ height: Fit }
+            });
+            WidgetRef::script_from_value(vm, v)
+        });
+        set_ui_root(&mut cx, &pane);
+        let pane_uid = pane.widget_uid();
+
+        let host = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template.as_object().into()));
+        cx.widget_tree_insert_child_deep(pane_uid, live_id!(apphost), host.clone());
+        host.widget(&cx, &[live_id!(splash)]).set_text(&mut cx, BODY);
+        let n = render_cycle(
+            &mut cx,
+            &host,
+            r#"{"threads":[{"sender":"a","body":"one"}]}"#,
+        );
+        eprintln!("### baseline children = {n}");
+        assert_eq!(n, 1);
+
+        let splash = host.widget(&cx, &[live_id!(splash)]);
+        let item_list = host.widget(&cx, &[live_id!(item_list)]);
+
+        let topdown0 = !cx
+            .widget_tree()
+            .find_within(pane_uid, &[live_id!(item_list)])
+            .is_empty();
+        eprintln!("### before flush: top-down find from pane: {topdown0}");
+
+        // what teardown / any structural event does to the owner
+        cx.widget_tree_mark_dirty(pane_uid);
+        // any flood search flushes with mark_structure_dirty=true
+        let _ = cx.widget_tree().root_uid();
+        let in_graph = !cx.widget_tree().widget(splash.widget_uid()).is_empty();
+        let topdown = !cx
+            .widget_tree()
+            .find_within(pane_uid, &[live_id!(item_list)])
+            .is_empty();
+        eprintln!("### after flush: splash node in graph: {in_graph}, top-down find from pane: {topdown}");
+
+        let n = render_cycle_no_heal(
+            &mut cx,
+            &splash,
+            &item_list,
+            r#"{"threads":[{"sender":"a","body":"one"},{"sender":"b","body":"two"}]}"#,
+        );
+        eprintln!("### after pane refresh children = {n}");
+        assert_eq!(n, 2, "render after pane refresh did not commit");
+    }
+
+    #[test]
+    fn second_isolate_render_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let template = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{ splash := Splash{} }
+            });
+            let obj = v.as_object().expect("template did not eval to an object");
+            vm.bx.heap.new_object_ref(obj)
+        });
+        let pane = cx.with_vm(|vm| {
+            let v = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View{ height: Fit }
+            });
+            WidgetRef::script_from_value(vm, v)
+        });
+        set_ui_root(&mut cx, &pane);
+        let pane_uid = pane.widget_uid();
+
+        for run in 0..2 {
+            let host =
+                cx.with_vm(|vm| WidgetRef::script_from_value(vm, template.as_object().into()));
+            cx.widget_tree_insert_child_deep(pane_uid, live_id!(apphost), host.clone());
+            host.widget(&cx, &[live_id!(splash)]).set_text(&mut cx, BODY);
+            let hk = host
+                .widget(&cx, &[live_id!(splash)])
+                .borrow_mut::<Splash>()
+                .unwrap()
+                .isolate_heap_key(&mut cx);
+            eprintln!("### run {run}: heap_key {hk:?}");
+            // warm the graph so the confined ui getter can resolve while the
+            // Splash itself is mut-borrowed below
+            let warm = host.widget(&cx, &[live_id!(item_list)]);
+            assert!(!warm.is_empty(), "run {run}: item_list not found in tree");
+            drop(warm);
+            let called = host
+                .widget(&cx, &[live_id!(splash)])
+                .borrow_mut::<Splash>()
+                .expect("splash widget")
+                .call_script_fn(&mut cx, live_id!(load), &[]);
+            assert!(called, "run {run}: load() not found in body scope");
+            pump_widget_async(&mut cx);
+            // the host drains and answers the bridge request, like robrix's broker
+            let reqs = crate::splash_host::take_splash_host_requests();
+            assert_eq!(reqs.len(), 1, "run {run}: expected one bridge request");
+            let req = &reqs[0];
+            let outcome = crate::splash_host::splash_host_respond(
+                &mut cx,
+                req.heap_key,
+                req.req_id,
+                Ok(r#"{"threads":[{"sender":"a","body":"one"},{"sender":"b","body":"two"}]}"#),
+            );
+            eprintln!("### run {run}: respond outcome {outcome:?}");
+            pump_widget_async(&mut cx);
+            let n = item_list_children(&cx, &host);
+            eprintln!("### run {run}: item_list children = {n}");
+
+            // aggressive GC afterwards, hunting the cross-heap panic
+            cx.with_vm(|vm| vm.gc());
+            {
+                let state = cx.global::<CxWidgetAsync>();
+                let ids: Vec<SplashVmId> =
+                    state.isolated_vms.vms.keys().copied().collect();
+                for id in ids {
+                    if let Some(iso) = cx
+                        .global::<CxWidgetAsync>()
+                        .isolated_vms
+                        .vms
+                        .get_mut(&id)
+                    {
+                        if let Some(bx) = iso.vm.as_mut() {
+                            bx.heap.mark(&bx.threads, &bx.code);
+                            bx.heap.sweep(false);
+                        }
+                    }
+                }
+            }
+            assert!(n >= 1, "run {run}: render did not commit (children={n})");
+
+            // force stop: drop every strong ref, then reclaim like the
+            // end-of-cycle pump does
+            drop(host);
+            pump_widget_async(&mut cx);
+        }
+    }
 }
