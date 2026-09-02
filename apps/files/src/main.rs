@@ -5021,7 +5021,9 @@ impl MatchEvent for App {
             .map(PathBuf::from)
             .filter(|p| vfs().is_dir(p))
             .unwrap_or_else(|| self.home.clone());
-        self.tabs = vec![Tab::new(start, ViewMode::Icons)];
+        // The first tab opens on the space view: where the bytes are is the
+        // question a file manager gets asked first.
+        self.tabs = vec![Tab::new(start, ViewMode::Treemap)];
         self.tab = 0;
         // Warm and still dormant: no disk scan and no thumbnails until
         // `wake` runs it — see `Dormancy`.
