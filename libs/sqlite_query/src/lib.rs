@@ -58,6 +58,8 @@ pub mod lock;
 pub mod pager;
 pub mod plan;
 pub mod schema;
+pub mod storage;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sync;
 pub mod sql;
 pub mod value;
@@ -69,6 +71,9 @@ pub use exec::Limits;
 pub use write::Connection;
 pub use pager::{DbHeader, Pager};
 pub use schema::{Column, IndexInfo, Schema, SchemaObject, TableInfo};
+pub use storage::{MemoryPageStore, MemoryStoreSet, PageStore, PageStoreSet, StoreKind, StoreLock, StoreOpenOptions};
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::{FilePageStore, FileStoreSet};
 pub use value::{Affinity, Collation, TextEncoding, TextMode, Value};
 
 use crate::plan::{Plan, Planner};
@@ -182,26 +187,42 @@ impl Statement {
 impl Database {
     /// Open a database file (following its `-wal` when present).
     pub fn open(path: &Path) -> Result<Database> {
-        let mut pager = Pager::open(path)?;
-        let schema = Schema::load(&mut pager)?;
-        // Idle handles hold nothing: every statement takes its own read lock.
-        pager.unlock()?;
-        Ok(Database {
-            pager,
-            schema,
-            limits: Limits::default(),
-        })
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut pager = Pager::open(path)?;
+            let schema = Schema::load(&mut pager)?;
+            // Idle handles hold nothing: every statement takes its own read lock.
+            pager.unlock()?;
+            return Ok(Database {
+                pager,
+                schema,
+                limits: Limits::default(),
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            Err(Error::unsupported("filesystem databases are unavailable on wasm32"))
+        }
     }
 
     pub fn open_with_cache(path: &Path, cache_pages: usize) -> Result<Database> {
-        let mut pager = Pager::open_with_cache(path, cache_pages)?;
-        let schema = Schema::load(&mut pager)?;
-        pager.unlock()?;
-        Ok(Database {
-            pager,
-            schema,
-            limits: Limits::default(),
-        })
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut pager = Pager::open_with_cache(path, cache_pages)?;
+            let schema = Schema::load(&mut pager)?;
+            pager.unlock()?;
+            return Ok(Database {
+                pager,
+                schema,
+                limits: Limits::default(),
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, cache_pages);
+            Err(Error::unsupported("filesystem databases are unavailable on wasm32"))
+        }
     }
 
     /// Prepare a read-only statement against the current schema.
