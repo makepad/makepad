@@ -622,6 +622,47 @@ impl<'a> Variants<'a> {
         }
     }
 
+    /// Frozen variant sets for one exact base revision, in digest order.
+    /// This bounded public read lets snapshot exporters discover the
+    /// immutable derived documents reachable from selected content without
+    /// exposing the variants database or any derivation/job history.
+    pub fn variant_sets_for_base(
+        &self,
+        base: &AssetRevisionRef,
+        after: Option<&VariantSetId>,
+        limit: u32,
+    ) -> ServerResult<Vec<VariantSetId>> {
+        if limit == 0 || limit > self.budgets.max_search_results {
+            return Err(ServerError::OverBudget {
+                what: "variant set export page size",
+                limit: self.budgets.max_search_results as u64,
+                found: limit as u64,
+            });
+        }
+        let mut s = self.db.prepare(
+            "variant sets for base",
+            "SELECT set_digest FROM variant_sets
+             WHERE base_asset=?1 AND base_revision=?2
+               AND (?3 IS NULL OR set_digest>?3)
+             ORDER BY set_digest LIMIT ?4",
+        )?;
+        s.bind_blob(1, base.asset_id.as_bytes())?;
+        s.bind_blob(2, base.revision.as_bytes())?;
+        match after {
+            Some(after) => s.bind_blob(3, after.as_bytes())?,
+            None => s.bind_null(3)?,
+        }
+        s.bind_u64(4, limit as u64)?;
+        let mut out = Vec::new();
+        while s.step()? {
+            out.push(VariantSetId::from_bytes(fixed32(
+                &s.column_blob(0),
+                "variant set export row",
+            )?));
+        }
+        Ok(out)
+    }
+
     // ---- resolution --------------------------------------------------------
 
     /// Deterministic read-only resolution of one frozen set against a bounded

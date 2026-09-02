@@ -27,6 +27,7 @@ makepad-asset-client = { path = "../client" }
 # thumbnail encoder every publication needs.
 makepad-filesystem-watcher = { path = "../../filesystem_watcher" }
 jpeg-encoder = { path = "../../jpeg-encoder", version = "0.6.1" }
+brotli = "8.0"
 
 [dev-dependencies]
 makepad-asset-client = { path = "../client" }
