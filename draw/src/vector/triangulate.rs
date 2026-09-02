@@ -76,6 +76,16 @@ pub fn pack_vector_record(record: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PER_VERT
     ]
 }
 
+/// Pack a tessellated symbol mesh into the 4-slot `IconVertexPacked` layout:
+/// (x, y) are screen-px offsets from the instance anchor.
+pub fn pack_icon_vertices(verts: &[VVertex]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(verts.len() * 4);
+    for v in verts {
+        out.extend_from_slice(&[v.x, v.y, pack_pair_f16(v.u, v.v), v.stroke_dist]);
+    }
+    out
+}
+
 /// Pack a whole 19-stride vertex buffer for GPU upload.
 pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
     let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
