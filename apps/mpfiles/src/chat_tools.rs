@@ -310,9 +310,8 @@ fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> 
             path.display()
         ));
     }
-    let real = vfs().real_path(path);
-    let data = std::fs::read(&real).map_err(|e| format!("{}: {e}", path.display()))?;
-    let size = data.len();
+    let size = vfs().stat(path)?.size;
+    let data = vfs().read_bytes(path, max_bytes.clamp(1, READ_LIMIT))?;
     let kind = model::kind_for(path, false);
     let looked_at = data.len().min(4096);
     if data[..looked_at].contains(&0) {
@@ -322,11 +321,11 @@ fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> 
                 "{} is a {} of {} — not text, so there is nothing to read out of it here",
                 path.display(),
                 kind.label().to_lowercase(),
-                model::format_size(size as u64, false),
+                model::format_size(size, false),
             ),
         ));
     }
-    let cut = size.min(max_bytes.clamp(1, READ_LIMIT));
+    let cut = data.len();
     let text = match std::str::from_utf8(&data[..cut]) {
         Ok(text) => text.to_string(),
         Err(error) if error.valid_up_to() > cut / 2 => {
@@ -339,7 +338,7 @@ fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> 
                     "{} is a {} of {} — not text",
                     path.display(),
                     kind.label().to_lowercase(),
-                    model::format_size(size as u64, false),
+                    model::format_size(size, false),
                 ),
             ))
         }
@@ -347,8 +346,8 @@ fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> 
     let mut out = format!(
         "{} — {}{}\n",
         path.display(),
-        model::format_size(size as u64, false),
-        if cut < size {
+        model::format_size(size, false),
+        if (cut as u64) < size {
             format!(", first {} shown", model::format_size(cut as u64, false))
         } else {
             String::new()
@@ -454,7 +453,7 @@ fn measure(path: &Path, deadline: Instant, budget: &mut usize, depth: usize) -> 
     }
     // Never walk through a link: the tree below it is somebody else's, and it
     // can lead straight back to where we started.
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if !vfs().is_demo() && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return (0, 0, true);
     }
     if model::skip_for_scan(path) {

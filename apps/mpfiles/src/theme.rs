@@ -81,6 +81,9 @@ impl Palette {
 
     /// The palette mpwm exported for this process, or Tokyo Night.
     pub fn load() -> Self {
+        if crate::vfs::demo_requested() {
+            return Self::tokyo_night();
+        }
         let Some(p) = mp_theme::current() else {
             return Self::tokyo_night();
         };

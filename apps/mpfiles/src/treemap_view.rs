@@ -833,7 +833,8 @@ impl TreemapView {
             return;
         };
         let root = self.root.clone();
-        thread::spawn(move || {
+        let instant = crate::vfs::vfs().is_instant();
+        let scan = move || {
             // The four scan threads all report through here, so the channel
             // and the signal clock live behind one lock. Waking the UI is the
             // expensive half and is what gets rate-limited; the steps
@@ -891,7 +892,13 @@ impl TreemapView {
                 finished: Some(if ok { Outcome::Scanned } else { Outcome::Failed }),
             });
             SignalToUI::set_ui_signal();
-        });
+        };
+        if instant {
+            scan();
+            self.drain(cx);
+        } else {
+            thread::spawn(scan);
+        }
         self.redraw(cx);
     }
 

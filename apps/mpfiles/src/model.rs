@@ -439,9 +439,18 @@ fn prefs_path() -> PathBuf {
     home_dir().join(".config").join("mpfiles").join("prefs")
 }
 
+fn memory_prefs() -> &'static std::sync::Mutex<String> {
+    static PREFS: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    PREFS.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
 /// One saved preference, by key. The file is `key=value` lines, nothing
 /// more; a missing file is simply no preferences.
 pub fn pref_get(key: &str) -> Option<String> {
+    if cfg!(feature = "demo") || crate::vfs::is_demo() {
+        let text = memory_prefs().lock().unwrap_or_else(|e| e.into_inner());
+        return pref_find(&text, key);
+    }
     let text = std::fs::read_to_string(prefs_path()).ok()?;
     pref_find(&text, key)
 }
@@ -449,6 +458,11 @@ pub fn pref_get(key: &str) -> Option<String> {
 /// Save one preference, leaving every other key exactly as it was — the
 /// file is shared by whatever small choices the app remembers.
 pub fn pref_set(key: &str, value: &str) {
+    if cfg!(feature = "demo") || crate::vfs::is_demo() {
+        let mut text = memory_prefs().lock().unwrap_or_else(|e| e.into_inner());
+        *text = pref_replace(&text, key, value);
+        return;
+    }
     let path = prefs_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -523,13 +537,13 @@ pub fn scan_exclusions() -> Option<String> {
 /// folder the browser is listing, and a context menu on a file three folders
 /// down has to describe that file, not fail to find a row for it.
 ///
-/// `None` when there is nothing there, or when the browser is on the demo
-/// filesystem — a virtual path has no `std::fs` entry to read, and inventing
-/// one would let an operation run against a file that does not exist.
+/// `None` when the active filesystem has nothing there. Both real metadata
+/// and virtual metadata arrive through `Vfs::stat`.
 pub fn entry_at(path: &Path) -> Option<FileEntry> {
-    if crate::vfs::is_demo() {
-        return None;
-    }
+    crate::vfs::vfs().stat(path).ok()
+}
+
+pub(crate) fn real_entry_at(path: &Path) -> Option<FileEntry> {
     let metadata = fs::metadata(path).ok()?;
     let is_dir = metadata.is_dir();
     Some(FileEntry {
@@ -660,19 +674,20 @@ pub fn now_secs() -> u64 {
 pub fn local_utc_offset_secs() -> i64 {
     static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFFSET.get_or_init(|| {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(all(not(target_arch = "wasm32"), any(target_os = "macos", target_os = "linux")))]
         {
             let Ok(out) = std::process::Command::new("date").arg("+%z").output() else {
                 return 0;
             };
             return parse_utc_offset(String::from_utf8_lossy(&out.stdout).trim());
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(any(target_arch = "wasm32", not(any(target_os = "macos", target_os = "linux"))))]
         0
     })
 }
 
 /// `+0200` / `-0730` -> seconds east of UTC.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_utc_offset(text: &str) -> i64 {
     let bytes = text.as_bytes();
     if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
@@ -754,8 +769,8 @@ pub fn format_age(secs: u64, now: u64) -> String {
 
 /// The first `lines` lines of a text file, for the in-app quick look.
 pub fn read_head(path: &Path, lines: usize, max_bytes: usize) -> Result<String, String> {
-    let data = fs::read(path).map_err(|e| format!("{}", e))?;
-    let cut = data.len().min(max_bytes);
+    let data = crate::vfs::vfs().read_bytes(path, max_bytes)?;
+    let cut = data.len();
     // Never split a UTF-8 sequence: back off to the last boundary in the cut.
     let text = match std::str::from_utf8(&data[..cut]) {
         Ok(text) => text.to_string(),

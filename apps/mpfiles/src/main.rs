@@ -18,7 +18,6 @@ use makepad_widgets::*;
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -27,9 +26,15 @@ use std::{
     thread,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::process::Command;
+
 mod bookmarks;
+#[cfg(feature = "chat")]
 mod chat_agent;
+#[cfg(feature = "chat")]
 mod chat_panel;
+#[cfg(feature = "chat")]
 mod chat_tools;
 mod contents;
 mod demo;
@@ -47,9 +52,6 @@ mod vfs;
 
 use crate::{
     bookmarks::Bookmarks,
-    chat_agent::{ChatAgent, ChatEvent},
-    chat_panel::{ChatState, ChatVoice},
-    chat_tools::{ToolJob, ToolRunner},
     contents::{FileContents, FileContentsAction, ViewMode, DEFAULT_ZOOM, ZOOM_LEVELS},
     model::{display_name, trash_dir, FileEntry},
     menu::{MenuAction, MenuRow},
@@ -60,6 +62,23 @@ use crate::{
     treemap_view::MapProjection,
     vfs::vfs,
 };
+
+#[cfg(feature = "chat")]
+use crate::{
+    chat_agent::{ChatAgent, ChatEvent},
+    chat_panel::{ChatState, ChatVoice},
+    chat_tools::{ToolJob, ToolRunner},
+};
+
+#[cfg(not(feature = "chat"))]
+mod no_chat {
+    use makepad_widgets::*;
+
+    script_mod! {
+        use mod.prelude.widgets.*
+        mod.widgets.MpfChatPanel = View{visible: false width: 0 height: 0}
+    }
+}
 
 app_main!(App);
 
@@ -636,6 +655,7 @@ script_mod! {
                                 }
                             }
                             chat_button := ToolButton{
+                                visible: #(cfg!(feature = "chat"))
                                 Icon{
                                     icon_walk: Walk{width: 15 height: 15}
                                     draw_icon +: {
@@ -1449,6 +1469,7 @@ enum FocusTarget {
     Path,
     Search,
     Batch,
+    #[cfg(feature = "chat")]
     Chat,
     Filter,
 }
@@ -1738,34 +1759,45 @@ pub struct App {
     /// The ask-about-these-files panel. Everything below it stays `None` until
     /// the panel is opened for the first time: a file browser must not load
     /// nine billion parameters for a panel nobody asked for.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_open: bool,
+    #[cfg(feature = "chat")]
     #[rust]
     chat: ChatState,
+    #[cfg(feature = "chat")]
     #[rust]
     agent: Option<ChatAgent>,
+    #[cfg(feature = "chat")]
     #[rust]
     tool_runner: Option<ToolRunner>,
     /// True between sending a question and the answer being finished.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_busy: bool,
+    #[cfg(feature = "chat")]
     #[rust]
     chat_ready: bool,
     /// How many tool results the model is still owed for this turn, and the
     /// ones that have come back so far — they go over in call order, together.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_awaiting_tools: usize,
+    #[cfg(feature = "chat")]
     #[rust]
     chat_tool_replies: Vec<ToolReply>,
     /// Tool rounds spent on the current question, so a model that decides to
     /// keep looking forever is stopped rather than left running.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_tool_rounds: usize,
     /// The status line under the panel header.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_status: String,
     /// The last "about:" chip and map-strip hint that were pushed into the UI,
     /// so the per-signal refresh only touches a widget when something changed.
+    #[cfg(feature = "chat")]
     #[rust]
     chat_about: String,
     #[rust]
@@ -1773,6 +1805,7 @@ pub struct App {
 }
 
 /// One finished tool call, waiting for its turn-mates.
+#[cfg(feature = "chat")]
 pub struct ToolReply {
     text: String,
     is_error: bool,
@@ -1887,6 +1920,7 @@ impl App {
                 .ui
                 .view(cx, ids!(batch_find))
                 .text_input(cx, ids!(field_input)),
+            #[cfg(feature = "chat")]
             FocusTarget::Chat => self.ui.text_input(cx, ids!(chat_input)),
             FocusTarget::Filter => self.ui.text_input(cx, ids!(filter_query)),
         };
@@ -1980,6 +2014,12 @@ impl App {
             }
         }
         let dir = path.clone();
+        if vfs().is_instant() {
+            let result = vfs().read_dir(&path, show_hidden);
+            let _ = sender.send(DirectoryResult { dir, request_id, parent: None, result });
+            self.drain_directory_results(cx);
+            return;
+        }
         thread::spawn(move || {
             let result = vfs().read_dir(&path, show_hidden);
             let sent = sender.send(DirectoryResult {
@@ -2002,7 +2042,12 @@ impl App {
         let show_hidden = self.show_hidden;
         let dir = self.current_dir();
         let request_id = self.request_id;
-        let _ = cx;
+        if vfs().is_instant() {
+            let result = vfs().read_dir(&folder, show_hidden);
+            let _ = sender.send(DirectoryResult { dir, request_id, parent: Some(folder), result });
+            self.drain_directory_results(cx);
+            return;
+        }
         thread::spawn(move || {
             let result = vfs().read_dir(&folder, show_hidden);
             let sent = sender.send(DirectoryResult {
@@ -2144,6 +2189,7 @@ impl App {
     fn place_path(&self, name: &str) -> PathBuf {
         match name {
             "home" | "recent" | "starred" => self.home.clone(),
+            "network" if vfs().is_demo() => self.home.join("Network"),
             "network" => PathBuf::from("/"),
             "trash" => trash_dir(&self.home),
             folder => self.home.join(folder),
@@ -3011,7 +3057,12 @@ impl App {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         self.size_cancel = Some(cancel.clone());
-        let _ = cx;
+        if vfs().is_instant() {
+            let bytes = vfs().total_bytes(&path, &cancel);
+            let _ = sender.send(SizeResult { path, bytes });
+            self.drain_sizes(cx);
+            return;
+        }
         thread::spawn(move || {
             let bytes = vfs().total_bytes(&path, &cancel);
             if cancel.load(Ordering::Relaxed) {
@@ -3465,6 +3516,10 @@ impl App {
     // ------------------------------------------------------------ terminal
 
     fn open_terminal(&mut self, cx: &mut Cx) {
+        if vfs().is_demo() {
+            self.status(cx, "Terminal is not in this demo");
+            return;
+        }
         let dir = self.current_dir();
         let request = mp_wm_api::WmRequest::Launch {
             app: "terminal".to_string(),
@@ -3474,13 +3529,20 @@ impl App {
             self.status(cx, &format!("Opening a terminal in {}", dir.display()));
             return;
         }
-        let Some(bin) = preview::sibling_bin("mpterm") else {
-            self.status(cx, "mpterm is not built — nothing to open a terminal with");
-            return;
-        };
-        match Command::new(&bin).arg("--cwd").arg(&dir).spawn() {
-            Ok(_) => self.status(cx, &format!("Opening a terminal in {}", dir.display())),
-            Err(error) => self.status(cx, &format!("Could not start mpterm: {error}")),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(bin) = preview::sibling_bin("mpterm") else {
+                self.status(cx, "mpterm is not built — nothing to open a terminal with");
+                return;
+            };
+            match Command::new(&bin).arg("--cwd").arg(&dir).spawn() {
+                Ok(_) => self.status(cx, &format!("Opening a terminal in {}", dir.display())),
+                Err(error) => self.status(cx, &format!("Could not start mpterm: {error}")),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status(cx, "Terminal is not in this demo");
         }
     }
 
@@ -3552,6 +3614,7 @@ impl App {
             }
             // Only while the caret is actually in the ask field: Escape on the
             // map still means "zoom back out", panel or no panel.
+            #[cfg(feature = "chat")]
             if self.chat_open && self.chat_is_typing(cx) {
                 return self.toggle_chat(cx);
             }
@@ -3616,6 +3679,7 @@ impl App {
 
         if command {
             match event.key_code {
+                #[cfg(feature = "chat")]
                 KeyCode::KeyK => return self.toggle_chat(cx),
                 KeyCode::KeyT if !shift => return self.new_tab(cx),
                 KeyCode::KeyW => return self.close_tab(cx),
@@ -3990,7 +4054,12 @@ impl App {
     /// starts the model loading — until then this app has no idea a language
     /// model exists, which is the only way a file browser is allowed to have
     /// one. Cmd+K, or the speech-bubble button in the toolbar.
+    #[cfg(feature = "chat")]
     fn toggle_chat(&mut self, cx: &mut Cx) {
+        if vfs().is_demo() {
+            self.status(cx, "Chat is not in this demo");
+            return;
+        }
         let open = !self.chat_open;
         self.chat_open = open;
         self.ui.widget(cx, ids!(chat_panel)).set_visible(cx, open);
@@ -4006,6 +4075,7 @@ impl App {
 
     /// Load the model, once. A machine without the weights on it says so and
     /// carries on being a file browser.
+    #[cfg(feature = "chat")]
     fn start_chat(&mut self, cx: &mut Cx) {
         let Some(model) = chat_agent::model_path() else {
             self.chat.push(
@@ -4034,6 +4104,7 @@ impl App {
         self.redraw_chat(cx);
     }
 
+    #[cfg(feature = "chat")]
     fn set_chat_status(&mut self, cx: &mut Cx, text: &str) {
         if self.chat_status == text {
             return;
@@ -4042,6 +4113,7 @@ impl App {
         self.ui.label(cx, ids!(chat_status)).set_text(cx, text);
     }
 
+    #[cfg(feature = "chat")]
     fn redraw_chat(&mut self, cx: &mut Cx) {
         let list = self.ui.portal_list(cx, ids!(chat_list));
         list.set_tail_range(true);
@@ -4051,6 +4123,7 @@ impl App {
     /// Where the user is, as the model reads it: the folder, the view, and
     /// what is picked. This rides in front of every question and never appears
     /// in the transcript — "what is this?" is the whole of what was asked.
+    #[cfg(feature = "chat")]
     fn chat_where(&mut self, cx: &mut Cx) -> String {
         let mode = self.tabs[self.tab].mode;
         let dir = self.current_dir();
@@ -4101,6 +4174,7 @@ impl App {
     fn refresh_chat(&mut self, cx: &mut Cx) {
         let mode = self.tabs[self.tab].mode;
         let picked = self.chat_subject(cx);
+        #[cfg(feature = "chat")]
         if self.chat_open {
             let about = match &picked {
                 Some(path) => format!("about: {}", describe_path(path)),
@@ -4147,12 +4221,18 @@ impl App {
 
     /// Is the caret in the ask field? The panel stays open while its answer is
     /// read, so "open" cannot be what decides whether a key is text.
+    #[cfg(feature = "chat")]
     fn chat_is_typing(&mut self, cx: &mut Cx) -> bool {
         if !self.chat_open {
             return false;
         }
         let area = self.ui.text_input(cx, ids!(chat_input)).area();
         !area.is_empty() && cx.has_key_focus(area)
+    }
+
+    #[cfg(not(feature = "chat"))]
+    fn chat_is_typing(&mut self, _cx: &mut Cx) -> bool {
+        false
     }
 
     /// Whether the caret is in the filter sidebar's query field.
@@ -4174,6 +4254,7 @@ impl App {
             .map(|entry| entry.path)
     }
 
+    #[cfg(feature = "chat")]
     fn send_chat(&mut self, cx: &mut Cx) {
         let field = self.ui.text_input(cx, ids!(chat_input));
         let text = field.text().trim().to_string();
@@ -4213,6 +4294,7 @@ impl App {
         self.redraw_chat(cx);
     }
 
+    #[cfg(feature = "chat")]
     fn stop_chat(&mut self, cx: &mut Cx) {
         if !self.chat_busy {
             return;
@@ -4231,6 +4313,7 @@ impl App {
     }
 
     /// Swap the Ask button for Stop while a turn is running.
+    #[cfg(feature = "chat")]
     fn set_chat_running(&mut self, cx: &mut Cx, running: bool) {
         self.ui
             .widget(cx, ids!(chat_send))
@@ -4239,6 +4322,7 @@ impl App {
     }
 
     /// Everything the model and the tool worker have said since the last frame.
+    #[cfg(feature = "chat")]
     fn drain_chat(&mut self, cx: &mut Cx) {
         let events = match &self.agent {
             Some(agent) => agent.poll(),
@@ -4280,6 +4364,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "chat")]
     fn on_chat_event(&mut self, cx: &mut Cx, event: ChatEvent) {
         match event {
             ChatEvent::Loading { phase, fraction } => {
@@ -4689,11 +4774,13 @@ fn now_minutes() -> u32 {
 
 /// How many times the model may go round the look-then-think loop for one
 /// question before it has to answer with what it has.
+#[cfg(feature = "chat")]
 const MAX_TOOL_ROUNDS: usize = 6;
 
 /// One path, as a sentence: what it is and how big. Reads off the disk, so it
 /// is the truth at the moment it is asked rather than whatever a listing
 /// remembered.
+#[cfg(feature = "chat")]
 fn describe_path(path: &Path) -> String {
     match model::entry_at(path) {
         Some(entry) => format!(
@@ -4707,6 +4794,7 @@ fn describe_path(path: &Path) -> String {
 }
 
 /// What the model is told it is, once, in front of everything else.
+#[cfg(feature = "chat")]
 const CHAT_SYSTEM_PROMPT: &str = "\
 You are the assistant inside mpfiles, a file browser. You answer questions \
 about the files the person is looking at right now.
@@ -4732,6 +4820,11 @@ impl MatchEvent for App {
         // Checked once: a warm-pool instance stays dormant until
         // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
         self.dormancy = Dormancy::start(mp_wm_api::warm_start());
+        // The feature build and the native switch install the same closed
+        // filesystem before preferences or paths can consult a backend.
+        if vfs::demo_requested() {
+            vfs::install(Arc::new(demo::DemoVfs::new()));
+        }
         // The scan-scope checkbox shows the saved choice from the first
         // frame; checked means the system folders stay out.
         self.ui
@@ -4746,19 +4839,17 @@ impl MatchEvent for App {
         };
         self.filter_popup_open = model::pref_get("filter_side").as_deref() == Some("1");
         self.style_projection_buttons(cx);
-        // `--demo` browses a home that does not exist, so a screen recording
-        // can show every feature of this app without showing anybody's disk.
-        // It is chosen before anything reads a path, and never afterwards.
-        if vfs::demo_requested() {
-            vfs::install(Arc::new(demo::DemoVfs::new()));
-        }
         let (sender, receiver) = mpsc::channel();
         self.sender = Some(sender);
         self.receiver = Some(receiver);
         let (size_sender, size_receiver) = mpsc::channel();
         self.size_sender = Some(size_sender);
         self.size_receiver = Some(size_receiver);
-        self.ops = Some(Ops::new(Box::new(SignalToUI::set_ui_signal)));
+        self.ops = if vfs().is_instant() {
+            None
+        } else {
+            Some(Ops::new(Box::new(SignalToUI::set_ui_signal)))
+        };
         self.home = vfs().home();
         // The demo must not write to the real home, so its bookmarks live and
         // die with the window.
@@ -4771,6 +4862,8 @@ impl MatchEvent for App {
             // Say so where it cannot be missed: a recording of the demo must
             // never be mistaken for a recording of somebody's files.
             self.ui.label(cx, ids!(files_title)).set_text(cx, "Files · Demo");
+            #[cfg(feature = "chat")]
+            self.ui.widget(cx, ids!(chat_button)).set_visible(cx, false);
         }
         let palette = Palette::shared();
         let colors = contents::Colors {
@@ -4850,24 +4943,27 @@ impl MatchEvent for App {
         }
 
         // ---- the ask panel
-        if self.ui.view(cx, ids!(chat_button)).finger_down(actions).is_some() {
-            self.toggle_chat(cx);
-        }
-        if self.chat_open {
-            if self.ui.view(cx, ids!(chat_close)).finger_down(actions).is_some() {
+        #[cfg(feature = "chat")]
+        {
+            if self.ui.view(cx, ids!(chat_button)).finger_down(actions).is_some() {
                 self.toggle_chat(cx);
-                return;
             }
-            if self.ui.view(cx, ids!(chat_stop)).finger_down(actions).is_some() {
-                self.stop_chat(cx);
-                return;
-            }
-            let field = self.ui.text_input(cx, ids!(chat_input));
-            let returned = field.returned(actions).is_some();
-            drop(field);
-            if returned || self.ui.view(cx, ids!(chat_send)).finger_down(actions).is_some() {
-                self.send_chat(cx);
-                return;
+            if self.chat_open {
+                if self.ui.view(cx, ids!(chat_close)).finger_down(actions).is_some() {
+                    self.toggle_chat(cx);
+                    return;
+                }
+                if self.ui.view(cx, ids!(chat_stop)).finger_down(actions).is_some() {
+                    self.stop_chat(cx);
+                    return;
+                }
+                let field = self.ui.text_input(cx, ids!(chat_input));
+                let returned = field.returned(actions).is_some();
+                drop(field);
+                if returned || self.ui.view(cx, ids!(chat_send)).finger_down(actions).is_some() {
+                    self.send_chat(cx);
+                    return;
+                }
             }
         }
         self.handle_map_tool_actions(cx, actions);
@@ -5073,13 +5169,18 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         // The WM's theme, first into the stock widgets and then into `mod.mpf`
         // for our own chrome — both before anything reads a color.
-        mp_theme::apply(vm);
+        if !vfs::demo_requested() {
+            mp_theme::apply(vm);
+        }
         Palette::shared().publish(vm);
         crate::theme::script_mod(vm);
         crate::thumbs::script_mod(vm);
         crate::treemap_view::script_mod(vm);
         crate::contents::script_mod(vm);
+        #[cfg(feature = "chat")]
         crate::chat_panel::script_mod(vm);
+        #[cfg(not(feature = "chat"))]
+        crate::no_chat::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -5125,6 +5226,7 @@ impl AppMain for App {
                     self.refresh_filter_popup(cx);
                 }
             }
+            #[cfg(feature = "chat")]
             self.drain_chat(cx);
             self.preview.poll();
         }
@@ -5141,8 +5243,10 @@ impl AppMain for App {
         }
         // The transcript draws from the chat state, so it rides down the tree
         // as the scope — every other widget in this window ignores it.
-        self.ui
-            .handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
+        #[cfg(feature = "chat")]
+        self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
+        #[cfg(not(feature = "chat"))]
+        self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
 

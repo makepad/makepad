@@ -18,7 +18,9 @@
 use makepad_widgets::makepad_micro_serde::*;
 use makepad_widgets::makepad_platform::studio::AppToStudio;
 use makepad_widgets::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 /// What an app can ask the window manager.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -206,6 +208,7 @@ pub fn viewer_for(path: &Path) -> &'static str {
 }
 
 /// Spawn a sibling binary of the running executable, detached.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_sibling(bin: &str, args: &[&str]) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
@@ -227,6 +230,11 @@ fn spawn_sibling(bin: &str, args: &[&str]) -> bool {
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_sibling(_bin: &str, _args: &[&str]) -> bool {
+    false
 }
 
 #[cfg(test)]
