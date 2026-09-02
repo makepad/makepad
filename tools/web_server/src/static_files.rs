@@ -10,8 +10,7 @@ use std::{
     collections::{HashMap, VecDeque},
     ffi::{CString, OsString},
     fs::{self, File, Metadata, OpenOptions},
-    fmt::Write as _,
-    io::{Read, Seek, Write},
+    io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{mpsc::{self, SyncSender, TrySendError}, Mutex},
@@ -289,7 +288,7 @@ impl StaticHandler {
             return;
         }
         let relative = request_path.trim_start_matches('/');
-        let mut original = match self.open_beneath(relative) {
+        let original = match self.open_beneath(relative) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 send_response(sender, static_error(404, "not found"));
@@ -325,13 +324,11 @@ impl StaticHandler {
         };
 
         let range_header = headers.header("Range");
-        let identity_etag = match etag(&mut original, false) {
-            Ok(etag) => etag,
-            Err(_) => {
-                send_response(sender, static_error(500, "internal error"));
-                return;
-            }
-        };
+        let identity_etag = etag(
+            original_metadata.len(),
+            original_metadata.modified().unwrap_or(UNIX_EPOCH),
+            false,
+        );
         let identity_modified = modified_seconds(&original_metadata);
         let range_honored = range_header.is_some()
             && headers
@@ -347,7 +344,7 @@ impl StaticHandler {
             None
         };
         let use_brotli = brotli_file.is_some() && accepts_brotli(headers.header("Accept-Encoding"));
-        let mut selected = if use_brotli {
+        let selected = if use_brotli {
             brotli_file.unwrap()
         } else {
             original
@@ -361,13 +358,11 @@ impl StaticHandler {
         };
         let len = metadata.len();
         let etag = if use_brotli {
-            match etag(&mut selected, true) {
-                Ok(etag) => etag,
-                Err(_) => {
-                    send_response(sender, static_error(500, "internal error"));
-                    return;
-                }
-            }
+            etag(
+                metadata.len(),
+                metadata.modified().unwrap_or(UNIX_EPOCH),
+                true,
+            )
         } else {
             identity_etag.clone()
         };
@@ -862,34 +857,18 @@ fn common_file_headers(etag: &str, last_modified: &str, encoded: bool, public: b
     )
 }
 
-pub fn etag(file: &mut File, encoded: bool) -> std::io::Result<String> {
-    let position = file.stream_position()?;
-    file.seek(std::io::SeekFrom::Start(0))?;
-    let digest = (|| {
-        let mut sha256 = makepad_network::digest::Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            sha256.update(&buffer[..read]);
-        }
-        Ok::<_, std::io::Error>(sha256.finalise())
-    })();
-    let restored = file.seek(std::io::SeekFrom::Start(position));
-    let digest = digest?;
-    restored?;
-    let mut value = String::with_capacity(69);
-    value.push('"');
-    for byte in digest {
-        write!(&mut value, "{byte:02x}").expect("write to string");
-    }
-    if encoded {
-        value.push_str("-br");
-    }
-    value.push('"');
-    Ok(value)
+pub fn etag(length: u64, modified: SystemTime, encoded: bool) -> String {
+    let (before_epoch, duration) = match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (false, duration),
+        Err(error) => (true, error.duration()),
+    };
+    let encoding_suffix = if encoded { "-br" } else { "" };
+    let epoch_marker = if before_epoch { "-" } else { "" };
+    format!(
+        "\"{length:x}-{epoch_marker}{:x}-{:08x}{encoding_suffix}\"",
+        duration.as_secs(),
+        duration.subsec_nanos()
+    )
 }
 
 fn if_none_match(header: Option<&str>, etag: &str) -> bool {
@@ -1378,34 +1357,17 @@ mod tests {
     }
 
     #[test]
-    fn etag_changes_with_bytes_when_length_and_mtime_are_preserved() {
-        let dir = std::env::temp_dir().join(format!(
-            "makepad-web-etag-{}-{:?}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join("asset.bin");
-        fs::write(&path, b"AAA").unwrap();
-        let modified = path.metadata().unwrap().modified().unwrap();
-        let mut first_file = File::open(&path).unwrap();
-        let first = etag(&mut first_file, false).unwrap();
-        let first_encoded = etag(&mut first_file, true).unwrap();
-        assert!(!first.ends_with("-br\""));
-        assert!(first_encoded.ends_with("-br\""));
-        fs::write(&path, b"BBB").unwrap();
-        File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(modified))
-            .unwrap();
-        let mut second_file = File::open(&path).unwrap();
-        let second = etag(&mut second_file, false).unwrap();
-        assert_eq!(path.metadata().unwrap().len(), 3);
-        assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
-        assert_ne!(first, second);
-        fs::remove_file(path).unwrap();
-        fs::remove_dir(dir).unwrap();
+    fn etag_tracks_size_mtime_and_content_encoding() {
+        let modified = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        let identity = etag(100, modified, false);
+        let brotli = etag(100, modified, true);
+        let other_size = etag(101, modified, false);
+        let other_mtime = etag(100, modified + Duration::new(0, 1), false);
+
+        assert_eq!(identity, "\"64-6553f100-075bcd15\"");
+        assert_ne!(identity, brotli);
+        assert_ne!(identity, other_size);
+        assert_ne!(identity, other_mtime);
+        assert!(brotli.ends_with("-br\""));
     }
 }
