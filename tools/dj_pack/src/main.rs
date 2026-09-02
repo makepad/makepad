@@ -16,7 +16,7 @@ use makepad_asset_store::{
 };
 use makepad_audio_decode::{decode_any, read_tags, DecodedAudio};
 use makepad_audio_sidechannels::{encode_stem_oggs, side_channel_files_with_analysis};
-use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson};
+use makepad_micro_serde::SerJson;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -33,16 +33,18 @@ fn usage() -> &'static str {
 \n\
 USAGE:\n\
   makepad-dj-pack stems <audio>... --hub <URL|auto> --out <stem-cache-dir>\n\
+  makepad-dj-pack analyse <audio>... [--wave-cache <dir>] [--loop-cache <dir>]\n\
   makepad-dj-pack pack --store <root> --site-out <dir> [--stem-cache <dir>]\n\
-                       [--lyrics-cache <dir>] [--require-stems] [--dry-run] <audio>...\n\
+                       [--lyrics-cache <dir>] [--wave-cache <dir>]\n\
+                       [--loop-cache <dir>] [--require-stems] [--dry-run] <audio>...\n\
 \n\
 stems decodes locally with makepad-audio-decode, sends 44.1 kHz stereo PCM\n\
-to the hub's stems capability, and writes VJ StemCache + four Ogg files plus\n\
-the native beat/wave analysis and stem-aware loop-splat caches. It never loads\n\
+to the hub's stems capability, and writes VJ StemCache + four Ogg files.\n\
+analyse runs the VJ's native beat/wave and loop-splat builders locally and\n\
+writes digest-keyed caches; it does not contact the AI hub. stems never loads\n\
 or runs a separation model. --hub auto listens for fleet beacons.\n\
-pack reads stem and lyrics caches only when their directories are explicitly\n\
-given, computes missing analysis without writing those caches, publishes the\n\
-original audio plus available side channels, then exports\n\
+pack only reads caches, publishes the original audio plus available side\n\
+channels, then exports\n\
 /v1/health, catalogs, aliases, revisions and /v1/blobs for StaticStore."
 }
 
@@ -64,6 +66,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     match command {
         "stems" => run_stems(parse_stems(&args[1..])?),
+        "analyse" => run_analyse(parse_analyse(&args[1..])?),
         "pack" => run_pack(parse_pack(&args[1..])?),
         other => Err(format!("unknown command {other:?}\n\n{}", usage())),
     }
@@ -114,9 +117,66 @@ struct PackArgs {
     site_out: PathBuf,
     stem_cache: Option<PathBuf>,
     lyrics_cache: Option<PathBuf>,
+    wave_cache: PathBuf,
+    loop_cache: PathBuf,
     require_stems: bool,
     dry_run: bool,
     audio: Vec<PathBuf>,
+}
+
+struct AnalyseArgs {
+    wave_cache: PathBuf,
+    loop_cache: PathBuf,
+    audio: Vec<PathBuf>,
+}
+
+fn default_loop_cache() -> PathBuf {
+    if let Ok(dir) = std::env::var("VJ_LOOP_CACHE") {
+        return PathBuf::from(dir);
+    }
+    makepad_vj_analysis::wave_analysis::cache_dir()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("loop-cache")
+}
+
+fn parse_analyse(args: &[String]) -> Result<AnalyseArgs, String> {
+    let mut wave_cache = None;
+    let mut loop_cache = None;
+    let mut audio = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--wave-cache" => {
+                index += 1;
+                wave_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--wave-cache needs a directory")?,
+                ));
+            }
+            "--loop-cache" => {
+                index += 1;
+                loop_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--loop-cache needs a directory")?,
+                ));
+            }
+            "-h" | "--help" => {
+                println!("{}", usage());
+                std::process::exit(0);
+            }
+            value if value.starts_with('-') => return Err(format!("unknown analyse option {value}")),
+            value => audio.push(PathBuf::from(value)),
+        }
+        index += 1;
+    }
+    if audio.is_empty() {
+        return Err("analyse needs at least one audio file".to_string());
+    }
+    Ok(AnalyseArgs {
+        wave_cache: wave_cache
+            .unwrap_or_else(makepad_vj_analysis::wave_analysis::cache_dir),
+        loop_cache: loop_cache.unwrap_or_else(default_loop_cache),
+        audio,
+    })
 }
 
 fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
@@ -124,6 +184,8 @@ fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
     let mut site_out = None;
     let mut stem_cache = None;
     let mut lyrics_cache = None;
+    let mut wave_cache = None;
+    let mut loop_cache = None;
     let mut require_stems = false;
     let mut dry_run = false;
     let mut audio = Vec::new();
@@ -150,6 +212,18 @@ fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
                     args.get(index).ok_or("--lyrics-cache needs a directory")?,
                 ));
             }
+            "--wave-cache" => {
+                index += 1;
+                wave_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--wave-cache needs a directory")?,
+                ));
+            }
+            "--loop-cache" => {
+                index += 1;
+                loop_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--loop-cache needs a directory")?,
+                ));
+            }
             "--require-stems" => require_stems = true,
             "--dry-run" => dry_run = true,
             "-h" | "--help" => {
@@ -169,6 +243,9 @@ fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
         site_out: site_out.ok_or("pack requires --site-out <dir>")?,
         stem_cache,
         lyrics_cache,
+        wave_cache: wave_cache
+            .unwrap_or_else(makepad_vj_analysis::wave_analysis::cache_dir),
+        loop_cache: loop_cache.unwrap_or_else(default_loop_cache),
         require_stems,
         dry_run,
         audio,
@@ -553,22 +630,8 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
         let pcm = model_pcm(&track);
         let header = CacheHeader::for_track(pcm.left.len() as u64);
         if makepad_ai_stems::cache_is_complete_on_disk(&args.out, &track.digest, &header) {
-            if service.is_none() {
-                service = Some(resolve_hub(&args.hub)?);
-            }
-            let resolved = service.as_ref().unwrap();
             ensure_cached_oggs(&args.out, &track.digest, &header, true)?;
-            let stems = cached_stem_set(&args.out, &track.digest, header.frames)?;
-            let (mut analysis, _) = analyze_track(&track, Some(&stems));
-            refine_analysis_through_hub(
-                &resolved.service,
-                &track,
-                resolved.max_job_body_bytes,
-                &mut analysis,
-            )?;
-            let splat = splat_for(&analysis, Some(&stems));
-            write_analysis_cache(&args.out, &track, &analysis, splat.as_ref())?;
-            println!("{}: cached {} + analysis", path.display(), track.digest);
+            println!("{}: cached {}", path.display(), track.digest);
             continue;
         }
         if service.is_none() {
@@ -595,18 +658,9 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
             }
             output
         };
-        let (mut analysis, _) = analyze_track(&track, Some(&stems));
-        refine_analysis_through_hub(
-            hub,
-            &track,
-            resolved.max_job_body_bytes,
-            &mut analysis,
-        )?;
-        let splat = splat_for(&analysis, Some(&stems));
         write_cache(&args.out, &track.digest, &stems)?;
         ensure_cached_oggs(&args.out, &track.digest, &header, true)?;
-        write_analysis_cache(&args.out, &track, &analysis, splat.as_ref())?;
-        println!("{}: separated {} + analysis", path.display(), track.digest);
+        println!("{}: separated {}", path.display(), track.digest);
     }
     Ok(())
 }
@@ -693,72 +747,6 @@ fn wait_for_stems(
     }
 }
 
-#[derive(DeJson)]
-struct BeatsArtifact {
-    bpm: f64,
-    confidence: f64,
-    beats: Vec<f64>,
-    downbeats: Vec<f64>,
-    frame_rate: f64,
-}
-
-fn refine_analysis_through_hub(
-    hub: &LocalService,
-    audio: &PreparedAudio,
-    body_limit: Option<u64>,
-    analysis: &mut makepad_vj_analysis::wave_analysis::TrackAnalysis,
-) -> Result<(), String> {
-    let has_beats = hub
-        .list_models()
-        .map_err(|error| format!("AI hub {} model query failed: {error}", hub.base_url()))?
-        .into_iter()
-        .any(|model| model.available && model.domain == Domain::Beats.as_str());
-    if !has_beats {
-        return Ok(());
-    }
-    let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
-        &audio.bytes,
-        &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
-    ))
-    .map_err(|_| "base64 encoder returned non-UTF-8".to_string())?;
-    let mut request = GenerateRequestJson::default();
-    request.model = "beat-this".to_string();
-    request.input_b64 = Some(input_b64);
-    request.input_content_type = Some(
-        match audio.media {
-            MediaType::Mp3 => "audio/mpeg",
-            MediaType::Ogg => "audio/ogg",
-            _ => "application/octet-stream",
-        }
-        .to_string(),
-    );
-    let request_bytes = request.serialize_json().len() as u64;
-    if body_limit.is_some_and(|limit| request_bytes > limit) {
-        return Err(format!(
-            "AI hub {} beat-analysis upload is {request_bytes} bytes, above max_job_body_bytes={}",
-            hub.base_url(),
-            body_limit.unwrap()
-        ));
-    }
-    let job = hub
-        .request(Domain::Beats, &request)
-        .map_err(|error| format!("AI hub {} beat-analysis submit failed: {error}", hub.base_url()))?;
-    let artifact = wait_for_stems(hub, &job)?;
-    if artifact.content_type != "application/json" {
-        return Err(format!(
-            "AI hub beat analysis returned {}, expected application/json",
-            artifact.content_type
-        ));
-    }
-    let text = std::str::from_utf8(&artifact.bytes)
-        .map_err(|_| "AI hub beat analysis returned non-UTF-8 JSON".to_string())?;
-    let beats = BeatsArtifact::deserialize_json(text)
-        .map_err(|error| format!("AI hub beat analysis JSON: {error:?}"))?;
-    let _summary = (beats.bpm, beats.confidence, beats.frame_rate);
-    analysis.refine_with_beats(&beats.beats, &beats.downbeats);
-    Ok(())
-}
-
 fn write_cache(root: &Path, digest: &str, stems: &StemSet) -> Result<(), String> {
     let frames = stems[0].left.len();
     if frames == 0
@@ -813,9 +801,12 @@ fn ensure_cached_oggs(
     Ok(oggs)
 }
 
-fn analysis_paths(root: &Path, digest: &str) -> (PathBuf, PathBuf) {
-    let dir = root.join(digest);
-    (dir.join(DJ_ANALYSIS_NAME), dir.join(DJ_LOOP_SPLAT_NAME))
+fn wave_cache_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(format!("{digest}.wave"))
+}
+
+fn loop_cache_path(root: &Path, digest: &str) -> PathBuf {
+    root.join(digest).join(DJ_LOOP_SPLAT_NAME)
 }
 
 fn analysis_pcm(audio: &PreparedAudio) -> makepad_vj_analysis::mixer::TrackPcm {
@@ -825,110 +816,68 @@ fn analysis_pcm(audio: &PreparedAudio) -> makepad_vj_analysis::mixer::TrackPcm {
     }
 }
 
-fn cached_stem_set(root: &Path, digest: &str, frames: u64) -> Result<StemSet, String> {
-    let mut cache = StemCache::open(root, digest, CacheHeader::for_track(frames))
-        .map_err(|error| error.to_string())?;
-    if !cache.is_complete() {
-        return Err(format!("stem cache {digest} is incomplete"));
-    }
-    cache.read_all().map_err(|error| error.to_string())
-}
-
-fn analyze_track(
-    audio: &PreparedAudio,
-    stems: Option<&StemSet>,
-) -> (
+fn analyze_track(audio: &PreparedAudio) -> (
     makepad_vj_analysis::wave_analysis::TrackAnalysis,
     Option<makepad_vj_analysis::loop_splat::SplatGrid>,
 ) {
     let pcm = analysis_pcm(audio);
     let analysis = makepad_vj_analysis::wave_analysis::analyze(&pcm);
-    let splat = splat_for(&analysis, stems);
+    let splat = makepad_vj_analysis::loop_splat::build_splat(&analysis, None);
     (analysis, splat)
 }
 
-fn splat_for(
-    analysis: &makepad_vj_analysis::wave_analysis::TrackAnalysis,
-    stems: Option<&StemSet>,
-) -> Option<makepad_vj_analysis::loop_splat::SplatGrid> {
-    use makepad_vj_analysis::loop_splat::{build_splat, StemLevels};
-    use makepad_vj_analysis::music_dsp::StemKind;
-    let levels = stems.map(|set| {
-        StemLevels::from_stems(
-            analysis.grid.beat_secs,
-            analysis.grid.first_beat_secs,
-            SAMPLE_RATE,
-            set[0].left.len(),
-            |stem, frame| {
-                let index = match stem {
-                    StemKind::Vocals => 3,
-                    StemKind::Drums => 0,
-                    StemKind::Bass => 1,
-                    StemKind::Other => 2,
-                };
-                Some([*set[index].left.get(frame)?, *set[index].right.get(frame)?])
-            },
-        )
-    });
-    build_splat(analysis, levels.as_ref())
+fn read_cache(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
-fn load_or_analyze(
+fn load_analysis_caches(
     args: &PackArgs,
-    audio: &PreparedAudio,
-    stems_complete: bool,
-) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    let cached_analysis = args.stem_cache.as_ref().and_then(|root| {
-        let (analysis_path, splat_path) = analysis_paths(root, &audio.digest);
-        let bytes = std::fs::read(&analysis_path).ok()?;
-        let analysis = makepad_vj_analysis::wave_analysis::decode_analysis(&bytes).ok()?;
-        let splat = std::fs::read(&splat_path).ok().and_then(|bytes| {
-            makepad_vj_analysis::loop_splat::decode_splat(&bytes)
-                .ok()
-                .map(|_| bytes)
-        });
-        Some((bytes, analysis, splat))
-    });
-    if let Some((analysis, _, Some(splat))) = &cached_analysis {
-        return Ok((analysis.clone(), Some(splat.clone())));
+    digest: &str,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), String> {
+    let wave_path = wave_cache_path(&args.wave_cache, digest);
+    let analysis = read_cache(&wave_path)?;
+    if let Some(bytes) = &analysis {
+        makepad_vj_analysis::wave_analysis::decode_analysis(bytes)
+            .map_err(|error| format!("{}: {error}", wave_path.display()))?;
     }
-    let stems = match (args.stem_cache.as_ref(), stems_complete) {
-        (Some(root), true) => {
-            let frames = model_pcm(audio).left.len() as u64;
-            Some(cached_stem_set(root, &audio.digest, frames)?)
-        }
-        _ => None,
-    };
-    if let Some((bytes, analysis, None)) = cached_analysis {
-        let splat = splat_for(&analysis, stems.as_ref())
-            .as_ref()
-            .map(makepad_vj_analysis::loop_splat::encode_splat);
-        return Ok((bytes, splat));
+    let loop_path = loop_cache_path(&args.loop_cache, digest);
+    let splat = read_cache(&loop_path)?;
+    if let Some(bytes) = &splat {
+        makepad_vj_analysis::loop_splat::decode_splat(bytes)
+            .map_err(|error| format!("{}: {error}", loop_path.display()))?;
     }
-    let (analysis, splat) = analyze_track(audio, stems.as_ref());
-    let analysis = makepad_vj_analysis::wave_analysis::encode_analysis(&analysis);
-    let splat = splat
-        .as_ref()
-        .map(makepad_vj_analysis::loop_splat::encode_splat);
     Ok((analysis, splat))
 }
 
-fn write_analysis_cache(
-    root: &Path,
-    audio: &PreparedAudio,
-    analysis: &makepad_vj_analysis::wave_analysis::TrackAnalysis,
-    splat: Option<&makepad_vj_analysis::loop_splat::SplatGrid>,
-) -> Result<(), String> {
-    let (analysis_path, splat_path) = analysis_paths(root, &audio.digest);
-    write_atomic(
-        &analysis_path,
-        &makepad_vj_analysis::wave_analysis::encode_analysis(analysis),
-    )?;
-    if let Some(splat) = splat {
-        write_atomic(
-            &splat_path,
-            &makepad_vj_analysis::loop_splat::encode_splat(splat),
+fn run_analyse(args: AnalyseArgs) -> Result<(), String> {
+    for path in &args.audio {
+        let audio = prepare_audio(path)?;
+        let (analysis, splat) = analyze_track(&audio);
+        let key = makepad_vj_analysis::wave_analysis::AnalysisKey::from_digest(&audio.digest)?;
+        let wave_path = makepad_vj_analysis::wave_analysis::store_analysis_in(
+            &args.wave_cache,
+            &key,
+            &analysis,
         )?;
+        debug_assert_eq!(wave_path, wave_cache_path(&args.wave_cache, &audio.digest));
+        let mut roles = DJ_ANALYSIS_NAME.to_string();
+        if let Some(splat) = splat {
+            let loop_path = loop_cache_path(&args.loop_cache, &audio.digest);
+            write_atomic(
+                &loop_path,
+                &makepad_vj_analysis::loop_splat::encode_splat(&splat),
+            )?;
+            roles.push_str(",loop-splat.bin");
+        }
+        println!(
+            "{}: analysed {} caches={roles}",
+            audio.path.display(),
+            audio.digest
+        );
     }
     Ok(())
 }
@@ -973,26 +922,34 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         if !stems_complete && args.require_stems {
             return Err(format!("required stem cache {} is not complete", audio.digest));
         }
+        let (analysis, splat) = load_analysis_caches(&args, &audio.digest)?;
         if args.dry_run {
             let has_lyrics = load_lyrics(&args, &audio.digest)?.is_some();
             let (_, _, description) = load_rights(&audio)?;
-            let stem_roles = if stems_complete {
-                ",StemDrums,StemBass,StemVocals,StemOther"
-            } else {
-                ""
-            };
+            let mut side_channels = Vec::new();
+            if stems_complete {
+                side_channels.extend(["stem_drums", "stem_bass", "stem_vocals", "stem_other"]);
+            }
+            if has_lyrics {
+                side_channels.push("lyrics");
+            }
+            if analysis.is_some() {
+                side_channels.push("dj_analysis");
+            }
+            if splat.is_some() {
+                side_channels.push("dj_loop_splat");
+            }
             let stem_report = if stems_complete {
                 "cached"
             } else {
                 "omitted (no complete cache)"
             };
             println!(
-                "DRY RUN {} -> {} digest={} roles=Audio{}{} stems={} description={description:?}",
+                "DRY RUN {} -> {} digest={} side-channels=[{}] stems={} description={description:?}",
                 audio.path.display(),
                 alias,
                 audio.digest,
-                stem_roles,
-                if has_lyrics { ",Lyrics" } else { "" },
+                side_channels.join(","),
                 stem_report
             );
             continue;
@@ -1009,8 +966,7 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
             None
         };
         let lyrics = load_lyrics(&args, &audio.digest)?;
-        let (analysis, splat) = load_or_analyze(&args, &audio, stems_complete)?;
-        let side_files = side_channel_files_with_analysis(oggs, lyrics, Some(analysis), splat);
+        let side_files = side_channel_files_with_analysis(oggs, lyrics, analysis, splat);
         let (rights, license_text, description) = load_rights(&audio)?;
         tracks.push(PackTrack { audio, alias, side_files, rights, license_text, description });
     }
@@ -1494,7 +1450,13 @@ mod tests {
             cells,
             bars_per_col: [4, 0, 0, 0, 0, 0, 0, 0],
         };
-        assert_eq!(decode_splat(&encode_splat(&grid)).unwrap(), grid);
+        let bytes = encode_splat(&grid);
+        assert_eq!(decode_splat(&bytes).unwrap(), grid);
+        let dir = TestDir::new("loop-cache");
+        let path = loop_cache_path(&dir.0, "abcd");
+        write_atomic(&path, &bytes).unwrap();
+        assert_eq!(path, dir.0.join("abcd/loop-splat.bin"));
+        assert_eq!(decode_splat(&std::fs::read(path).unwrap()).unwrap(), grid);
     }
 
     #[test]
@@ -1557,6 +1519,8 @@ mod tests {
         let tracks = dir.0.join("tracks");
         let cache = dir.0.join("stem-cache");
         let lyrics = dir.0.join("lyrics-cache");
+        let wave_cache = dir.0.join("wave-cache");
+        let loop_cache = dir.0.join("loop-cache");
         std::fs::create_dir_all(&tracks).unwrap();
         std::fs::create_dir_all(&lyrics).unwrap();
         let audio_path = tracks.join("tone.ogg");
@@ -1577,11 +1541,25 @@ mod tests {
         }
         .to_json(&audio.digest);
         std::fs::write(lyrics.join(format!("{}.json", audio.digest)), lyrics_json).unwrap();
+        run_analyse(AnalyseArgs {
+            wave_cache: wave_cache.clone(),
+            loop_cache: loop_cache.clone(),
+            audio: vec![audio_path.clone()],
+        })
+        .unwrap();
+        let wave_path = wave_cache_path(&wave_cache, &audio.digest);
+        assert_eq!(wave_path, wave_cache.join(format!("{}.wave", audio.digest)));
+        makepad_vj_analysis::wave_analysis::decode_analysis(
+            &std::fs::read(wave_path).unwrap(),
+        )
+        .unwrap();
         run_pack(PackArgs {
             store: dir.0.join("store"),
             site_out: dir.0.join("site"),
             stem_cache: Some(cache),
             lyrics_cache: Some(lyrics),
+            wave_cache: wave_cache.clone(),
+            loop_cache: loop_cache.clone(),
             require_stems: false,
             dry_run: false,
             audio: vec![audio_path],
@@ -1621,6 +1599,8 @@ mod tests {
             site_out: dir.0.join("site"),
             stem_cache: Some(dir.0.join("stem-cache")),
             lyrics_cache: Some(dir.0.join("lyrics-cache")),
+            wave_cache,
+            loop_cache,
             require_stems: false,
             dry_run: false,
             audio: vec![tracks.join("tone.ogg")],
@@ -1646,6 +1626,8 @@ mod tests {
             site_out: dir.0.join("required-site"),
             stem_cache: Some(cache.clone()),
             lyrics_cache: None,
+            wave_cache: dir.0.join("wave-cache"),
+            loop_cache: dir.0.join("loop-cache"),
             require_stems: true,
             dry_run: false,
             audio: vec![audio_path.clone()],
@@ -1658,6 +1640,8 @@ mod tests {
             site_out: dir.0.join("site"),
             stem_cache: Some(cache.clone()),
             lyrics_cache: None,
+            wave_cache: dir.0.join("wave-cache"),
+            loop_cache: dir.0.join("loop-cache"),
             require_stems: false,
             dry_run: false,
             audio: vec![audio_path],
@@ -1668,6 +1652,8 @@ mod tests {
         let static_manifest =
             std::fs::read_to_string(dir.0.join("site/v1/static/manifest.json")).unwrap();
         assert!(!static_manifest.contains("\"role\":\"stem_"));
+        assert!(!static_manifest.contains("\"role\":\"dj_analysis\""));
+        assert!(!static_manifest.contains("\"role\":\"dj_loop_splat\""));
     }
 
     #[test]
@@ -1689,6 +1675,8 @@ mod tests {
             site_out: dir.0.join("site"),
             stem_cache: Some(dir.0.join("stem-cache")),
             lyrics_cache: Some(dir.0.join("lyrics-cache")),
+            wave_cache: dir.0.join("wave-cache"),
+            loop_cache: dir.0.join("loop-cache"),
             require_stems: false,
             dry_run: true,
             audio: vec![audio_path],
@@ -1714,5 +1702,21 @@ mod tests {
         .unwrap();
         assert!(args.stem_cache.is_none());
         assert!(args.lyrics_cache.is_none());
+        assert_eq!(
+            args.wave_cache,
+            makepad_vj_analysis::wave_analysis::cache_dir()
+        );
+        assert_eq!(args.loop_cache, default_loop_cache());
+
+        let args = parse_analyse(&[
+            "tone.ogg".into(),
+            "--wave-cache".into(),
+            "waves".into(),
+            "--loop-cache".into(),
+            "loops".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.wave_cache, PathBuf::from("waves"));
+        assert_eq!(args.loop_cache, PathBuf::from("loops"));
     }
 }
