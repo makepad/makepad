@@ -27,6 +27,7 @@ use crate::music_dsp::{
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
+use crate::published::Published;
 use crate::score_preview::{PreviewEvent, PreviewSequence};
 use makepad_drumkit::{DrumKit, SampleBank};
 use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimedEvent};
@@ -345,7 +346,7 @@ pub struct SplatFrames {
     pub cells: [[Option<SplatFrameCell>; SPLAT_COLS]; SPLAT_ROWS],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DeckSnapshot {
     pub position_secs: f64,
     pub duration_secs: f64,
@@ -1244,6 +1245,11 @@ pub struct Mixer {
     /// The headphone cue bus, written by `render`, drained by the phones
     /// device callback (slot 1).
     cue_ring: Arc<CueRing>,
+    /// What each deck's transport looked like at the end of the last
+    /// callback, or the last change the UI made to it: read by the UI every
+    /// frame without touching the state lock. Written only from under that
+    /// lock, which is what keeps it to one writer at a time.
+    deck_snapshots: Arc<[Published<DeckSnapshot>; 2]>,
 }
 
 /// Infrequent UI-to-audio-state handoffs that carry prepared immutable
@@ -1292,7 +1298,29 @@ impl Mixer {
             contended_callbacks: Arc::new(AtomicU64::new(0)),
             render_max_nanos: Arc::new(AtomicU64::new(0)),
             cue_ring: Arc::new(CueRing::new()),
+            deck_snapshots: Arc::new([
+                Published::new(DeckSnapshot::default()),
+                Published::new(DeckSnapshot::default()),
+            ]),
         }
+    }
+
+    /// Publish a deck's transport for the lock-free readers. Called with the
+    /// state lock held, by the callback and by every setter that moves the
+    /// transport, so a seek shows before the next buffer.
+    fn publish_deck(&self, s: &MixState, index: usize) {
+        let d = &s.decks[index];
+        let snapshot = match &d.pcm {
+            None => DeckSnapshot { scratching: d.scratch.active(), ..DeckSnapshot::default() },
+            Some(pcm) => DeckSnapshot {
+                position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
+                duration_secs: pcm.seconds(),
+                playing: d.playing,
+                scratching: d.scratch.active(),
+                splat: d.splat.as_ref().map(SplatState::snapshot),
+            },
+        };
+        self.deck_snapshots[index].publish(snapshot);
     }
 
     /// `(silent contended callbacks, high-water render nanos)` — the two
@@ -1637,6 +1665,7 @@ impl Mixer {
         d.seek_frames(0.0);
         d.eq.reset();
         d.reset_blend();
+        self.publish_deck(&s, deck.index());
     }
 
     /// Drop the deck's track entirely: the voice renders silence until the
@@ -1652,6 +1681,7 @@ impl Mixer {
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
         d.reset_blend();
+        self.publish_deck(&s, deck.index());
     }
 
     /// Attach separated stems to the track already on the deck. They must be
@@ -1682,6 +1712,7 @@ impl Mixer {
             d.ended = false;
         }
         d.playing = playing;
+        self.publish_deck(&s, deck.index());
     }
 
     /// Install or replace a grid. Frame conversion is deliberately done
@@ -1698,6 +1729,7 @@ impl Mixer {
             }
             None => voice.splat = Some(SplatState::new(grid, frames, voice.pos)),
         }
+        self.publish_deck(&state, deck.index());
     }
 
     pub fn set_deck_splat_enabled(&self, deck: DeckId, on: bool) {
@@ -1718,6 +1750,7 @@ impl Mixer {
             splat.active = false;
             voice.seek_frames(master);
         }
+        self.publish_deck(&state, deck.index());
     }
 
     pub fn splat_launch(&self, deck: DeckId, row: SplatRow, col: u8, part: SplatPart) {
@@ -1725,6 +1758,7 @@ impl Mixer {
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             splat.queue_cell(row, col as usize, part);
         }
+        self.publish_deck(&state, deck.index());
     }
 
     pub fn splat_stop_row(&self, deck: DeckId, row: SplatRow, timed: bool) {
@@ -1732,6 +1766,7 @@ impl Mixer {
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             splat.queue_stop(row, timed);
         }
+        self.publish_deck(&state, deck.index());
     }
 
     /// Launch a whole section: every STEM row of the column. The mix row is
@@ -1746,6 +1781,7 @@ impl Mixer {
                 splat.queue_cell(row, col as usize, SplatPart::WHOLE);
             }
         }
+        self.publish_deck(&state, deck.index());
     }
 
     pub fn splat_stop_all(&self, deck: DeckId, timed: bool) {
@@ -1755,6 +1791,7 @@ impl Mixer {
                 splat.queue_stop(row, timed);
             }
         }
+        self.publish_deck(&state, deck.index());
     }
 
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
@@ -1766,6 +1803,7 @@ impl Mixer {
             d.seek_frames(fraction.clamp(0.0, 1.0) * len);
             d.arm_seek_fade(from);
         }
+        self.publish_deck(&s, deck.index());
     }
 
     /// Absolute seek in source seconds.
@@ -1777,6 +1815,7 @@ impl Mixer {
         let from = d.playhead_frames();
         d.seek_frames(frames);
         d.arm_seek_fade(from);
+        self.publish_deck(&s, deck.index());
     }
 
     /// Tempo multiplier. With key lock on the pitch is preserved; with it
@@ -1816,6 +1855,7 @@ impl Mixer {
             ScratchMotion::Move { rate } => d.scratch.drag(rate),
             ScratchMotion::Release => d.scratch.release(deck_rate),
         }
+        self.publish_deck(&s, deck.index());
     }
 
     /// One tone band, 0 = kill.
@@ -1869,6 +1909,7 @@ impl Mixer {
                 d.arm_seek_fade(from);
             }
         }
+        self.publish_deck(&s, deck.index());
     }
 
     pub fn set_deck_mute(&self, deck: DeckId, muted: bool) {
@@ -1882,7 +1923,10 @@ impl Mixer {
     }
 
     pub fn swap_decks(&self) {
-        self.state.lock().unwrap().decks.swap(0, 1);
+        let mut s = self.state.lock().unwrap();
+        s.decks.swap(0, 1);
+        self.publish_deck(&s, 0);
+        self.publish_deck(&s, 1);
     }
 
     pub fn set_crossfader(&self, position: f32) {
@@ -1933,40 +1977,15 @@ impl Mixer {
 
     /// `(position_secs, duration_secs, playing)` from the device clock.
     pub fn deck_position(&self, deck: DeckId) -> (f64, f64, bool) {
-        let s = self.state.lock().unwrap();
-        let d = &s.decks[deck.index()];
-        match &d.pcm {
-            None => (0.0, 0.0, false),
-            Some(pcm) => {
-                let position = d.playhead_frames() / pcm.sample_rate.max(1) as f64;
-                (position, pcm.seconds(), d.playing)
-            }
-        }
+        let snapshot = self.deck_snapshots[deck.index()].read();
+        (snapshot.position_secs, snapshot.duration_secs, snapshot.playing)
     }
 
-    /// Position, transport and splat state in one lock. The per-frame UI path
-    /// uses this because every extra grab competes with the callback's
-    /// `try_lock`.
+    /// Position, transport and splat state as of the last callback or the
+    /// last transport change, without the state lock: the per-frame UI path
+    /// never competes with the callback's `try_lock`.
     pub fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
-        let s = self.state.lock().unwrap();
-        let d = &s.decks[deck.index()];
-        let scratching = d.scratch.active();
-        match &d.pcm {
-            None => DeckSnapshot {
-                position_secs: 0.0,
-                duration_secs: 0.0,
-                playing: false,
-                scratching,
-                splat: None,
-            },
-            Some(pcm) => DeckSnapshot {
-                position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
-                duration_secs: pcm.seconds(),
-                playing: d.playing,
-                scratching,
-                splat: d.splat.as_ref().map(SplatState::snapshot),
-            },
-        }
+        self.deck_snapshots[deck.index()].read()
     }
 
     /// Pre-fader peak levels for the two deck VU meters. `meters()` reports
@@ -1981,7 +2000,7 @@ impl Mixer {
 
     /// True while a hand (or its release ramp) owns a deck's playhead.
     pub fn deck_scratching(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().decks[deck.index()].scratch.active()
+        self.deck_snapshots[deck.index()].read().scratching
     }
 
     /// Decks that ran off their end (loop off) since the last drain.
@@ -2748,6 +2767,8 @@ impl Mixer {
         for (i, p) in deck_peaks.iter().enumerate() {
             self.deck_meters[i].store(p.to_bits(), Ordering::Relaxed);
         }
+        self.publish_deck(s, 0);
+        self.publish_deck(s, 1);
         self.transition
             .publish_rendered_frame(self.device_frames.load(Ordering::Acquire));
         self.render_max_nanos
@@ -3491,6 +3512,47 @@ mod tests {
             error < 0.001,
             "the wrap must keep its overshoot: {error:.4}s off after ~200 laps"
         );
+    }
+
+    #[test]
+    fn deck_snapshot_reads_without_the_mixer_lock() {
+        // The UI asks for this every frame. If it took the state lock it
+        // would compete with the callback's try_lock and every smooth scroll
+        // could silence a buffer; it must answer while someone else holds
+        // the lock.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        mixer.seek_deck_seconds(DeckId::A, 0.5);
+        let held = mixer.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = held.state.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let began = std::time::Instant::now();
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(100),
+            "the snapshot must not wait for the lock"
+        );
+        assert!((snapshot.position_secs - 0.5).abs() < 1e-9);
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn a_seek_shows_in_the_snapshot_before_the_next_callback() {
+        // The UI seeks and reads back in the same tick; the answer must not
+        // lag a buffer behind.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 96_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.seek_deck_seconds(DeckId::A, 1.25);
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!((snapshot.position_secs - 1.25).abs() < 1e-9, "{}", snapshot.position_secs);
+        assert!(snapshot.playing);
+        assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
+        let (position, duration, playing) = mixer.deck_position(DeckId::A);
+        assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
     }
 
     #[test]

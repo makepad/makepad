@@ -95,6 +95,8 @@ mod mix;
 mod mixer;
 // The lock-free hand-off across the audio thread's boundary, in either direction.
 mod spsc;
+// One writer, any readers, never a lock: what the callback publishes per buffer.
+mod published;
 // The audio path pinned against what it rendered the day the reference was
 // recorded, and the click rule every transition has to keep.
 #[cfg(test)]
