@@ -12,19 +12,27 @@
 //! A tool can therefore be handed any string at all and still only ever read
 //! something the person running the app could already open in the browser.
 //!
-//! The tools run on a worker thread of their own, one job at a time in the
-//! order they were asked for. Measuring a folder is a disk walk, and a file
-//! browser that stops painting because its chat panel is counting bytes would
-//! be worse than one with no chat panel.
+//! The tools run on a worker thread, never the UI's: measuring a folder is a
+//! disk walk, and a file browser that stops painting because a chat is
+//! counting bytes would be worse than one with no chat. Two callers share
+//! them — the app's own panel through [`ToolRunner`] (in call order), and
+//! the desktop's assistant through the bus runner in `ai_service.rs`, which
+//! correlates by call id and can give up on a walk half-way ([`run_with`]).
 
 use std::{
     path::{Component, Path, PathBuf},
-    sync::mpsc::{channel, Receiver, Sender},
-    thread,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+#[cfg(feature = "chat")]
+use std::{
+    sync::mpsc::{channel, Receiver, Sender},
+    thread,
+};
 
-use makepad_ai_hub::local_llm::{arg, ToolSpec};
+#[cfg(feature = "chat")]
+use makepad_ai_hub::local_llm::ToolSpec;
+use makepad_ai_services::wire::{Risk, ServiceManifest, ToolDef};
 
 use crate::{
     model::{self, FileEntry},
@@ -46,30 +54,58 @@ const MEASURE_BUDGET: Duration = Duration::from_secs(4);
 const MEASURE_DEPTH: usize = 10;
 const MEASURE_ENTRIES: usize = 400_000;
 
-/// The tools, exactly as the model is told about them.
+/// The one table every description of the tools is built from: the old
+/// panel's `ToolSpec`s and the desktop bus's manifest read the SAME name,
+/// sentence and schema, so the two can never drift apart. Every schema is
+/// an argument object (`"type":"object"`), which the wire insists on.
+const TOOL_TABLE: [(&str, &str, &str); 4] = [
+    (
+        "list_dir",
+        "List what is directly inside a folder: each entry's name, whether it is a folder, its kind and its size. Bounded to the first 200 entries. Use this before saying anything about what a folder contains.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"folder path; ~ means the home folder, and a relative path is read from the folder the user is in"}},"required":["path"]}"#,
+    ),
+    (
+        "read_file",
+        "Read the beginning of a text file (at most 16 kB). Binary files are refused with a note of what they are instead. Use this to answer questions about what a file actually says.",
+        r#"{"type":"object","properties":{"path":{"type":"string"},"max_bytes":{"type":"integer","description":"how much to read, up to 16384"}},"required":["path"]}"#,
+    ),
+    (
+        "stat",
+        "One path's kind, size and modification time. Cheap — use it when you only need to know what something is.",
+        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+    ),
+    (
+        "treemap_summary",
+        "Where a folder's bytes actually are: its heaviest direct children with their recursive sizes and file counts. This is what the treemap draws. Use it for 'what is taking up the space' questions.",
+        r#"{"type":"object","properties":{"path":{"type":"string"},"top":{"type":"integer","description":"how many children to list, up to 12"}},"required":["path"]}"#,
+    ),
+];
+
+/// The tools, exactly as the panel's own model is told about them.
+#[cfg(feature = "chat")]
 pub fn tools() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec::new(
-            "list_dir",
-            "List what is directly inside a folder: each entry's name, whether it is a folder, its kind and its size. Bounded to the first 200 entries. Use this before saying anything about what a folder contains.",
-            r#"{"type":"object","properties":{"path":{"type":"string","description":"folder path; ~ means the home folder, and a relative path is read from the folder the user is in"}},"required":["path"]}"#,
-        ),
-        ToolSpec::new(
-            "read_file",
-            "Read the beginning of a text file (at most 16 kB). Binary files are refused with a note of what they are instead. Use this to answer questions about what a file actually says.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"max_bytes":{"type":"integer","description":"how much to read, up to 16384"}},"required":["path"]}"#,
-        ),
-        ToolSpec::new(
-            "stat",
-            "One path's kind, size and modification time. Cheap — use it when you only need to know what something is.",
-            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
-        ),
-        ToolSpec::new(
-            "treemap_summary",
-            "Where a folder's bytes actually are: its heaviest direct children with their recursive sizes and file counts. This is what the treemap draws. Use it for 'what is taking up the space' questions.",
-            r#"{"type":"object","properties":{"path":{"type":"string"},"top":{"type":"integer","description":"how many children to list, up to 12"}},"required":["path"]}"#,
-        ),
-    ]
+    TOOL_TABLE
+        .iter()
+        .map(|(name, description, schema)| ToolSpec::new(*name, *description, *schema))
+        .collect()
+}
+
+/// The same four tools as the desktop assistant learns them over the bus
+/// (`ai_service.rs`). All of them only look, so all of them are `Read`.
+pub fn service_manifest() -> ServiceManifest {
+    let mut manifest = ServiceManifest::new(
+        "files",
+        "Files",
+        "The file browser. Its tools only read: list a folder, read the head of \
+         a text file, stat one path, and measure where a folder's bytes are \
+         (the treemap). Paths may be absolute, `~` for the home folder, or \
+         relative to the folder the person is looking at (its context line \
+         says which); anything outside the home is refused.",
+    );
+    for (name, description, schema) in TOOL_TABLE {
+        manifest = manifest.with_tool(ToolDef::new(name, description, schema, Risk::Read));
+    }
+    manifest
 }
 
 /// One tool call, as it goes to the worker.
@@ -91,17 +127,20 @@ pub struct ToolOutcome {
 }
 
 /// The tool worker: one thread, one job at a time, results in call order.
+#[cfg(feature = "chat")]
 pub struct ToolRunner {
     jobs: Sender<ToolJob>,
     results: Receiver<ToolOutcome>,
 }
 
+#[cfg(feature = "chat")]
 impl Default for ToolRunner {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "chat")]
 impl ToolRunner {
     pub fn new() -> Self {
         let (jobs, job_rx) = channel::<ToolJob>();
@@ -127,7 +166,17 @@ impl ToolRunner {
 }
 
 /// Run one tool. The whole of what the model can do to a filesystem.
+#[cfg(any(test, feature = "chat"))]
 pub fn run(job: &ToolJob) -> ToolOutcome {
+    run_with(job, &AtomicBool::new(false), &|_| {})
+}
+
+/// [`run`] for a caller that may give up on the call: `cancel` set from any
+/// thread makes the folder walk return at once (the result is then a floor,
+/// and the bus runner reports the call as cancelled rather than as an
+/// answer), and `progress` hears a permille as `treemap_summary` finishes
+/// each direct child — the only tool slow enough to be worth watching.
+pub fn run_with(job: &ToolJob, cancel: &AtomicBool, progress: &dyn Fn(u16)) -> ToolOutcome {
     let raw = arg(&job.args, "path");
     let resolved = resolve(raw, &job.home, &job.cwd);
     let path = match resolved {
@@ -152,7 +201,7 @@ pub fn run(job: &ToolJob) -> ToolOutcome {
             let top = number(arg(&job.args, "top"))
                 .unwrap_or(SUMMARY_TOP)
                 .clamp(1, SUMMARY_TOP);
-            finish(summary(&path, top), format!("measured {shown}"), shown)
+            finish(summary(&path, top, cancel, progress), format!("measured {shown}"), shown)
         }
         other => ToolOutcome {
             note: format!("unknown tool {other}"),
@@ -275,6 +324,21 @@ pub fn short(path: &Path, home: &Path) -> String {
     }
 }
 
+/// One argument by name; empty when the call did not give it.
+fn arg<'a>(args: &'a [(String, String)], key: &str) -> &'a str {
+    args.iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("")
+}
+
+/// The bus runner's test seam: one bounded walk with a cancel flag.
+#[cfg(test)]
+pub fn measure_for_test(path: &Path, cancel: &AtomicBool) -> (u64, u32, bool) {
+    let mut budget = MEASURE_ENTRIES;
+    measure(path, Instant::now() + MEASURE_BUDGET, &mut budget, 0, cancel)
+}
+
 fn number(text: &str) -> Option<usize> {
     text.trim().parse::<usize>().ok()
 }
@@ -392,7 +456,12 @@ fn entry_for(path: &Path) -> Result<FileEntry, String> {
         .ok_or_else(|| format!("there is nothing at {}", path.display()))
 }
 
-fn summary(path: &Path, top: usize) -> Result<(String, String), String> {
+fn summary(
+    path: &Path,
+    top: usize,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u16),
+) -> Result<(String, String), String> {
     if !vfs().is_dir(path) {
         // A file has no children; saying so beats an empty table.
         return stat(path);
@@ -402,14 +471,21 @@ fn summary(path: &Path, top: usize) -> Result<(String, String), String> {
     let mut budget = MEASURE_ENTRIES;
     let mut measured: Vec<(String, u64, u32, bool)> = Vec::new();
     let mut complete = true;
-    for entry in &entries {
+    for (index, entry) in entries.iter().enumerate() {
         if entry.is_dir {
-            let (bytes, files, done) = measure(&entry.path, deadline, &mut budget, 0);
+            let (bytes, files, done) = measure(&entry.path, deadline, &mut budget, 0, cancel);
             complete &= done;
             measured.push((entry.name.clone(), bytes, files, done));
         } else {
             measured.push((entry.name.clone(), entry.size, 1, true));
         }
+        if cancel.load(Ordering::Relaxed) {
+            // The caller gave up: what is measured so far is a floor, said so
+            // below; the runner turns the whole answer into "cancelled".
+            complete = false;
+            break;
+        }
+        progress(((index + 1) * 1000 / entries.len().max(1)) as u16);
     }
     let total: u64 = measured.iter().map(|m| m.1).sum();
     let files: u32 = measured.iter().map(|m| m.2).sum();
@@ -447,8 +523,18 @@ fn summary(path: &Path, top: usize) -> Result<(String, String), String> {
 /// budget and a depth. Returns false when it ran out of one of them — a number
 /// that stopped early is a floor, and the caller says so rather than passing
 /// it off as the answer.
-fn measure(path: &Path, deadline: Instant, budget: &mut usize, depth: usize) -> (u64, u32, bool) {
-    if depth >= MEASURE_DEPTH || *budget == 0 || Instant::now() >= deadline {
+fn measure(
+    path: &Path,
+    deadline: Instant,
+    budget: &mut usize,
+    depth: usize,
+    cancel: &AtomicBool,
+) -> (u64, u32, bool) {
+    if depth >= MEASURE_DEPTH
+        || *budget == 0
+        || Instant::now() >= deadline
+        || cancel.load(Ordering::Relaxed)
+    {
         return (0, 0, false);
     }
     // Never walk through a link: the tree below it is somebody else's, and it
@@ -468,7 +554,7 @@ fn measure(path: &Path, deadline: Instant, budget: &mut usize, depth: usize) -> 
     for entry in entries {
         *budget = budget.saturating_sub(1);
         if entry.is_dir {
-            let (child_bytes, child_files, done) = measure(&entry.path, deadline, budget, depth + 1);
+            let (child_bytes, child_files, done) = measure(&entry.path, deadline, budget, depth + 1, cancel);
             bytes += child_bytes;
             files += child_files;
             complete &= done;
@@ -476,7 +562,7 @@ fn measure(path: &Path, deadline: Instant, budget: &mut usize, depth: usize) -> 
             bytes += entry.size;
             files += 1;
         }
-        if *budget == 0 || Instant::now() >= deadline {
+        if *budget == 0 || Instant::now() >= deadline || cancel.load(Ordering::Relaxed) {
             return (bytes, files, false);
         }
     }
@@ -555,6 +641,7 @@ mod tests {
         assert!(resolved.is_ok(), "{resolved:?}");
     }
 
+    #[cfg(feature = "chat")]
     #[test]
     fn every_tool_has_a_schema_and_a_safe_name() {
         let tools = tools();
@@ -575,6 +662,47 @@ mod tests {
                 "a {forbidden} tool must never exist here"
             );
         }
+    }
+
+    #[test]
+    fn the_bus_manifest_is_the_same_four_tools_and_validates() {
+        let manifest = service_manifest();
+        assert_eq!(manifest.id, "files");
+        manifest.validate().expect("a manifest the wire accepts");
+        assert_eq!(manifest.tools.len(), TOOL_TABLE.len());
+        for ((name, description, schema), tool) in TOOL_TABLE.iter().zip(&manifest.tools) {
+            assert_eq!(tool.name, *name);
+            assert_eq!(tool.description, *description);
+            assert_eq!(tool.parameters, *schema);
+            assert_eq!(tool.risk, Risk::Read, "{name} only looks");
+            assert!(schema.contains(r#""type":"object""#), "{name}: an argument object");
+        }
+        // Nothing that writes, moves, deletes or runs anything.
+        for forbidden in ["write", "delete", "move", "rename", "run", "exec", "shell"] {
+            assert!(
+                !manifest.tools.iter().any(|t| t.name.contains(forbidden)),
+                "a {forbidden} tool must never exist here"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_walk_answers_at_once_and_says_it_is_a_floor() {
+        // Cancel before the first child: the walk returns immediately and
+        // the summary carries the floor marker.
+        let home = model::home_dir();
+        let cancel = AtomicBool::new(true);
+        let job = ToolJob {
+            name: "treemap_summary".to_string(),
+            args: vec![("path".to_string(), "~".to_string())],
+            cwd: home.clone(),
+            home,
+        };
+        let started = Instant::now();
+        let outcome = run_with(&job, &cancel, &|_| {});
+        assert!(started.elapsed() < Duration::from_secs(2), "the flag must be honoured at once");
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(outcome.text.contains("cut short"), "{}", outcome.text);
     }
 
     #[test]
