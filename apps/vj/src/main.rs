@@ -24849,7 +24849,10 @@ p2 {}
                     DeckId::A => 0.0,
                     DeckId::B => 1.0,
                 };
-                let cmds = self.decks.fade_to(to, secs);
+                // `fade_over`, never `fade_to`: the length is a duration the
+                // planner measured, not a travel speed, and the blend
+                // choreography is scheduled against that same number.
+                let cmds = self.decks.fade_over(to, secs);
                 self.run_deck_cmds(cx, cmds);
                 self.start_crossfade_tracking(cx, target);
             }

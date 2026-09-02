@@ -100,6 +100,11 @@ pub enum AutoCmd {
     PlayIn { deck: DeckId },
     /// Start the timed crossfade. The host also arms fade tracking and the
     /// engine's auto-fade hold.
+    ///
+    /// `secs` is a DURATION, not a travel speed: the blend choreography is
+    /// laid out against it, so the host spends it through `fade_over` and
+    /// never through `fade_to`, whose seconds are a rate and would shrink
+    /// with the distance the fader has left to cross.
     BeginFade { to: DeckId, secs: f32 },
     /// The transition is over: unload `retire`, requeue it when `requeue`
     /// and the repeat toggle agree, pump the queue once. `requeue: false`

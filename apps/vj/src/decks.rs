@@ -1569,6 +1569,23 @@ impl DeckEngine {
         vec![DeckCmd::FadeCrossfader { position, secs: secs.max(0.0) * distance }]
     }
 
+    /// Timed move to one side that takes `secs` however far it has to go.
+    ///
+    /// The autopilot's twin of `fade_to`. A transition's length is not a
+    /// travel speed: it was measured against the incoming intro, the
+    /// outgoing runway and a bar of the incoming grid, and the blend
+    /// choreography is laid out against that same number. Scaling it by the
+    /// distance left — which is what a hand asking for a RATE wants — would
+    /// land the bass swap in the wrong bar whenever the fader was not parked
+    /// at one end, and drop every step past the early landing.
+    pub fn fade_over(&mut self, deck: DeckId, secs: f32) -> Vec<DeckCmd> {
+        let position = match deck {
+            DeckId::A => 0.0,
+            DeckId::B => 1.0,
+        };
+        vec![DeckCmd::FadeCrossfader { position, secs: secs.max(0.0) }]
+    }
+
     pub fn set_curve(&mut self, curve: FadeCurve) -> Vec<DeckCmd> {
         self.curve = curve;
         vec![DeckCmd::SetCurve { curve }]
@@ -2623,6 +2640,29 @@ mod tests {
         for (name, a, b) in [("dipped/linear", dipped, linear), ("linear/equal", linear, equal)] {
             assert!((b - a) > 0.05, "{name} differ by only {}", b - a);
         }
+    }
+
+    #[test]
+    fn an_autopilot_fade_spends_its_whole_duration_wherever_the_fader_stands() {
+        // `fade_to` is a RATE: the hand asks for a travel speed, so a fader
+        // already halfway across takes half the time. The autopilot asks for
+        // a DURATION — its length was measured against the incoming intro and
+        // the outgoing runway, and the blend choreography is laid out against
+        // that same number. Spend a shorter ride on a part-crossed fader and
+        // the bass swap lands in the wrong bar, or never lands at all.
+        let mut e = DeckEngine::new();
+        e.set_crossfader(0.5);
+
+        assert_eq!(
+            e.fade_to(DeckId::B, 8.0),
+            vec![DeckCmd::FadeCrossfader { position: 1.0, secs: 4.0 }],
+            "the performance button keeps its travel speed"
+        );
+        assert_eq!(
+            e.fade_over(DeckId::B, 8.0),
+            vec![DeckCmd::FadeCrossfader { position: 1.0, secs: 8.0 }],
+            "the autopilot's blend keeps its length"
+        );
     }
 
     #[test]
