@@ -488,10 +488,14 @@ impl Cx {
         self.textures[_texture.texture_id()].os.shared_handle
     }
 
+    /// `target_alloc` is the allocated size of `first_target` when it is a
+    /// texture the caller chose (the WM's shared textures are power-of-two
+    /// allocations larger than the pass); the depth buffer must match it.
     pub fn setup_pass_render_targets(
         &mut self,
         pass_id: DrawPassId,
         first_target: &Option<ID3D11RenderTargetView>,
+        target_alloc: Option<(usize, usize)>,
         d3d11_cx: &D3d11Cx,
     ) {
         let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
@@ -569,8 +573,12 @@ impl Cx {
         // attach/clear depth buffers, if any
         if let Some(depth_texture) = &self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture.texture_id()];
-            let size = pass_rect.size * dpi_factor;
-            cxtexture.update_depth_stencil(d3d11_cx, size.x as usize, size.y as usize);
+            // D3D11 binds a depth view only when its size equals the colour
+            // view's; with a mismatch OMSetRenderTargets binds nothing and every
+            // draw of the pass is dropped (the clear above still lands).
+            let (width, height) =
+                crate::draw_pass::depth_attachment_size(target_alloc, pass_rect.size, dpi_factor);
+            cxtexture.update_depth_stencil(d3d11_cx, width, height);
             let depth_stencil_view = cxtexture.os.depth_stencil_view.clone().unwrap();
             let is_initial = cxtexture.take_initial();
 
@@ -692,7 +700,12 @@ impl Cx {
         // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
         let mut presented = false;
         crate::gpu_texture::with_media_d3d11_lock(|| {
-            self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
+            self.setup_pass_render_targets(
+                pass_id,
+                &d3d11_window.render_target_view,
+                None,
+                d3d11_cx,
+            );
 
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
@@ -719,7 +732,12 @@ impl Cx {
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
-            d3d11_window.win32_window.show();
+            // MAKEPAD_HIDE_WINDOWS: an agent-driven instance renders and answers
+            // the bridge but never appears on the desktop (the macOS backend
+            // honours the same switch).
+            if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
+                d3d11_window.win32_window.show();
+            }
             d3d11_window.first_draw = false;
         }
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
@@ -736,10 +754,12 @@ impl Cx {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
         if let Some(texture_id) = texture_id {
-            let render_target_view = self.textures[texture_id].os.render_target_view.clone();
-            self.setup_pass_render_targets(pass_id, &render_target_view, d3d11_cx);
+            let cxtexture = &self.textures[texture_id];
+            let render_target_view = cxtexture.os.render_target_view.clone();
+            let target_alloc = cxtexture.alloc.as_ref().map(|alloc| (alloc.width, alloc.height));
+            self.setup_pass_render_targets(pass_id, &render_target_view, target_alloc, d3d11_cx);
         } else {
-            self.setup_pass_render_targets(pass_id, &None, d3d11_cx);
+            self.setup_pass_render_targets(pass_id, &None, None, d3d11_cx);
         }
 
         let mut zbias = 0.0;
