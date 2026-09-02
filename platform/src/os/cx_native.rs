@@ -6,7 +6,7 @@ use {
         path::{Path, PathBuf},
         rc::Rc,
         sync::OnceLock,
-        time::SystemTime,
+        time::{Instant, SystemTime},
     },
 };
 
@@ -78,5 +78,10 @@ impl Cx {
             return elapsed.as_secs_f64();
         }
         return 0.0;
+    }
+
+    pub fn monotonic_now() -> f64 {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
     }
 }

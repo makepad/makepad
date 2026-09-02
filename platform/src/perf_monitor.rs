@@ -15,6 +15,8 @@
 //! Collection is off until something (normally the PerfGraph widget) calls
 //! `set_enabled(true)`; disabled adds are a single branch.
 
+use std::{cell::Cell, rc::Rc};
+
 pub const PERF_MONITOR_HISTORY: usize = 240;
 pub const PERF_MONITOR_MAX_CHANNELS: usize = 12;
 
@@ -70,9 +72,8 @@ pub struct PerfMonitor {
     at: usize,
     cur: PerfMonitorFrame,
     last_frame_time: Option<f64>,
-    /// inner_call_event_handler recurses (Paint inside Timer); only the
-    /// outermost dispatch is timed.
-    pub(crate) event_depth: u32,
+    /// Active event-dispatch depth, used to attribute nested channel timing.
+    pub(crate) event_depth: Rc<Cell<u32>>,
     /// Time app channels attributed while inside an event dispatch; deducted
     /// from the "event" channel so the stacked plot doesn't double-count.
     event_deduct: u32,
@@ -96,7 +97,7 @@ impl Default for PerfMonitor {
             at: 0,
             cur: Default::default(),
             last_frame_time: None,
-            event_depth: 0,
+            event_depth: Rc::new(Cell::new(0)),
             event_deduct: 0,
             frames_painted: 0,
         }
@@ -153,7 +154,7 @@ impl PerfMonitor {
             // its own channels (script, physics, …) inside it.
             us = us.saturating_sub(self.event_deduct);
             self.event_deduct = 0;
-        } else if self.event_depth > 0 {
+        } else if self.event_depth.get() > 0 {
             self.event_deduct = self.event_deduct.saturating_add(us);
         }
         let slot = &mut self.cur.channel_us[channel.0.min(PERF_MONITOR_MAX_CHANNELS - 1)];

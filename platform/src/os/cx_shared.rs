@@ -21,6 +21,20 @@ use {
     std::rc::Rc,
 };
 
+struct EventDispatchGuard {
+    active: Rc<Cell<bool>>,
+    event_depth: Option<Rc<Cell<u32>>>,
+}
+
+impl Drop for EventDispatchGuard {
+    fn drop(&mut self) {
+        self.active.set(false);
+        if let Some(depth) = &self.event_depth {
+            depth.set(depth.get().saturating_sub(1));
+        }
+    }
+}
+
 /// File sinks for in-app frame captures (`Cx::capture_next_frame_to_file`).
 /// A static mutex rather than Cx state because the metal completion handler
 /// that produces the PNG runs off the main thread.
@@ -943,28 +957,51 @@ impl Cx {
     // event handler wrappers
 
     fn invoke_event_handler(&mut self, event: &Event) {
-        let mut event_handler = self.event_handler.take().expect(
-            "call_event_handler re-entered synchronously while an event handler was running; platform callbacks must defer nested dispatch",
-        );
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            event_handler(self, event);
-        }));
-        self.event_handler = Some(event_handler);
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
+        let event_handler = self.event_handler.clone();
+        // The active flag excludes aliasing, while the Rc keeps this stable
+        // allocation alive even if the handler mutates `Cx`.
+        unsafe {
+            (&mut *event_handler.get())(self, event);
         }
     }
 
+    fn event_dispatch_is_reentrant(&self, event: &Event) -> bool {
+        if self.event_handler_dispatch_active.get() {
+            crate::error!(
+                "Rejected synchronous re-entry while dispatching event {}",
+                event.name()
+            );
+            return true;
+        }
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn reset_event_dispatch_state(&mut self) {
+        self.event_handler_dispatch_active.set(false);
+        self.perf_monitor.event_depth.set(0);
+    }
+
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
+        if self.event_dispatch_is_reentrant(event) {
+            return;
+        }
         self.event_id += 1;
         // PerfMonitor "event" channel: time only the OUTERMOST dispatch —
         // Paint recurses into this from the Timer handler on macos.
         let perf_timing = self.perf_monitor.enabled();
         if perf_timing {
-            self.perf_monitor.event_depth += 1;
+            self.perf_monitor
+                .event_depth
+                .set(self.perf_monitor.event_depth.get() + 1);
         }
-        let perf_t0 = (perf_timing && self.perf_monitor.event_depth == 1)
-            .then(|| self.seconds_since_app_start());
+        let dispatch_guard = EventDispatchGuard {
+            active: self.event_handler_dispatch_active.clone(),
+            event_depth: perf_timing.then(|| self.perf_monitor.event_depth.clone()),
+        };
+        self.event_handler_dispatch_active.set(true);
+        let perf_t0 = (perf_timing && self.perf_monitor.event_depth.get() == 1)
+            .then(Cx::monotonic_now);
         if (Cx::has_studio_web_socket()
             && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
             || Cx::local_profile_capture_enabled()
@@ -985,12 +1022,12 @@ impl Cx {
         } else {
             self.invoke_event_handler(event);
         }
+        drop(dispatch_guard);
         if perf_timing {
-            self.perf_monitor.event_depth -= 1;
             if let Some(t0) = perf_t0 {
                 self.perf_monitor.add(
                     crate::perf_monitor::PERF_CHANNEL_EVENT,
-                    ((self.seconds_since_app_start() - t0).max(0.0) * 1_000_000.0) as u64,
+                    ((Cx::monotonic_now() - t0).max(0.0) * 1_000_000.0) as u64,
                 );
             }
         }
@@ -1054,8 +1091,8 @@ impl Cx {
     /// the current event dispatch (typically `Cx::set_window_dpi_override`
     /// called from a widget handler). Drained the same way as `handle_actions`
     /// — swap, dispatch each, repeat until quiescent. Each dispatch is a
-    /// fresh `inner_call_event_handler` call after the previous one's handler
-    /// has been put back, so the `event_handler.take()` is safe.
+    /// fresh `inner_call_event_handler` call after the previous dispatch has
+    /// completed, so it is not rejected as synchronous re-entry.
     pub fn handle_pending_window_geom_changes(&mut self) {
         let mut counter = 0;
         while !self.pending_window_geom_changes.is_empty() {
@@ -1089,6 +1126,9 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        if self.event_dispatch_is_reentrant(event) {
+            return;
+        }
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
@@ -1199,15 +1239,17 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     #[test]
-    fn platform_time_moves_forward() {
-        let start = Cx::time_now();
-        assert!(start > 0.0);
+    fn platform_monotonic_time_moves_forward() {
+        let wall = Cx::time_now();
+        let start = Cx::monotonic_now();
+        assert!(wall > 0.0);
+        assert!((wall - start).abs() > 1_000_000.0);
 
         let mut previous = start;
         let mut later = start;
         for _ in 0..1_000_000 {
             std::hint::spin_loop();
-            later = Cx::time_now();
+            later = Cx::monotonic_now();
             assert!(later >= previous);
             previous = later;
             if later > start {
@@ -1215,6 +1257,23 @@ mod tests {
             }
         }
         assert!(later - start > 0.0);
+    }
+
+    #[test]
+    fn synchronous_event_handler_reentry_is_rejected() {
+        let calls = Rc::new(Cell::new(0));
+        let handler_calls = calls.clone();
+        let mut cx = Cx::new(Box::new(move |cx, _event| {
+            handler_calls.set(handler_calls.get() + 1);
+            cx.call_event_handler(&Event::Signal);
+        }));
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 1);
+        assert!(!cx.event_handler_dispatch_active.get());
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]
@@ -1229,11 +1288,14 @@ mod tests {
                 panic!("intentional event-handler panic");
             }
         }));
+        cx.perf_monitor.set_enabled(true);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cx.call_event_handler(&Event::Signal);
         }));
         assert!(result.is_err());
+        assert!(!cx.event_handler_dispatch_active.get());
+        assert_eq!(cx.perf_monitor.event_depth.get(), 0);
 
         cx.call_event_handler(&Event::Signal);
         assert_eq!(calls.get(), 2);

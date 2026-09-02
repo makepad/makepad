@@ -106,6 +106,7 @@ pub(crate) fn consume_studio_socket_response(
     }
 }
 
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
 fn recv_studio_thread_msg(
     rx: &Receiver<StudioWebSocketThreadMsg>,
     timeout: Duration,
@@ -120,19 +121,44 @@ fn recv_studio_thread_msg(
         if timeout == Duration::MAX {
             return rx.recv().map_err(|_| RecvTimeoutError::Disconnected);
         }
+        recv_studio_thread_msg_timed(
+            rx,
+            timeout,
+            Cx::monotonic_now,
+            std::thread::park_timeout,
+        )
+    }
+}
 
-        let deadline = Cx::time_now() + timeout.as_secs_f64();
-        loop {
-            match rx.try_recv() {
-                Ok(msg) => return Ok(msg),
-                Err(TryRecvError::Empty) => {
-                    if Cx::time_now() >= deadline {
-                        return Err(RecvTimeoutError::Timeout);
-                    }
-                    std::thread::yield_now();
+#[cfg(any(test, all(target_arch = "wasm32", target_feature = "atomics")))]
+fn recv_studio_thread_msg_timed<T, N, P>(
+    rx: &Receiver<T>,
+    timeout: Duration,
+    mut now: N,
+    mut park: P,
+) -> Result<T, RecvTimeoutError>
+where
+    N: FnMut() -> f64,
+    P: FnMut(Duration),
+{
+    let deadline = now() + timeout.as_secs_f64();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => return Ok(msg),
+            Err(TryRecvError::Empty) => {
+                let remaining_secs = (deadline - now()).max(0.0);
+                if remaining_secs == 0.0 {
+                    return Err(RecvTimeoutError::Timeout);
                 }
-                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                let remaining = Duration::from_secs_f64(
+                    remaining_secs.min(timeout.as_secs_f64()),
+                );
+                // The mpsc sender does not unpark this futex wait. A message
+                // arriving here waits out the collect window and joins the
+                // current batch before the deadline is checked again.
+                park(remaining);
             }
+            Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
         }
     }
 }
@@ -221,9 +247,15 @@ impl Cx {
         SignalToUI::set_ui_signal();
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
     fn run_studio_websocket_thread(&mut self) {
+        let mut sender = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        if sender.is_some() {
+            return;
+        }
         let (tx, rx) = channel();
-        *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = Some(tx);
+        *sender = Some(tx);
+        drop(sender);
 
         self.spawn_thread(move || {
             let mut app_to_studio = AppToStudioVec(Vec::new());
@@ -237,7 +269,7 @@ impl Cx {
                 match recv_studio_thread_msg(&rx, cycle_time) {
                     Ok(StudioWebSocketThreadMsg::AppToStudio { message }) => {
                         if first_message_time.is_none() {
-                            first_message_time = Some(Cx::time_now());
+                            first_message_time = Some(Cx::monotonic_now());
                         }
                         if matches!(
                             &message,
@@ -259,7 +291,7 @@ impl Cx {
                 }
 
                 if let Some(first_time) = first_message_time {
-                    if (Cx::time_now() - first_time) >= collect_time.as_secs_f64() {
+                    if (Cx::monotonic_now() - first_time) >= collect_time.as_secs_f64() {
                         if studio_ws_send_binary(app_to_studio.serialize_bin()).is_err() {
                             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
                             break;
@@ -275,6 +307,9 @@ impl Cx {
         });
     }
 
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    fn run_studio_websocket_thread(&mut self) {}
+
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
             crate::log!("studio websocket disabled: empty studio_http");
@@ -289,11 +324,14 @@ impl Cx {
             let mut request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
             request.set_websocket_transport(WebSocketTransport::PlainTcp);
             *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
-            if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
-                crate::error!("could not open studio websocket: {err}");
-                HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
-                STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
-                *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+            match self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+                Ok(()) => self.run_studio_websocket_thread(),
+                Err(err) => {
+                    crate::error!("could not open studio websocket: {err}");
+                    HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+                    STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                    *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+                }
             }
         }
     }
@@ -311,21 +349,26 @@ impl Cx {
 
     #[cfg(any(target_os = "tvos", target_os = "ios"))]
     pub fn start_studio_websocket_delayed(&mut self) {
+        if self.studio_http.is_empty() {
+            return;
+        }
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
         STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
         let mut request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
         request.set_websocket_transport(WebSocketTransport::PlainTcp);
         *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
-        if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
-            crate::error!("could not open delayed studio websocket: {err}");
-            HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
-            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
-            *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+        match self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+            Ok(()) => self.run_studio_websocket_thread(),
+            Err(err) => {
+                crate::error!("could not open delayed studio websocket: {err}");
+                HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+                STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+            }
         }
     }
 
     pub fn init_websockets(&mut self, studio_http: &str) {
-        self.run_studio_websocket_thread();
         self.start_studio_websocket(studio_http);
     }
 
@@ -392,5 +435,64 @@ impl Cx {
         } else {
             let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn timed_wait_receives_message_before_deadline() {
+        let (tx, rx) = channel();
+        let now = Cell::new(0.0);
+        let parked = Cell::new(false);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| {
+                parked.set(true);
+                tx.send(7).unwrap();
+                now.set(now.get() + remaining.as_secs_f64() * 0.5);
+            },
+        );
+        assert_eq!(result.unwrap(), 7);
+        assert!(parked.get());
+    }
+
+    #[test]
+    fn timed_wait_reaches_deadline() {
+        let (_tx, rx) = channel::<u8>();
+        let now = Cell::new(0.0);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| now.set(now.get() + remaining.as_secs_f64()),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Timeout)));
+    }
+
+    #[test]
+    fn timed_wait_reports_disconnect() {
+        let (tx, rx) = channel::<u8>();
+        drop(tx);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || 0.0,
+            |_| panic!("a disconnected channel must not park"),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Disconnected)));
+    }
+
+    #[test]
+    fn empty_studio_url_spawns_no_thread() {
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_websockets("");
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
     }
 }
