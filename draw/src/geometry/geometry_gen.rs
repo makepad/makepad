@@ -144,6 +144,24 @@ pub struct RoadVertexTyped {
     pub uv: F16x2,
 }
 
+/// Typed road-union face vertex: the four `RoadVertexTyped` fields a
+/// grounded Boolean face actually varies. The road shader's other inputs
+/// are constants for such a record — zero expansion offset, zero deck, the
+/// tessellator's fill uv (0.5, 1) — and the face shader substitutes them,
+/// so a face record draws exactly as its 28-byte form did.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct FaceVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub color: UNorm8x4,
+    #[live]
+    pub params: F16x2,
+    #[live]
+    pub depth: F16x2,
+}
+
 /// Typed roof vertex. Height stays exact so instanced `f32` walls meet roofs.
 #[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
 #[repr(C)]
@@ -353,6 +371,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.RoadVertexTyped);
     let rpgen = shared(vm, id!(RoadGeomTyped), GeometryGen::from_triangle_2d_road_typed);
     set_script_value!(vm, geom.RoadGeomTyped = rpgen);
+    // Road-union faces: the road record minus its constant fields.
+    set_script_value_to_pod!(vm, geom.FaceVertexTyped);
+    let fcgen = shared(vm, id!(FaceGeomTyped), GeometryGen::from_triangle_2d_face_typed);
+    set_script_value!(vm, geom.FaceGeomTyped = fcgen);
     set_script_value_to_pod!(vm, geom.RoofVertexTyped);
     let rpgen = shared(vm, id!(RoofGeomTyped), GeometryGen::from_triangle_2d_roof_typed);
     set_script_value!(vm, geom.RoofGeomTyped = rpgen);
@@ -455,6 +477,15 @@ impl GeometryGen {
         let mut g = Self::default();
         for _ in 0..3 {
             g.vertices.extend_from_slice(&[0.0; 7]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_face_typed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0; 4]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

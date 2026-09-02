@@ -5,9 +5,10 @@ use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
     append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
-    is_compact_roof_record, pack_fill_vertices, pack_road_vertices, pack_roof_vertices,
-    pack_vector_vertices,
-    FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES, ROOF_TYPED_VERTEX_BYTES,
+    is_compact_face_record, is_compact_roof_record, pack_face_vertices, pack_fill_vertices,
+    pack_road_vertices, pack_roof_vertices, pack_vector_vertices,
+    FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
+    ROOF_TYPED_VERTEX_BYTES,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -121,6 +122,9 @@ pub enum TileLoadState {
         /// Non-fill records formerly interleaved with ground fills (building
         /// outline strokes), retained on the generic vector layout.
         fill_misc_geometry: Option<Geometry>,
+        /// Grounded road-union faces on the 16-byte face layout, drawn in
+        /// the casing pass just before `casing_geometry`.
+        face_geometry: Option<Geometry>,
         casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
         icon_geometry: Option<Geometry>,
@@ -208,6 +212,7 @@ pub struct TileFade {
     pub reuse_road_core: bool,
     pub fill_geometry: Option<Geometry>,
     pub fill_misc_geometry: Option<Geometry>,
+    pub face_geometry: Option<Geometry>,
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
     pub icon_geometry: Option<Geometry>,
@@ -853,8 +858,15 @@ pub struct TileBuffers {
     pub fill_vertices: Vec<u8>,
     pub fill_misc_indices: Vec<u32>,
     pub fill_misc_vertices: Vec<f32>,
+    /// Typed 16-byte `FaceVertexTyped` records: the grounded shape-0
+    /// Boolean union faces split out of the casing pass (see
+    /// `is_compact_face_record`). Drawn by the casing pass first, so the
+    /// faces keep their place under the pass's expandable strokes.
+    pub face_indices: Vec<u32>,
+    pub face_vertices: Vec<u8>,
     /// Typed 28-byte `RoadVertexTyped` records: GPU-expandable strokes
-    /// (shape >= 100) and shape-0 Boolean union faces.
+    /// (shape >= 100) and the shape-0 union records the face layout cannot
+    /// carry (lifted faces, deck fascia walls).
     pub casing_indices: Vec<u32>,
     pub casing_vertices: Vec<u8>,
     /// Typed 28-byte `RoadVertexTyped` records. Rails, dashed tunnels
@@ -935,13 +947,14 @@ fn typed_stream_byte_size(vertex_bytes: usize, stride: usize, index_count: usize
 }
 
 impl TileBuffers {
-    /// Byte sizes for the report's thirteen named mesh streams. The typed
+    /// Byte sizes for the report's fourteen named mesh streams. The typed
     /// streams account for the per-tile u16/u32 index choice; legacy streams
     /// remain f32 vertices with u32 indices.
-    pub fn stream_bytes(&self) -> [usize; 13] {
+    pub fn stream_bytes(&self) -> [usize; 14] {
         [
             typed_stream_byte_size(self.fill_vertices.len(), FILL_TYPED_VERTEX_BYTES, self.fill_indices.len()),
             (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            typed_stream_byte_size(self.face_vertices.len(), FACE_TYPED_VERTEX_BYTES, self.face_indices.len()),
             typed_stream_byte_size(self.casing_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.casing_indices.len()),
             typed_stream_byte_size(self.stroke_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.stroke_indices.len()),
             typed_stream_byte_size(self.fringe_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.fringe_indices.len()),
@@ -4012,69 +4025,139 @@ fn split_fringe_band_then_road_pack_round_trips() {
     assert_eq!(cov1, 0.0);
 }
 
+/// A primary road (a union tier) crossing nothing, and a tram line (a
+/// patterned stroke that stays on the road layout).
+#[cfg(test)]
+fn primary_road_and_tram_bake(want_fringe: bool) -> TileBuffers {
+    let ways = vec![
+        TileWay {
+            points: vec![(24.0, 128.0), (232.0, 128.0)],
+            tags: HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), "primary".to_string()),
+            ])
+            .into(),
+            closed: false,
+            dz: None,
+            fidx: None,
+            feature_group: None,
+            ring_index: None,
+        },
+        TileWay {
+            points: vec![(24.0, 80.0), (232.0, 80.0)],
+            tags: HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), "tram".to_string()),
+                ("rail".to_string(), "true".to_string()),
+            ])
+            .into(),
+            closed: false,
+            dz: None,
+            fidx: None,
+            feature_group: None,
+            ring_index: None,
+        },
+    ];
+    build_tile_buffers_from_features_profiled(
+        TileProfiler::new(),
+        TileKey { z: 14, x: 0, y: 0 },
+        &ways,
+        &Vec::new(),
+        &probe_compiled_theme(),
+        16,
+        false,
+        want_fringe,
+        true,
+        Vec::new(),
+        false,
+        false,
+        Vec::new(),
+        None,
+    )
+}
+
 #[cfg(test)]
 #[test]
 fn fringe_free_bake_keeps_road_core_byte_identical() {
-    let build = |want_fringe| {
-        let ways = vec![
-            TileWay {
-                points: vec![(24.0, 128.0), (232.0, 128.0)],
-                tags: HashMap::from([
-                    ("layer".to_string(), "streets".to_string()),
-                    ("highway".to_string(), "primary".to_string()),
-                ])
-                .into(),
-                closed: false,
-                dz: None,
-                fidx: None,
-                feature_group: None,
-                ring_index: None,
-            },
-            TileWay {
-                points: vec![(24.0, 80.0), (232.0, 80.0)],
-                tags: HashMap::from([
-                    ("layer".to_string(), "streets".to_string()),
-                    ("highway".to_string(), "tram".to_string()),
-                    ("rail".to_string(), "true".to_string()),
-                ])
-                .into(),
-                closed: false,
-                dz: None,
-                fidx: None,
-                feature_group: None,
-                ring_index: None,
-            },
-        ];
-        build_tile_buffers_from_features_profiled(
-            TileProfiler::new(),
-            TileKey { z: 14, x: 0, y: 0 },
-            &ways,
-            &Vec::new(),
-            &probe_compiled_theme(),
-            16,
-            false,
-            want_fringe,
-            true,
-            Vec::new(),
-            false,
-            false,
-            Vec::new(),
-            None,
-        )
-    };
-
-    let with_fringe = build(true);
-    let without_fringe = build(false);
+    let with_fringe = primary_road_and_tram_bake(true);
+    let without_fringe = primary_road_and_tram_bake(false);
     assert!(!with_fringe.fringe_vertices.is_empty());
     assert!(!with_fringe.fringe_indices.is_empty());
     assert!(!with_fringe.stroke_vertices.is_empty());
     assert!(!with_fringe.stroke_indices.is_empty());
     assert!(without_fringe.fringe_vertices.is_empty());
     assert!(without_fringe.fringe_indices.is_empty());
+    assert_eq!(without_fringe.face_vertices, with_fringe.face_vertices);
+    assert_eq!(without_fringe.face_indices, with_fringe.face_indices);
     assert_eq!(without_fringe.casing_vertices, with_fringe.casing_vertices);
     assert_eq!(without_fringe.casing_indices, with_fringe.casing_indices);
     assert_eq!(without_fringe.stroke_vertices, with_fringe.stroke_vertices);
     assert_eq!(without_fringe.stroke_indices, with_fringe.stroke_indices);
+}
+
+/// Every stream a face bake touches, checked against what the road layout
+/// would have held: each face record reads back as exactly one road record
+/// (offset 0, deck 0, uv (0.5, 1), fill kind), the road layout keeps nothing
+/// the face layout could carry, and the face indices are whole triangles
+/// over the face vertices.
+#[cfg(test)]
+fn assert_face_stream_is_the_road_form(buffers: &TileBuffers, what: &str) -> usize {
+    use crate::makepad_draw::vector::{
+        decode_face_vertex, decode_road_vertex, face_record_from_road, road_record_from_face,
+        FACE_IMPLICIT_DECK, FACE_IMPLICIT_OFF, FACE_IMPLICIT_UV, ROAD_KIND_FILL,
+        ROAD_PARAM_KIND_SCALE,
+    };
+    assert_eq!(buffers.face_vertices.len() % FACE_TYPED_VERTEX_BYTES, 0, "{what}");
+    assert_eq!(buffers.face_indices.len() % 3, 0, "{what}");
+    let face_count = buffers.face_vertices.len() / FACE_TYPED_VERTEX_BYTES;
+    assert!(
+        buffers.face_indices.iter().all(|&index| (index as usize) < face_count),
+        "{what}: face index out of range"
+    );
+    for chunk in buffers.face_vertices.chunks_exact(FACE_TYPED_VERTEX_BYTES) {
+        let face = decode_face_vertex(chunk);
+        let road = road_record_from_face(face);
+        assert_eq!(face_record_from_road(road), Some(face), "{what}");
+        assert_eq!(road.off, FACE_IMPLICIT_OFF, "{what}");
+        assert_eq!(road.deck.to_bits(), FACE_IMPLICIT_DECK.to_bits(), "{what}");
+        assert_eq!(road.uv.to_f32(), FACE_IMPLICIT_UV, "{what}");
+        let (meta, aux) = face.params.to_f32();
+        assert_eq!((meta / ROAD_PARAM_KIND_SCALE).floor(), ROAD_KIND_FILL, "{what}: kind");
+        let material = ((meta % 64.0) / 8.0).floor();
+        if material < 6.5 {
+            // Non-emissive faces carry their coverage, which is the fill uv.
+            assert_eq!(aux, FACE_IMPLICIT_UV.0, "{what}: coverage");
+        }
+    }
+    for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+        assert!(
+            face_record_from_road(decode_road_vertex(chunk)).is_none(),
+            "{what}: a face record stayed on the road layout"
+        );
+    }
+    face_count
+}
+
+#[cfg(test)]
+#[test]
+fn union_faces_take_the_face_layout_and_keep_their_road_form() {
+    use crate::makepad_draw::vector::{decode_road_vertex, ROAD_PARAM_EXPANDED_FLAG};
+    let buffers = primary_road_and_tram_bake(true);
+    let face_count = assert_face_stream_is_the_road_form(&buffers, "primary + tram");
+    assert!(face_count > 0, "the primary road's union faces");
+    assert_eq!(
+        buffers.stream_bytes()[2],
+        buffers.face_vertices.len() + buffers.face_indices.len() * 2
+    );
+    // The road layout keeps the expandable strokes (the tram's dashes among
+    // them) exactly as before the split.
+    let expanded = buffers
+        .casing_vertices
+        .chunks_exact(ROAD_TYPED_VERTEX_BYTES)
+        .chain(buffers.stroke_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES))
+        .filter(|chunk| decode_road_vertex(chunk).params.to_f32().0 >= ROAD_PARAM_EXPANDED_FLAG)
+        .count();
+    assert!(expanded > 0);
 }
 
 #[cfg(test)]
@@ -6634,6 +6717,8 @@ fn build_tile_buffers_from_features_profiled(
             fill_vertices: Vec::new(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
+            face_indices: Vec::new(),
+            face_vertices: Vec::new(),
             casing_indices: Vec::new(),
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),
@@ -7627,6 +7712,11 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         (Vec::new(), Vec::new())
     };
+    // Grounded union faces take the 16-byte face layout; the split keeps
+    // both streams in emission order. Faces are whole triangles by
+    // construction (one record kind per feature), so nothing duplicates.
+    let (face_vertices, face_indices) =
+        split_band_by(&mut casing_vertices, &mut casing_indices, is_compact_face_record);
     // 3D band sub-splits by material (param3, slot 14): walls skip at the
     // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
     // out. Materials were authored per-append so the predicate is exact.
@@ -7676,6 +7766,7 @@ fn build_tile_buffers_from_features_profiled(
     debug_assert!(fringe_vertices
         .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
         .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    let face_vertices = pack_face_vertices(&face_vertices);
     let casing_vertices = pack_road_vertices(&casing_vertices);
     let stroke_vertices = pack_road_vertices(&stroke_vertices);
     let icon_vertices = pack_vector_vertices(&icon_vertices);
@@ -7691,6 +7782,8 @@ fn build_tile_buffers_from_features_profiled(
         fill_vertices,
         fill_misc_indices,
         fill_misc_vertices,
+        face_indices,
+        face_vertices,
         casing_indices,
         casing_vertices,
         stroke_indices,
@@ -11074,6 +11167,54 @@ mod tag_arena_tests {
         (MAP_ALLOCATION_COUNT.load(Ordering::Relaxed), value)
     }
 
+    /// The 25 Amsterdam fixtures, the start view's tilted bake and the flat
+    /// bake: every grounded union face rides the face layout and reads back
+    /// as the road record it stood for, nothing the face layout could carry
+    /// stays on the road layout, and the face stream — tilt-invariant road
+    /// core — is byte-identical between the two bakes.
+    #[test]
+    #[ignore]
+    fn amsterdam_union_faces_ride_the_face_layout() {
+        let theme = probe_compiled_theme();
+        let mut face_records = 0usize;
+        for x in 8412..=8416 {
+            for y in 5382..=5386 {
+                let key = TileKey { z: 14, x, y };
+                let path = format!("../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded");
+                let data = std::fs::read(&path)
+                    .unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+                let bake = |buildings_3d: bool, want_fringe: bool| {
+                    build_tile_buffers_from_mvt(
+                        key,
+                        &data,
+                        Some(&data),
+                        None,
+                        false,
+                        &[],
+                        &theme,
+                        16,
+                        buildings_3d,
+                        want_fringe,
+                        true,
+                    )
+                    .unwrap_or_else(|err| panic!("bake {path}: {err}"))
+                };
+                let tilted = bake(true, false);
+                let flat = bake(false, true);
+                let tilted_faces =
+                    assert_face_stream_is_the_road_form(&tilted, &format!("{path} tilted"));
+                let flat_faces =
+                    assert_face_stream_is_the_road_form(&flat, &format!("{path} flat"));
+                assert_eq!(tilted_faces, flat_faces, "{path}");
+                assert_eq!(tilted.face_vertices, flat.face_vertices, "{path}");
+                assert_eq!(tilted.face_indices, flat.face_indices, "{path}");
+                face_records += tilted_faces;
+            }
+        }
+        println!("face records across the 25 fixtures: {face_records}");
+        assert!(face_records > 0);
+    }
+
     #[test]
     #[ignore]
     fn detail_parse_merge_allocations_drop_by_at_least_100x() {
@@ -11212,6 +11353,8 @@ mod tag_arena_tests {
         same_vec!(fill_vertices);
         same_vec!(fill_misc_indices);
         same_float_vec!(fill_misc_vertices);
+        same_vec!(face_vertices);
+        same_vec!(face_indices);
         same_vec!(casing_vertices);
         same_vec!(casing_indices);
         same_vec!(stroke_indices);
@@ -11887,6 +12030,8 @@ mod bridge_probe_tests {
             fill_vertices: Vec::new(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
+            face_indices: Vec::new(),
+            face_vertices: Vec::new(),
             casing_indices: Vec::new(),
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),
