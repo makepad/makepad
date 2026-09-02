@@ -40,6 +40,10 @@ pub trait Vfs: Send + Sync {
     /// The folder a fresh window opens in.
     fn home(&self) -> PathBuf;
 
+    /// The filesystem's wall clock, in seconds since the epoch. Demo
+    /// filesystems pin this to the same instant as their generated dates.
+    fn now_secs(&self) -> u64;
+
     /// One directory listing, sorted the way [`model::read_directory`] sorts.
     /// Real disks are dispatched to a worker; instant backends run inline.
     fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String>;
@@ -139,6 +143,10 @@ impl Vfs for RealVfs {
         model::home_dir()
     }
 
+    fn now_secs(&self) -> u64 {
+        model::real_now_secs()
+    }
+
     fn read_dir(&self, path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, String> {
         model::read_directory(path, show_hidden)
     }
@@ -231,6 +239,11 @@ pub fn vfs() -> &'static Arc<dyn Vfs> {
 /// True when the browser is showing the demo home rather than a real disk.
 pub fn is_demo() -> bool {
     vfs().is_demo()
+}
+
+/// The active filesystem's wall clock.
+pub fn now_secs() -> u64 {
+    vfs().now_secs()
 }
 
 /// The demo is asked for by `--demo` on the command line or `MPFILES_DEMO=1`

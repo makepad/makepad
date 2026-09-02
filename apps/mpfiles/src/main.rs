@@ -3008,7 +3008,7 @@ impl App {
         self.set_prop(cx, ids!(prop_kind), &kind);
         // The date says when; the age says whether that is recent, which is
         // the question anyone actually has about a file.
-        let now = model::now_secs();
+        let now = vfs::now_secs();
         let age = entry
             .as_ref()
             .filter(|e| e.modified_secs > 0)
@@ -4766,10 +4766,7 @@ fn slider_bytes(value: f64) -> Option<u64> {
 
 /// Now, in whole minutes since the epoch — the clock the age filter runs on.
 fn now_minutes() -> u32 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_secs() / 60).min(u32::MAX as u64) as u32)
-        .unwrap_or(0)
+    (vfs::now_secs() / 60).min(u32::MAX as u64) as u32
 }
 
 /// How many times the model may go round the look-then-think loop for one

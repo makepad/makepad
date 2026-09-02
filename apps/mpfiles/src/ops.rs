@@ -19,8 +19,12 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
 };
+
+use makepad_widgets::Cx;
+
+#[cfg(test)]
+use std::time::Duration;
 
 // ---------------------------------------------------------------------
 // Vocabulary
@@ -408,7 +412,7 @@ struct Progress {
     total: u64,
     done: Cell<u64>,
     bytes_since_emit: Cell<u64>,
-    last_emit: Cell<Instant>,
+    last_emit: Cell<f64>,
     current: RefCell<String>,
     updates: Arc<Mutex<VecDeque<OpUpdate>>>,
     notify: Arc<dyn Fn() + Send + Sync>,
@@ -422,7 +426,7 @@ impl Progress {
             total,
             done: Cell::new(0),
             bytes_since_emit: Cell::new(0),
-            last_emit: Cell::new(Instant::now()),
+            last_emit: Cell::new(Cx::time_now()),
             current: RefCell::new(String::new()),
             updates,
             notify,
@@ -443,9 +447,10 @@ impl Progress {
         let done = self.done.get() + delta;
         self.done.set(done);
         let since = self.bytes_since_emit.get() + delta;
-        if since >= 1_000_000 || self.last_emit.get().elapsed() >= Duration::from_millis(32) {
+        let now = Cx::time_now();
+        if since >= 1_000_000 || now - self.last_emit.get() >= 0.032 {
             self.bytes_since_emit.set(0);
-            self.last_emit.set(Instant::now());
+            self.last_emit.set(now);
             let update = OpUpdate::Progress {
                 id: self.id,
                 kind: self.kind,
@@ -1036,7 +1041,7 @@ fn run_undo_created(
     // there is no dedicated `OpKind` for "delete" to report instead.
     let total = paths.len() as u64;
     let mut done = 0u64;
-    let mut last_emit = Instant::now();
+    let mut last_emit = Cx::time_now();
     let mut removed = Vec::new();
     let mut cancelled = false;
     let mut failure = None;
@@ -1049,8 +1054,9 @@ fn run_undo_created(
             Ok(()) => {
                 removed.push(path.clone());
                 done += 1;
-                if done == total || last_emit.elapsed() >= Duration::from_millis(32) {
-                    last_emit = Instant::now();
+                let now = Cx::time_now();
+                if done == total || now - last_emit >= 0.032 {
+                    last_emit = now;
                     push_update(
                         updates,
                         notify,
@@ -1161,7 +1167,7 @@ mod tests {
     /// by `timeout` so a bug in the engine fails the test instead of
     /// hanging the suite.
     fn wait_for_done(ops: &Ops, id: u64, timeout: Duration) -> OpUpdate {
-        let start = Instant::now();
+        let start = Cx::time_now();
         loop {
             for update in ops.drain() {
                 let is_match = match &update {
@@ -1172,7 +1178,7 @@ mod tests {
                     return update;
                 }
             }
-            if start.elapsed() > timeout {
+            if Cx::time_now() - start > timeout.as_secs_f64() {
                 panic!("timed out waiting for update {id}");
             }
             thread::sleep(Duration::from_millis(5));
