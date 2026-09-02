@@ -23,6 +23,7 @@ use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
 use crate::music_dsp::{
+    audible, knob, knob64,
     DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
 };
@@ -570,7 +571,13 @@ impl Ramp {
 
     /// Move to `target` over `secs` — the whole move takes `secs` no matter
     /// how far it travels. `step` stores the rate in units/second.
+    ///
+    /// A target that is not a number is refused, for the reason spelled out
+    /// on `ParamRamp::slew`: it would never settle again.
     fn slew(&mut self, target: f32, secs: f32) {
+        if !target.is_finite() {
+            return;
+        }
         self.target = target;
         let distance = (target - self.current).abs();
         self.step = if secs <= 0.0 { f32::MAX } else { (distance / secs).max(1e-6) };
@@ -1795,12 +1802,13 @@ impl Mixer {
     }
 
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
+        let Some(fraction) = knob64(fraction, 0.0, 1.0) else { return };
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
         let len = d.frame_count() as f64;
         if len > 0.0 {
             let from = d.playhead_frames();
-            d.seek_frames(fraction.clamp(0.0, 1.0) * len);
+            d.seek_frames(fraction * len);
             d.arm_seek_fade(from);
         }
         self.publish_deck(&s, deck.index());
@@ -1811,7 +1819,8 @@ impl Mixer {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
         let Some(pcm) = d.pcm.as_ref() else { return };
-        let frames = secs.max(0.0) * pcm.sample_rate.max(1) as f64;
+        let Some(secs) = knob64(secs, 0.0, f64::from(u32::MAX)) else { return };
+        let frames = secs * pcm.sample_rate.max(1) as f64;
         let from = d.playhead_frames();
         d.seek_frames(frames);
         d.arm_seek_fade(from);
@@ -1821,7 +1830,10 @@ impl Mixer {
     /// Tempo multiplier. With key lock on the pitch is preserved; with it
     /// off the deck simply plays faster or slower.
     pub fn set_deck_rate(&self, deck: DeckId, rate: f64) {
-        let rate = rate.clamp(crate::decks::RATE_MIN, crate::decks::RATE_MAX) as f32;
+        let Some(rate) = knob64(rate, crate::decks::RATE_MIN, crate::decks::RATE_MAX) else {
+            return;
+        };
+        let rate = rate as f32;
         // A short ramp so a sync landing mid-phrase does not step the pitch.
         self.state.lock().unwrap().decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
     }
@@ -1834,7 +1846,11 @@ impl Mixer {
     /// ratio it stands for, because the render loop wants a multiplier and
     /// an exp2 per frame would be a waste.
     pub fn set_deck_key_shift(&self, deck: DeckId, semitones: f64) {
-        let semitones = semitones.clamp(-crate::decks::KEY_SHIFT_MAX, crate::decks::KEY_SHIFT_MAX);
+        let Some(semitones) =
+            knob64(semitones, -crate::decks::KEY_SHIFT_MAX, crate::decks::KEY_SHIFT_MAX)
+        else {
+            return;
+        };
         let ratio = (semitones / 12.0).exp2() as f32;
         // Same ramp as the tempo: a stepped semitone glides instead of
         // clicking, and the stretcher sees a ratio that never jumps.
@@ -1873,8 +1889,9 @@ impl Mixer {
         if stem >= STEM_COUNT {
             return;
         }
+        let Some(gain) = knob(gain, 0.0, crate::music_dsp::EQ_MAX_GAIN) else { return };
         self.state.lock().unwrap().decks[deck.index()].stem_gain[stem]
-            .slew(gain.max(0.0), SLEW_SECS * 2.0);
+            .slew(gain, SLEW_SECS * 2.0);
     }
 
     /// The deck's loop in source SECONDS, converted here against the
@@ -1930,11 +1947,14 @@ impl Mixer {
     }
 
     pub fn set_crossfader(&self, position: f32) {
-        self.state.lock().unwrap().fader.slew(position.clamp(0.0, 1.0), SLEW_SECS);
+        let Some(position) = knob(position, 0.0, 1.0) else { return };
+        self.state.lock().unwrap().fader.slew(position, SLEW_SECS);
     }
 
     pub fn fade_crossfader(&self, position: f32, secs: f32) {
-        self.state.lock().unwrap().fader.slew(position.clamp(0.0, 1.0), secs.max(SLEW_SECS));
+        let Some(position) = knob(position, 0.0, 1.0) else { return };
+        let Some(secs) = knob(secs, SLEW_SECS, 60.0) else { return };
+        self.state.lock().unwrap().fader.slew(position, secs);
     }
 
     /// Where the crossfader actually is right now, mid-ramp included. The
@@ -1951,11 +1971,12 @@ impl Mixer {
     }
 
     pub fn set_blend_stem(&self, deck: DeckId, stem: usize, gain: f32) {
+        let Some(gain) = knob(gain, 0.0, 1.0) else { return };
         if stem >= STEM_COUNT {
             return;
         }
         self.state.lock().unwrap().decks[deck.index()].blend_stem[stem]
-            .slew(gain.clamp(0.0, 1.0), BLEND_SECS);
+            .slew(gain, BLEND_SECS);
     }
 
     pub fn clear_blend(&self, deck: DeckId) {
@@ -1972,7 +1993,8 @@ impl Mixer {
     }
 
     pub fn set_master(&self, gain: f32) {
-        self.state.lock().unwrap().master.slew(gain.clamp(0.0, 1.2), SLEW_SECS);
+        let Some(gain) = knob(gain, 0.0, 1.2) else { return };
+        self.state.lock().unwrap().master.slew(gain, SLEW_SECS);
     }
 
     /// `(position_secs, duration_secs, playing)` from the device clock.
@@ -2070,9 +2092,10 @@ impl Mixer {
     }
 
     pub fn set_phones_volume(&self, volume: f32) {
+        let Some(volume) = knob(volume, 0.0, 1.0) else { return };
         self.cue_ring
             .volume_bits
-            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+            .store(volume.to_bits(), Ordering::Relaxed);
     }
 
     /// Route a deck into the phones. Cue follows the deck SLOT (the channel
@@ -2709,9 +2732,12 @@ impl Mixer {
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
             let master = s.master.tick(rate);
-            let l = ((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master)
+            // `audible` before the clamp, because a clamp passes NaN through
+            // and one non-finite sample would go on to poison the meters and
+            // the phones ring as well as the device buffer.
+            let l = audible((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master)
                 .clamp(-CLAMP, CLAMP);
-            let r = ((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master)
+            let r = audible((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master)
                 .clamp(-CLAMP, CLAMP);
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
@@ -3553,6 +3579,40 @@ mod tests {
         assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
         let (position, duration, playing) = mixer.deck_position(DeckId::A);
         assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
+    }
+
+    #[test]
+    fn a_deck_handed_a_number_that_is_not_one_keeps_playing() {
+        // One bad number out of a UI division by a zero-width widget, or a
+        // learned controller scale, used to take a deck out for the night.
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4096);
+        let before = render(&mixer, 48_000.0, 256).channel(0)[128];
+        assert!(before.abs() > 0.1, "the deck is sounding to begin with");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            mixer.set_deck_gain(DeckId::A, bad);
+            mixer.set_deck_eq_band(DeckId::A, 1, bad);
+            mixer.set_deck_filter(DeckId::A, bad);
+            mixer.set_master(bad);
+            mixer.set_crossfader(bad);
+            mixer.set_deck_stem_gain(DeckId::A, 0, bad);
+            mixer.set_deck_rate(DeckId::A, bad as f64);
+            mixer.set_deck_key_shift(DeckId::A, bad as f64);
+        }
+        let out = render(&mixer, 48_000.0, 1024);
+        assert!(
+            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
+            "the output stays finite"
+        );
+        assert!(
+            out.channel(0)[512].abs() > 0.1,
+            "and the deck is still sounding, at {}",
+            out.channel(0)[512]
+        );
     }
 
     #[test]
