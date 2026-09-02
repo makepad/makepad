@@ -70,6 +70,21 @@ fn needs_separate_detail_archive(config: &TileSourceConfig) -> bool {
     }
 }
 
+impl TileSourceConfig {
+    /// Hosted `.mkmap` archive constructor: base and detail from one root, no
+    /// sidecars. Keeping variant construction in the map crate lets callers stay
+    /// stable as HTTP sidecar fields come and go.
+    pub fn http_archive(root_url: impl Into<String>) -> Self {
+        let root_url = root_url.into();
+        Self::HttpArchive {
+            detail_root_url: root_url.clone(),
+            root_url,
+            overlay_mbtiles_paths: String::new(),
+            bridge_dz_path: String::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ArchiveTileParts {
     generation: u64,
@@ -1994,7 +2009,6 @@ impl ScriptHook for MapView {
         if self.next_request_id == 0 {
             self.next_request_id = 1;
         }
-        ensure_cache_dir();
         if self.status.is_empty() {
             self.status = "Loading Amsterdam tiles from local cache/mbtiles...".to_string();
         }
@@ -2973,7 +2987,7 @@ impl Widget for MapView {
         if full_place {
             self.perf_label_full_places += 1;
         }
-        if self.perf_frames >= 240 {
+        if self.is_local_archive() && self.perf_frames >= 240 {
             use std::io::Write;
             // GPU time per presented frame from the platform monitor
             // (command-buffer start->end, completion-handler thread).
@@ -3748,7 +3762,7 @@ impl MapView {
                 self.insert_ready_tile(cx, tile_key, buffers);
             }
             let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
-            if upload_ms > 4.0 {
+            if self.is_local_archive() && upload_ms > 4.0 {
                 use std::io::Write;
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
@@ -4566,6 +4580,7 @@ impl MapView {
         // resident set can eat the machine. Evict least-recently-used
         // non-visible tiles until the geometry footprint fits.
         const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
+        const HTTP_TILE_CACHE_BYTE_BUDGET: usize = 240_000_000;
         let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
         // Anti-thrash: street-zoom tiles now carry the full icon horizon
         // (50-85 MB each), so a fixed budget can sit BELOW visible+ring —
@@ -4580,7 +4595,14 @@ impl MapView {
             .filter(|(key, _)| visible_set.contains(*key))
             .map(|(_, entry)| entry.bytes)
             .sum();
-        let byte_budget = TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2));
+        let byte_budget = if matches!(
+            self.tile_source_config,
+            Some(TileSourceConfig::HttpArchive { .. })
+        ) {
+            HTTP_TILE_CACHE_BYTE_BUDGET.max(visible_bytes)
+        } else {
+            TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2))
+        };
         if total_bytes > byte_budget {
             let center = self.center_norm;
             let mut evictable: Vec<(TileKey, u64, usize)> = self

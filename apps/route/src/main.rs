@@ -11,39 +11,83 @@
 
 pub use ::makepad_widgets;
 
+#[cfg(all(feature = "native", feature = "demo"))]
+compile_error!("features `native` and `demo` are mutually exclusive");
+#[cfg(not(any(feature = "native", feature = "demo")))]
+compile_error!("enable either feature `native` or feature `demo`");
+
+#[cfg(feature = "native")]
 use makepad_converse::agent_seam::*;
 use makepad_widgets::*;
 
+#[cfg(feature = "native")]
 mod broker;
+#[cfg(feature = "native")]
 mod claude_agent;
+#[cfg(feature = "native")]
 mod ddg;
+#[cfg(feature = "native")]
 mod history;
+#[cfg(feature = "native")]
 mod layers;
+#[cfg(feature = "native")]
 mod local_agent;
+#[cfg(feature = "native")]
 mod nav;
+#[cfg(any(feature = "demo", test))]
+mod nav_api;
+#[cfg(feature = "native")]
 mod nav_data;
+mod provisioner;
+mod side_panel;
+#[cfg(feature = "native")]
 mod testmap;
+#[cfg(feature = "native")]
 mod tools;
 mod trip;
+#[cfg(feature = "native")]
 mod voice;
 
+#[cfg(feature = "demo")]
+mod demo_app;
+
+#[cfg(feature = "native")]
 use broker::{MarkerLegend, ToolCtx};
+#[cfg(feature = "native")]
 use ddg::{DdgEvent, DdgState};
+#[cfg(feature = "native")]
 use history::DriveLog;
+#[cfg(feature = "native")]
 use layers::{LayerState, TerrainUpdate, WindUpdate};
+#[cfg(feature = "native")]
 use nav::{ActiveNav, NavAction, NavTick};
+#[cfg(feature = "native")]
 use nav_data::{NavData, NavLoad, RadarData};
+#[cfg(feature = "native")]
 use makepad_converse::SpeechOutput;
-use testmap::{Stage as TestMapStage, TestMapBuild};
+#[cfg(feature = "native")]
+use provisioner::MapProvisioner;
+#[cfg(feature = "native")]
+use side_panel::{PanelAction, PanelController};
+#[cfg(feature = "native")]
+use testmap::Stage as TestMapStage;
+#[cfg(feature = "native")]
 use trip::TripModel;
+#[cfg(feature = "native")]
 use voice::{GateResult, VoiceGate};
 
+#[cfg(feature = "native")]
 app_main!(App);
+#[cfg(feature = "demo")]
+use demo_app::App as DemoApp;
+#[cfg(feature = "demo")]
+app_main!(DemoApp);
 
 /// Dam square, the point the map opens on and where a fresh test map
 /// lands.
-const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
+pub(crate) const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
 
+#[cfg(feature = "native")]
 const SYSTEM_PROMPT: &str = "\
 You are the route assistant inside a live map app (Netherlands detail, Europe-wide places), \
 a conversational replacement for a car GPS. The user sees a full-screen map; you act only \
@@ -59,11 +103,11 @@ digests are already shown in the transcript — summarize outcomes, don't repeat
 - Each user message ends with an [app state] block (map center, trip digest) — trust it.
 - If a tool reports data still loading or out of coverage, say so briefly; don't guess.";
 
+#[cfg(feature = "native")]
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.TranscriptListBase = #(TranscriptList::register_widget(vm))
     mod.widgets.TiltShiftLayerBase = #(TiltShiftLayer::register_widget(vm))
 
     let PanelText = Label{
@@ -362,179 +406,9 @@ script_mod! {
                             }
                         }
 
-                        // --- Assistant panel (bottom-right popover, closed by default) ---
-                        View{
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            align: Align{x: 1.0 y: 1.0}
-                            assistant_panel := mod.widgets.glass.Panel{
-                                visible: false
-                                flow: Down
-                                width: 380
-                                height: 620
-                                margin: Inset{right: 14, bottom: 6}
-                                padding: 10
-                                spacing: 0
-                                draw_bg +: {
-                                    corner_radius: 9.0
-                                    tint_color: #xf8fbff
-                                    tint_alpha: 0.30
-                                }
-                                header_label := Label{
-                                    draw_text +: {
-                                        color: #x223038
-                                        text_style: theme.font_bold{font_size: 11}
-                                    }
-                                    text: "Route Assistant"
-                                }
-                                intro_label := PanelText{
-                                    height: Fit
-                                    margin: Inset{top: 8}
-                                    text: "Ask about a trip: destinations, stops, sights and chargers along the way, rain at a point. Type /help for direct tool commands."
-                                }
-                                transcript_list := mod.widgets.TranscriptListBase{
-                                    width: Fill
-                                    height: Fill
-                                    margin: Inset{top: 8, bottom: 8}
-                                    list := PortalList{
-                                        width: Fill
-                                        height: Fill
-                                        UserLine := View{
-                                            width: Fill
-                                            height: Fit
-                                            margin: Inset{top: 8}
-                                            line_label := Label{
-                                                width: Fill
-                                                draw_text +: {
-                                                    color: #x101820
-                                                    text_style: theme.font_bold{font_size: 9.5}
-                                                }
-                                            }
-                                        }
-                                        AssistantLine := View{
-                                            width: Fill
-                                            height: Fit
-                                            margin: Inset{top: 4}
-                                            line_label := Label{
-                                                width: Fill
-                                                draw_text +: {
-                                                    color: #x2a3540
-                                                    text_style: theme.font_regular{font_size: 9.5}
-                                                }
-                                            }
-                                        }
-                                        ToolLine := View{
-                                            width: Fill
-                                            height: Fit
-                                            margin: Inset{top: 3, left: 8}
-                                            line_label := Label{
-                                                width: Fill
-                                                draw_text +: {
-                                                    color: #x7a8794
-                                                    text_style: theme.font_regular{font_size: 8.5}
-                                                }
-                                            }
-                                        }
-                                        InfoLine := View{
-                                            width: Fill
-                                            height: Fit
-                                            margin: Inset{top: 3, left: 8}
-                                            line_label := Label{
-                                                width: Fill
-                                                draw_text +: {
-                                                    color: #x93a0ad
-                                                    text_style: theme.font_regular{font_size: 8.5}
-                                                }
-                                            }
-                                        }
-                                        TripLine := View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
-                                            spacing: 6
-                                            margin: Inset{top: 8}
-                                            apply_btn := Button{
-                                                text: ">"
-                                            }
-                                            line_label := Label{
-                                                width: Fill
-                                                margin: Inset{top: 4}
-                                                draw_text +: {
-                                                    color: #x1d4ed8
-                                                    text_style: theme.font_bold{font_size: 9.5}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                images_row := View{
-                                    visible: false
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 4
-                                    margin: Inset{bottom: 6}
-                                    img_0 := Image{ width: 86, height: 64 }
-                                    img_1 := Image{ width: 86, height: 64 }
-                                    img_2 := Image{ width: 86, height: 64 }
-                                    img_3 := Image{ width: 86, height: 64 }
-                                }
-                                input_row := View{
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 6
-                                    align: Align{x: 0.0 y: 0.5}
-                                mic_button := AppButton{
-                                    padding: Inset{left: 12, right: 12, top: 8, bottom: 8}
-                                    text: "🎤"
-                                }
-                                speaker_button := AppButton{
-                                    padding: Inset{left: 12, right: 12, top: 8, bottom: 8}
-                                    text: "🔊"
-                                }
-                                // Kept visible (events must flow) but
-                                // zero-sized: the mic button is the only
-                                // recording indicator.
-                                mic_wave := VoiceWave{
-                                    width: 0
-                                    height: 0
-                                }
-                                prompt_input := TextInput{
-                                    width: Fill
-                                    empty_text: "Plan a trip…"
-                                    // The desktop theme's text colors are light
-                                    // (for dark insets); the panel is light, so
-                                    // pin dark text + medium placeholder.
-                                    draw_text +: {
-                                        color: #x16202a
-                                        color_hover: #x000000
-                                        color_focus: #x0b1218
-                                        color_down: #x000000
-                                        color_empty: #x6b7784
-                                        color_empty_hover: #x57626e
-                                        color_empty_focus: #x6b7784
-                                    }
-                                }
-                                } // input_row
-                                status_label := PanelText{
-                                    margin: Inset{top: 6, left: 2}
-                                    text: "starting…"
-                                }
-                            }
-                            assistant_button := AppButton{
-                                margin: Inset{right: 14, bottom: 16}
-                                padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
-                                spacing: 0
-                                text: ""
-                                icon_walk: Walk{width: 18, height: 18}
-                                draw_icon +: {
-                                    svg: crate_resource("self://resources/icons/assistant.svg")
-                                    color: #x223038
-                                }
-                            }
-                        }
+                        // Selected at the feature seam: AI/voice on native,
+                        // hosted trip planner in the demo profile.
+                        RouteSidePanel{}
 
                         // --- First-run test map (centered, over everything) ---
                         View{
@@ -621,6 +495,7 @@ script_mod! {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[cfg(feature = "native")]
 pub enum EntryKind {
     User,
     Assistant,
@@ -630,6 +505,7 @@ pub enum EntryKind {
 
 /// One transcript row; `trip` indexes into `ChatState::trips` and renders
 /// with a `>` re-apply button.
+#[cfg(feature = "native")]
 pub struct ChatEntry {
     pub kind: EntryKind,
     pub text: String,
@@ -638,6 +514,7 @@ pub struct ChatEntry {
 
 /// Shared with `TranscriptList`/`TiltShiftLayer` via `Scope::with_data`.
 #[derive(Default)]
+#[cfg(feature = "native")]
 pub struct ChatState {
     pub entries: Vec<ChatEntry>,
     pub trips: Vec<TripModel>,
@@ -657,6 +534,7 @@ pub struct ChatState {
 /// the top/bottom edges. Hoists into the overlay draw list (like glass),
 /// so panels drawn as glass stay sharp above it.
 #[derive(Script, ScriptHook, Widget)]
+#[cfg(feature = "native")]
 pub struct TiltShiftLayer {
     #[uid]
     uid: WidgetUid,
@@ -673,6 +551,7 @@ pub struct TiltShiftLayer {
     draw_bg: DrawQuad,
 }
 
+#[cfg(feature = "native")]
 impl TiltShiftLayer {
     fn bind_snapshot(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
         let draw = &mut self.draw_bg.draw_vars;
@@ -696,6 +575,7 @@ impl TiltShiftLayer {
     }
 }
 
+#[cfg(feature = "native")]
 impl Widget for TiltShiftLayer {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
@@ -736,6 +616,7 @@ impl Widget for TiltShiftLayer {
 }
 
 /// Per-kind transcript text color for the current UI theme.
+#[cfg(feature = "native")]
 fn entry_color(kind: EntryKind, is_trip: bool, dark: bool) -> Vec4 {
     if is_trip {
         return if dark { vec4(0.38, 0.65, 0.98, 1.0) } else { vec4(0.11, 0.31, 0.85, 1.0) };
@@ -755,6 +636,7 @@ fn entry_color(kind: EntryKind, is_trip: bool, dark: bool) -> Vec4 {
 /// PortalList-backed chat transcript; rows come from the `ChatState` in
 /// the event/draw scope.
 #[derive(Script, ScriptHook, Widget)]
+#[cfg(feature = "native")]
 pub struct TranscriptList {
     #[source]
     source: ScriptObjectRef,
@@ -762,6 +644,7 @@ pub struct TranscriptList {
     view: View,
 }
 
+#[cfg(feature = "native")]
 impl Widget for TranscriptList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
@@ -825,11 +708,14 @@ impl Widget for TranscriptList {
 }
 
 #[derive(Script, ScriptHook)]
+#[cfg(feature = "native")]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
     started: bool,
+    #[rust]
+    panel: PanelController,
     /// Last pushed disabled-state of the Space-warp row (None = never
     /// pushed): the row grays out whenever the camera leaves the
     /// near-first-person regime and re-enables when it returns.
@@ -880,10 +766,7 @@ pub struct App {
     /// First-run map acquisition (download + bake). Idle on a machine that
     /// already has map data.
     #[rust]
-    testmap: TestMapBuild,
-    /// The finished test map is adopted once, not on every poll.
-    #[rust]
-    testmap_adopted: bool,
+    testmap: MapProvisioner,
     /// Route assistant popover (bottom-right button). Closed on every
     /// launch — nothing persisted.
     #[rust]
@@ -936,6 +819,7 @@ pub struct App {
 /// timezone database, so we ask the system's own `date` — which knows about
 /// DST — instead of guessing. Same house pattern as
 /// `apps/files/src/model.rs::local_utc_offset_secs`.
+#[cfg(feature = "native")]
 fn local_utc_offset_secs() -> i64 {
     static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFFSET.get_or_init(|| {
@@ -952,6 +836,7 @@ fn local_utc_offset_secs() -> i64 {
 }
 
 /// `+0200` / `-0730` -> seconds east of UTC.
+#[cfg(feature = "native")]
 fn parse_utc_offset(text: &str) -> i64 {
     let bytes = text.as_bytes();
     if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
@@ -972,6 +857,7 @@ fn parse_utc_offset(text: &str) -> i64 {
 }
 
 /// The current local hour-of-day (0..24), wall clock + system UTC offset.
+#[cfg(feature = "native")]
 fn local_hour_now() -> u32 {
     let epoch_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -983,6 +869,7 @@ fn local_hour_now() -> u32 {
 
 /// Civil-twilight approximation for the startup theme, no location lookup:
 /// night from 19:00 through 06:59, light from 07:00 through 18:59.
+#[cfg(feature = "native")]
 fn theme_name_for_hour(hour: u32) -> &'static str {
     if hour >= 19 || hour < 7 {
         "night"
@@ -992,6 +879,7 @@ fn theme_name_for_hour(hour: u32) -> &'static str {
 }
 
 /// Pull "ctx USED/MAX" out of the local timing status line.
+#[cfg(feature = "native")]
 fn parse_ctx_usage(timing: &str) -> Option<(usize, usize)> {
     let at = timing.rfind("ctx ")?;
     let rest = &timing[at + 4..];
@@ -1006,6 +894,7 @@ fn parse_ctx_usage(timing: &str) -> Option<(usize, usize)> {
     ))
 }
 
+#[cfg(feature = "native")]
 fn read_secret(name: &str) -> Option<String> {
     if let Ok(v) = std::env::var(name) {
         let v = v.trim().to_string();
@@ -1022,6 +911,7 @@ fn read_secret(name: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "native")]
 impl App {
     /// Idempotent init; also re-runs after a script hot-reload wipes
     /// `#[rust]` state (same guard pattern as examples/map).
@@ -1058,25 +948,15 @@ impl App {
     /// the production archives, else a baked test map, else nothing — in
     /// which case the first-run popup offers to build one.
     fn adopt_map_source(&mut self, cx: &mut Cx) {
-        if let Some(basename) = nav_data::nav_basename() {
+        let nav_basename = nav_data::nav_basename();
+        if let Some(basename) = nav_basename.clone() {
             nav_data::start_nav_load(self.nav_rx.sender(), basename);
         }
-        if testmap::production_archive_present() {
-            return;
-        }
-        let paths = self.testmap.paths.clone();
-        if paths.archive.is_file() {
-            // A test map is all we have: the ocean and bridge-elevation
-            // overlays belong to the production set and are not part of it.
-            let archive = paths.archive.to_string_lossy().into_owned();
-            let map = self.ui.map_view(cx, ids!(map));
-            map.set_source_paths(cx, &archive, &archive, "");
-            map.set_overlay_paths(cx, "");
-            return;
-        }
-        self.testmap.offer_if_no_map(false);
-        if self.testmap.is_offered() {
-            self.testmap.start(cx);
+        let map = self.ui.map_view(cx, ids!(map));
+        if let Some(basename) = self.testmap.ensure_source(cx, &map) {
+            if nav_basename.is_none() {
+                nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            }
         }
         self.refresh_testmap_ui(cx);
     }
@@ -1132,25 +1012,6 @@ impl App {
             .button(cx, ids!(testmap_dismiss))
             .set_visible(cx, !matches!(self.testmap.stage, TestMapStage::Baking));
         self.ui.redraw(cx);
-    }
-
-    /// The bake finished: adopt what it built without a restart.
-    fn testmap_finished(&mut self, cx: &mut Cx) {
-        let paths = self.testmap.paths.clone();
-        let archive = paths.archive.to_string_lossy().into_owned();
-        let map = self.ui.map_view(cx, ids!(map));
-        map.set_source_paths(cx, &archive, &archive, "");
-        map.set_overlay_paths(cx, "");
-        map.set_center(cx, AMSTERDAM_CENTER.0, AMSTERDAM_CENTER.1);
-        nav_data::start_nav_load(
-            self.nav_rx.sender(),
-            paths.nav_basename.to_string_lossy().into_owned(),
-        );
-        self.push_entry(
-            cx,
-            EntryKind::Info,
-            "test map ready: Amsterdam tiles, routing graph and search index",
-        );
     }
 
     fn make_claude(api_key: String) -> Box<dyn Agent> {
@@ -2114,6 +1975,7 @@ impl App {
     }
 }
 
+#[cfg(feature = "native")]
 impl MatchEvent for App {
     // The test-map download rides the platform's HTTP stack, which reports
     // progress as the body streams. (DDG image search reads the same
@@ -2149,9 +2011,8 @@ impl MatchEvent for App {
                 self.refresh_testmap_ui(cx);
             }
         }
-        if let Some((text, _)) = self.ui.text_input(cx, ids!(prompt_input)).returned(actions) {
-            let text = text.trim().to_string();
-            if !text.is_empty() {
+        for panel_action in self.panel.actions(cx, &self.ui, actions) {
+            if let PanelAction::Search(text) = panel_action {
                 self.ui.text_input(cx, ids!(prompt_input)).set_text(cx, "");
                 self.send_user_prompt(cx, &text);
             }
@@ -2321,6 +2182,7 @@ impl MatchEvent for App {
     }
 }
 
+#[cfg(feature = "native")]
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         // Whisper stays on the F16 default (ggml-large-v3-turbo.bin): the
@@ -2328,6 +2190,7 @@ impl AppMain for App {
         // models fail every GPU op. Port the kernels before re-quantizing.
         crate::makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
+        crate::side_panel::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -2434,14 +2297,18 @@ impl AppMain for App {
             let next = self.voice_queue.remove(0);
             self.send_user_prompt(cx, &next);
         }
-        // The bake worker talks the same way every other worker here does.
-        if self.testmap.poll() {
-            let finished = matches!(self.testmap.stage, TestMapStage::Done)
-                && !self.testmap_adopted;
-            if finished {
-                self.testmap_adopted = true;
-                self.testmap_finished(cx);
-            }
+        // The provisioner owns polling and adoption of the native bake.
+        let map = self.ui.map_view(cx, ids!(map));
+        let provisioner_update = self.testmap.handle_event(cx, &map);
+        if let Some(basename) = provisioner_update.nav_basename {
+            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            self.push_entry(
+                cx,
+                EntryKind::Info,
+                "test map ready: Amsterdam tiles, routing graph and search index",
+            );
+        }
+        if provisioner_update.changed {
             self.refresh_testmap_ui(cx);
         }
         while let Ok(load) = self.nav_rx.try_recv() {
@@ -2509,7 +2376,7 @@ impl AppMain for App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 
