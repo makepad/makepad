@@ -250,7 +250,7 @@ pub trait AppMain {
 
 /// Internal helper for [`app_main!`]. Emits the boxed event-handler
 /// closure that every platform entry point hands to `Cx::new`. Captures
-/// its own `app` and `app_value` `Rc<RefCell<…>>` slots, so the four
+/// its own `app` and `app_value` slots, so the four
 /// platform entry points (desktop, Android activity, OHOS, wasm32) all
 /// share a single source of truth for `Event::Startup` / `LiveEdit` /
 /// `ScriptReapply` / `handle_event` dispatch.
@@ -264,20 +264,22 @@ pub trait AppMain {
 #[macro_export]
 macro_rules! _app_main_event_closure {
     ($app:ident) => {{
-        let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(None));
+        // Event dispatch already excludes synchronous re-entry. Plain captured slots
+        // also survive a caught wasm panic=abort trap; a RefCell borrow flag would not
+        // be released because wasm does not unwind the trapped Rust stack.
+        let mut app: Option<$app> = None;
+        let mut app_value: Option<$crate::ScriptObjectRef> = None;
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
                 // Font resource registration happens inside AppMain::script_mod,
                 // so freeze the app_main! choice before that code can run.
                 cx.freeze_font_set();
                 $crate::startup_trace("Startup: script_mod begin");
-                *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                app = Some(cx.with_vm(|vm| {
                     let value = <$app as AppMain>::script_mod(vm);
                     $crate::startup_trace("Startup: script_mod eval done");
                     if let Some(obj) = value.as_object() {
-                        *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                        app_value = Some(vm.heap_mut().new_object_ref(obj));
                     }
                     let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
                     $crate::startup_trace("Startup: app from_value done");
@@ -288,12 +290,11 @@ macro_rules! _app_main_event_closure {
                 cx.start_hot_reload_file_observer_if_requested();
             }
             if let Event::LiveEdit = event {
-                let mut app_ref = app.borrow_mut();
-                if let Some(app) = app_ref.as_mut() {
+                if let Some(app) = app.as_mut() {
                     cx.with_vm(|vm| {
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
-                            *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                            app_value = Some(vm.heap_mut().new_object_ref(obj));
                         }
                         <$app as $crate::ScriptApply>::script_apply(
                             app,
@@ -306,10 +307,8 @@ macro_rules! _app_main_event_closure {
                 }
             }
             if let Event::ScriptReapply = event {
-                let mut app_ref = app.borrow_mut();
-                if let Some(app) = app_ref.as_mut() {
+                if let Some(app) = app.as_mut() {
                     let value = app_value
-                        .borrow()
                         .as_ref()
                         .map(|r| $crate::ScriptValue::from(r.as_object()));
                     if let Some(value) = value {
@@ -325,7 +324,7 @@ macro_rules! _app_main_event_closure {
                     }
                 }
             }
-            if let Some(app) = &mut *app.borrow_mut() {
+            if let Some(app) = app.as_mut() {
                 <dyn AppMain>::handle_event(app, cx, event);
             }
         }) as Box<dyn FnMut(&mut Cx, &Event)>
