@@ -683,6 +683,19 @@ impl DeckState {
         self.loop_span.is_some()
     }
 
+    /// Whether the span standing on this deck is the whole file.
+    ///
+    /// A track repeat and a loop are ONE span and one wrap: there is no
+    /// second mechanism and no flag beside it, which is why the loop icon
+    /// lights, the overview band draws, RELOOP works and `[`, `]` and the
+    /// stepper all behave with nothing new plumbed. This only tells the two
+    /// apart for the gesture that placed it.
+    pub fn repeats_whole_track(&self) -> bool {
+        self.loop_span.is_some_and(|span| {
+            span.start_secs <= 0.0 && span.end_secs >= self.duration_secs - 1e-9
+        })
+    }
+
     pub fn title(&self) -> Option<&str> {
         match &self.load {
             DeckLoad::Empty => None,
@@ -1125,6 +1138,41 @@ impl DeckEngine {
             DeckCmd::SeekSeconds { deck, secs: span.start_secs },
             DeckCmd::SetLoopSpan { deck, span: Some(span) },
         ]
+    }
+
+    /// Repeat the whole track, or stop repeating it.
+    ///
+    /// This is the ordinary loop span set to the whole file, so the mixer's
+    /// wrap, its raw splice at the head (nothing exists before frame zero to
+    /// crossfade with) and its rule that a span never ends a deck all apply
+    /// unchanged. Nothing new is added to the audio path.
+    ///
+    /// Unlike every other way of engaging a span it leaves RELOOP's memory
+    /// and any placed bookmark alone. An operator who has a loop saved at
+    /// the drop and then repeats the track must still get that loop back
+    /// when they press RELOOP -- a repeat is a transport choice, not a
+    /// replacement for the loop they were keeping.
+    pub fn repeat_track(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.deck(deck).repeats_whole_track() {
+            let state = self.deck_mut(deck);
+            state.loop_span = None;
+            return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+        }
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        let duration = self.deck(deck).duration_secs;
+        // The same floor every other span passes: a file too short to hold
+        // one is not something to repeat.
+        let Some(span) = self.usable_span(deck, 0.0, duration) else {
+            return Vec::new();
+        };
+        let state = self.deck_mut(deck);
+        state.loop_span = Some(span);
+        state.loop_armed = None;
+        // No seek: the playhead is inside the whole file by definition, so
+        // there is nowhere for a repeat to move the record to.
+        vec![DeckCmd::SetLoopSpan { deck, span: Some(span) }]
     }
 
     /// Seconds one armed loop is worth on this deck, or `None` when the
@@ -3559,6 +3607,109 @@ mod tests {
         decks.trim_pitch(DeckId::A, -1.0, false);
         decks.trim_pitch(DeckId::A, 1.0, false);
         assert!((decks.deck(DeckId::A).pitch - was).abs() < 1e-12);
+    }
+
+    // ---- whole-track repeat ---------------------------------------------
+
+    #[test]
+    fn repeating_a_track_engages_a_span_over_the_whole_file() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let duration = e.deck(DeckId::A).duration_secs;
+        let cmds = e.repeat_track(DeckId::A);
+        assert_eq!(
+            cmds,
+            vec![DeckCmd::SetLoopSpan {
+                deck: DeckId::A,
+                span: Some(LoopSpan { start_secs: 0.0, end_secs: duration })
+            }],
+            "one span, no seek: the playhead is already inside the whole file"
+        );
+        assert!(e.deck(DeckId::A).repeats_whole_track());
+        assert!(e.deck(DeckId::A).loop_on(), "and it is an ordinary loop as far as everything else is concerned");
+    }
+
+    #[test]
+    fn a_second_press_stops_repeating_and_leaves_no_span() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.repeat_track(DeckId::A);
+        let cmds = e.repeat_track(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }]);
+        assert!(!e.deck(DeckId::A).loop_on());
+        assert!(!e.deck(DeckId::A).repeats_whole_track());
+    }
+
+    #[test]
+    fn a_repeat_does_not_cost_the_operator_the_loop_they_were_keeping() {
+        // The whole reason this does not go through `engage_loop`: that
+        // overwrites RELOOP's memory and throws away a placed bookmark, so
+        // repeating a track would quietly lose the loop saved at the drop.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let kept = LoopSpan { start_secs: 30.0, end_secs: 34.0 };
+        e.deck_mut(DeckId::A).loop_memory = Some(kept);
+        e.deck_mut(DeckId::A).bookmark = Some(12.5);
+
+        e.repeat_track(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).loop_memory, Some(kept), "RELOOP still remembers it");
+        assert_eq!(e.deck(DeckId::A).bookmark, Some(12.5), "and the green mark is still placed");
+
+        e.repeat_track(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).loop_memory, Some(kept), "leaving the repeat does not claim it either");
+        let cmds = e.toggle_loop(DeckId::A);
+        assert_eq!(
+            cmds,
+            vec![
+                DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+                DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(kept) },
+            ],
+            "and RELOOP brings back the loop, not the whole track"
+        );
+    }
+
+    #[test]
+    fn an_unloaded_deck_cannot_repeat_a_track() {
+        let mut e = DeckEngine::new();
+        assert!(e.repeat_track(DeckId::A).is_empty(), "nothing to repeat");
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+        // A deck with a load still in flight has a duration of zero, which
+        // would be a span of nothing at all.
+        e.click(item(1), DeckTarget::A);
+        assert!(e.repeat_track(DeckId::A).is_empty());
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+    }
+
+    #[test]
+    fn a_fresh_load_drops_a_whole_track_repeat_like_any_other_span() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.repeat_track(DeckId::A);
+        assert!(e.deck(DeckId::A).repeats_whole_track());
+        load_analysed(&mut e, DeckId::A, 2, 128.0, 0.0);
+        assert!(!e.deck(DeckId::A).loop_on(), "a span measured on the last track means nothing on this one");
+        assert!(!e.deck(DeckId::A).repeats_whole_track());
+    }
+
+    #[test]
+    fn the_stepper_shortens_a_repeat_into_an_ordinary_loop() {
+        // Halving a repeat leaves the first half, which is no longer the
+        // whole file -- so the gesture that made it a repeat makes it one
+        // again rather than toggling it off. Worth pinning: it is the one
+        // place the toggle is not its own inverse.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let duration = e.deck(DeckId::A).duration_secs;
+        e.repeat_track(DeckId::A);
+        e.loop_halve(DeckId::A);
+        assert!(!e.deck(DeckId::A).repeats_whole_track(), "half a file is a loop now");
+        assert!(e.deck(DeckId::A).loop_on());
+        e.repeat_track(DeckId::A);
+        assert_eq!(
+            e.deck(DeckId::A).loop_span,
+            Some(LoopSpan { start_secs: 0.0, end_secs: duration }),
+            "and the gesture puts the whole file back"
+        );
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {

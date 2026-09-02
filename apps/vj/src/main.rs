@@ -24335,8 +24335,19 @@ p2 {}
                 cmds.extend(self.decks.seek_secs(deck, cue));
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.loop_button.clicked(actions) {
-                let cmds = self.decks.toggle_loop(deck);
+            // RELOOP/EXIT plainly; SHIFT repeats the whole track, which is
+            // the same span mechanism with the file as its span. On this
+            // button rather than a new one for the reason written out
+            // twenty lines below for the beat pair: the transport row has
+            // no width left. Deliberately no `deck_hands_on` here, as the
+            // plain arm has never had one -- a repeat is not the operator
+            // taking the deck off the autopilot.
+            if let Some(modifiers) = refs.loop_button.clicked_modifiers(actions) {
+                let cmds = if modifiers.shift {
+                    self.decks.repeat_track(deck)
+                } else {
+                    self.decks.toggle_loop(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.loop_halve.clicked(actions) {
