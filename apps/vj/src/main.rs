@@ -115,6 +115,9 @@ mod score_preview;
 // Which columns a track list shows and in what order — the operator's, not
 // the template's.
 mod columns;
+// The strip under the lists: live numbers at rest, the app's log when it
+// is opened.
+mod console;
 // What may be worked out about a track before anyone asks to play it, and
 // where the results of that work are kept.
 mod preprocess;
