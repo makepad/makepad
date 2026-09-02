@@ -2207,19 +2207,22 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
                         deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // One beat back, one beat on — the nudge a hand makes
-                        // when the drop lands a hair early — and a phrase with a
-                        // modifier held: shift takes four bars, control sixteen.
-                        // A beat is a GRID measurement, so these do nothing until
-                        // a grid does: there is no length to step by before one
-                        // lands.
+                        // One beat either way — the nudge a hand makes when the
+                        // drop lands a hair off — and a phrase with a modifier held:
+                        // shift takes four bars, control sixteen.
+                        // A beat is a GRID measurement,
+                        // so these do nothing until a grid does: there is no
+                        // length to step by before one lands.
+                        //
+                        // The chevrons point at the TRACK, not at the playhead:
+                        // < sends the track a beat FORWARD past the head, > a
+                        // beat back. It is the same convention as a hand on the
+                        // platter — push the record the way the arrow points.
                         //
                         // NOT mirrored on deck B, for the reason the loop marks
-                        // are not: these point along the TRACK, and back is on
-                        // the left of every transport in the room whichever
-                        // deck it belongs to.
-                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
+                        // are not: the sense is the same whichever deck it is.
+                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: ">"}
                         deck_a_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
@@ -2760,9 +2763,9 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
                         // NOT mirrored, exactly as the loop marks above are
-                        // not: back is left on every transport in the room.
-                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
+                        // not: the chevrons read the same on both decks.
+                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: ">"}
                         deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
                         deck_b_play := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
@@ -3939,7 +3942,7 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "OVERLAP"}
-                        scan_overlap := MusicButton{width: 110 height: 22 text: "OVERLAP"}
+                        scan_overlap := MusicButton{width: 110 height: 22 text: "ALLOWED"}
                     }
                     View{
                         width: Fill
