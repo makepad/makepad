@@ -2776,9 +2776,14 @@ pub(crate) mod fixtures {
         Arc::new(TrackPcm { frames: all, sample_rate: rate })
     }
 
+    /// One device callback. A test thread is not an audio thread: the
+    /// callback arms flush-to-zero on whoever calls it, and a test that
+    /// runs next on this thread must not inherit that (it has its own
+    /// proof, `every_callback_arms_flush_to_zero`).
     pub(crate) fn render(mixer: &Mixer, rate: f64, frames: usize) -> AudioBuffer {
         let mut buffer = AudioBuffer::new_with_size(frames, 2);
         mixer.render(rate, &mut buffer);
+        crate::music_dsp::set_flush_denormals(false);
         buffer
     }
 
@@ -3496,7 +3501,8 @@ mod tests {
         // the thread must be flushing again.
         crate::music_dsp::set_flush_denormals(false);
         let mixer = Mixer::new();
-        render(&mixer, 48_000.0, 64);
+        let mut buffer = AudioBuffer::new_with_size(64, 2);
+        mixer.render(48_000.0, &mut buffer);
         let tiny = std::hint::black_box(f32::MIN_POSITIVE);
         let half = std::hint::black_box(0.5f32);
         assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
