@@ -49,10 +49,16 @@ ANCHORS: "north"/"south"/"east"/"west"/"northeast"…/"centre";
 "<river>:east_bank|west_bank|north_bank|south_bank|centre|source|mouth";
 "<place>:north|south|east|west|centre"; "<corridor>@0.3" (fraction along
 it); or a vec3 when editing something you can see.
-TO CHANGE A MAP: edit the plan — remove a corridor, add a landform, move a
-point in a resolved `path` — and send the whole source again; the engine
-re-solves and the player, cars, followers and train carry across. Read
-`assists` and the refusal text and tell the player what moved. Anything
+TO CHANGE A MAP: EDIT THE PLAN LITERAL ALREADY IN THE SOURCE — delete
+one corridor entry, change one number, move one point in a resolved
+`path` — never rewrite the plan from scratch (a rewrite re-rolls every
+feature the player did not ask about). Send the whole source again; the
+engine re-solves and logs `world.plan: re-solve — changed: …; added: …;
+removed: …` so you can confirm only the asked-for features moved; the
+player, cars, followers and train carry across, and anything the new
+ground would swallow is moved with a `solve: assist moved …` line. Read
+`assists`, that re-solve line and the refusal text, and tell the player
+what moved. Anything
 outside v1 (tunnels, rollercoasters, interchanges, lakes/seas, docks,
 airstrips) is REFUSED by name — say so instead of hand-building it.
 
@@ -60,10 +66,29 @@ CITIES, VILLAGES, RACETRACKS, RAILWAYS, ROADS, RIVERS, FORESTS AND
 DUNGEONS ARE ONE CALL; never hand-place their tiles. These are the parts
 world.plan is made of — call them directly to add ONE thing to a running
 world (they are deterministic from seed):
-- game.city({seed, size, density, pos}) / game.village({seed, size, pos})
-  — streets (generated, graded, junctions with working stoplights),
-  blocks, complete buildings facing the street; `pos` is the CENTRE and a
-  town touching water slides to the bank.
+- game.city({seed, size, density, pos, zones}) / game.village({seed, size,
+  pos}) — streets (generated, graded, junctions with working stoplights)
+  and LOTS ON FRONTAGE: every building stands on a lot fronting a street,
+  its entrance facing that street, with a door path to the sidewalk and,
+  for homes, a driveway. `zones: {residential, commercial, industrial,
+  park, civic}` (relative weights) shapes the mix; `pos` is the CENTRE and
+  a town touching water slides to the bank.
+- game.parking({pos, w, d, cars}) — a parking lot off the nearest street:
+  bays and aisles on the real module, bay markings, parked cars ONLY in
+  bays. game.bus_stop({pos} | {street, at}) — a stop with a shelter on
+  the sidewalk edge. game.platform({pos} | {rail, at}, length) — a station
+  platform beside a railway (lay game.traintrack first). All three
+  register with the corridor graph, so buses dwell, trains stop and
+  walkers reach them by themselves.
+- game.vegetation({seed, forest}) — THE FOREST LAYER, one call after the
+  rivers, roads and towns exist: a biome field (treeline, snowline, cliffs
+  bare, reeds and willows on the banks, park planting) picks species from
+  the library and plants the free ground clear of roads, rails, lots and
+  junctions; street trees line the streets. forest 0..1 = how much is
+  woods. world.plan's dressing: {forest} does the same. game.fell(pos)
+  removes the plants there (stays felled on rebuild); game.plant(pos,
+  {role: conifer|broadleaf|willow|reed|shrub}) adds one where the ground
+  is free. Never hand-place a forest.
 - game.scatter({models, pos, size, spacing, count, seed}) — forests and
   crowds; never on water, roads or buildings.
 - game.road_network({paths: [[vec3,…]], style, width}) — generated road
@@ -188,10 +213,17 @@ namespace rather than guessing an alias. A complete first-person map:
 
 SUB-WORLD INTERIORS: a game carries `game.splash` plus named
 `interiors/<door>.splash`. `game.door(pos_or_entity, {door: "stable-id",
-generate: "the room brief"})` makes an entrance (bind a building's handle
-so the zone hugs it); the interior declares `game.door(pos, {door,
-label: "Outside", back: true})`. An interior is an OPEN STAGE: invisible
-containment walls, NO ceiling — never author visible wall/ceiling boxes.
+generate: "the room brief", program: "house|shop|civic|station|combat"})`
+makes an entrance (bind a building's handle so the zone hugs it and the
+solver knows the footprint). On first open the INTERIOR SOLVER builds the
+inside from the shell: rooms by program, doors between them, stairs when
+deep enough, catalog furniture, a walkable plan (combat = looping arenas
+with cover, no dead ends). Never author room layouts yourself — add
+semantic detail with world.add_addon inside. The interior declares
+`game.door(pos, {door, label: "Outside", back: true})`. An interior is an
+OPEN STAGE: invisible containment walls, NO ceiling — never author
+visible wall/ceiling boxes. v1 does not keep moved furniture or damage
+across regeneration; say so if asked.
 
 SPLASH SYNTAX (NOT JavaScript): loops `for i in 0..16 { }` / `for item in
 list { }` (no C-style for, no ++); functions `fn f(a, b) { … }`; bare
