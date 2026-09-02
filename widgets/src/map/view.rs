@@ -2209,6 +2209,37 @@ const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
 const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
+const UPLOAD_BYTE_BUDGET: usize = 24_000_000;
+const UPLOAD_TIME_BUDGET_SECONDS: f64 = 0.006;
+
+#[derive(Default)]
+struct ReadyTileDrainStats {
+    count: usize,
+    bytes: usize,
+    seconds: f64,
+}
+
+fn drain_pending_ready_tiles<T>(
+    pending: &mut Vec<T>,
+    byte_size: impl Fn(&T) -> usize,
+    mut insert: impl FnMut(T) -> f64,
+) -> ReadyTileDrainStats {
+    let mut stats = ReadyTileDrainStats::default();
+    while !pending.is_empty() {
+        let size = byte_size(&pending[0]);
+        if stats.count > 0
+            && (stats.bytes.saturating_add(size) > UPLOAD_BYTE_BUDGET
+                || stats.seconds >= UPLOAD_TIME_BUDGET_SECONDS)
+        {
+            break;
+        }
+        let ready = pending.remove(0);
+        stats.count += 1;
+        stats.bytes = stats.bytes.saturating_add(size);
+        stats.seconds += insert(ready).max(0.0);
+    }
+    stats
+}
 
 fn tile_screen_priority(
     key: TileKey,
@@ -3564,9 +3595,8 @@ pub struct MapView {
     // shaping dominates label placement cost.
     #[rust]
     shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
-    // Finished tile buffers waiting for GPU upload; drained a couple per
-    // frame so a 10-tile rebuild batch doesn't stall a single frame with
-    // hundreds of MB of buffer creation/upload.
+    // Finished tile buffers waiting for GPU upload; drained within per-frame
+    // time and byte budgets so a rebuild burst cannot monopolize a frame.
     #[rust]
     pending_ready_tiles: Vec<(TileKey, TileBuffers)>,
     #[rust]
@@ -3741,7 +3771,7 @@ impl Widget for MapView {
                 self.sync_camera_fields();
                 self.emit_viewport_changed(cx);
             }
-            if self.needs_label_followup || !self.pending_ready_tiles.is_empty() {
+            if self.needs_label_followup {
                 self.zoom_settle_timer = cx.start_timeout(0.08);
             }
         }
@@ -6063,10 +6093,25 @@ impl MapView {
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
     }
 
-    /// The upload queue drains only 2 tiles per frame; a fast pan across 3D
-    /// building tiles can park gigabytes of baked buffers here. Drop the
-    /// oldest queued bakes beyond a byte budget — they were about to be
-    /// stale anyway.
+    fn sort_pending_ready_tiles(&mut self) {
+        let visible_tiles = &self.visible_tiles;
+        let center_norm = self.center_norm;
+        let rotation = self.screen_rotation();
+        let tilt_cos = self.tilt_cos();
+        self.pending_ready_tiles.sort_unstable_by_key(|(key, _)| {
+            (
+                !visible_tiles.contains(key),
+                tile_screen_priority(*key, key.z, center_norm, rotation, tilt_cos),
+                key.z,
+                key.y,
+                key.x,
+            )
+        });
+    }
+
+    /// A fast pan across 3D building tiles can park gigabytes of baked
+    /// buffers here. The queue is centre-out, so discard its least useful
+    /// tail beyond the byte budget.
     fn cap_pending_ready_tiles(&mut self) {
         const PENDING_BYTE_BUDGET: usize = 384_000_000;
         let mut total: usize = self
@@ -6075,7 +6120,7 @@ impl MapView {
             .map(|(_, buffers)| buffers.byte_size())
             .sum();
         while total > PENDING_BYTE_BUDGET && self.pending_ready_tiles.len() > 1 {
-            let (_, dropped) = self.pending_ready_tiles.remove(0);
+            let (_, dropped) = self.pending_ready_tiles.pop().unwrap();
             total -= dropped.byte_size();
         }
     }
@@ -6121,7 +6166,6 @@ impl MapView {
                             .retain(|(key, _)| *key != tile.tile_key);
                         self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
                     }
-                    self.cap_pending_ready_tiles();
                     if !empty_feature_tiles.is_empty() {
                         empty_feature_tiles.sort_unstable();
                         log!("MapView: local mbtiles loaded {} tile(s) with 0 rendered features sample:{}", empty_feature_tiles.len(), format_tile_key_sample(&empty_feature_tiles, 8));
@@ -6181,7 +6225,6 @@ impl MapView {
                     }
                     self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
                     self.pending_ready_tiles.push((tile_key, buffers));
-                    self.cap_pending_ready_tiles();
                     redraw = true;
                 }
                 TileWorkerMessage::NetworkTileParseFailed {
@@ -6197,39 +6240,33 @@ impl MapView {
                 }
             }
         }
-        // Drain at most two pending uploads per frame; a bucket-17+ tile can
-        // carry tens of MB of vertex data, and creating/uploading a whole
-        // 10-tile batch in one frame showed up as 200-550ms frame gaps.
+        if !self.pending_ready_tiles.is_empty() {
+            self.sort_pending_ready_tiles();
+            self.cap_pending_ready_tiles();
+        }
+        // Drain until the measured upload time or byte budget is spent. A
+        // bucket-17+ tile can carry tens of MB of vertex data, so always
+        // allow the first tile even when it exceeds a budget.
         if !self.pending_ready_tiles.is_empty()
             && self.last_tile_upload_frame != self.frame_counter
         {
             self.last_tile_upload_frame = self.frame_counter;
-            let upload_start = cx.seconds_since_app_start();
-            // Budget by BYTES, not just count: two 3D/overzoom tiles can
-            // carry 60+ MB of buffers each and stall the frame for hundreds
-            // of ms; always ship at least one so progress never stops.
-            const UPLOAD_BYTE_BUDGET: usize = 24_000_000;
-            let mut count = 0usize;
-            let mut budget = 0usize;
-            for (_, buffers) in self.pending_ready_tiles.iter() {
-                if count >= 2 {
-                    break;
-                }
-                let size = buffers.byte_size();
-                if count > 0 && budget + size > UPLOAD_BYTE_BUDGET {
-                    break;
-                }
-                budget += size;
-                count += 1;
+            let mut pending = std::mem::take(&mut self.pending_ready_tiles);
+            let stats = drain_pending_ready_tiles(
+                &mut pending,
+                |(_, buffers)| buffers.byte_size(),
+                |(tile_key, buffers)| {
+                    let started = cx.seconds_since_app_start();
+                    self.insert_ready_tile(cx, tile_key, buffers);
+                    cx.seconds_since_app_start() - started
+                },
+            );
+            if self.pending_ready_tiles.is_empty() {
+                self.pending_ready_tiles = pending;
+            } else {
+                self.pending_ready_tiles.append(&mut pending);
             }
-            let batch = self
-                .pending_ready_tiles
-                .drain(..count)
-                .collect::<Vec<_>>();
-            for (tile_key, buffers) in batch {
-                self.insert_ready_tile(cx, tile_key, buffers);
-            }
-            let upload_ms = (cx.seconds_since_app_start() - upload_start).max(0.0) * 1000.0;
+            let upload_ms = stats.seconds * 1000.0;
             if self.is_local_archive() && upload_ms > 4.0 {
                 use std::io::Write;
                 if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -6237,12 +6274,17 @@ impl MapView {
                     .append(true)
                     .open("local/map_perf.log")
                 {
-                    let _ = writeln!(file, "upload_ms:{:.2} tiles:{}", upload_ms, count);
+                    let _ = writeln!(file, "upload_ms:{:.2} tiles:{}", upload_ms, stats.count);
                 }
             }
             redraw = true;
         }
         if !self.pending_ready_tiles.is_empty() {
+            // A pass runs once per frame, and a draw alone never re-enters
+            // handle_event: the continuation has to be an event that arrives
+            // after the next frame, or the queue waits for an unrelated timer.
+            cx.new_next_frame();
+            cx.redraw_all();
             redraw = true;
         }
         if redraw {
@@ -10031,6 +10073,41 @@ mod tests {
                 TileKey { z: 2, x: 2, y: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn ready_tile_drain_inserts_25_results_within_nine_frames() {
+        struct FakeResult {
+            id: usize,
+            bytes: usize,
+            upload_seconds: f64,
+        }
+
+        let mut pending = (0..25)
+            .map(|id| FakeResult {
+                id,
+                bytes: if id == 0 { 30_000_000 } else { 4_000_000 },
+                upload_seconds: 0.0021,
+            })
+            .collect::<Vec<_>>();
+        let mut inserted = Vec::new();
+        let mut frames = 0;
+        while !pending.is_empty() {
+            frames += 1;
+            let stats = drain_pending_ready_tiles(
+                &mut pending,
+                |ready| ready.bytes,
+                |ready| {
+                    inserted.push(ready.id);
+                    ready.upload_seconds
+                },
+            );
+            assert!(stats.count > 0);
+            assert!(frames <= 9);
+        }
+
+        assert_eq!(frames, 9);
+        assert_eq!(inserted, (0..25).collect::<Vec<_>>());
     }
 
     #[test]
