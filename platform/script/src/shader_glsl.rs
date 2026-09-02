@@ -27,6 +27,11 @@ struct GlslPackedField {
     offset: usize,
 }
 
+struct GlslTypedAttr {
+    name: String,
+    ty_name: String,
+}
+
 impl ShaderOutput {
     pub fn glsl_create_vertex_shader(&self, vm: &ScriptVm, shared_defs: &str, out: &mut String) {
         let geometry_fields = self.glsl_collect_geometry_fields(vm);
@@ -51,7 +56,7 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         // `samplerExternalOES` + `camera_projection[int(VIEW_ID)]` (driver ICE).
         self.glsl_write_texture_uniforms(out, /*include_video_external*/ false);
         self.glsl_write_vertex_globals(vm, out);
-        self.glsl_write_vertex_input_attrs(&geometry_fields, &instance_fields, out);
+        self.glsl_write_vertex_input_attrs(vm, &geometry_fields, &instance_fields, out);
         self.glsl_write_varying_interface(varying_slots, true, out);
         let vertex_entry = self.backend.map_function_name("io_vertex");
         self.glsl_write_functions_for_entries(out, &[vertex_entry.as_str()]);
@@ -240,25 +245,109 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         }
     }
 
+    fn glsl_vertex_fetch_is_f32(&self, vm: &ScriptVm) -> bool {
+        self.io.iter().all(|io| match io.kind {
+            ShaderIoKind::VertexBuffer | ShaderIoKind::DynInstance | ShaderIoKind::RustInstance => {
+                !vm.bx.heap.pod_type_ref(io.ty).ty.has_compact_format()
+            }
+            _ => true,
+        })
+    }
+
     fn glsl_write_vertex_input_attrs(
         &self,
+        vm: &ScriptVm,
         geometry_fields: &[GlslPackedField],
         instance_fields: &[GlslPackedField],
         out: &mut String,
     ) {
-        let geometry_slots = geometry_fields
-            .last()
-            .map(|field| field.offset + field.slots)
-            .unwrap_or(0);
-        let instance_slots = instance_fields
-            .last()
-            .map(|field| field.offset + field.slots)
-            .unwrap_or(0);
-        for idx in 0..Self::glsl_num_packed_vec4s(geometry_slots) {
-            writeln!(out, "in vec4 packed_geometry_{};", idx).ok();
+        if self.glsl_vertex_fetch_is_f32(vm) {
+            let geometry_slots = geometry_fields
+                .last()
+                .map(|field| field.offset + field.slots)
+                .unwrap_or(0);
+            let instance_slots = instance_fields
+                .last()
+                .map(|field| field.offset + field.slots)
+                .unwrap_or(0);
+            for idx in 0..Self::glsl_num_packed_vec4s(geometry_slots) {
+                writeln!(out, "in vec4 packed_geometry_{};", idx).ok();
+            }
+            for idx in 0..Self::glsl_num_packed_vec4s(instance_slots) {
+                writeln!(out, "in vec4 packed_instance_{};", idx).ok();
+            }
+            return;
         }
-        for idx in 0..Self::glsl_num_packed_vec4s(instance_slots) {
-            writeln!(out, "in vec4 packed_instance_{};", idx).ok();
+        for attr in self.glsl_collect_typed_attrs(vm, true) {
+            writeln!(out, "in {} {};", attr.ty_name, attr.name).ok();
+        }
+        for attr in self.glsl_collect_typed_attrs(vm, false) {
+            writeln!(out, "in {} {};", attr.ty_name, attr.name).ok();
+        }
+    }
+
+    fn glsl_collect_typed_attrs(&self, vm: &ScriptVm, geometry: bool) -> Vec<GlslTypedAttr> {
+        let mut out = Vec::new();
+        for io in &self.io {
+            let want = if geometry {
+                matches!(io.kind, ShaderIoKind::VertexBuffer)
+            } else {
+                matches!(
+                    io.kind,
+                    ShaderIoKind::DynInstance | ShaderIoKind::RustInstance
+                )
+            };
+            if !want {
+                continue;
+            }
+            let prefix = if geometry { "geom_" } else { "inst_" };
+            let pod_ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
+            if let ScriptPodTy::Struct { .. } = pod_ty {
+                self.glsl_collect_typed_attrs_ty(vm, pod_ty, prefix.trim_end_matches('_'), &mut out);
+            } else {
+                let io_name = self.backend.map_io_name(io.name);
+                self.glsl_collect_typed_attrs_ty(
+                    vm,
+                    pod_ty,
+                    &format!("{}{}", prefix, io_name),
+                    &mut out,
+                );
+            }
+        }
+        out
+    }
+
+    fn glsl_collect_typed_attrs_ty(
+        &self,
+        vm: &ScriptVm,
+        ty: &ScriptPodTy,
+        name: &str,
+        out: &mut Vec<GlslTypedAttr>,
+    ) {
+        match ty {
+            ScriptPodTy::Struct { fields, .. } => {
+                let prefix = if name.is_empty() || name == "geom" || name == "inst" {
+                    if name == "inst" { "inst" } else { "geom" }
+                } else {
+                    name
+                };
+                for field in fields {
+                    let field_name = self.backend.map_field_name(field.name);
+                    self.glsl_collect_typed_attrs_ty(
+                        vm,
+                        &field.ty.data.ty,
+                        &format!("{}_{}", prefix, field_name),
+                        out,
+                    );
+                }
+            }
+            _ => {
+                let ty_name = Self::glsl_logical_attr_type(ty);
+                out.push(GlslTypedAttr {
+                    name: name.to_string(),
+                    ty_name,
+                });
+            }
         }
     }
 
@@ -288,6 +377,40 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         }
     }
 
+    fn glsl_logical_attr_type(ty: &ScriptPodTy) -> String {
+        match ty {
+            ScriptPodTy::Packed(p) if p.is_vec4() => "vec4".to_string(),
+            ScriptPodTy::Packed(_) => "vec2".to_string(),
+            ScriptPodTy::F32 | ScriptPodTy::F16 => "float".to_string(),
+            ScriptPodTy::U32 | ScriptPodTy::AtomicU32 | ScriptPodTy::Bool => "uint".to_string(),
+            ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => "int".to_string(),
+            ScriptPodTy::Vec(v) => match v {
+                crate::pod::ScriptPodVec::Vec2f | crate::pod::ScriptPodVec::Vec2h => {
+                    "vec2".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec3f | crate::pod::ScriptPodVec::Vec3h => {
+                    "vec3".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec4f | crate::pod::ScriptPodVec::Vec4h => {
+                    "vec4".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec2u | crate::pod::ScriptPodVec::Vec2b => {
+                    "uvec2".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec3u | crate::pod::ScriptPodVec::Vec3b => {
+                    "uvec3".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec4u | crate::pod::ScriptPodVec::Vec4b => {
+                    "uvec4".to_string()
+                }
+                crate::pod::ScriptPodVec::Vec2i => "ivec2".to_string(),
+                crate::pod::ScriptPodVec::Vec3i => "ivec3".to_string(),
+                crate::pod::ScriptPodVec::Vec4i => "ivec4".to_string(),
+            },
+            _ => "float".to_string(),
+        }
+    }
+
     fn glsl_write_vertex_main(
         &self,
         vm: &ScriptVm,
@@ -297,23 +420,27 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         out: &mut String,
     ) {
         writeln!(out, "void main() {{").ok();
-        for field in geometry_fields {
-            self.glsl_unpack_field_to_statements(
-                vm,
-                field,
-                "packed_geometry_",
-                GlslPackedSource::BitPackedFloat,
-                out,
-            );
-        }
-        for field in instance_fields {
-            self.glsl_unpack_field_to_statements(
-                vm,
-                field,
-                "packed_instance_",
-                GlslPackedSource::BitPackedFloat,
-                out,
-            );
+        if self.glsl_vertex_fetch_is_f32(vm) {
+            for field in geometry_fields {
+                self.glsl_unpack_field_to_statements(
+                    vm,
+                    field,
+                    "packed_geometry_",
+                    GlslPackedSource::BitPackedFloat,
+                    out,
+                );
+            }
+            for field in instance_fields {
+                self.glsl_unpack_field_to_statements(
+                    vm,
+                    field,
+                    "packed_instance_",
+                    GlslPackedSource::BitPackedFloat,
+                    out,
+                );
+            }
+        } else {
+            self.glsl_assign_typed_vertex_inputs(vm, out);
         }
         writeln!(out, "    vtx_pos = vec4(0.0, 0.0, 0.0, 1.0);").ok();
 
@@ -445,6 +572,54 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             search_start = abs + pattern.len();
         }
         false
+    }
+
+    fn glsl_assign_typed_vertex_inputs(&self, vm: &ScriptVm, out: &mut String) {
+        for io in &self.io {
+            let (prefix, var_prefix) = match io.kind {
+                ShaderIoKind::VertexBuffer => ("geom_", "vb_"),
+                ShaderIoKind::DynInstance => ("inst_", "dyninst_"),
+                ShaderIoKind::RustInstance => ("inst_", "rustinst_"),
+                _ => continue,
+            };
+            let io_name = self.backend.map_io_name(io.name);
+            let dst = format!("{}{}", var_prefix, io_name);
+            let src = format!("{}{}", prefix, io_name);
+            let pod_ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
+            let src = if matches!(pod_ty, ScriptPodTy::Struct { .. }) {
+                prefix.trim_end_matches('_').to_string()
+            } else {
+                src
+            };
+            self.glsl_assign_typed_ty(vm, pod_ty, &dst, &src, out);
+        }
+    }
+
+    fn glsl_assign_typed_ty(
+        &self,
+        vm: &ScriptVm,
+        ty: &ScriptPodTy,
+        dst: &str,
+        src: &str,
+        out: &mut String,
+    ) {
+        match ty {
+            ScriptPodTy::Struct { fields, .. } => {
+                for field in fields {
+                    let field_name = self.backend.map_field_name(field.name);
+                    self.glsl_assign_typed_ty(
+                        vm,
+                        &field.ty.data.ty,
+                        &format!("{}.{}", dst, field_name),
+                        &format!("{}_{}", src, field_name),
+                        out,
+                    );
+                }
+            }
+            _ => {
+                writeln!(out, "    {} = {};", dst, src).ok();
+            }
+        }
     }
 
     fn glsl_collect_geometry_fields(&self, vm: &ScriptVm) -> Vec<GlslPackedField> {
@@ -851,5 +1026,114 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         let mut out = String::new();
         self.backend.pod_type_name(ty, &mut out);
         out
+    }
+}
+
+#[cfg(test)]
+mod typed_vertex_tests {
+    use super::*;
+    use crate::{
+        pod::ScriptPodField,
+        shader::ShaderIo,
+        shader_backend::ShaderBackend,
+        value::NIL,
+        vm::{ScriptVmBase, ScriptVmHost},
+    };
+
+    fn field(vm: &ScriptVmBase, name: LiveId, ty: ScriptPodType) -> ScriptPodField {
+        ScriptPodField {
+            name,
+            default: NIL,
+            ty: ScriptPodTypeInline {
+                self_ref: ty,
+                data: vm.heap.pod_type_ref(ty).clone(),
+            },
+        }
+    }
+
+    fn vertex_io(name: LiveId, ty: ScriptPodType) -> ShaderIo {
+        ShaderIo {
+            kind: ShaderIoKind::VertexBuffer,
+            name,
+            ty,
+            buffer_index: None,
+        }
+    }
+
+    #[test]
+    fn compact_glsl_uses_typed_attributes_and_legacy_stays_packed() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        let half2 = vm.bx.code.builtins.pod.pod_f16x2;
+        let color = vm.bx.code.builtins.pod.pod_unorm8x4;
+        let object = vm.bx.heap.new_object();
+        let compact_ty = vm.bx.heap.new_pod_type(
+            object,
+            Some(id!(GlslCompactVertex)),
+            ScriptPodTy::new_struct(vec![
+                field(&vm.bx, id!(off), half2),
+                field(&vm.bx, id!(color), color),
+            ]),
+            NIL,
+        );
+        let compact = ShaderOutput {
+            backend: ShaderBackend::Glsl,
+            io: vec![vertex_io(id!(vertex), compact_ty)],
+            ..Default::default()
+        };
+        let mut source = String::new();
+        compact.glsl_write_vertex_input_attrs(&vm, &[], &[], &mut source);
+        compact.glsl_assign_typed_vertex_inputs(&vm, &mut source);
+        let off_name = compact.backend.map_field_name(id!(off));
+        let color_name = compact.backend.map_field_name(id!(color));
+        let vertex_name = compact.backend.map_io_name(id!(vertex));
+        assert!(
+            source.contains(&format!("in vec2 geom_{off_name};")),
+            "{source}"
+        );
+        assert!(
+            source.contains(&format!("in vec4 geom_{color_name};")),
+            "{source}"
+        );
+        assert!(
+            source.contains(&format!(
+                "vb_{vertex_name}.{off_name} = geom_{off_name};"
+            )),
+            "{source}"
+        );
+        assert!(
+            source.contains(&format!(
+                "vb_{vertex_name}.{color_name} = geom_{color_name};"
+            )),
+            "{source}"
+        );
+
+        let vec4f = vm.bx.code.builtins.pod.pod_vec4f;
+        let object = vm.bx.heap.new_object();
+        let legacy_ty = vm.bx.heap.new_pod_type(
+            object,
+            Some(id!(LegacyTwelveFloats)),
+            ScriptPodTy::new_struct(vec![
+                field(&vm.bx, id!(a), vec4f),
+                field(&vm.bx, id!(b), vec4f),
+                field(&vm.bx, id!(c), vec4f),
+            ]),
+            NIL,
+        );
+        let legacy = ShaderOutput {
+            backend: ShaderBackend::Glsl,
+            io: vec![vertex_io(id!(legacy), legacy_ty)],
+            ..Default::default()
+        };
+        let geometry_fields = legacy.glsl_collect_geometry_fields(&vm);
+        let mut source = String::new();
+        legacy.glsl_write_vertex_input_attrs(&vm, &geometry_fields, &[], &mut source);
+        assert!(source.contains("in vec4 packed_geometry_0;"), "{source}");
+        assert!(source.contains("in vec4 packed_geometry_1;"), "{source}");
+        assert!(source.contains("in vec4 packed_geometry_2;"), "{source}");
+        assert!(!source.contains("geom_a"), "{source}");
     }
 }

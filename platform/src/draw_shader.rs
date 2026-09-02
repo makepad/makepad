@@ -225,7 +225,11 @@ pub struct CxDrawShader {
 pub struct DrawShaderInputs {
     pub inputs: Vec<DrawShaderInput>,
     pub packing_method: DrawShaderInputPacking,
+    /// f32-lane count. For the all-F32xN case this is also `stride_bytes / 4`.
     pub total_slots: usize,
+    /// Packed byte stride. Equals `total_slots * 4` whenever every input is F32xN.
+    pub stride_bytes: usize,
+    max_byte_align: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,27 +243,243 @@ pub enum DrawShaderInputPacking {
     UniformsMetal,
 }
 
+/// Physical vertex/instance fetch format. The existing f32 path is the `F32xN`
+/// case of this enum; compact formats convert to `vec2f`/`vec4f` at fetch.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawShaderAttrFormat {
+    F32x1,
+    F32x2,
+    F32x3,
+    F32x4,
+    F16x2,
+    F16x4,
+    U16x2,
+    I16x2,
+    U16x2Norm,
+    I16x2Norm,
+    U8x4Norm,
+    I8x4Norm,
+    U32x1,
+    I32x1,
+}
+
+#[allow(non_upper_case_globals)]
+impl DrawShaderAttrFormat {
+    /// Old three-variant names kept as aliases so remaining matches compile.
+    pub const Float: Self = Self::F32x1;
+    pub const UInt: Self = Self::U32x1;
+    pub const SInt: Self = Self::I32x1;
+}
+
+impl Default for DrawShaderAttrFormat {
+    fn default() -> Self {
+        Self::F32x1
+    }
+}
+
+impl DrawShaderAttrFormat {
+    pub fn from_slots_f32(slots: usize) -> Self {
+        match slots {
+            1 => Self::F32x1,
+            2 => Self::F32x2,
+            3 => Self::F32x3,
+            _ => Self::F32x4,
+        }
+    }
+
+    pub fn is_f32_lane(self) -> bool {
+        matches!(self, Self::F32x1 | Self::F32x2 | Self::F32x3 | Self::F32x4)
+    }
+
+    pub fn is_compact(self) -> bool {
+        !self.is_f32_lane() && !matches!(self, Self::U32x1 | Self::I32x1)
+    }
+
+    /// Integer vertexAttribIPointer / DXGI *_UINT/SINT (not normalized).
+    pub fn is_integer_fetch(self) -> bool {
+        matches!(self, Self::U32x1 | Self::I32x1)
+    }
+
+    pub fn byte_align(self) -> usize {
+        match self {
+            Self::U8x4Norm | Self::I8x4Norm => 1,
+            Self::F16x2
+            | Self::F16x4
+            | Self::U16x2
+            | Self::I16x2
+            | Self::U16x2Norm
+            | Self::I16x2Norm => 2,
+            _ => 4,
+        }
+    }
+
+    pub fn byte_size(self) -> usize {
+        match self {
+            Self::F32x1 | Self::U32x1 | Self::I32x1 => 4,
+            Self::F32x2 => 8,
+            Self::F32x3 => 12,
+            Self::F32x4 => 16,
+            Self::F16x2
+            | Self::U16x2
+            | Self::I16x2
+            | Self::U16x2Norm
+            | Self::I16x2Norm
+            | Self::U8x4Norm
+            | Self::I8x4Norm => 4,
+            Self::F16x4 => 8,
+        }
+    }
+
+    pub fn component_count(self) -> usize {
+        match self {
+            Self::F32x1 | Self::U32x1 | Self::I32x1 => 1,
+            Self::F32x2
+            | Self::F16x2
+            | Self::U16x2
+            | Self::I16x2
+            | Self::U16x2Norm
+            | Self::I16x2Norm => 2,
+            Self::F32x3 => 3,
+            Self::F32x4 | Self::F16x4 | Self::U8x4Norm | Self::I8x4Norm => 4,
+        }
+    }
+
+    pub fn logical_slots(self) -> usize {
+        self.component_count()
+    }
+
+    pub fn is_normalized(self) -> bool {
+        matches!(
+            self,
+            Self::U16x2Norm | Self::I16x2Norm | Self::U8x4Norm | Self::I8x4Norm
+        )
+    }
+
+    /// WebGL/OpenGL type token: FLOAT=0, HALF_FLOAT=1, UNSIGNED_SHORT=2,
+    /// SHORT=3, UNSIGNED_BYTE=4, BYTE=5, UNSIGNED_INT=6, INT=7.
+    pub fn decode_to_f32(self, bytes: &[u8]) -> [f32; 4] {
+        fn f16(b: &[u8], i: usize) -> f32 {
+            if i + 1 >= b.len() {
+                return 0.0;
+            }
+            crate::f16_bits_to_f32(u16::from_le_bytes([b[i], b[i + 1]]))
+        }
+        fn u16v(b: &[u8], i: usize) -> u16 {
+            if i + 1 >= b.len() {
+                return 0;
+            }
+            u16::from_le_bytes([b[i], b[i + 1]])
+        }
+        fn i16v(b: &[u8], i: usize) -> i16 {
+            if i + 1 >= b.len() {
+                return 0;
+            }
+            i16::from_le_bytes([b[i], b[i + 1]])
+        }
+        match self {
+            Self::F32x1 | Self::F32x2 | Self::F32x3 | Self::F32x4 => {
+                let n = self.component_count();
+                let mut out = [0.0f32; 4];
+                for i in 0..n {
+                    let o = i * 4;
+                    if o + 3 < bytes.len() {
+                        out[i] = f32::from_le_bytes([
+                            bytes[o],
+                            bytes[o + 1],
+                            bytes[o + 2],
+                            bytes[o + 3],
+                        ]);
+                    }
+                }
+                out
+            }
+            Self::F16x2 => [f16(bytes, 0), f16(bytes, 2), 0.0, 0.0],
+            Self::F16x4 => [f16(bytes, 0), f16(bytes, 2), f16(bytes, 4), f16(bytes, 6)],
+            Self::U16x2 => [u16v(bytes, 0) as f32, u16v(bytes, 2) as f32, 0.0, 0.0],
+            Self::I16x2 => [i16v(bytes, 0) as f32, i16v(bytes, 2) as f32, 0.0, 0.0],
+            Self::U16x2Norm => [
+                u16v(bytes, 0) as f32 / 65535.0,
+                u16v(bytes, 2) as f32 / 65535.0,
+                0.0,
+                0.0,
+            ],
+            Self::I16x2Norm => [
+                (i16v(bytes, 0) as f32 / 32767.0).max(-1.0),
+                (i16v(bytes, 2) as f32 / 32767.0).max(-1.0),
+                0.0,
+                0.0,
+            ],
+            Self::U8x4Norm => {
+                let b = |i| bytes.get(i).copied().unwrap_or(0) as f32 / 255.0;
+                [b(0), b(1), b(2), b(3)]
+            }
+            Self::I8x4Norm => {
+                let b = |i| {
+                    (bytes.get(i).copied().unwrap_or(0) as i8 as f32 / 127.0).max(-1.0)
+                };
+                [b(0), b(1), b(2), b(3)]
+            }
+            Self::U32x1 => {
+                if bytes.len() >= 4 {
+                    [f32::from_bits(u32::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                    ])), 0.0, 0.0, 0.0]
+                } else {
+                    [0.0; 4]
+                }
+            }
+            Self::I32x1 => {
+                if bytes.len() >= 4 {
+                    [f32::from_bits(i32::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                    ]) as u32), 0.0, 0.0, 0.0]
+                } else {
+                    [0.0; 4]
+                }
+            }
+        }
+    }
+
+    pub fn gl_type_code(self) -> u32 {
+        match self {
+            Self::F32x1 | Self::F32x2 | Self::F32x3 | Self::F32x4 => 0,
+            Self::F16x2 | Self::F16x4 => 1,
+            Self::U16x2 | Self::U16x2Norm => 2,
+            Self::I16x2 | Self::I16x2Norm => 3,
+            Self::U8x4Norm => 4,
+            Self::I8x4Norm => 5,
+            Self::U32x1 => 6,
+            Self::I32x1 => 7,
+        }
+    }
+
+    /// Kind used by the f32 instance/uniform write path (bit-cast ints).
+    pub fn f32_write_kind(self) -> DrawShaderF32WriteKind {
+        match self {
+            Self::U32x1 => DrawShaderF32WriteKind::UInt,
+            Self::I32x1 => DrawShaderF32WriteKind::SInt,
+            _ => DrawShaderF32WriteKind::Float,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawShaderF32WriteKind {
     Float,
     UInt,
     SInt,
 }
 
-impl Default for DrawShaderAttrFormat {
-    fn default() -> Self {
-        Self::Float
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct DrawShaderInput {
     pub id: LiveId,
-    //pub ty: ShaderTy,
+    /// f32-lane offset. For all-F32 inputs this is `byte_offset / 4`.
     pub offset: usize,
     pub slots: usize,
     pub attr_format: DrawShaderAttrFormat,
-    // pub live_ptr: Option<LivePtr>
+    pub byte_offset: usize,
+    pub byte_size: usize,
 }
 
 fn uniform_packing() -> DrawShaderInputPacking {
@@ -290,35 +510,119 @@ impl DrawShaderInputs {
             inputs: Vec::new(),
             packing_method,
             total_slots: 0,
+            stride_bytes: 0,
+            max_byte_align: 1,
         }
+    }
+
+    pub fn has_compact(&self) -> bool {
+        self.inputs.iter().any(|i| i.attr_format.is_compact())
+    }
+
+    pub fn all_f32_lanes(&self) -> bool {
+        !self.inputs.is_empty() && self.inputs.iter().all(|i| i.attr_format.is_f32_lane())
+    }
+
+    /// Stable signature of the physical fetch record. Field names are not
+    /// included: only byte interpretation and ordering affect buffer safety.
+    pub fn layout_signature(&self) -> u64 {
+        fn mix(hash: &mut u64, value: usize) {
+            for byte in value.to_le_bytes() {
+                *hash ^= byte as u64;
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+
+        let mut hash = 0xcbf29ce484222325;
+        mix(&mut hash, self.stride_bytes);
+        mix(&mut hash, self.total_slots);
+        mix(&mut hash, self.inputs.len());
+        for input in &self.inputs {
+            mix(&mut hash, input.attr_format as usize);
+            mix(&mut hash, input.byte_offset);
+            mix(&mut hash, input.byte_size);
+            mix(&mut hash, input.slots);
+        }
+        hash
+    }
+
+    /// Decode one packed vertex into f32 logical slots (headless fetch).
+    pub fn decode_vertex_f32(&self, vertex_bytes: &[u8], dst: &mut [f32]) {
+        for input in &self.inputs {
+            let end = (input.byte_offset + input.byte_size).min(vertex_bytes.len());
+            if input.byte_offset >= vertex_bytes.len() {
+                continue;
+            }
+            let decoded = input
+                .attr_format
+                .decode_to_f32(&vertex_bytes[input.byte_offset..end]);
+            let n = input.slots.min(4).min(dst.len().saturating_sub(input.offset));
+            for i in 0..n {
+                dst[input.offset + i] = decoded[i];
+            }
+        }
+    }
+
+    fn push_input(
+        &mut self,
+        id: LiveId,
+        offset: usize,
+        slots: usize,
+        attr_format: DrawShaderAttrFormat,
+        byte_offset: usize,
+        byte_size: usize,
+    ) {
+        self.inputs.push(DrawShaderInput {
+            id,
+            offset,
+            slots,
+            attr_format,
+            byte_offset,
+            byte_size,
+        });
     }
 
     pub fn push(&mut self, id: LiveId, slots: usize, attr_format: DrawShaderAttrFormat) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
-                let needs_int_align = attr_format != DrawShaderAttrFormat::Float && slots > 1;
+                let byte_size = if attr_format.is_f32_lane() || attr_format.is_integer_fetch() {
+                    // F32xN / U32x1 / I32x1: size follows the f32-lane count so a
+                    // 19-slot f32 blob stays 76 bytes (the packed-geometry path).
+                    slots * 4
+                } else {
+                    attr_format.byte_size()
+                };
+                let align = attr_format.byte_align();
+                self.max_byte_align = self.max_byte_align.max(align);
+                if align > 1 && self.stride_bytes % align != 0 {
+                    self.stride_bytes += align - (self.stride_bytes % align);
+                }
+                let byte_offset = self.stride_bytes;
+                // Keep the old vec4-slot pad for integer *lane* vectors so
+                // existing UInt/SInt f32-slot layouts stay byte-identical.
+                let needs_int_align = attr_format.is_integer_fetch() && slots > 1;
                 if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
-                self.inputs.push(DrawShaderInput {
-                    id,
-                    offset: self.total_slots,
-                    slots,
-                    attr_format,
-                });
+                let offset = self.total_slots;
+                self.push_input(id, offset, slots, attr_format, byte_offset, byte_size);
+                self.stride_bytes += byte_size;
                 self.total_slots += slots;
                 if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
             }
             DrawShaderInputPacking::UniformsGLSLTight => {
-                self.inputs.push(DrawShaderInput {
+                self.push_input(
                     id,
-                    offset: self.total_slots,
+                    self.total_slots,
                     slots,
                     attr_format,
-                });
+                    self.total_slots * 4,
+                    slots * 4,
+                );
                 self.total_slots += slots;
+                self.stride_bytes = self.total_slots * 4;
             }
             DrawShaderInputPacking::UniformsGLSL140 => {
                 // std140 alignment rules:
@@ -334,13 +638,16 @@ impl DrawShaderInputs {
                 if self.total_slots % alignment != 0 {
                     self.total_slots += alignment - (self.total_slots % alignment);
                 }
-                self.inputs.push(DrawShaderInput {
+                self.push_input(
                     id,
-                    offset: self.total_slots,
+                    self.total_slots,
                     slots,
                     attr_format,
-                });
+                    self.total_slots * 4,
+                    slots * 4,
+                );
                 self.total_slots += slots;
+                self.stride_bytes = self.total_slots * 4;
             }
             DrawShaderInputPacking::UniformsHLSL => {
                 if slots > 4 {
@@ -350,13 +657,16 @@ impl DrawShaderInputs {
                 } else if (self.total_slots & 3) + slots > 4 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
-                self.inputs.push(DrawShaderInput {
+                self.push_input(
                     id,
-                    offset: self.total_slots,
+                    self.total_slots,
                     slots,
                     attr_format,
-                });
+                    self.total_slots * 4,
+                    slots * 4,
+                );
                 self.total_slots += slots;
+                self.stride_bytes = self.total_slots * 4;
             }
             DrawShaderInputPacking::UniformsMetal => {
                 // Metal struct alignment rules:
@@ -373,27 +683,40 @@ impl DrawShaderInputs {
                 if self.total_slots % alignment != 0 {
                     self.total_slots += alignment - (self.total_slots % alignment);
                 }
-                self.inputs.push(DrawShaderInput {
+                self.push_input(
                     id,
-                    offset: self.total_slots,
+                    self.total_slots,
                     slots,
                     attr_format,
-                });
+                    self.total_slots * 4,
+                    aligned_slots * 4,
+                );
                 self.total_slots += aligned_slots;
+                self.stride_bytes = self.total_slots * 4;
             }
         }
     }
 
     pub fn finalize(&mut self) {
         match self.packing_method {
-            DrawShaderInputPacking::Attribute => (),
-            DrawShaderInputPacking::UniformsGLSLTight => (),
+            DrawShaderInputPacking::Attribute => {
+                if self.inputs.iter().all(|i| !i.attr_format.is_compact()) {
+                    self.stride_bytes = self.total_slots * 4;
+                } else if self.stride_bytes % self.max_byte_align != 0 {
+                    self.stride_bytes +=
+                        self.max_byte_align - (self.stride_bytes % self.max_byte_align);
+                }
+            }
+            DrawShaderInputPacking::UniformsGLSLTight => {
+                self.stride_bytes = self.total_slots * 4;
+            }
             DrawShaderInputPacking::UniformsHLSL
             | DrawShaderInputPacking::UniformsMetal
             | DrawShaderInputPacking::UniformsGLSL140 => {
                 if self.total_slots & 3 > 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
+                self.stride_bytes = self.total_slots * 4;
             }
         }
     }
@@ -533,23 +856,62 @@ pub struct CxDrawShaderMapping {
 impl CxDrawShaderMapping {
     fn attr_format_from_pod_type(ty: &ScriptPodTy) -> DrawShaderAttrFormat {
         match ty {
-            ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => DrawShaderAttrFormat::UInt,
-            ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => DrawShaderAttrFormat::SInt,
-            ScriptPodTy::Bool => DrawShaderAttrFormat::UInt,
+            ScriptPodTy::Packed(p) => match p {
+                crate::makepad_script::pod::ScriptPodPacked::F16x2 => DrawShaderAttrFormat::F16x2,
+                crate::makepad_script::pod::ScriptPodPacked::F16x4 => DrawShaderAttrFormat::F16x4,
+                crate::makepad_script::pod::ScriptPodPacked::U16x2 => DrawShaderAttrFormat::U16x2,
+                crate::makepad_script::pod::ScriptPodPacked::I16x2 => DrawShaderAttrFormat::I16x2,
+                crate::makepad_script::pod::ScriptPodPacked::U16x2Norm => {
+                    DrawShaderAttrFormat::U16x2Norm
+                }
+                crate::makepad_script::pod::ScriptPodPacked::I16x2Norm => {
+                    DrawShaderAttrFormat::I16x2Norm
+                }
+                crate::makepad_script::pod::ScriptPodPacked::U8x4Norm => {
+                    DrawShaderAttrFormat::U8x4Norm
+                }
+                crate::makepad_script::pod::ScriptPodPacked::I8x4Norm => {
+                    DrawShaderAttrFormat::I8x4Norm
+                }
+            },
+            ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => DrawShaderAttrFormat::U32x1,
+            ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => DrawShaderAttrFormat::I32x1,
+            ScriptPodTy::Bool => DrawShaderAttrFormat::U32x1,
+            ScriptPodTy::F32 | ScriptPodTy::F16 => DrawShaderAttrFormat::F32x1,
             ScriptPodTy::Vec(vec_ty) => match vec_ty {
                 ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
-                    DrawShaderAttrFormat::UInt
+                    DrawShaderAttrFormat::U32x1
                 }
                 ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
-                    DrawShaderAttrFormat::SInt
+                    DrawShaderAttrFormat::I32x1
                 }
                 ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
-                    DrawShaderAttrFormat::UInt
+                    DrawShaderAttrFormat::U32x1
                 }
-                _ => DrawShaderAttrFormat::Float,
+                ScriptPodVec::Vec2f | ScriptPodVec::Vec2h => DrawShaderAttrFormat::F32x2,
+                ScriptPodVec::Vec3f | ScriptPodVec::Vec3h => DrawShaderAttrFormat::F32x3,
+                ScriptPodVec::Vec4f | ScriptPodVec::Vec4h => DrawShaderAttrFormat::F32x4,
             },
-            _ => DrawShaderAttrFormat::Float,
+            _ => DrawShaderAttrFormat::from_slots_f32(ty.slots().max(1).min(4)),
         }
+    }
+
+    fn push_pod_fields(
+        inputs: &mut DrawShaderInputs,
+        ty: &ScriptPodTy,
+        fallback_id: LiveId,
+    ) {
+        if let ScriptPodTy::Struct { fields, .. } = ty {
+            if ty.has_compact_format() {
+                for field in fields {
+                    Self::push_pod_fields(inputs, &field.ty.data.ty, field.name);
+                }
+                return;
+            }
+        }
+        let slots = ty.slots();
+        let attr_format = Self::attr_format_from_pod_type(ty);
+        inputs.push(fallback_id, slots, attr_format);
     }
 
     pub fn debug_dump_shader_draw_call(
@@ -690,7 +1052,7 @@ impl CxDrawShaderMapping {
                 let pod_ty = heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
                 let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
-                instances.push(io.name, slots, attr_format);
+                Self::push_pod_fields(&mut instances, &pod_ty.ty, io.name);
                 dyn_instances.push(io.name, slots, attr_format);
             }
         }
@@ -702,7 +1064,6 @@ impl CxDrawShaderMapping {
             .filter(|io| matches!(io.kind, ShaderIoKind::RustInstance))
         {
             let pod_ty = heap.pod_type_ref(io.ty);
-            let slots = pod_ty.ty.slots();
             let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
 
             // Track special field offsets
@@ -716,7 +1077,8 @@ impl CxDrawShaderMapping {
                 draw_clip = Some(instances.total_slots);
             }
 
-            instances.push(io.name, slots, attr_format);
+            let _ = attr_format;
+            Self::push_pod_fields(&mut instances, &pod_ty.ty, io.name);
         }
 
         // Process Uniform fields
@@ -728,13 +1090,13 @@ impl CxDrawShaderMapping {
             }
         }
 
-        // Process VertexBuffer (geometry) fields
+        // Process VertexBuffer (geometry) fields. Compact POD structs are
+        // flattened to per-field physical formats; all-F32 structs stay one
+        // blob so packed_geometry_N codegen remains byte-identical.
         for io in &output.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 let pod_ty = heap.pod_type_ref(io.ty);
-                let slots = pod_ty.ty.slots();
-                let attr_format = Self::attr_format_from_pod_type(&pod_ty.ty);
-                geometries.push(io.name, slots, attr_format);
+                Self::push_pod_fields(&mut geometries, &pod_ty.ty, io.name);
             }
         }
 
@@ -1012,6 +1374,19 @@ impl CxDrawShaderMapping {
             varying_total_slots: 0,
             color_format,
         }
+    }
+
+    /// Shader-side geom stride in bytes. All-F32 shaders report `total_slots * 4`.
+    pub fn geometry_stride_bytes(&self) -> usize {
+        if self.geometries.stride_bytes != 0 {
+            self.geometries.stride_bytes
+        } else {
+            self.geometries.total_slots.saturating_mul(4)
+        }
+    }
+
+    pub fn geometry_is_compact(&self) -> bool {
+        self.geometries.has_compact()
     }
 
     /// Write one table constant's live value into its scope-uniform slot

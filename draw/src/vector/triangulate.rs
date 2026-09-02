@@ -25,34 +25,7 @@ pub const ROAD_PARAM_EXPANDED_FLAG: f32 = 1024.0;
 
 #[inline]
 fn f16_bits(value: f32) -> u32 {
-    // IEEE 754 binary16 encode (round-to-nearest-even, clamps to inf).
-    let bits = value.to_bits();
-    let sign = (bits >> 16) & 0x8000;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let frac = bits & 0x007f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if frac != 0 { 0x200 } else { 0 };
-    }
-    let e = exp - 127 + 15;
-    if e >= 0x1f {
-        return sign | 0x7c00;
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign;
-        }
-        let frac = frac | 0x0080_0000;
-        let shift = (14 - e) as u32;
-        let half = frac >> shift;
-        let rem = frac & ((1 << shift) - 1);
-        let round = (rem > (1 << (shift - 1)))
-            || (rem == (1 << (shift - 1)) && (half & 1) != 0);
-        return sign | (half + round as u32);
-    }
-    let half = ((e as u32) << 10) | (frac >> 13);
-    let rem = frac & 0x1fff;
-    let round = (rem > 0x1000) || (rem == 0x1000 && (half & 1) != 0);
-    sign | (half + round as u32)
+    makepad_math::f32_to_f16_bits(value) as u32
 }
 
 /// Two floats into one f32 slot as an f16 pair; unpacked in-shader with
@@ -341,20 +314,7 @@ pub fn pack_roof_vertices(vertices: &[f32]) -> Vec<f32> {
 /// IEEE 754 binary16 decode — inverse of `f16_bits` above.
 #[inline]
 fn f16_bits_to_f32(h: u32) -> f32 {
-    let sign = (h & 0x8000) << 16;
-    let exp = (h >> 10) & 0x1f;
-    let frac = h & 0x3ff;
-    if exp == 0 {
-        if frac == 0 {
-            return f32::from_bits(sign);
-        }
-        let v = frac as f32 * (-24f32).exp2();
-        return if sign != 0 { -v } else { v };
-    }
-    if exp == 0x1f {
-        return f32::from_bits(sign | 0x7f80_0000 | (frac << 13));
-    }
-    f32::from_bits(sign | ((exp + 112) << 23) | (frac << 13))
+    makepad_math::f16_bits_to_f32(h as u16)
 }
 
 #[inline]

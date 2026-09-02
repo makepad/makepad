@@ -811,17 +811,30 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
             }
             let io_name = output.backend.map_io_name(io.name);
             let ty = type_name(output, vm, io.ty);
-            let slots = vm.bx.heap.pod_type_ref(io.ty).ty.slots();
-            let is_struct = matches!(
-                vm.bx.heap.pod_type_ref(io.ty).ty,
-                crate::makepad_script::pod::ScriptPodTy::Struct { .. }
-            );
-            if is_struct {
+            let pod_ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
+            let slots = if pod_ty.has_compact_format() {
+                // Logical f32 components after fetch decode.
+                logical_fetch_slots(pod_ty)
+            } else {
+                pod_ty.slots()
+            };
+            let is_struct = matches!(pod_ty, crate::makepad_script::pod::ScriptPodTy::Struct { .. });
+            if is_struct && !pod_ty.has_compact_format() {
                 writeln!(
                     out,
                     "    rcx.vb_{io_name} = std::ptr::read(geom.as_ptr().add({slot}) as *const {ty});"
                 )
                 .ok();
+            } else if is_struct {
+                write_logical_struct_assign(
+                    out,
+                    &format!("rcx.vb_{io_name}"),
+                    "geom",
+                    slot,
+                    pod_ty,
+                    output,
+                    vm,
+                );
             } else {
                 write_static_assign(out, &format!("rcx.vb_{io_name}"), "geom", slot, slots);
             }
@@ -1096,6 +1109,75 @@ fn headless_uniform_packing() -> DrawShaderInputPacking {
     }
 }
 
+fn logical_fetch_slots(ty: &crate::makepad_script::pod::ScriptPodTy) -> usize {
+    match ty {
+        crate::makepad_script::pod::ScriptPodTy::Packed(p) => p.logical_slots(),
+        crate::makepad_script::pod::ScriptPodTy::Struct { fields, .. } => {
+            fields.iter().map(|f| logical_fetch_slots(&f.ty.data.ty)).sum()
+        }
+        _ => ty.slots(),
+    }
+}
+
+fn write_logical_struct_assign(
+    out: &mut String,
+    var_name: &str,
+    buf: &str,
+    offset: usize,
+    ty: &crate::makepad_script::pod::ScriptPodTy,
+    output: &crate::makepad_script::shader::ShaderOutput,
+    _vm: &crate::makepad_script::vm::ScriptVm,
+) {
+    let mut slot = offset;
+    write_logical_struct_assign_inner(out, var_name, buf, &mut slot, ty, output, _vm);
+}
+
+fn write_logical_struct_assign_inner(
+    out: &mut String,
+    var_name: &str,
+    buf: &str,
+    slot: &mut usize,
+    ty: &crate::makepad_script::pod::ScriptPodTy,
+    output: &crate::makepad_script::shader::ShaderOutput,
+    vm: &crate::makepad_script::vm::ScriptVm,
+) {
+    match ty {
+        crate::makepad_script::pod::ScriptPodTy::Struct { fields, .. } => {
+            for field in fields {
+                let field_name = output.backend.map_field_name(field.name);
+                write_logical_struct_assign_inner(
+                    out,
+                    &format!("{var_name}.{field_name}"),
+                    buf,
+                    slot,
+                    &field.ty.data.ty,
+                    output,
+                    vm,
+                );
+            }
+        }
+        crate::makepad_script::pod::ScriptPodTy::U32
+        | crate::makepad_script::pod::ScriptPodTy::AtomicU32 => {
+            write_static_assign_typed(out, var_name, buf, *slot, 1, "u32");
+            *slot += 1;
+        }
+        crate::makepad_script::pod::ScriptPodTy::I32
+        | crate::makepad_script::pod::ScriptPodTy::AtomicI32 => {
+            write_static_assign_typed(out, var_name, buf, *slot, 1, "i32");
+            *slot += 1;
+        }
+        crate::makepad_script::pod::ScriptPodTy::Bool => {
+            write_static_assign_typed(out, var_name, buf, *slot, 1, "bool");
+            *slot += 1;
+        }
+        _ => {
+            let slots = logical_fetch_slots(ty);
+            write_static_assign(out, var_name, buf, *slot, slots);
+            *slot += slots;
+        }
+    }
+}
+
 /// Assign a value from a float buffer to a variable.
 fn write_static_assign(out: &mut String, var_name: &str, buf: &str, offset: usize, slots: usize) {
     write_static_assign_typed(out, var_name, buf, offset, slots, "f32");
@@ -1112,6 +1194,10 @@ fn write_static_assign_typed(
     let read_elem = |out: &mut String, idx: usize| {
         if ty == "u32" {
             write!(out, "{buf}[{idx}].to_bits()").ok();
+        } else if ty == "i32" {
+            write!(out, "{buf}[{idx}].to_bits() as i32").ok();
+        } else if ty == "bool" {
+            write!(out, "{buf}[{idx}].to_bits() != 0").ok();
         } else {
             write!(out, "{buf}[{idx}]").ok();
         }
@@ -1377,3 +1463,19 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
 
 /// The inline runtime preamble embedded in every generated shader module.
 const SHADER_RUNTIME_PREAMBLE: &str = include_str!("shader_runtime_preamble.rs");
+
+#[cfg(test)]
+mod typed_vertex_tests {
+    use super::write_static_assign_typed;
+
+    #[test]
+    fn integer_vertex_siblings_reconstruct_from_f32_bit_lanes() {
+        let mut source = String::new();
+        write_static_assign_typed(&mut source, "out.u", "geom", 1, 1, "u32");
+        write_static_assign_typed(&mut source, "out.i", "geom", 2, 1, "i32");
+        write_static_assign_typed(&mut source, "out.b", "geom", 3, 1, "bool");
+        assert!(source.contains("out.u = geom[1].to_bits();"), "{source}");
+        assert!(source.contains("out.i = geom[2].to_bits() as i32;"), "{source}");
+        assert!(source.contains("out.b = geom[3].to_bits() != 0;"), "{source}");
+    }
+}

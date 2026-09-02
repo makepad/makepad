@@ -1436,13 +1436,21 @@ impl Cx {
                 Some(id) => id,
                 None => continue,
             };
-            let geom = &self.geometries[geometry_id];
-            let vertices = &geom.vertices;
-            let indices = &geom.indices;
-
-            if indices.is_empty() || vertices.is_empty() {
+            if !crate::geometry::geometry_layout_matches_shader(
+                &mut self.geometries[geometry_id],
+                &sh.mapping.geometries,
+            ) {
                 continue;
             }
+            let geom = &self.geometries[geometry_id];
+            if geom.indices.is_empty() || geom.vertices.is_empty() {
+                continue;
+            }
+            let geom_stride = if geom.vertex_stride != 0 {
+                geom.vertex_stride
+            } else {
+                sh.mapping.geometry_stride_bytes()
+            };
 
             let instances_data = match &draw_item.instances {
                 Some(data) => data.as_slice(),
@@ -1471,15 +1479,21 @@ impl Cx {
             let geom_slots = sh.mapping.geometries.total_slots;
             let varying_slots = sh.mapping.varying_total_slots;
 
-            let vertex_count = if geom_slots > 0 {
-                vertices.len() / geom_slots
+            let vertex_count = if geom.vertices.is_f32() {
+                if geom_slots > 0 {
+                    geom.vertices.as_f32().map(|v| v.len() / geom_slots).unwrap_or(0)
+                } else {
+                    0
+                }
+            } else if geom_stride > 0 {
+                geom.vertices.byte_len() / geom_stride
             } else {
                 0
             };
             if vertex_count == 0 {
                 continue;
             }
-            let tri_count = indices.len() / 3;
+            let tri_count = geom.indices.len() / 3;
             if tri_count == 0 {
                 continue;
             }
@@ -1499,9 +1513,24 @@ impl Cx {
                 let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
                 let inst_base = inst_idx * vertex_count;
 
+                let mut decoded_geom = vec![0.0f32; geom_slots.max(1)];
                 for vert_idx in 0..vertex_count {
-                    let geom_offset = vert_idx * geom_slots;
-                    let geom_slice = &vertices[geom_offset..geom_offset + geom_slots];
+                    let geom_slice: &[f32] = if let Some(f32s) = geom.vertices.as_f32() {
+                        let geom_offset = vert_idx * geom_slots;
+                        &f32s[geom_offset..geom_offset + geom_slots]
+                    } else {
+                        let bytes = geom.vertices.as_bytes();
+                        let start = vert_idx * geom_stride;
+                        let end = (start + geom_stride).min(bytes.len());
+                        if start < bytes.len() {
+                            decoded_geom.fill(0.0);
+                            sh.mapping.geometries.decode_vertex_f32(
+                                &bytes[start..end],
+                                &mut decoded_geom,
+                            );
+                        }
+                        &decoded_geom
+                    };
                     let shaded_idx = inst_base + vert_idx;
                     let vary_offset = shaded_idx * varying_slots;
                     let varying_out = &mut shaded_varyings
@@ -1557,9 +1586,25 @@ impl Cx {
             for inst_idx in 0..instance_count {
                 let inst_base = (inst_idx * vertex_count) as u32;
                 for tri_idx in 0..tri_count {
-                    let i0 = indices[tri_idx * 3];
-                    let i1 = indices[tri_idx * 3 + 1];
-                    let i2 = indices[tri_idx * 3 + 2];
+                    let (i0, i1, i2) = match geom.index_width {
+                        4 => {
+                            let Some(idx) = geom.indices.as_u32() else {
+                                continue;
+                            };
+                            (idx[tri_idx * 3], idx[tri_idx * 3 + 1], idx[tri_idx * 3 + 2])
+                        }
+                        2 => {
+                            let Some(idx) = geom.indices.as_u16() else {
+                                continue;
+                            };
+                            (
+                                idx[tri_idx * 3] as u32,
+                                idx[tri_idx * 3 + 1] as u32,
+                                idx[tri_idx * 3 + 2] as u32,
+                            )
+                        }
+                        _ => continue,
+                    };
                     if i0 as usize >= vertex_count
                         || i1 as usize >= vertex_count
                         || i2 as usize >= vertex_count

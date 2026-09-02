@@ -5586,7 +5586,21 @@ impl CxVulkan {
                 }
             };
 
+            let shader_layout = cx.draw_shaders.shaders[packet.shader_index]
+                .mapping
+                .geometries
+                .clone();
             let geometry = &mut cx.geometries[packet.geometry_id];
+            if !crate::geometry::geometry_backend_supports_typed(
+                geometry,
+                "vulkan",
+                shader_layout.has_compact(),
+            ) {
+                continue;
+            }
+            if !crate::geometry::geometry_layout_matches_shader(geometry, &shader_layout) {
+                continue;
+            }
             if geometry.index_count == 0 || geometry.vertex_count == 0 {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
@@ -6379,23 +6393,43 @@ impl CxVulkan {
     }
 
     fn collect_attribute_chunk_formats(total_slots: usize) -> Vec<DrawShaderAttrFormat> {
-        vec![DrawShaderAttrFormat::Float; (total_slots + 3) / 4]
+        vec![DrawShaderAttrFormat::F32x4; (total_slots + 3) / 4]
     }
 
     fn vk_vertex_format(attr_format: DrawShaderAttrFormat, components: usize) -> vk::Format {
         match (attr_format, components.max(1).min(4)) {
-            (DrawShaderAttrFormat::Float, 1) => vk::Format::R32_SFLOAT,
-            (DrawShaderAttrFormat::Float, 2) => vk::Format::R32G32_SFLOAT,
-            (DrawShaderAttrFormat::Float, 3) => vk::Format::R32G32B32_SFLOAT,
-            (DrawShaderAttrFormat::Float, _) => vk::Format::R32G32B32A32_SFLOAT,
-            (DrawShaderAttrFormat::UInt, 1) => vk::Format::R32_UINT,
-            (DrawShaderAttrFormat::UInt, 2) => vk::Format::R32G32_UINT,
-            (DrawShaderAttrFormat::UInt, 3) => vk::Format::R32G32B32_UINT,
-            (DrawShaderAttrFormat::UInt, _) => vk::Format::R32G32B32A32_UINT,
-            (DrawShaderAttrFormat::SInt, 1) => vk::Format::R32_SINT,
-            (DrawShaderAttrFormat::SInt, 2) => vk::Format::R32G32_SINT,
-            (DrawShaderAttrFormat::SInt, 3) => vk::Format::R32G32B32_SINT,
-            (DrawShaderAttrFormat::SInt, _) => vk::Format::R32G32B32A32_SINT,
+            (DrawShaderAttrFormat::F32x1, 1)
+            | (DrawShaderAttrFormat::F32x2, 1)
+            | (DrawShaderAttrFormat::F32x3, 1)
+            | (DrawShaderAttrFormat::F32x4, 1) => vk::Format::R32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, 2)
+            | (DrawShaderAttrFormat::F32x2, 2)
+            | (DrawShaderAttrFormat::F32x3, 2)
+            | (DrawShaderAttrFormat::F32x4, 2) => vk::Format::R32G32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, 3)
+            | (DrawShaderAttrFormat::F32x2, 3)
+            | (DrawShaderAttrFormat::F32x3, 3)
+            | (DrawShaderAttrFormat::F32x4, 3) => vk::Format::R32G32B32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, _)
+            | (DrawShaderAttrFormat::F32x2, _)
+            | (DrawShaderAttrFormat::F32x3, _)
+            | (DrawShaderAttrFormat::F32x4, _) => vk::Format::R32G32B32A32_SFLOAT,
+            (DrawShaderAttrFormat::U32x1, 1) => vk::Format::R32_UINT,
+            (DrawShaderAttrFormat::U32x1, 2) => vk::Format::R32G32_UINT,
+            (DrawShaderAttrFormat::U32x1, 3) => vk::Format::R32G32B32_UINT,
+            (DrawShaderAttrFormat::U32x1, _) => vk::Format::R32G32B32A32_UINT,
+            (DrawShaderAttrFormat::I32x1, 1) => vk::Format::R32_SINT,
+            (DrawShaderAttrFormat::I32x1, 2) => vk::Format::R32G32_SINT,
+            (DrawShaderAttrFormat::I32x1, 3) => vk::Format::R32G32B32_SINT,
+            (DrawShaderAttrFormat::I32x1, _) => vk::Format::R32G32B32A32_SINT,
+            (DrawShaderAttrFormat::F16x2, _) => vk::Format::R16G16_SFLOAT,
+            (DrawShaderAttrFormat::F16x4, _) => vk::Format::R16G16B16A16_SFLOAT,
+            (DrawShaderAttrFormat::U16x2, _) => vk::Format::R16G16_UINT,
+            (DrawShaderAttrFormat::I16x2, _) => vk::Format::R16G16_SINT,
+            (DrawShaderAttrFormat::U16x2Norm, _) => vk::Format::R16G16_UNORM,
+            (DrawShaderAttrFormat::I16x2Norm, _) => vk::Format::R16G16_SNORM,
+            (DrawShaderAttrFormat::U8x4Norm, _) => vk::Format::R8G8B8A8_UNORM,
+            (DrawShaderAttrFormat::I8x4Norm, _) => vk::Format::R8G8B8A8_SNORM,
         }
     }
 
@@ -6494,24 +6528,29 @@ impl CxVulkan {
         let index_needs_upload = existing.is_none() || geometry.dirty_indices;
 
         let new_vertex_buffer = if vertex_needs_upload {
+            let vertices = geometry.vertices.as_f32().ok_or_else(|| {
+                "vulkan: compact vertex formats are not implemented".to_string()
+            })?;
             let buffer = self.create_host_buffer_with_data(
                 vk::BufferUsageFlags::VERTEX_BUFFER,
-                &geometry.vertices,
+                vertices,
             )?;
             self.xr_geometry_upload_bytes_this_frame +=
-                std::mem::size_of_val(geometry.vertices.as_slice()) as u64;
+                std::mem::size_of_val(vertices) as u64;
             Some(buffer)
         } else {
             None
         };
 
         let new_index_buffer = if index_needs_upload {
-            match self
-                .create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, &geometry.indices)
-            {
+            let indices = match geometry.indices.as_u32() {
+                Some(i) => i,
+                None => return Err("vulkan: u16 index buffers are not implemented".to_string()),
+            };
+            match self.create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, indices) {
                 Ok(buffer) => {
                     self.xr_geometry_upload_bytes_this_frame +=
-                        std::mem::size_of_val(geometry.indices.as_slice()) as u64;
+                        std::mem::size_of_val(indices) as u64;
                     Some(buffer)
                 }
                 Err(err) => {

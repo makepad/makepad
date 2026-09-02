@@ -262,7 +262,10 @@ where
         Self: Sized,
     {
         use crate::pod::*;
-        use makepad_math::{Mat4f, Quat, Vec2f, Vec3f, Vec4f};
+        use makepad_math::{
+            F16x2, F16x4, I16x2, Mat4f, Quat, SNorm16x2, SNorm8x4, U16x2, UNorm16x2, UNorm8x4,
+            Vec2f, Vec3f, Vec4f,
+        };
         use std::any::TypeId;
 
         fn align_up(offset: usize, align: usize) -> usize {
@@ -310,6 +313,42 @@ where
             }
             if type_id == TypeId::of::<Quat>() {
                 return Some((std::mem::size_of::<Quat>(), std::mem::align_of::<Quat>()));
+            }
+            if type_id == TypeId::of::<F16x2>() {
+                return Some((std::mem::size_of::<F16x2>(), std::mem::align_of::<F16x2>()));
+            }
+            if type_id == TypeId::of::<F16x4>() {
+                return Some((std::mem::size_of::<F16x4>(), std::mem::align_of::<F16x4>()));
+            }
+            if type_id == TypeId::of::<U16x2>() {
+                return Some((std::mem::size_of::<U16x2>(), std::mem::align_of::<U16x2>()));
+            }
+            if type_id == TypeId::of::<I16x2>() {
+                return Some((std::mem::size_of::<I16x2>(), std::mem::align_of::<I16x2>()));
+            }
+            if type_id == TypeId::of::<UNorm16x2>() {
+                return Some((
+                    std::mem::size_of::<UNorm16x2>(),
+                    std::mem::align_of::<UNorm16x2>(),
+                ));
+            }
+            if type_id == TypeId::of::<SNorm16x2>() {
+                return Some((
+                    std::mem::size_of::<SNorm16x2>(),
+                    std::mem::align_of::<SNorm16x2>(),
+                ));
+            }
+            if type_id == TypeId::of::<UNorm8x4>() {
+                return Some((
+                    std::mem::size_of::<UNorm8x4>(),
+                    std::mem::align_of::<UNorm8x4>(),
+                ));
+            }
+            if type_id == TypeId::of::<SNorm8x4>() {
+                return Some((
+                    std::mem::size_of::<SNorm8x4>(),
+                    std::mem::align_of::<SNorm8x4>(),
+                ));
             }
 
             let type_check = heap.registered_type(type_id)?;

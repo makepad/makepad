@@ -4231,6 +4231,15 @@ impl Widget for MapView {
                         else {
                             continue;
                         };
+                        let (indices, vertices) = match (indices, vertices) {
+                            (IndexData::U32(indices), VertexData::F32(vertices)) => {
+                                (indices, vertices)
+                            }
+                            (indices, vertices) => {
+                                geometry.restore_cpu_buffers(cx.cx, indices, vertices);
+                                continue;
+                            }
+                        };
                         match pool.submit(QueueOrder::Fifo, move || drop((indices, vertices))) {
                             Ok(handle) => handle.detach(),
                             Err(_) => {

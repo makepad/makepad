@@ -255,18 +255,37 @@ impl Cx {
 
                 let geometry = &mut self.geometries[geometry_id];
 
+                if !crate::geometry::geometry_backend_supports_typed(
+                    geometry,
+                    "d3d11",
+                    sh.mapping.geometry_is_compact(),
+                ) {
+                    continue;
+                }
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
                 if geometry.dirty_indices {
+                    let Some(indices) = geometry.indices.as_u32() else {
+                        continue;
+                    };
                     geometry
                         .os
                         .geom_ibuf
-                        .update_with_u32_index_data(d3d11_cx, &geometry.indices);
+                        .update_with_u32_index_data(d3d11_cx, indices);
                     geometry.dirty_indices = false;
                 }
                 if geometry.dirty_vertices {
+                    let Some(vertices) = geometry.vertices.as_f32() else {
+                        continue;
+                    };
                     geometry
                         .os
                         .geom_vbuf
-                        .update_with_f32_vertex_data(d3d11_cx, &geometry.vertices);
+                        .update_with_f32_vertex_data(d3d11_cx, vertices);
                     geometry.dirty_vertices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -3672,27 +3691,37 @@ impl CxOsDrawShader {
 
         fn slots_to_dxgi_format(slots: usize, attr_format: DrawShaderAttrFormat) -> DXGI_FORMAT {
             match attr_format {
-                DrawShaderAttrFormat::Float => match slots {
+                DrawShaderAttrFormat::F32x1
+                | DrawShaderAttrFormat::F32x2
+                | DrawShaderAttrFormat::F32x3
+                | DrawShaderAttrFormat::F32x4 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_FLOAT,
                     2 => DXGI_FORMAT_R32G32_FLOAT,
                     3 => DXGI_FORMAT_R32G32B32_FLOAT,
-                    4 => DXGI_FORMAT_R32G32B32A32_FLOAT,
-                    _ => panic!("slots_to_dxgi_format unsupported float slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_FLOAT,
                 },
-                DrawShaderAttrFormat::UInt => match slots {
+                DrawShaderAttrFormat::U32x1 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_UINT,
                     2 => DXGI_FORMAT_R32G32_UINT,
                     3 => DXGI_FORMAT_R32G32B32_UINT,
-                    4 => DXGI_FORMAT_R32G32B32A32_UINT,
-                    _ => panic!("slots_to_dxgi_format unsupported uint slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_UINT,
                 },
-                DrawShaderAttrFormat::SInt => match slots {
+                DrawShaderAttrFormat::I32x1 => match slots.max(1).min(4) {
                     1 => DXGI_FORMAT_R32_SINT,
                     2 => DXGI_FORMAT_R32G32_SINT,
                     3 => DXGI_FORMAT_R32G32B32_SINT,
-                    4 => DXGI_FORMAT_R32G32B32A32_SINT,
-                    _ => panic!("slots_to_dxgi_format unsupported sint slotcount {}", slots),
+                    _ => DXGI_FORMAT_R32G32B32A32_SINT,
                 },
+                // Compact formats: DXGI enum values (this windows crate subset
+                // does not re-export every DXGI_FORMAT_* alias).
+                DrawShaderAttrFormat::F16x2 => DXGI_FORMAT(34),            // R16G16_FLOAT
+                DrawShaderAttrFormat::F16x4 => DXGI_FORMAT(10),            // R16G16B16A16_FLOAT
+                DrawShaderAttrFormat::U16x2 => DXGI_FORMAT(36),            // R16G16_UINT
+                DrawShaderAttrFormat::I16x2 => DXGI_FORMAT(38),            // R16G16_SINT
+                DrawShaderAttrFormat::U16x2Norm => DXGI_FORMAT(35),        // R16G16_UNORM
+                DrawShaderAttrFormat::I16x2Norm => DXGI_FORMAT(37),        // R16G16_SNORM
+                DrawShaderAttrFormat::U8x4Norm => DXGI_FORMAT_R8G8B8A8_UNORM,
+                DrawShaderAttrFormat::I8x4Norm => DXGI_FORMAT(31),         // R8G8B8A8_SNORM,
             }
         }
         fn slot_chunks(slots: usize) -> Vec<usize> {
@@ -3818,7 +3847,7 @@ impl CxOsDrawShader {
                     SemanticIndex: semantic_chunk_index as u32,
                     Format: slots_to_dxgi_format(chunk_slots, geom.attr_format),
                     InputSlot: 0,
-                    AlignedByteOffset: ((geom.offset + slot_offset) * 4) as u32,
+                    AlignedByteOffset: (geom.byte_offset + slot_offset * 4) as u32,
                     InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
                     InstanceDataStepRate: 0,
                 });
@@ -3848,7 +3877,7 @@ impl CxOsDrawShader {
                     SemanticIndex: semantic_chunk_index as u32,
                     Format: slots_to_dxgi_format(chunk_slots, inst.attr_format),
                     InputSlot: 1,
-                    AlignedByteOffset: ((inst.offset + slot_offset) * 4) as u32,
+                    AlignedByteOffset: (inst.byte_offset + slot_offset * 4) as u32,
                     InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
                     InstanceDataStepRate: 1,
                 });

@@ -55,6 +55,14 @@ pub struct ScriptPodBuiltins {
     pub pod_mat4x2f: ScriptPodType,
     pub pod_mat4x3f: ScriptPodType,
     pub pod_mat4x4f: ScriptPodType,
+    pub pod_f16x2: ScriptPodType,
+    pub pod_f16x4: ScriptPodType,
+    pub pod_u16x2: ScriptPodType,
+    pub pod_i16x2: ScriptPodType,
+    pub pod_unorm16x2: ScriptPodType,
+    pub pod_snorm16x2: ScriptPodType,
+    pub pod_unorm8x4: ScriptPodType,
+    pub pod_snorm8x4: ScriptPodType,
 }
 
 impl ScriptPodBuiltins {
@@ -219,6 +227,71 @@ pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> Sc
     let pod_mat4x3f = heap.pod_def_mat(pod, id_lut!(mat4x3f), ScriptPodMat::Mat4x3f);
     let pod_mat4x4f = heap.pod_def_mat(pod, id_lut!(mat4x4f), ScriptPodMat::Mat4x4f);
 
+    let pod_f16x2 = heap.pod_def_atom(
+        pod,
+        id_lut!(f16x2),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::F16x2),
+        id_lut!(pod_f16x2),
+        ScriptValue::NIL,
+    );
+    let pod_f16x4 = heap.pod_def_atom(
+        pod,
+        id_lut!(f16x4),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::F16x4),
+        id_lut!(pod_f16x4),
+        ScriptValue::NIL,
+    );
+    let pod_u16x2 = heap.pod_def_atom(
+        pod,
+        id_lut!(u16x2),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::U16x2),
+        id_lut!(pod_u16x2),
+        ScriptValue::NIL,
+    );
+    let pod_i16x2 = heap.pod_def_atom(
+        pod,
+        id_lut!(i16x2),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::I16x2),
+        id_lut!(pod_i16x2),
+        ScriptValue::NIL,
+    );
+    let pod_unorm16x2 = heap.pod_def_atom(
+        pod,
+        id_lut!(unorm16x2),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::U16x2Norm),
+        id_lut!(pod_unorm16x2),
+        ScriptValue::NIL,
+    );
+    let pod_snorm16x2 = heap.pod_def_atom(
+        pod,
+        id_lut!(snorm16x2),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::I16x2Norm),
+        id_lut!(pod_snorm16x2),
+        ScriptValue::NIL,
+    );
+    let pod_unorm8x4 = heap.pod_def_atom(
+        pod,
+        id_lut!(unorm8x4),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::U8x4Norm),
+        id_lut!(pod_unorm8x4),
+        ScriptValue::NIL,
+    );
+    let pod_snorm8x4 = heap.pod_def_atom(
+        pod,
+        id_lut!(snorm8x4),
+        None,
+        ScriptPodTy::Packed(ScriptPodPacked::I8x4Norm),
+        id_lut!(pod_snorm8x4),
+        ScriptValue::NIL,
+    );
+
     // Add mix method for all pod types (f32, vec2f, vec3f, vec4f, etc.)
     // self.mix(other, alpha) -> mix(self, other, alpha)
     native.add_type_method(
@@ -358,6 +431,14 @@ pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> Sc
         pod_mat4x2f,
         pod_mat4x3f,
         pod_mat4x4f,
+        pod_f16x2,
+        pod_f16x4,
+        pod_u16x2,
+        pod_i16x2,
+        pod_unorm16x2,
+        pod_snorm16x2,
+        pod_unorm8x4,
+        pod_snorm8x4,
     };
     ps
 }
