@@ -2078,6 +2078,7 @@ mod tests {
             namespace: "game".into(),
             kind: None,
             title: title.into(),
+            creator: String::new(),
             snippet: String::new(),
             score: 0,
             live: true,

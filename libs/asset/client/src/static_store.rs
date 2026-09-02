@@ -401,6 +401,7 @@ impl StaticStore {
                 namespace: doc.namespace.clone(),
                 kind: doc.kind,
                 title: doc.title.clone(),
+                creator: doc.creator.clone(),
                 snippet: snippet(&doc.title, &doc.description),
                 score: *score,
                 live: doc.live,

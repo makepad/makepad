@@ -473,7 +473,21 @@ impl<C: Clone> BrowseModel<C> {
         let mut q = CatalogQuery::text(self.text.clone(), PAGE_SIZE);
         q.kind = Some(self.kinds[slot.min(self.kinds.len() - 1)]);
         if !self.category.is_empty() {
-            q.category = Some(self.category.clone());
+            // The public web snapshot is exported as the `music` namespace;
+            // unlike the mutable native catalog it does not require a
+            // duplicate category annotation to make those tracks visible.
+            #[cfg(target_arch = "wasm32")]
+            {
+                if q.kind == Some(AssetKind::Audio) && self.category == "music" {
+                    q.namespace = Some(self.category.clone());
+                } else {
+                    q.category = Some(self.category.clone());
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                q.category = Some(self.category.clone());
+            }
         }
         if !self.tag.is_empty() {
             q.tag = Some(self.tag.clone());

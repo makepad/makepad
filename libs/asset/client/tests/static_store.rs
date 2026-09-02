@@ -34,6 +34,106 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+struct MusicFixtureRow {
+    asset: AssetId,
+    alias: AssetAlias,
+    revision: AssetRevisionId,
+    audio: BlobId,
+    audio_bytes: Vec<u8>,
+    manifest_bytes: Vec<u8>,
+    document: Value,
+    search: Value,
+}
+
+fn music_fixture_row(
+    base: &AssetManifest,
+    seed: u8,
+    alias: &str,
+    title: &str,
+    creator: &str,
+) -> MusicFixtureRow {
+    let asset = AssetId::from_bytes([seed; 16]);
+    let alias = AssetAlias::from_str(alias).unwrap();
+    let audio_bytes = format!("fixture mp3 {seed}").into_bytes();
+    let audio = BlobId::hash_of(&audio_bytes);
+    let mut manifest = base.clone();
+    manifest.asset_id = asset;
+    manifest.kind = AssetKind::Audio;
+    manifest.files = vec![AssetFile {
+        role: FileRole::Audio,
+        tier: DeviceTier::Any,
+        lod: 0,
+        media: MediaType::Mp3,
+        blob: audio,
+        byte_len: audio_bytes.len() as u64,
+        dims: None,
+    }];
+    manifest.thumbnail = None;
+    manifest.metrics = Metrics {
+        total_bytes: audio_bytes.len() as u64,
+        media_millis: 1_000,
+        ..Default::default()
+    };
+    manifest.bounds = Bounds { min: Vec3::ZERO, max: Vec3::ZERO };
+    manifest.capabilities.loopable = true;
+    manifest.rights.credits = creator.to_string();
+    manifest.canonicalize();
+    manifest.validate().unwrap();
+    let manifest_bytes = manifest.to_canonical_bytes().unwrap();
+    let revision = AssetRevisionId::hash_of(&manifest_bytes);
+    let document = obj(vec![
+        ("asset_id", s(asset.to_string())),
+        ("kind", s("audio")),
+        ("files", Value::Arr(vec![obj(vec![
+            ("role", s("audio")),
+            ("tier", s("any")),
+            ("lod", Value::Int(0)),
+            ("media", s("mp3")),
+            ("blob", s(audio.to_string())),
+            ("byte_len", Value::Int(audio_bytes.len() as i64)),
+        ])])),
+        ("dependencies", Value::Arr(vec![])),
+    ]);
+    let mut terms = title
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    let search = obj(vec![
+        ("asset_id", s(asset.to_string())),
+        ("namespace", s("music")),
+        ("kind", s("audio")),
+        ("title", s(title)),
+        ("description", s("CC0 music fixture")),
+        // Deliberately no `music` category: the web explorer contract is
+        // namespace-scoped, exactly like the deployed static snapshot.
+        ("categories", Value::Arr(vec![])),
+        ("tags", Value::Arr(vec![])),
+        ("creator", s(creator)),
+        ("generator", s("makepad-dj-pack")),
+        ("backend", s("fixture")),
+        ("model", s("fixture")),
+        ("live", Value::Bool(true)),
+        ("updated_ms", Value::Int(1_700_000_000_000 + seed as i64)),
+        ("aliases", Value::Arr(vec![s(alias.to_string())])),
+        ("terms", Value::Arr(terms.into_iter().map(|term| obj(vec![
+            ("term", s(term)), ("weight", Value::Int(10)),
+        ])).collect())),
+    ]);
+    MusicFixtureRow {
+        asset,
+        alias,
+        revision,
+        audio,
+        audio_bytes,
+        manifest_bytes,
+        document,
+        search,
+    }
+}
+
 fn fixture() -> ExportFixture {
     let asset = AssetId::from_bytes([7; 16]);
     let alias = AssetAlias::from_str("stock/fixture/box").unwrap();
@@ -115,6 +215,22 @@ fn fixture() -> ExportFixture {
         ("alias", s(alias.to_string())), ("asset_id", s(asset.to_string())),
         ("head_revision", s(revision.to_string())),
     ]).to_json().into_bytes();
+    let music_rows = vec![
+        music_fixture_row(
+            &manifest,
+            8,
+            "music/marsel-minga/drum-machine-battle",
+            "Drum Machine Battle",
+            "Marsel Minga",
+        ),
+        music_fixture_row(
+            &manifest,
+            9,
+            "music/wilfredor-sample-dance-1/wilfredor-sample-dance-1",
+            "Wilfredor Sample Dance 1",
+            "Wilfredor",
+        ),
+    ];
     let mut routes = BTreeMap::from([
         ("/v1/health".into(), health),
         (format!("/v1/assets/{asset}"), detail),
@@ -129,6 +245,31 @@ fn fixture() -> ExportFixture {
     // Alias and revision thumbnail routes are byte-identical in a real export.
     *routes.get_mut(&format!("/v1/thumbnails/alias/{alias}")).unwrap() =
         routes[&format!("/v1/blobs/{thumbnail}")].clone();
+    for row in &music_rows {
+        routes.insert(
+            format!("/v1/assets/{}", row.asset),
+            obj(vec![
+                ("asset_id", s(row.asset.to_string())),
+                ("namespace", s("music")),
+                ("retired", Value::Bool(false)),
+                ("retired_ms", Value::Null),
+                ("candidates", Value::Arr(vec![])),
+            ]).to_json().into_bytes(),
+        );
+        routes.insert(
+            format!("/v1/aliases/{}", row.alias),
+            obj(vec![
+                ("alias", s(row.alias.to_string())),
+                ("asset_id", s(row.asset.to_string())),
+                ("head_revision", s(row.revision.to_string())),
+            ]).to_json().into_bytes(),
+        );
+        routes.insert(
+            format!("/v1/revisions/{}", row.revision),
+            row.manifest_bytes.clone(),
+        );
+        routes.insert(format!("/v1/blobs/{}", row.audio), row.audio_bytes.clone());
+    }
     let files = Value::Arr(routes.iter().map(|(path, bytes)| obj(vec![
         ("path", s(path.clone())), ("byte_len", Value::Int(bytes.len() as i64)),
         ("sha256", s(hex(&sha256(bytes)))), ("content_type", s("application/octet-stream")),
@@ -148,53 +289,79 @@ fn fixture() -> ExportFixture {
             ("byte_len", Value::Int(routes[&format!("/v1/blobs/{thumbnail}")].len() as i64)),
         ])),
     ]);
+    let mut assets = vec![obj(vec![
+        ("asset_id", s(asset.to_string())), ("namespace", s("stock")),
+        ("created_ms", Value::Int(1_700_000_000_000)),
+        ("revisions", Value::Arr(vec![s(revision.to_string())])),
+    ])];
+    let mut aliases = vec![obj(vec![
+        ("alias", s(alias.to_string())), ("asset_id", s(asset.to_string())),
+        ("head_revision", s(revision.to_string())),
+        ("updated_ms", Value::Int(1_700_000_000_001)),
+    ])];
+    let mut revisions = vec![obj(vec![
+        ("revision", s(revision.to_string())), ("document", document),
+    ])];
+    let mut search_documents = vec![obj(vec![
+        ("asset_id", s(asset.to_string())), ("namespace", s("stock")),
+        ("kind", s("prop")), ("title", s("Fixture Box")),
+        ("description", s("A public fixture box")),
+        ("categories", Value::Arr(vec![s("fixture")])),
+        ("tags", Value::Arr(vec![s("public")])),
+        ("creator", s("Fixture Author")), ("generator", s("fixture")),
+        ("backend", s("fixture")), ("model", s("fixture")),
+        ("live", Value::Bool(true)), ("updated_ms", Value::Int(1_700_000_000_001)),
+        ("aliases", Value::Arr(vec![s(alias.to_string())])),
+        ("terms", Value::Arr(vec![
+            obj(vec![("term", s("box")), ("weight", Value::Int(5))]),
+            obj(vec![("term", s("fixture")), ("weight", Value::Int(10))]),
+        ])),
+    ])];
+    let mut blobs = vec![
+        blob_value(blob, blob_bytes.len() as u64),
+        blob_value(thumbnail, routes[&format!("/v1/blobs/{thumbnail}")].len() as u64),
+    ];
+    for row in &music_rows {
+        assets.push(obj(vec![
+            ("asset_id", s(row.asset.to_string())), ("namespace", s("music")),
+            ("created_ms", Value::Int(1_700_000_000_000 + row.asset.as_bytes()[0] as i64)),
+            ("revisions", Value::Arr(vec![s(row.revision.to_string())])),
+        ]));
+        aliases.push(obj(vec![
+            ("alias", s(row.alias.to_string())), ("asset_id", s(row.asset.to_string())),
+            ("head_revision", s(row.revision.to_string())),
+            ("updated_ms", Value::Int(1_700_000_000_000 + row.asset.as_bytes()[0] as i64)),
+        ]));
+        revisions.push(obj(vec![
+            ("revision", s(row.revision.to_string())), ("document", row.document.clone()),
+        ]));
+        search_documents.push(row.search.clone());
+        blobs.push(blob_value(row.audio, row.audio_bytes.len() as u64));
+    }
+    assets.sort_by_key(Value::to_json);
+    aliases.sort_by_key(Value::to_json);
+    revisions.sort_by_key(Value::to_json);
+    search_documents.sort_by_key(Value::to_json);
+    blobs.sort_by_key(Value::to_json);
+    let unique_blob_bytes = blobs.iter().map(|value| {
+        value.get("byte_len").and_then(Value::as_u64).unwrap()
+    }).sum::<u64>();
     let static_manifest = obj(vec![
         ("static_version", Value::Int(1)),
         ("protocol_version", Value::Int(makepad_asset_client::wire::PROTOCOL_VERSION as i64)),
         ("snapshot_id", s("22222222222222222222222222222222")),
         ("server_id", s("11111111111111111111111111111111")),
         ("generated_ms", Value::Int(1_700_000_000_000)),
-        ("assets", Value::Arr(vec![obj(vec![
-            ("asset_id", s(asset.to_string())), ("namespace", s("stock")),
-            ("created_ms", Value::Int(1_700_000_000_000)),
-            ("revisions", Value::Arr(vec![s(revision.to_string())])),
-        ])])),
-        ("aliases", Value::Arr(vec![obj(vec![
-            ("alias", s(alias.to_string())), ("asset_id", s(asset.to_string())),
-            ("head_revision", s(revision.to_string())),
-            ("updated_ms", Value::Int(1_700_000_000_001)),
-        ])])),
-        ("revisions", Value::Arr(vec![obj(vec![
-            ("revision", s(revision.to_string())), ("document", document),
-        ])])),
+        ("assets", Value::Arr(assets)),
+        ("aliases", Value::Arr(aliases)),
+        ("revisions", Value::Arr(revisions)),
         ("search", obj(vec![
             ("normalization", s("ascii-alnum-lower-v1")),
             ("ranking", s("public-weight-sum-v1")),
-            ("documents", Value::Arr(vec![obj(vec![
-                ("asset_id", s(asset.to_string())), ("namespace", s("stock")),
-                ("kind", s("prop")), ("title", s("Fixture Box")),
-                ("description", s("A public fixture box")),
-                ("categories", Value::Arr(vec![s("fixture")])),
-                ("tags", Value::Arr(vec![s("public")])),
-                ("creator", s("Fixture Author")), ("generator", s("fixture")),
-                ("backend", s("fixture")), ("model", s("fixture")),
-                ("live", Value::Bool(true)), ("updated_ms", Value::Int(1_700_000_000_001)),
-                ("aliases", Value::Arr(vec![s(alias.to_string())])),
-                ("terms", Value::Arr(vec![
-                    obj(vec![("term", s("box")), ("weight", Value::Int(5))]),
-                    obj(vec![("term", s("fixture")), ("weight", Value::Int(10))]),
-                ])),
-            ])])),
+            ("documents", Value::Arr(search_documents)),
         ])),
         ("variants", Value::Arr(vec![])),
-        ("blobs", {
-            let mut blobs = vec![
-                blob_value(blob, blob_bytes.len() as u64),
-                blob_value(thumbnail, routes[&format!("/v1/blobs/{thumbnail}")].len() as u64),
-            ];
-            blobs.sort_by_key(Value::to_json);
-            Value::Arr(blobs)
-        }),
+        ("blobs", Value::Arr(blobs)),
         ("files", files),
         ("policy", obj(vec![
             ("namespace", Value::Null),
@@ -205,13 +372,12 @@ fn fixture() -> ExportFixture {
             ("include_video_up_to", Value::Int(32 * 1024 * 1024)),
         ])),
         ("totals", obj(vec![
-            ("assets", Value::Int(1)),
-            ("aliases", Value::Int(1)),
-            ("revisions", Value::Int(1)),
-            ("blobs_present", Value::Int(2)),
+            ("assets", Value::Int(3)),
+            ("aliases", Value::Int(3)),
+            ("revisions", Value::Int(3)),
+            ("blobs_present", Value::Int(4)),
             ("blobs_omitted", Value::Int(0)),
-            ("unique_blob_bytes", Value::Int((blob_bytes.len()
-                + routes[&format!("/v1/blobs/{thumbnail}")].len()) as i64)),
+            ("unique_blob_bytes", Value::Int(unique_blob_bytes as i64)),
         ])),
         ("exclusions", obj(vec![
             ("rights", Value::Int(0)),
@@ -331,6 +497,40 @@ fn complete(runtime: &mut ClientRuntime, request: ClientRequest) -> Result<Clien
 }
 
 #[test]
+fn static_snapshot_music_namespace_yields_two_rows() {
+    let fixture = fixture();
+    let transport = MockTransport {
+        next: 1,
+        routes: fixture.routes,
+        ready: VecDeque::new(),
+        truncated_manifest: false,
+    };
+    let mut store = StaticStore::start(
+        BaseUrl::parse("https://static.example").unwrap(),
+        Box::new(transport),
+        Box::new(MemoryCacheStore::new(1024 * 1024)),
+    ).unwrap();
+    for _ in 0..4 {
+        let _ = store.poll();
+        if store.is_ready() {
+            break;
+        }
+    }
+    assert!(store.is_ready());
+    let mut query = makepad_asset_client::CatalogQuery::browse(10);
+    query.namespace = Some("music".into());
+    query.kind = Some(AssetKind::Audio);
+    let page = store.catalog_search(&query, None).unwrap();
+    assert_eq!(
+        page.hits.iter().map(|hit| (hit.title.as_str(), hit.creator.as_str())).collect::<Vec<_>>(),
+        [
+            ("Drum Machine Battle", "Marsel Minga"),
+            ("Wilfredor Sample Dance 1", "Wilfredor"),
+        ],
+    );
+}
+
+#[test]
 fn platform_runtime_reads_static_export_and_deduplicates_digests() {
     let _serial = socket_test_lock();
     let fixture = fixture();
@@ -368,6 +568,20 @@ fn platform_runtime_reads_static_export_and_deduplicates_digests() {
     assert_eq!(
         page.facets.iter().map(|facet| (facet.label.as_str(), facet.count)).collect::<Vec<_>>(),
         [("fixture", 1), ("public", 1)],
+    );
+    let mut music_query = makepad_asset_client::CatalogQuery::browse(10);
+    music_query.namespace = Some("music".into());
+    music_query.kind = Some(AssetKind::Audio);
+    let ClientOutput::CatalogPage(music) = complete(
+        &mut runtime,
+        ClientRequest::CatalogSearch { query: music_query, cursor: None },
+    ).unwrap() else { panic!("music search output") };
+    assert_eq!(
+        music.hits.iter().map(|hit| (hit.title.as_str(), hit.creator.as_str())).collect::<Vec<_>>(),
+        [
+            ("Drum Machine Battle", "Marsel Minga"),
+            ("Wilfredor Sample Dance 1", "Wilfredor"),
+        ],
     );
     let ClientOutput::AssetDetail(detail) = complete(&mut runtime, ClientRequest::AssetDetail {
         id: fixture.asset,
