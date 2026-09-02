@@ -3,13 +3,15 @@ use crate::http::{
     PUBLIC_ASSET_HEADERS,
 };
 use makepad_network::http_server::{
-    HttpServerPendingBody, HttpServerResponse, HttpServerResponseSender,
+    normalize_client_ip, HttpServerPendingBody, HttpServerResponse, HttpServerResponseSender,
 };
 use makepad_network::HttpServerHeaders;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{CString, OsString},
     fs::{File, Metadata},
+    fmt::Write as _,
+    io::{Read, Seek},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{mpsc::{self, SyncSender, TrySendError}, Mutex},
@@ -256,7 +258,7 @@ impl StaticHandler {
             return;
         }
         let relative = request_path.trim_start_matches('/');
-        let original = match self.open_beneath(relative) {
+        let mut original = match self.open_beneath(relative) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 send_response(sender, static_error(404, "not found"));
@@ -292,7 +294,13 @@ impl StaticHandler {
         };
 
         let range_header = headers.header("Range");
-        let identity_etag = etag(&original_metadata);
+        let identity_etag = match etag(&mut original) {
+            Ok(etag) => etag,
+            Err(_) => {
+                send_response(sender, static_error(500, "internal error"));
+                return;
+            }
+        };
         let identity_modified = modified_seconds(&original_metadata);
         let range_honored = range_header.is_some()
             && headers
@@ -308,7 +316,7 @@ impl StaticHandler {
             None
         };
         let use_brotli = brotli_file.is_some() && accepts_brotli(headers.header("Accept-Encoding"));
-        let selected = if use_brotli {
+        let mut selected = if use_brotli {
             brotli_file.unwrap()
         } else {
             original
@@ -321,7 +329,17 @@ impl StaticHandler {
             }
         };
         let len = metadata.len();
-        let etag = etag(&metadata);
+        let etag = if use_brotli {
+            match etag(&mut selected) {
+                Ok(etag) => etag,
+                Err(_) => {
+                    send_response(sender, static_error(500, "internal error"));
+                    return;
+                }
+            }
+        } else {
+            identity_etag.clone()
+        };
         let modified = modified_seconds(&metadata);
         let last_modified = http_date(modified);
         let cache = cache_policy(relative);
@@ -340,7 +358,7 @@ impl StaticHandler {
                 "HTTP/1.1 304 Not Modified\r\nContent-Type: {mime}\r\n{APP_ISOLATION_HEADERS}\
                  Cache-Control: {cache}\r\n{common}Content-Length: 0\r\nConnection: close\r\n\r\n"
             );
-            send_response(sender, HttpServerResponse { header, body: Vec::new() });
+            send_response(sender, HttpServerResponse::new(header, Vec::new()));
             return;
         }
 
@@ -371,7 +389,7 @@ impl StaticHandler {
             reason(status)
         );
         if headers.verb == "HEAD" {
-            send_response(sender, HttpServerResponse { header, body: Vec::new() });
+            send_response(sender, HttpServerResponse::new(header, Vec::new()));
             return;
         }
         send_response(sender, HttpServerResponse::from_file(header, selected, offset, body_len));
@@ -394,8 +412,20 @@ impl StaticHandler {
     }
 
     fn open_beneath(&self, relative: &str) -> std::io::Result<File> {
+        validate_relative_components(relative)?;
         open_beneath(&self.root_fd, &self.root, relative)
     }
+}
+
+fn validate_relative_components(relative: &str) -> std::io::Result<()> {
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok(())
 }
 
 fn log_report(ip: IpAddr, bytes: &[u8], encoded: bool) {
@@ -622,8 +652,8 @@ const CLOUDFLARE_V6: &[(&str, u8)] = &[
     ("2c0f:f248::", 32),
 ];
 
-fn cloudflare_peer(ip: IpAddr) -> bool {
-    match ip {
+pub fn cloudflare_peer(ip: IpAddr) -> bool {
+    match normalize_client_ip(ip) {
         IpAddr::V4(ip) => {
             let value = u32::from(ip);
             CLOUDFLARE_V4.iter().any(|(base, prefix)| {
@@ -644,7 +674,7 @@ fn cloudflare_peer(ip: IpAddr) -> bool {
 }
 
 pub fn client_ip(headers: &HttpServerHeaders) -> IpAddr {
-    let peer = headers.addr.ip();
+    let peer = normalize_client_ip(headers.addr.ip());
     let client = if cloudflare_peer(peer) {
         let mut forwarded = headers
             .lines
@@ -661,13 +691,6 @@ pub fn client_ip(headers: &HttpServerHeaders) -> IpAddr {
         peer
     };
     normalize_client_ip(client)
-}
-
-fn normalize_client_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => ip,
-        IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from(u128::from(ip) & (!0u128 << 64))),
-    }
 }
 
 fn sibling_brotli(path: &str) -> String {
@@ -756,13 +779,31 @@ fn common_file_headers(etag: &str, last_modified: &str, encoded: bool, public: b
     )
 }
 
-pub fn etag(metadata: &Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .unwrap_or_default();
-    format!("\"{:x}-{:x}-{:x}\"", metadata.len(), modified.as_secs(), modified.subsec_nanos())
+pub fn etag(file: &mut File) -> std::io::Result<String> {
+    let position = file.stream_position()?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let digest = (|| {
+        let mut sha256 = makepad_network::digest::Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            sha256.update(&buffer[..read]);
+        }
+        Ok::<_, std::io::Error>(sha256.finalise())
+    })();
+    let restored = file.seek(std::io::SeekFrom::Start(position));
+    let digest = digest?;
+    restored?;
+    let mut value = String::with_capacity(66);
+    value.push('"');
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("write to string");
+    }
+    value.push('"');
+    Ok(value)
 }
 
 fn if_none_match(header: Option<&str>, etag: &str) -> bool {
@@ -1050,6 +1091,14 @@ mod tests {
     }
 
     #[test]
+    fn redundant_path_components_are_rejected_before_platform_open() {
+        for path in ["dir//file.js", "dir/./file.js", "./file.js", "dir/../file.js", ""] {
+            assert!(validate_relative_components(path).is_err(), "accepted {path:?}");
+        }
+        assert!(validate_relative_components("dir/file.js").is_ok());
+    }
+
+    #[test]
     fn brotli_requires_a_valid_positive_quality() {
         assert!(accepts_brotli(Some("gzip, br")));
         assert!(accepts_brotli(Some("br;q=0.5")));
@@ -1072,7 +1121,13 @@ mod tests {
         ] {
             assert!(cache_policy(path).contains("immutable"), "{path}");
         }
-        for path in ["app-a1b2c3d4.wasm", "app.wasm", "app.0123.wasm", "app.0123456789abcdef.js"] {
+        for path in [
+            "app-a1b2c3d4.wasm",
+            "app.wasm",
+            "app.names.wasm",
+            "app.0123.wasm",
+            "app.0123456789abcdef.js",
+        ] {
             assert_eq!(cache_policy(path), "private, no-cache", "{path}");
         }
     }
@@ -1094,6 +1149,10 @@ mod tests {
             client_ip(&trusted),
             "2001:db8:1234:5678::".parse::<IpAddr>().unwrap()
         );
+
+        let mapped_peer = headers("::ffff:173.245.48.1", Some("::ffff:198.51.100.7"));
+        assert!(cloudflare_peer(mapped_peer.addr.ip()));
+        assert_eq!(client_ip(&mapped_peer), "198.51.100.7".parse::<IpAddr>().unwrap());
 
         let mut duplicate = headers("173.245.48.1", Some("198.51.100.7"));
         duplicate.lines.push("CF-Connecting-IP: 203.0.113.8\r\n".into());
@@ -1180,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn etag_uses_length_and_mtime() {
+    fn etag_changes_with_bytes_when_length_and_mtime_are_preserved() {
         let dir = std::env::temp_dir().join(format!(
             "makepad-web-etag-{}-{:?}",
             std::process::id(),
@@ -1188,10 +1247,21 @@ mod tests {
         ));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("asset.bin");
-        fs::write(&path, b"abcd").unwrap();
-        let first = etag(&path.metadata().unwrap());
-        fs::write(&path, b"abcdefgh").unwrap();
-        let second = etag(&path.metadata().unwrap());
+        fs::write(&path, b"AAA").unwrap();
+        let modified = path.metadata().unwrap().modified().unwrap();
+        let mut first_file = File::open(&path).unwrap();
+        let first = etag(&mut first_file).unwrap();
+        fs::write(&path, b"BBB").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let mut second_file = File::open(&path).unwrap();
+        let second = etag(&mut second_file).unwrap();
+        assert_eq!(path.metadata().unwrap().len(), 3);
+        assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
         assert_ne!(first, second);
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();

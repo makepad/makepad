@@ -224,7 +224,7 @@ fn error_response(status: u16, reason: &'static str, message: String) -> HttpSer
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 fn busy_response() -> HttpServerResponse {
@@ -237,7 +237,7 @@ fn busy_response() -> HttpServerResponse {
         "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 1\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 fn etag_for(digest: &str) -> String {
@@ -383,7 +383,7 @@ pub fn route_blob(
                 blob.size,
                 etag_for(&digest)
             );
-            return respond(HttpServerResponse { header, body });
+            return respond(HttpServerResponse::new(header, body));
         }
     }
     let start = range.map(|(from, _)| from).unwrap_or(0);
@@ -485,7 +485,7 @@ fn read_chunk_response(
             blob.size
         )
     };
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 #[cfg(test)]

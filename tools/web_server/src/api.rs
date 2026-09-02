@@ -22,6 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
 };
@@ -292,14 +293,9 @@ impl NavBackend for ProductionBackend {
     }
 }
 
-enum AlongBody {
-    Ready(Vec<u8>),
-    Pending(HttpServerPendingBody),
-}
-
 enum QueryJob {
     Search(SearchRequest, HttpServerResponseSender),
-    Along(AlongBody, HttpServerResponseSender),
+    Along(Vec<u8>, AlongPermit, HttpServerResponseSender),
 }
 
 struct RouteJob(RouteRequest, HttpServerResponseSender);
@@ -308,7 +304,43 @@ struct RouteJob(RouteRequest, HttpServerResponseSender);
 struct WorkerSenders {
     search: SyncSender<QueryJob>,
     along: SyncSender<QueryJob>,
+    along_admission: Arc<AlongAdmission>,
     route: SyncSender<RouteJob>,
+}
+
+struct AlongAdmission {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+struct AlongPermit {
+    admission: Arc<AlongAdmission>,
+}
+
+impl AlongAdmission {
+    fn try_acquire(self: &Arc<Self>) -> Option<AlongPermit> {
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            if used >= self.limit {
+                return None;
+            }
+            match self.used.compare_exchange_weak(
+                used,
+                used + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(AlongPermit { admission: self.clone() }),
+                Err(changed) => used = changed,
+            }
+        }
+    }
+}
+
+impl Drop for AlongPermit {
+    fn drop(&mut self) {
+        self.admission.used.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub struct ServiceRegistry {
@@ -343,6 +375,10 @@ impl ServiceRegistry {
         let (along_sender, along_receiver) = mpsc::sync_channel(route_queue);
         let (route_sender, route_receiver) = mpsc::sync_channel(route_queue);
         let along_workers = query_workers.saturating_sub(1).max(1);
+        let along_admission = Arc::new(AlongAdmission {
+            used: AtomicUsize::new(0),
+            limit: route_queue.saturating_add(along_workers),
+        });
         let registry = Arc::downgrade(self);
         spawn_query_workers(registry.clone(), backend.clone(), search_receiver, 1, "search");
         spawn_query_workers(registry.clone(), backend.clone(), along_receiver, along_workers, "along");
@@ -350,6 +386,7 @@ impl ServiceRegistry {
         *self.workers.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(WorkerSenders {
             search: search_sender,
             along: along_sender,
+            along_admission,
             route: route_sender,
         });
         *self.health.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = HealthState {
@@ -471,7 +508,7 @@ impl ServiceRegistry {
                 send_response(sender, api_error(413, "too_large", "request body exceeds 2 MiB"));
                 return true;
             }
-            self.enqueue_query(QueryJob::Along(AlongBody::Ready(body), sender.clone()));
+            self.enqueue_along(body, sender.clone());
             true
         } else if headers.path.starts_with("/api/") {
             let status = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
@@ -502,7 +539,32 @@ impl ServiceRegistry {
                 body.reject(api_error(415, "unsupported_media_type", "Content-Type must be application/json"));
                 return true;
             }
-            self.enqueue_query(QueryJob::Along(AlongBody::Pending(body), sender.clone()));
+            let workers = self.workers.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            let Some(workers) = workers else {
+                body.reject(api_error(503, "unavailable", "navigation services are not ready"));
+                return true;
+            };
+            let Some(permit) = workers.along_admission.try_acquire() else {
+                body.reject(api_error(429, "busy", "query queue is full"));
+                return true;
+            };
+            let along = workers.along;
+            let response = sender.clone();
+            let _ = std::thread::Builder::new()
+                .name("web-along-upload".into())
+                .spawn(move || {
+                    let Ok(bytes) = body.receive() else { return };
+                    let job = QueryJob::Along(bytes, permit, response);
+                    match along.send(job) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            reject_query_job(
+                                error.0,
+                                api_error(503, "unavailable", "query workers are unavailable"),
+                            );
+                        }
+                    }
+                });
             true
         } else if headers.path.starts_with("/api/") {
             let response = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
@@ -523,17 +585,35 @@ impl ServiceRegistry {
             reject_query_job(job, api_error(503, "unavailable", "navigation services are not ready"));
             return;
         };
-        let queue = match &job {
-            QueryJob::Search(_, _) => &workers.search,
-            QueryJob::Along(_, _) => &workers.along,
-        };
-        match queue.try_send(job) {
+        match workers.search.try_send(job) {
             Ok(()) => {}
             Err(TrySendError::Full(job)) => {
                 reject_query_job(job, api_error(429, "busy", "query queue is full"));
             }
             Err(TrySendError::Disconnected(job)) => {
                 reject_query_job(job, api_error(503, "unavailable", "query workers are unavailable"));
+            }
+        }
+    }
+
+    fn enqueue_along(&self, body: Vec<u8>, sender: HttpServerResponseSender) {
+        let workers = self.workers.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let Some(workers) = workers else {
+            send_response(&sender, api_error(503, "unavailable", "navigation services are not ready"));
+            return;
+        };
+        let Some(permit) = workers.along_admission.try_acquire() else {
+            send_response(&sender, api_error(429, "busy", "query queue is full"));
+            return;
+        };
+        let job = QueryJob::Along(body, permit, sender);
+        match workers.along.send(job) {
+            Ok(()) => {}
+            Err(error) => {
+                reject_query_job(
+                    error.0,
+                    api_error(503, "unavailable", "query workers are unavailable"),
+                );
             }
         }
     }
@@ -571,7 +651,7 @@ fn spawn_query_workers(
                 let job = receiver.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
                 let Ok(job) = job else { break };
                 let sender = match &job {
-                    QueryJob::Search(_, sender) | QueryJob::Along(_, sender) => sender.clone(),
+                    QueryJob::Search(_, sender) | QueryJob::Along(_, _, sender) => sender.clone(),
                 };
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
                     QueryJob::Search(request, _) => {
@@ -581,9 +661,7 @@ fn spawn_query_workers(
                             .map(|results| search_response_for(&query, results))
                             .unwrap_or_else(ApiFailure::response)
                     }
-                    QueryJob::Along(body, _) => body
-                        .receive()
-                        .and_then(|body| parse_along(&body))
+                    QueryJob::Along(body, _permit, _) => parse_along(&body)
                         .and_then(|request| backend.along(request))
                         .map(along_response)
                         .unwrap_or_else(ApiFailure::response),
@@ -602,23 +680,11 @@ fn spawn_query_workers(
     }
 }
 
-impl AlongBody {
-    fn receive(self) -> Result<Vec<u8>, ApiFailure> {
-        match self {
-            Self::Ready(body) => Ok(body),
-            Self::Pending(body) => body
-                .receive()
-                .map_err(|_| bad_request("request body connection closed")),
-        }
-    }
-}
-
 fn reject_query_job(job: QueryJob, response: HttpServerResponse) {
     match job {
-        QueryJob::Search(_, sender) | QueryJob::Along(AlongBody::Ready(_), sender) => {
+        QueryJob::Search(_, sender) | QueryJob::Along(_, _, sender) => {
             send_response(&sender, response)
         }
-        QueryJob::Along(AlongBody::Pending(body), _) => body.reject(response),
     }
 }
 

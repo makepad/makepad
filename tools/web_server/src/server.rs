@@ -33,6 +33,7 @@ pub fn run_with_registry(
         post_max_size_overrides: vec![("/$report_error".into(), crate::static_files::REPORT_BODY_LIMIT as u64)],
         pre_admit_posts: true,
         client_ip_resolver: Some(crate::static_files::client_ip),
+        trusted_proxy: Some(crate::static_files::cloudflare_peer),
         request: request_sender,
     }) else {
         return Err(format!("failed to bind {listen}"));

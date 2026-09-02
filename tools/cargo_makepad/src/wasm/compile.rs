@@ -1889,6 +1889,7 @@ fn start_wasm_server(
         post_max_size_overrides: Vec::new(),
         pre_admit_posts: false,
         client_ip_resolver: None,
+        trusted_proxy: None,
         request: tx_request,
     });
     if _listen_thread.is_none() {
@@ -1975,10 +1976,7 @@ fn start_wasm_server(
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response_sender.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response_sender.send(HttpServerResponse::new(header, vec![]));
                         continue;
                     }
                     if path == "/$report_error" {
@@ -1989,10 +1987,7 @@ fn start_wasm_server(
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response_sender.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response_sender.send(HttpServerResponse::new(header, vec![]));
                         continue;
                     }
 
@@ -2005,7 +2000,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                         continue;
                     }
 
@@ -2065,7 +2060,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                         continue;
                     };
 
@@ -2109,7 +2104,7 @@ fn start_wasm_server(
                                         body.len()
                                     );
                                     let _ =
-                                        response_sender.send(HttpServerResponse { header, body });
+                                        response_sender.send(HttpServerResponse::new(header, body));
                                     continue;
                                 }
                             }
@@ -2146,7 +2141,7 @@ fn start_wasm_server(
                                 cache_extra,
                                 body.len()
                             );
-                            let _ = response_sender.send(HttpServerResponse { header, body });
+                            let _ = response_sender.send(HttpServerResponse::new(header, body));
                         }
                     } else {
                         println!("Wasm webserver 404 (missing file): {}", headers.path);
@@ -2158,7 +2153,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                     }
                 }
                 HttpServerRequest::Post {
@@ -2178,10 +2173,7 @@ fn start_wasm_server(
                             Cache-Control: max-age:0\r\n\
                             Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response.send(HttpServerResponse::new(header, vec![]));
                     } else {
                         let body = b"Not found".to_vec();
                         let header = format!(
@@ -2191,14 +2183,14 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response.send(HttpServerResponse { header, body });
+                        let _ = response.send(HttpServerResponse::new(header, body));
                     }
                 }
                 HttpServerRequest::PostPending { body, .. } => {
-                    body.reject(HttpServerResponse {
-                        header: "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-                        body: Vec::new(),
-                    });
+                    body.reject(HttpServerResponse::new(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                        Vec::new(),
+                    ));
                 }
             }
         }

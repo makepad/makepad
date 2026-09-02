@@ -273,13 +273,7 @@ pub fn fmt_duration(secs: f64) -> String {
 
 /// Haversine distance in meters.
 pub fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
-    let (lon1, lat1) = (a.0.to_radians(), a.1.to_radians());
-    let (lon2, lat2) = (b.0.to_radians(), b.1.to_radians());
-    let dlat = lat2 - lat1;
-    let dlon = lon2 - lon1;
-    let h = (dlat / 2.0).sin().powi(2)
-        + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * 6_371_000.0 * h.sqrt().asin()
+    makepad_map_nav::geo::haversine_m(LonLat::new(a.0, a.1), LonLat::new(b.0, b.1))
 }
 
 /// Sample a lon/lat polyline every `spacing_m` meters.

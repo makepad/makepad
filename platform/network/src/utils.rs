@@ -8,8 +8,9 @@ use makepad_script::*;
 use std::net::{IpAddr, Ipv4Addr};
 
 pub const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_ERROR_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-const LOW_LEVEL_SECURITY_HEADERS: &str = "Cross-Origin-Opener-Policy: same-origin\r\n\
+pub(crate) const LOW_LEVEL_SECURITY_HEADERS: &str = "Cross-Origin-Opener-Policy: same-origin\r\n\
 Cross-Origin-Embedder-Policy: require-corp\r\n";
 
 pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
@@ -45,16 +46,52 @@ fn status_reason(code: u16) -> &'static str {
     }
 }
 
-pub fn http_error_out(mut tcp_stream: TcpStream, code: u16) {
-    write_bytes_to_tcp_stream_no_error(
+pub fn http_error_out(tcp_stream: TcpStream, code: u16) {
+    http_error_out_until(tcp_stream, code, None, Instant::now() + HTTP_ERROR_WRITE_TIMEOUT);
+}
+
+pub fn http_error_out_until(
+    mut tcp_stream: TcpStream,
+    code: u16,
+    allow: Option<&str>,
+    deadline: Instant,
+) {
+    let allow = allow.map(|value| format!("Allow: {value}\r\n")).unwrap_or_default();
+    write_bytes_to_tcp_stream_until(
         &mut tcp_stream,
         format!(
-            "HTTP/1.1 {code} {}\r\n{LOW_LEVEL_SECURITY_HEADERS}Content-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {code} {}\r\n{LOW_LEVEL_SECURITY_HEADERS}{allow}Content-Length: 0\r\nConnection: close\r\n\r\n",
             status_reason(code)
         )
         .as_bytes(),
+        deadline,
     );
     let _ = tcp_stream.shutdown(Shutdown::Both);
+}
+
+pub fn write_bytes_to_tcp_stream_until(
+    tcp_stream: &mut TcpStream,
+    bytes: &[u8],
+    deadline: Instant,
+) -> bool {
+    let mut written = 0;
+    while written < bytes.len() {
+        let Some(wait) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+        else {
+            return false;
+        };
+        if tcp_stream.set_write_timeout(Some(wait)).is_err() {
+            return false;
+        }
+        match tcp_stream.write(&bytes[written..]) {
+            Ok(0) => return false,
+            Ok(count) => written += count,
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
@@ -230,7 +267,10 @@ impl HttpServerHeaders {
         let version = fields.next().ok_or(HttpHeadError::BadRequest)?;
         if fields.next().is_some()
             || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
-            || !matches!(verb, "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "DELETE")
+            || verb.is_empty()
+            || !verb
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
         {
             return Err(HttpHeadError::BadRequest);
         }

@@ -351,6 +351,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         post_max_size_overrides: Vec::new(),
         pre_admit_posts: false,
         client_ip_resolver: None,
+        trusted_proxy: None,
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {addr}")))?;
 
@@ -2960,7 +2961,7 @@ fn json_response(status: u16, json: String) -> HttpServerResponse {
         status_reason(status),
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }
 
 fn ok_json(json: String) -> HttpServerResponse {
@@ -2981,5 +2982,5 @@ fn artifact_response(content_type: &str, sha256: &str, body: Vec<u8>) -> HttpSer
         sha256,
         body.len()
     );
-    HttpServerResponse { header, body }
+    HttpServerResponse::new(header, body)
 }

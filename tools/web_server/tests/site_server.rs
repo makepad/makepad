@@ -146,6 +146,16 @@ fn post(address: SocketAddr, path: &str, body: &[u8]) -> Response {
     request(address, &request_bytes)
 }
 
+fn slow_along_upload(address: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    stream
+        .write_all(
+            b"POST /api/along HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: 2097152\r\n\r\n",
+        )
+        .unwrap();
+    stream
+}
+
 fn direct_headers(verb: &str, target: &str) -> HttpServerHeaders {
     let (path, search) = target
         .split_once('?')
@@ -205,11 +215,13 @@ fn start_fixture_server(base: &Path) -> (ServerChild, SocketAddr) {
     let root = base.join("site");
     let data = base.join("private-data");
     fs::create_dir_all(root.join("maps")).unwrap();
+    fs::create_dir_all(root.join("dir")).unwrap();
     fs::create_dir_all(data.join("nav")).unwrap();
     fs::write(root.join("index.html"), b"<h1>fixture</h1>").unwrap();
     fs::write(root.join("app.0123456789abcdef.wasm"), b"0123456789").unwrap();
     fs::write(root.join("app.0123456789abcdef.wasm.br"), b"BR").unwrap();
     fs::write(root.join("plus+file.js"), b"plus").unwrap();
+    fs::write(root.join("dir/file.js"), b"nested").unwrap();
     fs::write(root.join("maps/root.mkidx"), b"map-index").unwrap();
     fs::write(root.join("maps/root.mkidx.br"), b"wrong-index-representation").unwrap();
     fs::write(root.join("maps/tiles-001.mkshard"), b"map-shard").unwrap();
@@ -266,6 +278,8 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert_eq!(invalid_quality.body, b"0123456789");
     assert!(!invalid_quality.headers.contains("Content-Encoding: br"));
     assert_eq!(get(address, "/plus+file.js", "").body, b"plus");
+    assert_eq!(get(address, "/dir//file.js", "").status, 400);
+    assert_eq!(get(address, "/dir/./file.js", "").status, 400);
 
     let partial = get(address, "/app.0123456789abcdef.wasm", "Range: bytes=2-5\r\nAccept-Encoding: br\r\n");
     assert_eq!(partial.status, 206);
@@ -435,6 +449,24 @@ fn check_along_json_rejects_deep_trailing_and_huge_typed_inputs() {
     huge.push_str("],\"cum_dist_m\":[0,1],\"kinds\":[\"museum\"]}");
     assert!(huge.len() < 2 * 1024 * 1024);
     assert_eq!(post(address, "/api/along", huge.as_bytes()).status, 400);
+}
+
+fn check_slow_along_upload_never_occupies_compute_worker() {
+    let tree = TempTree::new("slow-along");
+    let (_server, address) = start_fixture_server(&tree.0);
+    let first = slow_along_upload(address);
+    thread::sleep(Duration::from_millis(50));
+
+    let valid = br#"{"polyline":[[4.8952,52.3702],[4.915,52.35]],"cum_dist_m":[0,3000],"kinds":["museum"]}"#;
+    let response = post(address, "/api/along", valid);
+    assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
+
+    let second = slow_along_upload(address);
+    thread::sleep(Duration::from_millis(50));
+    let capped = post(address, "/api/along", valid);
+    assert_eq!(capped.status, 503, "per-client upload cap must reject promptly");
+    let _ = first.shutdown(Shutdown::Both);
+    let _ = second.shutdown(Shutdown::Both);
 }
 
 fn check_malformed_request_line_is_a_hardened_bad_request() {
@@ -705,6 +737,7 @@ fn live_server_adversarial_contracts() {
     check_static_and_navigation_contracts_work_end_to_end();
     check_unavailable_is_returned_before_navigation_is_ready();
     check_along_json_rejects_deep_trailing_and_huge_typed_inputs();
+    check_slow_along_upload_never_occupies_compute_worker();
     check_malformed_request_line_is_a_hardened_bad_request();
     check_route_falls_back_as_a_whole_to_major_graph();
 }

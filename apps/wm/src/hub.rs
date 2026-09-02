@@ -64,6 +64,7 @@ impl WmHub {
             post_max_size_overrides: Vec::new(),
             pre_admit_posts: false,
             client_ip_resolver: None,
+            trusted_proxy: None,
         })?;
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();

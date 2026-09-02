@@ -478,11 +478,11 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                                 let response = HttpServerResponse::script_from_value(vm, ret);
                                 let _ = response_sender.send(response);
                             } else {
-                                let _ = response_sender.send(HttpServerResponse {
-                                    header: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                                let _ = response_sender.send(HttpServerResponse::new(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                                         .to_string(),
-                                    body: "No body".to_string().into_bytes(),
-                                });
+                                    "No body".to_string().into_bytes(),
+                                ));
                             }
                         });
                     }
@@ -504,20 +504,20 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                                 let response_obj = HttpServerResponse::script_from_value(vm, ret);
                                 let _ = response.send(response_obj);
                             } else {
-                                let _ = response.send(HttpServerResponse {
-                                    header: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                                let _ = response.send(HttpServerResponse::new(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
                                         .to_string(),
-                                    body: "No body".to_string().into_bytes(),
-                                });
+                                    "No body".to_string().into_bytes(),
+                                ));
                             }
                         });
                     }
                 }
                 HttpServerRequest::PostPending { body, .. } => {
-                    body.reject(HttpServerResponse {
-                        header: "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-                        body: Vec::new(),
-                    });
+                    body.reject(HttpServerResponse::new(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -805,6 +805,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 post_max_size_overrides: Vec::new(),
                 pre_admit_posts: false,
                 client_ip_resolver: None,
+                trusted_proxy: None,
                 request: server_tx,
             };
 
