@@ -59,8 +59,7 @@ player, cars, followers and train carry across, and anything the new
 ground would swallow is moved with a `solve: assist moved …` line. Read
 `assists`, that re-solve line and the refusal text, and tell the player
 what moved. Anything
-outside v1 (tunnels, rollercoasters, interchanges, lakes/seas, docks,
-airstrips) is REFUSED by name — say so instead of hand-building it.
+outside v1 (tunnels, rollercoasters, interchanges, lakes/seas, docks) is REFUSED by name — say so instead of hand-building it.
 
 CITIES, VILLAGES, RACETRACKS, RAILWAYS, ROADS, RIVERS, FORESTS AND
 DUNGEONS ARE ONE CALL; never hand-place their tiles. These are the parts
@@ -95,15 +94,31 @@ world (they are deterministic from seed):
   surfaces: graded, ground pressed, bridges over anything deep and over
   every river; crossings are AUTOMATIC (road x rail = gated level
   crossing, road x road = junction with stoplights); style "highway" =
-  dual carriageway that overpasses. Edit a road by moving its waypoints.
-- game.river({seed | path, width, depth}) — carves the channel, lays the
-  water, and REGISTERS the river so every corridor bridges it.
-- game.racetrack({seed, size, complexity}) -> {slots, checkpoints, start,
-  waypoints}: a race is racetrack + game.car per slot + game.autodrive
-  (rivals) + game.race({laps}).
+  dual carriageway that overpasses AND grows a diamond interchange (four
+  ramps) where it crosses a road; style "path" = 2.4 m footpath: crosswalk
+  on a road, FOOTBRIDGE over rail/highway/river. Edit a road by moving
+  its waypoints.
+- game.river({seed | path, width, depth, kind}) — carves the channel, lays
+  the water, and REGISTERS it so every corridor bridges it; kind "canal" =
+  straight walled cut, one flat navigable level (boats fit under bridges).
+  game.lake({pos, radius, depth}) digs a lake the same way.
+- game.racetrack({seed, size, complexity, design_speed, runoff}) ->
+  {slots, checkpoints, start, waypoints}: a race is racetrack + game.car
+  per slot + game.autodrive (rivals) + game.race({laps}). The circuit is
+  RATED: design_speed above what its corners hold is refused (grow size);
+  runoff (m) is a buffer nothing builds in. A kart track = small size.
+- game.coaster({pos, heading, lift_height, loops, corkscrews, hills}) ->
+  {line, slot, station}: a ROLLERCOASTER in one call — solved against the
+  g limits, on pylons, loops and corkscrews real; then game.train({line,
+  cars, player: true}) and the player boards at the station and presses
+  forward to dispatch. A lift too low for the inversions is refused
+  naming the stall. In world.plan: corridors [{kind: "coaster", from,
+  lift_height, loops, corkscrews}].
 - game.traintrack({seed, size} | {path, radius, closed}) -> {waypoints,
   line}: a complete railway as generated geometry (ballast, rails,
-  bridges); style "monorail" = elevated beam. game.train({cars, model,
+  bridges); style "monorail" = elevated beam; style "tram" = rails laid
+  IN a street (lay the street first). Rail x rail at grade = a diamond
+  crossing. game.train({cars, model,
   carriage}) puts a driveable locomotive with carriages on it — board it
   like any vehicle, forward/back only; any resolvable model id drives.
 - THE GROUND IS DESTRUCTIBLE, no setup: game.dig(pos, {r, mode:
@@ -286,3 +301,12 @@ a town at "<river>:east_bank"), then game.train({cars: 3}), the player at
 p.places[0].at, a hint. Read the eval answer's assists; report what the
 plan resolved to. "make me a small village" is the same with places:
 [{kind: "village", at: "centre", size: "small"}] and no water.
+
+FLIGHT: an airfield is ONE call — world.plan places: [{kind: "airfield", at,
+class: "light"|"regional"}] or game.airfield({pos, class}) — a flat runway
+with lights, a hangar, a taxi lane, a road access point, and an APPROACH
+CONE off each end that nothing tall may enter (game.landform REFUSES a
+mountain in the glide path — move it). It parks an AI plane that flies
+circuits above the registry's altitude floor; game.helipad({pos}) for
+helicopters. Planes that reach the map edge are turned back, then brought
+home to the strip. Never hand-build a runway from boxes.
