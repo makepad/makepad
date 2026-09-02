@@ -26,6 +26,15 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // The slot a `--gallery` run fills at startup: the fixture tree is
+    // built by name then, never as part of the desk's DSL (on the web its
+    // construction alone would overflow the 1 MiB wasm stack).
+    mod.widgets.ShellGalleryHostBase = #(ShellGalleryHost::register_widget(vm))
+    mod.widgets.ShellGalleryHost = set_type_default() do mod.widgets.ShellGalleryHostBase {
+        width: Fill
+        height: Fill
+    }
+
     mod.widgets.ShellGalleryBase = #(ShellGallery::register_widget(vm))
     mod.widgets.ShellGallery = set_type_default() do mod.widgets.ShellGalleryBase {
         width: Fill
@@ -646,5 +655,63 @@ mod tests {
         ] {
             assert!(titles.contains(&want), "missing gallery section {}", want);
         }
+    }
+}
+
+/// The gallery's slot in the desk: empty until a `--gallery` run fills it,
+/// by name, at startup. It exists so the gallery's deep fixture tree is
+/// never part of the desk's own DSL — every other run pays nothing for
+/// it, and the web build (a 1 MiB wasm stack) could not even construct it.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ShellGalleryHost {
+    #[source]
+    source: ScriptObjectRef,
+    #[uid]
+    uid: WidgetUid,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[rust]
+    area: Area,
+    #[rust]
+    gallery: Option<WidgetRef>,
+}
+
+impl ShellGalleryHost {
+    /// Build the gallery here, once. Inserted into the widget tree under
+    /// this host, so `ids!(shell_gallery)` finds it like any child.
+    pub fn ensure(&mut self, cx: &mut Cx) {
+        if self.gallery.is_some() {
+            return;
+        }
+        let gallery = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.widgets.*
+                ShellGallery {}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        cx.widget_tree_insert_child(self.uid, live_id!(shell_gallery), gallery.clone());
+        self.gallery = Some(gallery);
+        cx.redraw_all();
+    }
+}
+
+impl Widget for ShellGalleryHost {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(gallery) = self.gallery.clone() {
+            gallery.handle_event(cx, event, scope);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        if let Some(gallery) = self.gallery.clone() {
+            gallery.draw_walk_all(cx, scope, Walk::fill());
+        }
+        cx.end_turtle_with_area(&mut self.area);
+        DrawStep::done()
     }
 }

@@ -10,6 +10,7 @@ use crate::docs;
 use crate::formula::{Value, FUNCTIONS};
 use crate::sheet::{self, HAlign, NumFormat, Pos, Workbook};
 use crate::theme;
+use makepad_widgets::makepad_platform::storage::{StorageHandle, StorageRequestId, StorageResponse, StorageResult};
 use makepad_widgets::*;
 
 const ROWS: usize = 1000;
@@ -488,6 +489,18 @@ pub struct MpSheets {
     chrome_synced: bool,
     #[rust]
     widths_applied: bool,
+    /// The instance's storage jail, when a host gave it one (the module
+    /// contract): Open and Save read and write CSV there — the browser's
+    /// store on the web, files under the makepad home natively — and the
+    /// answers come back on `Event::Storage`.
+    #[rust]
+    storage: Option<StorageHandle>,
+    /// An Open in flight: the request and the key it was for.
+    #[rust]
+    storage_load: Option<(StorageRequestId, String)>,
+    /// A Save in flight.
+    #[rust]
+    storage_save: Option<(StorageRequestId, String)>,
 }
 
 impl MpSheets {
@@ -853,8 +866,64 @@ impl MpSheets {
         }
     }
 
+    /// A host handed this instance its storage jail: Open and Save go there
+    /// from now on, and the disk controls show whatever the platform has.
+    pub fn set_storage(&mut self, storage: StorageHandle) {
+        self.storage = Some(storage);
+        self.chrome_synced = false;
+    }
+
+    /// Whether Save can go anywhere: the jail when a host gave one, else
+    /// the platform's own disk.
+    fn can_save(&self) -> bool {
+        self.storage.is_some() || docs::docs().can_save()
+    }
+
+    /// The sheet name a stored key gets: the last path segment, without
+    /// its extension — `sheets/budget.csv` opens as `budget`.
+    fn name_for_key(key: &str) -> String {
+        let last = key.rsplit('/').next().unwrap_or(key);
+        let stem = last.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(last);
+        if stem.is_empty() { "Imported".to_string() } else { stem.to_string() }
+    }
+
+    /// The jail answered an Open or a Save.
+    fn on_storage(&mut self, cx: &mut Cx, responses: &[StorageResponse]) {
+        for response in responses {
+            if self.storage_load.as_ref().map(|(id, _)| *id == response.request_id).unwrap_or(false) {
+                let (_, key) = self.storage_load.take().unwrap();
+                match &response.result {
+                    Ok(StorageResult::Value(Some(bytes))) => {
+                        let text = String::from_utf8_lossy(bytes);
+                        self.wb.open_loaded_sheet(sheet::sheet_from_csv(&Self::name_for_key(&key), &text));
+                        self.reset_loaded_sheet_view(cx);
+                        self.status = format!("Opened {key}");
+                    }
+                    Ok(_) => self.status = format!("Nothing is saved as {key} yet"),
+                    Err(e) => self.status = format!("Open failed: {e}"),
+                }
+                self.after_model_change(cx);
+            } else if self.storage_save.as_ref().map(|(id, _)| *id == response.request_id).unwrap_or(false) {
+                let (_, key) = self.storage_save.take().unwrap();
+                self.status = match &response.result {
+                    Ok(_) => format!("Saved {key}"),
+                    Err(e) => format!("Save failed: {e}"),
+                };
+                self.sync_chrome(cx);
+            }
+        }
+    }
+
     fn open_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
+        if let Some(storage) = &self.storage {
+            // Asynchronous: the sheet lands in `on_storage`.
+            let id = storage.get(cx, &path);
+            self.storage_load = Some((id, path.clone()));
+            self.status = format!("Opening {path}…");
+            self.sync_chrome(cx);
+            return;
+        }
         match docs::docs().load(&path) {
             Ok(sheet) => {
                 self.wb.open_loaded_sheet(sheet);
@@ -868,6 +937,13 @@ impl MpSheets {
 
     fn save_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
+        if let Some(storage) = &self.storage {
+            let id = storage.set(cx, &path, sheet::to_csv(self.wb.sheet()).into_bytes());
+            self.storage_save = Some((id, path.clone()));
+            self.status = format!("Saving {path}…");
+            self.sync_chrome(cx);
+            return;
+        }
         self.status = match docs::docs().save(&path, self.wb.sheet()) {
             Ok(()) => format!("Saved {path}"),
             Err(e) => format!("Save failed: {e}"),
@@ -1233,6 +1309,9 @@ impl Widget for MpSheets {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Storage(responses) = event {
+            self.on_storage(cx, responses);
+        }
         if self.handle_fill_gesture(cx, event) {
             return;
         }
@@ -1255,7 +1334,7 @@ impl Widget for MpSheets {
             labels.extend(FUNCTIONS.iter().map(|(name, _)| name.to_string()));
             self.view.drop_down(cx, ids!(fx_menu)).set_labels(cx, labels);
             let source = docs::docs();
-            let can_save = source.can_save();
+            let can_save = self.can_save();
             let has_demos = !source.demos().is_empty();
             self.view
                 .widget(cx, ids!(disk_controls))

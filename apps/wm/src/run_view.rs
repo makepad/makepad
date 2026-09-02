@@ -134,10 +134,7 @@ pub fn trace_host(line: &str) {
         })
     });
     let Some(file) = file else { return };
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
+    let ms = crate::host::wall_now() * 1000.0;
     if let Ok(mut f) = file.lock() {
         let _ = writeln!(f, "{:.2} H {}", ms % 1.0e7, line);
     }
@@ -205,7 +202,7 @@ pub struct MpRunView {
     /// When the FIRST frame landed: the content fades in quickly from the
     /// "starting…" panel instead of popping on abruptly.
     #[rust]
-    first_present_at: Option<std::time::Instant>,
+    first_present_at: Option<f64>,
     #[rust]
     tick_timer: Timer,
     #[rust]
@@ -587,7 +584,7 @@ impl MpRunView {
             if self.present_ok_count == 1 {
                 // Whatever frames come in first, they fade in quickly
                 // rather than popping over the "starting…" panel.
-                self.first_present_at = Some(std::time::Instant::now());
+                self.first_present_at = Some(crate::host::now());
             }
             self.bootstrap_pending = false;
             self.bootstrap_tick_count = 0;
@@ -692,7 +689,7 @@ impl MpRunView {
     pub fn arrival_fade(&self) -> f32 {
         match self.first_present_at {
             Some(t0) => {
-                let t = (t0.elapsed().as_secs_f32() / ARRIVAL_FADE_SECS).min(1.0);
+                let t = ((crate::host::now() - t0) as f32 / ARRIVAL_FADE_SECS).min(1.0);
                 t * t * (3.0 - 2.0 * t)
             }
             None => 1.0,
@@ -803,7 +800,7 @@ impl Widget for MpRunView {
         const FIRST_FADE: f32 = ARRIVAL_FADE_SECS;
         let first_fade = match self.first_present_at {
             Some(t0) => {
-                let t = (t0.elapsed().as_secs_f32() / FIRST_FADE).min(1.0);
+                let t = ((crate::host::now() - t0) as f32 / FIRST_FADE).min(1.0);
                 if t < 1.0 {
                     self.redraw(cx);
                 }
