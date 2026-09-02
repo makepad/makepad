@@ -7,6 +7,9 @@
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
+#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
+pub use makepad_ai_cuda::launch::GemmPrecision;
+
 /// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
 /// a ggml dtype, its output width and its bias (empty for none).
 #[derive(Clone, Copy)]
@@ -111,6 +114,7 @@ pub fn gpu_vit_backbone_resident(
 
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
+    use super::GemmPrecision;
     use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
@@ -2378,6 +2382,16 @@ mod imp {
         }
     }
 
+    pub fn gpu_linear_nt_cached_with_precision(
+        _x: &GpuTensor,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _bias: &[f32],
+        _precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_cached(_x, _cache_namespace, _parts, _bias)
+    }
+
     pub fn gpu_linear_nt_cached_f16(
         _x: &GpuTensor,
         _cache_namespace: &str,
@@ -2392,6 +2406,16 @@ mod imp {
         {
             Err(GPU_UNAVAILABLE.to_string())
         }
+    }
+
+    pub fn gpu_linear_nt_cached_f16_with_precision(
+        _x: &GpuTensor,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _bias: &[f32],
+        _precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_cached_f16(_x, _cache_namespace, _parts, _bias)
     }
 
     pub fn gpu_gelu_bias_f16(
@@ -3229,6 +3253,7 @@ mod imp {
         _scale: f32,
         _motion_tokens: usize,
         _band_radius: usize,
+        _f16_attention_operands: bool,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }

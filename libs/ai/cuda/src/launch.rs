@@ -1,3 +1,23 @@
+/// Per-model precision policy for the generic CUDA dense-linear path.
+///
+/// The default is the validated Flux policy that the old unset environment
+/// switches selected. Models with a stricter numerical contract pass an
+/// explicit value to the `*_with_precision` launch entry points.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GemmPrecision {
+    pub f16_accumulate: bool,
+    pub f16_activations: bool,
+}
+
+impl Default for GemmPrecision {
+    fn default() -> Self {
+        Self {
+            f16_accumulate: true,
+            f16_activations: true,
+        }
+    }
+}
+
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
     use crate::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
@@ -13,6 +33,8 @@ mod imp {
     use std::ffi::c_void;
     use std::ptr::NonNull;
     use std::rc::Rc;
+
+    use super::GemmPrecision;
 
     pub use crate::{CudaGraph, CudaGraphExec};
 
@@ -1742,18 +1764,6 @@ mod imp {
             output: *mut f32,
             row_count: u32,
             cols: u32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-
-        fn makepad_cuda_flash_attention_f32(
-            q: *const u16,
-            k: *const u16,
-            v: *const u16,
-            out: *mut f32,
-            seq: u32,
-            head_count: u32,
-            hidden: u32,
-            scale: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -3911,14 +3921,6 @@ mod imp {
             .unwrap_or(false)
     }
 
-    /// `MAKEPAD_POOL_TRACE=1`: one stderr line per fresh (non-pooled) device
-    /// allocation with the idle-pool state — the tool for "why does this
-    /// phase cudaMalloc at all" questions near the WDDM residency cliff.
-    fn pool_trace_enabled() -> bool {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var("MAKEPAD_POOL_TRACE").as_deref() == Ok("1"))
-    }
-
     fn gpu_pool_acquire(min_bytes: usize) -> Result<DeviceBuffer, String> {
         let rounded = gpu_pool_round(min_bytes);
         // BEST-FIT: take the smallest pooled buffer in [rounded, 2*rounded)
@@ -3951,23 +3953,6 @@ mod imp {
         } else {
             perf_count(&PERF_POOL_FRESH_ALLOC_COUNT, 1);
             perf_count(&PERF_POOL_FRESH_ALLOC_BYTES, rounded as u64);
-            if pool_trace_enabled() {
-                let pooled = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
-                let idle: Vec<String> = GPU_TENSOR_POOL.with(|pool| {
-                    pool.borrow()
-                        .iter()
-                        .map(|(size, buffers)| format!("{}x{}MB", buffers.len(), size >> 20))
-                        .collect()
-                });
-                eprintln!(
-                    "pool trace: fresh alloc {}MB (asked {}MB) pooled={}MB cap={}MB idle=[{}]",
-                    rounded >> 20,
-                    min_bytes >> 20,
-                    pooled >> 20,
-                    gpu_pool_cap_bytes() >> 20,
-                    idle.join(" ")
-                );
-            }
             match DeviceBuffer::new(rounded) {
                 Ok(buffer) => buffer,
                 Err(_) => {
@@ -4232,8 +4217,8 @@ mod imp {
         })
     }
 
-    /// MAKEPAD_GPU_PROF=1 attribution for the device-resident ops: sync the
-    /// stream so the elapsed time covers the op's GPU work, then record.
+    /// Synchronize around device-resident ops so non-env callers of the
+    /// profiling API can attribute their GPU work.
     fn gpu_prof(stream: cudaStream_t, cat: usize, start: std::time::Instant, bytes: u64) {
         if crate::prof::enabled() {
             let _ = crate::synchronize_stream(stream);
@@ -4566,16 +4551,8 @@ mod imp {
     /// The f16 activation spine: qkv/mlp activations stay f16 between the
     /// f16-accumulate gemms and the attention/gelu consumers, skipping the
     /// convert passes and halving slice/concat/norm/rope traffic.
-    /// FLUX_ACT_F16=0 restores f32 activations everywhere (requires the
-    /// f16acc gemms, so FLUX_GEMM_F16ACC=0 also disables it).
     pub fn gpu_act_f16_enabled() -> bool {
-        if !gpu_gemm_f16acc_enabled() {
-            return false;
-        }
-        match std::env::var("FLUX_ACT_F16") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
+        GemmPrecision::default().f16_activations
     }
 
     /// C = X @ concat(parts)^T + bias, all resident. Multi-part weights write
@@ -4587,7 +4564,33 @@ mod imp {
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
-        gpu_linear_nt_impl(x, cache_namespace, parts, bias, false, false, false)
+        gpu_linear_nt_cached_with_precision(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            GemmPrecision::default(),
+        )
+    }
+
+    /// Generic cached linear under an explicit per-model precision policy.
+    pub fn gpu_linear_nt_cached_with_precision(
+        x: &GpuTensor,
+        cache_namespace: &str,
+        parts: &[GpuLinearPart<'_>],
+        bias: &[f32],
+        precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_impl(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            false,
+            false,
+            false,
+            precision,
+        )
     }
 
     /// BF16-weight linear with BF16 GEMM operands and f32 accumulation/output,
@@ -4606,7 +4609,16 @@ mod imp {
         {
             return Err("gpu_linear_nt_cached_bf16_f32acc requires BF16 weights".to_string());
         }
-        gpu_linear_nt_impl(x, cache_namespace, parts, bias, false, true, false)
+        gpu_linear_nt_impl(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            false,
+            true,
+            false,
+            GemmPrecision::default(),
+        )
     }
 
     /// PyTorch 2.7's bias-free BF16 `nn.Linear` contract: the contiguous 3-D
@@ -5025,7 +5037,16 @@ mod imp {
         {
             return Err("gpu_linear_nt_cached_f16_f32acc requires BF16 weights".to_string());
         }
-        gpu_linear_nt_impl(x, cache_namespace, parts, bias, false, false, true)
+        gpu_linear_nt_impl(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            false,
+            false,
+            true,
+            GemmPrecision::default(),
+        )
     }
 
     /// Like gpu_linear_nt_cached but the output STAYS f16 (the gemm's C is
@@ -5037,7 +5058,33 @@ mod imp {
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
-        gpu_linear_nt_impl(x, cache_namespace, parts, bias, true, false, false)
+        gpu_linear_nt_cached_f16_with_precision(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            GemmPrecision::default(),
+        )
+    }
+
+    /// F16-output cached linear under an explicit per-model precision policy.
+    pub fn gpu_linear_nt_cached_f16_with_precision(
+        x: &GpuTensor,
+        cache_namespace: &str,
+        parts: &[GpuLinearPart<'_>],
+        bias: &[f32],
+        precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_impl(
+            x,
+            cache_namespace,
+            parts,
+            bias,
+            true,
+            false,
+            false,
+            precision,
+        )
     }
 
     fn gpu_linear_nt_impl(
@@ -5048,6 +5095,7 @@ mod imp {
         out_half: bool,
         force_native_bf16: bool,
         force_f16_operands: bool,
+        precision: GemmPrecision,
     ) -> Result<GpuTensor, String> {
         let m = x.rows;
         let k = x.cols;
@@ -5091,7 +5139,7 @@ mod imp {
             // dequant scratch is bf16.
             let f16acc = !quant_call
                 && !force_native_bf16
-                && (force_f16_operands || gpu_gemm_f16acc_enabled())
+                && (force_f16_operands || precision.f16_accumulate)
                 && m > 1;
             if (x.half || out_half) && !f16acc {
                 return Err("gpu_linear f16 activations require f16acc gemms".to_string());
@@ -6642,32 +6690,8 @@ mod imp {
             return Err("gpu_attention_cross head mismatch".to_string());
         }
         let head_dim = hidden / head_count;
-        if gpu_attention_cross_fused_enabled() && head_dim == 128 {
-            let fused = gpu_attention_packed_cross_fused(q, k, v, head_count, scale)?;
-            if gpu_attention_compare_enabled() {
-                let reference = gpu_attention_packed_cross_composite(
-                    q,
-                    k,
-                    v,
-                    head_count,
-                    scale,
-                    PackedAttentionPrecision::Environment,
-                )?;
-                let fused_host = gpu_download(&fused)?;
-                let reference_host = gpu_download(&reference)?;
-                let mut max_abs_diff = 0.0f32;
-                let mut max_ref = 0.0f32;
-                for (a, b) in fused_host.iter().zip(&reference_host) {
-                    max_abs_diff = max_abs_diff.max((a - b).abs());
-                    max_ref = max_ref.max(b.abs());
-                }
-                eprintln!(
-                    "FLUX_ATTN_COMPARE cross q={} kv={} heads={head_count} \
-                     max_abs_diff={max_abs_diff:.3e} max_ref={max_ref:.3e}",
-                    q.rows, k.rows
-                );
-            }
-            return Ok(fused);
+        if head_dim == 128 {
+            return gpu_attention_packed_cross_fused(q, k, v, head_count, scale);
         }
         gpu_attention_packed_cross_composite(
             q,
@@ -7553,18 +7577,10 @@ mod imp {
         })
     }
 
-    /// FLUX_ATTN_CROSS=0 falls back to the composite cross path (also
-    /// disabled whenever the fused kernels are off globally). Public so
-    /// callers holding per-stage KV caches can store them f16 (the fused
-    /// kernel's native operand type) only when the fused path will run.
+    /// Public so callers holding per-stage KV caches can store them f16, the
+    /// fused kernel's native operand type.
     pub fn gpu_attention_cross_fused_enabled() -> bool {
-        if !gpu_attention_fused_enabled() {
-            return false;
-        }
-        match std::env::var("FLUX_ATTN_CROSS") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
+        true
     }
 
     /// The fused FA2 cross kernel (head_dim 128, kv_len independent of
@@ -9865,53 +9881,22 @@ mod imp {
         result
     }
 
-    fn gpu_attention_f16_enabled() -> bool {
-        match std::env::var("FLUX_ATTN_F16") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
-    fn gpu_attention_fused_enabled() -> bool {
-        match std::env::var("FLUX_ATTN_FUSED") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
-    /// The register-level FA2 kernel (raw mma.sync, fragment-resident
-    /// softmax). FLUX_ATTN_MMA=0 falls back to the wmma flash kernel.
-    fn gpu_attention_mma_enabled() -> bool {
-        match std::env::var("FLUX_ATTN_MMA") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
     /// f16-accumulate dense gemms (CUBLAS_COMPUTE_16F): consumer GeForce runs
     /// f16xf16->f16 tensor ops at TWICE the f32-accumulate rate, and this is
     /// the same reduced-precision-reduction torch enables by default for f16
-    /// models. FLUX_GEMM_F16ACC=0 restores f32 accumulation everywhere.
+    /// models.
     pub fn gpu_gemm_f16acc_enabled() -> bool {
-        match std::env::var("FLUX_GEMM_F16ACC") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
-    fn gpu_attention_compare_enabled() -> bool {
-        matches!(std::env::var("FLUX_ATTN_COMPARE"), Ok(value) if value == "1")
+        GemmPrecision::default().f16_accumulate
     }
 
     /// Full bidirectional self attention on token-major packed q/k/v.
     ///
     /// Default path (head_dim 128): the fused flash-attention kernel —
     /// online-softmax tiling on tensor cores, no materialized score tensor
-    /// (f16 gemm inputs, f32 softmax and accumulators). FLUX_ATTN_FUSED=0
-    /// (or an unsupported head_dim) falls back to the cublas composite:
+    /// (f16 gemm inputs, f32 softmax and accumulators). An unsupported
+    /// head_dim falls back to the cublas composite:
     /// two strided-batched gemms around an in-place f32 row softmax, gemm
-    /// inputs in f16 unless FLUX_ATTN_F16=0. FLUX_ATTN_COMPARE=1 runs BOTH
-    /// paths and prints the max/mean abs difference per call (validation).
+    /// inputs in f16.
     pub fn gpu_attention_packed(
         q: &GpuTensor,
         k: &GpuTensor,
@@ -9928,37 +9913,8 @@ mod imp {
             return Err("gpu_attention head mismatch".to_string());
         }
         let head_dim = hidden / head_count;
-        if gpu_attention_fused_enabled() && head_dim == 128 {
-            let fused = gpu_attention_packed_fused(q, k, v, head_count, scale)?;
-            if gpu_attention_compare_enabled() {
-                let reference = gpu_attention_packed_composite(
-                    q,
-                    k,
-                    v,
-                    head_count,
-                    scale,
-                    PackedAttentionMask::None,
-                    PackedAttentionPrecision::Environment,
-                )?;
-                let fused_host = gpu_download(&fused)?;
-                let reference_host = gpu_download(&reference)?;
-                let mut max_abs_diff = 0.0f32;
-                let mut sum_abs_diff = 0.0f64;
-                let mut max_ref = 0.0f32;
-                for (a, b) in fused_host.iter().zip(&reference_host) {
-                    let diff = (a - b).abs();
-                    max_abs_diff = max_abs_diff.max(diff);
-                    sum_abs_diff += diff as f64;
-                    max_ref = max_ref.max(b.abs());
-                }
-                let mean_abs_diff = sum_abs_diff / fused_host.len().max(1) as f64;
-                eprintln!(
-                    "FLUX_ATTN_COMPARE seq={seq} heads={head_count} \
-                     max_abs_diff={max_abs_diff:.3e} mean_abs_diff={mean_abs_diff:.3e} \
-                     max_ref={max_ref:.3e}"
-                );
-            }
-            return Ok(fused);
+        if head_dim == 128 {
+            return gpu_attention_packed_fused(q, k, v, head_count, scale);
         }
         gpu_attention_packed_composite(
             q,
@@ -10244,7 +10200,7 @@ mod imp {
             return Err("gpu_attention_packed_causal_flash head mismatch".to_string());
         }
         let head_dim = hidden / head_count;
-        if !gpu_attention_fused_enabled() || head_dim != 128 {
+        if head_dim != 128 {
             return gpu_attention_packed_composite(
                 q,
                 k,
@@ -10368,7 +10324,7 @@ mod imp {
             return Err("gpu_attention_packed_flash_cross head mismatch".to_string());
         }
         let head_dim = hidden / head_count;
-        if !gpu_attention_fused_enabled() || head_dim != 128 {
+        if head_dim != 128 {
             return Err("gpu_attention_packed_flash_cross needs fused head_dim 128".to_string());
         }
         if q.half != k.half || q.half != v.half {
@@ -10645,7 +10601,7 @@ mod imp {
     }
 
     /// Torch SDPA MATH: f32 QK GEMM, f32 causal softmax, f32 PV. Independent
-    /// of FLUX_ATTN_F16 (which otherwise makes Environment composite f16).
+    /// of the f16 Environment composite path.
     pub fn gpu_attention_packed_causal_f32(
         q: &GpuTensor,
         k: &GpuTensor,
@@ -10753,6 +10709,7 @@ mod imp {
         scale: f32,
         motion_tokens: usize,
         band_radius: usize,
+        f16_attention_operands: bool,
     ) -> Result<GpuTensor, String> {
         let seq = q.rows;
         let hidden = q.cols;
@@ -10777,7 +10734,11 @@ mod imp {
                 motion_tokens,
                 band_radius,
             },
-            PackedAttentionPrecision::Environment,
+            if f16_attention_operands {
+                PackedAttentionPrecision::F16
+            } else {
+                PackedAttentionPrecision::F32
+            },
         )
     }
 
@@ -10833,34 +10794,18 @@ mod imp {
                 ),
             };
             let out = GpuTensor::from_pool(seq, hidden)?;
-            let status = if gpu_attention_mma_enabled() {
-                unsafe {
-                    makepad_cuda_flash_attention2_f32(
-                        q_ptr,
-                        k_ptr,
-                        v_ptr,
-                        out.device_ptr()?,
-                        seq as u32,
-                        head_count as u32,
-                        hidden as u32,
-                        scale,
-                        backend.stream,
-                    )
-                }
-            } else {
-                unsafe {
-                    makepad_cuda_flash_attention_f32(
-                        q_ptr,
-                        k_ptr,
-                        v_ptr,
-                        out.device_ptr()?,
-                        seq as u32,
-                        head_count as u32,
-                        hidden as u32,
-                        scale,
-                        backend.stream,
-                    )
-                }
+            let status = unsafe {
+                makepad_cuda_flash_attention2_f32(
+                    q_ptr,
+                    k_ptr,
+                    v_ptr,
+                    out.device_ptr()?,
+                    seq as u32,
+                    head_count as u32,
+                    hidden as u32,
+                    scale,
+                    backend.stream,
+                )
             };
             gpu_check(status)?;
             if let Some((q16, k16, v16)) = halves {
@@ -10910,7 +10855,7 @@ mod imp {
         let head_dim = hidden / head_count;
         let use_half = match precision {
             PackedAttentionPrecision::F32 => false,
-            PackedAttentionPrecision::Environment => gpu_attention_f16_enabled(),
+            PackedAttentionPrecision::Environment => true,
             PackedAttentionPrecision::Bf16 | PackedAttentionPrecision::F16 => true,
         };
         let half_type = if precision == PackedAttentionPrecision::Bf16 {
@@ -11975,25 +11920,11 @@ mod imp {
         })
     }
 
-    fn gpu_conv_gemm_enabled() -> bool {
-        match std::env::var("FLUX_VAE_CONV_GEMM") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
-    fn gpu_conv_im2col_enabled() -> bool {
-        match std::env::var("FLUX_VAE_CONV_IM2COL") {
-            Ok(value) => value != "0",
-            Err(_) => true,
-        }
-    }
-
     /// Stride-1 "same" planar conv2d; weights are device-cached under
     /// `{cache_namespace}::{weight_cache_key}` so warm decodes upload nothing.
     ///
-    /// Default path (FLUX_VAE_CONV_GEMM!=0, odd kernels with matching "same"
-    /// padding): implicit GEMM — the input is zero-padded + converted to f16
+    /// Odd kernels with matching "same" padding use implicit GEMM: the input
+    /// is zero-padded + converted to f16
     /// once, then kh*kw strided-batched cuBLAS gemms (batch = output rows,
     /// f16 inputs, f32 accumulate) accumulate the shifted contributions; the
     /// weight cache holds a per-shift (ic x oc) f16 repack. Fallback: the
@@ -12026,7 +11957,7 @@ mod imp {
         if weights.len() != out_channels * in_channels * kw * kh || bias.len() != out_channels {
             return Err("gpu_conv2d weight/bias shape mismatch".to_string());
         }
-        if gpu_conv_gemm_enabled() && kw == 1 && kh == 1 && pad_x == 0 && pad_y == 0 {
+        if kw == 1 && kh == 1 && pad_x == 0 && pad_y == 0 {
             return gpu_conv2d_1x1_gemm(
                 x,
                 width,
@@ -12038,24 +11969,8 @@ mod imp {
                 out_channels,
             );
         }
-        if gpu_conv_gemm_enabled() && kw == 2 * pad_x + 1 && kh == 2 * pad_y + 1 {
-            if gpu_conv_im2col_enabled() {
-                return gpu_conv2d_planar_im2col(
-                    x,
-                    width,
-                    height,
-                    cache_namespace,
-                    weight_cache_key,
-                    weights,
-                    bias,
-                    out_channels,
-                    kw,
-                    kh,
-                    pad_x,
-                    pad_y,
-                );
-            }
-            return gpu_conv2d_planar_gemm(
+        if kw == 2 * pad_x + 1 && kh == 2 * pad_y + 1 {
+            return gpu_conv2d_planar_im2col(
                 x,
                 width,
                 height,
@@ -13243,7 +13158,7 @@ mod imp {
                 out_channels,
             );
         }
-        if batch > 1 && gpu_conv_gemm_enabled() && crate::cudnn::available() {
+        if batch > 1 && crate::cudnn::available() {
             static CUDNN_LOG: std::sync::Once = std::sync::Once::new();
             CUDNN_LOG.call_once(|| {
                 eprintln!(
@@ -14998,7 +14913,7 @@ mod imp {
 
     /// Independent self-attention over `batch` sequences packed as
     /// `[batch * seq, hidden]`. Does not mix tokens across the batch.
-    /// Inference (`FLUX_ATTN_F16` default on) packs heads and uses one
+    /// Inference packs heads and uses one
     /// strided-batched f16 GEMM; tap canaries keep the scalar f32 kernel.
     pub fn gpu_paint_attn_batched_self(
         q: &GpuTensor,
@@ -15026,7 +14941,7 @@ mod imp {
             return Err("gpu_paint_attn_batched_self is f32-only".into());
         }
         let head_dim = hidden / heads;
-        if gpu_attention_f16_enabled() && head_dim == 64 {
+        if head_dim == 64 {
             return gpu_paint_attn_batched_self_f16(q, k, v, batch, seq, heads, head_dim, scale);
         }
         with_dense_linear_backend(|backend| {
@@ -15966,166 +15881,6 @@ mod imp {
     }
 
     /// Implicit-GEMM planar conv (see gpu_conv2d_planar_cached).
-    #[allow(clippy::too_many_arguments)]
-    fn gpu_conv2d_planar_gemm(
-        x: &GpuTensor,
-        width: usize,
-        height: usize,
-        cache_namespace: &str,
-        weight_cache_key: &str,
-        weights: &[f32],
-        bias: &[f32],
-        out_channels: usize,
-        kw: usize,
-        kh: usize,
-        pad_x: usize,
-        pad_y: usize,
-    ) -> Result<GpuTensor, String> {
-        let in_channels = x.rows;
-        let plane = width * height;
-        let padded_width = width + 2 * pad_x;
-        let padded_height = height + 2 * pad_y;
-        let padded_plane = padded_width * padded_height;
-        let prof_start = std::time::Instant::now();
-        with_dense_linear_backend(|backend| {
-            backend.prepare_device()?;
-
-            // Per-shift (ic x oc) col-major f16 weight repack, device-cached.
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}::g9f16");
-            let repack_len = kw * kh * in_channels * out_channels;
-            backend.cached_weight_buffer(&qualified_key, repack_len * size_of::<u16>(), || {
-                let mut packed = vec![0u16; repack_len];
-                for oc in 0..out_channels {
-                    for ic in 0..in_channels {
-                        for ky in 0..kh {
-                            for kx in 0..kw {
-                                let src = ((oc * in_channels + ic) * kh + ky) * kw + kx;
-                                let shift = ky * kw + kx;
-                                let dst = shift * in_channels * out_channels
-                                    + oc * in_channels
-                                    + ic;
-                                packed[dst] = crate::quant::f32_to_f16(weights[src]);
-                            }
-                        }
-                    }
-                }
-                let raw = unsafe {
-                    std::slice::from_raw_parts(
-                        packed.as_ptr().cast::<u8>(),
-                        packed.len() * size_of::<u16>(),
-                    )
-                };
-                Ok(raw.to_vec())
-            })?;
-
-            // Zero-padded f16 input, with one spare plane of slack: the
-            // largest shift reads up to (kh-1)*padded_width + (kw-1) elements
-            // past a channel's plane. Interior spills read the next channel's
-            // (valid) data and the last channel spills into the spare plane —
-            // all of which only feeds accumulator rows that get discarded.
-            let padded_ptr =
-                conv_scratch_ptr(0, (in_channels + 1) * padded_plane * size_of::<u16>())?;
-            let status = unsafe {
-                makepad_cuda_pad_planar_f32_to_f16(
-                    x.device_ptr()?,
-                    padded_ptr.cast::<u16>(),
-                    width as u32,
-                    height as u32,
-                    in_channels as u32,
-                    pad_x as u32,
-                    pad_y as u32,
-                    backend.stream,
-                )
-            };
-            gpu_check(status)?;
-
-            // Padded-plane accumulator: one LARGE gemm per kernel shift
-            // (m = padded_plane) instead of per-output-row batches — cuBLAS
-            // runs these at real tensor-core rates.
-            let acc_ptr = conv_scratch_ptr(1, out_channels * padded_plane * size_of::<f32>())?
-                .cast::<f32>();
-            let weight = backend
-                .weight_buffers
-                .get(&qualified_key)
-                .ok_or_else(|| format!("missing cached CUDA conv repack buffer {qualified_key}"))?;
-            let alpha = 1.0f32;
-            for ky in 0..kh {
-                for kx in 0..kw {
-                    let shift = ky * kw + kx;
-                    let beta = if shift == 0 { 0.0f32 } else { 1.0f32 };
-                    let a_offset_elems = ky * padded_width + kx;
-                    let b_offset_elems = shift * in_channels * out_channels;
-                    unsafe {
-                        let a_ptr = padded_ptr
-                            .cast::<u16>()
-                            .add(a_offset_elems)
-                            .cast::<std::ffi::c_void>();
-                        let b_ptr = weight
-                            .ptr
-                            .as_ptr()
-                            .cast::<u16>()
-                            .add(b_offset_elems)
-                            .cast::<std::ffi::c_void>();
-                        // C (padded_plane x oc, ldc=padded_plane) +=
-                        //   A_shift (padded_plane x ic, lda=padded_plane)
-                        //   * W_shift (ic x oc, ldb=ic)
-                        crate::cublas_gemm_strided_batched_ex(
-                            backend.blas,
-                            crate::CUBLAS_OP_N,
-                            crate::CUBLAS_OP_N,
-                            padded_plane as i32,
-                            out_channels as i32,
-                            in_channels as i32,
-                            &alpha,
-                            a_ptr,
-                            crate::CUDA_R_16F,
-                            padded_plane as i32,
-                            0,
-                            b_ptr,
-                            crate::CUDA_R_16F,
-                            in_channels as i32,
-                            0,
-                            &beta,
-                            acc_ptr.cast::<std::ffi::c_void>(),
-                            crate::CUDA_R_32F,
-                            padded_plane as i32,
-                            0,
-                            1,
-                            crate::CUBLAS_COMPUTE_32F,
-                            crate::CUBLAS_GEMM_DEFAULT,
-                        )
-                        .map_err(|err| {
-                            format!(
-                                "gpu_conv2d gemm failed (shift {shift}, w={width} oc={out_channels} ic={in_channels}): {err}"
-                            )
-                        })?;
-                    }
-                }
-            }
-
-            let out = GpuTensor::from_pool(out_channels, plane)?;
-            let bias_buf = gpu_upload_small(backend, bias)?;
-            let status = unsafe {
-                makepad_cuda_conv_extract_bias_f32(
-                    acc_ptr,
-                    bias_buf.ptr.as_ptr().cast::<f32>(),
-                    out.device_ptr()?,
-                    width as u32,
-                    height as u32,
-                    padded_width as u32,
-                    padded_plane as u32,
-                    out_channels as u32,
-                    backend.stream,
-                )
-            };
-            gpu_check(status)?;
-            gpu_pool_release(bias_buf);
-            gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
-            Ok(out)
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn gpu_group_norm_planar(
         x: &GpuTensor,
         width: usize,
@@ -20627,12 +20382,7 @@ mod imp {
         });
         match result {
             Ok(out) => Some(out),
-            Err(err) => {
-                if std::env::var_os("MAKEPAD_CUDA_TRACE").is_some() {
-                    eprintln!("CUDA BF16 matmul_nt fallback failed: m={m} k={k} n={n}: {err}");
-                }
-                None
-            }
+            Err(_) => None,
         }
     }
 
@@ -20675,14 +20425,7 @@ mod imp {
         });
         match result {
             Ok(out) => Some(out),
-            Err(err) => {
-                if std::env::var_os("MAKEPAD_CUDA_TRACE").is_some() {
-                    eprintln!(
-                        "CUDA flash attention fallback failed: n={n_q} heads={n_head} d={d}: {err}"
-                    );
-                }
-                None
-            }
+            Err(_) => None,
         }
     }
 
