@@ -78,6 +78,7 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub mod remote;
+pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
 pub mod audio_output_tap;
