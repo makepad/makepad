@@ -533,7 +533,11 @@ fn rebuild_layout(map: &mut NavMap, src: &NavSrc, entity_hash: u64, trev: u64) {
 
 /// Walk-surface height and blocked-ness at one cell centre. This is THE
 /// definition of walkable; everything else in the module is bookkeeping.
-fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
+///
+/// `entities` is the chunk's pre-filtered slice of `src.entities` (same
+/// order — id order — so the height sort below stays the only ordering):
+/// a chunk touches a handful of solids, the world holds thousands.
+fn derive_cell(src: &NavSrc, entities: &[&Entity], cx: i32, cz: i32) -> (Option<f32>, bool) {
     let x = (cx as f32 + 0.5) * NAV_CELL;
     let z = (cz as f32 + 0.5) * NAV_CELL;
     let mut floor: Option<f32> = src.terrain.and_then(|t| t.height_at(x, z));
@@ -556,7 +560,7 @@ fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
     // by id; the sort below is by height with total_cmp — fully deterministic.
     let mut solids: Vec<(f32, f32)> = Vec::new();
     let mut water_top: Option<f32> = None;
-    for e in src.entities {
+    for &e in entities {
         if (x - e.pos.x).abs() >= e.half.x + inflate || (z - e.pos.z).abs() >= e.half.z + inflate {
             continue;
         }
@@ -623,10 +627,29 @@ fn derive_cells(src: &NavSrc, base_cx: i32, base_cz: i32) -> NavChunk {
     const N: usize = (NAV_CHUNK + 2) as usize;
     let mut floor = [0.0f32; N * N];
     let mut walk = [false; N * N];
+    // Spatial prefilter: the entities whose inflated box reaches any cell
+    // centre of this chunk (apron included), in world order. One pass over
+    // the world per chunk instead of one per cell.
+    let inflate = NAV_CELL * 0.5;
+    let x0 = (base_cx as f32 - 0.5) * NAV_CELL;
+    let z0 = (base_cz as f32 - 0.5) * NAV_CELL;
+    let x1 = (base_cx as f32 + NAV_CHUNK as f32 + 0.5) * NAV_CELL;
+    let z1 = (base_cz as f32 + NAV_CHUNK as f32 + 0.5) * NAV_CELL;
+    let entities: Vec<&Entity> = src
+        .entities
+        .iter()
+        .filter(|e| {
+            e.pos.x + e.half.x + inflate > x0
+                && e.pos.x - e.half.x - inflate < x1
+                && e.pos.z + e.half.z + inflate > z0
+                && e.pos.z - e.half.z - inflate < z1
+        })
+        .collect();
     for az in 0..N {
         for ax in 0..N {
             let (f, blocked) = derive_cell(
                 src,
+                &entities,
                 base_cx - 1 + ax as i32,
                 base_cz - 1 + az as i32,
             );
@@ -809,15 +832,43 @@ fn snap(map: &mut NavMap, src: &NavSrc, cx: i32, cz: i32, mask: u8) -> Option<(i
 /// its straight-line fallback. On success `out` holds smoothed waypoints
 /// ending exactly at `to`.
 pub fn find_path(map: &mut NavMap, src: &NavSrc, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> bool {
+    match find_route(map, src, from, to, out) {
+        RouteKind::Full => true,
+        _ => {
+            out.clear();
+            false
+        }
+    }
+}
+
+/// What a route search produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteKind {
+    /// `out` reaches the goal.
+    Full,
+    /// No route within the search budget: `out` walks over passable cells
+    /// to the reachable point nearest the goal and stops there.
+    Partial,
+    /// No coverage, or nothing meaningfully nearer than where the agent
+    /// already stands.
+    None,
+}
+
+/// [`find_path`] that does not give up empty-handed: a walled-in or
+/// out-of-budget goal still yields the passable path to the reachable point
+/// nearest it, so an agent can close in and hold instead of beelining.
+pub fn find_route(map: &mut NavMap, src: &NavSrc, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> RouteKind {
     out.clear();
     sync(map, src);
     let (fx, fz) = cell_of(from);
     let (tx, tz) = cell_of(to);
     if !in_bounds(map, fx, fz) || !in_bounds(map, tx, tz) {
-        return false;
+        return RouteKind::None;
     }
     // Plan on CLEAR (eroded) cells; if either end has no CLEAR nearby or no
     // route exists, retry on the raw WALKABLE mask so narrow gaps stay usable.
+    // Of two partial routes, keep the one that ends nearer the goal.
+    let mut partial: Option<Vec<Vec3f>> = None;
     for mask in [FLAG_CLEAR, FLAG_WALKABLE] {
         let Some(start) = snap(map, src, fx, fz, mask) else {
             continue;
@@ -825,13 +876,39 @@ pub fn find_path(map: &mut NavMap, src: &NavSrc, from: Vec3f, to: Vec3f, out: &m
         let Some(goal) = snap(map, src, tx, tz, mask) else {
             continue;
         };
-        if astar(map, src, start, goal, mask, out) {
-            string_pull(map, src, from, to, mask, out);
-            return true;
+        match astar(map, src, start, goal, mask, out) {
+            RouteKind::Full => {
+                string_pull(map, src, from, to, mask, out);
+                return RouteKind::Full;
+            }
+            RouteKind::Partial => {
+                let end = *out.last().unwrap();
+                string_pull(map, src, from, end, mask, out);
+                let nearer = partial
+                    .as_ref()
+                    .and_then(|p| p.last())
+                    .map_or(true, |prev| planar(end, to) < planar(*prev, to));
+                if nearer {
+                    partial = Some(std::mem::take(out));
+                } else {
+                    out.clear();
+                }
+            }
+            RouteKind::None => out.clear(),
         }
     }
-    false
+    match partial {
+        Some(p) => {
+            *out = p;
+            RouteKind::Partial
+        }
+        None => RouteKind::None,
+    }
 }
+
+/// A partial route must end at least this much nearer the goal (octile
+/// units: 10 per straight cell) than the start to be worth walking.
+const PARTIAL_GAIN: u32 = 30;
 
 /// Grid A*: 10/14 costs, octile heuristic, deterministic tie-break (lower
 /// f, then lower cell index). Bounded to a working region around the
@@ -843,7 +920,7 @@ fn astar(
     goal: (i32, i32),
     mask: u8,
     out: &mut Vec<Vec3f>,
-) -> bool {
+) -> RouteKind {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
@@ -866,7 +943,7 @@ fn astar(
     let rh = rz1 - rz0 + 1;
     let inside = |x: i32, z: i32| x >= rx0 && z >= rz0 && x <= rx1 && z <= rz1;
     if !inside(start.0, start.1) || !inside(goal.0, goal.1) {
-        return false;
+        return RouteKind::None;
     }
     let idx = |x: i32, z: i32| ((z - rz0) * rw + (x - rx0)) as usize;
     let cells = (rw * rh) as usize;
@@ -881,14 +958,19 @@ fn astar(
     let mut open: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
     let si = idx(start.0, start.1);
     g[si] = 0;
-    open.push(Reverse((octile(start.0, start.1), si as u32)));
+    let start_h = octile(start.0, start.1);
+    open.push(Reverse((start_h, si as u32)));
     let mut pops = 0usize;
     let mut found = false;
+    // The expanded cell nearest the goal (heuristic, then lower index):
+    // where a partial route ends when the goal is out of reach.
+    let mut best = (start_h, si);
     while let Some(Reverse((f, ci))) = open.pop() {
         let ci = ci as usize;
         let x = rx0 + (ci as i32 % rw);
         let z = rz0 + (ci as i32 / rw);
-        if f > g[ci].saturating_add(octile(x, z)) {
+        let h = octile(x, z);
+        if f > g[ci].saturating_add(h) {
             continue; // stale entry
         }
         if (x, z) == goal {
@@ -897,7 +979,10 @@ fn astar(
         }
         pops += 1;
         if pops > ASTAR_BUDGET {
-            return false;
+            break;
+        }
+        if h < best.0 || (h == best.0 && ci < best.1) {
+            best = (h, ci);
         }
         let (_, here_floor) = cell(map, src, x, z);
         for &(dx, dz, cost) in NEIGHBORS.iter() {
@@ -926,11 +1011,15 @@ fn astar(
             }
         }
     }
-    if !found {
-        return false;
-    }
-    // Reconstruct goal→start, then reverse.
-    let mut ci = idx(goal.0, goal.1);
+    let end = if found {
+        idx(goal.0, goal.1)
+    } else if best.0 + PARTIAL_GAIN <= start_h {
+        best.1
+    } else {
+        return RouteKind::None;
+    };
+    // Reconstruct end→start, then reverse.
+    let mut ci = end;
     loop {
         let x = rx0 + (ci as i32 % rw);
         let z = rz0 + (ci as i32 / rw);
@@ -942,7 +1031,11 @@ fn astar(
         ci = came[ci] as usize;
     }
     out.reverse();
-    true
+    if found {
+        RouteKind::Full
+    } else {
+        RouteKind::Partial
+    }
 }
 
 /// String-pulling: greedily keep only waypoints the previous kept point
@@ -1177,6 +1270,20 @@ pub struct NavAgent {
     /// Re-plan cooldown (ticks) for moving targets, so a chase does not
     /// solve A* sixty times a second.
     cool: u16,
+    /// Ticks to stand before trying again after a failed or partial plan —
+    /// doubling per consecutive failure up to `HOLD_MAX`. The no-route case
+    /// used to re-plan every tick and then beeline at the goal.
+    hold: u16,
+    fails: u8,
+    /// The current path stops short of the goal (`RouteKind::Partial`).
+    partial: bool,
+}
+
+/// Longest hold between plan attempts on a goal that keeps failing (4 s).
+const HOLD_MAX: u16 = 240;
+
+fn hold_for(fails: u8) -> u16 {
+    (REPLAN_COOLDOWN << fails.min(4) as u16).min(HOLD_MAX)
 }
 
 /// How far a goal may drift from the planned one before a re-plan (moving
@@ -1196,6 +1303,20 @@ impl NavAgent {
         self.path.clear();
         self.at = 0;
         self.cool = 0;
+        self.hold = 0;
+        self.fails = 0;
+        self.partial = false;
+    }
+
+    /// Standing still because the goal has no route (or the partial route
+    /// to it is walked out), waiting for the next attempt.
+    pub fn holding(&self) -> bool {
+        self.hold > 0 && (self.path.is_empty() || (self.partial && self.at >= self.path.len()))
+    }
+
+    /// Consecutive plan attempts that found no full route.
+    pub fn failures(&self) -> u8 {
+        self.fails
     }
 
     /// The point to steer straight at this tick, given where the agent
@@ -1205,7 +1326,7 @@ impl NavAgent {
             None | Some(true) => {
                 // Straight line is fine (or no coverage): legacy steering,
                 // bit-identical to the pre-nav brains.
-                if !self.path.is_empty() {
+                if !self.path.is_empty() || self.hold > 0 {
                     self.reset();
                 }
                 goal
@@ -1214,23 +1335,46 @@ impl NavAgent {
                 if self.cool > 0 {
                     self.cool -= 1;
                 }
+                if self.hold > 0 {
+                    self.hold -= 1;
+                }
                 let drifted = planar(goal, self.goal) > REPLAN_DRIFT;
                 let stale = self.generation != world.nav.generation;
-                if self.path.is_empty() || stale || (drifted && self.cool == 0) {
+                let exhausted =
+                    self.path.is_empty() || (self.partial && self.at >= self.path.len());
+                if stale || (self.hold == 0 && (exhausted || (drifted && self.cool == 0))) {
                     self.cool = REPLAN_COOLDOWN;
                     self.goal = goal;
                     self.generation = world.nav.generation;
                     self.at = 0;
                     let mut path = std::mem::take(&mut self.path);
-                    if !world.nav_find_path(pos, goal, &mut path) {
-                        path.clear();
+                    match world.nav_find_route(pos, goal, &mut path) {
+                        RouteKind::Full => {
+                            self.partial = false;
+                            self.fails = 0;
+                            self.hold = 0;
+                        }
+                        RouteKind::Partial => {
+                            self.partial = true;
+                            self.fails = self.fails.saturating_add(1);
+                            self.hold = hold_for(self.fails);
+                        }
+                        RouteKind::None => {
+                            path.clear();
+                            self.partial = false;
+                            self.fails = self.fails.saturating_add(1);
+                            self.hold = hold_for(self.fails);
+                        }
                     }
                     self.path = path;
                 }
                 if self.path.is_empty() {
-                    // No route: keep the legacy head-straight-at-it behavior
-                    // (the stuck/give-up machinery above this stays in charge).
-                    return goal;
+                    // No route: HOLD. Standing where the agent is known to be
+                    // safe beats walking a straight line into whatever
+                    // blocked the plan (water, a wall, a drop); the
+                    // stuck/give-up machinery above this stays in charge and
+                    // the next attempt comes after the hold.
+                    return pos;
                 }
                 while self.at < self.path.len() && planar(pos, self.path[self.at]) < WAYPOINT_REACHED
                 {
@@ -1245,7 +1389,13 @@ impl NavAgent {
                     self.at += 1;
                 }
                 if self.at >= self.path.len() {
-                    goal
+                    // A full route ends at the goal itself; a partial one
+                    // ends as near as the world allows — hold there.
+                    if self.partial {
+                        pos
+                    } else {
+                        goal
+                    }
                 } else {
                     self.path[self.at]
                 }
@@ -1325,6 +1475,14 @@ impl GameWorld {
     pub fn nav_find_path(&mut self, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> bool {
         let (map, src) = self.nav_src();
         find_path(map, &src, from, to, out)
+    }
+
+    /// `nav_find_path` that hands back the passable path to the reachable
+    /// point nearest an unroutable goal (`RouteKind::Partial`) instead of
+    /// nothing — what `NavAgent` walks before it holds.
+    pub fn nav_find_route(&mut self, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> RouteKind {
+        let (map, src) = self.nav_src();
+        find_route(map, &src, from, to, out)
     }
 
     /// Flow field toward `target` covering the group at `around`.
@@ -1454,6 +1612,49 @@ mod tests {
             "crossing must be inside the gap, was x={x_at_wall}"
         );
         assert_eq!(*path.last().unwrap(), to, "path ends at the exact goal");
+    }
+
+    /// A goal walled in on all four sides has no route. The search must not
+    /// come back empty: it yields the passable path to the nearest reachable
+    /// point, and the agent walks it and HOLDS there — it never steers a
+    /// straight line into the pen, and it backs off between attempts
+    /// instead of solving A* every tick.
+    #[test]
+    fn unreachable_goal_yields_a_partial_route_and_the_agent_holds() {
+        let mut world = plaza();
+        // A closed pen around (12, 12) on the north half of the plaza.
+        world.push_entity(solid(4, vec3f(12.0, 1.0, 8.5), vec3f(3.5, 1.0, 0.5)));
+        world.push_entity(solid(5, vec3f(12.0, 1.0, 15.5), vec3f(3.5, 1.0, 0.5)));
+        world.push_entity(solid(6, vec3f(8.5, 1.0, 12.0), vec3f(0.5, 1.0, 3.5)));
+        world.push_entity(solid(7, vec3f(15.5, 1.0, 12.0), vec3f(0.5, 1.0, 3.5)));
+        let from = vec3f(-6.0, 0.5, 8.0);
+        let to = vec3f(12.0, 0.5, 12.0);
+        let mut path = Vec::new();
+        assert!(!world.nav_find_path(from, to, &mut path), "the pen is sealed");
+        assert_eq!(world.nav_find_route(from, to, &mut path), RouteKind::Partial);
+        let end = *path.last().unwrap();
+        assert!(planar(end, to) < planar(from, to), "the partial route gets nearer: {end:?}");
+        assert!(planar(end, to) > 3.5, "but stops outside the pen: {end:?}");
+
+        let mut agent = NavAgent::default();
+        let mut pos = from;
+        let mut plans_at_start = None;
+        for _ in 0..600 {
+            let target = agent.steer(&mut world, pos, to);
+            assert!(planar(target, to) > 3.5, "no-route must never steer at the goal: {target:?}");
+            let len = planar(target, pos);
+            if len > 1.0e-6 {
+                let step = len.min(0.3);
+                pos = pos + vec3f(target.x - pos.x, 0.0, target.z - pos.z) * (step / len);
+            }
+            if plans_at_start.is_none() {
+                plans_at_start = Some(agent.failures());
+            }
+        }
+        assert!(agent.failures() >= 2, "attempts back off and repeat: {}", agent.failures());
+        assert!(agent.failures() <= 8, "but not sixty times a second: {}", agent.failures());
+        let d = planar(pos, to);
+        assert!(d > 3.5 && d < 10.0, "closed in on the pen and stayed out of it: {pos:?}");
     }
 
     /// A streamed strategy map: no terrain, no static bodies, only the
