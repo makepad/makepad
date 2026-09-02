@@ -41,6 +41,12 @@ pub struct AutoDeckObs {
     pub bar_secs_src: Option<f64>,
     /// The four separated lanes are live on this deck.
     pub stems_ready: bool,
+    /// The record's own tempo, when it has been measured.
+    pub bpm: Option<f64>,
+    /// How far a transition may lean on this record's grid, 0..=1.
+    pub grid_trust: f32,
+    /// How hot this record runs, on the scale two records share.
+    pub energy: f32,
 }
 
 impl Default for AutoDeckObs {
@@ -56,6 +62,9 @@ impl Default for AutoDeckObs {
             scratching: false,
             bar_secs_src: None,
             stems_ready: false,
+            bpm: None,
+            grid_trust: 0.0,
+            energy: 0.0,
         }
     }
 }
@@ -143,6 +152,11 @@ struct Plan {
     /// Vocal-guard verdict: how far past the fire point (OUT source secs)
     /// the incoming vocals stay ducked. None = no clash.
     duck_offset_src: Option<f64>,
+    /// The shape of the transition, decided when the plan was built and
+    /// carried whole into the fade. A planner that chose a route and an
+    /// executor that received only a deck and a length would run the
+    /// default every time and nobody would ever know.
+    route: blend::Route,
     /// The medium latched when prep pre-muted the incoming deck. Fire uses
     /// this, never a fresh reading — a deck pre-muted for EQ must not fire
     /// as Stems with an open bass lane.
@@ -203,6 +217,9 @@ pub struct AutoPilot {
     /// Choose where to leave the outgoing record from its own shape,
     /// instead of always taking the outro the envelope found.
     pub pick_exit: bool,
+    /// Choose the SHAPE of the transition per pair, instead of always
+    /// running the long blend.
+    pub pick_route: bool,
     /// Bars per load generation, same lifecycle as the sung maps.
     bars: Vec<(DeckGen, Vec<crate::mix_facts::BarRow>)>,
     /// Sung intervals per load generation, same lifecycle as `shapes`.
@@ -237,6 +254,7 @@ impl AutoPilot {
             vocal_guard: true,
             phrase_snap: true,
             pick_exit: false,
+            pick_route: false,
             bars: Vec::new(),
             vocals: Vec::new(),
             changes: Vec::new(),
@@ -343,6 +361,11 @@ impl AutoPilot {
     /// arrivals re-plan for the same reason sung maps do.
     pub fn set_pick_exit(&mut self, on: bool) {
         self.pick_exit = on;
+        self.replan();
+    }
+
+    pub fn set_pick_route(&mut self, on: bool) {
+        self.pick_route = on;
         self.replan();
     }
 
@@ -601,6 +624,25 @@ impl AutoPilot {
                 duck_offset_src = duck;
             }
         }
+        // The shape, before the snap and the guard move the moment. Both
+        // records' grids have to hold for the length of a long blend, so
+        // the trust the analysis measured decides this and not the style.
+        let route = if self.pick_route {
+            blend::route(
+                crate::decks::tempo_fit(
+                    o.bpm.unwrap_or(0.0),
+                    i.bpm.unwrap_or(0.0),
+                ),
+                o.grid_trust,
+                i.grid_trust,
+                i.energy - o.energy,
+            )
+        } else {
+            blend::RoutePick {
+                route: blend::Route::Handover,
+                reason: "the long blend, as always".to_string(),
+            }
+        };
         let deadline_src = (o.duration_secs - lead).max(o.position_secs);
         // RANDOM resolves here, once per plan: everything downstream —
         // prep's pre-mutes, the fire's ramps — reads the one rolled value.
@@ -619,6 +661,7 @@ impl AutoPilot {
             prepped: false,
             abandoned: false,
             duck_offset_src,
+            route: route.route,
             prep_medium: None,
         });
         self.set_countdown(obs, out, incoming, fire_at_src);
@@ -858,7 +901,7 @@ impl AutoPilot {
         let bar_wall = i.bar_secs_src.map(|bar| bar / in_rate).unwrap_or(2.0);
         let duck_wall = plan.duck_offset_src.map(|duck| duck / out_rate);
         let schedule: Vec<BlendStep> =
-            blend::choreography(medium, fade, bar_wall, duck_wall)
+            blend::choreography(plan.route, medium, fade, bar_wall, duck_wall)
                 .into_iter()
                 .filter(|step| step.at_wall > 0.0 || step.role == Role::Out)
                 .collect();
@@ -994,6 +1037,11 @@ mod tests {
             scratching: false,
             bar_secs_src: Some(2.0), // 120 BPM bars
             stems_ready: false,
+            bpm: Some(120.0),
+            // The fixture record is measured and steady: the route tests
+            // move these themselves when they want a different answer.
+            grid_trust: 1.0,
+            energy: 0.5,
         }
     }
 

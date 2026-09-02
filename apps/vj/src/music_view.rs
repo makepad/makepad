@@ -3373,6 +3373,13 @@ script_mod! {
                         width: Fill
                         height: Fit
                         flow: Right
+                        spacing: 8
+                        auto_route := MusicButton{width: 110 height: 22 text: "PICK SHAPE"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
                         align: Align{x: 1.0, y: 0.5}
                         auto_cfg_close := MusicButton{width: 60 height: 22 text: "Close"}
                     }

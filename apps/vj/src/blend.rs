@@ -99,6 +99,83 @@ pub fn medium(brain: MixBrain, out_stems: bool, in_stems: bool) -> Medium {
     }
 }
 
+/// What kind of transition a pair of records wants.
+///
+/// Three, not a catalogue. These are what the overlay can actually perform
+/// — the bands, the stem lanes and the sweep — and between them they cover
+/// the complaint that every transition sounds the same. A fourth would need
+/// something the engine cannot do cleanly yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The long blend the tab has always run: the basslines trade at the
+    /// middle and the records share the room either side of it.
+    Handover,
+    /// The incoming record arrives under a filter and opens up as it comes,
+    /// so it is present before it is loud. For a record arriving hotter
+    /// than the one it replaces.
+    Pickup,
+    /// Neither record's grid can be trusted for long, or the tempos are too
+    /// far apart to hold: get across quickly and cleanly.
+    Short,
+}
+
+/// The route, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoutePick {
+    pub route: Route,
+    pub reason: String,
+}
+
+/// How much grid trust a long blend needs on BOTH records.
+const TRUSTED: f32 = 0.5;
+
+/// How well the tempos have to sit before a long blend is worth trying.
+const CLOSE_ENOUGH: f32 = 0.35;
+
+/// How much hotter the incoming record has to be before it is worth
+/// bringing it in under a filter rather than trading basslines.
+const ARRIVES_HOTTER: f32 = 0.12;
+
+/// Choose the route for one pair.
+///
+/// Called before the phrase snap and the vocal guard, and it decides the
+/// SHAPE of the transition, never its moment: the guard still has the last
+/// word on where the fire lands, which is the order that keeps a clash
+/// outranking a boundary.
+pub fn route(
+    tempo_fit: f32,
+    grid_trust_out: f32,
+    grid_trust_in: f32,
+    energy_delta: f32,
+) -> RoutePick {
+    // The two ways a long blend falls apart, checked first because neither
+    // is a matter of taste. A grid that cannot be trusted for the length of
+    // the blend takes the records apart before it lands; tempos too far
+    // apart never came together in the first place.
+    if grid_trust_out.min(grid_trust_in) < TRUSTED {
+        return RoutePick {
+            route: Route::Short,
+            reason: "one grid will not hold a long blend".to_string(),
+        };
+    }
+    if tempo_fit < CLOSE_ENOUGH {
+        return RoutePick {
+            route: Route::Short,
+            reason: "too much tempo between them".to_string(),
+        };
+    }
+    if energy_delta > ARRIVES_HOTTER {
+        return RoutePick {
+            route: Route::Pickup,
+            reason: "the incoming record arrives hotter".to_string(),
+        };
+    }
+    RoutePick {
+        route: Route::Handover,
+        reason: "they sit together".to_string(),
+    }
+}
+
 /// The gain schedule for one transition. Empty = a plain fade (either the
 /// medium is Fade, or the fade is too short for a swap to breathe).
 ///
@@ -107,14 +184,17 @@ pub fn medium(brain: MixBrain, out_stems: bool, in_stems: bool) -> Medium {
 /// — the basslines exchange. Stems additionally holds the incoming VOCALS
 /// silent until `duck_vocals_until` when the guard asked for it.
 pub fn choreography(
+    route: Route,
     medium: Medium,
     fade_wall: f64,
     bar_wall: f64,
     duck_vocals_until: Option<f64>,
 ) -> Vec<BlendStep> {
     let bar = bar_wall.max(0.5);
-    if fade_wall < 2.0 * bar {
-        // A three-second blend has no room for a bass swap.
+    if route == Route::Short || fade_wall < 2.0 * bar {
+        // Nothing to swap, or no room to swap it in. Either way the fade is
+        // the whole move, and choreographing one anyway is how a blend ends
+        // up running with no bass in it.
         return Vec::new();
     }
     let low: Lane = match medium {
@@ -144,9 +224,32 @@ pub fn choreography(
         steps.push(BlendStep { at_wall: 0.0, role: Role::In, lane, gain: held });
         steps.push(BlendStep { at_wall: release, role: Role::In, lane, gain: 1.0 });
     }
+    if route == Route::Pickup {
+        // In under a filter and open by the swap, so the incoming record is
+        // present before it is loud and the two are never both wide open
+        // and fighting for the same air.
+        let opened = ((swap + bar).min(fade_wall - bar)).max(bar);
+        steps.push(BlendStep {
+            at_wall: 0.0,
+            role: Role::In,
+            lane: Lane::Filter,
+            gain: PICKUP_SWEEP,
+        });
+        steps.push(BlendStep {
+            at_wall: opened,
+            role: Role::In,
+            lane: Lane::Filter,
+            gain: 0.0,
+        });
+    }
     steps.sort_by(|a, b| a.at_wall.total_cmp(&b.at_wall));
     steps
 }
+
+/// How far down the sweep the incoming record arrives on a pickup, as an
+/// offset from the operator's own knob. Enough to take the weight out of
+/// it without making it sound broken. Ours to measure.
+const PICKUP_SWEEP: f32 = -0.35;
 
 /// Where a transition could leave the outgoing record, and how good the
 /// moment is.
@@ -382,7 +485,7 @@ mod tests {
     #[test]
     fn the_basslines_swap_on_the_bar_nearest_the_middle() {
         // 8 s fade, 2 s bars: the middle IS a bar line — swap at 4.
-        let steps = choreography(Medium::Eq, 8.0, 2.0, None);
+        let steps = choreography(Route::Handover, Medium::Eq, 8.0, 2.0, None);
         assert_eq!(steps.len(), 3);
         assert_eq!(
             steps[0],
@@ -393,20 +496,20 @@ mod tests {
         assert_eq!(swap.len(), 2, "out-kill and in-release land together");
         // 7 s fade, 2 s bars: middle 3.5 rounds to the bar at 4, clamped
         // inside [2, 5].
-        let steps = choreography(Medium::Eq, 7.0, 2.0, None);
+        let steps = choreography(Route::Handover, Medium::Eq, 7.0, 2.0, None);
         let swap_at = steps.iter().find(|s| s.role == Role::Out).unwrap().at_wall;
         assert!((swap_at - 4.0).abs() < 1e-9, "swap at {swap_at}");
     }
 
     #[test]
     fn a_short_fade_has_no_room_to_swap() {
-        assert!(choreography(Medium::Stems, 3.0, 2.0, None).is_empty());
-        assert!(choreography(Medium::Fade, 30.0, 2.0, None).is_empty());
+        assert!(choreography(Route::Handover, Medium::Stems, 3.0, 2.0, None).is_empty());
+        assert!(choreography(Route::Handover, Medium::Fade, 30.0, 2.0, None).is_empty());
     }
 
     #[test]
     fn the_stems_medium_ducks_the_incoming_singer_until_released() {
-        let steps = choreography(Medium::Stems, 12.0, 2.0, Some(5.0));
+        let steps = choreography(Route::Handover, Medium::Stems, 12.0, 2.0, Some(5.0));
         let duck: Vec<&BlendStep> = steps
             .iter()
             .filter(|s| s.lane == Lane::Stem(VOCALS))
@@ -417,7 +520,7 @@ mod tests {
         assert!((duck[1].at_wall - 5.0).abs() < 1e-9);
         assert!((duck[1].gain - 1.0).abs() < 1e-6);
         // The release clamps inside the fade.
-        let steps = choreography(Medium::Stems, 12.0, 2.0, Some(40.0));
+        let steps = choreography(Route::Handover, Medium::Stems, 12.0, 2.0, Some(40.0));
         let release = steps
             .iter()
             .filter(|s| s.lane == Lane::Stem(VOCALS))
@@ -436,7 +539,7 @@ mod tests {
         // A voice lives in the mid band, so the incoming one gives way there
         // — partly, never fully: the mids carry the whole record, and
         // killing them would leave a hole where a duck was wanted.
-        let steps = choreography(Medium::Eq, 12.0, 2.0, Some(5.0));
+        let steps = choreography(Route::Handover, Medium::Eq, 12.0, 2.0, Some(5.0));
         let duck: Vec<&BlendStep> =
             steps.iter().filter(|s| s.lane == Lane::Band(1)).collect();
         assert_eq!(duck.len(), 2, "a duck and its release");
@@ -450,13 +553,13 @@ mod tests {
         assert!((duck[1].gain - 1.0).abs() < 1e-6);
 
         // The release clamps inside the fade, as the stem duck does.
-        let long = choreography(Medium::Eq, 12.0, 2.0, Some(40.0));
+        let long = choreography(Route::Handover, Medium::Eq, 12.0, 2.0, Some(40.0));
         let release =
             long.iter().filter(|s| s.lane == Lane::Band(1)).last().unwrap();
         assert!((release.at_wall - 12.0).abs() < 1e-9);
 
         // No clash measured, no duck: an untouched mid band stays untouched.
-        let clean = choreography(Medium::Eq, 12.0, 2.0, None);
+        let clean = choreography(Route::Handover, Medium::Eq, 12.0, 2.0, None);
         assert!(!clean.iter().any(|s| s.lane == Lane::Band(1)));
     }
 
@@ -604,5 +707,64 @@ mod tests {
     #[test]
     fn a_record_with_no_bars_offers_nothing_rather_than_guessing() {
         assert!(exits(&[], &[], 48.0, 2.0).is_empty());
+    }
+
+    #[test]
+    fn an_untrusted_grid_gets_across_quickly() {
+        // A long blend leans on both grids for its whole length. Without
+        // them it walks apart, so it does not get to be long.
+        let pick = route(1.0, 0.2, 0.9, 0.0);
+        assert_eq!(pick.route, Route::Short, "{}", pick.reason);
+        assert!(pick.reason.to_lowercase().contains("grid"), "{}", pick.reason);
+        // Either side is enough to spoil it.
+        assert_eq!(route(1.0, 0.9, 0.1, 0.0).route, Route::Short);
+    }
+
+    #[test]
+    fn tempos_too_far_apart_get_across_quickly_too() {
+        let pick = route(0.1, 0.9, 0.9, 0.0);
+        assert_eq!(pick.route, Route::Short, "{}", pick.reason);
+        assert!(pick.reason.to_lowercase().contains("tempo"), "{}", pick.reason);
+    }
+
+    #[test]
+    fn a_record_arriving_hotter_comes_in_under_a_filter() {
+        let pick = route(1.0, 0.9, 0.9, 0.4);
+        assert_eq!(pick.route, Route::Pickup, "{}", pick.reason);
+        assert!(!pick.reason.is_empty());
+    }
+
+    #[test]
+    fn two_records_that_sit_together_trade_basslines() {
+        // The tab's own answer, and the one that has to remain the default
+        // when nothing argues for anything else.
+        let pick = route(1.0, 0.9, 0.9, 0.0);
+        assert_eq!(pick.route, Route::Handover, "{}", pick.reason);
+        // A record arriving COOLER is not a pickup: there is nothing to
+        // hold back, and the trade is the gentler move.
+        assert_eq!(route(1.0, 0.9, 0.9, -0.4).route, Route::Handover);
+    }
+
+    #[test]
+    fn the_pickup_brings_the_incoming_record_in_under_a_filter_and_opens_it() {
+        let steps = choreography(Route::Pickup, Medium::Eq, 12.0, 2.0, None);
+        let sweep: Vec<&BlendStep> =
+            steps.iter().filter(|step| step.lane == Lane::Filter).collect();
+        assert_eq!(sweep.len(), 2, "closed, then opened: {steps:?}");
+        assert!(sweep[0].role == Role::In && sweep[1].role == Role::In);
+        assert!(sweep[0].gain < 0.0, "it arrives filtered: {}", sweep[0].gain);
+        assert!((sweep[1].gain - 0.0).abs() < 1e-6, "and ends open");
+        assert!(sweep[1].at_wall > sweep[0].at_wall);
+        assert!(sweep[1].at_wall <= 12.0);
+        // It still trades the basslines: a pickup is a way IN, not a
+        // different way of dealing with two kick drums.
+        assert!(steps.iter().any(|step| step.lane == Lane::Band(0)));
+    }
+
+    #[test]
+    fn a_short_route_does_not_choreograph_anything() {
+        // Nothing to swap and no room to swap it in: the fade is the whole
+        // move, and pretending otherwise is how a bass-less blend happens.
+        assert!(choreography(Route::Short, Medium::Stems, 12.0, 2.0, Some(4.0)).is_empty());
     }
 }

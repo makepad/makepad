@@ -18986,6 +18986,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -18995,6 +18996,7 @@ p2 {}
             u8::from(self.decks.shuffle),
             u8::from(self.auto_pick),
             u8::from(self.autopilot.pick_exit),
+            u8::from(self.autopilot.pick_route),
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19032,6 +19034,7 @@ p2 {}
         // is missing it and reads as off, which is what the tab did before.
         self.auto_pick = next(0) == 1;
         self.autopilot.pick_exit = next(0) == 1;
+        self.autopilot.pick_route = next(0) == 1;
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -21965,6 +21968,7 @@ p2 {}
         self.paint_lit(cx, ids!(auto_phrase), self.autopilot.phrase_snap);
         self.paint_lit(cx, ids!(auto_choose), self.auto_pick);
         self.paint_lit(cx, ids!(auto_exit), self.autopilot.pick_exit);
+        self.paint_lit(cx, ids!(auto_route), self.autopilot.pick_route);
         self.paint_lit(cx, ids!(queue_repeat), self.decks.repeat);
         self.paint_lit(cx, ids!(queue_shuffle), self.decks.shuffle);
         // The AUTO DJ button IS the status line, the SYNC-button pattern:
@@ -24439,6 +24443,12 @@ p2 {}
             self.autopilot.set_pick_exit(on);
             self.save_autopilot_settings();
         }
+        if self.ui.button(cx, ids!(auto_route)).clicked(actions) {
+            // Off, every transition is the long blend, as before.
+            let on = !self.autopilot.pick_route;
+            self.autopilot.set_pick_route(on);
+            self.save_autopilot_settings();
+        }
         self.handle_wave_input(cx);
     }
 
@@ -24878,6 +24888,13 @@ p2 {}
                     .filter(|grid| grid.has_grid())
                     .map(|grid| grid.beat_secs * 4.0),
                 stems_ready: state.stems_ready,
+                bpm: state.grid.filter(|grid| grid.has_grid()).map(|grid| grid.bpm),
+                grid_trust: self.deck_analysis[deck.index()].as_ref().map_or(0.0, |a| {
+                    crate::mix_facts::grid_trust(&a.grid, &a.tempo_map)
+                }),
+                energy: self.deck_analysis[deck.index()].as_ref().map_or(0.0, |a| {
+                    crate::mix_facts::comparable_energy(&a.tiles.overview)
+                }),
             };
         }
         let obs = AutoObs {
