@@ -119,6 +119,7 @@ mod columns;
 // is opened.
 mod console;
 mod dsp_math;
+mod marks;
 #[macro_use]
 mod verify;
 // What may be worked out about a track before anyone asks to play it, and
@@ -10956,45 +10957,28 @@ p2 {}
         (TARGET_RMS / rms).clamp(0.25, 3.0) as f32
     }
 
-    /// A track's marks file: its cue on the first line, then one line per
-    /// loop slot. The cue line is prefixed, so a reader that only wants the
-    /// slots drops it on the floor without knowing it exists — which is
-    /// exactly what `load_loop_marks` does.
+    /// A track's marks file, as one typed record: the cue, the loop slots
+    /// and — for the first time — the bookmark, which the two hand-rolled
+    /// shapes this replaces had no room for. See `crate::marks`.
     fn save_loop_marks(&self, deck: DeckId) {
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let path = Self::loop_marks_path(item);
-        let mut text = format!("cue {}\n", state.cue_secs);
-        for slot in &state.loop_slots {
-            text.push_str(&format!("{} {}\n", slot.start_secs, slot.end_secs));
-        }
-        let _ = crate::durable::write_file(&path, text);
+        let mut record = crate::marks::MarkRecord::default();
+        record.set_cue(Some(state.cue_secs));
+        record.set_bookmark(state.bookmark);
+        let spans: Vec<(f64, f64)> =
+            state.loop_slots.iter().map(|slot| (slot.start_secs, slot.end_secs)).collect();
+        record.set_loops(&spans);
+        let _ = crate::durable::write_file(&path, record.to_text());
     }
 
-    /// Where a track last had its red marker, so it starts where the
-    /// operator left it rather than at the top.
-    fn load_track_cue(item: &crate::decks::TrackItem) -> Option<f64> {
-        let text = std::fs::read_to_string(Self::loop_marks_path(item)).ok()?;
-        text.lines()
-            .find_map(|line| line.strip_prefix("cue "))
-            .and_then(|secs| crate::durable::seconds(secs.trim()))
-            .filter(|secs| secs.is_finite() && *secs > 0.0)
-    }
-
-    fn load_loop_marks(item: &crate::decks::TrackItem) -> Vec<crate::decks::LoopSpan> {
-        let Ok(text) = std::fs::read_to_string(Self::loop_marks_path(item)) else {
-            return Vec::new();
-        };
-        text.lines()
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                // Same guard the found-loops sibling puts on its own spans: a
-                // torn write leaves text that parses and means nothing.
-                let start = crate::durable::seconds(parts.next()?)?;
-                let end = crate::durable::seconds(parts.next()?)?;
-                Some(crate::decks::LoopSpan { start_secs: start, end_secs: end })
-            })
-            .collect()
+    /// What this track was marked with, in whatever shape the file is in.
+    /// A missing or unreadable file is simply a track nobody has marked.
+    fn load_marks(item: &crate::decks::TrackItem) -> crate::marks::MarkRecord {
+        std::fs::read_to_string(Self::loop_marks_path(item))
+            .map(|text| crate::marks::MarkRecord::from_text(&text))
+            .unwrap_or_default()
     }
 
     /// Where the scanner's findings sleep: a sibling of `loop-marks`, one
@@ -15952,11 +15936,21 @@ p2 {}
                             // and so does the red marker: a track starts
                             // where the operator left it, not at the top.
                             if let Some(item) = self.decks.deck(deck).item().cloned() {
-                                let marks = Self::load_loop_marks(&item);
-                                if !marks.is_empty() {
-                                    self.decks.restore_loop_slots(deck, marks);
+                                let record = Self::load_marks(&item);
+                                let slots: Vec<crate::decks::LoopSpan> = record
+                                    .loops()
+                                    .into_iter()
+                                    .map(|(start, end)| crate::decks::LoopSpan {
+                                        start_secs: start,
+                                        end_secs: end,
+                                    })
+                                    .collect();
+                                if !slots.is_empty() || record.bookmark().is_some() {
+                                    self.decks.restore_marks(deck, slots, record.bookmark());
                                 }
-                                if let Some(cue) = Self::load_track_cue(&item) {
+                                if let Some(cue) =
+                                    record.cue().filter(|secs| *secs > 0.0)
+                                {
                                     self.decks.set_cue(deck, cue);
                                     let cmds = self.decks.seek_secs(deck, cue);
                                     self.run_deck_cmds(cx, cmds);

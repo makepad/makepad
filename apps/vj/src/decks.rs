@@ -1350,12 +1350,6 @@ impl DeckEngine {
         self.engage_loop(deck, resized, false)
     }
 
-    /// Marks read back from disk on a track's install.
-    pub fn restore_loop_slots(&mut self, deck: DeckId, mut slots: Vec<LoopSpan>) {
-        slots.truncate(LOOP_SLOT_CAP);
-        self.deck_mut(deck).loop_slots = slots;
-    }
-
     /// REMOVE USER LOOPS: drop every blue mark and the bookmark in one act
     /// — the operator's own marks, gone. No stash to press again: the scan
     /// dialog's CANCEL is the undo now, and a second meaning for this call
@@ -1367,8 +1361,8 @@ impl DeckEngine {
         state.bookmark = None;
     }
 
-    /// Put a snapshot of the operator's marks back — CANCEL's undo path,
-    /// cap-respecting like `restore_loop_slots` because a snapshot taken
+    /// Put the operator's marks back: CANCEL's undo path, and the marks
+    /// file on a track's install. Cap-respecting, because a snapshot taken
     /// before a restore-from-disk could carry more than the row holds.
     pub fn restore_marks(
         &mut self,
