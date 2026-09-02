@@ -269,6 +269,19 @@ pub const RATE_MAX: f64 = 4.0;
 /// that a mix has left the track behind anyway.
 pub const KEY_SHIFT_MAX: f64 = 12.0;
 
+/// How close to the mark counts as being ON it. A hair over one frame at
+/// 48k, so a return that lands sample-exact reads as parked while a
+/// deliberate scrub of a millisecond does not.
+const CUE_AT_MARK_SECS: f64 = 0.001;
+
+/// What the CUE lamp is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CueLed {
+    Dark,
+    Solid,
+    Blink,
+}
+
 /// Which key the lock holds, and what letting go does with it.
 ///
 /// Three flat states rather than two switches: `Original` captures
@@ -671,6 +684,10 @@ pub struct DeckState {
     /// tape faster. It also decides where a key shift is measured from: with
     /// the lock on, from the track's own key; with it off, from whatever the
     /// tempo already did to the pitch.
+    /// CUE is down and previewing from the mark. The two sync servos leave
+    /// a previewing deck alone, exactly as they leave a scratched one
+    /// alone: what is sounding is an audition, not the mix.
+    pub cue_held: bool,
     pub keylock: bool,
     /// Which key the lock holds. See `KeylockMode`.
     pub keylock_mode: KeylockMode,
@@ -739,6 +756,7 @@ impl Default for DeckState {
             synced: false,
             ext_sync: false,
             auto_opt_out: false,
+            cue_held: false,
             keylock: true,
             keylock_mode: KeylockMode::default(),
             keylock_offset: 0.0,
@@ -2116,7 +2134,7 @@ impl DeckEngine {
             return Vec::new();
         }
         let state = self.deck(follower);
-        if !state.is_loaded() || state.auto_opt_out || state.scratching {
+        if !state.is_loaded() || state.auto_opt_out || state.scratching || state.cue_held {
             return Vec::new();
         }
         if state.sync_view().is_none() {
@@ -2224,7 +2242,7 @@ impl DeckEngine {
         let mut cmds = Vec::new();
         for deck in [DeckId::A, DeckId::B] {
             let state = self.deck(deck);
-            if !state.ext_sync || !state.playing || state.scratching {
+            if !state.ext_sync || !state.playing || state.scratching || state.cue_held {
                 continue;
             }
             cmds.extend(self.follow_view(deck, external));
@@ -2255,7 +2273,7 @@ impl DeckEngine {
                 continue;
             }
             let state = self.deck(deck);
-            if !state.synced || state.ext_sync || !state.playing || state.scratching {
+            if !state.synced || state.ext_sync || !state.playing || state.scratching || state.cue_held {
                 continue;
             }
             cmds.extend(self.follow_view(deck, &view));
@@ -2474,6 +2492,78 @@ impl DeckEngine {
         Vec::new()
     }
 
+    /// CUE went down.
+    ///
+    /// Paused away from the mark, this MOVES the mark here -- that is how a
+    /// cue point gets set without a second control. Anywhere else it starts
+    /// a preview from the mark, which sounds for as long as the button is
+    /// held.
+    ///
+    /// The preview deliberately does not go through `seek_secs` or `play`:
+    /// both re-run auto sync, and a playing follower would be jumped to the
+    /// nearest beat -- up to half a beat from the very mark it is
+    /// auditioning.
+    pub fn cue_press(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        let state = self.deck(deck);
+        let at_mark = (state.position_secs - state.cue_secs).abs() < CUE_AT_MARK_SECS;
+        if !state.playing && !at_mark {
+            let secs = state.position_secs;
+            self.deck_mut(deck).cue_secs = secs;
+            return Vec::new();
+        }
+        let cue = state.cue_secs;
+        let state = self.deck_mut(deck);
+        state.cue_held = true;
+        state.playing = true;
+        state.position_secs = cue;
+        vec![
+            DeckCmd::SeekSeconds { deck, secs: cue },
+            DeckCmd::SetPlaying { deck, playing: true },
+        ]
+    }
+
+    /// CUE came up: the preview stops and the record goes back to the mark.
+    /// A press that only moved the mark has nothing to release.
+    pub fn cue_release(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if !self.deck(deck).cue_held {
+            return Vec::new();
+        }
+        let cue = self.deck(deck).cue_secs;
+        let state = self.deck_mut(deck);
+        state.cue_held = false;
+        state.playing = false;
+        state.position_secs = cue;
+        vec![
+            DeckCmd::SetPlaying { deck, playing: false },
+            DeckCmd::SeekSeconds { deck, secs: cue },
+        ]
+    }
+
+    /// What the CUE lamp should be doing.
+    pub fn cue_led(&self, deck: DeckId) -> CueLed {
+        let state = self.deck(deck);
+        if !state.is_loaded() {
+            return CueLed::Dark;
+        }
+        if state.cue_held {
+            return CueLed::Solid;
+        }
+        // Parked exactly on the mark, ready to go: the light every hand
+        // reads as "this deck is cued and waiting".
+        if !state.playing && (state.position_secs - state.cue_secs).abs() < CUE_AT_MARK_SECS {
+            return CueLed::Solid;
+        }
+        // Stopped somewhere else: pressing CUE will move the mark here, and
+        // the blink is the warning that it will.
+        if !state.playing {
+            return CueLed::Blink;
+        }
+        CueLed::Dark
+    }
+
     /// Pointer on the waveform. A grab suspends the phase lock; the release
     /// re-locks against the leader if auto sync is on.
     pub fn scratch(&mut self, deck: DeckId, motion: ScratchMotion) -> Vec<DeckCmd> {
@@ -2596,7 +2686,7 @@ impl DeckEngine {
             return own;
         }
         let state = self.deck(deck);
-        if !state.is_loaded() || state.auto_opt_out || state.scratching {
+        if !state.is_loaded() || state.auto_opt_out || state.scratching || state.cue_held {
             return own;
         }
         let (Some(lead), Some(follow)) =
@@ -4196,6 +4286,89 @@ mod tests {
             e.deck(DeckId::A).key_shift, KEY_SHIFT_MAX,
             "and letting go must not take back semitones it never got"
         );
+    }
+
+    // ---- CUE over its own edges -----------------------------------------
+
+    #[test]
+    fn cue_pressed_on_a_stopped_deck_away_from_the_mark_moves_the_mark_here() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).position_secs = 42.0;
+        let cmds = e.cue_press(DeckId::A);
+        assert!(cmds.is_empty(), "setting a mark makes no sound and moves nothing");
+        assert_eq!(e.deck(DeckId::A).cue_secs, 42.0);
+        assert!(!e.deck(DeckId::A).cue_held, "there is nothing to release");
+        assert!(e.cue_release(DeckId::A).is_empty());
+    }
+
+    #[test]
+    fn cue_held_on_a_cued_deck_previews_from_the_mark_and_stops_on_release() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).cue_secs = 30.0;
+        e.deck_mut(DeckId::A).position_secs = 30.0;
+        let down = e.cue_press(DeckId::A);
+        assert_eq!(down, vec![
+            DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+            DeckCmd::SetPlaying { deck: DeckId::A, playing: true },
+        ]);
+        assert!(e.deck(DeckId::A).cue_held);
+        // It ran on for a while, as a preview does.
+        e.deck_mut(DeckId::A).position_secs = 33.0;
+        let up = e.cue_release(DeckId::A);
+        assert_eq!(up, vec![
+            DeckCmd::SetPlaying { deck: DeckId::A, playing: false },
+            DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+        ]);
+        assert!(!e.deck(DeckId::A).cue_held);
+        assert_eq!(e.deck(DeckId::A).cue_secs, 30.0, "an audition never moves the mark");
+    }
+
+    #[test]
+    fn cue_pressed_while_playing_returns_to_the_mark_rather_than_moving_it() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).cue_secs = 12.0;
+        e.deck_mut(DeckId::A).position_secs = 90.0;
+        e.deck_mut(DeckId::A).playing = true;
+        e.cue_press(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).cue_secs, 12.0, "a playing deck's mark is not up for grabs");
+        e.cue_release(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).position_secs, 12.0);
+        assert!(!e.deck(DeckId::A).playing);
+    }
+
+    #[test]
+    fn a_previewing_deck_is_left_alone_by_the_lock() {
+        // The audition is not the mix. A servo that corrected it would
+        // drag the preview off the very mark it is auditioning.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        e.deck_mut(DeckId::B).position_secs = e.deck(DeckId::B).cue_secs;
+        e.cue_press(DeckId::B);
+        let held = e.hold_deck_sync();
+        assert!(
+            !held.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { deck, .. } if *deck == DeckId::B)),
+            "the lock must not move a deck that is being auditioned: {held:?}"
+        );
+    }
+
+    #[test]
+    fn the_cue_lamp_says_what_the_button_will_do() {
+        let mut e = DeckEngine::new();
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Dark, "an empty deck has nothing to cue");
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Solid, "parked on the mark, ready");
+        e.deck_mut(DeckId::A).position_secs = 42.0;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Blink, "stopped elsewhere: a press moves the mark");
+        e.deck_mut(DeckId::A).playing = true;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Dark, "nothing to say while it plays");
+        e.deck_mut(DeckId::A).cue_held = true;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Solid, "except while it is being auditioned");
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {

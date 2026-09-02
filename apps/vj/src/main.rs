@@ -22106,6 +22106,18 @@ p2 {}
             // Wall time, not a frame count: the pump runs per UI frame.
             let blink = self.blink_anchor.elapsed().as_millis() / 250 % 2 == 0;
             self.paint_lit(cx, ids.loop_out, loop_armed && blink);
+            // The CUE lamp on the same phase: lit parked on the mark or
+            // while auditioning, blinking when a press would move the mark,
+            // dark while the deck simply plays.
+            self.paint_lit(
+                cx,
+                ids.cue,
+                match self.decks.cue_led(deck) {
+                    crate::decks::CueLed::Solid => true,
+                    crate::decks::CueLed::Blink => blink,
+                    crate::decks::CueLed::Dark => false,
+                },
+            );
             self.paint_lit(cx, ids.mute, muted);
             // The SYNC control wears its mode: chrome when free, lit when
             // held against the other deck, and lit reading EXT + the room's
@@ -24330,16 +24342,22 @@ p2 {}
                 let cmds = self.decks.play_pause(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.cue.clicked(actions) {
+            // CUE reads its own edges rather than a click, because holding
+            // it is a different instruction from tapping it. Down: a
+            // stopped deck away from the mark MOVES the mark here, and
+            // anything else previews from it for as long as it is held. Up:
+            // the preview stops and the record goes back.
+            //
+            // A finger lifted inside the button reports Clicked and one
+            // lifted outside reports Released, and only one action per
+            // widget comes back, so the release accepts either.
+            if refs.cue.pressed(actions) {
                 self.deck_hands_on();
-                // Cue: stop and return to wherever the red marker sits —
-                // the track start until the operator drags it elsewhere.
-                let cue = self.decks.deck(deck).cue_secs;
-                let mut cmds = Vec::new();
-                if self.decks.deck(deck).playing {
-                    cmds.extend(self.decks.play_pause(deck));
-                }
-                cmds.extend(self.decks.seek_secs(deck, cue));
+                let cmds = self.decks.cue_press(deck);
+                self.run_deck_cmds(cx, cmds);
+            }
+            if refs.cue.released(actions) || refs.cue.clicked(actions) {
+                let cmds = self.decks.cue_release(deck);
                 self.run_deck_cmds(cx, cmds);
             }
             // RELOOP/EXIT plainly; SHIFT repeats the whole track, which is
