@@ -109,6 +109,7 @@ mod notes_map;
 mod music_dsp;
 mod music_import_ui;
 mod music_view;
+mod mix_facts;
 mod score_preview;
 mod set_history;
 // Which columns a track list shows and in what order — the operator's, not
