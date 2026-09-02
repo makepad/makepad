@@ -108,10 +108,7 @@ pub fn build_raster(
     }
     writer.set_metadata(
         "geodata_built_unix",
-        format!(
-            "{}",
-            makepad_platform::Cx::time_now().max(0.0) as u64
-        ),
+        crate::clock::now_unix().to_string(),
     );
     for (_, (zoom, x, y, data)) in tiles {
         writer

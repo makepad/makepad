@@ -491,7 +491,7 @@ pub(crate) fn create_writer(
     );
     writer.set_metadata(
         "geodata_built_unix",
-        (makepad_platform::Cx::time_now().max(0.0) as u64).to_string(),
+        crate::clock::now_unix().to_string(),
     );
     Ok(writer)
 }

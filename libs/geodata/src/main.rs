@@ -134,7 +134,7 @@ fn main() {
                         eprintln!("{}: fetch {} failed: {error}", layer.id(), source.id);
                     }
                 }
-                let start = makepad_platform::Cx::monotonic_now();
+                let start = std::time::Instant::now();
                 match layer.build(&ctx) {
                     Ok(report) => println!(
                         "{:<14} {} features -> {} tiles, {:.1} MB, {:.1}s -> {}",
@@ -142,7 +142,7 @@ fn main() {
                         report.features,
                         report.tiles,
                         report.bytes as f64 / 1e6,
-                        makepad_platform::Cx::monotonic_now() - start,
+                        start.elapsed().as_secs_f64(),
                         report.out_path.display()
                     ),
                     Err(error) => {
@@ -209,13 +209,13 @@ fn main() {
                 let data = std::fs::read(&frame.path).expect("read volume");
                 volumes.push(radar_volume::RadarVolume::decode(&data).expect("decode volume"));
             }
-            let start = makepad_platform::Cx::monotonic_now();
+            let start = std::time::Instant::now();
             let frame = radar_volume::composite_volumes(&volumes, 4);
             println!(
                 "composited {}x{} in {:.2}s",
                 frame.cols,
                 frame.rows,
-                makepad_platform::Cx::monotonic_now() - start
+                start.elapsed().as_secs_f64()
             );
             // Grayscale PNG of PV values (255 = outside coverage).
             let png = makepad_geodata::png::encode(
