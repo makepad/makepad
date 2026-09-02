@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 /// build without it does instead (refuses the request at admission time).
 #[cfg(feature = "video")]
 mod h264 {
-    pub use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
+    pub use makepad_video::{
+        stream_debug, StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions,
+    };
 }
 
 /// One connected realtime websocket: the sender the connection's write
@@ -391,8 +393,20 @@ impl RealtimeSession {
             }
         }
         let decoder = decoder_slot.as_mut().unwrap();
-        match decoder.push_packet(payload, header.frame_index as i64) {
+        // The decoder wants monotonic 100 ns timestamps; the wire only
+        // carries a frame index, so stamp it at a nominal 30 fps.
+        let pts_100ns = header.frame_index as i64 * 333_333;
+        h264::stream_debug::log(|| {
+            format!(
+                "realtime: h264 frame #{} {} bytes head [{}]",
+                header.frame_index,
+                payload.len(),
+                h264::stream_debug::head(payload)
+            )
+        });
+        match decoder.push_packet(payload, pts_100ns) {
             Ok(frames) => {
+                h264::stream_debug::log(|| format!("realtime: h264 frame #{} -> {} decoded", header.frame_index, frames.len()));
                 if let Some(frame) = frames.into_iter().last() {
                     self.push_input_frame(RgbImage {
                         width: frame.width,
@@ -404,8 +418,11 @@ impl RealtimeSession {
                 // or the decoder still buffering) — not a drop.
             }
             Err(e) => {
-                eprintln!("realtime: h264 input decode failed, dropping packet: {e}");
-                self.dropped_decode.fetch_add(1, Ordering::Relaxed);
+                let dropped = self.dropped_decode.fetch_add(1, Ordering::Relaxed) + 1;
+                h264::stream_debug::log(|| format!("realtime: h264 frame #{} decode failed: {e}", header.frame_index));
+                if dropped <= 3 || dropped % 100 == 0 {
+                    eprintln!("realtime: h264 input decode failed, dropping packet ({dropped} so far): {e}");
+                }
             }
         }
     }
