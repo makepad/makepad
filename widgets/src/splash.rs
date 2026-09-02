@@ -552,6 +552,9 @@ impl Splash {
     /// The scope object holding this Splash body's top-level definitions, via
     /// the body id cached at eval time (with a pointer-identity fallback for
     /// robustness).
+    /// The scope the script's top-level names live in: the one its body
+    /// ended in, since a `let`/`fn` that shadows a prelude name opens a
+    /// child scope the module scope cannot see into.
     fn body_scope(&mut self, cx: &mut Cx) -> Option<ScriptObject> {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return None;
@@ -560,13 +563,14 @@ impl Splash {
         let body_id = self.body_id;
         cx.with_script_vm_id(self.vm_id, |vm| {
             let bodies = vm.bx.code.bodies.borrow();
+            let ended_in = |body: &ScriptBody| {
+                body.end_scope.as_ref().unwrap_or(&body.scope).as_object()
+            };
             if let Some(body) = body_id.and_then(|i| bodies.get(i as usize)) {
-                return Some(body.scope.as_object());
+                return Some(ended_in(body));
             }
             bodies.iter().find_map(|body| match &body.source {
-                ScriptSource::Mod(m) if m.module_path == body_key => {
-                    Some(body.scope.as_object())
-                }
+                ScriptSource::Mod(m) if m.module_path == body_key => Some(ended_in(body)),
                 _ => None,
             })
         })
