@@ -3392,7 +3392,15 @@ script_mod! {
                     }
                     // Why the last record was chosen, in the scorer's own
                     // words so the label and the plan cannot disagree.
-                    auto_why := MusicLabel{width: Fill text: ""}
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+                        auto_why := MusicLabel{width: Fill text: ""}
+                        auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
+                    }
                     View{
                         width: Fill
                         height: Fit

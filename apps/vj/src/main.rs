@@ -6592,6 +6592,11 @@ pub struct App {
     /// Why the picker chose what it chose, for the panel.
     #[rust]
     auto_pick_reason: String,
+    /// Records the operator has turned down for THIS decision. Cleared the
+    /// moment one is actually loaded: a veto is "not that one, now" rather
+    /// than a ban, and a record turned down at midnight is fair game at two.
+    #[rust]
+    auto_vetoed: Vec<AssetId>,
     /// The DJ autopilot: pure planner ticked from the 20 Hz pump.
     #[rust(AutoPilot::new())]
     autopilot: AutoPilot,
@@ -24494,6 +24499,9 @@ p2 {}
             self.set_length_mins = LENGTHS[(at + 1) % LENGTHS.len()];
             self.save_autopilot_settings();
         }
+        if self.ui.button(cx, ids!(auto_veto)).clicked(actions) {
+            self.veto_next();
+        }
         if self.ui.button(cx, ids!(auto_curve)).clicked(actions) {
             let at = Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0);
             self.set_curve = Curve::ALL[(at + 1) % Curve::ALL.len()];
@@ -24980,6 +24988,21 @@ p2 {}
         self.save_set_history();
     }
 
+    /// Turn down what the picker is offering and take its next answer.
+    ///
+    /// The record stays in the set list — it is the operator's, and the
+    /// veto is about this moment rather than the record. It comes back into
+    /// the running as soon as one is actually loaded.
+    fn veto_next(&mut self) {
+        let Some(head) = self.decks.queue().first().map(|item| item.asset) else {
+            return;
+        };
+        if !self.auto_vetoed.contains(&head) {
+            self.auto_vetoed.push(head);
+        }
+        self.choose_next();
+    }
+
     /// Put the record the picker wants at the front of the queue.
     ///
     /// The engine's queue keeps every rule it had — this only reorders it,
@@ -25011,7 +25034,14 @@ p2 {}
         let dir = wave_analysis::cache_dir();
         let queued: Vec<crate::decks::TrackItem> = self.decks.queue().to_vec();
         let mut candidates: Vec<crate::pick::Candidate> = Vec::with_capacity(queued.len());
-        for item in &queued {
+        // A veto drops a record from the running, so the candidate list is
+        // no longer the queue one for one and has to say where each came
+        // from — otherwise the wrong record goes to the front.
+        let mut from_queue: Vec<usize> = Vec::with_capacity(queued.len());
+        for (position, item) in queued.iter().enumerate() {
+            if self.auto_vetoed.contains(&item.asset) {
+                continue;
+            }
             let key = crate::music_view::TrackKey::Asset(item.asset);
             let summary = self.row_summary(&key);
             let artist = self.row_tags(&key).artist;
@@ -25032,6 +25062,10 @@ p2 {}
                 musical_key: summary.and_then(|summary| summary.key),
                 energy,
             });
+            from_queue.push(position);
+        }
+        if candidates.is_empty() {
+            return;
         }
         let settings = crate::pick::PickSettings {
             target_energy: crate::arc::target(self.set_curve, through),
@@ -25047,17 +25081,18 @@ p2 {}
         let Some(index) = crate::pick::choose(&ranked, Self::now_secs().max(1)) else {
             return;
         };
+        let queue_index = from_queue[index];
         if let Some(pick) = ranked.iter().find(|scored| scored.index == index) {
             let mut reason = pick.reason.clone();
             if relaxed != crate::pick::Relaxed::Not {
                 reason.push_str(", nothing else was free");
             }
-            log!("auto dj: next is {} ({reason})", queued[index].title);
+            log!("auto dj: next is {} ({reason})", queued[queue_index].title);
             // Kept, not only logged: the panel says why in the same words
             // the scorer used, so the two cannot drift apart.
-            self.auto_pick_reason = format!("{} — {reason}", queued[index].title);
+            self.auto_pick_reason = format!("{} — {reason}", queued[queue_index].title);
         }
-        if self.decks.move_queued(index, 0) {
+        if self.decks.move_queued(queue_index, 0) {
             self.queue_rows_dirty = true;
         }
     }
@@ -25106,6 +25141,7 @@ p2 {}
                     }
                 }
                 self.choose_next();
+                self.auto_vetoed.clear();
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
                 self.decks.end_auto_fade();
@@ -25128,6 +25164,7 @@ p2 {}
             }
             AutoCmd::PumpQueue => {
                 self.choose_next();
+                self.auto_vetoed.clear();
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
                 self.queue_rows_dirty = true;
