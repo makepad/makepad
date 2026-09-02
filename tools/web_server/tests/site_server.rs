@@ -156,6 +156,16 @@ fn slow_along_upload(address: SocketAddr) -> TcpStream {
     stream
 }
 
+fn post_with_type(address: SocketAddr, path: &str, content_type: &str, body: &[u8]) -> Response {
+    let mut request_bytes = format!(
+        "POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request_bytes.extend_from_slice(body);
+    request(address, &request_bytes)
+}
+
 fn direct_headers(verb: &str, target: &str) -> HttpServerHeaders {
     let (path, search) = target
         .split_once('?')
@@ -759,12 +769,67 @@ fn live_server_adversarial_contracts() {
         return;
     };
     drop(probe);
+    check_crash_endpoint_contracts();
+    check_slow_crash_body_does_not_hold_dispatcher();
     check_static_and_navigation_contracts_work_end_to_end();
     check_unavailable_is_returned_before_navigation_is_ready();
     check_along_json_rejects_deep_trailing_and_huge_typed_inputs();
     check_slow_along_upload_never_occupies_compute_worker();
     check_malformed_request_line_is_a_hardened_bad_request();
     check_route_falls_back_as_a_whole_to_major_graph();
+}
+
+fn check_crash_endpoint_contracts() {
+    let tree = TempTree::new("crash-endpoint");
+    let (_server, address) = start_fixture_server(&tree.0);
+    let data = tree.0.join("private-data");
+    let body = b"{\n\"kind\":\"panic\",\"data\":{\"message\":\"boom\"}\n}";
+
+    let stored = post(address, "/api/crash", body);
+    assert_eq!(stored.status, 204);
+    assert!(stored.headers.contains("Cache-Control: private, no-cache"));
+    assert_eq!(
+        post_with_type(address, "/api/crash", "text/plain;charset=UTF-8", b"plain").status,
+        204
+    );
+
+    let log = fs::read_to_string(data.join("crash.log")).unwrap();
+    let mut fields = log.lines().next().unwrap().splitn(3, ' ');
+    assert!(fields.next().unwrap().parse::<u128>().is_ok());
+    assert_eq!(fields.next(), Some("127.0.0.1"));
+    let escaped_body = String::from_utf8_lossy(body).replace('\n', "\\n");
+    assert_eq!(fields.next(), Some(escaped_body.as_str()));
+
+    let wrong_method = get(address, "/api/crash", "");
+    assert_eq!(wrong_method.status, 405);
+    assert!(wrong_method.headers.contains("Allow: POST, OPTIONS"));
+    let options = request(address, b"OPTIONS /api/crash HTTP/1.1\r\nHost: test\r\n\r\n");
+    assert_eq!(options.status, 204);
+    assert!(options.headers.contains("Allow: POST, OPTIONS"));
+    assert_eq!(post(address, "/api/crash", &[0xff]).status, 400);
+    assert_eq!(post(address, "/api/crash", &vec![b'x'; 64 * 1024 + 1]).status, 413);
+
+    assert_eq!(get(address, "/$report_error?data=old%0Aline", "").status, 204);
+    let log = fs::read_to_string(data.join("crash.log")).unwrap();
+    assert!(log.contains("{\"kind\":\"legacy-get\",\"data\":\"old\\nline\"}"));
+
+    for _ in 0..26 {
+        assert_eq!(post(address, "/api/crash", b"{}").status, 204);
+    }
+    assert_eq!(post(address, "/api/crash", b"{}").status, 429);
+}
+
+fn check_slow_crash_body_does_not_hold_dispatcher() {
+    let tree = TempTree::new("crash-slow-body");
+    let (_server, address) = start_fixture_server(&tree.0);
+    let mut slow = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    slow.write_all(
+        b"POST /api/crash HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(get(address, "/", "").status, 200);
+    drop(slow);
 }
 
 fn reference_trip_samples(line: &[LonLat], spacing_m: f64) -> Vec<(LonLat, f64)> {

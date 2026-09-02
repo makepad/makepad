@@ -22,15 +22,20 @@ pub fn run_with_registry(
     registry: std::sync::Arc<ServiceRegistry>,
     load_production_data: bool,
 ) -> Result<(), String> {
-    let static_handler = StaticHandler::new(&config.root)?;
-    let data_root = canonical_data_root(&config, static_handler.root())?;
+    let static_root = config.root.canonicalize()
+        .map_err(|error| format!("canonicalize static root {}: {error}", config.root.display()))?;
+    let data_root = canonical_data_root(&config, &static_root)?;
+    let static_handler = StaticHandler::new_with_data_dir(&static_root, data_root.as_deref())?;
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
     let listen = config.listen;
     let Some(_listen_thread) = runtime.start_http_server(HttpServer {
         listen_address: listen,
         post_max_size: 2 * 1024 * 1024,
-        post_max_size_overrides: vec![("/$report_error".into(), crate::static_files::REPORT_BODY_LIMIT as u64)],
+        post_max_size_overrides: vec![
+            ("/$report_error".into(), crate::static_files::REPORT_BODY_LIMIT as u64),
+            ("/api/crash".into(), crate::static_files::CRASH_BODY_LIMIT as u64),
+        ],
         pre_admit_posts: true,
         client_ip_resolver: Some(crate::static_files::client_ip),
         trusted_proxy: Some(crate::static_files::cloudflare_peer),
@@ -50,19 +55,25 @@ pub fn run_with_registry(
     while let Ok(request) = request_receiver.recv() {
         match request {
             HttpServerRequest::Get { headers, response_sender } => {
-                if !registry.handle_get(&headers, &response_sender) {
+                if headers.path == "/api/crash" {
+                    static_handler.handle_get(&headers, &response_sender);
+                } else if !registry.handle_get(&headers, &response_sender) {
                     static_handler.handle_get(&headers, &response_sender);
                 }
             }
             HttpServerRequest::Post { headers, body, response } => {
-                if headers.path.starts_with("/api/") {
+                if headers.path == "/api/crash" {
+                    static_handler.handle_post(&headers, &body, &response);
+                } else if headers.path.starts_with("/api/") {
                     registry.handle_post(&headers, body, &response);
                 } else if !static_handler.handle_post(&headers, &body, &response) {
                     static_handler.handle_get(&headers, &response);
                 }
             }
             HttpServerRequest::PostPending { headers, body, response } => {
-                if headers.path.starts_with("/api/") {
+                if headers.path == "/api/crash" {
+                    let _ = static_handler.handle_post_pending(&headers, body, &response);
+                } else if headers.path.starts_with("/api/") {
                     registry.handle_post_pending(&headers, body, &response);
                 } else if let Err(body) = static_handler.handle_post_pending(&headers, body, &response) {
                     body.reject(crate::http::response(
