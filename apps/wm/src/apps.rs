@@ -32,6 +32,11 @@ impl Default for AppRegistry {
     }
 }
 
+/// A linked module by id, without a registry: what the launcher asks.
+pub fn is_linked(id: &str) -> bool {
+    linked_modules().iter().any(|m| m.id() == id)
+}
+
 /// The modules this build links, one entry per `app-*` feature.
 fn linked_modules() -> Vec<&'static dyn AppModule> {
     let mut out: Vec<&'static dyn AppModule> = Vec::new();
@@ -69,13 +74,29 @@ impl AppRegistry {
         self.modules.iter().copied().find(|m| m.id() == id)
     }
 
-    /// How a launch of `id` is hosted: Module only when a module is linked
-    /// AND the person (or the dev flag) asked for it.
+    /// How a launch of `id` is hosted. On a desktop: Module only when a
+    /// module is linked AND the person (or the dev flag) asked for it. In a
+    /// build without processes (the web): every linked module is a module,
+    /// and everything else is simply not there.
     pub fn hosting(&self, id: &str) -> Hosting {
+        if !crate::host::processes_available() {
+            return if self.module(id).is_some() { Hosting::Module } else { Hosting::Process };
+        }
         match self.overrides.get(id) {
             Some(Hosting::Module) if self.module(id).is_some() => Hosting::Module,
             _ => Hosting::Process,
         }
+    }
+
+    /// Whether the assistant is the aichat MODULE seated in the pane
+    /// in-process (feature `app-aichat`): always where there are no
+    /// processes; on a desktop only when `aichat` is switched to module
+    /// hosting, the child process being the default.
+    pub fn pane_in_process(&self) -> bool {
+        if !cfg!(feature = "app-aichat") {
+            return false;
+        }
+        !crate::host::processes_available() || self.overrides.get("aichat") == Some(&Hosting::Module)
     }
 
     pub fn linked_ids(&self) -> Vec<&'static str> {

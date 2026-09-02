@@ -125,9 +125,11 @@ pub struct ToWasmMsg {
     data: Vec<u64>,
 }
 
+/// Where a block ends: the writer (the generated JS wrapper) stores the
+/// buffer-absolute u64 index one past the block, header word included —
+/// the same number it writes as the buffer's running length.
 pub struct ToWasmBlockSkip {
-    len: usize,
-    base: usize,
+    end: usize,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -185,14 +187,15 @@ impl<'a> ToWasmMsgRef<'a> {
     }
 
     pub fn read_block_skip(&mut self) -> ToWasmBlockSkip {
-        ToWasmBlockSkip {
-            base: self.u32_offset >> 1,
-            len: self.read_u32() as usize,
-        }
+        ToWasmBlockSkip { end: self.read_u32() as usize }
     }
 
+    /// Continue at the next block. Absolute, not relative: adding the
+    /// stored end to the current position landed one word past the next
+    /// block's id whenever two messages shared a buffer, so the second was
+    /// decoded from garbage and the reader ran off the end.
     pub fn block_skip(&mut self, block_skip: ToWasmBlockSkip) {
-        self.u32_offset = (block_skip.base + block_skip.len - 1) << 1
+        self.u32_offset = block_skip.end << 1
     }
 
     pub fn read_f32(&mut self) -> f32 {
@@ -222,5 +225,40 @@ impl<'a> ToWasmMsgRef<'a> {
     pub fn was_last_block(&mut self) -> bool {
         self.u32_offset += self.u32_offset & 1;
         self.u32_offset >> 1 >= self.data.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two messages in one buffer, laid out exactly as the generated JS
+    /// wrapper writes them: a header word, then per block the id (one u64),
+    /// the block's absolute end (low u32, sharing a word with the first
+    /// payload u32) and its payload. The second block starts at the first
+    /// block's stored end — never one word later.
+    #[test]
+    fn a_batched_buffer_reads_every_block_from_its_stored_end() {
+        let id = 0x0000_222e_f84f_fd91u64;
+        let data: Vec<u64> = vec![
+            (5u64 << 32) | 0x401,      // header: 5 words long
+            id,                        // block A id
+            (2u64 << 32) | 3,          // block A: end = 3, payload = 2
+            id,                        // block B id, at word 3
+            (1u64 << 32) | 5,          // block B: end = 5, payload = 1
+        ];
+        let msg = ToWasmMsg { data };
+        let mut r = msg.as_ref();
+        let mut seen = Vec::new();
+        while !r.was_last_block() {
+            let block_id = r.read_u64();
+            let skip = r.read_block_skip();
+            let payload = r.read_u32();
+            seen.push((block_id, payload));
+            r.block_skip(skip);
+        }
+        assert_eq!(seen, vec![(id, 2), (id, 1)]);
+        // The buffer is never handed back to the allocator in a test.
+        std::mem::forget(msg);
     }
 }

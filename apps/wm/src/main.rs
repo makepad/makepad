@@ -17,10 +17,12 @@ mod binds;
 mod clients;
 mod demo_home;
 mod desk;
+mod host;
 mod hub;
 mod layout;
 mod module_host;
 mod module_view;
+mod pane_links;
 mod preview;
 mod run_view;
 mod shell;
@@ -50,6 +52,8 @@ use apps::{AppRegistry, Hosting};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
 use makepad_app_module::{AppModule, ExecOutcome};
 use module_host::ModuleHost;
+use pane_links::{PaneCall, PaneLinks};
+use makepad_widgets::ai_slot::AiSlotRequests;
 use shell::ai_pane::ShellAiPane;
 
 app_main!(
@@ -163,11 +167,15 @@ script_mod! {
                     }
                     // `wm --gallery`: every ported omarchy surface with
                     // fixture data, over the desktop (see shell/gallery.rs).
+                    // `wm --gallery` fills this at startup (handle_startup):
+                    // the gallery is a deep fixture tree nobody else pays for
+                    // — on the web its construction alone overflows the 1 MiB
+                    // wasm stack.
                     gallery_holder := View{
                         width: Fill
                         height: Fill
                         visible: false
-                        shell_gallery := ShellGallery{}
+                        shell_gallery_host := ShellGalleryHost{}
                     }
                 }
             }
@@ -313,7 +321,7 @@ pub struct App {
     /// because the FIRST ticks are what make a frame possible at all — see
     /// `pump_warm`.
     #[rust]
-    warm_last_tick: HashMap<ClientId, std::time::Instant>,
+    warm_last_tick: HashMap<ClientId, f64>,
     /// The desktop window's dpi factor, as the platform last reported it —
     /// a warm instance is configured with the same one its tile will use,
     /// so the glyph atlas and shaders it warms up are the right ones.
@@ -327,6 +335,10 @@ pub struct App {
     /// isolate each, seated in a `ModuleTile`.
     #[rust]
     module_host: ModuleHost,
+    /// The in-process transport to an assistant seated in the pane as a
+    /// module: the WM's services as links its registry adopts (pane_links.rs).
+    #[rust]
+    pane_links: PaneLinks,
     /// Which apps are linked as modules and which the person switched to
     /// module hosting (apps.rs).
     #[rust]
@@ -353,11 +365,11 @@ pub struct WarmFrame {
     /// but the child may still have a frame in flight against this one, so
     /// it is held briefly before being dropped — the same hazard
     /// `MpRunView::last_swapchain_with_completed_draws` covers on resize.
-    retired: Option<std::time::Instant>,
+    retired: Option<f64>,
 }
 
 /// How long a retired warm swapchain is kept after adoption.
-const WARM_FRAME_RETIRE: std::time::Duration = std::time::Duration::from_secs(2);
+const WARM_FRAME_RETIRE: f64 = 2.0;
 
 /// The pump interval: fast enough that a warm instance reaches its first
 /// frame promptly, slow enough to be nothing on the WM's own clock.
@@ -365,7 +377,7 @@ const WARM_PUMP: f64 = 0.05;
 
 /// What a DORMANT instance gets once it has drawn: enough to keep its
 /// watchdog and any app-side timer alive, little enough to be free.
-const WARM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
+const WARM_HEARTBEAT: f64 = 1.0;
 
 /// The channel every client's reader thread writes its output into.
 pub struct ClientLines {
@@ -522,6 +534,13 @@ impl App {
             }
         }
 
+        // From here it is a PROCESS: nothing a build without a process
+        // host can do (the web hosts its linked modules and nothing else).
+        if !host::processes_available() {
+            log!("wm: {} is not linked into this build; it cannot start here", app_id);
+            return;
+        }
+
         // THE POOL: a standby instance of this app becomes the window now,
         // already drawn, and the pool tops itself back up behind it.
         if self.adopt_warm(cx, app_id) {
@@ -655,7 +674,7 @@ impl App {
             if let Some(slot) = state.clients.get_mut(&client) {
                 slot.warm = false;
                 slot.takes_focus = true;
-                slot.open_at = Some(std::time::Instant::now());
+                slot.open_at = Some(host::now());
                 slot.opened_warm = true;
             }
             let gap = state.gap;
@@ -679,7 +698,7 @@ impl App {
         // The tile owns the framebuffer now; the warm one is held briefly
         // in case a frame is still in flight against it.
         if let Some(frame) = self.warm_frames.get_mut(&client) {
-            frame.retired = Some(std::time::Instant::now());
+            frame.retired = Some(host::now());
         }
         log!("wm: adopted warm {} as client {}", app_id, client);
         self.redraw_all(cx);
@@ -692,7 +711,7 @@ impl App {
     /// the pool is invisible infrastructure, and anything it cannot do
     /// simply means the next launch of that app is a cold one.
     fn spawn_warm(&mut self, app_id: &str) {
-        if !self.warm_pool.wants(app_id, std::time::Instant::now()) {
+        if !self.warm_pool.wants(app_id, host::now()) {
             return;
         }
         let Some(app) = crate::clients::find_app(app_id) else {
@@ -731,7 +750,7 @@ impl App {
     /// four cargo builds into the same target-dir lock at once, and they
     /// would only queue behind each other anyway.
     fn top_up_warm_pool(&mut self) {
-        let Some(app) = self.warm_pool.next_missing(std::time::Instant::now()) else {
+        let Some(app) = self.warm_pool.next_missing(host::now()) else {
             return;
         };
         self.spawn_warm(&app);
@@ -814,13 +833,13 @@ impl App {
     /// is what keeps a cached task manager from burning a core in the
     /// background.
     fn pump_warm(&mut self, _cx: &mut Cx) {
-        let now = std::time::Instant::now();
+        let now = host::now();
         // A retired framebuffer outlives adoption only long enough for any
         // frame still in flight against it.
         self.warm_frames.retain(|_, frame| {
             frame
                 .retired
-                .map(|t| now.saturating_duration_since(t) < WARM_FRAME_RETIRE)
+                .map(|t| now - t < WARM_FRAME_RETIRE)
                 .unwrap_or(true)
         });
         let warm = self.warm_pool.clients();
@@ -837,7 +856,7 @@ impl App {
                     Some(frame) => frame.swapchain.is_some() && !frame.presented,
                 };
                 match self.warm_last_tick.get(client) {
-                    Some(t) if !warming => now.saturating_duration_since(*t) >= WARM_HEARTBEAT,
+                    Some(t) if !warming => now - *t >= WARM_HEARTBEAT,
                     _ => true,
                 }
             })
@@ -872,7 +891,7 @@ impl App {
             "wm: {} client {} first frame in {} ms ({})",
             app,
             client,
-            at.elapsed().as_millis(),
+            ((host::now() - at) * 1000.0) as u64,
             if warm { "warm" } else { "cold" }
         );
     }
@@ -937,7 +956,7 @@ impl App {
                 // and about to be exec'd for the first time.
                 slot.linked = raw.starts_with("Running ") || raw.starts_with("Finished ");
                 if slot.linked {
-                    slot.linked_at = Some(std::time::Instant::now());
+                    slot.linked_at = Some(host::now());
                 }
             }
             // A warm instance has no tile to put a status line on, and
@@ -1295,7 +1314,7 @@ impl App {
             if slot.closing.is_some() {
                 return;
             }
-            slot.closing = Some(std::time::Instant::now());
+            slot.closing = Some(host::now());
             if let Some(sender) = &slot.sender {
                 // Ask over the API first (the app may want to save), then
                 // the protocol's own Kill; the reaper is the fallback.
@@ -1358,6 +1377,8 @@ impl App {
         if let Some(bye) = self.ai_bus.client_died(client) {
             self.send_to_pane(bye);
         }
+        // An in-process assistant sees the instance's link close.
+        self.pane_links.close_instance(client);
         // A dying warm instance clears its pool slot, so the next launch
         // of that app falls back to a cold spawn instead of talking to a
         // dead socket, and the pool heals itself. A death nobody asked for
@@ -1371,7 +1392,7 @@ impl App {
             .unwrap_or(false);
         if let Some(app) = self.warm_pool.forget(client) {
             if !asked_for_it {
-                self.warm_pool.note_crash(&app, std::time::Instant::now());
+                self.warm_pool.note_crash(&app, host::now());
                 log!("wm: warm {} (client {}) died", app, client);
             }
             // The top-up runs on the tick — one spawn at a time, and it
@@ -1449,7 +1470,7 @@ impl App {
     /// it (XprotectService/syspolicyd; the second exec is instant). Say so
     /// instead of leaving the tile silent.
     fn explain_first_exec_scan(&mut self, cx: &mut Cx) {
-        const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+        const GRACE: f64 = 3.0;
         let waiting: Vec<ClientId> = self
             .state_mut()
             .clients
@@ -1460,7 +1481,7 @@ impl App {
                 !s.warm
                     && s.linked
                     && s.sender.is_none()
-                    && s.linked_at.map(|t| t.elapsed() > GRACE).unwrap_or(false)
+                    && s.linked_at.map(|t| host::now() - t > GRACE).unwrap_or(false)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1490,7 +1511,7 @@ impl App {
         // A client that ignored the polite close gets the fallback.
         for slot in self.state_mut().clients.values_mut() {
             let Some(since) = slot.closing else { continue };
-            if since.elapsed() < clients::CLOSE_GRACE {
+            if host::now() - since < clients::CLOSE_GRACE.as_secs_f64() {
                 continue;
             }
             if let Some(child) = slot.child.as_mut() {
@@ -1584,7 +1605,11 @@ impl App {
     /// has a frame to receive it in; every registered app hears
     /// `ChatOpen`.
     fn open_ai_pane(&mut self, cx: &mut Cx) {
-        if self.ai_bus.pane_client.is_none() && !self.launch_ai_pane(cx) {
+        if self.apps.pane_in_process() {
+            if !self.ensure_local_pane(cx) {
+                return;
+            }
+        } else if self.ai_bus.pane_client.is_none() && !self.launch_ai_pane(cx) {
             return;
         }
         self.sync_ai_pane_geometry(cx);
@@ -1646,7 +1671,8 @@ impl App {
     /// keeps the request pending until its run view has drawn (see
     /// `ShellAiPane::focus_keyboard`).
     fn focus_pane(&mut self, cx: &mut Cx) {
-        if self.ai_bus.pane_client.is_none() {
+        let local = self.with_ai_pane(cx, |_, p| p.is_local()).unwrap_or(false);
+        if self.ai_bus.pane_client.is_none() && !local {
             return;
         }
         self.with_ai_pane(cx, |cx, p| p.focus_keyboard(cx));
@@ -1820,10 +1846,16 @@ impl App {
             d.mark_module(id);
             d.with_module_view(cx, id, |cx, v| v.set_root(cx, id, vm_id, root));
         });
-        // On the bus as a local endpoint: the pane learns its tools now, or
-        // at the replay when it connects later.
-        let frame = self.ai_bus.register_local(id, manifest);
-        self.send_to_pane(frame);
+        // On the bus. An in-process assistant adopts the instance as a
+        // link (waiting on `Cx` until the pane's root exists); the aichat
+        // child learns of it as a local endpoint now, or at the replay
+        // when it connects later.
+        if self.apps.pane_in_process() {
+            self.pane_links.open_instance(cx, id, manifest);
+        } else {
+            let frame = self.ai_bus.register_local(id, manifest);
+            self.send_to_pane(frame);
+        }
         log!("wm: launched {} as client {} (in-process)", module.id(), id);
         self.focus_client(cx, id);
         self.update_bar(cx);
@@ -1849,11 +1881,59 @@ impl App {
         }
     }
 
-    /// Results in-process executors answered later, up to the pane.
+    /// Results in-process executors answered later, up to the pane: down
+    /// the instance's link when the assistant is in-process, as a frame to
+    /// the aichat child otherwise.
     fn drain_module_replies(&mut self) {
         for (client, result) in self.module_host.drain_replies() {
-            let frame = self.ai_bus.local_reply(client, result);
-            self.send_to_pane(frame);
+            if self.pane_links.is_instance(client) {
+                self.pane_links.reply(client, result);
+            } else {
+                let frame = self.ai_bus.local_reply(client, result);
+                self.send_to_pane(frame);
+            }
+        }
+    }
+
+    // ---- the assistant in-process (pane_links.rs) ----
+
+    /// The pane's body is the aichat module: seat it (by name), and put
+    /// the WM's own `os` service on its registry. False, logged, when this
+    /// build does not link the assistant.
+    fn ensure_local_pane(&mut self, cx: &mut Cx) -> bool {
+        let seated = self.with_ai_pane(cx, |cx, p| p.ensure_overlay(cx)).unwrap_or(false);
+        if !seated {
+            return false;
+        }
+        self.pane_links.open_os(cx, AiBus::os_manifest(&Self::registry_apps()));
+        true
+    }
+
+    /// What the in-process assistant asked through its links: the `os`
+    /// calls are the WM's, the rest go to the instances' executors.
+    fn drain_pane_links(&mut self, cx: &mut Cx) {
+        for call in self.pane_links.drain() {
+            match call {
+                PaneCall::Os(call) => {
+                    let result = self.answer_os_call(cx, &call);
+                    self.pane_links.reply_os(result);
+                }
+                PaneCall::Instance(client, call) => {
+                    let result = match self.module_host.execute(cx, client, &call) {
+                        Some(ExecOutcome::Done(result)) => result,
+                        // Answered later through the instance's reply sink.
+                        Some(ExecOutcome::Pending) => continue,
+                        None => ToolResult::unavailable(&call.call_id, "that app is gone"),
+                    };
+                    self.pane_links.reply(client, result);
+                }
+                PaneCall::Cancel(client, call_id) => self.module_host.cancel(cx, client, &call_id),
+            }
+        }
+        // The chat's own Escape (an idle, empty composer) asks the slot it
+        // would sit in to close; in the pane that slot is us.
+        if cx.global::<AiSlotRequests>().open.take() == Some(false) {
+            self.close_ai_pane(cx);
         }
     }
 
@@ -1937,6 +2017,16 @@ impl App {
                         id,
                         format!("no app `{app}`; known: {}", known_app_ids()),
                     ),
+                    Some(def) if !host::processes_available() && self.apps.hosting(&def.id) != Hosting::Module => {
+                        ToolResult::unavailable(
+                            id,
+                            format!(
+                                "{} is not part of this build; it links {}",
+                                def.label,
+                                self.apps.linked_ids().join(", ")
+                            ),
+                        )
+                    }
                     Some(def) => {
                         self.launch_app(cx, &def.id);
                         // The person is talking to the chat: the new
@@ -2199,9 +2289,10 @@ impl App {
             state.accent = rgb;
         }
         state.borders = desk::BorderTheme::from_theme_source(&source);
-        // Children style themselves from the same file.
-        std::env::set_var("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name));
-        let _ = std::fs::write(theme::themes_dir().join("../current-theme"), name);
+        // Children style themselves from the same file; the choice outlives
+        // this run (a state file natively, the desk's storage on the web).
+        host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
+        host::persist_theme_choice(cx, name);
         // Chrome DSL colors refresh fully on restart; borders, terminal
         // palette and backgrounds apply immediately.
         self.apply_background(cx, 0);
@@ -2532,10 +2623,12 @@ impl App {
         let s = cache.lock().map(|s| s.clone()).unwrap_or_default();
         self.bar_sample.volume = s.volume;
         self.bar_sample.muted = s.muted;
-        self.bar_sample.clock = if self.clock_alt {
-            s.clock_alt
-        } else {
-            s.clock
+        // No sampler (no processes to fork `date` in: the web): the clock
+        // is formatted from the platform's own epoch seconds instead.
+        self.bar_sample.clock = match (self.clock_alt, s.clock.is_empty()) {
+            (alt, true) => host::fallback_clock(alt),
+            (true, false) => s.clock_alt,
+            (false, false) => s.clock,
         };
         self.status_tick = self.status_tick.wrapping_add(1);
         self.bar_sample.battery = s.battery;
@@ -3389,10 +3482,7 @@ impl MatchEvent for App {
         let theme_name = Self::theme_name_from_env();
         // Children inherit the theme file path so every Makepad app styles
         // itself from the same theme.splash.
-        std::env::set_var(
-            "MAKEPAD_WM_THEME_SPLASH",
-            theme::theme_splash_path(&theme_name),
-        );
+        host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(&theme_name).as_os_str());
         let source = theme::load_theme_source(&theme_name);
         let term_env = theme::scan_term_palette(&source)
             .map(|p| p.env_value())
@@ -3405,9 +3495,11 @@ impl MatchEvent for App {
         });
         let borders = desk::BorderTheme::from_theme_source(&source);
 
-        let hub = WmHub::start();
+        // The client hub is the PROCESS host's: a build without processes
+        // (the web) never binds one and hosts its linked modules instead.
+        let hub = if host::processes_available() { WmHub::start() } else { None };
         let hub_port = hub.as_ref().map(|h| h.port).unwrap_or(0);
-        if hub.is_none() {
+        if hub.is_none() && host::processes_available() {
             log!("wm: could not bind the client hub; tiles will not start");
         }
         self.hub = hub;
@@ -3433,6 +3525,11 @@ impl MatchEvent for App {
         let args: Vec<String> = std::env::args().collect();
         self.apps = AppRegistry::load(&theme::makepad_home().join("wm/apps.splash"), &args);
         log!("wm: modules linked: {:?}", self.apps.linked_ids());
+        // An in-process assistant: the WM's own service waits on Cx for
+        // the pane's root to adopt it, so it is there from the first open.
+        if self.apps.pane_in_process() {
+            self.pane_links.open_os(cx, AiBus::os_manifest(&Self::registry_apps()));
+        }
         self.tick = cx.start_interval(1.0);
         // The warm pool's pump. Started even when the pool is off: it
         // costs one no-op wakeup and keeps the timer id stable.
@@ -3445,10 +3542,29 @@ impl MatchEvent for App {
         // desktop, so the port is verifiable over --remote (shell/gallery.rs).
         if shell::gallery::ShellGallery::requested() {
             self.gallery = true;
+            // Built now, not in the DSL: the fixture tree is deep and only
+            // a gallery run ever looks at it (shell/gallery.rs).
+            let host = self.ui.widget(cx, ids!(shell_gallery_host));
+            if let Some(mut host) = host.borrow_mut::<shell::gallery::ShellGalleryHost>() {
+                host.ensure(cx);
+            }
             self.ui.widget(cx, ids!(gallery_holder)).set_visible(cx, true);
             self.ui.widget(cx, ids!(main_column)).set_visible(cx, false);
             self.redraw_all(cx);
             return;
+        }
+
+        // The assistant starts WITH the desktop (user, 2026-09-02), the
+        // pane closed: its body — the aichat child, or the module in-process
+        // — is running, configured and drawn off the desk's edge before any
+        // F10, so the first slide-in is instant. Nothing takes the keyboard
+        // here: the layout's focus stays where it is.
+        if self.apps.pane_in_process() {
+            if self.with_ai_pane(cx, |cx, p| p.ensure_overlay(cx)).unwrap_or(false) {
+                log!("wm: the assistant starts with the desktop (in-process)");
+            }
+        } else if hub_port != 0 && self.launch_ai_pane(cx) {
+            log!("wm: the assistant starts with the desktop (the aichat child)");
         }
 
         // Start EMPTY like omarchy — booting children is slow (first-exec
@@ -3690,6 +3806,10 @@ impl AppMain for App {
         run_view::script_mod(vm);
         module_view::script_mod(vm);
         desk::script_mod(vm);
+        // The assistant as a module: its panel and overlay root, so the
+        // pane can seat `mod.widgets.AiChatOverlay{}` by name.
+        #[cfg(feature = "app-aichat")]
+        makepad_aichat::script_mod(vm);
         shell::script_mod(vm);
         self::script_mod(vm)
     }
@@ -3864,6 +3984,12 @@ impl AppMain for App {
                 self.drain_hub(cx);
                 self.drain_client_lines(cx);
             }
+        }
+
+        // An in-process assistant's calls arrive on channels, not events:
+        // looked at on every event, cheap when there is nothing.
+        if self.state.is_some() {
+            self.drain_pane_links(cx);
         }
 
         self.match_event(cx, event);

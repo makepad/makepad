@@ -38,12 +38,17 @@ impl AppModule for SheetsModule {
         OpenSchema::new(1).arg("file", OpenArgKind::FileHandle, false)
     }
 
-    fn create(&self, vm: &mut ScriptVm, _open: ValidatedOpen, _handles: InstanceHandles) -> InstanceParts {
+    fn create(&self, vm: &mut ScriptVm, _open: ValidatedOpen, handles: InstanceHandles) -> InstanceParts {
         let value = script_eval!(vm, {
             use mod.widgets.*
             MpSheets {}
         });
         let root = WidgetRef::script_from_value(vm, value);
+        // The instance's disk is its storage jail: Open and Save keep CSV
+        // there, on every host the same way (the browser's store on the web).
+        if let Some(mut sheets) = root.borrow_mut::<MpSheets>() {
+            sheets.set_storage(handles.storage);
+        }
         InstanceParts {
             root: root.clone(),
             executor: Box::new(SheetsExecutor { root }),
