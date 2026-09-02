@@ -332,6 +332,17 @@ pub trait CxSplashVmExt {
     /// down while widgets it minted were still in the tree. Such a call must be
     /// dropped, never redirected — see the note on the impl.
     fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> Option<SplashVmId>;
+    /// [`with_script_vm_id`](Self::with_script_vm_id) WITHOUT the per-entry
+    /// script budget: a host registering a trusted native module's widget
+    /// families into an isolate and building its root there. The budget is
+    /// for app script; a registration that takes longer than one budget
+    /// slice would otherwise stop half way through.
+    fn with_script_vm_id_trusted<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
+    /// Tear an isolate down now: its script timers stop, its storage jail
+    /// and host-bridge state go, its heap is freed. Every widget minted in
+    /// it must be dropped by then (or about to be): a ref that outlives
+    /// the heap is dropped, never redirected — see `script_ref_vm_id`.
+    fn free_splash_vm(&mut self, vm_id: SplashVmId);
 }
 
 impl CxSplashVmExt for Cx {
@@ -464,6 +475,19 @@ impl CxSplashVmExt for Cx {
         with_isolate_installed(self, vm_id, |cx| {
             cx.with_vm_thread(thread_id, |vm| with_splash_budget(vm, f))
         })
+    }
+
+    fn with_script_vm_id_trusted<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+        let current = self.global::<CxWidgetAsync>().current_vm_id;
+        if current == vm_id || vm_id == MAIN_SPLASH_VM_ID {
+            return self.with_vm(f);
+        }
+        with_isolate_installed(self, vm_id, |cx| cx.with_vm(f))
+    }
+
+    fn free_splash_vm(&mut self, vm_id: SplashVmId) {
+        mark_splash_isolate_dead(vm_id);
+        gc_dead_splash_isolates(self);
     }
 
     fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> Option<SplashVmId> {
@@ -1343,4 +1367,132 @@ fn pump_widget_async_hook(host: &mut dyn Any) -> bool {
     host.downcast_mut::<Cx>()
         .map(pump_widget_async)
         .unwrap_or(false)
+}
+
+/// The module contract's entry gate (aicontrol.md §3): what an isolate
+/// costs, measured. Run with `--nocapture` to read the table.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod isolate_bench {
+    use super::*;
+
+    /// Resident set in kB, from the OS (the script heap keeps no byte
+    /// count of its own).
+    fn rss_kb() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok();
+        out.and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn isolate_allocation_cost_table() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut rows = Vec::new();
+        for n in [1usize, 2, 8, 32] {
+            let rss0 = rss_kb();
+            let t0 = Cx::monotonic_now();
+            let ids: Vec<SplashVmId> = (0..n).map(|_| cx.alloc_splash_vm_with_network(false)).collect();
+            let ms_each = (Cx::monotonic_now() - t0) * 1000.0 / n as f64;
+            let rss_each = rss_kb().saturating_sub(rss0) / n as u64;
+            rows.push((n, ms_each, rss_each));
+            for id in ids {
+                cx.free_splash_vm(id);
+            }
+        }
+        println!("isolates | alloc ms each | rss growth kB each (during that round)");
+        for (n, ms, kb) in &rows {
+            println!("{n:>8} | {ms:>13.2} | {kb:>10}");
+        }
+        assert!(rows.iter().all(|(_, ms, _)| *ms > 0.0));
+    }
+}
+
+/// An isolate installed on `Cx` by [`enter_isolate`]; hand it back to
+/// [`leave_isolate`] on the same `Cx`, in the same frame, with nothing of
+/// the isolate's left executing.
+pub struct IsolateEntry {
+    vm_id: SplashVmId,
+    previous_vm_id: SplashVmId,
+    network_enabled: bool,
+    outer_std: Option<ScriptStd>,
+    outer_vm: Option<Box<ScriptVmBase>>,
+}
+
+/// Install isolate `vm_id` on `Cx` for a stretch of HOST code that draws or
+/// dispatches events to widgets minted in it — a module tile's draw pass,
+/// its event delivery. While it is installed, every `cx.with_vm` those
+/// widgets make (a lazily created child, a shader compiled on first draw,
+/// an `on_click` callback) resolves against the isolate's own heap, which
+/// is the only heap their objects mean anything in. Pair with
+/// [`leave_isolate`]; the main VM is a no-op entry.
+pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
+    let previous_vm_id = cx.global::<CxWidgetAsync>().current_vm_id;
+    if vm_id == MAIN_SPLASH_VM_ID || previous_vm_id == vm_id {
+        return IsolateEntry { vm_id: MAIN_SPLASH_VM_ID, previous_vm_id, network_enabled: false, outer_std: None, outer_vm: None };
+    }
+    // Out of the table while installed, exactly as `with_isolate_installed`
+    // keeps it: a nested entry by id takes the "already current" path.
+    let isolated = cx
+        .global::<CxWidgetAsync>()
+        .isolated_vms
+        .vms
+        .remove(&vm_id)
+        .unwrap_or_else(|| panic!("missing Splash VM {:?}", vm_id));
+    cx.global::<CxWidgetAsync>().current_vm_id = vm_id;
+    let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
+    let outer_vm = cx.script_vm.take();
+    cx.script_vm = isolated.vm;
+    IsolateEntry { vm_id, previous_vm_id, network_enabled: isolated.network_enabled, outer_std: Some(outer_std), outer_vm }
+}
+
+/// Put the outer VM back. See [`enter_isolate`].
+pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
+    if entry.vm_id == MAIN_SPLASH_VM_ID {
+        return;
+    }
+    let IsolateEntry { vm_id, previous_vm_id, network_enabled, outer_std, outer_vm } = entry;
+    let isolate_vm = cx.script_vm.take();
+    cx.script_vm = outer_vm;
+    let isolate_std = std::mem::replace(&mut cx.script_data.std, outer_std.expect("an entered isolate has an outer std"));
+    cx.global::<CxWidgetAsync>().current_vm_id = previous_vm_id;
+    cx.global::<CxWidgetAsync>()
+        .isolated_vms
+        .vms
+        .insert(vm_id, IsolatedSplashVm { network_enabled, std: isolate_std, vm: isolate_vm });
+}
+
+#[cfg(test)]
+mod isolate_entry_tests {
+    use super::*;
+
+    #[test]
+    fn entering_an_isolate_makes_it_the_current_vm_and_leaving_restores_the_outer_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let main_heap = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let vm_id = cx.alloc_splash_vm();
+        let isolate_heap = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
+        assert_ne!(main_heap, isolate_heap);
+        // Entered: a plain `with_vm` — what a lazily created child or a
+        // first-draw shader compile does — runs in the isolate's heap.
+        let entry = enter_isolate(&mut cx, vm_id);
+        assert_eq!(cx.global::<CxWidgetAsync>().current_vm_id, vm_id);
+        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), isolate_heap);
+        // A nested entry by id takes the already-current path.
+        assert_eq!(cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key()), isolate_heap);
+        leave_isolate(&mut cx, entry);
+        assert_eq!(cx.global::<CxWidgetAsync>().current_vm_id, MAIN_SPLASH_VM_ID);
+        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), main_heap);
+        // The isolate is whole again: usable by id, and freeable.
+        assert_eq!(cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key()), isolate_heap);
+        // The main VM is a no-op entry.
+        let entry = enter_isolate(&mut cx, MAIN_SPLASH_VM_ID);
+        assert_eq!(cx.with_vm(|vm| vm.bx.heap.heap_key()), main_heap);
+        leave_isolate(&mut cx, entry);
+        cx.free_splash_vm(vm_id);
+    }
 }

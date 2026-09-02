@@ -14,14 +14,8 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
+use makepad_sheets::{ai, theme, view};
 use makepad_widgets::*;
-
-mod ai;
-mod formula;
-mod docs;
-mod sheet;
-mod theme;
-mod view;
 
 app_main!(
     App,
@@ -107,15 +101,15 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        crate::makepad_widgets::script_mod(vm);
+        makepad_widgets::script_mod(vm);
         // Retint the stock widgets from the WM palette, then publish the same
         // palette as `mod.sheets` for this app's own splash.
         makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
         makepad_aichat::script_mod(vm);
-        crate::theme::install(vm);
-        crate::view::script_mod(vm);
+        theme::install(vm);
+        view::script_mod(vm);
         self::script_mod(vm)
     }
 

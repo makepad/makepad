@@ -90,7 +90,9 @@ pub struct CxDrawShaders {
     pub const_table_mode: Option<bool>,
 
     pub cache_object_reuse_epoch_seen: u64,
-    pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
+    /// Keyed by (heap key, object): an isolate's objects share index space
+    /// with the app heap's and must never hit its entries.
+    pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
     pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
