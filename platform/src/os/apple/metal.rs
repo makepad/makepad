@@ -1064,6 +1064,10 @@ impl Cx {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
+                crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.present(now);
+                });
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
@@ -1151,6 +1155,10 @@ impl Cx {
                 } else {
                     let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
                 }
+                crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.present(now);
+                });
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
