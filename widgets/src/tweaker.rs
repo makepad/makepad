@@ -701,7 +701,7 @@ pub fn window_intercept(
     // the AI vibecode loop need --remote; without it they simply are not
     // there, and the panel still is.
     //
-    // SHIFT+F12 is not ours: that is the screen recorder
+    // CTRL+F10 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {

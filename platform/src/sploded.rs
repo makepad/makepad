@@ -11,7 +11,7 @@
 //! scrollbar thumb by dragging is therefore deliberately NOT possible while
 //! exploded — a drag is the orbit — and that is the coexistence rule.
 //!
-//! F10 tilts the window into an isometric stack that renders **the component
+//! Shift+F10 tilts the window into an isometric stack that renders **the component
 //! nesting structure**: one plane per nesting level, siblings sharing a plane,
 //! children lifting toward the viewer and their parents staying at the bottom
 //! of the stack. The point is to see — and click — the fully-covered parent
@@ -460,7 +460,7 @@ impl Cx {
 
     /// Programmatic toggle (the tweaker's panel button). DEFERRED: safe to
     /// call from anywhere including action handling — the intercept
-    /// performs it at the next event, pre-dispatch. Leave via Esc / F10, or
+    /// performs it at the next event, pre-dispatch. Leave via Esc / Shift+F10, or
     /// the same button (a press inside a declared flat band always reaches
     /// the app, so the panel stays clickable while the mode is up).
     pub fn sploded_toggle(&mut self) {
@@ -727,7 +727,7 @@ impl Cx {
         }
         match event {
             Event::KeyDown(e) => {
-                if e.key_code == KeyCode::F10 {
+                if e.key_code == KeyCode::F10 && e.modifiers.shift {
                     if e.is_repeat {
                         return true;
                     }
@@ -862,7 +862,7 @@ impl Cx {
         self.sploded_sync();
         if active {
             crate::log!(
-                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, I = isometric, 0 resets, esc/F10 exits",
+                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, I = isometric, 0 resets, esc/Shift+F10 exits",
                 self.sploded.layers as u32
             );
         } else {
