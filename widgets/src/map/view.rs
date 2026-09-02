@@ -9,6 +9,7 @@ use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
+use crate::makepad_draw::vector::MAP_VERTEX_POSITION_SCALE;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -945,20 +946,20 @@ script_mod! {
         }
     }
 
-    // Ground polygon fills: 20-byte vertices. Their UVs are map-anchored
+    // Ground polygon fills: 16-byte typed vertices. Their UVs are map-anchored
     // position, and all other generic-vector channels are constants. The
     // inherited fragment/material/pattern path remains the source of truth.
     mod.draw.DrawMapFill = mod.std.set_type_default() do #(DrawMapFill::script_shader(vm)){
         ..mod.draw.DrawMapVector
-        geom: vertex_buffer(geom.FillVertexPacked, geom.FillGeomPacked)
+        geom: vertex_buffer(geom.FillVertexTyped, geom.FillGeomTyped)
 
         vertex: fn() {
-            let pos = vec2(self.geom.x, self.geom.y)
-            let fill = unpack2f16(self.geom.params)
-            let color = unpack4u8(self.geom.color)
-            let depth = unpack4u8(self.geom.zbias) * 255.0
-            let flat_zbias = (depth.x + depth.y * 256.0) * 0.000001
-            let param5 = (depth.z + depth.w * 256.0) * 0.00001
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            let fill = self.geom.params
+            let color = self.geom.color
+            let depth = self.geom.zbias
+            let flat_zbias = depth.x * 0.000001
+            let param5 = depth.y * 0.00001
             var shape_id = 0.0
             var material = fill.x
             if fill.x > 29.5 {
@@ -1069,21 +1070,21 @@ script_mod! {
         }
     }
 
-    // Compact road-only path: eight 32-bit lanes instead of DrawMapVector's
-    // twelve. params.x is an f16 integer: class + 8*material in the low
+    // Typed road-only path: 28-byte records instead of DrawMapVector's 48.
+    // params.x is an f16 integer: class + 8*material in the low
     // six bits, then dash (get_stroke_mask 10/11/12 as 1/2/3) and kind
     // (stroke/fill/fringe). params.y carries the one kind-specific pixel
     // scalar (dash distance, route-emissive strength, or coverage); uv
     // preserves both tessellator coordinates.
     mod.draw.DrawMapRoad = mod.std.set_type_default() do #(DrawMapRoad::script_shader(vm)){
         ..mod.draw.DrawMapVector
-        geom: vertex_buffer(geom.RoadVertexPacked, geom.RoadGeomPacked)
+        geom: vertex_buffer(geom.RoadVertexTyped, geom.RoadGeomTyped)
 
         vertex: fn() {
-            let off = unpack2f16(self.geom.off)
-            let road_params = unpack2f16(self.geom.params)
-            let road_depth = unpack2f16(self.geom.depth)
-            let road_uv = unpack2f16(self.geom.uv)
+            let off = self.geom.off
+            let road_params = self.geom.params
+            let road_depth = self.geom.depth
+            let road_uv = self.geom.uv
             let expanded = floor(road_params.x / 1024.0)
             let meta = road_params.x - expanded * 1024.0
             let kind = floor(meta / 256.0)
@@ -1092,7 +1093,7 @@ script_mod! {
             var cls = modf(class_material, 8.0)
             let material = floor(class_material / 8.0)
 
-            let pos = vec2(self.geom.x, self.geom.y)
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
             var transformed = pos * self.map_scale + self.map_offset
             let terrain_pos = transformed
             var corr = self.width_correction.x
@@ -1147,7 +1148,7 @@ script_mod! {
             let lift_m = self.geom.deck * self.height_grow + ground_fill
 
             // Inception/space-warp projection, in lockstep with the generic
-            // vector path. Road meshes use their own packed-stride midpoint
+            // vector path. Road meshes use their own typed-stride midpoint
             // subdivision before upload, so long chords follow the fold.
             if self.space_warp.x > 0.0001 {
                 let cos_t = self.tilt_params.x
@@ -1200,7 +1201,7 @@ script_mod! {
             } else if dash_id > 2.5 {
                 shape_id = 12.0
             }
-            let color = unpack4u8(self.geom.color)
+            let color = self.geom.color
             if kind > 1.5 {
                 self.v_color = color
                 self.v_stroke_mult = 2000000.0
@@ -1250,17 +1251,17 @@ script_mod! {
         }
     }
 
-    // Lifted shape-0 roofs: the five-slot geometry keeps exact metre height
+    // Lifted shape-0 roofs: the 16-byte typed geometry keeps exact metre height
     // and reconstructs the fixed generic-vector channels here. Shadow-mask
     // modes 1/2 deliberately share this vertex path with the color pass.
     mod.draw.DrawMapRoof = mod.std.set_type_default() do #(DrawMapRoof::script_shader(vm)){
         ..mod.draw.DrawMapVector
-        geom: vertex_buffer(geom.RoofVertexPacked, geom.RoofGeomPacked)
+        geom: vertex_buffer(geom.RoofVertexTyped, geom.RoofGeomTyped)
 
         vertex: fn() {
-            let pos = vec2(self.geom.x, self.geom.y)
-            let roof = unpack2f16(self.geom.params)
-            let color = unpack4u8(self.geom.color)
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            let roof = self.geom.params
+            let color = self.geom.color
             let feature_lift = self.geom.height * self.height_grow
             var surface_depth = 0.5
             if self.geom.height > 0.0 {
@@ -2580,7 +2581,7 @@ impl DrawMapVector {
     }
 }
 
-/// Road-only draw path backed by `RoadVertexPacked`. It deliberately has no
+/// Road-only draw path backed by `RoadVertexTyped`. It deliberately has no
 /// per-placement instance inputs: each tile road mesh is one ordinary draw.
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -4231,15 +4232,6 @@ impl Widget for MapView {
                         else {
                             continue;
                         };
-                        let (indices, vertices) = match (indices, vertices) {
-                            (IndexData::U32(indices), VertexData::F32(vertices)) => {
-                                (indices, vertices)
-                            }
-                            (indices, vertices) => {
-                                geometry.restore_cpu_buffers(cx.cx, indices, vertices);
-                                continue;
-                            }
-                        };
                         match pool.submit(QueueOrder::Fifo, move || drop((indices, vertices))) {
                             Ok(handle) => handle.detach(),
                             Err(_) => {
@@ -5306,6 +5298,22 @@ impl MapView {
     fn handle_archive_watch(&mut self, _cx: &mut Cx, _event: &Event) {}
 }
 
+fn typed_index_data(indices: Vec<u32>, vertex_count: usize) -> IndexData {
+    if vertex_count < 65_536 {
+        debug_assert!(indices.iter().all(|&index| index < 65_536));
+        IndexData::U16(indices.into_iter().map(|index| index as u16).collect())
+    } else {
+        IndexData::U32(indices)
+    }
+}
+
+/// The typed upload needs the shader's physical layout, which exists once the
+/// shader has drawn; a tile that lands earlier waits in the pending queue.
+fn geometry_layout(cx: &Cx, draw_vars: &DrawVars) -> Option<DrawShaderInputs> {
+    let shader_id = draw_vars.draw_shader_id?;
+    Some(cx.draw_shaders[shader_id.index].mapping.geometries.clone())
+}
+
 // --- MapView impl ---
 
 impl MapView {
@@ -5755,11 +5763,6 @@ impl MapView {
                 &old_road_icon_vertices,
             );
         }
-        let tile_bytes = if reuse_road_core {
-            buffers.byte_size().max(old_bytes)
-        } else {
-            buffers.byte_size()
-        };
         // Space-warp mode: refine long chords in the ground meshes before
         // upload. A flat triangle with far-apart vertices (full-tile land
         // sheets, long straight road quads) warps only at its corners, so
@@ -5798,10 +5801,30 @@ impl MapView {
                 max_edge,
             );
         }
+        let tile_bytes = if reuse_road_core {
+            buffers.byte_size().max(old_bytes)
+        } else {
+            buffers.byte_size()
+        };
+        let (Some(fill_layout), Some(road_layout), Some(roof_layout)) = (
+            geometry_layout(cx, &self.draw_fill.draw_vars),
+            geometry_layout(cx, &self.draw_road.draw_vars),
+            geometry_layout(cx, &self.draw_roof.draw_vars),
+        ) else {
+            self.pending_ready_tiles.insert(0, (tile_key, buffers));
+            cx.redraw_all();
+            return;
+        };
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_indices, buffers.fill_vertices);
+            let vertex_count = buffers.fill_vertices.len() / fill_layout.stride_bytes;
+            geometry.update_typed(
+                cx,
+                typed_index_data(buffers.fill_indices, vertex_count),
+                buffers.fill_vertices,
+                &fill_layout,
+            );
             Some(geometry)
         } else {
             None
@@ -5819,7 +5842,13 @@ impl MapView {
         let new_casing_geometry =
             if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
+                let vertex_count = buffers.casing_vertices.len() / road_layout.stride_bytes;
+                geometry.update_typed(
+                    cx,
+                    typed_index_data(buffers.casing_indices, vertex_count),
+                    buffers.casing_vertices,
+                    &road_layout,
+                );
                 Some(geometry)
             } else {
                 None
@@ -5833,7 +5862,13 @@ impl MapView {
         let new_stroke_geometry =
             if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.stroke_indices, buffers.stroke_vertices);
+                let vertex_count = buffers.stroke_vertices.len() / road_layout.stride_bytes;
+                geometry.update_typed(
+                    cx,
+                    typed_index_data(buffers.stroke_indices, vertex_count),
+                    buffers.stroke_vertices,
+                    &road_layout,
+                );
                 Some(geometry)
             } else {
                 None
@@ -5865,7 +5900,13 @@ impl MapView {
             && !buffers.fringe_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fringe_indices, buffers.fringe_vertices);
+            let vertex_count = buffers.fringe_vertices.len() / road_layout.stride_bytes;
+            geometry.update_typed(
+                cx,
+                typed_index_data(buffers.fringe_indices, vertex_count),
+                buffers.fringe_vertices,
+                &road_layout,
+            );
             Some(geometry)
         } else {
             None
@@ -5874,7 +5915,13 @@ impl MapView {
             && !buffers.fill_3d_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_3d_indices, buffers.fill_3d_vertices);
+            let vertex_count = buffers.fill_3d_vertices.len() / roof_layout.stride_bytes;
+            geometry.update_typed(
+                cx,
+                typed_index_data(buffers.fill_3d_indices, vertex_count),
+                buffers.fill_3d_vertices,
+                &roof_layout,
+            );
             Some(geometry)
         } else {
             None
@@ -9833,6 +9880,18 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_indices_use_u16_below_limit_and_u32_at_limit() {
+        assert!(matches!(
+            typed_index_data(vec![0, 65_534], 65_535),
+            IndexData::U16(indices) if indices == vec![0, 65_534]
+        ));
+        assert!(matches!(
+            typed_index_data(vec![0, 65_535], 65_536),
+            IndexData::U32(indices) if indices == vec![0, 65_535]
+        ));
+    }
     use makepad_mbtile_reader::MbtilesWriter;
 
     fn test_map(cx: &mut Cx) -> MapView {
@@ -9841,6 +9900,48 @@ mod tests {
             crate::script_mod(vm);
             MapView::script_new_with_default(vm)
         })
+    }
+
+    #[test]
+    fn map_typed_shader_layouts_match_upload_strides() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let map = test_map(&mut cx);
+        let fill = geometry_layout(&cx, &map.draw_fill.draw_vars).expect("fill shader initialised");
+        let road = geometry_layout(&cx, &map.draw_road.draw_vars).expect("road shader initialised");
+        let roof = geometry_layout(&cx, &map.draw_roof.draw_vars).expect("roof shader initialised");
+        assert_eq!(fill.stride_bytes, 16);
+        assert_eq!(road.stride_bytes, 28);
+        assert_eq!(roof.stride_bytes, 16);
+        assert_eq!(
+            fill.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::U16x2,
+            ]
+        );
+        assert_eq!(
+            road.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::F32x1,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::F16x2,
+            ]
+        );
+        assert_eq!(
+            roof.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F32x1,
+                DrawShaderAttrFormat::F16x2,
+            ]
+        );
     }
 
     fn temp_mbtiles_with_zoom(

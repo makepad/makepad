@@ -13,8 +13,8 @@ use super::tile::{
     load_local_tile_batch, TileBuffers, SHADOW_DISC_INSTANCE_FLOATS,
 };
 use crate::makepad_draw::vector::{
-    FILL_PACKED_FLOATS_PER_VERTEX, ROAD_PACKED_FLOATS_PER_VERTEX, ROOF_PACKED_FLOATS_PER_VERTEX,
-    VECTOR_FLOATS_PER_VERTEX, VECTOR_PACKED_FLOATS_PER_VERTEX,
+    decode_fill_vertex, decode_road_vertex, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
+    ROOF_TYPED_VERTEX_BYTES, VECTOR_FLOATS_PER_VERTEX, VECTOR_PACKED_FLOATS_PER_VERTEX,
 };
 use makepad_mbtile_reader::TileArchiveReader;
 use std::path::{Path, PathBuf};
@@ -65,28 +65,32 @@ fn start_view_tiles() -> Vec<TileKey> {
 }
 
 /// Every vertex/index stream of a bake, in the order the tile struct lists
-/// them: (name, vertex floats, index count, vertex stride).
+/// them: (name, vertex count, index count, real upload bytes).
 fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
-    [
-        ("fill", b.fill_vertices.len(), b.fill_indices.len(), FILL_PACKED_FLOATS_PER_VERTEX),
+    let bytes = b.stream_bytes();
+    let streams = [
+        ("fill", b.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES, b.fill_indices.len()),
         (
             "fill_misc",
-            b.fill_misc_vertices.len(),
+            b.fill_misc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             b.fill_misc_indices.len(),
-            VECTOR_PACKED_FLOATS_PER_VERTEX,
         ),
-        ("casing", b.casing_vertices.len(), b.casing_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
-        ("stroke", b.stroke_vertices.len(), b.stroke_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
-        ("fringe", b.fringe_vertices.len(), b.fringe_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
-        ("icon", b.icon_vertices.len(), b.icon_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("icon_high", b.icon_high_vertices.len(), b.icon_high_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("road_icon", b.road_icon_vertices.len(), b.road_icon_indices.len(), VECTOR_FLOATS_PER_VERTEX),
-        ("fill_3d", b.fill_3d_vertices.len(), b.fill_3d_indices.len(), ROOF_PACKED_FLOATS_PER_VERTEX),
-        ("fill_3d_misc", b.fill_3d_misc_vertices.len(), b.fill_3d_misc_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("wall", b.wall_vertices.len(), b.wall_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("tree", b.tree_vertices.len(), b.tree_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("tree_cross", b.tree_cross_vertices.len(), b.tree_cross_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-    ]
+        ("casing", b.casing_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.casing_indices.len()),
+        ("stroke", b.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.stroke_indices.len()),
+        ("fringe", b.fringe_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.fringe_indices.len()),
+        ("icon", b.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.icon_indices.len()),
+        ("icon_high", b.icon_high_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.icon_high_indices.len()),
+        ("road_icon", b.road_icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX, b.road_icon_indices.len()),
+        ("fill_3d", b.fill_3d_vertices.len() / ROOF_TYPED_VERTEX_BYTES, b.fill_3d_indices.len()),
+        ("fill_3d_misc", b.fill_3d_misc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.fill_3d_misc_indices.len()),
+        ("wall", b.wall_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.wall_indices.len()),
+        ("tree", b.tree_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.tree_indices.len()),
+        ("tree_cross", b.tree_cross_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, b.tree_cross_indices.len()),
+    ];
+    std::array::from_fn(|index| {
+        let (name, vertices, indices) = streams[index];
+        (name, vertices, indices, bytes[index])
+    })
 }
 
 fn mib(bytes: usize) -> f64 {
@@ -106,28 +110,26 @@ fn classify_packed(vertices: &[f32], into: &mut std::collections::BTreeMap<(i32,
 }
 
 fn classify_fill_packed(
-    vertices: &[f32],
+    vertices: &[u8],
     into: &mut std::collections::BTreeMap<(i32, i32), usize>,
 ) {
-    use crate::makepad_draw::vector::unpack_pair_f16;
-    for record in vertices.chunks_exact(FILL_PACKED_FLOATS_PER_VERTEX) {
-        let code = unpack_pair_f16(record[3]).0.round() as i32;
+    for record in vertices.chunks_exact(FILL_TYPED_VERTEX_BYTES) {
+        let code = decode_fill_vertex(record).params.to_f32().0.round() as i32;
         let (shape_id, material) = match code {
             30 | 32 => (code, 5),
             31 => (code, 0),
             material => (0, material),
         };
-        *into.entry((shape_id, material)).or_default() += FILL_PACKED_FLOATS_PER_VERTEX * 4;
+        *into.entry((shape_id, material)).or_default() += FILL_TYPED_VERTEX_BYTES;
     }
 }
 
 fn classify_road_packed(
-    vertices: &[f32],
+    vertices: &[u8],
     into: &mut std::collections::BTreeMap<(i32, i32), usize>,
 ) {
-    use crate::makepad_draw::vector::unpack_pair_f16;
-    for record in vertices.chunks_exact(8) {
-        let meta = unpack_pair_f16(record[4]).0 % 1024.0;
+    for record in vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+        let meta = decode_road_vertex(record).params.to_f32().0 % 1024.0;
         let kind = (meta / 256.0).floor() as i32;
         let dash = ((meta % 256.0) / 64.0).floor() as i32;
         let low = meta % 64.0;
@@ -142,7 +144,7 @@ fn classify_road_packed(
             }
         };
         let material = if kind == 1 { (low / 8.0).floor() as i32 } else { 0 };
-        *into.entry((shape_id, material)).or_default() += 8 * 4;
+        *into.entry((shape_id, material)).or_default() += ROAD_TYPED_VERTEX_BYTES;
     }
 }
 
@@ -226,9 +228,9 @@ fn amsterdam_start_view_bake_report() {
         let b = &tile.buffers;
         let per_stream = streams(b);
         let bytes = b.byte_size();
-        let verts: usize = per_stream.iter().map(|(_, v, _, stride)| v / stride).sum();
-        for (slot, (_, v, i, _)) in per_stream.iter().enumerate() {
-            stream_totals[slot] += (v + i) * 4;
+        let verts: usize = per_stream.iter().map(|(_, vertices, _, _)| vertices).sum();
+        for (slot, (_, _, _, bytes)) in per_stream.iter().enumerate() {
+            stream_totals[slot] += bytes;
         }
         total_raw += raw.len();
         total_mvt += mvt;
@@ -237,7 +239,7 @@ fn amsterdam_start_view_bake_report() {
         baked += 1;
         let cols: Vec<String> = per_stream
             .iter()
-            .map(|(_, v, i, _)| format!("{:.1}", mib((v + i) * 4)))
+            .map(|(_, _, _, bytes)| format!("{:.1}", mib(*bytes)))
             .collect();
         let icon_count: usize = b
             .icon_instances

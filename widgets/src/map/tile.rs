@@ -7,6 +7,7 @@ use crate::makepad_draw::vector::{
     append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
     is_compact_roof_record, pack_fill_vertices, pack_road_vertices, pack_roof_vertices,
     pack_vector_vertices,
+    FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES, ROOF_TYPED_VERTEX_BYTES,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -351,20 +352,20 @@ impl IconInstances {
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
     pub fill_indices: Vec<u32>,
-    pub fill_vertices: Vec<f32>,
+    pub fill_vertices: Vec<u8>,
     pub fill_misc_indices: Vec<u32>,
     pub fill_misc_vertices: Vec<f32>,
-    /// Compact eight-float `RoadVertexPacked` records: GPU-expandable strokes
+    /// Typed 28-byte `RoadVertexTyped` records: GPU-expandable strokes
     /// (shape >= 100) and shape-0 Boolean union faces.
     pub casing_indices: Vec<u32>,
-    pub casing_vertices: Vec<f32>,
-    /// Compact eight-float `RoadVertexPacked` records. Rails, dashed tunnels
+    pub casing_vertices: Vec<u8>,
+    /// Typed 28-byte `RoadVertexTyped` records. Rails, dashed tunnels
     /// and other patterned lines go through `append_expanded_stroke_geometry`
     /// (shape 11/12 become 111/112); plaza fills are shape-0. Oneway arrows
     /// stay in `icon_*` / `road_icon_*`. No leftover non-road shapes, so
     /// there is no `stroke_misc` stream.
     pub stroke_indices: Vec<u32>,
-    pub stroke_vertices: Vec<f32>,
+    pub stroke_vertices: Vec<u8>,
     /// Vertex-baked symbols that must ride the map plane: road-surface
     /// decals (oneway arrows). Free-standing POI symbols are instances.
     pub icon_indices: Vec<u32>,
@@ -382,15 +383,15 @@ pub struct TileBuffers {
     /// Tree/signal contact-shadow discs, drawn only into the shadow mask.
     pub shadow_disc_instances: Vec<f32>,
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band),
-    /// stored as compact eight-float `RoadVertexPacked` records and drawn
+    /// stored as typed 28-byte `RoadVertexTyped` records and drawn
     /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
     pub fringe_indices: Vec<u32>,
-    pub fringe_vertices: Vec<f32>,
+    pub fringe_vertices: Vec<u8>,
     /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
     /// tilt so the far field skips its vertex mass.
     pub fill_3d_indices: Vec<u32>,
-    pub fill_3d_vertices: Vec<f32>,
-    /// Lifted records that cannot use `RoofVertexPacked`.
+    pub fill_3d_vertices: Vec<u8>,
+    /// Lifted records that cannot use `RoofVertexTyped`.
     pub fill_3d_misc_indices: Vec<u32>,
     pub fill_3d_misc_vertices: Vec<f32>,
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
@@ -430,44 +431,45 @@ pub struct TileBuffers {
     pub stage_summary: String,
 }
 
+fn typed_stream_byte_size(vertex_bytes: usize, stride: usize, index_count: usize) -> usize {
+    let vertex_count = vertex_bytes / stride;
+    vertex_bytes + index_count * if vertex_count < 65_536 { 2 } else { 4 }
+}
+
 impl TileBuffers {
+    /// Byte sizes for the report's thirteen named mesh streams. The typed
+    /// streams account for the per-tile u16/u32 index choice; legacy streams
+    /// remain f32 vertices with u32 indices.
+    pub fn stream_bytes(&self) -> [usize; 13] {
+        [
+            typed_stream_byte_size(self.fill_vertices.len(), FILL_TYPED_VERTEX_BYTES, self.fill_indices.len()),
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            typed_stream_byte_size(self.casing_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.casing_indices.len()),
+            typed_stream_byte_size(self.stroke_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.stroke_indices.len()),
+            typed_stream_byte_size(self.fringe_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.fringe_indices.len()),
+            (self.icon_vertices.len() + self.icon_indices.len()) * 4,
+            (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
+            (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
+            typed_stream_byte_size(self.fill_3d_vertices.len(), ROOF_TYPED_VERTEX_BYTES, self.fill_3d_indices.len()),
+            (self.fill_3d_misc_vertices.len() + self.fill_3d_misc_indices.len()) * 4,
+            (self.wall_vertices.len() + self.wall_indices.len()) * 4,
+            (self.tree_vertices.len() + self.tree_indices.len()) * 4,
+            (self.tree_cross_vertices.len() + self.tree_cross_indices.len()) * 4,
+        ]
+    }
+
     /// Geometry byte footprint (vertex + index data).
     pub fn byte_size(&self) -> usize {
-        (self.fill_indices.len()
-            + self.fill_vertices.len()
-            + self.fill_misc_indices.len()
-            + self.fill_misc_vertices.len()
-            + self.casing_indices.len()
-            + self.casing_vertices.len()
-            + self.stroke_indices.len()
-            + self.stroke_vertices.len()
-            + self.icon_indices.len()
-            + self.icon_high_indices.len()
-            + self.icon_high_vertices.len()
-            + self.fringe_indices.len()
-            + self.fringe_vertices.len()
-            + self.fill_3d_indices.len()
-            + self.fill_3d_vertices.len()
-            + self.fill_3d_misc_indices.len()
-            + self.fill_3d_misc_vertices.len()
-            + self.wall_indices.len()
-            + self.wall_vertices.len()
-            + self.tree_indices.len()
-            + self.tree_vertices.len()
-            + self.tree_cross_indices.len()
-            + self.tree_cross_vertices.len()
-            + self.shadow_disc_instances.len()
-            + self.icon_vertices.len()
-            + self.road_icon_indices.len()
-            + self.road_icon_vertices.len()
-            + self.tree_template_indices.len()
-            + self.tree_template_vertices.len()
-            + self.tree_cross_template_indices.len()
-            + self.tree_cross_template_vertices.len()
-            + self.tree_instances.len()
-            + self.wall_instances.len()
-            + self.icon_instance_floats())
-            * 4
+        self.stream_bytes().into_iter().sum::<usize>()
+            + (self.shadow_disc_instances.len()
+                + self.tree_template_indices.len()
+                + self.tree_template_vertices.len()
+                + self.tree_cross_template_indices.len()
+                + self.tree_cross_template_vertices.len()
+                + self.tree_instances.len()
+                + self.wall_instances.len()
+                + self.icon_instance_floats())
+                * 4
     }
 
     /// Instance floats across both icon bands.
@@ -3226,10 +3228,22 @@ fn profile_clock_elapsed_is_non_negative() {
 
 #[cfg(test)]
 #[test]
+fn typed_stream_bytes_switch_indices_at_u16_vertex_limit() {
+    assert_eq!(
+        typed_stream_byte_size(65_535 * 16, 16, 9),
+        65_535 * 16 + 9 * 2
+    );
+    assert_eq!(
+        typed_stream_byte_size(65_536 * 16, 16, 9),
+        65_536 * 16 + 9 * 4
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn compact_fill_record_roundtrips_within_packed_precision() {
     use crate::makepad_draw::vector::{
-        pack_fill_record, unpack_fill_depths, unpack_pair_f16,
-        FILL_PACKED_FLOATS_PER_VERTEX,
+        pack_fill_record, unpack_fill_depths, unpack_typed_position,
     };
 
     let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
@@ -3244,21 +3258,24 @@ fn compact_fill_record_roundtrips_within_packed_precision() {
     record[18] = 0.004321;
 
     let packed = pack_fill_record(&record).unwrap();
-    assert_eq!(packed.len(), FILL_PACKED_FLOATS_PER_VERTEX);
     assert_eq!(
-        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::FillVertexPacked>(),
-        20
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::FillVertexTyped>(),
+        16
     );
-    assert_eq!((packed[0], packed[1]), (record[0], record[1]));
-    let (code, coverage) = unpack_pair_f16(packed[3]);
+    let pos = unpack_typed_position(packed.pos);
+    assert!((pos.0 - record[0]).abs() <= 1.0 / 64.0);
+    assert!((pos.1 - record[1]).abs() <= 1.0 / 64.0);
+    let (code, coverage) = packed.params.to_f32();
     assert_eq!(code, 30.0);
     assert!((coverage - record[2]).abs() <= 0.00025);
-    let rgba = packed[2].to_bits();
-    for (channel, shift) in record[4..8].iter().zip([0, 8, 16, 24]) {
-        let unpacked = ((rgba >> shift) & 0xff) as f32 / 255.0;
+    let rgba = packed.color.to_f32();
+    for (channel, unpacked) in record[4..8]
+        .iter()
+        .zip([rgba.0, rgba.1, rgba.2, rgba.3])
+    {
         assert!((unpacked - channel).abs() <= 0.5 / 255.0 + f32::EPSILON);
     }
-    let (zbias, param5) = unpack_fill_depths(packed[4]);
+    let (zbias, param5) = unpack_fill_depths(packed.zbias);
     assert!((zbias - record[18]).abs() <= VECTOR_ZBIAS_STEP * 0.5 + f32::EPSILON);
     assert!((param5 - record[16]).abs() <= 0.000005 + f32::EPSILON);
 }
@@ -3266,12 +3283,12 @@ fn compact_fill_record_roundtrips_within_packed_precision() {
 #[cfg(test)]
 #[test]
 fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
-    use crate::makepad_draw::geometry::geometry_gen::RoadVertexPacked;
+    use crate::makepad_draw::geometry::geometry_gen::RoadVertexTyped;
     use crate::makepad_draw::vector::{
-        unpack_pair_f16, ROAD_PACKED_FLOATS_PER_VERTEX, ROAD_PARAM_KIND_SCALE,
+        decode_road_vertex, ROAD_PARAM_KIND_SCALE, ROAD_TYPED_VERTEX_BYTES,
     };
 
-    assert_eq!(std::mem::size_of::<RoadVertexPacked>(), 32);
+    assert_eq!(std::mem::size_of::<RoadVertexTyped>(), 28);
     let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
     record[0] = 14.0;
     record[1] = 27.0;
@@ -3287,24 +3304,25 @@ fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
     record[16] = 0.384;
     record[18] = 321.0 * VECTOR_ZBIAS_STEP;
     let packed = pack_road_vertices(&record);
-    assert_eq!(packed.len(), ROAD_PACKED_FLOATS_PER_VERTEX);
-    let (ox, oy) = unpack_pair_f16(packed[2]);
+    assert_eq!(packed.len(), ROAD_TYPED_VERTEX_BYTES);
+    let packed = decode_road_vertex(&packed);
+    let (ox, oy) = packed.off.to_f32();
     assert!((ox + 1.75).abs() < 0.002 && (oy - 2.5).abs() < 0.002);
-    let rgba = packed[3].to_bits().to_le_bytes();
-    for (actual, expected) in rgba
+    let rgba = packed.color.to_f32();
+    for (actual, expected) in [rgba.0, rgba.1, rgba.2, rgba.3]
         .into_iter()
         .zip([0.1f32, 0.3, 0.7, 1.0])
     {
-        assert!((actual as f32 / 255.0 - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
     }
-    let (meta, stroke_dist) = unpack_pair_f16(packed[4]);
+    let (meta, stroke_dist) = packed.params.to_f32();
     assert_eq!(meta, 1.0 + 64.0 * 3.0 + 1024.0);
     assert_eq!(stroke_dist, record[9]);
-    assert_eq!(packed[5], 100.25);
-    let (param5, zbias_ticks) = unpack_pair_f16(packed[6]);
+    assert_eq!(packed.deck, 100.25);
+    let (param5, zbias_ticks) = packed.depth.to_f32();
     assert!((param5 - record[16]).abs() < 0.0002);
     assert_eq!(zbias_ticks, 321.0);
-    let (u, v) = unpack_pair_f16(packed[7]);
+    let (u, v) = packed.uv.to_f32();
     assert!((u - record[2]).abs() < 0.001);
     assert!((v - record[3]).abs() < 0.001);
 
@@ -3313,11 +3331,11 @@ fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
     record[8] = VECTOR_ANALYTIC_FRINGE_STROKE_MULT;
     record[10] = 0.0;
     record[14] = 3.0;
-    let packed = pack_road_vertices(&record);
-    let (meta, coverage) = unpack_pair_f16(packed[4]);
+    let packed = decode_road_vertex(&pack_road_vertices(&record));
+    let (meta, coverage) = packed.params.to_f32();
     assert_eq!(meta, 24.0 + ROAD_PARAM_KIND_SCALE * 2.0);
     assert_eq!(coverage, 0.0);
-    let (u, v) = unpack_pair_f16(packed[7]);
+    let (u, v) = packed.uv.to_f32();
     assert_eq!(u, -1.0);
     assert!((v - 0.375).abs() < 0.001);
 
@@ -3325,8 +3343,8 @@ fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
     record[8] = 1e6;
     record[12] = 0.35;
     record[14] = 7.0;
-    let packed = pack_road_vertices(&record);
-    let (meta, emissive) = unpack_pair_f16(packed[4]);
+    let packed = decode_road_vertex(&pack_road_vertices(&record));
+    let (meta, emissive) = packed.params.to_f32();
     assert_eq!(meta, 8.0 * 7.0 + ROAD_PARAM_KIND_SCALE);
     assert!((emissive - 0.35).abs() < 0.001);
 }
@@ -3335,7 +3353,7 @@ fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
 #[test]
 fn split_fringe_band_then_road_pack_round_trips() {
     use crate::makepad_draw::vector::{
-        unpack_pair_f16, ROAD_PACKED_FLOATS_PER_VERTEX, ROAD_PARAM_KIND_SCALE,
+        decode_road_vertex, ROAD_PARAM_KIND_SCALE, ROAD_TYPED_VERTEX_BYTES,
     };
 
     fn push_record(buf: &mut Vec<f32>, x: f32, u: f32, stroke_mult: f32) {
@@ -3364,15 +3382,15 @@ fn split_fringe_band_then_road_pack_round_trips() {
     assert_eq!(fringe_indices, vec![0, 1, 2]);
 
     let packed_body = pack_road_vertices(&vertices);
-    assert_eq!(packed_body.len(), ROAD_PACKED_FLOATS_PER_VERTEX * 3);
-    let (meta, coverage) = unpack_pair_f16(packed_body[4]);
+    assert_eq!(packed_body.len(), ROAD_TYPED_VERTEX_BYTES * 3);
+    let (meta, coverage) = decode_road_vertex(&packed_body).params.to_f32();
     assert_eq!(meta, ROAD_PARAM_KIND_SCALE);
     assert!((coverage - 0.5).abs() < 0.001);
 
     let packed_fringe = pack_road_vertices(&fringe_vertices);
-    assert_eq!(packed_fringe.len(), ROAD_PACKED_FLOATS_PER_VERTEX * 3);
-    let (meta0, cov0) = unpack_pair_f16(packed_fringe[4]);
-    let (meta1, cov1) = unpack_pair_f16(packed_fringe[4 + ROAD_PACKED_FLOATS_PER_VERTEX]);
+    assert_eq!(packed_fringe.len(), ROAD_TYPED_VERTEX_BYTES * 3);
+    let (meta0, cov0) = decode_road_vertex(&packed_fringe).params.to_f32();
+    let (meta1, cov1) = decode_road_vertex(&packed_fringe[ROAD_TYPED_VERTEX_BYTES..]).params.to_f32();
     assert_eq!(meta0, ROAD_PARAM_KIND_SCALE * 2.0);
     assert_eq!(meta1, ROAD_PARAM_KIND_SCALE * 2.0);
     assert!((cov0 - 1.0).abs() < 0.001);
@@ -3383,7 +3401,7 @@ fn split_fringe_band_then_road_pack_round_trips() {
 #[test]
 fn compact_roof_record_keeps_exact_height_and_rejects_extra_depth() {
     use crate::makepad_draw::vector::{
-        pack_roof_record, unpack_pair_f16, ROOF_PACKED_FLOATS_PER_VERTEX,
+        pack_roof_record, unpack_typed_position,
     };
 
     let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
@@ -3400,13 +3418,15 @@ fn compact_roof_record_keeps_exact_height_and_rejects_extra_depth() {
     record[18] = 0.0015;
 
     let packed = pack_roof_record(&record).unwrap();
-    assert_eq!(packed.len(), ROOF_PACKED_FLOATS_PER_VERTEX);
     assert_eq!(
-        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::RoofVertexPacked>(),
-        20
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::RoofVertexTyped>(),
+        16
     );
-    assert_eq!(packed[3], record[15]);
-    let (material, zbias_ticks) = unpack_pair_f16(packed[4]);
+    let pos = unpack_typed_position(packed.pos);
+    assert!((pos.0 - record[0]).abs() <= 1.0 / 64.0);
+    assert!((pos.1 - record[1]).abs() <= 1.0 / 64.0);
+    assert_eq!(packed.height, record[15]);
+    let (material, zbias_ticks) = packed.params.to_f32();
     assert_eq!(material, MAT_ROOF);
     assert_eq!(zbias_ticks, 1500.0);
 
@@ -6904,7 +6924,7 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
-    // Ordinary lifted shape-0 roofs use the 20-byte roof layout. Parapet
+    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout. Parapet
     // depth variants, marker stalks, signals and any future gradient or
     // patterned roof remain byte-for-byte on the generic vector path.
     let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
@@ -10076,59 +10096,63 @@ mod bridge_probe_tests {
                 // runtime-vs-runtime must show the same equivalence as
                 // baked-vs-runtime (proving the bake adds no divergence
                 // beyond the pre-existing jitter).
-                let vert_multiset = |verts: &[f32]| -> Vec<Vec<u32>> {
-                    let mut rows: Vec<Vec<u32>> = verts
-                        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+                let vert_multiset = |verts: &[u8], stride: usize, depth_at: usize| -> Vec<Vec<u8>> {
+                    let mut rows: Vec<Vec<u8>> = verts
+                        .chunks_exact(stride)
                         .map(|chunk| {
                             chunk
                                 .iter()
                                 .enumerate()
-                                .filter(|(i, _)| *i != 16 && *i != 18)
-                                .map(|(_, v)| v.to_bits())
+                                .filter(|(i, _)| !(depth_at..depth_at + 4).contains(i))
+                                .map(|(_, &byte)| byte)
                                 .collect()
                         })
                         .collect();
                     rows.sort_unstable();
                     rows
                 };
-                for (name, a, b, c) in [
+                for (name, a, b, c, stride, depth_at) in [
                     (
                         "casing",
                         &runtime.casing_vertices,
                         &runtime2.casing_vertices,
                         &baked_build.casing_vertices,
+                        ROAD_TYPED_VERTEX_BYTES,
+                        20,
                     ),
                     (
                         "stroke",
                         &runtime.stroke_vertices,
                         &runtime2.stroke_vertices,
                         &baked_build.stroke_vertices,
+                        ROAD_TYPED_VERTEX_BYTES,
+                        20,
                     ),
                     (
                         "fill",
                         &runtime.fill_vertices,
                         &runtime2.fill_vertices,
                         &baked_build.fill_vertices,
+                        FILL_TYPED_VERTEX_BYTES,
+                        12,
                     ),
                 ] {
-                    let ma = vert_multiset(a);
+                    let ma = vert_multiset(a, stride, depth_at);
                     assert_eq!(
                         ma,
-                        vert_multiset(b),
+                        vert_multiset(b, stride, depth_at),
                         "{name} runtime-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}"
                     );
-                    let mc = vert_multiset(c);
+                    let mc = vert_multiset(c, stride, depth_at);
                     if ma != mc {
                         let only_a: Vec<_> = ma.iter().filter(|r| !mc.contains(r)).take(3).collect();
                         let only_c: Vec<_> = mc.iter().filter(|r| !ma.contains(r)).take(3).collect();
                         println!("{name}: rows {} vs {}", ma.len(), mc.len());
                         for r in &only_a {
-                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
-                            println!("  only-runtime: {:?}", &f[..8.min(f.len())]);
+                            println!("  only-runtime: {:?}", &r[..16.min(r.len())]);
                         }
                         for r in &only_c {
-                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
-                            println!("  only-baked:   {:?}", &f[..8.min(f.len())]);
+                            println!("  only-baked:   {:?}", &r[..16.min(r.len())]);
                         }
                         panic!("{name} baked-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}");
                     }
@@ -11350,6 +11374,9 @@ mod bridge_probe_tests {
     #[ignore]
     fn seam_probe() {
         use super::*;
+        use crate::makepad_draw::vector::{
+            decode_road_vertex, unpack_typed_position, ROAD_TYPED_VERTEX_BYTES,
+        };
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
@@ -11374,11 +11401,14 @@ mod bridge_probe_tests {
         )
         .unwrap();
         let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
-        for chunk in buffers.casing_vertices.chunks_exact(19) {
-            let (x, y, deck, p5) = (chunk[0], chunk[1], chunk[15], chunk[16]);
-            let color = ((chunk[4] * 255.0) as u32) << 16
-                | ((chunk[5] * 255.0) as u32) << 8
-                | (chunk[6] * 255.0) as u32;
+        for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+            let vertex = decode_road_vertex(chunk);
+            let (x, y) = unpack_typed_position(vertex.pos);
+            let deck = vertex.deck;
+            let p5 = vertex.depth.to_f32().0;
+            let color = (vertex.color.0[0] as u32) << 16
+                | (vertex.color.0[1] as u32) << 8
+                | vertex.color.0[2] as u32;
             if deck > 0.3 && (120.0..262.0).contains(&x) && (170.0..255.0).contains(&y) {
                 rows.push((
                     x.round() as i32,
@@ -11449,12 +11479,14 @@ mod bridge_probe_tests {
         for (tag, buffers, x_off) in
             [('A', &buffers, 0.0f32), ('B', &buffers_b, 256.0)]
         {
-            for chunk in buffers.casing_vertices.chunks_exact(19) {
-                let (x, y, deck) = (chunk[0], chunk[1], chunk[15]);
+            for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+                let vertex = decode_road_vertex(chunk);
+                let (x, y) = unpack_typed_position(vertex.pos);
+                let deck = vertex.deck;
                 let gx = x + x_off;
-                let color = ((chunk[4] * 255.0) as u32) << 16
-                    | ((chunk[5] * 255.0) as u32) << 8
-                    | (chunk[6] * 255.0) as u32;
+                let color = (vertex.color.0[0] as u32) << 16
+                    | (vertex.color.0[1] as u32) << 8
+                    | vertex.color.0[2] as u32;
                 // Road surface colors only (motorway center + casing).
                 if deck > 0.3
                     && (252.0..261.0).contains(&gx)
@@ -11628,6 +11660,7 @@ mod bridge_probe_tests {
     #[ignore] // needs local bake output
     fn probe_bridge_dz_load() {
         use super::*;
+        use crate::makepad_draw::vector::{decode_road_vertex, ROAD_TYPED_VERTEX_BYTES};
         let path = std::path::Path::new("../local/maps/nl-bridge-dz.mbtiles");
         assert!(path.is_file(), "no bake output at {}", path.display());
         let mut reader = MbtilesReader::open(path).unwrap();
@@ -11670,11 +11703,10 @@ mod bridge_probe_tests {
         .unwrap();
         println!("loaded {} failed {}", loaded.len(), failed.len());
         let buffers = &loaded[0].buffers;
-        let floats_per_vertex = 19;
         let mut decked = 0usize;
         let mut max_deck = 0.0f32;
-        for chunk in buffers.stroke_vertices.chunks_exact(floats_per_vertex) {
-            let deck = chunk[15];
+        for chunk in buffers.stroke_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+            let deck = decode_road_vertex(chunk).deck;
             if deck > 0.3 {
                 decked += 1;
                 max_deck = max_deck.max(deck);
@@ -11682,7 +11714,7 @@ mod bridge_probe_tests {
         }
         println!(
             "stroke verts {} decked {} max {:.1}",
-            buffers.stroke_vertices.len() / floats_per_vertex,
+            buffers.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES,
             decked,
             max_deck
         );
@@ -11791,12 +11823,13 @@ mod bridge_probe_tests {
         );
 
         // Oneway arrows: count map-aligned icon glyphs and their lifts.
+        use crate::makepad_draw::vector::unpack_pair_f16;
         let mut arrows = 0;
         let mut lifted_arrows = 0;
-        for chunk in buffers.icon_vertices.chunks_exact(floats_per_vertex) {
-            let shape = chunk[10];
-            let param3 = chunk[14];
-            let param4 = chunk[15];
+        for chunk in buffers.icon_vertices.chunks_exact(VECTOR_PACKED_FLOATS_PER_VERTEX) {
+            let shape = unpack_pair_f16(chunk[6]).1;
+            let param3 = unpack_pair_f16(chunk[8]).0;
+            let param4 = chunk[9];
             if (shape - 20.0).abs() < 0.1 && (param3 - 2.0).abs() < 0.1 {
                 arrows += 1;
                 if param4.abs() > 0.05 {
@@ -11998,7 +12031,7 @@ mod bridge_probe_tests {
                 "tile z{} icons {} strokes {} labels {}",
                 tile.tile_key.z,
                 tile.buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-                tile.buffers.stroke_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                tile.buffers.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES,
                 tile.buffers.labels.len()
             );
         }
@@ -12231,7 +12264,7 @@ mod bridge_probe_tests {
                     best,
                     best,
                     buffers.feature_count,
-                    buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                    buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
                 );
                 continue;
             }
@@ -12274,7 +12307,7 @@ mod bridge_probe_tests {
                 best,
                 best,
                 buffers.feature_count,
-                buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
             );
             println!(
                 "                  icons {} labels {}",
@@ -12288,6 +12321,9 @@ mod bridge_probe_tests {
     #[test]
     #[ignore]
     fn weesperplein_tear_probe() {
+        use crate::makepad_draw::vector::{
+            decode_road_vertex, unpack_typed_position, ROAD_TYPED_VERTEX_BYTES,
+        };
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
         let dz_name = std::env::var("TEAR_DZ")
@@ -12335,29 +12371,32 @@ mod bridge_probe_tests {
             use std::collections::HashMap;
             let mut groups: HashMap<(u32, u32, u32), (f32, f32, f32, f32, f32, f32, usize)> =
                 HashMap::new();
-            for v in verts.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
-                let deck = v[15];
+            for record in verts.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+                let vertex = decode_road_vertex(record);
+                let pos = unpack_typed_position(vertex.pos);
+                let deck = vertex.deck;
                 // Weesperplein plaza window; report every vertex incl.
                 // grounded so the full layer stack is visible.
                 let win = std::env::var("TEAR_WIN").unwrap_or_else(|_| "88,118,86,120".to_string());
                 let mut wv = win.split(',').map(|v| v.parse::<f32>().unwrap());
                 let (wx0, wx1, wy0, wy1) = (wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap());
-                if v[0] < wx0 || v[0] > wx1 || v[1] < wy0 || v[1] > wy1 {
+                if pos.0 < wx0 || pos.0 > wx1 || pos.1 < wy0 || pos.1 > wy1 {
                     continue;
                 }
                 let _ = deck;
-                let color_key = ((v[4] * 15.0) as u32) << 8
-                    | ((v[5] * 15.0) as u32) << 4
-                    | (v[6] * 15.0) as u32;
-                let p5_key = (v[16] * 1000.0) as u32;
-                let shape_key = v[10] as u32;
+                let color = vertex.color.to_f32();
+                let color_key = ((color.0 * 15.0) as u32) << 8
+                    | ((color.1 * 15.0) as u32) << 4
+                    | (color.2 * 15.0) as u32;
+                let p5_key = (vertex.depth.to_f32().0 * 1000.0) as u32;
+                let shape_key = vertex.params.to_f32().0 as u32;
                 let entry = groups
                     .entry((color_key, p5_key, shape_key))
                     .or_insert((f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MAX, f32::MIN, 0));
-                entry.0 = entry.0.min(v[0]);
-                entry.1 = entry.1.min(v[1]);
-                entry.2 = entry.2.max(v[0]);
-                entry.3 = entry.3.max(v[1]);
+                entry.0 = entry.0.min(pos.0);
+                entry.1 = entry.1.min(pos.1);
+                entry.2 = entry.2.max(pos.0);
+                entry.3 = entry.3.max(pos.1);
                 entry.4 = entry.4.min(deck);
                 entry.5 = entry.5.max(deck);
                 entry.6 += 1;
@@ -12370,7 +12409,7 @@ mod bridge_probe_tests {
                     *p5 as f32 / 1000.0
                 );
             }
-            println!("-- {name} total verts {}", verts.len() / VECTOR_FLOATS_PER_VERTEX);
+            println!("-- {name} total verts {}", verts.len() / ROAD_TYPED_VERTEX_BYTES);
         }
         // SVG dump of the window's triangles in draw order (casing pass):
         // the tear must show as literal holes/overdraw in here.
@@ -12383,28 +12422,36 @@ mod bridge_probe_tests {
             );
             let mut tris = 0usize;
             for tri in indices.chunks_exact(3) {
-                let v0 = &verts[tri[0] as usize * VECTOR_FLOATS_PER_VERTEX..];
-                let v1 = &verts[tri[1] as usize * VECTOR_FLOATS_PER_VERTEX..];
-                let v2 = &verts[tri[2] as usize * VECTOR_FLOATS_PER_VERTEX..];
+                let decode = |index: u32| {
+                    let at = index as usize * ROAD_TYPED_VERTEX_BYTES;
+                    decode_road_vertex(&verts[at..at + ROAD_TYPED_VERTEX_BYTES])
+                };
+                let v0 = decode(tri[0]);
+                let v1 = decode(tri[1]);
+                let v2 = decode(tri[2]);
+                let p0 = unpack_typed_position(v0.pos);
+                let p1 = unpack_typed_position(v1.pos);
+                let p2 = unpack_typed_position(v2.pos);
                 let vb = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
                 let mut vbv = vb.split(' ').map(|v| v.parse::<f32>().unwrap());
                 let (bx, by, bw, bh) = (vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap());
-                let inside = |v: &[f32]| {
-                    v[0] > bx && v[0] < bx + bw && v[1] > by && v[1] < by + bh
+                let inside = |v: (f32, f32)| {
+                    v.0 > bx && v.0 < bx + bw && v.1 > by && v.1 < by + bh
                 };
-                if !(inside(v0) || inside(v1) || inside(v2)) {
+                if !(inside(p0) || inside(p1) || inside(p2)) {
                     continue;
                 }
-                let a = v0[7].max(0.001);
+                let color = v0.color.to_f32();
+                let a = color.3.max(0.001);
                 let rgb = (
-                    (v0[4] / a * 255.0).min(255.0) as u8,
-                    (v0[5] / a * 255.0).min(255.0) as u8,
-                    (v0[6] / a * 255.0).min(255.0) as u8,
+                    (color.0 / a * 255.0).min(255.0) as u8,
+                    (color.1 / a * 255.0).min(255.0) as u8,
+                    (color.2 / a * 255.0).min(255.0) as u8,
                 );
                 let _ = write!(
                     svg,
                     "<polygon points='{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}' fill='rgb({},{},{})' fill-opacity='{:.2}'/>\n",
-                    v0[0], v0[1], v1[0], v1[1], v2[0], v2[1], rgb.0, rgb.1, rgb.2, a
+                    p0.0, p0.1, p1.0, p1.1, p2.0, p2.1, rgb.0, rgb.1, rgb.2, a
                 );
                 tris += 1;
             }
@@ -12452,7 +12499,7 @@ mod bridge_probe_tests {
         .unwrap();
         println!(
             "fill verts {} icon verts {} shadow_disc instances {}",
-            buffers.fill_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
+            buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
             buffers.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             buffers.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS,
         );

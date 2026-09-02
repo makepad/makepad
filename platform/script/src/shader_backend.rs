@@ -1225,6 +1225,10 @@ impl ShaderBackend {
                 id_lut!(packed_half2);
                 id_lut!(packed_half3);
                 id_lut!(packed_half4);
+                id_lut!(packed_short2);
+                id_lut!(packed_ushort2);
+                id_lut!(uchar4);
+                id_lut!(char4);
                 id_lut!(packed_uint2);
                 id_lut!(packed_uint3);
                 id_lut!(packed_uint4);
