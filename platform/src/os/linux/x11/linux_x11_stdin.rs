@@ -2,7 +2,7 @@ use crate::{
     cx::Cx,
     cx_api::CxOsOp,
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-    event::{Event, WindowGeom, WindowGeomChangeEvent},
+    event::{Event, WindowGeom},
     gl_sys,
     makepad_math::*,
     makepad_micro_serde::*,
@@ -361,14 +361,10 @@ impl Cx {
                         old_geom.dpi_factor
                     );
                 }
-                self.windows[window_id].window_geom = new_geom.clone();
-                if geom_changed {
+                let re = self.windows.stdin_apply_native_geom(window_id, new_geom);
+                if geom_changed || re.old_geom != re.new_geom {
                     self.redraw_all();
-                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                        window_id,
-                        new_geom,
-                        old_geom,
-                    }));
+                    self.call_event_handler(&Event::WindowGeomChange(re));
                 }
                 let _ = Self::stdin_aux_chan_endpoint(aux_chan_client_endpoint);
             }
