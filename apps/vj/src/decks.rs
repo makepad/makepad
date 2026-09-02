@@ -1090,7 +1090,7 @@ impl DeckEngine {
         vec![DeckCmd::SeekFraction { deck, fraction: fraction.clamp(0.0, 1.0) }]
     }
 
-    /// RELOOP / EXIT, the CDJ's third loop button. Drop out of the running
+    /// RELOOP / EXIT, the third loop button. Drop out of the running
     /// loop keeping it for later, or jump back into the last one. Inert
     /// with nothing to return to — the fall-out-and-slam-back-in move is
     /// the whole reason this is not just another way to spell "off".
