@@ -1973,6 +1973,19 @@ impl AnalysisKey {
         AnalysisKey(format!("local-{hash:016x}"))
     }
 
+    /// A decoded-audio SHA-256 used by the stem/lyrics/analysis bakers.
+    pub fn from_digest(digest: &str) -> Result<AnalysisKey, String> {
+        if digest.len() != 64
+            || !digest
+                .as_bytes()
+                .iter()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err("analysis digest must be 64 lowercase hexadecimal characters".into());
+        }
+        Ok(AnalysisKey(digest.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -2129,14 +2142,24 @@ pub fn store_analysis(key: &AnalysisKey, analysis: &TrackAnalysis) {
 }
 
 fn store_cached(dir: &Path, key: &AnalysisKey, analysis: &TrackAnalysis) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
+    let _ = store_analysis_in(dir, key, analysis);
+}
+
+/// Write the native cache format into an explicitly selected cache root.
+/// Headless bakers use this entry point so their files are interchangeable
+/// with caches produced by the app.
+pub fn store_analysis_in(
+    dir: &Path,
+    key: &AnalysisKey,
+    analysis: &TrackAnalysis,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let path = cache_path(dir, key);
     let temporary = path.with_extension("wave.tmp");
-    if std::fs::write(&temporary, encode_analysis(analysis)).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
-    }
+    std::fs::write(&temporary, encode_analysis(analysis))
+        .map_err(|error| format!("{}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
 }
 
 /// Downmix deck PCM and band-limited resample it to Beat This!'s 22.05 kHz
