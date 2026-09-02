@@ -2620,14 +2620,38 @@ impl App {
         data.workspaces = workspaces;
         data.active_window = (!title.is_empty()).then_some(title);
         data.open_panel = self.shell_panel_open;
+        // The middle window control reads "restore" while maximized.
+        data.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
         let bar = self.ui.widget(cx, ids!(shell_bar));
         {
             let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
             if let Some(b) = borrowed.as_mut() {
                 b.data = data;
+                // Where the platform draws no caption buttons, the bar does.
+                b.window_controls = shell::bar::window_controls_default();
             }
         }
         self.redraw_all(cx);
+    }
+
+    /// The bar's window controls: the same three calls the stock caption
+    /// bar makes on its own buttons (widgets/src/window.rs).
+    fn window_control(&mut self, cx: &mut Cx, module: BarModule) -> bool {
+        let window = self.ui.window(cx, ids!(main_window));
+        match module {
+            BarModule::WindowMin => window.minimize(cx),
+            BarModule::WindowMax => {
+                if window.is_fullscreen(cx) {
+                    window.restore(cx);
+                } else {
+                    window.maximize(cx);
+                }
+            }
+            BarModule::WindowClose => window.close(cx),
+            _ => return false,
+        }
+        log!("wm: window control {:?}", module);
+        true
     }
 
     /// The bar IS this window's caption, so it has to be tall enough to
@@ -3713,6 +3737,14 @@ impl MatchEvent for App {
                     BarModule::ActiveWindow => {
                         if let Some(focus) = self.state_mut().layout.focused_client() {
                             self.focus_client(cx, focus);
+                        }
+                    }
+                    control @ (BarModule::WindowMin | BarModule::WindowMax | BarModule::WindowClose) => {
+                        // The gallery's bar is a picture of one: its
+                        // controls log (shell/gallery.rs), never close or
+                        // shrink the window they are drawn in.
+                        if !self.gallery {
+                            self.window_control(cx, control);
                         }
                     }
                     other => self.toggle_shell_panel(cx, other),

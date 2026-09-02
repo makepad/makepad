@@ -314,6 +314,9 @@ script_mod! {
             shirt +: {svg: crate_resource("self:resources/icons/shirt.svg")}
             pulse +: {svg: crate_resource("self:resources/icons/pulse.svg")}
             photo +: {svg: crate_resource("self:resources/icons/photo.svg")}
+            window_min +: {svg: crate_resource("self:resources/icons/window-min.svg")}
+            window_max +: {svg: crate_resource("self:resources/icons/window-max.svg")}
+            window_restore +: {svg: crate_resource("self:resources/icons/window-restore.svg")}
             speaker +: {svg: crate_resource("self:resources/icons/speaker.svg")}
             headphone +: {svg: crate_resource("self:resources/icons/headphone.svg")}
             lock +: {svg: crate_resource("self:resources/icons/lock.svg")}
@@ -422,6 +425,12 @@ pub struct ShellIcons {
     #[live]
     pub photo: DrawSvg,
     #[live]
+    pub window_min: DrawSvg,
+    #[live]
+    pub window_max: DrawSvg,
+    #[live]
+    pub window_restore: DrawSvg,
+    #[live]
     pub speaker: DrawSvg,
     #[live]
     pub headphone: DrawSvg,
@@ -471,6 +480,9 @@ pub enum Ico {
     Shirt,
     Pulse,
     Photo,
+    WindowMin,
+    WindowMax,
+    WindowRestore,
 }
 
 impl ShellIcons {
@@ -511,6 +523,9 @@ impl ShellIcons {
             Ico::Shirt => &mut self.shirt,
             Ico::Pulse => &mut self.pulse,
             Ico::Photo => &mut self.photo,
+            Ico::WindowMin => &mut self.window_min,
+            Ico::WindowMax => &mut self.window_max,
+            Ico::WindowRestore => &mut self.window_restore,
             Ico::Speaker => &mut self.speaker,
             Ico::Headphone => &mut self.headphone,
             Ico::Lock => &mut self.lock,

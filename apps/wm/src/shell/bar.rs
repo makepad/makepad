@@ -46,6 +46,13 @@ pub enum BarModule {
     Audio,
     Monitor,
     Power,
+    /// The window's own controls, at the far right where Windows and most
+    /// Linux desktops put them: the omarchy bar IS this window's caption,
+    /// and a client-sized frame draws none of its own. macOS keeps its
+    /// traffic lights on the left instead.
+    WindowMin,
+    WindowMax,
+    WindowClose,
 }
 
 /// One workspace pill.
@@ -92,6 +99,8 @@ pub struct BarData {
     pub battery: Option<Battery>,
     /// The module whose panel is open — it wears the accent pill.
     pub open_panel: Option<BarModule>,
+    /// The window is maximized: the middle control shows "restore".
+    pub maximized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -148,6 +157,7 @@ impl BarData {
                 charging: true,
             }),
             open_panel: None,
+            maximized: false,
         }
     }
 }
@@ -370,6 +380,36 @@ const PANEL_PILL_INSET: f64 = 2.0;
 const ACTIVE_WINDOW_MAX: f64 = 280.0;
 /// `Ui/Button.qml` tooltip `delay` — 400ms of hover before it shows.
 const TOOLTIP_DELAY: f64 = 0.4;
+/// The window controls: three slots of this width at the bar's far right,
+/// the usual caption-button proportion (wider than an icon slot, so a
+/// close is an easy target), a gap before the status modules.
+const WINDOW_CONTROL_WIDTH: f64 = 36.0;
+const WINDOW_CONTROL_GAP: f64 = 6.0;
+
+/// The module whose recorded hit rect holds `p` — what the WM's drag query
+/// asks (`shell_bar_claims`): a claimed point is a button, not a drag.
+pub fn module_at_in(hits: &[(BarModule, Rect)], p: Vec2d) -> Option<BarModule> {
+    hits.iter().find(|(_, r)| contains(*r, p)).map(|(m, _)| *m)
+}
+
+/// Whether this platform draws its window controls in the bar: every
+/// platform but macOS, whose traffic lights sit natively on the left.
+pub const fn window_controls_default() -> bool {
+    !cfg!(target_os = "macos")
+}
+
+/// Where the right side of the bar starts, given the strip's right edge:
+/// the x the window controls occupy from (`None` without them) and the x
+/// the status modules are laid out leftwards from. Pure, so the layout is
+/// tested without a window.
+pub fn right_cluster_layout(bar_right: f64, controls: bool) -> (Option<f64>, f64) {
+    let edge = bar_right - EDGE_MARGIN;
+    if !controls {
+        return (None, edge);
+    }
+    let controls_left = edge - 3.0 * WINDOW_CONTROL_WIDTH;
+    (Some(controls_left), controls_left - WINDOW_CONTROL_GAP)
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -458,6 +498,10 @@ pub struct ShellBar {
     reveal_indicators: bool,
     #[rust]
     pub inert: bool,
+    /// Draw the window's min/max/close at the far right
+    /// ([`window_controls_default`]; the gallery turns it on to show them).
+    #[rust]
+    pub window_controls: bool,
 }
 
 impl ShellBar {
@@ -676,9 +720,35 @@ impl ShellBar {
             self.hits.push((BarModule::SystemUpdate, cell));
         }
 
-        // ---- right: tray then the status modules, laid out right to left
+        // ---- right: the window controls at the very edge (where the
+        // platform draws none), then tray and the status modules, laid out
+        // right to left
+        let (controls_left, modules_right) =
+            right_cluster_layout(r.pos.x + r.size.x, self.window_controls);
+        if let Some(mut cx_ctrl) = controls_left {
+            let controls = [
+                (BarModule::WindowMin, Ico::WindowMin),
+                (
+                    BarModule::WindowMax,
+                    if self.data.maximized { Ico::WindowRestore } else { Ico::WindowMax },
+                ),
+                (BarModule::WindowClose, Ico::Close),
+            ];
+            for (module, ico) in controls {
+                let cell = rect(cx_ctrl, r.pos.y, WINDOW_CONTROL_WIDTH, r.size.y);
+                if self.hover == Some(module) {
+                    // The hovered control lights its slot, a close in the
+                    // accent, like every desktop's caption buttons.
+                    let wash = if module == BarModule::WindowClose { accent } else { fg };
+                    self.d.solid(cx, cell, fade(wash, 0.18));
+                }
+                self.d.icon_centered(cx, ico, cell, canvas * 0.8, fg);
+                self.hits.push((module, cell));
+                cx_ctrl += WINDOW_CONTROL_WIDTH;
+            }
+        }
         let modules = self.right_modules();
-        let mut rx = r.pos.x + r.size.x - EDGE_MARGIN;
+        let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
             rx -= slot;
             let cell = rect(rx, r.pos.y, slot, r.size.y);
@@ -762,6 +832,11 @@ impl ShellBar {
                 .get(i)
                 .map(|ind| ind.tooltip.to_string())
                 .unwrap_or_default(),
+            BarModule::WindowMin => "Minimize".into(),
+            BarModule::WindowMax => {
+                if self.data.maximized { "Restore".into() } else { "Maximize".into() }
+            }
+            BarModule::WindowClose => "Close".into(),
         }
     }
 
@@ -800,10 +875,7 @@ impl ShellBar {
     }
 
     pub fn module_at(&self, p: Vec2d) -> Option<BarModule> {
-        self.hits
-            .iter()
-            .find(|(_, r)| contains(*r, p))
-            .map(|(m, _)| *m)
+        module_at_in(&self.hits, p)
     }
 
     /// The rect a module occupies — the panels anchor to it.
@@ -904,6 +976,44 @@ mod tests {
         assert_eq!(volume_icon(Some(67), false), Ico::Volume3);
         // Muted always reads as the silent glyph, whatever the level.
         assert_eq!(volume_icon(Some(90), true), Ico::Volume0);
+    }
+
+    #[test]
+    fn the_window_controls_take_the_far_right_and_push_the_modules_left() {
+        // Without controls the status modules end at the edge margin.
+        assert_eq!(right_cluster_layout(1000.0, false), (None, 992.0));
+        // With them: three slots at the edge, a gap, then the modules.
+        let (controls, modules) = right_cluster_layout(1000.0, true);
+        assert_eq!(controls, Some(992.0 - 3.0 * WINDOW_CONTROL_WIDTH));
+        assert_eq!(modules, 992.0 - 3.0 * WINDOW_CONTROL_WIDTH - WINDOW_CONTROL_GAP);
+        assert!(modules < controls.unwrap());
+        // The default follows the platform: macOS keeps its own buttons.
+        assert_eq!(window_controls_default(), !cfg!(target_os = "macos"));
+    }
+
+    /// The drag query asks the bar which points are BUTTONS: the window
+    /// controls must claim theirs, or a press on Close would drag the
+    /// window instead. `module_at` is that answer; the hit rects the draw
+    /// records are what it reads, so this pins the rects the layout gives.
+    #[test]
+    fn the_window_controls_claim_their_points_from_the_drag_query() {
+        // What draw_bar records for the controls, laid out by the same rule.
+        let r = rect(0.0, 0.0, 1000.0, 26.0);
+        let (controls_left, _) = right_cluster_layout(r.pos.x + r.size.x, true);
+        let left = controls_left.unwrap();
+        let mut hits: Vec<(BarModule, Rect)> = Vec::new();
+        let mut x = left;
+        for module in [BarModule::WindowMin, BarModule::WindowMax, BarModule::WindowClose] {
+            hits.push((module, rect(x, r.pos.y, WINDOW_CONTROL_WIDTH, r.size.y)));
+            x += WINDOW_CONTROL_WIDTH;
+        }
+        // Inside each control: claimed, by that control. Just left of the
+        // first one: nobody's — a drag.
+        let mid = r.pos.y + 13.0;
+        assert_eq!(module_at_in(&hits, dvec2(left + 18.0, mid)), Some(BarModule::WindowMin));
+        assert_eq!(module_at_in(&hits, dvec2(left + 54.0, mid)), Some(BarModule::WindowMax));
+        assert_eq!(module_at_in(&hits, dvec2(left + 90.0, mid)), Some(BarModule::WindowClose));
+        assert_eq!(module_at_in(&hits, dvec2(left - 2.0, mid)), None);
     }
 
     #[test]
