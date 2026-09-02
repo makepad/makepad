@@ -196,6 +196,13 @@ impl<'a> CxDraw<'a> {
             .unwrap_or(dvec2(0.0, 0.0))
     }
 
+    /// The paint-order depth the current pass adds per draw call: what a
+    /// drawer that splits one call into several must take back off through
+    /// `draw_depth` for its later calls to keep the depth of the one call.
+    pub fn current_pass_zbias_step(&self) -> f32 {
+        self.cx.passes[self.pass_stack.last().unwrap().pass_id].zbias_step
+    }
+
     pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {
         let dl = &mut self.cx.draw_lists[*self.draw_list_stack.last().unwrap()];
         dl.append_sub_list(self.cx.redraw_id, draw_list_2d.id());

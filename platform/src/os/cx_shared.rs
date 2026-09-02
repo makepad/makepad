@@ -1163,6 +1163,9 @@ impl Cx {
             }
             return;
         }
+        if matches!(event, Event::Startup) {
+            self.initialize_memory_budget();
+        }
         if !matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
         }
