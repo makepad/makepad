@@ -29,6 +29,7 @@ use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
 use crate::browser_store::BrowserStore;
 
 mod apc40;
+mod ai;
 mod archive_stream;
 mod archive_ui;
 mod autopilot;
@@ -185,6 +186,7 @@ use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use crate::archive_ui::{ArchiveChange, ArchivePanel, ImportState, PublishTarget, Swatch};
+use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_archive_org::MediaFilter;
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
@@ -5923,6 +5925,12 @@ pub struct App {
     >,
     #[live]
     ui: WidgetRef,
+    /// This running console on the desktop assistant's service bus.
+    #[rust]
+    ai_port: Option<AiServicePort>,
+    /// Last volatile program line sent, so ordinary frame events stay quiet.
+    #[rust]
+    ai_context: String,
     #[rust]
     started: bool,
     /// The IMPORT CONTENT panel: its path, its worker and its progress.
@@ -7234,6 +7242,243 @@ impl App {
             Surface::Music => &self.music_model,
             Surface::Sfx => &self.sfx_model,
             Surface::Mesh => &self.mesh_model,
+        }
+    }
+
+    fn ai_status(&self) -> String {
+        let cue = |item: Option<&CueItem>| {
+            item.map(|item| format!("{} ({})", item.title, item.asset))
+                .unwrap_or_else(|| "—".to_string())
+        };
+        let mut text = format!(
+            "live: {}\nnext: {}\nfader: {:.3}\noverlay: {}\nautopilot: {} ({})",
+            cue(self.cue.live()),
+            cue(self.cue.next()),
+            self.cue.fader(),
+            if self.cue.overlay() { "on" } else { "off" },
+            if self.autopilot.on() { "on" } else { "off" },
+            ai::style_name(self.autopilot.style()),
+        );
+        if let Some(beat) = self.current_beat() {
+            text.push_str(&format!("\nbpm: {:.1}", beat.bpm));
+        }
+        text
+    }
+
+    fn ai_context_line(&self) -> String {
+        let live = self
+            .cue
+            .live()
+            .map(|item| format!("{} ({})", item.title.chars().take(512).collect::<String>(), item.asset))
+            .unwrap_or_else(|| "nothing".to_string());
+        format!(
+            "VJ live: {live}; video fader {:.3}; autopilot {} ({}).",
+            self.cue.fader(),
+            if self.autopilot.on() { "on" } else { "off" },
+            ai::style_name(self.autopilot.style()),
+        )
+    }
+
+    fn refresh_ai_context(&mut self) {
+        if self.ai_port.is_none() {
+            return;
+        }
+        let text = self.ai_context_line();
+        if text == self.ai_context {
+            return;
+        }
+        self.ai_context = text.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&text);
+        }
+    }
+
+    fn ai_answer(
+        &mut self,
+        cx: &mut Cx,
+        call: &makepad_ai_services::wire::ServiceCall,
+    ) -> makepad_ai_services::wire::ToolResult {
+        use makepad_ai_services::wire::ToolResult;
+
+        let request = match ai::decode(call) {
+            Ok(request) => request,
+            Err(result) => return result,
+        };
+        let id = &call.call_id;
+        match request {
+            ai::Request::Status => ToolResult::ok(id, self.ai_status(), "VJ status"),
+            ai::Request::Search(query) => {
+                let hits = ai::search(
+                    self.video_model
+                        .tiles()
+                        .iter()
+                        .chain(self.music_model.tiles().iter()),
+                    &query,
+                );
+                if hits.is_empty() {
+                    return ToolResult::ok(id, format!("no catalog tiles match {query:?}"), "no matches");
+                }
+                let text = hits
+                    .iter()
+                    .map(|tile| {
+                        let kind = tile.kind.map(|kind| format!("{kind:?}").to_ascii_lowercase())
+                            .unwrap_or_else(|| "item".to_string());
+                        match tile.alias.as_deref() {
+                            Some(alias) => format!("{} — {} — {} — {}", tile.asset, kind, tile.title, alias),
+                            None => format!("{} — {} — {}", tile.asset, kind, tile.title),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ToolResult::ok(id, text, format!("{} match(es)", hits.len()))
+            }
+            ai::Request::Cue(item) => {
+                let Some(title) = self.video_model.tile(&item).map(|tile| tile.title.clone()) else {
+                    return ToolResult::failed(id, format!("no visual catalog tile {item}"));
+                };
+                // Program-cue mode: an effect tile takes the UI's explicit
+                // effect-as-content branch instead of silently filling an
+                // effect slot, so every accepted item reaches CueEngine::click.
+                self.video_tile_clicked(cx, item, true);
+                ToolResult::ok(id, format!("cued {title} ({item})"), format!("cued {title}"))
+            }
+            ai::Request::Fader(value) => {
+                self.auto_fade.cancel();
+                self.sync_autofade_ui(cx);
+                self.set_visual_mix(cx, value);
+                ToolResult::ok(id, format!("video fader set to {value:.3}"), "video fader moved")
+            }
+            ai::Request::Next => {
+                let Some(title) = self.cue.next().map(|item| item.title.clone()) else {
+                    return ToolResult::refused(id, "there is no next visual cue");
+                };
+                if !self.force_armed_fade_now(cx) {
+                    return ToolResult::unavailable(id, format!("{title} is still loading and cannot be taken yet"));
+                }
+                ToolResult::ok(id, format!("taking {title} now"), format!("next: {title}"))
+            }
+            ai::Request::Autopilot { on, style } => {
+                self.set_autopilot_on(on);
+                if let Some(style) = style {
+                    self.autopilot.set_style(style);
+                    self.save_autopilot_settings();
+                    self.sync_autopilot_panel(cx);
+                }
+                self.paint_lit(cx, ids!(auto_dj), on);
+                let style = ai::style_name(self.autopilot.style());
+                ToolResult::ok(
+                    id,
+                    format!("autopilot {} ({style})", if on { "on" } else { "off" }),
+                    format!("autopilot {}", if on { "on" } else { "off" }),
+                )
+            }
+            ai::Request::Overlay(on) => {
+                self.cue.set_overlay(on);
+                ToolResult::ok(
+                    id,
+                    format!("visual overlay {}", if on { "on" } else { "off" }),
+                    format!("overlay {}", if on { "on" } else { "off" }),
+                )
+            }
+            ai::Request::DeckPlay(deck) => {
+                if !self.decks.deck(deck).is_loaded() {
+                    return ToolResult::failed(id, format!("deck {} has no loaded track", Self::ai_deck_name(deck)));
+                }
+                self.deck_hands_on();
+                let cmds = self.decks.play(deck);
+                self.run_deck_cmds(cx, cmds);
+                ToolResult::ok(
+                    id,
+                    format!("deck {} playing", Self::ai_deck_name(deck)),
+                    format!("played deck {}", Self::ai_deck_name(deck)),
+                )
+            }
+            ai::Request::DeckStop(deck) => {
+                if !self.decks.deck(deck).is_loaded() {
+                    return ToolResult::failed(id, format!("deck {} has no loaded track", Self::ai_deck_name(deck)));
+                }
+                self.deck_hands_on();
+                if self.decks.deck(deck).playing {
+                    let cmds = self.decks.play_pause(deck);
+                    self.run_deck_cmds(cx, cmds);
+                }
+                ToolResult::ok(
+                    id,
+                    format!("deck {} stopped", Self::ai_deck_name(deck)),
+                    format!("stopped deck {}", Self::ai_deck_name(deck)),
+                )
+            }
+            ai::Request::DeckLoad { deck, item } => {
+                let Some(tile) = self.music_model.tile(&item) else {
+                    return ToolResult::failed(id, format!("no music catalog tile {item}"));
+                };
+                let (Some(revision), Some(media)) = (tile.revision, tile.media.clone()) else {
+                    return ToolResult::unavailable(id, format!("{} is not resolved yet", tile.title));
+                };
+                let title = tile.title.clone();
+                let track = TrackItem {
+                    asset: item,
+                    revision,
+                    title: title.clone(),
+                    media_blob: media.blob,
+                    media_len: media.len,
+                    media: media.media,
+                    side: self.track_side_channels.get(&revision).cloned().unwrap_or_default(),
+                };
+                self.deck_hands_on();
+                let target = match deck {
+                    DeckId::A => DeckTarget::A,
+                    DeckId::B => DeckTarget::B,
+                };
+                let cmds = self.decks.click(track, target);
+                self.run_deck_cmds(cx, cmds);
+                self.grids_dirty = true;
+                ToolResult::ok(
+                    id,
+                    format!("loading {title} ({item}) on deck {}", Self::ai_deck_name(deck)),
+                    format!("loaded deck {}", Self::ai_deck_name(deck)),
+                )
+            }
+            ai::Request::Crossfade(value) => {
+                self.deck_hands_on();
+                self.xfade_target = None;
+                let cmds = self.decks.set_crossfader(value);
+                self.run_deck_cmds(cx, cmds);
+                self.apply_eq_fade();
+                self.ui.slider(cx, ids!(xfader)).set_value(cx, value as f64);
+                ToolResult::ok(id, format!("music crossfader set to {value:.3}"), "music crossfader moved")
+            }
+        }
+    }
+
+    fn ai_deck_name(deck: DeckId) -> &'static str {
+        match deck {
+            DeckId::A => "A",
+            DeckId::B => "B",
+        }
+    }
+
+    fn drain_ai_port(&mut self, cx: &mut Cx, event: &Event) {
+        let events = match self.ai_port.as_mut() {
+            Some(port) => port.handle_event(cx, event),
+            None => return,
+        };
+        for event in events {
+            match event {
+                PortEvent::Registered(endpoint) => {
+                    log!("vj: AI service registered as {}", endpoint.as_str());
+                    self.ai_context.clear();
+                    self.refresh_ai_context();
+                }
+                PortEvent::Call(call) => {
+                    let result = self.ai_answer(cx, &call);
+                    self.refresh_ai_context();
+                    if let Some(port) = self.ai_port.as_ref() {
+                        port.reply(result);
+                    }
+                }
+                PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+            }
         }
     }
 
@@ -12488,6 +12733,7 @@ p2 {}
             self.apc_leds.invalidate();
         }
         self.sync_apc_leds();
+        self.refresh_ai_context();
     }
 
     fn sync_apc_leds(&mut self) {
@@ -13314,6 +13560,7 @@ p2 {}
                 }
             }
         }
+        self.refresh_ai_context();
     }
 
     fn run_deck_cmds(&mut self, cx: &mut Cx, cmds: Vec<DeckCmd>) {
@@ -22095,6 +22342,7 @@ p2 {}
             self.set_visual_mix(cx, mix);
             if !self.auto_fade.active() {
                 self.sync_autofade_ui(cx);
+                self.refresh_ai_context();
             }
         }
         // ---- ARCHIVE STREAM DECKS: not-imported clips playing straight
@@ -23553,14 +23801,7 @@ p2 {}
         }
         if self.music_refs.auto_dj.clicked(actions) {
             let on = !self.autopilot.on();
-            self.autopilot.set_on(on);
-            if !on {
-                // A dropped plan must not leave the retiring deck opted
-                // out of auto sync, nor the overlay holding anything down.
-                self.decks.end_auto_fade();
-                self.mixer.clear_blend(DeckId::A);
-                self.mixer.clear_blend(DeckId::B);
-            }
+            self.set_autopilot_on(on);
         }
         if self.music_refs.queue_repeat.clicked(actions) {
             self.decks.repeat = !self.decks.repeat;
@@ -24115,6 +24356,18 @@ p2 {}
         self.mixer.clear_blend(DeckId::B);
     }
 
+    /// The AUTO DJ button and the assistant share this exact latch path.
+    fn set_autopilot_on(&mut self, on: bool) {
+        self.autopilot.set_on(on);
+        if !on {
+            // A dropped plan must not leave the retiring deck opted out of
+            // auto sync, nor the overlay holding anything down.
+            self.decks.end_auto_fade();
+            self.mixer.clear_blend(DeckId::A);
+            self.mixer.clear_blend(DeckId::B);
+        }
+    }
+
     /// One display frame of the deck surface: fresh playheads into the
     /// lanes and nothing else. Scheduled while a deck is playing or a hand
     /// is on a record, so a scratch tracks at the display's rate rather
@@ -24529,6 +24782,7 @@ p2 {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.status_text = "starting…".to_string();
         let output_available = output_window_available().is_ok();
         self.ui
@@ -26055,6 +26309,7 @@ impl MatchEvent for App {
                 }
             }
         }
+        self.refresh_ai_context();
     }
 }
 
@@ -26081,6 +26336,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.drain_ai_port(cx, event);
         #[cfg(target_arch = "wasm32")]
         if self.browser_store.handle_event(cx, event) {
             self.music_rows.clear();
