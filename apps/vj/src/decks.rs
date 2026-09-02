@@ -569,6 +569,16 @@ pub struct DeckState {
     pub position_secs: f64,
     /// Playback rate multiplier; 1.0 = the track's own tempo.
     pub rate: f64,
+    /// Whether the rate above was worked out by SYNC rather than put there
+    /// by hand.
+    ///
+    /// The two are the same number and mean different things. A rate the
+    /// operator set is a preference and may follow them onto the next
+    /// track; a rate the lock computed describes a PAIR of tracks and is
+    /// nonsense the moment one of them is replaced. Nothing could tell
+    /// them apart before, so a load onto a synced follower kept a match to
+    /// a track that had left the deck.
+    pub rate_from_lock: bool,
     /// Operator pitch offset as a fraction (−0.08 = 8% slow).
     pub pitch: f64,
     /// A HELD bend, on top of whatever the fader says, in the same units.
@@ -641,6 +651,7 @@ impl Default for DeckState {
             splat: None,
             position_secs: 0.0,
             rate: 1.0,
+            rate_from_lock: false,
             bend: 0.0,
             pitch: 0.0,
             pitch_range: PitchRange::Narrow,
@@ -1041,6 +1052,13 @@ impl DeckEngine {
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
+        // A held bend belongs to the track that was under the hand.
+        state.bend = 0.0;
+        // A deck with a load in flight cannot lead, and when its new grid
+        // lands it must not become the reference the LIVE deck is dragged
+        // to. Eject has always handed the pin over; loading over a track is
+        // the same loss of the deck and never did.
+        self.hand_pin_over(deck);
         vec![DeckCmd::LoadTrack { deck, gen, item }]
     }
 
@@ -1069,6 +1087,16 @@ impl DeckEngine {
         state.found_loops.clear();
         state.cue_secs = 0.0;
         state.bookmark = None;
+        // A rate the LOCK worked out matched this deck to the one on the
+        // other side. That match described a pair of tracks and one of them
+        // has just been replaced, so it goes back to the track's own tempo
+        // rather than following a stranger onto a new record. A rate the
+        // operator set by hand is a preference and stays.
+        if state.rate_from_lock {
+            state.rate = 1.0;
+            state.pitch = 0.0;
+            state.rate_from_lock = false;
+        }
         // Fresh installs inherit the whole standing channel-strip intent:
         // transport, tone, stems and the rate the pitch slider is sitting at.
         let mut cmds = vec![
@@ -1173,6 +1201,21 @@ impl DeckEngine {
         // No seek: the playhead is inside the whole file by definition, so
         // there is nowhere for a repeat to move the record to.
         vec![DeckCmd::SetLoopSpan { deck, span: Some(span) }]
+    }
+
+    /// Give the sync pin to the other deck, if it can carry it.
+    ///
+    /// Called wherever a deck stops being able to lead: ejected, unsynced,
+    /// or loading. The same election was written out three times before
+    /// this and missing from the fourth place that needed it.
+    fn hand_pin_over(&mut self, deck: DeckId) {
+        if self.sync_master != Some(deck) {
+            return;
+        }
+        let other = deck.other();
+        let state = self.deck(other);
+        self.sync_master =
+            (state.synced && state.is_loaded() && state.sync_view().is_some()).then_some(other);
     }
 
     /// Seconds one armed loop is worth on this deck, or `None` when the
@@ -1692,14 +1735,7 @@ impl DeckEngine {
         state.scratching = false;
         // An ejected master hands the pin to the remaining group member
         // (or the group ends with it).
-        if self.sync_master == Some(deck) {
-            let other = deck.other();
-            let state = self.deck(other);
-            self.sync_master = (state.synced
-                && state.is_loaded()
-                && state.sync_view().is_some())
-            .then_some(other);
-        }
+        self.hand_pin_over(deck);
         vec![DeckCmd::UnloadTrack { deck }]
     }
 
@@ -1909,6 +1945,11 @@ impl DeckEngine {
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
         state.synced = true;
+        // Outside the guard on purpose: a lock that works out the rate the
+        // deck already has still means that rate describes a PAIR of
+        // tracks, and marking it only when it moved would miss exactly the
+        // case where the two tracks already agreed.
+        state.rate_from_lock = true;
         if (state.rate - plan.rate).abs() > 1e-9 {
             state.rate = plan.rate;
             // Show the operator the rate the sync chose on the pitch slider.
@@ -2015,12 +2056,7 @@ impl DeckEngine {
             state.synced = false;
             state.auto_opt_out = true;
             if self.sync_master == Some(deck) {
-                let other = deck.other();
-                let state = self.deck(other);
-                self.sync_master = (state.synced
-                    && state.is_loaded()
-                    && state.sync_view().is_some())
-                .then_some(other);
+                self.hand_pin_over(deck);
             } else if !self.deck(deck.other()).synced {
                 // The last follower left: the group is dissolved.
                 self.sync_master = None;
@@ -2125,6 +2161,7 @@ impl DeckEngine {
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(deck);
+        state.rate_from_lock = true;
         if (state.rate - follow.rate).abs() > 1e-4 {
             state.rate = follow.rate;
             state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
@@ -2174,6 +2211,9 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.pitch = pitch;
         state.rate = rate;
+        // A hand on the tempo makes it the operator's, whatever the lock
+        // had made of it before.
+        state.rate_from_lock = false;
         if !is_master {
             state.synced = false;
             state.auto_opt_out = true;
@@ -3710,6 +3750,87 @@ mod tests {
             Some(LoopSpan { start_secs: 0.0, end_secs: duration }),
             "and the gesture puts the whole file back"
         );
+    }
+
+    // ---- what a load may and may not carry ------------------------------
+
+    #[test]
+    fn a_load_drops_a_tempo_the_lock_worked_out_but_keeps_one_set_by_hand() {
+        // The lock's rate matched THIS deck to the one on the other side.
+        // Replace the track under it and that match describes a record that
+        // has left the building.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        let locked = e.deck(DeckId::B).rate;
+        assert!((locked - 1.0).abs() > 1e-6, "the lock did move the rate: {locked}");
+        assert!(e.deck(DeckId::B).rate_from_lock);
+
+        // With AUTO SYNC off nothing would ever correct it, which is the
+        // case that made this a fault rather than a wrinkle.
+        e.auto_sync = false;
+        load_analysed(&mut e, DeckId::B, 3, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::B).rate, 1.0, "back to the new track's own tempo");
+        assert_eq!(e.deck(DeckId::B).pitch, 0.0);
+        assert!(!e.deck(DeckId::B).rate_from_lock);
+    }
+
+    #[test]
+    fn dropping_the_locks_tempo_does_not_stop_auto_sync_claiming_the_new_track() {
+        // The reset runs when the track lands; the grid arrives after it,
+        // and AUTO SYNC locking the new record to the room is the whole
+        // point of leaving it on.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        assert!(e.auto_sync, "on by default, and this test is about that");
+        load_analysed(&mut e, DeckId::B, 3, 100.0, 0.0);
+        assert!(
+            (e.deck(DeckId::B).rate - 1.28).abs() < 1e-9,
+            "the new track is locked to the live one, not left at its own tempo: {}",
+            e.deck(DeckId::B).rate
+        );
+    }
+
+    #[test]
+    fn a_tempo_the_hand_set_survives_a_load() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 0.5);
+        let by_hand = e.deck(DeckId::A).rate;
+        assert!(!e.deck(DeckId::A).rate_from_lock, "a hand on the slider owns the rate");
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::A).rate, by_hand, "the operator's tempo follows them");
+    }
+
+    #[test]
+    fn loading_over_the_pinned_deck_hands_the_pin_on_rather_than_dragging_the_live_one() {
+        // A deck with a load in flight cannot lead. Left holding the pin,
+        // its new grid arrives and the LIVE deck gets pulled onto it.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::B).playing = true;
+        e.sync(DeckId::B, true);
+        e.sync_master = Some(DeckId::A);
+
+        e.click(item(9), DeckTarget::A);
+        assert_ne!(e.sync_master, Some(DeckId::A), "a loading deck does not keep the pin");
+    }
+
+    #[test]
+    fn a_held_bend_does_not_follow_the_operator_onto_the_next_track() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.hold_bend(DeckId::A, 1.0, false);
+        assert_ne!(e.deck(DeckId::A).bend, 0.0);
+        e.click(item(9), DeckTarget::A);
+        assert_eq!(e.deck(DeckId::A).bend, 0.0, "the lean was on the record that just left");
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
