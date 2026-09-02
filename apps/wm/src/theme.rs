@@ -517,7 +517,7 @@ pub fn makepad_home() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(crate::host::homeless_root)
         .join(".makepad")
 }
 

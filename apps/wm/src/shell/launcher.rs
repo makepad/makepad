@@ -74,7 +74,9 @@ pub fn apps() -> Vec<MenuItem> {
     let hides = hides();
     let items: Vec<MenuItem> = clients::registry()
         .iter()
-        .filter(|app| app.is_available())
+        // Launchable: a package this checkout can run, or a module this
+        // build links (the only kind the web build has).
+        .filter(|app| app.is_available() || crate::apps::is_linked(&app.id))
         .filter(|app| !is_hidden(&app.id, &hides))
         .map(|app| MenuItem {
             id: format!("apps.{}", app.id),
