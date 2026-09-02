@@ -27,21 +27,26 @@
 //! weights (norms explicitly in f32). Here: weights stream from the f32
 //! shards converted to f16 into the device cache (each gemm sees f16
 //! operands, like autocast); activations/residual stay f32 on device; norms
-//! f32; blends and post_quant_conv host-side f32. FLUX_GEMM_F16ACC=0 gives
-//! f32-accumulate gemms (closest to torch autocast); the default f16-acc is
-//! the flux-proven speed path.
+//! f32; blends and post_quant_conv host-side f32. The VAE explicitly uses
+//! f16 accumulation while retaining f32 activations, matching the reference
+//! autocast path without process-global precision state.
 
 use crate::backend::{
     gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download,
-    gpu_gated_residual, gpu_gather_cols, gpu_gemm_f16acc_enabled, gpu_group_norm_planar,
-    gpu_layer_norm_mul_add, gpu_linear_nt_cached, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
+    gpu_gated_residual, gpu_gather_cols, gpu_group_norm_planar, gpu_layer_norm_mul_add,
+    gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    GpuLinearPart, GpuTensor,
+    GemmPrecision, GpuLinearPart, GpuTensor,
 };
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_F16;
 use makepad_ai_loader::MlxDType;
+
+pub const H3_VAE_PRECISION: GemmPrecision = GemmPrecision {
+    f16_accumulate: true,
+    f16_activations: false,
+};
 
 pub const H3_VAE_NAMESPACE: &str = "h3vae";
 pub const H3_VAE_LATENT_CHANNELS: usize = 24;
@@ -333,7 +338,7 @@ fn ensure_linear<'a>(
     k: usize,
     m: usize,
 ) -> Result<GpuLinearPart<'a>> {
-    let want_a16 = gpu_gemm_f16acc_enabled() && m > 1;
+    let want_a16 = H3_VAE_PRECISION.f16_accumulate && m > 1;
     let (dtype, _shape) = weights.tensor_dtype_shape(name)?;
     gpu_weight_cache_ensure(H3_VAE_NAMESPACE, name, GGML_TYPE_F16, n, k, want_a16, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
@@ -373,7 +378,8 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached(x, H3_VAE_NAMESPACE, &parts, bias).map_err(DiffusionError::model)
+    gpu_linear_nt_cached_with_precision(x, H3_VAE_NAMESPACE, &parts, bias, H3_VAE_PRECISION)
+        .map_err(DiffusionError::model)
 }
 
 // ---------------------------------------------------------------------------
@@ -618,8 +624,14 @@ fn decoder_vit_forward_group(
             ensure_linear(weights, &k_name, dim, dim, batch * seq)?,
             ensure_linear(weights, &v_name, dim, dim, batch * seq)?,
         ];
-        let qkv = gpu_linear_nt_cached(&normed, H3_VAE_NAMESPACE, &parts, &prepared.qkv_bias[layer])
-            .map_err(DiffusionError::model)?;
+        let qkv = gpu_linear_nt_cached_with_precision(
+            &normed,
+            H3_VAE_NAMESPACE,
+            &parts,
+            &prepared.qkv_bias[layer],
+            H3_VAE_PRECISION,
+        )
+        .map_err(DiffusionError::model)?;
         drop(normed);
         let q = gpu_slice_cols(&qkv, 0, dim).map_err(DiffusionError::model)?;
         let k = gpu_slice_cols(&qkv, dim, dim).map_err(DiffusionError::model)?;
@@ -952,29 +964,6 @@ pub struct H3VaeDecodeRun {
 /// Decode DENORMALIZED latents (24, T, lh, lw) into raw ImageNet-normalized
 /// frames. Mirrors `_decode`: post_quant_conv, temporal chunks of 5+2 latent
 /// frames -> 28 pixel frames, per-chunk frame slicing and 5-frame cross-fade.
-/// Restores an env var to its previous state on drop (scoped knob override).
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 pub fn h3_vae_decode(
     weights: &H3ShardedWeights,
     prepared: &H3VaeDecoderPrepared,
@@ -1005,19 +994,6 @@ pub fn h3_vae_decode_ctrl(
     latent_width: usize,
     ctrl: Option<&mut H3VaeCtrl>,
 ) -> Result<H3VaeDecodeRun> {
-    // The reference decodes the video VAE under f16 AUTOCAST (weights f32,
-    // math f16) — H3's f16-overflow hazard is a DiT/TE activation property,
-    // not a VAE one. So the VAE stage scopes f16-accumulate gemms ON even
-    // when the surrounding pipeline pins FLUX_GEMM_F16ACC=0 for the DiT/TE
-    // (f32-acc gemms measured 4-5x slower here, and are LESS faithful to the
-    // reference's autocast). H3_VAE_F16ACC=0 opts back out. The f16 activation
-    // spine stays off: these ops were validated with f32 activations.
-    let vae_f16acc = std::env::var("H3_VAE_F16ACC")
-        .map(|value| value != "0")
-        .unwrap_or(true);
-    let _gemm_guard = vae_f16acc.then(|| EnvGuard::set("FLUX_GEMM_F16ACC", "1"));
-    let _act_guard = vae_f16acc.then(|| EnvGuard::set("FLUX_ACT_F16", "0"));
-
     let (c, lh, lw) = (H3_VAE_LATENT_CHANNELS, latent_height, latent_width);
     if latents.len() != c * num_latent_frames * lh * lw {
         return Err(DiffusionError::workflow(format!(

@@ -20,6 +20,7 @@
 //! forward-0 input are re-used verbatim (anchor parity) and the rest is the
 //! reference noise.
 
+use makepad_diffusion::backend::GemmPrecision;
 use makepad_diffusion::h3::H3_VIDEO_PATCH_DIM;
 use makepad_diffusion::h3::H3KeyframeAnchor;
 use makepad_diffusion::h3_pipeline::{h3_generate, H3GenerateParams, H3KeyframeInput};
@@ -202,7 +203,6 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
     let steps = opt_usize(opts, "steps", 50);
     let seed = opt_usize(opts, "seed", 42) as u64;
     let own_noise = opts.contains_key("own-noise");
-    let act16 = std::env::var("H3_ACT_F16").map(|v| v != "0").unwrap_or(false);
 
     // Token ids: --prompt through the in-repo Qwen tokenizer port, or from
     // the dump (fixed r1 prompt) for oracle-parity runs.
@@ -328,11 +328,13 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
             return Some(H3ComponentFile {
                 path: std::path::PathBuf::from(path),
                 format: H3WeightFormat::Gguf,
+                dit_namespace: None,
             });
         }
         opts.get(nvfp4_key).map(|path| H3ComponentFile {
             path: std::path::PathBuf::from(path),
             format: H3WeightFormat::Nvfp4,
+            dit_namespace: None,
         })
     };
     let dit_file = component("dit-gguf", "dit-nvfp4");
@@ -365,7 +367,10 @@ fn run(opts: &HashMap<String, String>) -> Result<(), String> {
         video_noise_rows: video_noise,
         audio_noise_rows: audio_noise,
         condition_rows_override,
-        act16,
+        precision: GemmPrecision {
+            f16_accumulate: false,
+            f16_activations: false,
+        },
         decode_audio: !opts.contains_key("no-audio"),
         model_set,
         staged_residency: opts.contains_key("staged"),

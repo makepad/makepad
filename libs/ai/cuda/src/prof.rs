@@ -1,14 +1,12 @@
-//! Per-op-class GPU accel profiling counters, opt-in via MAKEPAD_GPU_PROF=1.
+//! Per-op-class GPU accel profiling counters.
 //!
 //! Recording happens at the backend entry points (accel.rs dispatchers, the
 //! metal/compat.rs shims, and inside the CUDA dense-linear cached path where
 //! the upload/gemm/download phases are split with explicit stream syncs when
 //! profiling is enabled). All counters are plain atomics so this module
-//! compiles on every platform; when the env flag is absent the only cost is a
-//! branch at each site.
+//! compiles on every platform. Profiling is disabled at the runtime layer.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::Instant;
 
 pub const CAT_DENSE_TOTAL: usize = 0;
@@ -63,8 +61,7 @@ impl Counters {
 static COUNTERS: Counters = Counters::new();
 
 pub fn enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_GPU_PROF").is_some())
+    false
 }
 
 /// Record `elapsed` (and optionally an approximate host<->device byte count)

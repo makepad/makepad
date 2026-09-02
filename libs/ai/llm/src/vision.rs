@@ -30,6 +30,7 @@ use crate::{
     BufferUsage, Context, CudaExecRuntime, CudaRawGraphSession, Graph, Op, Prec, ScaleMode,
     TensorId, TensorType, UnaryOp, GGML_ROPE_TYPE_VISION,
 };
+use crate::cuda_exec::CudaGraphOptions;
 use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
 
 /// Which device the tower runs on.
@@ -37,6 +38,23 @@ use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
 pub enum VisionBackend {
     Metal,
     Cuda,
+}
+
+/// Arithmetic choices for one vision tower. Defaults are the production
+/// winners; parity tools can construct the reference paths explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisionExecutionConfig {
+    pub use_f16_gemm: bool,
+    pub tiled_roformer: bool,
+}
+
+impl Default for VisionExecutionConfig {
+    fn default() -> Self {
+        Self {
+            use_f16_gemm: true,
+            tiled_roformer: true,
+        }
+    }
 }
 
 enum VisionRuntime {
@@ -375,6 +393,7 @@ pub struct VisionTower {
     pub config: VisionConfig,
     weights: LoadedGgufWeights,
     runtime: VisionRuntime,
+    execution: VisionExecutionConfig,
     /// One compiled graph per patch grid seen, oldest first in
     /// `graph_order`; bounded by `graph_cache_cap` because a graph session
     /// holds its own device mirror of the weights on CUDA.
@@ -408,6 +427,13 @@ impl VisionTower {
     /// `MAKEPAD_VISION_BACKEND=cuda|metal` pins it (and turns a missing backend
     /// into an error rather than a silent fallback).
     pub fn load(path: &str) -> Result<Self> {
+        Self::load_with_execution_config(path, VisionExecutionConfig::default())
+    }
+
+    pub fn load_with_execution_config(
+        path: &str,
+        execution: VisionExecutionConfig,
+    ) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
         let config = VisionConfig::from_gguf(&gguf)?;
         let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
@@ -418,6 +444,7 @@ impl VisionTower {
             config,
             weights,
             runtime,
+            execution,
             graphs: BTreeMap::new(),
             graph_order: VecDeque::new(),
             graph_cache_cap: graph_cache_cap(),
@@ -534,13 +561,7 @@ impl VisionTower {
     fn build_graph(&mut self, grid_w: usize, grid_h: usize) -> Result<VisionGraph> {
         let cfg = self.config.clone();
         // Metal's maskless flash kernel takes f16 K/V; CUDA's takes f32.
-        // `MAKEPAD_VISION_KV=f32|f16` pins it, so either shape can be run on
-        // either backend and gated against the same oracle.
-        let kv_f16 = match std::env::var("MAKEPAD_VISION_KV").ok().as_deref() {
-            Some("f32") => false,
-            Some("f16") => true,
-            _ => matches!(self.runtime, VisionRuntime::Metal(_)),
-        };
+        let kv_f16 = matches!(self.runtime, VisionRuntime::Metal(_));
         let n_patches = grid_w * grid_h;
         let n_embd = cfg.n_embd as i64;
         let n_heads = cfg.n_heads as i64;
@@ -803,7 +824,15 @@ impl VisionTower {
                 )
             }
             VisionRuntime::Cuda(runtime) => VisionSession::Cuda(Box::new(
-                runtime.create_raw_graph_session(&self.weights.ctx, &graph, &[cur])?,
+                runtime.create_raw_graph_session_with_options(
+                    &self.weights.ctx,
+                    &graph,
+                    &[cur],
+                    CudaGraphOptions {
+                        use_f16_gemm: self.execution.use_f16_gemm,
+                        tiled_roformer: self.execution.tiled_roformer,
+                    },
+                )?,
             )),
         };
 

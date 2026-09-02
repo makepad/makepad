@@ -45,6 +45,9 @@ pub struct LlamaSessionConfig {
     /// Maximum MTP draft tokens per speculative step. 0 disables speculative
     /// decoding entirely, and then the nextn block is not even loaded.
     pub spec_draft_max: usize,
+    /// Execute logits-producing graphs without copying logits back to the
+    /// host. Intended for fixed-token throughput measurements.
+    pub skip_logits_readback: bool,
 }
 
 impl Default for LlamaSessionConfig {
@@ -59,6 +62,7 @@ impl Default for LlamaSessionConfig {
             recurrent_s_type: TensorType::F32,
             extra_activation_bytes: DEFAULT_EXTRA_ACTIVATION_BYTES,
             spec_draft_max: 0,
+            skip_logits_readback: false,
         }
     }
 }
@@ -815,12 +819,9 @@ impl LlamaSession {
         // WITHIN the slot. So slot 0 (base 0) keys the same graphs it always
         // did and is byte-identical by construction.
         let key_span = start + batch;
-        let window = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-            key_span
-        } else {
-            key_span.next_multiple_of(GRAPH_KEY_BUCKET)
-        }
-        .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
+        let window = key_span
+            .next_multiple_of(GRAPH_KEY_BUCKET)
+            .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
         let attention_key_count = window;
         let mut graph_params = SessionGraphParams::greedy(batch, attention_key_count);
         graph_params.attention_key_base = kv_base;
@@ -958,12 +959,9 @@ impl LlamaSession {
             // is within-slot, so lane N pays what lane 0 pays for the same
             // page rather than paying for every row below its base.
             let key_span = chunk_start + batch;
-            let window = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-                key_span
-            } else {
-                key_span.next_multiple_of(GRAPH_KEY_BUCKET)
-            }
-            .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
+            let window = key_span
+                .next_multiple_of(GRAPH_KEY_BUCKET)
+                .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
             let mut graph_params = SessionGraphParams::greedy_embeddings(batch, window);
             graph_params.attention_key_base = kv_base;
             self.ensure_compiled_graph(graph_params)?;
@@ -1038,14 +1036,10 @@ impl LlamaSession {
         // Bucketed exactly as the single-stream path buckets, but against the
         // ARENA rather than one slot's context, because the key span is an
         // absolute row count across slots.
-        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-            layout.attention_key_count
-        } else {
-            layout
-                .attention_key_count
-                .next_multiple_of(GRAPH_KEY_BUCKET)
-                .min(self.attention_arena_rows)
-        };
+        let attention_key_count = layout
+            .attention_key_count
+            .next_multiple_of(GRAPH_KEY_BUCKET)
+            .min(self.attention_arena_rows);
         let graph_params = SessionGraphParams::batched(width, attention_key_count);
         self.ensure_compiled_graph(graph_params)?;
         let mut layout = layout;
@@ -1103,9 +1097,6 @@ impl LlamaSession {
         if let Some(mtp) = self.mtp.as_mut() {
             mtp.state_row = 0;
             mtp.mtp_filled = 0;
-        }
-        if std::env::var("MAKEPAD_LLM_RESET_VERIFY").is_ok() {
-            self.verify_state_cleared()?;
         }
         Ok(())
     }
@@ -1216,49 +1207,6 @@ impl LlamaSession {
             out.push((name, offset, len, hash));
         }
         Ok(out)
-    }
-
-    /// Debug (MAKEPAD_LLM_RESET_VERIFY=1): read every shared cache tensor
-    /// back from the live device buffer and report any that still holds
-    /// nonzero bytes after `reset`. Catches a clear that silently missed the
-    /// device (wrong offsets, wrong buffer, stale stream).
-    fn verify_state_cleared(&self) -> Result<()> {
-        let ctx = &self.weights.ctx;
-        let mut named: Vec<(String, usize, usize)> = Vec::new();
-        for (layer, ids) in &self.graphs.shared_cache.attention {
-            for (tag, id) in [("k", ids.k_cache), ("v", ids.v_cache)] {
-                let Some(tensor) = ctx.tensor(id) else { continue };
-                let Some(offset) = tensor.data_offset else { continue };
-                named.push((format!("attn{layer}.{tag}"), offset, tensor.nbytes()));
-            }
-        }
-        for (layer, ids) in &self.graphs.shared_cache.recurrent {
-            for (tag, id) in [("r", ids.r_cache), ("s", ids.s_cache)] {
-                let Some(tensor) = ctx.tensor(id) else { continue };
-                let Some(offset) = tensor.data_offset else { continue };
-                named.push((format!("recur{layer}.{tag}"), offset, tensor.nbytes()));
-            }
-        }
-        let mut dirty = 0usize;
-        for (name, offset, len) in &named {
-            let bytes = self.graphs.shared_runtime.read_state_range(
-                &self.graphs.shared_buffers,
-                *offset,
-                *len,
-            )?;
-            let nonzero = bytes.iter().filter(|b| **b != 0).count();
-            if nonzero > 0 {
-                dirty += 1;
-                eprintln!(
-                    "[llm reset-verify] {name} STILL DIRTY: {nonzero}/{len} nonzero bytes at ctx offset {offset}"
-                );
-            }
-        }
-        eprintln!(
-            "[llm reset-verify] {} cache tensors checked, {dirty} dirty",
-            named.len()
-        );
-        Ok(())
     }
 
     pub fn append_token(&mut self, token_id: i32) -> Result<()> {
@@ -1441,17 +1389,6 @@ impl LlamaSession {
             config.recurrent_r_type,
             config.recurrent_s_type,
         )?;
-        // Debug escape hatch: truncate the network to the first N blocks so a
-        // wrong-output bug can be bisected to the block where it starts.
-        if let Ok(max_blocks) = std::env::var("MAKEPAD_LLAMA_MAX_BLOCKS") {
-            if let Ok(max_blocks) = max_blocks.parse::<usize>() {
-                eprintln!(
-                    "session: truncating {} layers to {max_blocks} (MAKEPAD_LLAMA_MAX_BLOCKS)",
-                    spec.layers.len()
-                );
-                spec.layers.truncate(max_blocks);
-            }
-        }
         // Same graph with precomputed-embedding input for image spans; both
         // specs share the cache tensors, so batches can alternate freely.
         let mut spec_embeddings = spec.clone();
@@ -1488,10 +1425,7 @@ impl LlamaSession {
                 }
             }
         }
-        // MKLLM_MTP_FULL_DRAFT_VOCAB=1 keeps the full 248320-row draft head
-        // (the A/B for the restricted-head win).
-        let draft_vocab = if draft_max > 0 && std::env::var_os("MKLLM_MTP_FULL_DRAFT_VOCAB").is_none()
-        {
+        let draft_vocab = if draft_max > 0 {
             DraftVocab::load_for_model(
                 &model.gguf.path,
                 u32::try_from(vocab.len())
@@ -1703,19 +1637,15 @@ impl LlamaSession {
         // key_count-cache_tokens of attention work per token; keying wider
         // than the mask CANNOT be fixed by view reconfigure — the flash op
         // reads permute nodes with build-time dims, which silently corrupted
-        // attention). MAKEPAD_LLAMA_PER_LEN_GRAPHS=1 restores per-length
-        // keying (A/B escape hatch).
-        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-            cache_tokens
-        } else {
-            cache_tokens
-                .next_multiple_of(GRAPH_KEY_BUCKET)
-                .min(self.max_context())
-        };
+        // attention).
+        let attention_key_count = cache_tokens
+            .next_multiple_of(GRAPH_KEY_BUCKET)
+            .min(self.max_context());
         let graph_params = SessionGraphParams::greedy(batch_size, attention_key_count);
         self.ensure_compiled_graph(graph_params)?;
         let state_row = self.live_state_row();
         let hidden_write_rows = self.carry_rows_for_positions(start, batch_size);
+        let skip_logits_readback = self.config.skip_logits_readback;
         let run = {
             let compiled = self
                 .graphs
@@ -1734,8 +1664,11 @@ impl LlamaSession {
             if compiled.decode().input_recurrent_state_rows.is_none() {
                 layout.recurrent_state_rows.clear();
             }
-            compiled
-                .execute_logits_only_with_layout(LogitsProbeInput::TokenIds(token_ids), &layout)?
+            compiled.execute_logits_only_with_layout_options(
+                LogitsProbeInput::TokenIds(token_ids),
+                &layout,
+                skip_logits_readback,
+            )?
         };
         self.token_ids.extend_from_slice(token_ids);
         self.rope_pos_next += batch_size as i64;
@@ -2750,11 +2683,7 @@ impl LlamaSession {
             mtp.drafted += drafts.len() as u64;
             mtp.accepted += accepted as u64;
             mtp.rounds += 1;
-            mtp.mtp_filled = if reuse_draft_kv() {
-                start + committed.len()
-            } else {
-                (start + 1).min(start + committed.len())
-            };
+            mtp.mtp_filled = (start + 1).min(start + committed.len());
         }
 
         if stop_reason.is_none() {
@@ -2892,13 +2821,8 @@ impl LlamaSession {
             // only position `start` used the main model's hidden state; the
             // rest chained off the draft head's own output. Re-running the
             // accepted tail through the prefill hook restores llama.cpp's
-            // exact conditioning. MKLLM_MTP_REUSE_DRAFT_KV=1 keeps the
-            // approximate rows and skips that catch-up decode.
-            mtp.mtp_filled = if reuse_draft_kv() {
-                start + committed.len()
-            } else {
-                (start + 1).min(start + committed.len())
-            };
+            // exact conditioning.
+            mtp.mtp_filled = (start + 1).min(start + committed.len());
         }
 
         Ok(stop_reason)
@@ -3119,23 +3043,15 @@ impl LlamaSession {
     }
 
     fn graph_key_count(&self, cache_tokens: usize) -> usize {
-        if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-            cache_tokens
-        } else {
-            cache_tokens
-                .next_multiple_of(GRAPH_KEY_BUCKET)
-                .min(self.max_context())
-        }
+        cache_tokens
+            .next_multiple_of(GRAPH_KEY_BUCKET)
+            .min(self.max_context())
     }
 }
 
 /// Tokens per MTP catch-up call. Large enough that a long prompt costs only a
 /// handful of the draft head's ~1 GB LM-head reads.
 const MTP_PREFILL_CHUNK: usize = 512;
-
-fn reuse_draft_kv() -> bool {
-    std::env::var_os("MKLLM_MTP_REUSE_DRAFT_KV").is_some()
-}
 
 /// One lane's facts for a batched speculative round.
 ///
@@ -3446,7 +3362,7 @@ impl LlamaSession {
         // saw would leave a hole its next catch-up skips over: the draft head
         // would then be conditioned on a token it never read, and the only
         // symptom is worse proposals.
-        let ingested = draft_head_fill_after(drafts.len(), committed.len(), reuse_draft_kv());
+        let ingested = draft_head_fill_after(drafts.len());
         Ok(SpecRoundOutcome {
             live_state_offset: commit,
             mtp_filled: start + ingested,
@@ -3736,12 +3652,9 @@ impl LlamaSession {
                 span, self.attention_arena_rows
             )));
         }
-        Ok(if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
-            span
-        } else {
-            span.next_multiple_of(GRAPH_KEY_BUCKET)
-                .min(self.attention_arena_rows)
-        })
+        Ok(span
+            .next_multiple_of(GRAPH_KEY_BUCKET)
+            .min(self.attention_arena_rows))
     }
 }
 
@@ -3758,8 +3671,8 @@ impl LlamaSession {
 /// next catch-up skips straight over — after which the draft head is
 /// conditioned on a token it never read, and the only symptom is proposals
 /// quietly getting worse.
-fn draft_head_fill_after(drafted: usize, committed: usize, reuse: bool) -> usize {
-    drafted.min(if reuse { committed } else { 1 })
+fn draft_head_fill_after(drafted: usize) -> usize {
+    drafted.min(1)
 }
 
 /// One lower bound per lane, or empty when every lane is at row 0.
@@ -3825,20 +3738,13 @@ fn build_runtime_state(
     progress: &mut dyn FnMut(&str, f64),
 ) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
     // Weights come from a read-only mmap of the gguf (clean file-backed
-    // pages, lazy page-in) unless mapping is unavailable or disabled;
-    // the fallback is EXACTLY the previous owned-arena path.
-    // MAKEPAD_LLAMA_NO_MMAP=1 forces the owned-arena path (A/B).
-    let use_mmap = std::env::var_os("MAKEPAD_LLAMA_NO_MMAP").is_none();
+    // pages, lazy page-in); the fallback is the owned-arena path.
     let mut extra_bytes = context_extra_bytes;
     for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
         // Retries re-run this: remapping the same file is cheap, and only
         // a real mapping failure may take the owned-arena fallback.
         progress("load llm mmap", 0.130);
-        let mapped_weights = if use_mmap {
-            plan.full_weights.map_and_load(&model.gguf, extra_bytes)
-        } else {
-            None
-        };
+        let mapped_weights = plan.full_weights.map_and_load(&model.gguf, extra_bytes);
         let weight_gb = plan.full_weights.total_bytes as f64 / 1e9;
         let mut weights = match mapped_weights {
             Some(weights) => weights,
@@ -4725,16 +4631,11 @@ mod tests {
         // leaves a hole the next catch-up skips, after which the draft head is
         // conditioned on a token it never read — and the only symptom is
         // proposals quietly getting worse.
-        assert_eq!(draft_head_fill_after(0, 1, false), 0);
-        assert_eq!(draft_head_fill_after(0, 1, true), 0);
+        assert_eq!(draft_head_fill_after(0), 0);
         // The shipped default: only `first` is trustworthy, because the draft
         // chain's own tokens may have been rejected.
-        assert_eq!(draft_head_fill_after(3, 4, false), 1);
-        assert_eq!(draft_head_fill_after(1, 2, false), 1);
-        // With reuse the accepted prefix is trustworthy, but never past what
-        // was actually drafted.
-        assert_eq!(draft_head_fill_after(3, 2, true), 2);
-        assert_eq!(draft_head_fill_after(2, 4, true), 2);
+        assert_eq!(draft_head_fill_after(3), 1);
+        assert_eq!(draft_head_fill_after(1), 1);
     }
 
     #[test]

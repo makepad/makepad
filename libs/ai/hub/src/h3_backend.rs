@@ -20,10 +20,6 @@
 //! seed, codec}` -> one `video/mp4` artifact (24 fps, stereo AAC when the
 //! pipeline yields audio).
 //!
-//! Numerics note: the validated H3 config is the f32 spine — H3 activations
-//! overflow f16 (reference's own f16 dumps are inf), so `ensure_loaded` pins
-//! FLUX_GEMM_F16ACC=0 unless the environment overrides it explicitly.
-//!
 //! Warm residency (flux pattern, measured 2026-08-13 on the 96GB box): H3
 //! streams weights per tensor (no host arenas) and its DiT/VAE device
 //! weight caches persist across jobs on the worker thread already — the
@@ -1009,14 +1005,6 @@ mod h3_gen {
             ctx: &mut BackendCtx,
             plan: &super::H3TierPlan,
         ) -> Result<(), AssetAiError> {
-            // The validated H3 numerics config is the f32 spine: f16-accumulate
-            // gemms saturate H3's >1e4 activation outliers into NaN. Pin the
-            // knob once unless the operator explicitly set it. (Holds for the
-            // quantized tiers too: their weights dequantize into bf16 and run
-            // the same f32-accumulate gemms.)
-            if std::env::var_os("FLUX_GEMM_F16ACC").is_none() {
-                std::env::set_var("FLUX_GEMM_F16ACC", "0");
-            }
             // Downloads any missing registry files (bf16: 61 files ~134 GiB,
             // usually pre-seeded/junctioned; quant tiers: the pinned GGUF or
             // NVFP4 set, ~30-35 GiB).
@@ -1231,7 +1219,12 @@ mod h3_gen {
                 video_noise_rows: None,
                 audio_noise_rows: None,
                 condition_rows_override: None,
-                act16: false,
+                // H3's >1e4 activation outliers require an f32 activation
+                // spine and f32 GEMM accumulation to avoid f16 saturation.
+                precision: makepad_ai_h3::backend::GemmPrecision {
+                    f16_accumulate: false,
+                    f16_activations: false,
+                },
                 decode_audio: job.audio,
                 model_set: self.model_set.clone(),
                 staged_residency: self.staged_residency,

@@ -49,8 +49,7 @@ enum ForwardOutput {
 }
 
 /// Default is the cuDNN f16 fast path (the official CUDA forward is fp16).
-/// `MAKEPAD_REALESRGAN_MODE=reference` selects the f32 planar path, which
-/// combined with `FLUX_VAE_CONV_GEMM=0` is the pure-f32 parity oracle.
+/// `MAKEPAD_REALESRGAN_MODE=reference` selects the f32 planar validation path.
 fn fast_mode_enabled() -> bool {
     match std::env::var("MAKEPAD_REALESRGAN_MODE") {
         Ok(value) => value != "reference",

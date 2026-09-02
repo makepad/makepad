@@ -31,6 +31,8 @@
 //!            --evict (drop the file from the page cache before each run),
 //!            --verify (mincore residency before/after each run)
 
+#[cfg(unix)]
+mod unix_bench {
 use std::path::Path;
 use std::time::Instant;
 
@@ -179,7 +181,7 @@ impl Dest {
     }
 }
 
-fn main() {
+pub fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
@@ -701,4 +703,16 @@ fn evict_file(path: &Path, bytes: u64) -> Result<(usize, usize, usize), String> 
     }
     let (after, _) = map.residency();
     Ok((before, after, pages))
+}
+
+}
+
+#[cfg(unix)]
+fn main() {
+    unix_bench::main()
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mac-storage-bench is a unix-only tool (raw open/read syscalls)");
 }

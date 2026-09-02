@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::metal_compiled::{
-    create_context_main_buffer, create_context_main_buffer_no_copy, create_context_ro_buffer,
+    create_context_main_buffer_no_copy, create_context_ro_buffer,
     execute_compiled_graph, execute_compiled_graph_in_active_batch,
-    execute_compiled_graph_with_buffer_inputs, prepare_graph, warmup_affine_qmm_weights,
+    execute_compiled_graph_with_buffer_inputs, prepare_graph,
     MetalCompiledGraph, MetalContextBuffers, MetalGraphSession, MetalGraphTensorBufferCopy,
     MetalGraphTensorWrite, MetalPreparedGraph,
 };
@@ -363,23 +363,16 @@ fn flash_attention_supported_head_dim(head_dim: u32) -> bool {
 }
 
 fn should_use_flash_attention(head_dim: u32, n_tokens: usize) -> bool {
-    if std::env::var("LLAMA_NO_FLASH_ATTN").is_ok() {
-        return false;
-    }
     if !flash_attention_supported_head_dim(head_dim) {
         return false;
     }
     // Decode-sized online-softmax flash stays for n_tokens < 20.
     // Prefill uses llama.cpp fattn-mma-f16 (D=256, ncols 8x8) only.
-    // The naive flash was measured slower (1713 -> 1671). Rollback:
-    // MKLLM_DISABLE_FATTN_MMA=1 restores batched GEMM for large n.
+    // The naive flash was measured slower (1713 -> 1671).
     if n_tokens < 20 {
         return true;
     }
-    let fattn_disabled = std::env::var_os("MKLLM_DISABLE_FATTN_MMA")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    !fattn_disabled && head_dim == 256
+    head_dim == 256
 }
 
 /// Re-express absolute arena rows in the coordinates of a graph whose
@@ -1171,10 +1164,6 @@ pub struct HybridDecodeGraph {
     pub attention_cache_views: Vec<HybridAttentionCacheView>,
     pub moe_selected_experts: Vec<HybridMoeSelection>,
     pub state_updates: Vec<TensorId>,
-    /// Debug-only graph outputs selected by `MAKEPAD_LLAMA_TRACE_ALL`.
-    /// Keeping the ids on the shared graph makes Metal and CUDA pin and
-    /// read back the exact same intermediate tensors for parity diagnosis.
-    pub debug_outputs: Vec<TensorId>,
     pub result_hidden: TensorId,
     pub result_logits: TensorId,
 }
@@ -4729,11 +4718,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
     ctx.set_tensor_name(conv_states, format!("{prefix}.conv_states_reshaped"))
         .map_err(LlamaError::format)?;
 
-    let mut qkv_mixed_t = ctx.transpose(qkv_mixed).map_err(LlamaError::format)?;
-    // Debug bisection hatch: materialize the transpose before the concat.
-    if std::env::var("MAKEPAD_LLAMA_DN_CONT_CONCAT").is_ok() {
-        qkv_mixed_t = ctx.cont(qkv_mixed_t).map_err(LlamaError::format)?;
-    }
+    let qkv_mixed_t = ctx.transpose(qkv_mixed).map_err(LlamaError::format)?;
     ctx.set_tensor_name(qkv_mixed_t, format!("{prefix}.qkv_mixed_transposed"))
         .map_err(LlamaError::format)?;
     let conv_input = ctx
@@ -4854,13 +4839,6 @@ fn build_delta_net_recurrent_decode_from_hidden(
     ctx.set_tensor_name(conv_output, format!("{prefix}.conv_output"))
         .map_err(LlamaError::format)?;
 
-    // Debug bisection hatch: bypass the causal conv, reading q/k/v straight
-    // from the projection (same [qkv_dim, n_tokens, n_seqs] shape).
-    let conv_output = if std::env::var("MAKEPAD_LLAMA_DN_NO_CONV").is_ok() {
-        qkv_mixed
-    } else {
-        conv_output
-    };
     let conv_output_tensor = require_tensor(ctx, conv_output)?.clone();
     let qk_heads_width = i64::from(block.key_head_dim) * i64::from(block.key_head_count);
     let q_conv = ctx
@@ -4911,22 +4889,14 @@ fn build_delta_net_recurrent_decode_from_hidden(
 
     let use_fused_delta_net = true;
 
-    // Debug bisection hatch: skip the pre-delta q/k L2 norm.
-    let skip_qk_norm = std::env::var("MAKEPAD_LLAMA_DN_NO_QKNORM").is_ok();
-    let mut q_conv = if skip_qk_norm {
-        q_conv
-    } else {
-        ctx.l2_norm_eps(q_conv, block.rms_epsilon, BufferUsage::Activations)
-            .map_err(LlamaError::format)?
-    };
+    let mut q_conv = ctx
+        .l2_norm_eps(q_conv, block.rms_epsilon, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
     ctx.set_tensor_name(q_conv, format!("{prefix}.q_conv_predelta"))
         .map_err(LlamaError::format)?;
-    let mut k_conv = if skip_qk_norm {
-        k_conv
-    } else {
-        ctx.l2_norm_eps(k_conv, block.rms_epsilon, BufferUsage::Activations)
-            .map_err(LlamaError::format)?
-    };
+    let mut k_conv = ctx
+        .l2_norm_eps(k_conv, block.rms_epsilon, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
     ctx.set_tensor_name(k_conv, format!("{prefix}.k_conv_predelta"))
         .map_err(LlamaError::format)?;
     if block.value_head_count != block.key_head_count && !use_fused_delta_net {
@@ -5151,13 +5121,6 @@ fn build_delta_net_recurrent_decode_from_hidden(
         (output, new_state, Vec::new())
     };
 
-    // Debug bisection hatch: pass raw v through instead of the delta-net
-    // attention result (the state save still runs).
-    let output = if std::env::var("MAKEPAD_LLAMA_DN_RAW_V").is_ok() {
-        v_conv
-    } else {
-        output
-    };
     let s_cache_updates = if checkpoint_s_updates.is_empty() {
         let new_state_nb3 = require_tensor(ctx, new_state)?.nb[3];
         let new_state_rows = ctx
@@ -7420,15 +7383,6 @@ fn build_hybrid_decode_graph_impl(
         .build_forward_expand(ctx, result_logits)
         .map_err(LlamaError::format)?;
 
-    let debug_outputs = if std::env::var_os("MAKEPAD_LLAMA_TRACE_ALL").is_some() {
-        graph.nodes.clone()
-    } else {
-        Vec::new()
-    };
-    for &output in &debug_outputs {
-        mark_output(ctx, output)?;
-    }
-
     Ok(HybridDecodeGraph {
         graph,
         input_primary,
@@ -7443,7 +7397,6 @@ fn build_hybrid_decode_graph_impl(
         attention_cache_views,
         moe_selected_experts,
         state_updates,
-        debug_outputs,
         result_hidden,
         result_logits,
     })
@@ -7632,17 +7585,8 @@ pub fn create_metal_context_buffer_with_runtime(
     let ro_split = if ro_buffer.is_some() { ctx.ro_split() } else { 0 };
     // Zero-copy shared weights on unified memory (one resident copy
     // instead of CPU arena + private GPU duplicate).
-    // MAKEPAD_GGML_COPY_WEIGHTS=1 restores the old copying path (A/B;
-    // single-arena contexts only — mapped weights are never copied).
-    let main_buffer = if ro_buffer.is_none() && std::env::var_os("MAKEPAD_GGML_COPY_WEIGHTS").is_some()
-    {
-        create_context_main_buffer(runtime, ctx, BufferStorageMode::Private)
-            .map_err(LlamaError::format)?
-    } else {
-        create_context_main_buffer_no_copy(runtime, ctx, BufferStorageMode::Private)
-            .map_err(LlamaError::format)?
-    };
-    let _ = warmup_affine_qmm_weights(runtime, ctx);
+    let main_buffer = create_context_main_buffer_no_copy(runtime, ctx, BufferStorageMode::Private)
+        .map_err(LlamaError::format)?;
     Ok(MetalContextBuffers {
         ro_buffer,
         ro_split,
@@ -8214,10 +8158,7 @@ pub(crate) fn validate_hybrid_decode_layout(
                 )));
             }
         }
-    } else if !positions.is_empty() && std::env::var("MAKEPAD_LLAMA_MAX_BLOCKS").is_err() {
-        // Positions with no attention layers is normally a caller bug, but a
-        // block-truncated debug graph (MAKEPAD_LLAMA_MAX_BLOCKS) may cut off
-        // every attention layer on purpose.
+    } else if !positions.is_empty() {
         return Err(LlamaError::format(
             "hybrid decode received positions for a graph without attention layers",
         ));
@@ -8530,90 +8471,6 @@ pub(crate) fn collect_hybrid_decode_run(
     })
 }
 
-/// Print compact, deterministic stats for graph intermediates selected by
-/// `MAKEPAD_LLAMA_TRACE_ALL`. This intentionally lives above either backend
-/// so a Metal/CUDA trace compares identical tensor ids, names, and bytes.
-pub(crate) fn debug_trace_outputs(
-    backend: &str,
-    ctx: &Context,
-    decode: &HybridDecodeGraph,
-    outputs: &BTreeMap<TensorId, Vec<u8>>,
-) -> Result<()> {
-    if decode.debug_outputs.is_empty() {
-        return Ok(());
-    }
-    eprintln!(
-        "trace.begin backend={} nodes={}",
-        backend,
-        decode.debug_outputs.len()
-    );
-    for (index, &tensor_id) in decode.debug_outputs.iter().enumerate() {
-        let tensor = ctx
-            .tensor(tensor_id)
-            .ok_or_else(|| LlamaError::format(format!("invalid trace tensor {tensor_id}")))?;
-        let bytes = outputs.get(&tensor_id).ok_or_else(|| {
-            LlamaError::format(format!("trace tensor {tensor_id} was not read back"))
-        })?;
-        let values = match tensor.desc.ty {
-            TensorType::F32 => f32_bytes_to_vec(bytes)?,
-            TensorType::F16 => bytes
-                .chunks_exact(2)
-                .map(|chunk| {
-                    makepad_ai_cuda::quant::f16_to_f32(u16::from_le_bytes(
-                        chunk.try_into().unwrap(),
-                    ))
-                })
-                .collect(),
-            _ => {
-                eprintln!(
-                    "trace.node backend={} index={} id={} op={:?} ty={} name={} bytes={}",
-                    backend,
-                    index,
-                    tensor_id,
-                    tensor.op,
-                    tensor.desc.ty.name(),
-                    tensor.name().unwrap_or("<unnamed>"),
-                    bytes.len()
-                );
-                continue;
-            }
-        };
-        let mut sum = 0.0f64;
-        let mut abs_sum = 0.0f64;
-        let mut l2 = 0.0f64;
-        let mut max_abs = 0.0f32;
-        let mut nans = 0usize;
-        for &value in &values {
-            if value.is_nan() {
-                nans += 1;
-                continue;
-            }
-            let value64 = f64::from(value);
-            sum += value64;
-            abs_sum += value64.abs();
-            l2 += value64 * value64;
-            max_abs = max_abs.max(value.abs());
-        }
-        eprintln!(
-            "trace.node backend={} index={} id={} op={:?} name={} n={} sum={:.9e} abs={:.9e} l2={:.9e} max={:.9e} nans={} head={:?}",
-            backend,
-            index,
-            tensor_id,
-            tensor.op,
-            tensor.name().unwrap_or("<unnamed>"),
-            values.len(),
-            sum,
-            abs_sum,
-            l2.sqrt(),
-            max_abs,
-            nans,
-            &values[..values.len().min(4)]
-        );
-    }
-    eprintln!("trace.end backend={backend}");
-    Ok(())
-}
-
 pub fn execute_prepared_hybrid_decode_metal(
     runtime: &MetalRuntime,
     ctx: &mut Context,
@@ -8646,11 +8503,8 @@ pub fn execute_prepared_hybrid_decode_metal(
                 .map(|sel| sel.selected_experts),
         );
     }
-    outputs.extend(decode.debug_outputs.iter().copied());
     let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &outputs)
         .map_err(LlamaError::format)?;
-
-    debug_trace_outputs("metal", ctx, decode, &execution.outputs)?;
 
     collect_hybrid_decode_run(ctx, decode, output_config, &execution.outputs)
 }

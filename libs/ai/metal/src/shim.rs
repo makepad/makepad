@@ -1,13 +1,3 @@
-/// Metal backend debug breadcrumbs (init, dispatch choices). Off by default —
-/// set GGML_METAL_TRACE=1 to enable, mirroring MAKEPAD_CUDA_TRACE.
-fn log_metal_trace() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("GGML_METAL_TRACE").is_some()
-            || std::env::var_os("MAKEPAD_MUSIC3_TRACE").is_some()
-    })
-}
-
 /// Missing-kernel fallbacks fire per matmul; print each distinct message once.
 fn log_metal_error_once(msg: impl std::fmt::Display) {
     use std::collections::HashSet;
@@ -21,11 +11,6 @@ fn log_metal_error_once(msg: impl std::fmt::Display) {
     if seen.insert(text.clone()) {
         eprintln!("{text}");
     }
-}
-
-#[allow(dead_code)]
-fn log_mul_mat_requested() -> bool {
-    log_metal_trace()
 }
 
 pub fn is_available() -> bool {
@@ -1933,7 +1918,6 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
-    use std::sync::OnceLock;
     use std::thread;
     use std::time::Duration;
 
@@ -2974,11 +2958,6 @@ mod imp {
     /// only matters for one-off giants (DiT prefill strips).
     const POOL_CAP_BYTES: usize = 1280 * 1024 * 1024;
 
-    fn pool_disabled() -> bool {
-        static OFF: OnceLock<bool> = OnceLock::new();
-        *OFF.get_or_init(|| std::env::var_os("MAKEPAD_MUSIC3_NO_POOL").is_some())
-    }
-
     struct MetalContext {
         device: StrongId,
         command_queue: StrongId,
@@ -3065,10 +3044,6 @@ mod imp {
                         Self::compile_library(device.as_id(), &source)?
                     }
                 };
-
-                if super::log_metal_trace() {
-                    eprintln!("[ggml][metal] backend initialized (shared kernels)");
-                }
 
                 return Ok(Self {
                     device,
@@ -3235,14 +3210,12 @@ mod imp {
         /// touching the Metal allocator.
         fn pool_take(&mut self, byte_len: usize) -> Result<StrongId, String> {
             let need = byte_len.max(4);
-            if !pool_disabled() {
-                if let Some(i) = self
-                    .pool_free
-                    .iter()
-                    .position(|p| p.cap_bytes == need)
-                {
-                    return Ok(self.pool_free.swap_remove(i).buf);
-                }
+            if let Some(i) = self
+                .pool_free
+                .iter()
+                .position(|p| p.cap_bytes == need)
+            {
+                return Ok(self.pool_free.swap_remove(i).buf);
             }
             self.new_buffer_with_length(need)
         }
@@ -3262,9 +3235,6 @@ mod imp {
         /// Park a transient buffer until the next queue wait proves the GPU
         /// is done with it.
         fn pool_give(&mut self, buf: StrongId) {
-            if pool_disabled() {
-                return;
-            }
             let cap_bytes = unsafe {
                 let len: u64 = msg_send![buf.as_id(), length];
                 len as usize
@@ -4087,11 +4057,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mv_ext");
-            }
-
             let nsg = 2i32;
             let nxpsg = if ne00 % 256 == 0 && ne11 < 3 {
                 16i32
@@ -4213,11 +4178,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mm");
-            }
-
             let bc_inp = ne00 % 32 != 0;
             let bc_out = ne0 % 64 != 0 || ne1 % 32 != 0;
 
@@ -4334,11 +4294,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mv");
-            }
-
             let (nsg, nr0, nr1, smem, suffix) = match src0 {
                 Src0Type::F32 | Src0Type::F16 | Src0Type::BF16 => {
                     if ne00 < 32 {
@@ -8369,20 +8324,17 @@ mod imp {
             let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
             let used_mul_mm = ne00 >= 64 && ne11 > 8;
 
-            let (kernel, compute_res) = if used_mul_mv_ext {
-                (
-                    "mul_mv_ext",
-                    self.dispatch_mul_mv_ext(
+            let compute_res = if used_mul_mv_ext {
+                self.dispatch_mul_mv_ext(
                         src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
                         nb11, ne0, ne1,
-                    ),
-                )
+                    )
             } else if used_mul_mm {
                 match self.dispatch_mul_mm(
                     src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
                 ) {
-                    Ok(()) => ("mul_mm", Ok(())),
-                    Err(e) => ("mul_mv", {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
                         super::log_metal_error_once(format!(
                             "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
                             src0, e
@@ -8391,30 +8343,15 @@ mod imp {
                             src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
                             nb10, nb11, ne0, ne1,
                         )
-                    }),
+                    }
                 }
             } else {
-                (
-                    "mul_mv",
-                    self.dispatch_mul_mv(
+                self.dispatch_mul_mv(
                         src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
                         nb11, ne0, ne1,
-                    ),
-                )
+                    )
             };
             compute_res?;
-            if super::log_mul_mat_requested() {
-                eprintln!(
-                    "[ggml][metal] mul_mat kernel={} src0={} src1=f32 ne00={} ne01={} ne11={} ne12=1 nb01={} nb11={}",
-                    kernel,
-                    src0_type_name(src0),
-                    ne00,
-                    ne01,
-                    ne11,
-                    nb01,
-                    nb11
-                );
-            }
             drop(src0_temp);
             if let Some(dst_buffer) = dst_temp {
                 Ok(dst_buffer)

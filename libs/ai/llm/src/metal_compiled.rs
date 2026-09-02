@@ -1088,13 +1088,6 @@ pub fn create_context_main_buffer(
 /// context. Sized to `dirty_size` (prepared.main_buffer_size - ro_split),
 /// with the CPU dirty prefix (inputs / constants) copied in. Never wraps
 /// a huge overcommitted CPU arena — that is what failed at 32GiB.
-pub fn warmup_affine_qmm_weights(
-    runtime: &MetalRuntime,
-    ctx: &Context,
-) -> Result<usize, String> {
-    crate::metal_qmm::warmup_affine_qmm(runtime, ctx)
-}
-
 pub fn create_context_dirty_buffer(
     runtime: &MetalRuntime,
     ctx: &Context,
@@ -1368,7 +1361,6 @@ impl MetalGraphSession {
                 ro_split,
                 main_buffer,
             };
-            let _ = crate::metal_qmm::warmup_affine_qmm(&runtime, ctx);
             return Self::from_runtime_with_context_buffers(
                 runtime,
                 prepared,
@@ -1377,7 +1369,6 @@ impl MetalGraphSession {
             );
         }
         let compiled = compile_prepared_graph(&runtime, ctx, prepared, main_storage, tail_storage)?;
-        let _ = crate::metal_qmm::warmup_affine_qmm(&runtime, ctx);
         Ok(Self { runtime, compiled })
     }
 
@@ -1439,11 +1430,6 @@ pub fn execute_compiled_graph_with_buffer_inputs(
     buffer_inputs: &[MetalGraphTensorBufferCopy<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
-    if crate::metal_qmm::affine_qmm_enabled()
-        || std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some()
-    {
-        runtime.reset_counters();
-    }
     // Write host inputs while the GPU is idle (after the previous
     // execute's readback wait). A Shared memcpy inside an active batch
     // was invisible to later compute: Flux kept the step-0 packed
@@ -1473,18 +1459,6 @@ pub fn execute_compiled_graph_with_buffer_inputs(
         return Err(err);
     }
     runtime.end_command_batch()?;
-    if crate::metal_qmm::affine_qmm_enabled() {
-        let c = runtime.counters();
-        eprintln!(
-            "metal: steel graph commits={} dispatches={} encoders={}->{} barriers={}",
-            c.command_buffer_commits,
-            c.compute_dispatches,
-            c.compute_encoder_starts,
-            c.compute_encoder_ends,
-            c.buffer_barriers
-        );
-    }
-
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
         // Offsets were frozen at compile time; if the reuse planner recycled
@@ -1510,15 +1484,6 @@ pub fn execute_compiled_graph_with_buffer_inputs(
         execution.outputs.insert(
             tensor_id,
             runtime.read_buffer_range(buffer, offset_bytes, binding.size_bytes)?,
-        );
-    }
-    // GPUStartTime/EndTime is only valid after the CBs complete. The
-    // in-batch counter dump runs before that wait; print true GPU time here.
-    if std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some() {
-        let c = runtime.counters();
-        eprintln!(
-            "metal.gpu_ms={:.3} (sum of MTLCommandBuffer GPUStart/End)",
-            c.gpu_elapsed_ns as f64 / 1e6
         );
     }
     Ok(execution)
@@ -1566,12 +1531,6 @@ pub fn execute_compiled_graph_in_active_batch(
     // this node's src/dst *buffer ranges* overlap a prior dst (or a prior src
     // if we write). Tensor-id RAW barriers serialize independent Flux streams.
     let mut live_ranges: Vec<MetalMemRange> = Vec::with_capacity(256);
-    let mut concurrent_nodes = 0u32;
-    let mut missing_bind = 0u32;
-    let mut barrier_raw = 0u32;
-    let mut barrier_war = 0u32;
-    let mut barrier_alias = 0u32;
-    let log_ops = std::env::var_os("MAKEPAD_METAL_LOG_OPS").is_some();
     // Official n_cb=1: encode+submit the first max(64, 10%) nodes so the GPU
     // starts while the remaining ops are encoded.
     let n_main = compiled.nodes.len().div_ceil(10).max(64);
@@ -1579,67 +1538,13 @@ pub fn execute_compiled_graph_in_active_batch(
         let tensor = ctx
             .tensor(node.node_id)
             .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
-        if log_ops {
-            let stage = node
-                .stages
-                .first()
-                .map(|stage| stage.descriptor.base_name.as_str())
-                .unwrap_or("-");
-            let src_desc: Vec<String> = tensor
-                .src
-                .iter()
-                .map(|src| match src {
-                    Some(id) => match ctx.tensor(*id) {
-                        Some(src_t) => {
-                            let bind = compiled
-                                .bindings
-                                .get(id)
-                                .map(|binding| binding.offset_bytes)
-                                .unwrap_or(usize::MAX);
-                            format!(
-                                "{}:{}:{:?}:bind={}",
-                                id,
-                                src_t.name().unwrap_or("?"),
-                                src_t.ne,
-                                bind
-                            )
-                        }
-                        None => format!("{id}:missing"),
-                    },
-                    None => "-".to_string(),
-                })
-                .collect();
-            let dest_bind = compiled
-                .bindings
-                .get(&tensor.id)
-                .map(|binding| binding.offset_bytes)
-                .unwrap_or(usize::MAX);
-            eprintln!(
-                "metal.op[{op_i}]: id={} op={} ne={:?} dest_bind={} src=[{}] fuse={:?} out={} kernel={stage}",
-                tensor.id,
-                tensor.op.name(),
-                tensor.ne,
-                dest_bind,
-                src_desc.join(", "),
-                node.fuse_src_ids,
-                node.output_id,
-            );
-        }
         match node_range_status(compiled, ctx, tensor, node, &live_ranges) {
-            NodeRangeStatus::Concurrent => concurrent_nodes += 1,
+            NodeRangeStatus::Concurrent => {}
             NodeRangeStatus::MissingBind => {
-                missing_bind += 1;
                 runtime.memory_barrier_buffers()?;
                 live_ranges.clear();
             }
-            NodeRangeStatus::Overlap { raw, war, alias } => {
-                if raw {
-                    barrier_raw += 1;
-                } else if war {
-                    barrier_war += 1;
-                } else if alias {
-                    barrier_alias += 1;
-                }
+            NodeRangeStatus::Overlap { .. } => {
                 runtime.memory_barrier_buffers()?;
                 live_ranges.clear();
             }
@@ -1650,23 +1555,6 @@ pub fn execute_compiled_graph_in_active_batch(
             runtime.submit_partial_command_batch()?;
             live_ranges.clear();
         }
-    }
-    if std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some() {
-        let c = runtime.counters();
-        eprintln!(
-            "metal.counters nodes={} barriers={} raw={} war={} alias={} dispatches={} enc_start={} cb_commit={} n_main={} concurrent={} missing_bind={}",
-            compiled.nodes.len(),
-            c.buffer_barriers,
-            barrier_raw,
-            barrier_war,
-            barrier_alias,
-            c.compute_dispatches,
-            c.compute_encoder_starts,
-            c.command_buffer_commits,
-            n_main,
-            concurrent_nodes,
-            missing_bind
-        );
     }
     Ok(())
 }
@@ -4215,26 +4103,6 @@ fn dispatch_mul_mat(
         .map_err(|_| format!("mul_mat r3 {} exceeds i16", ne13 / ne03))?;
 
     if base.starts_with("kernel_mul_mm_") {
-        let src0_bind = buffer_ref(compiled, 1, src0_id);
-        let src1_bind = buffer_ref(compiled, 2, src1_id);
-        let dst_bind = buffer_ref(compiled, 3, tensor.id);
-        match crate::metal_qmm::try_dispatch_affine_qmm(
-            runtime,
-            ctx,
-            src0,
-            src1,
-            tensor,
-            src0_bind,
-            src1_bind,
-            dst_bind,
-            ne12,
-        ) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
-            Err(err) => {
-                eprintln!("metal: affine qmm unavailable ({err}); using kernel_mul_mm");
-            }
-        }
         let ne00 = i32_dim(src0, 0)?;
         let ne01 = i32_dim(src0, 1)?;
         let ne0 = i32_dim(tensor, 0)?;
@@ -5152,18 +5020,6 @@ fn dispatch_flash_attn_ext(
     let k_shape = shape4(k)?;
     let v_shape = shape4(v)?;
     let dst_shape = shape4(tensor)?;
-    if std::env::var_os("MAKEPAD_FLASH_LOG").is_some() {
-        eprintln!(
-            "flash: q={:?} k={:?}(nb {:?}) v={:?} mask={:?} mask_nb={:?}",
-            q_shape,
-            k_shape,
-            k.nb,
-            v_shape,
-            mask.map(|m| m.ne),
-            mask.map(|m| m.nb),
-        );
-    }
-
     let has_mask = mask.is_some();
     let _has_sinks = sinks.is_some();
     let max_bias = tensor.op_param_f32(1);

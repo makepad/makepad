@@ -25,7 +25,7 @@ use std::time::Instant;
 use makepad_ai_llm::{
     CudaExecRuntime, ExecBackendKind, ExecRuntime, LlamaModel, LlamaSession, LlamaSessionConfig,
 };
-use makepad_ai_llm::cuda_exec::{host_split_reset, host_split_snapshot, MMV_MAX_COLUMNS};
+use makepad_ai_llm::cuda_exec::MMV_MAX_COLUMNS;
 use makepad_ai_cuda::quant;
 use makepad_ai_llm::{
     BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
@@ -198,29 +198,6 @@ fn f16_rne(value: f32) -> f32 {
     quant::f16_to_f32(f32_to_f16_rne_bits(value))
 }
 
-struct ScopedEnv {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ScopedEnv {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnv {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Ds4Group {
     q: [i8; 32],
@@ -383,32 +360,16 @@ fn q4k_mmq_weights(k: usize, n: usize) -> Vec<u8> {
     weights
 }
 
-#[derive(Clone, Copy)]
-struct ErrorStats {
-    max: f32,
-    mean: f64,
-    non_finite: usize,
-}
-
-fn error_stats(got: &[f32], want: &[f32]) -> ErrorStats {
+fn max_abs_diff(got: &[f32], want: &[f32]) -> f32 {
     assert_eq!(got.len(), want.len());
     let mut max = 0.0f32;
-    let mut sum = 0.0f64;
-    let mut non_finite = 0usize;
     for (&got, &want) in got.iter().zip(want) {
         let error = (got - want).abs();
         if error.is_finite() {
             max = max.max(error);
-            sum += f64::from(error);
-        } else {
-            non_finite += 1;
         }
     }
-    ErrorStats {
-        max,
-        mean: sum / got.len().max(1) as f64,
-        non_finite,
-    }
+    max
 }
 
 /// Random-but-sane K-quant block stream: random payload bytes, controlled
@@ -633,8 +594,6 @@ fn run_q4k_mmq_case(
     k: usize,
     n: usize,
     m: usize,
-    force: bool,
-    profile: bool,
 ) -> Vec<f32> {
     let mut bench = Bench::new(64 << 20);
     let w = bench.tensor(
@@ -653,9 +612,6 @@ fn run_q4k_mmq_case(
         .ctx
         .mul_mat(w, x, BufferUsage::Activations)
         .expect("q4k MMQ mul_mat");
-    let _force = ScopedEnv::set("MKLLM_FORCE_Q4K_MMQ", if force { "1" } else { "0" });
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_Q4K_MMQ", if force { "0" } else { "1" });
-    let _profile = profile.then(|| ScopedEnv::set("MAKEPAD_LLAMA_CUDA_PROFILE", "1"));
     let outputs = bench.run(exec, out, &[out]);
     bytes_to_f32(&outputs[&out])
 }
@@ -1079,27 +1035,20 @@ fn q4k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     let acts = q4k_mmq_activations(k, m);
     let want = q4k_mmq_reference(&weights, &acts, k, n, m);
 
-    // Quant profiling prints mmq_ds4 + mmq_kind_j128 when dispatch really
-    // enters the candidate. The numerical proof below is machine-checked:
-    // the forced result must match DS4 and differ from the known slab route.
-    let forced = run_q4k_mmq_case(exec, &weights, &acts, k, n, m, true, true);
-    let slab = run_q4k_mmq_case(exec, &weights, &acts, k, n, m, false, false);
-    let forced_stats = error_stats(&forced, &want);
-    let slab_stats = error_stats(&slab, &want);
-    let route_delta = error_stats(&forced, &slab);
+    let got = run_q4k_mmq_case(exec, &weights, &acts, k, n, m);
 
     compare_tol(
-        "q4k_mmq_forced_ds4",
-        forced.clone(),
+        "q4k_mmq_ds4",
+        got.clone(),
         want.clone(),
         3e-3,
         2e-4,
         failures,
     );
 
-    let zero_column_ok = forced[..n].iter().all(|value| value.abs() <= f32::EPSILON);
-    let has_positive = forced[n..].iter().any(|value| *value > 1e-2);
-    let has_negative = forced[n..].iter().any(|value| *value < -1e-2);
+    let zero_column_ok = got[..n].iter().all(|value| value.abs() <= f32::EPSILON);
+    let has_positive = got[n..].iter().any(|value| *value > 1e-2);
+    let has_negative = got[n..].iter().any(|value| *value < -1e-2);
     if zero_column_ok && has_positive && has_negative {
         println!("ok   q4k_mmq_zero_sign: zero column and both output signs covered");
     } else {
@@ -1116,7 +1065,7 @@ fn q4k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     for col in boundary_cols {
         for row in boundary_rows {
             let index = col * n + row;
-            let error = (forced[index] - want[index]).abs();
+            let error = (got[index] - want[index]).abs();
             boundary_max = boundary_max.max(error);
             boundary_ok &= error <= 3e-3 + 2e-4 * want[index].abs();
         }
@@ -1128,71 +1077,6 @@ fn q4k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
         *failures += 1;
     }
 
-    // If the env force were ignored, both executions would be the same slab
-    // path. Also require the slab to be measurably farther from the DS4 oracle
-    // so a nondeterministic repeated GEMM cannot masquerade as route proof.
-    let route_ok = forced_stats.non_finite == 0
-        && slab_stats.non_finite == 0
-        && route_delta.non_finite == 0
-        && route_delta.max > 1e-4
-        && slab_stats.mean > forced_stats.mean * 2.0 + 1e-6;
-    if route_ok {
-        println!(
-            "ok   q4k_mmq_dispatch: forced/slab max_delta {:.7}, DS4 mean forced {:.7} slab {:.7}",
-            route_delta.max, forced_stats.mean, slab_stats.mean,
-        );
-    } else {
-        println!(
-            "FAIL q4k_mmq_dispatch: delta_max {:.7}, DS4 forced max/mean {:.7}/{:.7}, slab max/mean {:.7}/{:.7}, non_finite {}/{}/{}",
-            route_delta.max,
-            forced_stats.max,
-            forced_stats.mean,
-            slab_stats.max,
-            slab_stats.mean,
-            forced_stats.non_finite,
-            slab_stats.non_finite,
-            route_delta.non_finite,
-        );
-        *failures += 1;
-    }
-
-    // M=129 must remain on the accepted slab implementation even while the
-    // force variable is set: this catches accidental widening of the J=128
-    // host gate before a tail-capable kernel exists.
-    let (gate_n, gate_m) = (129usize, 129usize);
-    let row_bytes = (k / 256) * 144;
-    let gate_weights = &weights[..gate_n * row_bytes];
-    let gate_acts = &acts[..gate_m * k];
-    let gate_forced = run_q4k_mmq_case(
-        exec,
-        gate_weights,
-        gate_acts,
-        k,
-        gate_n,
-        gate_m,
-        true,
-        false,
-    );
-    let gate_slab = run_q4k_mmq_case(
-        exec,
-        gate_weights,
-        gate_acts,
-        k,
-        gate_n,
-        gate_m,
-        false,
-        false,
-    );
-    let gate_delta = error_stats(&gate_forced, &gate_slab);
-    if gate_delta.non_finite == 0 && gate_delta.max <= 1e-6 {
-        println!("ok   q4k_mmq_m129_gate: forced env stayed on slab");
-    } else {
-        println!(
-            "FAIL q4k_mmq_m129_gate: max_delta {:.7}, non_finite {}",
-            gate_delta.max, gate_delta.non_finite,
-        );
-        *failures += 1;
-    }
 }
 
 fn opcheck_q4k_mmq() -> i32 {
@@ -1300,8 +1184,6 @@ fn run_q6k_mmq_case(
     k: usize,
     n: usize,
     m: usize,
-    force: bool,
-    profile: bool,
 ) -> Vec<f32> {
     let mut bench = Bench::new(64 << 20);
     let w = bench.tensor(
@@ -1320,8 +1202,6 @@ fn run_q6k_mmq_case(
         .ctx
         .mul_mat(w, x, BufferUsage::Activations)
         .expect("q6k MMQ mul_mat");
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_Q6K_MMQ", if force { "0" } else { "1" });
-    let _profile = profile.then(|| ScopedEnv::set("MAKEPAD_LLAMA_CUDA_PROFILE", "1"));
     let outputs = bench.run(exec, out, &[out]);
     bytes_to_f32(&outputs[&out])
 }
@@ -1338,24 +1218,20 @@ fn q6k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     let acts = q4k_mmq_activations(k, m);
     let want = q6k_mmq_reference(&weights, &acts, k, n, m);
 
-    let forced = run_q6k_mmq_case(exec, &weights, &acts, k, n, m, true, true);
-    let slab = run_q6k_mmq_case(exec, &weights, &acts, k, n, m, false, false);
-    let forced_stats = error_stats(&forced, &want);
-    let slab_stats = error_stats(&slab, &want);
-    let route_delta = error_stats(&forced, &slab);
+    let got = run_q6k_mmq_case(exec, &weights, &acts, k, n, m);
 
     compare_tol(
-        "q6k_mmq_forced_d4",
-        forced.clone(),
+        "q6k_mmq_d4",
+        got.clone(),
         want.clone(),
         3e-3,
         2e-4,
         failures,
     );
 
-    let zero_column_ok = forced[..n].iter().all(|value| value.abs() <= f32::EPSILON);
-    let has_positive = forced[n..].iter().any(|value| *value > 1e-2);
-    let has_negative = forced[n..].iter().any(|value| *value < -1e-2);
+    let zero_column_ok = got[..n].iter().all(|value| value.abs() <= f32::EPSILON);
+    let has_positive = got[n..].iter().any(|value| *value > 1e-2);
+    let has_negative = got[n..].iter().any(|value| *value < -1e-2);
     if zero_column_ok && has_positive && has_negative {
         println!("ok   q6k_mmq_zero_sign: zero column and both output signs covered");
     } else {
@@ -1372,7 +1248,7 @@ fn q6k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     for col in boundary_cols {
         for row in boundary_rows {
             let index = col * n + row;
-            let error = (forced[index] - want[index]).abs();
+            let error = (got[index] - want[index]).abs();
             boundary_max = boundary_max.max(error);
             boundary_ok &= error <= 3e-3 + 2e-4 * want[index].abs();
         }
@@ -1384,65 +1260,6 @@ fn q6k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
         *failures += 1;
     }
 
-    let route_ok = forced_stats.non_finite == 0
-        && slab_stats.non_finite == 0
-        && route_delta.non_finite == 0
-        && route_delta.max > 1e-4
-        && slab_stats.mean > forced_stats.mean * 2.0 + 1e-6;
-    if route_ok {
-        println!(
-            "ok   q6k_mmq_dispatch: forced/slab max_delta {:.7}, D4 mean forced {:.7} slab {:.7}",
-            route_delta.max, forced_stats.mean, slab_stats.mean,
-        );
-    } else {
-        println!(
-            "FAIL q6k_mmq_dispatch: delta_max {:.7}, D4 forced max/mean {:.7}/{:.7}, slab max/mean {:.7}/{:.7}, non_finite {}/{}/{}",
-            route_delta.max,
-            forced_stats.max,
-            forced_stats.mean,
-            slab_stats.max,
-            slab_stats.mean,
-            forced_stats.non_finite,
-            slab_stats.non_finite,
-            route_delta.non_finite,
-        );
-        *failures += 1;
-    }
-
-    let (gate_n, gate_m) = (129usize, 129usize);
-    let row_bytes = (k / 256) * 210;
-    let gate_weights = &weights[..gate_n * row_bytes];
-    let gate_acts = &acts[..gate_m * k];
-    let gate_forced = run_q6k_mmq_case(
-        exec,
-        gate_weights,
-        gate_acts,
-        k,
-        gate_n,
-        gate_m,
-        true,
-        false,
-    );
-    let gate_slab = run_q6k_mmq_case(
-        exec,
-        gate_weights,
-        gate_acts,
-        k,
-        gate_n,
-        gate_m,
-        false,
-        false,
-    );
-    let gate_delta = error_stats(&gate_forced, &gate_slab);
-    if gate_delta.non_finite == 0 && gate_delta.max <= 1e-6 {
-        println!("ok   q6k_mmq_m129_gate: forced env stayed on slab");
-    } else {
-        println!(
-            "FAIL q6k_mmq_m129_gate: max_delta {:.7}, non_finite {}",
-            gate_delta.max, gate_delta.non_finite,
-        );
-        *failures += 1;
-    }
 }
 
 fn q5k_value(block: &[u8], group: usize, lane: usize) -> i32 {
@@ -1501,8 +1318,6 @@ fn run_q5k_mmq_case(
     k: usize,
     n: usize,
     m: usize,
-    force: bool,
-    profile: bool,
 ) -> Vec<f32> {
     let mut bench = Bench::new(64 << 20);
     let w = bench.tensor("q5k_mmq_w", TensorType::Q5K, &[k as i64, n as i64], weights);
@@ -1516,8 +1331,6 @@ fn run_q5k_mmq_case(
         .ctx
         .mul_mat(w, x, BufferUsage::Activations)
         .expect("q5k MMQ mul_mat");
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_Q5K_MMQ", if force { "0" } else { "1" });
-    let _profile = profile.then(|| ScopedEnv::set("MAKEPAD_LLAMA_CUDA_PROFILE", "1"));
     let outputs = bench.run(exec, out, &[out]);
     bytes_to_f32(&outputs[&out])
 }
@@ -1532,63 +1345,15 @@ fn q5k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     let weights = quant_blocks(&mut rng, TensorType::Q5K, k, n);
     let acts = q4k_mmq_activations(k, m);
     let want = q5k_mmq_reference(&weights, &acts, k, n, m);
-    let forced = run_q5k_mmq_case(exec, &weights, &acts, k, n, m, true, true);
-    let slab = run_q5k_mmq_case(exec, &weights, &acts, k, n, m, false, false);
-    let forced_stats = error_stats(&forced, &want);
-    let slab_stats = error_stats(&slab, &want);
-    let route_delta = error_stats(&forced, &slab);
+    let got = run_q5k_mmq_case(exec, &weights, &acts, k, n, m);
     compare_tol(
-        "q5k_mmq_forced_ds4",
-        forced.clone(),
+        "q5k_mmq_ds4",
+        got,
         want,
         3e-3,
         2e-4,
         failures,
     );
-    let route_ok = forced_stats.non_finite == 0
-        && slab_stats.non_finite == 0
-        && route_delta.max > 1e-4
-        && slab_stats.mean > forced_stats.mean * 2.0 + 1e-6;
-    if route_ok {
-        println!(
-            "ok   q5k_mmq_dispatch: forced/slab max_delta {:.7}, DS4 mean forced {:.7} slab {:.7}",
-            route_delta.max, forced_stats.mean, slab_stats.mean,
-        );
-    } else {
-        println!(
-            "FAIL q5k_mmq_dispatch: delta_max {:.7} forced mean {:.7} slab mean {:.7}",
-            route_delta.max, forced_stats.mean, slab_stats.mean,
-        );
-        *failures += 1;
-    }
-    let row_bytes = (k / 256) * 176;
-    let gate_forced = run_q5k_mmq_case(
-        exec,
-        &weights[..129 * row_bytes],
-        &acts[..129 * k],
-        k,
-        129,
-        129,
-        true,
-        false,
-    );
-    let gate_slab = run_q5k_mmq_case(
-        exec,
-        &weights[..129 * row_bytes],
-        &acts[..129 * k],
-        k,
-        129,
-        129,
-        false,
-        false,
-    );
-    let gate_delta = error_stats(&gate_forced, &gate_slab);
-    if gate_delta.non_finite == 0 && gate_delta.max <= 1e-6 {
-        println!("ok   q5k_mmq_m129_gate: forced env stayed on slab");
-    } else {
-        println!("FAIL q5k_mmq_m129_gate: max_delta {:.7}", gate_delta.max);
-        *failures += 1;
-    }
 }
 
 fn opcheck_q5k_mmq() -> i32 {
@@ -1647,7 +1412,6 @@ fn run_mmvq_swiglu_case(
     acts: &[f32],
     k: usize,
     n: usize,
-    fuse: bool,
 ) -> Vec<f32> {
     let bytes = gate.len() + up.len() + acts.len() * 4 + n * (acts.len() / k) * 12 + (32 << 20);
     let mut bench = Bench::new(bytes);
@@ -1672,19 +1436,16 @@ fn run_mmvq_swiglu_case(
         .ctx
         .glu_split(g, u, GluOp::Swiglu, BufferUsage::Activations)
         .expect("fused mmvq swiglu");
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_MMVQ_FUSION", if fuse { "0" } else { "1" });
     let outputs = bench.run(exec, out, &[out]);
     bytes_to_f32(&outputs[&out])
 }
 
-/// The fused gate+up+SwiGLU mat-vec, at every width decode takes.
+/// The gate+up+SwiGLU mat-vec, at every width decode takes.
 ///
 /// This is the FFN of every decode step, and it was covered at `m = 1` only —
 /// which is how a whole speculative verify batch's FFN could change behaviour
-/// with nothing in the gate to notice. Two properties per width:
-///
-///   * fused == unfused, which is what the fusion promises, and
-///   * column 0 unchanged when the same column rides in a wider batch, which is
+/// with nothing in the gate to notice. It checks the fused result against a
+/// CPU reference and reports column 0 unchanged when the same column rides in
 ///     what a speculative verify batch silently depends on: if a token's FFN
 ///     output depends on how many drafts travelled with it, then accepting a
 ///     draft is not the same thing as decoding it.
@@ -1707,32 +1468,42 @@ fn mmvq_swiglu_canary(exec: &CudaExecRuntime, failures: &mut usize) {
             continue;
         }
         let cols = &acts[..k * m];
-        let fused = run_mmvq_swiglu_case(exec, TensorType::Q4K, &gate, &up, cols, k, n, true);
-        let unfused = run_mmvq_swiglu_case(exec, TensorType::Q4K, &gate, &up, cols, k, n, false);
-        let delta = error_stats(&fused, &unfused);
+        let got = run_mmvq_swiglu_case(exec, TensorType::Q4K, &gate, &up, cols, k, n);
+        let gate_rows = gate
+            .chunks_exact(gate.len() / n)
+            .map(|row| dequant_row(TensorType::Q4K, row, k))
+            .collect::<Vec<_>>();
+        let up_rows = up
+            .chunks_exact(up.len() / n)
+            .map(|row| dequant_row(TensorType::Q4K, row, k))
+            .collect::<Vec<_>>();
+        let (gate_ref, _) = quant_matmul_reference(&gate_rows, cols, k, m, ActFormat::Q81);
+        let (up_ref, _) = quant_matmul_reference(&up_rows, cols, k, m, ActFormat::Q81);
+        let want = gate_ref
+            .iter()
+            .zip(up_ref.iter())
+            .map(|(&g, &u)| (g / (1.0 + (-g).exp())) * u)
+            .collect::<Vec<_>>();
         let drift = solo
             .as_ref()
-            .map(|solo| error_stats(&fused[..n], solo).max)
+            .map(|solo| max_abs_diff(&got[..n], solo))
             .unwrap_or(0.0);
         if solo.is_none() {
-            solo = Some(fused[..n].to_vec());
+            solo = Some(got[..n].to_vec());
         }
-        if delta.non_finite == 0 && delta.max <= 2e-4 {
-            println!(
-                "ok   mmvq_swiglu_fuse_m{m}: fused/unfused max_delta {:.7}, col0 vs solo {drift:.7}",
-                delta.max
-            );
-        } else {
-            *failures += 1;
-            println!(
-                "FAIL mmvq_swiglu_fuse_m{m}: max_delta {:.7} non_finite {}",
-                delta.max, delta.non_finite
-            );
-        }
+        compare_tol(
+            "mmvq_swiglu",
+            got,
+            want,
+            3e-3,
+            2e-4,
+            failures,
+        );
+        println!("     mmvq_swiglu_m{m}: col0 vs solo {drift:.7}");
     }
 }
 
-fn run_cpy_set_rows_case(exec: &CudaExecRuntime, fuse: bool) -> Vec<f32> {
+fn run_cpy_set_rows_case(exec: &CudaExecRuntime) -> (Vec<f32>, Vec<f32>) {
     let (prefix, channels) = (3usize, 64usize);
     let width = prefix * channels;
     let mut rng = Rng::new(0xC0F1);
@@ -1797,27 +1568,21 @@ fn run_cpy_set_rows_case(exec: &CudaExecRuntime, fuse: bool) -> Vec<f32> {
         .ctx
         .set_rows(dest, packed, rows, BufferUsage::State)
         .expect("set_rows");
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_CPY_FUSION", if fuse { "0" } else { "1" });
     let outputs = bench.run(exec, out, &[out]);
-    bytes_to_f32(&outputs[&out])
+    let mut expected = Vec::with_capacity(width);
+    for channel in 0..channels {
+        expected.extend_from_slice(&cache_data[channel * prefix + 1..(channel + 1) * prefix]);
+        expected.push(qkv_data[channel]);
+    }
+    (bytes_to_f32(&outputs[&out]), expected)
 }
 
 fn cpy_set_rows_canary(exec: &CudaExecRuntime, failures: &mut usize) {
-    let fused = run_cpy_set_rows_case(exec, true);
-    let unfused = run_cpy_set_rows_case(exec, false);
-    let delta = error_stats(&fused, &unfused);
-    if delta.non_finite == 0 && delta.max == 0.0 {
-        println!("ok   cpy_set_rows_fuse: fused/unfused max_delta 0");
-    } else {
-        *failures += 1;
-        println!(
-            "FAIL cpy_set_rows_fuse: max_delta {:.7} non_finite {}",
-            delta.max, delta.non_finite
-        );
-    }
+    let (got, want) = run_cpy_set_rows_case(exec);
+    compare("cpy_set_rows", got, want, 0.0, failures);
 }
 
-fn run_cpy_ssm_state_case(exec: &CudaExecRuntime, fuse: bool) -> Vec<f32> {
+fn run_cpy_ssm_state_case(exec: &CudaExecRuntime) -> (Vec<f32>, Vec<f32>) {
     // llama.cpp qwen35.cpp:346: CPY new_state (4D view of the GDN pack)
     // into a 1D cache view. We still build SET_ROWS of that view.
     let head = 8usize;
@@ -1870,24 +1635,16 @@ fn run_cpy_ssm_state_case(exec: &CudaExecRuntime, fuse: bool) -> Vec<f32> {
         .ctx
         .set_rows(dest, new_state_rows, rows, BufferUsage::State)
         .expect("set_rows s-state");
-    let _disable = ScopedEnv::set("MKLLM_DISABLE_CPY_FUSION", if fuse { "0" } else { "1" });
     let outputs = bench.run(exec, out, &[out]);
-    bytes_to_f32(&outputs[&out])
+    (
+        bytes_to_f32(&outputs[&out]),
+        packed_data[out_width..].to_vec(),
+    )
 }
 
 fn cpy_ssm_state_canary(exec: &CudaExecRuntime, failures: &mut usize) {
-    let fused = run_cpy_ssm_state_case(exec, true);
-    let unfused = run_cpy_ssm_state_case(exec, false);
-    let delta = error_stats(&fused, &unfused);
-    if delta.non_finite == 0 && delta.max == 0.0 {
-        println!("ok   cpy_ssm_state_fuse: fused/unfused max_delta 0");
-    } else {
-        *failures += 1;
-        println!(
-            "FAIL cpy_ssm_state_fuse: max_delta {:.7} non_finite {}",
-            delta.max, delta.non_finite
-        );
-    }
+    let (got, want) = run_cpy_ssm_state_case(exec);
+    compare("cpy_ssm_state", got, want, 0.0, failures);
 }
 
 // ---------------------------------------------------------------------------
@@ -2104,14 +1861,14 @@ fn mmvq_error_report(args: &[String]) -> i32 {
     }
     println!(
         "\ncolumns: nmse_* = sum(err^2)/sum(ref^2) against the Q8_1-modelled \
-         reference, the full-f32 reference, and the f32-activation KERNEL.\n\
+         reference and the full-f32 reference.\n\
          rel_* = |err| as a fraction of that dot's summed term magnitude \
          (mean / p99 / max).\n\
          rel_width = max change in column 0 when the SAME column rides in an \
          m-wide batch instead of alone."
     );
     println!(
-        "\n{:<6} {:<8} {:>5} {:>3} {:>6} {:>10} {:>10} {:>10} {:>26} {:>26} {:>10}",
+        "\n{:<6} {:<8} {:>5} {:>3} {:>6} {:>10} {:>10} {:>26} {:>26} {:>10}",
         "type",
         "acts",
         "k",
@@ -2119,7 +1876,6 @@ fn mmvq_error_report(args: &[String]) -> i32 {
         "rows",
         "nmse_q81",
         "nmse_f32",
-        "nmse_f32k",
         "rel_q81 mean/p99/max",
         "rel_f32 mean/p99/max",
         "rel_width",
@@ -2147,7 +1903,7 @@ fn mmvq_error_report(args: &[String]) -> i32 {
                 } else {
                     acts_uniform(&mut rng, k * MMV_WIDTHS[MMV_WIDTHS.len() - 1])
                 };
-                let solo = run_quant_mul_mat(&exec, ty, &weights, &wide[..k], k, n, 1, false);
+                let solo = run_quant_mul_mat(&exec, ty, &weights, &wide[..k], k, n, 1);
                 for m in MMV_WIDTHS {
                     // The report is about the Q8_1 route; if the dispatcher
                     // would not take it at this width there is nothing here to
@@ -2158,15 +1914,13 @@ fn mmvq_error_report(args: &[String]) -> i32 {
                         continue;
                     }
                     let acts = wide[..k * m].to_vec();
-                    let got = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, false);
-                    let f32_kernel = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, true);
+                    let got = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m);
                     let (want_q81, mag_q81) =
                         quant_matmul_reference(&rows, &acts, k, m, ActFormat::Q81);
                     let (want_f32, mag_f32) =
                         quant_matmul_reference(&rows, &acts, k, m, ActFormat::F32);
                     let d_q81 = error_dist(&got, &want_q81, &mag_q81);
                     let d_f32 = error_dist(&got, &want_f32, &mag_f32);
-                    let d_kernels = error_dist(&got, &f32_kernel, &mag_f32);
                     // Same first column, different batch width. Any difference
                     // here is the kernel's launch geometry: `calc_nwarps` gives
                     // ncols_dst 1..4 four warps and 5..8 two, so the k reduction
@@ -2175,11 +1929,10 @@ fn mmvq_error_report(args: &[String]) -> i32 {
                     // a token happens to travel in.
                     let d_width = error_dist(&got[..n], &solo, &mag_q81[..n]);
                     println!(
-                        "{tag:<6} {acts_tag:<8} {k:>5} {m:>3} {:>6} {:>10.2e} {:>10.2e} {:>10.2e} {:>26} {:>26} {:>10.2e}",
+                        "{tag:<6} {acts_tag:<8} {k:>5} {m:>3} {:>6} {:>10.2e} {:>10.2e} {:>26} {:>26} {:>10.2e}",
                         d_q81.count,
                         d_q81.nmse,
                         d_f32.nmse,
-                        d_kernels.nmse,
                         format!(
                             "{:.1e}/{:.1e}/{:.1e}",
                             d_q81.mean_rel, d_q81.p99_rel, d_q81.max_rel
@@ -2282,8 +2035,8 @@ fn mmvq_width_report(
             let up_weights = fused.then(|| quant_blocks(&mut rng, ty, k, n));
             let run = |acts: &[f32], m: usize| -> Vec<f32> {
                 match &up_weights {
-                    Some(up) => run_mmvq_swiglu_case(exec, ty, &weights, up, acts, k, n, true),
-                    None => run_quant_mul_mat(exec, ty, &weights, acts, k, n, m, false),
+                    Some(up) => run_mmvq_swiglu_case(exec, ty, &weights, up, acts, k, n),
+                    None => run_quant_mul_mat(exec, ty, &weights, acts, k, n, m),
                 }
             };
             for (acts_tag, outlier) in [("uniform", false), ("outlier", true)] {
@@ -2323,8 +2076,7 @@ fn mmvq_width_report(
     0
 }
 
-/// One `mul_mat` through the planner, optionally with the official Q8_1
-/// mat-vec route switched off so the hand-written f32-activation kernel runs.
+/// One `mul_mat` through the planner.
 fn run_quant_mul_mat(
     exec: &CudaExecRuntime,
     ty: TensorType,
@@ -2333,9 +2085,7 @@ fn run_quant_mul_mat(
     k: usize,
     n: usize,
     m: usize,
-    force_f32_acts: bool,
 ) -> Vec<f32> {
-    let _disable = force_f32_acts.then(|| ScopedEnv::set("MKLLM_DISABLE_Q81_MMVQ", "1"));
     // Size the arena to the data. The LM head is a gigabyte of Q6_K on its
     // own, so a fixed 512 MB context cannot hold the shape the open question
     // is actually about.
@@ -2409,6 +2159,53 @@ fn quant_matmul_case(
     compare_budget(name, fmt.label(), &got, &want, &budget, failures);
 }
 
+/// Make the activation columns non-contiguous so the official Q8_1 MMVQ
+/// route is naturally ineligible and the surviving f32 `mmv_quant` fallback
+/// is compared with its f32 CPU oracle.
+fn quant_matmul_strided_f32_fallback_case(
+    exec: &CudaExecRuntime,
+    name: &str,
+    ty: TensorType,
+    rows: &[Vec<f32>],
+    weights: &[u8],
+    acts: &[f32],
+    k: usize,
+    n: usize,
+    m: usize,
+    failures: &mut usize,
+) {
+    let stride = k + 3;
+    let mut padded = vec![0.0f32; stride * m];
+    for column in 0..m {
+        padded[column * stride..column * stride + k]
+            .copy_from_slice(&acts[column * k..(column + 1) * k]);
+    }
+    let mut bench = Bench::new(64 << 20);
+    let w = bench.tensor("w", ty, &[k as i64, n as i64], weights);
+    let storage = bench.tensor(
+        "x_padded",
+        TensorType::F32,
+        &[(stride * m) as i64],
+        &as_bytes_f32(&padded),
+    );
+    let x = bench
+        .ctx
+        .view_2d(storage, k as i64, m as i64, stride * std::mem::size_of::<f32>(), 0)
+        .expect("strided mmv activation view");
+    let out = bench
+        .ctx
+        .mul_mat(w, x, BufferUsage::Activations)
+        .expect("strided mmv mul_mat");
+    let outputs = bench.run(exec, out, &[out]);
+    let got = bytes_to_f32(&outputs[&out]);
+    let (want, mag) = quant_matmul_reference(rows, acts, k, m, ActFormat::F32);
+    let budget: Vec<f32> = mag
+        .iter()
+        .map(|value| dot_error_budget(ActFormat::F32, *value))
+        .collect();
+    compare_budget(name, "f32-strided", &got, &want, &budget, failures);
+}
+
 /// The mat-vec and GEMM gates for every weight type decode reads.
 ///
 /// The width decides the route and the route decides the activation format, so
@@ -2454,32 +2251,20 @@ fn quant_matmul_canary(exec: &CudaExecRuntime, rng: &mut Rng, failures: &mut usi
             );
         }
 
-        // The hand-written `mmv_quant` is not dead code: the official route
-        // needs contiguous activation columns and a contiguous destination and
-        // declines otherwise, and unlike `mul_mat_vec_q` it promises to read
-        // the activations as f32. Force it and gate it at the f32 budget, so
-        // the tight f32 gate these cases used to carry survives — pointed at
-        // the kernel that actually makes the promise.
-        if ty != TensorType::Q8_0 {
-            let _disable = ScopedEnv::set("MKLLM_DISABLE_Q81_MMVQ", "1");
-            for m in [1usize, 5] {
-                let name = format!("mmvf32_{tag}_m{m}");
-                let acts = f32s(rng, k * m);
-                quant_matmul_case(
-                    exec,
-                    &name,
-                    ty,
-                    &rows,
-                    &weights,
-                    &acts,
-                    k,
-                    n,
-                    m,
-                    ActFormat::F32,
-                    failures,
-                );
-            }
-        }
+        let m = 5usize.min(MMV_MAX_COLUMNS);
+        let acts = f32s(rng, k * m);
+        quant_matmul_strided_f32_fallback_case(
+            exec,
+            &format!("mmv_{tag}_f32_strided"),
+            ty,
+            &rows,
+            &weights,
+            &acts,
+            k,
+            n,
+            m,
+            failures,
+        );
 
         let m = GEMM_CASE_WIDTH;
         let acts = f32s(rng, k * m);
@@ -2495,6 +2280,24 @@ fn quant_matmul_canary(exec: &CudaExecRuntime, rng: &mut Rng, failures: &mut usi
             n,
             m,
             fmt,
+            failures,
+        );
+
+        // M=129 is one column past the J=128 MMQ tile. Its ordinary shape
+        // must remain on the accepted bf16 dequant-slab fallback.
+        let m = 129usize;
+        let acts = f32s(rng, k * m);
+        quant_matmul_case(
+            exec,
+            &format!("mmq_{tag}_m129_fallback"),
+            ty,
+            &rows,
+            &weights,
+            &acts,
+            k,
+            n,
+            m,
+            ActFormat::Bf16,
             failures,
         );
     }
@@ -3010,48 +2813,6 @@ fn opcheck() -> i32 {
                 eps,
             );
             compare(case_name, got, want, 1e-5, &mut failures);
-        }
-        {
-            let (ne0, rows) = (96usize, 6usize);
-            let x_data = f32s(&mut rng, ne0 * rows);
-            let w_data = f32s(&mut rng, ne0);
-            let eps = 1e-6f32;
-            let run = |fuse: bool| {
-                let mut bench = Bench::new(8 << 20);
-                let x = bench.tensor(
-                    "x",
-                    TensorType::F32,
-                    &[ne0 as i64, rows as i64],
-                    &as_bytes_f32(&x_data),
-                );
-                let w = bench.tensor("w", TensorType::F32, &[ne0 as i64], &as_bytes_f32(&w_data));
-                let norm = bench
-                    .ctx
-                    .rms_norm_eps(x, eps, BufferUsage::Activations)
-                    .expect("rms");
-                let out = bench
-                    .ctx
-                    .binary_like_a(makepad_ai_llm::Op::Mul, norm, w, BufferUsage::Activations)
-                    .expect("mul");
-                let _disable = ScopedEnv::set("MKLLM_DISABLE_RMS_FUSION", if fuse { "0" } else { "1" });
-                let outputs = bench.run(&exec, out, &[out]);
-                bytes_to_f32(&outputs[&out])
-            };
-            let fused = run(true);
-            let unfused = run(false);
-            let delta = error_stats(&fused, &unfused);
-            if delta.non_finite == 0 && delta.max <= 1e-6 {
-                println!(
-                    "ok   rms_norm_mul_fuse: fused/unfused max_delta {:.7}",
-                    delta.max
-                );
-            } else {
-                failures += 1;
-                println!(
-                    "FAIL rms_norm_mul_fuse: max_delta {:.7} non_finite {}",
-                    delta.max, delta.non_finite
-                );
-            }
         }
     }
 
@@ -3666,11 +3427,6 @@ fn run_test_gen(
     trace_keys: bool,
     max_context: usize,
 ) {
-    let split = std::env::var_os("MAKEPAD_LLAMA_HOST_SPLIT").is_some();
-    if split {
-        host_split_reset();
-    }
-    let t_wall = Instant::now();
     for i in 0..n_gen {
         let tok = if i == 0 && session.token_count() == 0 {
             bos.unwrap_or_else(|| (rng.next_u64() % n_vocab as u64) as i32)
@@ -3688,15 +3444,6 @@ fn run_test_gen(
         }
         session.append_token(tok).expect("decode");
     }
-    if split {
-        let wall_ms = t_wall.elapsed().as_secs_f64() * 1e3;
-        let snap = host_split_snapshot();
-        println!("{}", snap.report_line());
-        println!(
-            "host.split.canary: wall={:.3} ms/tok llama-bench.cpp:2026 test_gen=decode+sync+rand",
-            wall_ms / n_gen.max(1) as f64
-        );
-    }
 }
 
 fn bench(args: &[String]) -> i32 {
@@ -3709,8 +3456,6 @@ fn bench(args: &[String]) -> i32 {
     });
     let kv = parse_kv(args);
     // llama-bench.cpp:2036 test_gen: decode + synchronize + rand.
-    // Never llama_get_logits — D2H+parse of vocab 248320 was 0.63 ms/tok.
-    std::env::set_var("MAKEPAD_LLAMA_SKIP_LOGITS", "1");
     let prompt_tokens: usize = kv.get("prompt-tokens").and_then(|v| v.parse().ok()).unwrap_or(512);
     let gen_tokens: usize = kv.get("gen-tokens").and_then(|v| v.parse().ok()).unwrap_or(128);
     let repeats: usize = kv.get("repeats").and_then(|v| v.parse().ok()).unwrap_or(5);
@@ -3732,6 +3477,7 @@ fn bench(args: &[String]) -> i32 {
         LlamaSessionConfig {
             max_context: Some(max_context),
             prefill_batch_size: prefill_batch,
+            skip_logits_readback: true,
             ..LlamaSessionConfig::default()
         },
     )
