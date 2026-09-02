@@ -2042,10 +2042,10 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
-    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MP_TILE_PROFILE):
+    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MAKEPAD_TILE_PROFILE):
     // where the "boolean" lap actually goes.
     let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MP_TILE_PROFILE").is_some();
+        || std::env::var_os("MAKEPAD_TILE_PROFILE").is_some();
     let prof_dissolve: f64;
     let prof_cascade: f64;
 
@@ -2509,7 +2509,7 @@ pub fn build_paint_faces(
     aa: f32,
 ) -> Vec<PaintFace> {
     let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MP_TILE_PROFILE").is_some();
+        || std::env::var_os("MAKEPAD_TILE_PROFILE").is_some();
     let prof_t_facetess = std::time::Instant::now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
@@ -3549,7 +3549,7 @@ mod overlay_tests {
 mod boolean_repro_tests {
     /// Replay a hang capture from /tmp/mp_boolean_last_*.txt (written when
     /// /tmp/mp_boolean_debug exists). Run manually:
-    ///   MP_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
+    ///   MAKEPAD_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
     ///   makepad-widgets --features maps --release boolean_repro -- \
     ///   --ignored --nocapture
     #[test]
@@ -3559,7 +3559,7 @@ mod boolean_repro_tests {
         use i_overlay::core::overlay_rule::OverlayRule;
         use i_overlay::float::simplify::SimplifyShape;
         use i_overlay::float::single::SingleFloatOverlay;
-        let path = std::env::var("MP_REPRO").expect("set MP_REPRO to a capture file");
+        let path = std::env::var("MAKEPAD_REPRO").expect("set MAKEPAD_REPRO to a capture file");
         let text = std::fs::read_to_string(&path).unwrap();
         let mut tag = String::new();
         let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();

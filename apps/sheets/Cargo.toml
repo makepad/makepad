@@ -1,0 +1,25 @@
+# sheets — a spreadsheet as a plain full-window Makepad app, part of the
+# Makepad family (wm hosts it as a tile; terminal/browser/files/task are
+# siblings). The grid is the stock `DataGrid` widget; everything above it —
+# the formula engine, the dependency graph, formats, undo, CSV — lives here.
+#
+# sheets runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# the shared --stdin-loop client runtime every Makepad app has.
+
+[package]
+name = "makepad-sheets"
+version = "0.1.0"
+edition = "2021"
+default-run = "sheets"
+
+[[bin]]
+name = "sheets"
+path = "src/main.rs"
+
+[features]
+default = []
+demo = []
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }

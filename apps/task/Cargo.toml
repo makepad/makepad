@@ -1,0 +1,13 @@
+[package]
+name = "makepad-task"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "task"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }

@@ -3266,7 +3266,7 @@ pub struct TileWay {
     pub fidx: Option<u32>,
 }
 
-/// Stage clock for MP_TILE_PROFILE=1: per-stage wall time to stderr, so the
+/// Stage clock for MAKEPAD_TILE_PROFILE=1: per-stage wall time to stderr, so the
 /// generator's cost distribution is measurable headless and in-app alike.
 struct TileProfiler {
     on: bool,
@@ -3282,7 +3282,7 @@ impl TileProfiler {
         let now = std::time::Instant::now();
         // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
-            on: std::env::var_os("MP_TILE_PROFILE").is_some()
+            on: std::env::var_os("MAKEPAD_TILE_PROFILE").is_some()
                 || std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
                 || std::path::Path::new("/tmp/mp_tile_profile").exists(),
             last: now,
@@ -11251,8 +11251,8 @@ mod bridge_probe_tests {
     }
 
     /// Headless generator probe: build real tiles with the mirrored live
-    /// theme, print per-stage timings (MP_TILE_PROFILE=1) and buffer sizes.
-    /// Run: MP_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
+    /// theme, print per-stage timings (MAKEPAD_TILE_PROFILE=1) and buffer sizes.
+    /// Run: MAKEPAD_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
     ///   --release union_perf_probe -- --ignored --nocapture
     #[test]
     #[ignore]

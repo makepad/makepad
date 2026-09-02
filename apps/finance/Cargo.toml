@@ -20,7 +20,7 @@ demo = []
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-mp-theme = { path = "../../libs/mp_theme" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-sqlite = { path = "../../libs/sqlite_query" }

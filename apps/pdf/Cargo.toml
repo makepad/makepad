@@ -1,0 +1,37 @@
+# pdf — a PDF viewer, part of the Makepad app family (terminal, wm, files,
+# image, video, task, sheets, route, mixer...).
+#
+# `pdf <path>` opens a document as one continuous scroll of pages on a
+# dark makepad_wm_theme background: PageDown/Space page through, Cmd +/- zoom,
+# Cmd+0 fits the width, Cmd+1 shows 100%, Cmd+scroll zooms around the
+# cursor, Cmd+Shift+T shows a thumbnail strip, Escape/Q quits.
+# `--preview <path>` sizes the window as a popup — that is files' Quick
+# Look.
+#
+# Nothing here parses or draws PDF: the parser is libs/pdf_parse and the
+# renderer is the `PdfView`/`PdfPageView` pair in widgets/src/pdf_view.rs
+# (feature `pdf`), which walks the page's content-stream ops straight into
+# DrawVector geometry and DrawText runs — no rasterization anywhere. This
+# crate is the viewer around them: an off-thread loader that streams parsed
+# pages in as they come, the zoom/fit/navigation maths, the thumbnail
+# strip, and the chrome.
+
+[package]
+name = "makepad-pdf"
+version = "0.1.0"
+edition = "2021"
+default-run = "pdf"
+
+[lib]
+name = "makepad_pdf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pdf"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", features = ["pdf"] }
+makepad-pdf-parse = { path = "../../libs/pdf_parse" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
