@@ -254,7 +254,7 @@ impl WindSync {
     }
 
     fn now_unix() -> u64 {
-        makepad_platform::Cx::time_now().max(0.0) as u64
+        crate::clock::now_unix()
     }
 
     /// Cached field without any network contact.

@@ -354,7 +354,7 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn now_unix() -> u64 {
-    makepad_platform::Cx::time_now().max(0.0) as u64
+    crate::clock::now_unix()
 }
 
 /// Parse "2026-07-28T12:00:00+00:00" (KNMI `created`) to unix seconds.

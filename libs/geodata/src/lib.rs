@@ -10,6 +10,9 @@
 //! machinery later for periodically synced sources (e.g. the NDW charger
 //! file); the `geodata` binary is a thin CLI over it.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod clock;
+
 pub mod fetch;
 pub mod geo;
 pub mod gpkg;
