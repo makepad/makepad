@@ -26884,6 +26884,11 @@ impl AppMain for App {
                 }
             }
         }
+        if let Event::Signal = event {
+            // A store completion raises the UI signal; poll the session on
+            // it rather than waiting for the next poll tick.
+            self.pump_session(cx);
+        }
         if self.poll_timer.is_event(event).is_some() {
             self.pump(cx);
         }
