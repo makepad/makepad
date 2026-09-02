@@ -466,4 +466,21 @@ mod open_tests {
         assert!(pending.links.is_empty());
         assert!(AiServicePort::open_in(true, &mut pending, bad).is_none());
     }
+    #[test]
+    fn a_call_dispatched_before_the_first_pump_still_reaches_the_port() {
+        // The port announced itself at open; the registry answers that
+        // Register at registration, so a call sent before any pump lands
+        // AFTER the port learned its address — Registered, then Call.
+        let mut pending = PendingServiceLinks::default();
+        let mut port = AiServicePort::open_in(false, &mut pending, sheets()).expect("opens");
+        let registry = ServiceRegistry::new();
+        let endpoint = registry.register(pending.take().remove(0), "in this window", None).expect("adopted");
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into() };
+        assert!(registry.send(&endpoint, ServiceDown::Call(call)));
+        let events = port.test_drain();
+        assert!(
+            matches!(events.as_slice(), [PortEvent::Registered(_), PortEvent::Call(c)] if c.call_id == "c1"),
+            "{events:?}"
+        );
+    }
 }

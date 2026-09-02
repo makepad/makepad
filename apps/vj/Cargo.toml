@@ -17,6 +17,7 @@ default-run = "makepad-vj"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
+makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-score-view = { path = "../../libs/score_view" }
 makepad-piano-model = { path = "../../libs/piano_model" }
 makepad-drumkit = { path = "../../libs/drumkit" }

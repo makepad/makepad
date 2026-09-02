@@ -17,6 +17,7 @@ use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
 pub mod bus;
+pub mod gen;
 pub mod overlay;
 pub mod panel;
 pub mod settings;

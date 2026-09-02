@@ -12,6 +12,7 @@
 //! advance without a host timer.
 
 use crate::bus::ServiceBus;
+use crate::gen::GenService;
 use crate::settings::AiSettings;
 #[cfg(feature = "engine")]
 use makepad_ai_services::engine::models::{build_model, provider_rows};
@@ -230,6 +231,10 @@ pub struct AiChatPanel {
     registry: ServiceRegistry,
     #[rust]
     bus: ServiceBus,
+    /// The assistant's own `gen` service (pictures from the fleet), joined
+    /// to the registry with the engine.
+    #[rust]
+    gen: Option<GenService>,
     #[rust]
     settings: Option<AiSettings>,
     #[rust]
@@ -287,6 +292,7 @@ impl AiChatPanel {
             // it, so provider facts go in through the core.
             core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
             self.engine = Some(core);
+            self.gen = GenService::open(&self.registry);
         }
         self.engine.as_mut().unwrap()
     }
@@ -362,6 +368,11 @@ impl Widget for AiChatPanel {
                     cx.widget_action(self.widget_uid(), AiChatPanelAction::Close);
                 }
             }
+        }
+        // The built-in services answer before the engine pumps, so a
+        // finished picture lands in this same event.
+        if let Some(gen) = self.gen.as_mut() {
+            gen.handle_event(cx, event);
         }
         // Drive the engine on every event; the bus relays what it sent.
         let now = Self::now(cx);
