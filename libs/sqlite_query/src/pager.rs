@@ -1388,6 +1388,7 @@ fn next_page_number(current: u32, page_size: usize) -> u32 {
 /// The journal checksum nonce. It only has to differ between transactions so a
 /// stale record cannot pass a fresh checksum; time plus pid gives that without
 /// a random source.
+#[cfg(not(target_arch = "wasm32"))]
 fn journal_nonce() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -1395,4 +1396,13 @@ fn journal_nonce() -> u32 {
         .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
         .unwrap_or(0x5a5a_5a5a);
     t ^ (std::process::id().wrapping_mul(2654435761))
+}
+
+/// The browser has neither a clock nor a pid here; a stepping counter still
+/// differs between transactions, which is all the nonce is for.
+#[cfg(target_arch = "wasm32")]
+fn journal_nonce() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0x5a5a_5a5a);
+    NEXT.fetch_add(0x9e37_79b9, Ordering::Relaxed)
 }
