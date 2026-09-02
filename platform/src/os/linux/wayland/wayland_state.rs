@@ -3,16 +3,15 @@ use crate::{
     libc_sys::{self, munmap},
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
-    Area, DragEvent, DragItem, DragResponse, DropEvent, KeyEvent, KeyModifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
-    WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
+    Area, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    TextClipboardEvent, TextInputEvent, WindowClosedEvent, WindowDragQueryEvent,
+    WindowDragQueryResponse,
 };
 use std::{
     cell::{Cell, RefCell},
     os::fd::{AsFd, AsRawFd, FromRawFd},
     rc::Rc,
     sync::Arc,
-    sync::Mutex,
 };
 
 use wayland_client::{
@@ -94,7 +93,6 @@ pub(crate) struct WaylandState {
     pending_paste_text_input: Option<String>,
     /// Queued clipboard copy content waiting for a serial from keyboard/pointer.
     pub(crate) pending_clipboard_copy: Option<String>,
-    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
@@ -181,7 +179,6 @@ impl WaylandState {
             pending_clipboard_read: None,
             pending_paste_text_input: None,
             pending_clipboard_copy: None,
-            internal_drag_items: None,
             clipboard_text: String::new(),
             cursor_manager: None,
             cursor_shape: None,
@@ -1321,20 +1318,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                     modifiers: state.modifiers,
                                     time: state.time_now(),
                                 }));
-                                if btn == MouseButton::PRIMARY {
-                                    if let Some(items) = state.internal_drag_items.take() {
-                                        state.do_callback(XlibEvent::Drop(
-                                            window_id,
-                                            DropEvent {
-                                                modifiers: state.modifiers,
-                                                handled: Arc::new(Mutex::new(false)),
-                                                abs: state.last_mouse_pos,
-                                                items,
-                                            },
-                                        ));
-                                        state.do_callback(XlibEvent::DragEnd);
-                                    }
-                                }
                             }
                             WEnum::Unknown(_) | WEnum::Value(_) => {}
                         }
@@ -1622,10 +1605,6 @@ impl WaylandState {
         }
     }
 
-    pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
-        self.internal_drag_items = Some(Arc::new(items));
-    }
-
     fn dispatch_paste_bytes(&mut self, mut bytes: Vec<u8>) {
         while bytes.last() == Some(&0) {
             bytes.pop();
@@ -1750,8 +1729,8 @@ impl WaylandState {
         }
     }
 
-    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove` (plus a `Drag`
-    /// while an internal drag is in flight), then clear it. Called once after the `wl_pointer` event
+    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove`, then clear it.
+    /// Called once after the `wl_pointer` event
     /// batch is drained and before any intervening button/leave, so a high-Hz mouse produces one
     /// hover hit-test per frame instead of one per queued motion. See [`Self::pending_motion`].
     pub(crate) fn flush_pending_motion(&mut self) {
@@ -1774,18 +1753,6 @@ impl WaylandState {
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
         }));
-        if let Some(items) = self.internal_drag_items.as_ref() {
-            self.do_callback(XlibEvent::Drag(
-                window_id,
-                DragEvent {
-                    modifiers: self.modifiers,
-                    handled: Arc::new(Mutex::new(false)),
-                    abs: pos,
-                    items: items.clone(),
-                    response: Arc::new(Mutex::new(DragResponse::None)),
-                },
-            ));
-        }
     }
 
     /// True while the given window's last presented frame awaits its `wl_surface::frame`

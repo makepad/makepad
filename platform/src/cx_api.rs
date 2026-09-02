@@ -1205,12 +1205,19 @@ impl Cx {
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
+        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        {
+            self.drag_drop.start_internal_drag(items);
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "linux", test)))]
+        {
         self.platform_ops.iter().for_each(|p| {
             if let CxOsOp::StartDragging { .. } = p {
                 panic!("start drag twice");
             }
         });
         self.platform_ops.push_back(CxOsOp::StartDragging(items));
+        }
     }
 
     /// Starts a native drag-and-drop session that can leave the Makepad app.
