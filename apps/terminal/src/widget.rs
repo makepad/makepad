@@ -321,6 +321,39 @@ pub struct MpTerm {
 impl ScriptHook for MpTerm {}
 
 impl MpTerm {
+    /// Rows currently painted in the widget, or the last `lines` rows of
+    /// scrollback plus the active grid. Used by the terminal's AI service;
+    /// row text comes from the same cell content the renderer uses.
+    pub fn ai_screen_rows(
+        &self,
+        recent_lines: Option<usize>,
+    ) -> Option<(Vec<String>, usize, usize)> {
+        let session = self.session.as_ref()?;
+        let screen = session.terminal.screen();
+        let total = screen.total_rows();
+        let (start, end) = match recent_lines {
+            Some(lines) => (total.saturating_sub(lines), total),
+            None => {
+                let start = screen.scrollback.len().saturating_sub(self.view_offset);
+                (start, (start + screen.rows).min(total))
+            }
+        };
+        let rows = (start..end)
+            .filter_map(|index| screen.row_virtual(index))
+            .map(|row| row.text())
+            .collect();
+        Some((rows, screen.cursor.y, screen.cursor.x))
+    }
+
+    /// Type bytes through the live PTY's ordinary input path.
+    pub fn ai_type_bytes(&mut self, bytes: &[u8]) -> bool {
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        session.write(bytes);
+        true
+    }
+
     /// Quick Look retarget (`WmEvent::PreviewFile`): tear down the current
     /// job — dropping the session kills the PTY child — and run a new one
     /// in place, same process, same window.
