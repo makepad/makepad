@@ -4,9 +4,11 @@
 //! Studio tiles via the shared --stdin-loop client runtime.
 
 pub use makepad_widgets;
+use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_cef::BootstrapResult;
 use makepad_widgets::*;
 
+mod ai;
 mod chrome;
 mod tabs;
 mod theme;
@@ -155,8 +157,46 @@ pub struct App {
     focus_frame: NextFrame,
     #[rust]
     focus_retries: u32,
+    #[rust]
+    ai_port: Option<AiServicePort>,
+    #[rust]
+    ai_context: String,
 }
 
+struct AiBrowserTarget<'a> {
+    cx: &'a mut Cx,
+    webview: &'a mut WebView,
+}
+
+impl ai::BrowserTarget for AiBrowserTarget<'_> {
+    fn page(&self) -> Option<ai::PageState> {
+        let info = self.webview.active_info();
+        info.id.map(|_| ai::PageState {
+            title: info.title,
+            url: info.url,
+        })
+    }
+
+    fn tabs(&self) -> Vec<ai::TabState> {
+        self.webview
+            .ai_tabs()
+            .into_iter()
+            .map(|(title, url, active)| ai::TabState { title, url, active })
+            .collect()
+    }
+
+    fn navigate(&mut self, url: &str) -> bool {
+        if self.webview.active_id().is_none() {
+            return false;
+        }
+        self.webview.navigate(self.cx, url);
+        true
+    }
+
+    fn new_tab(&mut self, url: &str) {
+        self.webview.new_tab(self.cx, url, true);
+    }
+}
 
 impl App {
     fn with_webview<R>(&self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut WebView) -> R) -> Option<R> {
@@ -221,6 +261,8 @@ impl App {
             .with_webview(cx, |_cx, wv| (wv.summaries(), wv.active_info()))
             .unwrap_or_default();
 
+        self.refresh_ai_context(&info);
+
         if let Some(mut strip) = self.ui.widget(cx, ids!(tab_strip)).borrow_mut::<TabStrip>() {
             strip.set_tabs(cx, summaries);
         }
@@ -278,6 +320,62 @@ impl App {
             );
         }
         self.ui.redraw(cx);
+    }
+
+    fn refresh_ai_context(&mut self, info: &webview::ActiveInfo) {
+        let context = if info.id.is_some() {
+            format!("active tab: {} — {}", info.title, info.url)
+        } else {
+            "no active tab".to_string()
+        };
+        if context == self.ai_context {
+            return;
+        }
+        self.ai_context = context.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&context);
+        }
+    }
+
+    fn refresh_ai_context_from_webview(&mut self, cx: &mut Cx) {
+        let info = self
+            .with_webview(cx, |_cx, webview| webview.active_info())
+            .unwrap_or_default();
+        self.refresh_ai_context(&info);
+    }
+
+    fn drain_ai_port(&mut self, cx: &mut Cx, event: &Event) {
+        let events = match self.ai_port.as_mut() {
+            Some(port) => port.handle_event(cx, event),
+            None => return,
+        };
+        for event in events {
+            match event {
+                PortEvent::Registered(endpoint) => {
+                    log!("browser: AI service registered as {}", endpoint.as_str());
+                    self.ai_context.clear();
+                    self.refresh_ai_context_from_webview(cx);
+                }
+                PortEvent::Call(call) => {
+                    let result = self
+                        .with_webview(cx, |cx, webview| {
+                            let mut target = AiBrowserTarget { cx, webview };
+                            ai::answer(&call, &mut target)
+                        })
+                        .unwrap_or_else(|| {
+                            makepad_ai_services::wire::ToolResult::unavailable(
+                                &call.call_id,
+                                "the browser view is not ready",
+                            )
+                        });
+                    if let Some(port) = self.ai_port.as_ref() {
+                        port.reply(result);
+                    }
+                    self.refresh_chrome(cx);
+                }
+                PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+            }
+        }
     }
 
     fn navigate_from_omnibox(&mut self, cx: &mut Cx, text: &str) {
@@ -363,6 +461,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        self.ai_port = AiServicePort::open(cx, ai::manifest());
         match makepad_cef::startup_phases() {
             Some((bundle_ms, exec_gap_ms)) => log!(
                 "browser: window up at {} ms after main (app bundle prepared in {} ms, exec-to-main gap {} ms)",
@@ -547,6 +646,7 @@ impl AppMain for App {
                 return;
             }
         }
+        self.drain_ai_port(cx, event);
         if let Event::KeyDown(ke) = event {
             if self.handle_shortcut(cx, ke) {
                 return;

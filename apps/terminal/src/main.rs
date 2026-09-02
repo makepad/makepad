@@ -10,9 +10,12 @@
 //!                      viewer app claims.
 
 pub use makepad_widgets;
+use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_widgets::*;
 use makepad_terminal::widget::{MpTerm, MpTermAction};
 use std::path::{Path, PathBuf};
+
+mod ai;
 
 app_main!(
     App,
@@ -87,6 +90,10 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     preview: bool,
+    #[rust]
+    ai_port: Option<AiServicePort>,
+    #[rust]
+    ai_context: String,
 }
 
 impl MatchEvent for App {
@@ -111,6 +118,8 @@ impl MatchEvent for App {
                 .window(cx, ids!(main_window))
                 .set_title(cx, &format!("{} \u{2014} preview", name));
         }
+        self.ai_port = AiServicePort::open(cx, ai::manifest());
+        self.refresh_ai_context(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -124,6 +133,7 @@ impl MatchEvent for App {
                 MpTermAction::TitleChanged(title) if !self.preview => {
                     self.ui.window(cx, ids!(main_window)).set_title(cx, &title);
                 }
+                MpTermAction::PwdChanged(_) => self.refresh_ai_context(cx),
                 // The pager quit: the preview popup goes with it.
                 MpTermAction::Exited if self.preview => cx.quit(),
                 _ => {}
@@ -133,6 +143,68 @@ impl MatchEvent for App {
 }
 
 impl App {
+    fn refresh_ai_context(&mut self, cx: &mut Cx) {
+        let cwd = self
+            .ui
+            .widget(cx, ids!(term))
+            .borrow::<MpTerm>()
+            .and_then(|term| term.cwd.clone());
+        let Some(cwd) = cwd else {
+            return;
+        };
+        let shown = std::env::var_os("HOME")
+            .and_then(|home| cwd.strip_prefix(PathBuf::from(home)).ok().map(Path::to_path_buf))
+            .map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    "~".to_string()
+                } else {
+                    format!("~/{}", rest.display())
+                }
+            })
+            .unwrap_or_else(|| cwd.display().to_string());
+        let context = format!("shell in {shown}");
+        if context == self.ai_context {
+            return;
+        }
+        self.ai_context = context.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&context);
+        }
+    }
+
+    fn drain_ai_port(&mut self, cx: &mut Cx, event: &Event) {
+        let events = match self.ai_port.as_mut() {
+            Some(port) => port.handle_event(cx, event),
+            None => return,
+        };
+        for event in events {
+            match event {
+                PortEvent::Registered(endpoint) => {
+                    log!("terminal: AI service registered as {}", endpoint.as_str());
+                    self.ai_context.clear();
+                    self.refresh_ai_context(cx);
+                }
+                PortEvent::Call(call) => {
+                    let result = self
+                        .ui
+                        .widget(cx, ids!(term))
+                        .borrow_mut::<MpTerm>()
+                        .map(|mut term| ai::answer(&call, &mut *term))
+                        .unwrap_or_else(|| {
+                            makepad_ai_services::wire::ToolResult::unavailable(
+                                &call.call_id,
+                                "the terminal widget is not ready",
+                            )
+                        });
+                    if let Some(port) = self.ai_port.as_ref() {
+                        port.reply(result);
+                    }
+                }
+                PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+            }
+        }
+    }
+
     /// Quick Look v2, viewer half: wm retargets a warm text preview with
     /// `PreviewFile` (restart the pager in place — no respawn, no new
     /// window) and parks it with `PreviewUnload`. `PreviewUnload` never
@@ -185,8 +257,35 @@ impl AppMain for App {
                 self.handle_wm_event(cx, &wm);
             }
         }
+        self.drain_ai_port(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+impl ai::TerminalTarget for MpTerm {
+    fn visible_screen(&self) -> Option<ai::ScreenState> {
+        let (rows, cursor_row, cursor_col) = self.ai_screen_rows(None)?;
+        Some(ai::ScreenState {
+            rows,
+            cursor_row,
+            cursor_col,
+            cwd: self.cwd.as_ref().map(|path| path.display().to_string()),
+        })
+    }
+
+    fn recent_screen(&self, lines: usize) -> Option<ai::ScreenState> {
+        let (rows, cursor_row, cursor_col) = self.ai_screen_rows(Some(lines))?;
+        Some(ai::ScreenState {
+            rows,
+            cursor_row,
+            cursor_col,
+            cwd: self.cwd.as_ref().map(|path| path.display().to_string()),
+        })
+    }
+
+    fn type_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.ai_type_bytes(bytes)
     }
 }
 
