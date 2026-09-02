@@ -34,6 +34,18 @@ pub fn log(line: impl FnOnce() -> String) {
     }
 }
 
+/// Keeps the first access units beside the trace (`<trace>.au0007.h264`)
+/// so a failing stream can be replayed through the decoder offline.
+pub fn dump_packet(index: u64, bytes: &[u8]) {
+    let Some(path) = target() else { return };
+    if index >= 64 {
+        return;
+    }
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".au{index:04}.h264"));
+    let _ = std::fs::write(name, bytes);
+}
+
 /// `hr` as the mferror.h-style hex a reader can look up.
 pub fn hex_hr(hr: i32) -> String {
     format!("0x{:08X}", hr as u32)

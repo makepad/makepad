@@ -20,10 +20,12 @@
 //! list of hand-derived constants this implies.
 
 use windows::core::{Interface, GUID};
+use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::Media::MediaFoundation::{
-    IMFAttributes, IMFMediaType, IMFSample, IMFTransform, MFT_MESSAGE_TYPE, MFT_OUTPUT_DATA_BUFFER,
+    ICodecAPI, IMFAttributes, IMFMediaType, IMFSample, IMFTransform, MFT_MESSAGE_TYPE, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_INFO,
 };
+use windows::Win32::System::Variant::{VARENUM, VARIANT};
 
 // mftransform.h — stable since Vista, not part of the vendored binding
 // subset (see module doc). FLUSH/NOTIFY_END_OF_STREAM are unused today
@@ -60,6 +62,9 @@ pub(crate) const MF_E_BUFFERTOOSMALL: i32 = 0xC00D_36B1u32 as i32;
 /// decoded instead of holding a reorder window — without it a 2–3 frame
 /// live pipeline never sees a single output frame.
 pub(crate) const MF_LOW_LATENCY: GUID = GUID::from_u128(0x9c27891a_ed7a_40e1_88e8_b22727a024ee);
+/// `CODECAPI_AVLowLatencyMode` (codecapi.h) — the same switch through the
+/// decoder's `ICodecAPI`, which is where the H.264 decoder documents it.
+pub(crate) const CODECAPI_AV_LOW_LATENCY_MODE: GUID = GUID::from_u128(0x9c27891a_ed7a_40e1_88e8_b22727a024ee);
 
 /// Bit in `MFT_OUTPUT_STREAM_INFO::dwFlags` meaning the MFT allocates its
 /// own output samples (caller must pass `None` to `process_output`,
@@ -146,7 +151,7 @@ pub(crate) unsafe fn process_input(transform: &IMFTransform, sample: &IMFSample)
 pub(crate) unsafe fn process_output(
     transform: &IMFTransform,
     provided_sample: Option<IMFSample>,
-) -> (windows::core::HRESULT, Option<IMFSample>) {
+) -> (windows::core::HRESULT, u32, Option<IMFSample>) {
     let mut buffer = MFT_OUTPUT_DATA_BUFFER {
         dwStreamID: 0,
         pSample: core::mem::ManuallyDrop::new(provided_sample),
@@ -157,5 +162,16 @@ pub(crate) unsafe fn process_output(
     let vtbl = Interface::vtable(transform);
     let hr = (vtbl.ProcessOutput)(Interface::as_raw(transform), 0, 1, &mut buffer, &mut status);
     let sample = core::mem::ManuallyDrop::into_inner(buffer.pSample);
-    (hr, sample)
+    (hr, buffer.dwStatus, sample)
+}
+
+/// `ICodecAPI::SetValue(guid, VT_BOOL)` on the transform — how the Microsoft
+/// codecs take their codec-level switches (`CODECAPI_AVLowLatencyMode`).
+/// Err when the MFT has no `ICodecAPI` or refuses the property.
+pub(crate) unsafe fn set_codec_api_bool(transform: &IMFTransform, property: &GUID, on: bool) -> windows::core::Result<()> {
+    let codec_api: ICodecAPI = transform.cast()?;
+    let mut value = VARIANT::default();
+    (*value.Anonymous.Anonymous).vt = VARENUM(11); // VT_BOOL
+    (*value.Anonymous.Anonymous).Anonymous.boolVal = VARIANT_BOOL(if on { -1 } else { 0 });
+    codec_api.SetValue(property, &value)
 }
