@@ -294,11 +294,17 @@ pub struct GameWorld {
     pub tick: u64,
     pub time: f64,
     pub log_pending: Vec<String>,
-    /// PERF: bumped whenever anything a STATIC entity contributes to the
-    /// screen changes (spawn/remove/restyle/sky). The renderer caches packed
-    /// instance slabs for static content keyed by this — bump it or your
-    /// static edit won't show.
+    /// PERF: bumped whenever the static GEOMETRY of the world changes —
+    /// a static entity spawned, removed, moved, resized, its parts settled,
+    /// the sky or sun restyled. The renderer keys everything derived from
+    /// static geometry on this: the packed instance slabs, the CPU
+    /// occlusion bake, the shadow receivers and the GPU lightmap kick. Bump
+    /// it (`mark_render_dirty`) or your static edit won't show.
     pub render_rev: u64,
+    /// PERF: bumped when a static entity is only REPAINTED — colour or glow,
+    /// nothing moved. Only the packed slabs key on this; a repaint never
+    /// re-bakes light. `mark_paint_dirty`.
+    pub paint_rev: u64,
 }
 
 impl GameWorld {
@@ -629,6 +635,16 @@ impl GameWorld {
         self.render_rev = self.render_rev.wrapping_add(1);
     }
 
+    /// See `paint_rev`. Call after restyling a static entity's colour or
+    /// glow WITHOUT moving, resizing, spawning or removing anything: the
+    /// packed slabs repaint, the light bake stays. A lamp head that turns
+    /// red every few seconds is the case this exists for — through
+    /// `mark_render_dirty` it rebaked the whole map's lightmap on every
+    /// phase change (Crossroads, 2026-09-02: 68 bakes a minute).
+    pub fn mark_paint_dirty(&mut self) {
+        self.paint_rev = self.paint_rev.wrapping_add(1);
+    }
+
     /// Bring the box3d mirror up to date for an exact query (F7): entities
     /// spawned or teleported since the last tick get their bodies before the
     /// cast runs, so `game.raycast` sees the world the script just built —
@@ -745,6 +761,21 @@ mod id_lookup_tests {
             id,
             ..Default::default()
         }
+    }
+
+    /// The two static revisions are separate on purpose: a repaint reaches
+    /// the packed slabs and nothing else, a geometry change reaches
+    /// everything derived from static geometry (see the fields' docs).
+    #[test]
+    fn a_repaint_moves_paint_rev_and_leaves_the_geometry_revision_alone() {
+        let mut w = GameWorld::new();
+        let (render, paint) = (w.render_rev, w.paint_rev);
+        w.mark_paint_dirty();
+        assert_eq!(w.render_rev, render);
+        assert_eq!(w.paint_rev, paint.wrapping_add(1));
+        w.mark_render_dirty();
+        assert_eq!(w.render_rev, render.wrapping_add(1));
+        assert_eq!(w.paint_rev, paint.wrapping_add(1));
     }
 
     #[test]
