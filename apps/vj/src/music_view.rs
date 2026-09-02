@@ -3081,6 +3081,18 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "Stem separation"}
+                        stem_separation := DropDown{
+                            labels: ["Off" "AI hub" "Local"]
+                            selected_item: 1
+                        }
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
                         auto_vocal := MusicButton{width: 110 height: 22 text: "VOCAL GUARD"}
                         auto_phrase := MusicButton{width: 110 height: 22 text: "PHRASE SNAP"}
                     }
