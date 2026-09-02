@@ -7,6 +7,11 @@
 > studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
 
 ## Execution Policy
+
+- **Designs stay local.** Design documents, plans, and reports are local files
+  (`local/agent_state/<topic>/DESIGN.md`) that lanes read from disk. Never
+  publish them to the web (no Artifacts, no hosted pages); summarize in the
+  terminal instead.
 - Launch UI programs as standalone release binaries from this checkout. Do
   not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
   `cargo-makepad studio` websocket client.
@@ -31,6 +36,16 @@
   can be run directly in the shell.
 - A standalone app's built-in screenshot/capture hook is valid for visual
   inspection.
+- **System-level screenshots are FORBIDDEN.** Never run `screencapture`,
+  `CGWindowListCreateImage`/`CGDisplayCreateImage` scripts, `xcap`,
+  `import`, `scrot`, `grim`, `xwd`, PowerShell/Win32 screen grabs, or any
+  other OS screen capture — not of the display, not of a window, not
+  "just the caption". The user's screen is private. The only image of a
+  running app you may ever take is the app's own `--remote` grab (`/g`,
+  `/gq`, `/tweak/grab`), which renders the app's own drawable and nothing
+  else. If something only shows in the OS layer (native caption buttons,
+  other apps, the desktop), ask the user for a screenshot instead of
+  taking one.
 - When adding a new example crate, update both the Cargo workspace and
   `makepad.splash`.
 
@@ -43,6 +58,22 @@
 5. `GET /gq` when you are done. Always.
 
 ## App Remote Control (`--remote`)
+
+> **Focus law.** A `--remote` app opens its window VISIBLE BUT UNFOCUSED and
+> stays that way: it never activates, never becomes key, and bridge clicks
+> never raise it. The user keeps typing wherever they were. Everything the
+> bridge does (grabs, `/m`, `/k`, `/t`, `/snap`) works without focus because
+> input is injected through the app's event loop, not the OS. Do not work
+> around this (`MAKEPAD_FOCUS=1` exists only for a run the user asks to see
+> in front); `MAKEPAD_NO_FOCUS=1` gives a non-remote launch the same manners.
+
+> **Who may open a visible window.** Subagent/lane verification runs HIDDEN:
+> launch with `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote` — the window never
+> appears, grabs (`/g`), `/snap`, `/m`, `/k`, `/t` all still work offscreen.
+> Only the integrating session opens the one visible, unfocused window the
+> user watches; several look-alike windows on screen made the user "go
+> insane" (2026-08-26).
+
 
 Any makepad app launched with `--remote` runs a localhost HTTP server inside
 the process and prints one line before the UI appears:
@@ -111,6 +142,8 @@ this pattern as an executable end-to-end test across three example apps.
   `GET /gq` (or `/close` each window, then `/quit`). Never leave test windows
   on the user's screen, and never `pkill` when the protocol is available.
 - **Never touch an instance the user is running.** Launch your own.
+- **`/g` is the only camera.** No OS-level screen capture of any kind (see
+  Execution Policy) — the remote grab is what you get.
 - **A vanished window or app with `[makepad-remote] user closed …` in the log
   means the human dismissed it — it was in their way.** Do **not** treat that
   as a crash and do **not** relaunch it. The app prints
@@ -150,6 +183,59 @@ this pattern as an executable end-to-end test across three example apps.
   OHOS and wasm compile to a no-op.
 - **Cost when idle is zero.** The event loop only upshifts its paint clock
   while a remote request is in flight.
+
+### The TWEAKER (`/tweak/*`) — design feedback and live styling
+
+Every `--remote` app carries a design-feedback overlay (plan of record:
+repo-root `tweaker.md`; implementation: `widgets/src/tweaker.rs`). Off it
+costs nothing. On, the person (or you) points at the UI: pointer events over
+the window body are swallowed before widget dispatch — **clicking a Button in
+tweak mode outlines it and never fires it** — and the window grows a property
+sidebar next to the (compressed) app UI. F12 toggles it in-app; every edit,
+theirs or yours, lands in one shared diff log.
+
+| Route | Answer | Notes |
+|---|---|---|
+| `/tweak` `?on=1\|0&annotate=1\|0` | `{"on":1,"annotate":0}` | toggle the overlay / the freehand draw mode (Alt-drag draws too) |
+| `/tweak/state` | `{"on":1,"sel":{path,ty,r,band},"props":[{n,v,set}],"hover":…,"diff":[…],"ann":[…]}` | the STRUCTURE feedback: pinned selection, its real reflected properties (`set:1` = explicitly applied), the edit log, annotation strokes with the widget paths they touch |
+| `/tweak/apply` (POST) | `{"ok":1,"path":…,"changed":[{path,prop,old,new}]}` | body `{"path":"a.b.c","splash":"{padding: Inset{left: 20}}"}` or the one-property shorthand `{"path":…,"prop":"draw_bg.border_radius","value":"8"}`. Evaluates the chunk onto that ONE instance through the ordinary apply machinery (`+:` merge rules intact) and triggers a full relayout. Answers after the next drawn frame |
+| `/tweak/diff` | `{"diff":[{path,prop,old,new}…]}` | the raw edit log, in order |
+| `/tweak/clear` | `{"ok":1}` | reset diff + annotations |
+| `/tweak/final` | `{"final":[…coalesced…],"ann":[…],"drew":0\|1,"png":path?}` | **read this when tweaking is done**: per (path, prop) only the original and final value, churn collapsed. When the user drew, `png` is the composited screenshot — look at it, the strokes mean something |
+| `/tweak/grab` | like `/g` | the overlay (outlines, strokes, sidebar) draws in the window's own pass, so any grab is already composited |
+
+`local/tools/tweak` wraps all of this:
+`tweak PORT on`, `tweak PORT state`, `tweak PORT apply PATH PROP VALUE`,
+`tweak PORT splash PATH 'CHUNK'`, `tweak PORT final`, …
+
+**How to listen.** Sidebar edits push to you: each one emits a marked
+`TWEAK sidebar <path> <prop> <old> -> <new>` line into the app log — the
+`/log` tail is your ear; you never poll `/tweak/state` for changes. Talk back
+on `/tweak/apply` (values or whole shader chunks) to the same selected
+instance.
+
+**Write-back (you do this part — the overlay never writes source).** When the
+session is done, take `/tweak/final` and edit the splash source:
+
+1. Resolve each entry's widget path to its DSL site: the dotted path mirrors
+   the `script_mod!` tree (`/d` shows the same ids). `-` segments are
+   anonymous containers — skip them when searching the source.
+2. Write each property at the **most specific existing site** — the widget's
+   own `name := Type{…}` block if it has one; create one only when none
+   exists.
+3. Respect the merge law: a property inside a typed sub-struct goes through
+   `+:` (`draw_bg +: { border_radius: 8 }`), never a replacing
+   `draw_bg: {…}`. Plain walk/layout values (`padding`, `margin`, `width`)
+   are set directly (`padding: Inset{left: 20}`).
+4. Values come back in source spelling (`#rrggbbaa` colors, plain numbers) —
+   paste them as-is. Mind the Rust-tokenizer hex-`e` trap in `script_mod!`:
+   `#1e1e2e` must be written `#x1e1e2e`.
+5. Rebuild and relaunch; verify the value survived with `/tweak/state` or
+   `/snap` before calling it done.
+
+Reflection truth: `props` come from the widget's live Rust fields plus the
+type's DSL-declared shader inputs (`instance()`/`uniform()`), so the list is
+what the widget actually exposes — there is no synthetic schema to drift.
 
 ### Studio remote bridge (the older path)
 
