@@ -661,7 +661,7 @@ fn build_envelopes(pcm: &TrackPcm) -> Envelopes {
     let mut hop_peak = 0.0f32;
     let mut in_hop = 0usize;
     for frame in &pcm.frames {
-        let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+        let mono = crate::dsp_math::mono(*frame);
         let low_band = low.process(mono);
         let mid_band = mid.process(mono) - low_band;
         let high_band = mono - low.state - mid_band;
@@ -1923,7 +1923,7 @@ fn streaming_prior(pcm: &TrackPcm) -> Option<f64> {
         scratch.extend(
             chunk
                 .iter()
-                .map(|frame| (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0),
+                .map(|frame| crate::dsp_math::mono(*frame)),
         );
         analyzer.push_mono(&scratch);
     }
@@ -2239,7 +2239,7 @@ fn mono_22k(pcm: &TrackPcm) -> Result<Vec<f32>, String> {
     let mono: Vec<f32> = pcm
         .frames
         .iter()
-        .map(|frame| (frame[0] as f32 + frame[1] as f32) * (0.5 / 32768.0))
+        .map(|frame| crate::dsp_math::mono(*frame))
         .collect();
     if pcm.sample_rate == OUT_RATE || mono.is_empty() {
         return Ok(mono);
@@ -2721,7 +2721,7 @@ mod tests {
         let mut sums = [0.0f64; 3];
         let mut in_hop = 0usize;
         for frame in &pcm.frames {
-            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let mono = crate::dsp_math::mono(*frame);
             let low_band = low.process(mono);
             let mid_band = mid.process(mono) - low_band;
             let high_band = mono - low.state - mid_band;

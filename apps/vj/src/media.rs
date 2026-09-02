@@ -2043,7 +2043,7 @@ pub fn preview_wave_bins(pcm: &TrackPcm, cols: usize) -> Vec<f32> {
             (((col + 1) as f64 * per_col) as usize).clamp(start + 1, pcm.frames.len());
         let mut sum = 0.0f64;
         for frame in &pcm.frames[start..end] {
-            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let mono = crate::dsp_math::mono(*frame);
             sum += (mono as f64) * (mono as f64);
         }
         let rms = (sum / (end - start).max(1) as f64).sqrt() as f32;
@@ -2069,7 +2069,7 @@ pub fn wave_peaks(pcm: &TrackPcm, cols: usize) -> Vec<(f32, f32)> {
             .clamp(start + 1, pcm.frames.len());
         let (mut lo, mut hi) = (0.0f32, 0.0f32);
         for frame in &pcm.frames[start..end] {
-            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let mono = crate::dsp_math::mono(*frame);
             lo = lo.min(mono);
             hi = hi.max(mono);
         }

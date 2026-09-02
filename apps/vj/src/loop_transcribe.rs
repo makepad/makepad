@@ -1330,7 +1330,7 @@ pub fn transcribe_monophonic(
     if peak_energy <= 1e-7 {
         return Vec::new();
     }
-    let silence = peak_energy * 10.0f32.powf(-30.0 / 20.0);
+    let silence = peak_energy * crate::dsp_math::db_to_ratio(-30.0);
     for (pitch, energy) in pitches.iter_mut().zip(&energies) {
         if *energy < silence {
             *pitch = None;
@@ -1464,7 +1464,7 @@ fn segment_notes(
         let boundary = match (start, pitch) {
             (Some(segment_start), Some(current)) if index > segment_start => {
                 let energy_rise = energies[index]
-                    > energies[index.saturating_sub(1)].max(1e-9) * 10.0f32.powf(6.0 / 20.0);
+                    > energies[index.saturating_sub(1)].max(1e-9) * crate::dsp_math::db_to_ratio(6.0);
                 let prior = recent_median_pitch(pitches, segment_start, index).unwrap_or(current);
                 let jump = semitone_distance(prior, current) > 1.0
                     && pitch_is_held(pitches, index, current);
@@ -1854,7 +1854,7 @@ mod tests {
 
     fn add_bleed_and_smear(clean: &[f32]) -> Vec<f32> {
         let peak = clean.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
-        let bass_level = peak * 10.0f32.powf(-18.0 / 20.0);
+        let bass_level = peak * crate::dsp_math::db_to_ratio(-18.0);
         let delay = (RATE as f32 * 0.030).round() as usize;
         let mut degraded = clean.to_vec();
         for index in 0..degraded.len() {

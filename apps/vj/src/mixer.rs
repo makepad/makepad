@@ -18,6 +18,7 @@
 //! flags advance only inside `render`.
 
 use crate::cue::SlotId;
+use crate::dsp_math::{lerp, lerp_frame};
 use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
@@ -827,10 +828,7 @@ fn splat_cell_frame(
     };
     let a = read(index);
     let b = read(next);
-    [
-        a[0] + (b[0] - a[0]) * fraction,
-        a[1] + (b[1] - a[1]) * fraction,
-    ]
+    lerp_frame(a, b, fraction)
 }
 
 /// Splat reads bypass the stretcher and rate reader: every source position is
@@ -1216,8 +1214,8 @@ impl CueRing {
             let (bl, br) = self.frame_at(index + 1);
             let fraction = (state.cursor_fp & (FP_ONE - 1)) as f32 / FP_ONE as f32;
             state.volume += (target_volume - state.volume) * volume_pole;
-            let l = (al + (bl - al) * fraction) * state.volume;
-            let r = (ar + (br - ar) * fraction) * state.volume;
+            let l = lerp(al, bl, fraction) * state.volume;
+            let r = lerp(ar, br, fraction) * state.volume;
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] = if channel == 0 { l } else { r };
             }
@@ -2434,8 +2432,8 @@ impl Mixer {
                 let fraction = (bus.cursor - index as f64) as f32;
                 let (al, ar) = bus.queue[index];
                 let (bl, br) = bus.queue[index + 1];
-                video.0 += (al + (bl - al) * fraction) * gain;
-                video.1 += (ar + (br - ar) * fraction) * gain;
+                video.0 += lerp(al, bl, fraction) * gain;
+                video.1 += lerp(ar, br, fraction) * gain;
                 bus.cursor += (bus.source_rate / device_rate) * bus.playback_rate;
             }
             let program_mute = s.video_mute.tick(rate);
@@ -2601,10 +2599,7 @@ impl Mixer {
                         let fraction = (d.pos - index as f64) as f32;
                         let a = source.frame(index.min(length - 1));
                         let b = source.frame((index + 1).min(length - 1));
-                        let out = [
-                            a[0] + (b[0] - a[0]) * fraction,
-                            a[1] + (b[1] - a[1]) * fraction,
-                        ];
+                        let out = lerp_frame(a, b, fraction);
                         // A hand on the record overrules the key shift: a
                         // scratch is pitch and tempo welded together, and
                         // that is the sound being asked for.
@@ -2658,10 +2653,7 @@ impl Mixer {
                             let a = source.frame(index.min(length - 1));
                             let b = source.frame((index + 1).min(length - 1));
                             let t = (u / xf) as f32;
-                            [
-                                frame[0] + (a[0] + (b[0] - a[0]) * fraction - frame[0]) * t,
-                                frame[1] + (a[1] + (b[1] - a[1]) * fraction - frame[1]) * t,
-                            ]
+                            lerp_frame(frame, lerp_frame(a, b, fraction), t)
                         } else {
                             frame
                         }
@@ -2681,10 +2673,7 @@ impl Mixer {
                         let a = source.frame(index.min(length - 1));
                         let b = source.frame((index + 1).min(length - 1));
                         let t = (fade.left / fade.total).clamp(0.0, 1.0) as f32;
-                        let out = [
-                            frame[0] + (a[0] + (b[0] - a[0]) * fraction - frame[0]) * t,
-                            frame[1] + (a[1] + (b[1] - a[1]) * fraction - frame[1]) * t,
-                        ];
+                        let out = lerp_frame(frame, lerp_frame(a, b, fraction), t);
                         fade.pos += natural_step * deck_rate as f64;
                         fade.left -= 1.0;
                         // An outgoing stream that runs off the track just
@@ -3066,7 +3055,7 @@ mod tests {
     }
 
     fn decibels(ratio: f64) -> f64 {
-        20.0 * ratio.max(1e-12).log10()
+        crate::dsp_math::ratio_to_db_f64(ratio)
     }
 
     /// A separated stem peaks above full scale — the lane format has to

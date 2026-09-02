@@ -118,6 +118,7 @@ mod columns;
 // The strip under the lists: live numbers at rest, the app's log when it
 // is opened.
 mod console;
+mod dsp_math;
 // What may be worked out about a track before anyone asks to play it, and
 // where the results of that work are kept.
 mod preprocess;
@@ -3294,7 +3295,7 @@ fn copy_loop_mono(
         }
         None => {
             for sample in &pcm.frames[start..end] {
-                mono.push((sample[0] as f32 + sample[1] as f32) * (0.5 / 32768.0));
+                mono.push(crate::dsp_math::mono(*sample));
             }
         }
     }
@@ -21684,7 +21685,7 @@ p2 {}
                 any = true;
                 let mut sum = 0.0f64;
                 for frame in &block[offset..end] {
-                    let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
+                    let mono = crate::dsp_math::mono_f64(*frame);
                     sum += mono * mono;
                 }
                 // The headroom is undone once per lane rather than per
@@ -24995,7 +24996,7 @@ p2 {}
                     Vec::with_capacity(lane.len() * stems.chunk_frames / 4 + 4);
                 for block in lane.iter().flatten() {
                     for frame in block.iter().step_by(4) {
-                        mono.push((frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0);
+                        mono.push(crate::dsp_math::mono(*frame));
                     }
                 }
                 let rate = sample_rate as f64 / 4.0;

@@ -175,12 +175,6 @@ impl StemKind {
     }
 }
 
-/// Linear interpolation between two stereo frames.
-#[inline]
-pub fn lerp_frame(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-}
-
 /// Catmull-Rom between `b` and `c`, with `a` and `d` as the shoulders.
 ///
 /// A straight line between two samples is a poor guess at what the waveform
@@ -427,7 +421,7 @@ impl Stretcher {
         let mut window = Box::new([0.0f32; WSOLA_WINDOW]);
         for (index, value) in window.iter_mut().enumerate() {
             // Periodic Hann: two of these at 50% overlap sum to exactly 1.
-            *value = 0.5 - 0.5 * (2.0 * PI * index as f32 / WSOLA_WINDOW as f32).cos();
+            *value = crate::dsp_math::hann(index, WSOLA_WINDOW);
         }
         Stretcher {
             window,
@@ -1360,7 +1354,7 @@ mod tests {
     }
 
     fn db(value: f64) -> f64 {
-        20.0 * value.max(1e-12).log10()
+        crate::dsp_math::ratio_to_db_f64(value)
     }
 
     #[test]
