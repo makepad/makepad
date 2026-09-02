@@ -123,61 +123,9 @@ pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn 
     }
 }
 
-// ------------------------------------------------------------------ NoModel
-
-/// Nothing answers. Sends fail at once with a plain message; the tool
-/// console still works because it never touches the model.
-pub struct NoModel;
-
-impl Model for NoModel {
-    fn label(&self) -> String {
-        "No model".into()
-    }
-    fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
-        Ok(())
-    }
-    fn send_user(&mut self, _text: &str, _dynamic_context: &str) {}
-    fn send_tool_result(&mut self, _call_id: &str, _text: &str, _is_error: bool) {}
-    fn cancel(&mut self) {}
-    fn reset(&mut self) {}
-    fn poll(&mut self) -> Vec<ModelEvent> {
-        Vec::new()
-    }
-}
-
-/// `NoModel` that answers every send with the reason, so the transcript
-/// says why nothing happened.
-pub struct NoModelWithReason {
-    reason: String,
-    queued: Vec<ModelEvent>,
-}
-
-impl NoModelWithReason {
-    pub fn new(reason: impl Into<String>) -> Self {
-        NoModelWithReason { reason: reason.into(), queued: Vec::new() }
-    }
-}
-
-impl Model for NoModelWithReason {
-    fn label(&self) -> String {
-        "No model".into()
-    }
-    fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
-        Ok(())
-    }
-    fn send_user(&mut self, _text: &str, _dynamic_context: &str) {
-        self.queued.push(ModelEvent::Error(format!(
-            "no model is answering ({}). The tools still work from the console: /name {{json}}",
-            self.reason
-        )));
-    }
-    fn send_tool_result(&mut self, _call_id: &str, _text: &str, _is_error: bool) {}
-    fn cancel(&mut self) {}
-    fn reset(&mut self) {}
-    fn poll(&mut self) -> Vec<ModelEvent> {
-        std::mem::take(&mut self.queued)
-    }
-}
+// The no-answer models live in `no_model.rs`, outside this feature, so a
+// build without a runtime still has one to hand the core.
+pub use super::no_model::{NoModel, NoModelWithReason};
 
 // --------------------------------------------------------------- LocalModel
 
@@ -265,8 +213,12 @@ impl Model for LocalModel {
         let changed = system != self.system || tools != self.tools.as_slice();
         self.system = system.to_string();
         self.tools = tools.to_vec();
+        // No session yet: nothing to do — the weights load on the FIRST
+        // user line (`send_user`), never on a registration. An app joining
+        // the bus must not cost the machine a model load the person has
+        // not asked for.
         match &self.session {
-            None => self.start_session(),
+            None => {}
             Some(_) if changed => self.pending_update = Some(Self::render_update(system, tools)),
             Some(_) => {}
         }
@@ -274,6 +226,10 @@ impl Model for LocalModel {
     }
 
     fn send_user(&mut self, text: &str, dynamic_context: &str) {
+        if self.session.is_none() {
+            // The first line of the conversation is what loads the model.
+            self.start_session();
+        }
         let Some(session) = &self.session else {
             self.queued.push(ModelEvent::Error("the local model is not loaded".into()));
             return;
@@ -318,7 +274,10 @@ impl Model for LocalModel {
     fn reset(&mut self) {
         // The context is append-only; a fresh conversation is a fresh
         // session (the hub election keeps the weights resident where it can).
-        self.start_session();
+        // A model never started stays unstarted: the next line starts it.
+        if self.session.is_some() {
+            self.start_session();
+        }
     }
 
     fn poll(&mut self) -> Vec<ModelEvent> {

@@ -23,3 +23,7 @@ demo = []
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+# The assistant: the F10 overlay in this window, and the one read tool the
+# sheet exposes to it (src/ai.rs).
+makepad-aichat = { path = "../aichat" }
+makepad-ai-services = { path = "../../libs/ai/services" }

@@ -27,8 +27,15 @@ path = "src/lib.rs"
 name = "aichat"
 path = "src/main.rs"
 
+[features]
+default = ["engine"]
+# The real models (the hub's local runtime, the cloud providers). Off for a
+# build without a model runtime — the web page answers with NoModel and the
+# tool console still works.
+engine = ["makepad-ai-services/engine"]
+
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-ai-services = { path = "../../libs/ai/services", features = ["engine"] }
+makepad-ai-services = { path = "../../libs/ai/services", default-features = false }
