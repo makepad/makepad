@@ -31,6 +31,7 @@ use crate::score_preview::{PreviewEvent, PreviewSequence};
 use makepad_drumkit::{DrumKit, SampleBank};
 use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimedEvent};
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
+use makepad_widgets::makepad_platform::thread::lock_from_ui;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1308,7 +1309,7 @@ impl Mixer {
 
     /// (Re)open a slot bus, silent, empty, unpaused.
     pub fn open_slot(&self, slot: SlotId) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let bus = &mut s.video[slot.index()];
         bus.flush();
         bus.open = true;
@@ -1319,7 +1320,7 @@ impl Mixer {
 
     /// Close = mute-and-flush; the decode thread just stops feeding it.
     pub fn close_slot(&self, slot: SlotId) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         if let Some(scheduled) = s.scheduled_video.filter(|scheduled| scheduled.to == slot) {
             s.scheduled_video = None;
             // The device may have crossed the target just before the UI
@@ -1382,11 +1383,16 @@ impl Mixer {
     }
 
     pub fn flush_slot_audio(&self, slot: SlotId) {
+        lock_from_ui(&self.state).video[slot.index()].flush();
+    }
+
+    /// Decode-worker half of [`Self::flush_slot_audio`].
+    pub fn flush_slot_audio_from_worker(&self, slot: SlotId) {
         self.state.lock().unwrap().video[slot.index()].flush();
     }
 
     pub fn set_slot_paused(&self, slot: SlotId, paused: bool) {
-        self.state.lock().unwrap().video[slot.index()].paused = paused;
+        lock_from_ui(&self.state).video[slot.index()].paused = paused;
     }
 
     /// Audio resampling rate for a video slot. The bounded range is small on
@@ -1394,12 +1400,12 @@ impl Mixer {
     /// remaining perceptually safe. Deck and SFX cursors are unrelated.
     pub fn set_slot_playback_rate(&self, slot: SlotId, rate: f64) -> f64 {
         let rate = rate.clamp(MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE);
-        self.state.lock().unwrap().video[slot.index()].playback_rate = rate;
+        lock_from_ui(&self.state).video[slot.index()].playback_rate = rate;
         rate
     }
 
     pub fn slot_playback_rate(&self, slot: SlotId) -> f64 {
-        self.state.lock().unwrap().video[slot.index()].playback_rate
+        lock_from_ui(&self.state).video[slot.index()].playback_rate
     }
 
     /// Number of output frames rendered by this mixer. This is the same
@@ -1424,7 +1430,7 @@ impl Mixer {
         target_frame: u64,
         fade_frames: u64,
     ) -> Result<u64, VideoTransitionError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         self.schedule_video_transition_locked(
             &mut state,
             id,
@@ -1489,7 +1495,7 @@ impl Mixer {
         delay_frames: u64,
         fade_frames: u64,
     ) -> Result<u64, VideoTransitionError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let target = self
             .device_frames
             .load(Ordering::Acquire)
@@ -1501,7 +1507,7 @@ impl Mixer {
     /// device clock and must run to completion; callers cannot rewind it from
     /// the UI thread.
     pub fn cancel_video_transition(&self, id: VideoTransitionId) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let Some(scheduled) = state.scheduled_video else { return false };
         if scheduled.id != id || scheduled.started {
             return false;
@@ -1573,7 +1579,7 @@ impl Mixer {
     /// The timed A/V crossfade: `to` ramps to 1, `from` ramps to 0. The
     /// program mute is a separate multiplier and is never touched here.
     pub fn fade_slots(&self, from: Option<SlotId>, to: SlotId, secs: f32) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         if let Some(scheduled) = s.scheduled_video.take() {
             if scheduled.started {
                 // The audio clock owns a started transition. Legacy UI code
@@ -1606,7 +1612,7 @@ impl Mixer {
     /// so a fast hand never zippers. Ignored while a scheduled transition
     /// owns the gains (it lands them itself).
     pub fn set_video_mix(&self, mix: f32) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         if s.scheduled_video.is_some() {
             return;
         }
@@ -1616,9 +1622,7 @@ impl Mixer {
     }
 
     pub fn set_video_muted(&self, muted: bool) {
-        self.state
-            .lock()
-            .unwrap()
+        lock_from_ui(&self.state)
             .video_mute
             .slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS * 4.0);
     }
@@ -1628,7 +1632,7 @@ impl Mixer {
     /// Install a decoded track, paused at zero. Any stems from a previous
     /// track go with it; the tone chain is reset but its settings stand.
     pub fn install_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         d.pcm = Some(pcm);
         d.stems = None;
@@ -1642,7 +1646,7 @@ impl Mixer {
     /// Drop the deck's track entirely: the voice renders silence until the
     /// next install. Settings (gain, EQ, keylock) stand, like install_deck.
     pub fn clear_deck(&self, deck: DeckId) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         d.pcm = None;
         d.stems = None;
@@ -1657,7 +1661,7 @@ impl Mixer {
     /// Attach separated stems to the track already on the deck. They must be
     /// the same timeline as the mixed file; the deck keeps playing.
     pub fn install_deck_stems(&self, deck: DeckId, stems: Arc<TrackStems>) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         if d.pcm.is_none() || stems.is_empty() {
             return;
@@ -1666,11 +1670,11 @@ impl Mixer {
     }
 
     pub fn clear_deck_stems(&self, deck: DeckId) {
-        self.state.lock().unwrap().decks[deck.index()].stems = None;
+        lock_from_ui(&self.state).decks[deck.index()].stems = None;
     }
 
     pub fn set_deck_playing(&self, deck: DeckId, playing: bool) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         if playing {
             // Playing from the end restarts.
@@ -1687,7 +1691,7 @@ impl Mixer {
     /// Install or replace a grid. Frame conversion is deliberately done
     /// here, on the caller thread, before the callback sees the state.
     pub fn set_deck_splat(&self, deck: DeckId, grid: Arc<SplatGrid>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let voice = &mut state.decks[deck.index()];
         let Some(pcm) = voice.pcm.as_ref() else { return };
         let frames = SplatFrames::from_grid(&grid, pcm.sample_rate.max(1) as f64);
@@ -1701,7 +1705,7 @@ impl Mixer {
     }
 
     pub fn set_deck_splat_enabled(&self, deck: DeckId, on: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let voice = &mut state.decks[deck.index()];
         let frame_count = voice.frame_count() as f64;
         let Some(splat) = voice.splat.as_mut() else { return };
@@ -1721,14 +1725,14 @@ impl Mixer {
     }
 
     pub fn splat_launch(&self, deck: DeckId, row: SplatRow, col: u8, part: SplatPart) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             splat.queue_cell(row, col as usize, part);
         }
     }
 
     pub fn splat_stop_row(&self, deck: DeckId, row: SplatRow, timed: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             splat.queue_stop(row, timed);
         }
@@ -1737,7 +1741,7 @@ impl Mixer {
     /// Launch a whole section: every STEM row of the column. The mix row is
     /// the undemixed track and never plays under its own stems.
     pub fn splat_launch_scene(&self, deck: DeckId, col: u8) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             for row in SplatRow::ALL {
                 if row == SplatRow::Mix {
@@ -1749,7 +1753,7 @@ impl Mixer {
     }
 
     pub fn splat_stop_all(&self, deck: DeckId, timed: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
             for row in SplatRow::ALL {
                 splat.queue_stop(row, timed);
@@ -1758,7 +1762,7 @@ impl Mixer {
     }
 
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         let len = d.frame_count() as f64;
         if len > 0.0 {
@@ -1770,7 +1774,7 @@ impl Mixer {
 
     /// Absolute seek in source seconds.
     pub fn seek_deck_seconds(&self, deck: DeckId, secs: f64) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         let Some(pcm) = d.pcm.as_ref() else { return };
         let frames = secs.max(0.0) * pcm.sample_rate.max(1) as f64;
@@ -1784,11 +1788,11 @@ impl Mixer {
     pub fn set_deck_rate(&self, deck: DeckId, rate: f64) {
         let rate = rate.clamp(crate::decks::RATE_MIN, crate::decks::RATE_MAX) as f32;
         // A short ramp so a sync landing mid-phrase does not step the pitch.
-        self.state.lock().unwrap().decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
+        lock_from_ui(&self.state).decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
     }
 
     pub fn deck_rate(&self, deck: DeckId) -> f64 {
-        self.state.lock().unwrap().decks[deck.index()].rate.target() as f64
+        lock_from_ui(&self.state).decks[deck.index()].rate.target() as f64
     }
 
     /// Key shift in SEMITONES: pitch without tempo. Stored as the frequency
@@ -1799,16 +1803,16 @@ impl Mixer {
         let ratio = (semitones / 12.0).exp2() as f32;
         // Same ramp as the tempo: a stepped semitone glides instead of
         // clicking, and the stretcher sees a ratio that never jumps.
-        self.state.lock().unwrap().decks[deck.index()].key_ratio.slew(ratio, SLEW_SECS * 4.0);
+        lock_from_ui(&self.state).decks[deck.index()].key_ratio.slew(ratio, SLEW_SECS * 4.0);
     }
 
     pub fn set_deck_keylock(&self, deck: DeckId, on: bool) {
-        self.state.lock().unwrap().decks[deck.index()].keylock = on;
+        lock_from_ui(&self.state).decks[deck.index()].keylock = on;
     }
 
     /// Vinyl-style pointer control over the playhead.
     pub fn scratch_deck(&self, deck: DeckId, motion: ScratchMotion) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         let deck_rate = d.rate.current();
         match motion {
@@ -1820,12 +1824,12 @@ impl Mixer {
 
     /// One tone band, 0 = kill.
     pub fn set_deck_eq_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_band(band, gain);
+        lock_from_ui(&self.state).decks[deck.index()].eq.set_band(band, gain);
     }
 
     /// Bipolar sweep filter; 0.5 = off.
     pub fn set_deck_filter(&self, deck: DeckId, position: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_filter(position);
+        lock_from_ui(&self.state).decks[deck.index()].eq.set_filter(position);
     }
 
     /// One stem lane's gain. Ramped, so a knob move never zippers.
@@ -1833,14 +1837,14 @@ impl Mixer {
         if stem >= STEM_COUNT {
             return;
         }
-        self.state.lock().unwrap().decks[deck.index()].stem_gain[stem]
+        lock_from_ui(&self.state).decks[deck.index()].stem_gain[stem]
             .slew(gain.max(0.0), SLEW_SECS * 2.0);
     }
 
     /// The deck's loop in source SECONDS, converted here against the
     /// track's own rate so the render path only ever deals in frames.
     pub fn set_deck_loop_span(&self, deck: DeckId, span: Option<(f64, f64)>) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         let Some(pcm) = d.pcm.as_ref() else {
             d.loop_span = None;
@@ -1872,50 +1876,50 @@ impl Mixer {
     }
 
     pub fn set_deck_mute(&self, deck: DeckId, muted: bool) {
-        self.state.lock().unwrap().decks[deck.index()]
+        lock_from_ui(&self.state).decks[deck.index()]
             .mute
             .slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS);
     }
 
     pub fn set_deck_gain(&self, deck: DeckId, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].gain.slew(gain, SLEW_SECS);
+        lock_from_ui(&self.state).decks[deck.index()].gain.slew(gain, SLEW_SECS);
     }
 
     pub fn swap_decks(&self) {
-        self.state.lock().unwrap().decks.swap(0, 1);
+        lock_from_ui(&self.state).decks.swap(0, 1);
     }
 
     pub fn set_crossfader(&self, position: f32) {
-        self.state.lock().unwrap().fader.slew(position.clamp(0.0, 1.0), SLEW_SECS);
+        lock_from_ui(&self.state).fader.slew(position.clamp(0.0, 1.0), SLEW_SECS);
     }
 
     pub fn fade_crossfader(&self, position: f32, secs: f32) {
-        self.state.lock().unwrap().fader.slew(position.clamp(0.0, 1.0), secs.max(SLEW_SECS));
+        lock_from_ui(&self.state).fader.slew(position.clamp(0.0, 1.0), secs.max(SLEW_SECS));
     }
 
     /// Where the crossfader actually is right now, mid-ramp included. The
     /// deck surface mirrors this while a timed fade runs, so the on-screen
     /// fader travels with the audio instead of teleporting to the target.
     pub fn crossfader_position(&self) -> f32 {
-        self.state.lock().unwrap().fader.current
+        lock_from_ui(&self.state).fader.current
     }
 
     /// The autopilot's blend overlay: multiplies the operator's values,
     /// never moves them. `clear_blend` is the whole restore.
     pub fn set_blend_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_blend_band(band, gain);
+        lock_from_ui(&self.state).decks[deck.index()].eq.set_blend_band(band, gain);
     }
 
     pub fn set_blend_stem(&self, deck: DeckId, stem: usize, gain: f32) {
         if stem >= STEM_COUNT {
             return;
         }
-        self.state.lock().unwrap().decks[deck.index()].blend_stem[stem]
+        lock_from_ui(&self.state).decks[deck.index()].blend_stem[stem]
             .slew(gain.clamp(0.0, 1.0), BLEND_SECS);
     }
 
     pub fn clear_blend(&self, deck: DeckId) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         d.eq.clear_blend();
         for ramp in &mut d.blend_stem {
@@ -1924,16 +1928,16 @@ impl Mixer {
     }
 
     pub fn set_curve(&self, curve: FadeCurve) {
-        self.state.lock().unwrap().curve = curve;
+        lock_from_ui(&self.state).curve = curve;
     }
 
     pub fn set_master(&self, gain: f32) {
-        self.state.lock().unwrap().master.slew(gain.clamp(0.0, 1.2), SLEW_SECS);
+        lock_from_ui(&self.state).master.slew(gain.clamp(0.0, 1.2), SLEW_SECS);
     }
 
     /// `(position_secs, duration_secs, playing)` from the device clock.
     pub fn deck_position(&self, deck: DeckId) -> (f64, f64, bool) {
-        let s = self.state.lock().unwrap();
+        let s = lock_from_ui(&self.state);
         let d = &s.decks[deck.index()];
         match &d.pcm {
             None => (0.0, 0.0, false),
@@ -1948,7 +1952,7 @@ impl Mixer {
     /// uses this because every extra grab competes with the callback's
     /// `try_lock`.
     pub fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
-        let s = self.state.lock().unwrap();
+        let s = lock_from_ui(&self.state);
         let d = &s.decks[deck.index()];
         let scratching = d.scratch.active();
         match &d.pcm {
@@ -1981,18 +1985,18 @@ impl Mixer {
 
     /// True while a hand (or its release ramp) owns a deck's playhead.
     pub fn deck_scratching(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().decks[deck.index()].scratch.active()
+        lock_from_ui(&self.state).decks[deck.index()].scratch.active()
     }
 
     /// Decks that ran off their end (loop off) since the last drain.
     pub fn drain_ended_decks(&self) -> Vec<DeckId> {
-        std::mem::take(&mut self.state.lock().unwrap().ended_decks)
+        std::mem::take(&mut lock_from_ui(&self.state).ended_decks)
     }
 
     // ---- sfx voices ---------------------------------------------------------
 
     pub fn start_voice(&self, alloc: VoiceAlloc, pcm: Arc<TrackPcm>) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         s.sfx.push(SfxVoice {
             id: alloc.id,
             pad: alloc.pad,
@@ -2005,7 +2009,7 @@ impl Mixer {
     }
 
     pub fn stop_voice(&self, id: VoiceId) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         // Fast declick: a stopped voice ramps out over one slew and is
         // reaped by the render pass.
         for v in s.sfx.iter_mut().filter(|v| v.id == id) {
@@ -2016,7 +2020,7 @@ impl Mixer {
     }
 
     pub fn set_pad_voices_gain(&self, pad: PadKey, gain: f32) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         for v in s.sfx.iter_mut().filter(|v| v.pad == pad && !v.done) {
             v.gain.slew(gain, SLEW_SECS);
         }
@@ -2024,7 +2028,7 @@ impl Mixer {
 
     /// Voices that finished naturally (ran off the end, loop off).
     pub fn drain_ended_voices(&self) -> Vec<VoiceId> {
-        std::mem::take(&mut self.state.lock().unwrap().ended_voices)
+        std::mem::take(&mut lock_from_ui(&self.state).ended_voices)
     }
 
     /// Current peak meters: `[master, video, deck_a, deck_b, sfx]`.
@@ -2059,26 +2063,26 @@ impl Mixer {
     /// Route a deck into the phones. Cue follows the deck SLOT (the channel
     /// strip), not the record: `swap_decks` deliberately leaves it alone.
     pub fn set_deck_cue(&self, deck: DeckId, on: bool) {
-        self.state.lock().unwrap().cue_deck[deck.index()] = on;
+        lock_from_ui(&self.state).cue_deck[deck.index()] = on;
     }
 
     pub fn deck_cue(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().cue_deck[deck.index()]
+        lock_from_ui(&self.state).cue_deck[deck.index()]
     }
 
     /// Which point of the chain the cue listens to. A hard switch, like
     /// the monitor-select toggle on hardware.
     pub fn set_cue_mode(&self, mode: CueMode) {
-        self.state.lock().unwrap().cue_mode = mode;
+        lock_from_ui(&self.state).cue_mode = mode;
     }
 
     pub fn cue_mode(&self) -> CueMode {
-        self.state.lock().unwrap().cue_mode
+        lock_from_ui(&self.state).cue_mode
     }
 
     /// Install (and by default start) the pre-listen player.
     pub fn install_preview(&self, pcm: Arc<TrackPcm>, autoplay: bool) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         s.preview.pcm = Some(pcm);
         s.preview.cursor_fp = 0;
         s.preview.ended = false;
@@ -2092,7 +2096,7 @@ impl Mixer {
     /// Take the preview down and HAND BACK the pcm, so the (possibly huge)
     /// buffer is dropped by the caller, outside this lock.
     pub fn clear_preview(&self) -> Option<Arc<TrackPcm>> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         s.preview.playing = false;
         s.preview.ended = false;
         s.preview.cursor_fp = 0;
@@ -2101,7 +2105,7 @@ impl Mixer {
     }
 
     pub fn set_preview_playing(&self, playing: bool) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         if s.preview.pcm.is_none() {
             return;
         }
@@ -2116,7 +2120,7 @@ impl Mixer {
     }
 
     pub fn seek_preview_fraction(&self, fraction: f64) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_from_ui(&self.state);
         let Some(pcm) = s.preview.pcm.as_ref() else { return };
         let len = pcm.frames.len() as f64;
         let frame = (fraction.clamp(0.0, 1.0) * len).clamp(0.0, (len - 1.0).max(0.0));
@@ -2127,7 +2131,7 @@ impl Mixer {
     /// `(position_secs, duration_secs, playing, ended)` — the pre-listen
     /// mirror of `deck_position`. `None` while no preview is installed.
     pub fn preview_position(&self) -> Option<(f64, f64, bool, bool)> {
-        let s = self.state.lock().unwrap();
+        let s = lock_from_ui(&self.state);
         let p = &s.preview;
         let pcm = p.pcm.as_ref()?;
         let position =
@@ -2142,7 +2146,7 @@ impl Mixer {
     /// callback itself still only `try_lock`s and never blocks.
     pub fn run_cmd(&self, command: MixCmd) {
         let retired = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = lock_from_ui(&self.state);
             match command {
                 MixCmd::SetDrumBank(bank) => state.score_preview.set_drum_bank(bank),
             }
@@ -2158,7 +2162,7 @@ impl Mixer {
         let sample_rate = sequence.sample_rate.max(1);
         let needed = ScorePreviewVoice::required_event_capacity(&sequence);
         let (rebuild, grow_events) = {
-            let state = self.state.lock().unwrap();
+            let state = lock_from_ui(&self.state);
             (
                 state.score_preview.sample_rate != sample_rate,
                 state.score_preview.piano_events.capacity() < needed,
@@ -2166,7 +2170,7 @@ impl Mixer {
         };
         let piano = rebuild.then(|| Box::new(Piano::new(sample_rate as f32)));
         let events = grow_events.then(|| Vec::with_capacity(needed));
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let retired_piano = piano.map(|piano| {
             state.score_preview.replace_instruments(piano, sample_rate)
         });
@@ -2181,11 +2185,11 @@ impl Mixer {
     }
 
     pub fn score_preview_stop(&self) {
-        self.state.lock().unwrap().score_preview.stop(true);
+        lock_from_ui(&self.state).score_preview.stop(true);
     }
 
     pub fn score_preview_state(&self) -> (bool, u64) {
-        let state = self.state.lock().unwrap();
+        let state = lock_from_ui(&self.state);
         (state.score_preview.playing, state.score_preview.pos)
     }
 

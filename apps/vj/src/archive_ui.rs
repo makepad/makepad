@@ -1222,11 +1222,11 @@ impl SwatchPlayer {
     }
 
     pub fn take_frame(&self) -> Option<(Vec<u32>, u32, u32)> {
-        self.shared.frame.lock().ok()?.take()
+        self.shared.frame.try_lock().ok()?.take()
     }
 
     pub fn failure(&self) -> Option<String> {
-        self.shared.failure.lock().ok()?.clone()
+        self.shared.failure.try_lock().ok()?.clone()
     }
 }
 

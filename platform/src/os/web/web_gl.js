@@ -18,6 +18,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count = 0;
     this.webgl_shader_poll_frame_id = 0;
     this.webgl_shader_timeline_start = undefined;
+    this.webgl_shader_batch_program_count = 0;
+    this.webgl_shader_batch_failed_count = 0;
+    this.webgl_shader_summary_timer = undefined;
     this.video_players = {};
     this.init_webgl_context();
 
@@ -331,21 +334,26 @@ export class WasmWebGL extends WasmWebBrowser {
     return attrib_locs;
   }
 
-  log_webgl_shader_timeline(shader, phase) {
-    let now = performance.now();
-    let cumulative_ms = now - this.webgl_shader_timeline_start;
-    let elapsed_ms = now - shader.started_at;
-    console.log(
-      "makepad.webgl.shader" +
-        " id=" + shader.shader_id +
-        " phase=" + phase +
-        " vertex_ms=" + shader.vertex_ms.toFixed(2) +
-        " fragment_ms=" + shader.fragment_ms.toFixed(2) +
-        " link_ms=" + shader.link_ms.toFixed(2) +
-        " status_ms=" + shader.status_ms.toFixed(2) +
-        " ms=" + elapsed_ms.toFixed(2) +
-        " cumulative_ms=" + cumulative_ms.toFixed(2),
-    );
+  schedule_webgl_shader_summary() {
+    if (
+      this.pending_webgl_shader_count != 0 ||
+      this.webgl_shader_timeline_start === undefined ||
+      this.webgl_shader_summary_timer !== undefined
+    ) {
+      return;
+    }
+    this.webgl_shader_summary_timer = setTimeout(() => {
+      this.webgl_shader_summary_timer = undefined;
+      if (this.pending_webgl_shader_count != 0) {
+        return;
+      }
+      console.log(
+        `webgl shaders: ${this.webgl_shader_batch_program_count} programs, ${this.webgl_shader_batch_failed_count} failed, ${(performance.now() - this.webgl_shader_timeline_start).toFixed(1)} ms`,
+      );
+      this.webgl_shader_timeline_start = undefined;
+      this.webgl_shader_batch_program_count = 0;
+      this.webgl_shader_batch_failed_count = 0;
+    }, 0);
   }
 
   fail_webgl_shader(shader, stage, info_log) {
@@ -359,7 +367,8 @@ export class WasmWebGL extends WasmWebBrowser {
     this.draw_shaders[shader.shader_id] = { compile_failed: true };
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
-    this.log_webgl_shader_timeline(shader, "failed_" + stage);
+    this.webgl_shader_batch_failed_count++;
+    this.schedule_webgl_shader_summary();
   }
 
   finish_webgl_shader(shader) {
@@ -451,7 +460,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.assert_no_gl_error(gl, "compile_shader_end");
-    this.log_webgl_shader_timeline(shader, "ready");
+    this.schedule_webgl_shader_summary();
     return true;
   }
 
@@ -500,6 +509,7 @@ export class WasmWebGL extends WasmWebBrowser {
     if (this.webgl_shader_timeline_start === undefined) {
       this.webgl_shader_timeline_start = started_at;
     }
+    this.webgl_shader_batch_program_count++;
 
     let vsh = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vsh, args.vertex);
@@ -540,7 +550,6 @@ export class WasmWebGL extends WasmWebBrowser {
       status_ms: 0,
     };
     this.draw_shaders[args.shader_id] = shader;
-    this.log_webgl_shader_timeline(shader, "queued");
 
     if (shader.pending) {
       this.pending_webgl_shader_count++;
@@ -1198,11 +1207,9 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
     // With a PIXEL_PACK_BUFFER bound, zero is a byte offset. The transfer is
     // queued on the producing WebGL command stream and does not copy to JS.
-    const queueStarted = performance.now();
     gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
     const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     gl.flush();
-    const queueMs = performance.now() - queueStarted;
     gl.pixelStorei(gl.PACK_ALIGNMENT, oldPackAlignment);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
     gl.bindFramebuffer(gl.FRAMEBUFFER, oldFramebuffer);
@@ -1247,7 +1254,6 @@ export class WasmWebGL extends WasmWebBrowser {
         return;
       }
       const data = new Uint8Array(byteLength);
-      const copyStarted = performance.now();
       try {
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pixelBuffer);
         gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, data);
@@ -1257,7 +1263,6 @@ export class WasmWebGL extends WasmWebBrowser {
         return;
       }
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, oldPixelBuffer);
-      const copyMs = performance.now() - copyStarted;
       finish();
       this.to_wasm.ToWasmRenderTextureCapture({
         texture_id: args.texture_id,
@@ -1266,11 +1271,7 @@ export class WasmWebGL extends WasmWebBrowser {
         data,
         error: "",
       });
-      const bridgeStarted = performance.now();
       this.do_wasm_pump();
-      console.log(
-        `render texture readback ui: queue ${queueMs.toFixed(2)}ms, copy ${copyMs.toFixed(2)}ms, bridge ${(performance.now() - bridgeStarted).toFixed(2)}ms, ${width}x${height}`,
-      );
     };
     requestAnimationFrame(poll);
   }

@@ -21,7 +21,7 @@ use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_
 use crate::pads::PadKey;
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{lock_from_ui, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -464,7 +464,7 @@ impl SlotPlayer {
     }
 
     pub fn failure(&self) -> Option<String> {
-        self.shared.failure.lock().unwrap().clone()
+        self.shared.failure.try_lock().ok()?.clone()
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -491,7 +491,11 @@ impl SlotPlayer {
     pub fn needs_frame_pump(&self) -> bool {
         !self.shared.paused.load(Ordering::Acquire)
             && (!self.shared.end_of_stream.load(Ordering::Acquire)
-                || !self.shared.frames.lock().unwrap().is_empty())
+                || self
+                    .shared
+                    .frames
+                    .try_lock()
+                    .map_or(true, |frames| !frames.is_empty()))
     }
 
     /// Ask for this clip's loop to be CLOSED: when the repeat window is
@@ -524,7 +528,7 @@ impl SlotPlayer {
     /// The eager repeat cache, once complete — the tweener reads frame
     /// pairs straight out of it.
     pub fn cache_frames(&self) -> Option<Arc<Vec<Frame>>> {
-        self.shared.repeat_cache.lock().unwrap().frames.clone()
+        lock_from_ui(&self.shared.repeat_cache).frames.clone()
     }
 
     /// A stable identity for this player (this cue of this clip): the
@@ -713,7 +717,7 @@ impl SlotPlayer {
         if self.shared.paused.load(Ordering::Acquire) {
             return None;
         }
-        let mut frames = self.shared.frames.lock().unwrap();
+        let mut frames = self.shared.frames.try_lock().ok()?;
         let first_pts = frames.front()?.pts_100ns;
         // A large backward pts jump means the stream restarted (loop or
         // seek): rebase the clock there.
@@ -813,7 +817,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     decoder = d;
                     audio_eos = !info.has_audio;
                     shared.frames.lock().unwrap().clear();
-                    mixer.flush_slot_audio(slot);
+                    mixer.flush_slot_audio_from_worker(slot);
                     // Discard video frames strictly before the target.
                     loop {
                         if shared.stop.load(Ordering::Acquire) {
@@ -2161,24 +2165,17 @@ pub const UI_STEP_BUDGET_MS: f32 = 8.0;
 /// pool; what is left on this thread is GPU work (buffer/texture creation)
 /// that cannot happen anywhere else. This says whether that is still true:
 /// the cost is folded into the F3 perf graph's own `load` channel, and a
-/// step over [`UI_STEP_BUDGET_MS`] names itself in the log, so a hitch is
-/// attributable from `/log` without the graph being open.
-/// `VJ_TRACE_LOAD=1` also logs the steps that stayed INSIDE the budget —
-/// how a before/after is measured once the hitches are gone.
-fn trace_load() -> bool {
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("VJ_TRACE_LOAD").is_some())
-}
+/// step is recorded in the F3 performance graph without emitting a
+/// per-item console line.
 
 #[must_use = "a step that is never `done` is never measured"]
 pub struct UiStep {
     t0: Instant,
-    what: &'static str,
 }
 
 impl UiStep {
-    pub fn new(what: &'static str) -> Self {
-        Self { t0: Instant::now(), what }
+    pub fn new(_what: &'static str) -> Self {
+        Self { t0: Instant::now() }
     }
 
     /// Close the step; returns its cost in milliseconds.
@@ -2186,16 +2183,7 @@ impl UiStep {
         let us = self.t0.elapsed().as_micros() as u64;
         let channel = cx.perf_monitor.channel("load", 0xff_b4_54);
         cx.perf_monitor.add(channel, us);
-        let ms = us as f32 / 1000.0;
-        if ms > UI_STEP_BUDGET_MS {
-            makepad_widgets::log!(
-                "ui-hitch: {} took {ms:.1}ms on the UI thread (budget {UI_STEP_BUDGET_MS:.1}ms)",
-                self.what
-            );
-        } else if trace_load() {
-            makepad_widgets::log!("ui-step: {} {ms:.2}ms", self.what);
-        }
-        ms
+        us as f32 / 1000.0
     }
 }
 
@@ -3397,7 +3385,7 @@ impl ThumbQueue {
     /// How many workers may decode at once. Raising it wakes the parked
     /// ones; lowering it lets the ones already decoding finish.
     fn set_width(&self, width: usize) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         let width = width.max(1);
         if state.width == width {
             return;
@@ -3408,7 +3396,9 @@ impl ThumbQueue {
     }
 
     fn take_dropped(&self) -> Vec<AssetRevisionId> {
-        let mut state = self.state.lock().unwrap();
+        let Ok(mut state) = self.state.try_lock() else {
+            return Vec::new();
+        };
         std::mem::take(&mut state.dropped)
     }
 
@@ -3421,7 +3411,7 @@ impl ThumbQueue {
     }
 
     fn push(&self, job: PendingThumb) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         if job.epoch > state.newest_epoch {
             state.newest_epoch = job.epoch;
             // A new visible range makes every pending job for the old one
@@ -3470,7 +3460,7 @@ impl ThumbQueue {
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.state);
         state.closed = true;
         self.cv.notify_all();
     }
@@ -3490,21 +3480,10 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
 fn run_heavy_job(job: DecodeJob) -> DecodeDone {
     match job {
         DecodeJob::Deck { deck, gen, source, media } => {
-            makepad_widgets::log!(
-                "deck-load: decode started deck={deck:?} gen={gen} media={media:?}"
-            );
             let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = wave_peaks(&pcm, WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
-            match &result {
-                Ok(_) => makepad_widgets::log!(
-                    "deck-load: decode finished deck={deck:?} gen={gen} ok"
-                ),
-                Err(error) => makepad_widgets::log!(
-                    "deck-load: decode finished deck={deck:?} gen={gen} error={error}"
-                ),
-            }
             DecodeDone::Deck { deck, gen, result }
         }
         DecodeJob::Pad { pad, gen, revision, source, media } => {

@@ -452,9 +452,6 @@ struct ActiveJob {
     job: FxThumbJob,
     phase: Phase,
     encoder: Option<TaskHandle<Result<FxThumbSheet, String>>>,
-    /// A readback may be deferred by the frame deadline, so remember that
-    /// this transition-only diagnostic was already emitted.
-    render_logged: bool,
     /// LIVECODING: the log position this document's load started at, so a
     /// draw-shader failure raised while the lane rendered can be attributed
     /// to it (see `crate::livecode`).
@@ -467,22 +464,10 @@ struct ActiveJob {
     seq_pending: Option<Option<usize>>,
     /// The sheet target holds drawn cells (clear turns into load-preserve).
     sheet_cleared: bool,
-    /// When the renderer-owned capture was requested ([`Phase::AwaitRead`]):
-    /// its read time for the report line.
-    await_started: Instant,
     /// Frames spent in [`Phase::AwaitRead`] — the timeout counts POLLS, not
     /// wall time, so a stalled clock (occlusion, machine sleep) can never
     /// spuriously fail a lane whose capture is simply parked with the app.
     await_polls: u32,
-    // Honest numbers for the report line.
-    started: Instant,
-    frames: u32,
-    load_ms: f32,
-    read_ms: f32,
-    /// CPU spent in tick_manual across the sheet (sim + clock).
-    tick_ms: f32,
-    /// CPU spent encoding the draws (scene + chain + cell blits).
-    draw_ms: f32,
 }
 
 /// One lane's own render target: the sheet the GPU packs cell by cell, plus
@@ -597,7 +582,7 @@ pub struct VjFxThumbs {
     #[rust]
     cache_reads: HashMap<StorageRequestId, CacheLookup>,
     #[rust]
-    cache_writes: HashMap<StorageRequestId, (AssetRevisionId, String)>,
+    cache_writes: HashMap<StorageRequestId, (AssetRevisionId, String, bool)>,
     #[rust]
     cache_misses: HashSet<AssetRevisionId>,
     #[rust]
@@ -645,25 +630,26 @@ pub struct VjFxThumbs {
     /// bank at one lane and one step per frame.
     #[rust(true)]
     full_speed: bool,
-    // Session totals for the report line.
-    #[rust]
-    done_count: usize,
-    #[rust]
-    done_ms: f32,
     #[rust]
     batch_started: Option<Instant>,
     #[rust]
-    batch_ui_ms: f32,
+    batch_rendered: usize,
     #[rust]
-    max_frame_ui_ms: f32,
+    batch_cached: usize,
+    #[rust]
+    batch_stored: usize,
+    #[rust]
+    batch_failed: usize,
 }
 
 impl VjFxThumbs {
     fn begin_batch(&mut self) {
         if self.batch_started.is_none() {
             self.batch_started = Some(Instant::now());
-            self.batch_ui_ms = 0.0;
-            self.max_frame_ui_ms = 0.0;
+            self.batch_rendered = 0;
+            self.batch_cached = 0;
+            self.batch_stored = 0;
+            self.batch_failed = 0;
         }
     }
 
@@ -725,9 +711,7 @@ impl VjFxThumbs {
         let key = cache_key(&asset, &revision, transition);
         self.begin_batch();
         self.cache_keys.insert(revision, key.clone());
-        log!("fx thumb: requested {revision}");
         let request = self.storage(cx).get(cx, &key);
-        log!("fx thumb: cache read {revision}");
         self.cache_reads.insert(
             request,
             CacheLookup { revision, key, job: None },
@@ -738,7 +722,7 @@ impl VjFxThumbs {
     pub fn invalidate_cache(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
         if let Some(key) = self.cache_keys.get(&revision).cloned() {
             let request = self.storage(cx).delete(cx, &key);
-            self.cache_writes.insert(request, (revision, key));
+            self.cache_writes.insert(request, (revision, key, false));
         }
         self.cache_misses.insert(revision);
     }
@@ -747,6 +731,7 @@ impl VjFxThumbs {
     pub fn is_idle(&self) -> bool {
         self.pending.is_empty()
             && self.cache_reads.is_empty()
+            && self.cache_writes.is_empty()
             && self.lanes.iter().all(|l| l.job.is_none())
     }
 
@@ -795,6 +780,11 @@ impl VjFxThumbs {
     }
 
     fn mark_failed(&mut self, revision: AssetRevisionId, error: String) {
+        if self.failed.contains_key(&revision) {
+            return;
+        }
+        log!("fx thumbs: {revision} failed: {error}");
+        self.batch_failed += 1;
         self.failed.insert(revision, error);
         self.new_failures.push(revision);
     }
@@ -832,9 +822,6 @@ impl VjFxThumbs {
         }
         self.pending.retain(|j| j.asset != job.asset);
         self.begin_batch();
-        if !self.cache_keys.contains_key(&job.revision) {
-            log!("fx thumb: requested {}", job.revision);
-        }
         if self.cache_misses.contains(&job.revision) {
             self.pending.push(job);
         } else if let Some(read) = self
@@ -847,7 +834,6 @@ impl VjFxThumbs {
             let key = cache_key(&job.asset, &job.revision, job.transition);
             self.cache_keys.insert(job.revision, key.clone());
             let request = self.storage(cx).get(cx, &key);
-            log!("fx thumb: cache read {}", job.revision);
             self.cache_reads.insert(
                 request,
                 CacheLookup { revision: job.revision, key, job: Some(job) },
@@ -914,7 +900,7 @@ impl VjFxThumbs {
                     Ok(StorageResult::Value(Some(jpeg)))
                         if jpeg.starts_with(&[0xff, 0xd8]) =>
                     {
-                        log!("fx thumb: cache hit {} ({} bytes)", read.revision, jpeg.len());
+                        self.batch_cached += 1;
                         self.results.push(FxThumbSheet {
                             revision: read.revision,
                             jpeg: jpeg.clone(),
@@ -924,21 +910,23 @@ impl VjFxThumbs {
                         });
                     }
                     Ok(StorageResult::Value(_)) => {
-                        log!("fx thumb: cache miss {}", read.revision);
                         self.cache_misses.insert(read.revision);
                         if let Some(job) = read.job {
                             self.pending.push(job);
                         }
                     }
                     Ok(_) => {
-                        log!("fx thumb: cache miss {}", read.revision);
                         self.cache_misses.insert(read.revision);
                         if let Some(job) = read.job {
                             self.pending.push(job);
                         }
                     }
                     Err(error) => {
-                        log!("fx thumb: cache read {} failed: {error}", read.key);
+                        log!(
+                            "fx thumbs: {} cache read failed ({}): {error}",
+                            read.revision,
+                            read.key
+                        );
                         self.cache_misses.insert(read.revision);
                         if let Some(job) = read.job {
                             self.pending.push(job);
@@ -947,12 +935,15 @@ impl VjFxThumbs {
                 }
                 changed = true;
             }
-            if let Some((revision, key)) = self.cache_writes.remove(&response.request_id) {
+            if let Some((revision, key, stores_value)) =
+                self.cache_writes.remove(&response.request_id)
+            {
                 if let Err(error) = &response.result {
-                    log!("fx thumb: cache write {key} failed: {error}");
-                } else {
-                    log!("fx thumb: cache stored {revision}");
+                    log!("fx thumbs: {revision} cache write failed ({key}): {error}");
+                } else if stores_value {
+                    self.batch_stored += 1;
                 }
+                changed = true;
             }
         }
         if changed {
@@ -983,11 +974,6 @@ impl VjFxThumbs {
 
     fn fail_lane(&mut self, cx: &mut Cx, index: usize, error: String) {
         if let Some(active) = self.lanes[index].job.take() {
-            log!(
-                "fx thumb: {} FAILED — {} (marked failed for this revision)",
-                active.job.title,
-                error
-            );
             self.mark_failed(active.job.revision, error);
         }
         self.view(index).clear_effect(cx);
@@ -1021,9 +1007,7 @@ impl VjFxThumbs {
             }
             let Some(job) = self.take_next() else { return };
             loads += 1;
-            log!("fx thumb: render scheduled {} lane {index}", job.revision);
             let prepared = self.lanes[index].prepared;
-            let t0 = Instant::now();
             let view = self.view(index);
             if !prepared {
                 view.set_manual_clock(true);
@@ -1044,26 +1028,14 @@ impl VjFxThumbs {
                         job,
                         phase: Phase::Warmup(0),
                         encoder: None,
-                        render_logged: false,
                         mark,
                         pending_chain: Vec::new(),
                         seq_pending: None,
                         sheet_cleared: false,
-                        await_started: t0,
                         await_polls: 0,
-                        started: t0,
-                        frames: 0,
-                        load_ms: t0.elapsed().as_secs_f32() * 1000.0,
-                        read_ms: 0.0,
-                        tick_ms: 0.0,
-                        draw_ms: 0.0,
                     });
                 }
                 Err(error) => {
-                    log!(
-                        "fx thumb: {} document failed to load — {error} (placeholder kept)",
-                        job.title
-                    );
                     // A parse failure is DEFINITE: report it as the answer
                     // rather than waiting to see what the shader does.
                     crate::livecode::report(
@@ -1088,7 +1060,6 @@ impl VjFxThumbs {
             }
             let Some(mut active) = self.lanes[index].job.take() else { continue };
             let Some(mut handle) = active.encoder.take() else { continue };
-            let total_ms = active.started.elapsed().as_secs_f32() * 1000.0;
             // LIVECODING: the document parsed and a full sheet was DRAWN, so
             // whatever the shader had to say has been said by now. A black
             // sheet is not itself a verdict — an input-shaping transition
@@ -1102,27 +1073,7 @@ impl VjFxThumbs {
                     self.lanes[index].job = Some(active);
                 }
                 Some(Ok(Ok(sheet))) => {
-                    log!("fx thumb: encode done {}", active.job.revision);
-                    self.done_count += 1;
-                    self.done_ms += total_ms;
-                    log!(
-                        "fx thumb: {} rendered — {} frames over {:.1}s in {:.0}ms ({} steps: UI tick {:.1}ms + draw {:.1}ms + load {:.1}ms, async read {:.1}ms, worker jpeg {:.1}ms); {} done, avg {:.0}ms, {:.1}s elapsed",
-                        active.job.title,
-                        FRAME_COUNT,
-                        CAPTURE_SPAN,
-                        total_ms,
-                        active.frames,
-                        active.tick_ms,
-                        active.draw_ms,
-                        active.load_ms,
-                        active.read_ms,
-                        sheet.encode_ms,
-                        self.done_count,
-                        self.done_ms / self.done_count as f32,
-                        self.batch_started
-                            .map(|t| t.elapsed().as_secs_f32())
-                            .unwrap_or(0.0),
-                    );
+                    self.batch_rendered += 1;
                     let key = cache_key(
                         &active.job.asset,
                         &active.job.revision,
@@ -1130,16 +1081,11 @@ impl VjFxThumbs {
                     );
                     self.cache_keys.insert(active.job.revision, key.clone());
                     let request = self.storage(cx).set(cx, &key, sheet.jpeg.clone());
-                    log!("fx thumb: cache write {}", active.job.revision);
                     self.cache_writes
-                        .insert(request, (active.job.revision, key));
+                        .insert(request, (active.job.revision, key, true));
                     self.results.push(sheet);
                 }
                 Some(Ok(Err(error))) => {
-                    log!(
-                        "fx thumb: {} FAILED — {error} (marked failed for this revision)",
-                        active.job.title
-                    );
                     self.mark_failed(active.job.revision, error);
                 }
                 Some(Err(error)) => {
@@ -1314,14 +1260,12 @@ impl VjFxThumbs {
         // same paint (fall through below) — sim-field documents keep
         // strict alternation ([`VjFxView::bake_seq_pipeline`]).
         if let Some(capture) = active.seq_pending.take() {
-            let t_draw = Instant::now();
             let texture = view.seq_chain_step(cx);
             if let (Some(k), Some(texture)) = (capture, texture) {
                 cell.draw_vars.set_texture(0, &texture);
                 cell.draw_abs(cx, cell_rect(k));
                 active.sheet_cleared = true;
             }
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
             active.phase =
                 Self::advance_sequential_phase(active.phase, view.needs_stepped_time());
             if !view.bake_seq_pipeline()
@@ -1339,12 +1283,8 @@ impl VjFxThumbs {
             Phase::Capture(k) => (FRAME_STEP, Some(k)),
             _ => (0.0, None),
         };
-        let t_tick = Instant::now();
         view.tick_manual(cx.cx, dt);
-        active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
-        active.frames += 1;
 
-        let t_draw = Instant::now();
         Self::bind_step_inputs(
             cx.cx,
             view,
@@ -1370,7 +1310,6 @@ impl VjFxThumbs {
             active.phase =
                 Self::advance_sequential_phase(phase, view.needs_stepped_time());
         }
-        active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
         false
     }
 
@@ -1396,7 +1335,6 @@ impl VjFxThumbs {
         // their chains and blit. Nothing else this paint — the pool steps
         // must not be re-encoded under a chain that reads them.
         if !active.pending_chain.is_empty() {
-            let t_draw = Instant::now();
             let pending = std::mem::take(&mut active.pending_chain);
             let mut left = Vec::new();
             for (step, k) in pending {
@@ -1412,7 +1350,6 @@ impl VjFxThumbs {
                 *budget = budget.saturating_sub(1);
             }
             active.pending_chain = left;
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
             if active.pending_chain.is_empty() && active.phase == Phase::Flush {
                 active.phase = Phase::Readback;
             }
@@ -1437,15 +1374,12 @@ impl VjFxThumbs {
         // never seen and fed no GPU state — the regen sequence (same dts)
         // is the whole effect. Runs to completion in one paint.
         if let Phase::Preroll { mut left, dt } = active.phase {
-            let t_tick = Instant::now();
             while left > 0 && *budget > 0 && Cx::monotonic_now() < deadline {
                 view.tick_manual(cx.cx, dt);
                 view.bake_advance_only();
-                active.frames += 1;
                 left -= 1;
                 *budget = budget.saturating_sub(1);
             }
-            active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
             active.phase = if left == 0 {
                 Phase::Capture(0)
             } else {
@@ -1465,12 +1399,8 @@ impl VjFxThumbs {
             if *budget == 0 || used >= limit || Cx::monotonic_now() >= deadline {
                 break;
             }
-            let t_tick = Instant::now();
             view.tick_manual(cx.cx, FRAME_STEP);
-            active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
-            active.frames += 1;
 
-            let t_draw = Instant::now();
             Self::bind_step_inputs(
                 cx.cx,
                 view,
@@ -1487,8 +1417,6 @@ impl VjFxThumbs {
                 cell.draw_abs(cx, cell_rect(k));
                 active.sheet_cleared = true;
             }
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
-
             used += 1;
             *budget = budget.saturating_sub(1);
             active.phase = if k + 1 < FRAME_COUNT {
@@ -1522,9 +1450,6 @@ impl VjFxThumbs {
             return;
         };
         if cx.request_render_texture_capture(&texture) {
-            if let Some(active) = self.lanes[index].job.as_ref() {
-                log!("fx thumb: readback issued {}", active.job.revision);
-            }
             // Repaint the sheet pass so the producing queue's next command
             // buffer carries the blit (its retained draw lists re-execute
             // — same cells, same pixels); the bytes arrive through
@@ -1532,16 +1457,11 @@ impl VjFxThumbs {
             cx.repaint_pass(pass_id);
             if let Some(active) = self.lanes[index].job.as_mut() {
                 active.phase = Phase::AwaitRead;
-                active.await_started = Instant::now();
                 active.await_polls = 0;
             }
             // The effect can stop ticking now — every cell is encoded.
             self.view(index).clear_effect(cx);
             return;
-        }
-        let t0 = Instant::now();
-        if let Some(active) = self.lanes[index].job.as_ref() {
-            log!("fx thumb: readback issued {}", active.job.revision);
         }
         let Some((w, h, bytes)) = cx.debug_read_render_texture(&texture) else {
             self.readback_failures += 1;
@@ -1555,11 +1475,7 @@ impl VjFxThumbs {
             return;
         };
         self.readback_failures = 0;
-        let read_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        if let Some(active) = self.lanes[index].job.as_ref() {
-            log!("fx thumb: readback complete {}", active.job.revision);
-        }
-        self.spawn_encode(cx, index, w, h, bytes, read_ms);
+        self.spawn_encode(cx, index, w, h, bytes);
     }
 
     /// The sheet bytes are on the CPU: hand them to the encode worker. The
@@ -1571,10 +1487,8 @@ impl VjFxThumbs {
         w: usize,
         h: usize,
         bytes: Vec<u8>,
-        read_ms: f32,
     ) {
         let Some(active) = self.lanes[index].job.as_mut() else { return };
-        active.read_ms = read_ms;
         let revision = active.job.revision;
         active.phase = Phase::Encoding;
         match cx
@@ -1583,7 +1497,6 @@ impl VjFxThumbs {
         {
             Ok(handle) => {
                 active.encoder = Some(handle);
-                log!("fx thumb: encode sent {revision}");
             }
             Err(error) => {
                 self.fail_lane(cx, index, format!("jpeg worker unavailable: {error}"));
@@ -1619,15 +1532,7 @@ impl VjFxThumbs {
                 continue;
             }
             self.readback_failures = 0;
-            let read_ms = self.lanes[index]
-                .job
-                .as_ref()
-                .map(|a| a.await_started.elapsed().as_secs_f32() * 1000.0)
-                .unwrap_or(0.0);
-            if let Some(active) = self.lanes[index].job.as_ref() {
-                log!("fx thumb: readback complete {}", active.job.revision);
-            }
-            self.spawn_encode(cx, index, w, h, bytes, read_ms);
+            self.spawn_encode(cx, index, w, h, bytes);
         }
         for index in 0..self.lanes.len() {
             let timed_out = match self.lanes[index].job.as_mut() {
@@ -1648,39 +1553,6 @@ impl VjFxThumbs {
         }
     }
 
-    /// TEMPORARY: env-gated view of the bank's real occupancy.
-    fn debug_bank(&mut self) {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static TICK: AtomicU32 = AtomicU32::new(0);
-        if std::env::var("VJ_FX_BANK_DEBUG").is_err() {
-            return;
-        }
-        let n = TICK.fetch_add(1, Ordering::Relaxed);
-        if n % 20 != 0 {
-            return;
-        }
-        let phases: String = self
-            .lanes
-            .iter()
-            .map(|l| match l.job.as_ref().map(|a| a.phase) {
-                None => '.',
-                Some(Phase::Warmup(_)) => 'w',
-                Some(Phase::Preroll { .. }) => 'p',
-                Some(Phase::Capture(_)) => 'c',
-                Some(Phase::Flush) => 'f',
-                Some(Phase::Readback) => 'r',
-                Some(Phase::AwaitRead) => 'a',
-                Some(Phase::Encoding) => 'e',
-            })
-            .collect();
-        log!(
-            "fx bank: budget={} full_speed={} pending={} lanes=[{}]",
-            self.lane_budget(),
-            self.full_speed,
-            self.pending.len(),
-            phases
-        );
-    }
 }
 
 /// THE CLASS PULL, standalone so the tests can pin it. Classes are decided
@@ -1896,7 +1768,6 @@ impl Widget for VjFxThumbs {
         self.poll_encoders(cx.cx);
         self.poll_captures(cx.cx);
         self.start_jobs(cx.cx, deadline);
-        self.debug_bank();
 
         let mut budget = if self.full_speed { STEP_BUDGET } else { 1 };
         let mut ready: Vec<usize> = Vec::new();
@@ -1931,12 +1802,6 @@ impl Widget for VjFxThumbs {
                 &mut budget,
                 deadline,
             ) {
-                if let Some(active) = self.lanes[index].job.as_mut() {
-                    if !active.render_logged {
-                        active.render_logged = true;
-                        log!("fx thumb: rendered {}", active.job.revision);
-                    }
-                }
                 ready.push(index);
             }
             if let Some(sheet) = self.lanes[index].sheet.as_ref() {
@@ -1958,28 +1823,23 @@ impl Widget for VjFxThumbs {
             self.draw_present.draw_abs(cx, rect);
         }
         cx.end_turtle_with_area(&mut self.area);
-        let frame_ui_ms = ((Cx::monotonic_now() - ui_started) * 1000.0) as f32;
-        self.batch_ui_ms += frame_ui_ms;
-        self.max_frame_ui_ms = self.max_frame_ui_ms.max(frame_ui_ms);
-        if frame_ui_ms > 8.0 {
-            log!(
-                "fx thumb ui: {:.2}ms frame exceeded 8ms ceiling (batch max {:.2}ms)",
-                frame_ui_ms,
-                self.max_frame_ui_ms
-            );
-        }
         if !self.is_idle() {
             self.area.redraw(cx.cx);
             self.next_frame = cx.cx.new_next_frame();
         } else {
             if let Some(started) = self.batch_started.take() {
-                log!(
-                    "fx thumb batch: {:.0}ms wall, {:.1}ms UI total, {:.2}ms max frame (budget {:.1}ms)",
-                    started.elapsed().as_secs_f32() * 1000.0,
-                    self.batch_ui_ms,
-                    self.max_frame_ui_ms,
-                    UI_STEP_BUDGET_MS,
-                );
+                if self.batch_rendered + self.batch_cached + self.batch_stored + self.batch_failed
+                    > 0
+                {
+                    log!(
+                        "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s",
+                        self.batch_rendered,
+                        self.batch_cached,
+                        self.batch_stored,
+                        self.batch_failed,
+                        started.elapsed().as_secs_f32(),
+                    );
+                }
             }
             // Hand the bake pools' MEMORY back the moment the bank rests —
             // never their pass identity (see bake_pool_release_memory: pass

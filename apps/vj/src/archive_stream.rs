@@ -166,11 +166,11 @@ impl StreamSwatch {
     }
 
     pub fn take_frame(&self) -> Option<StreamFrame> {
-        self.shared.frame.lock().ok()?.take()
+        self.shared.frame.try_lock().ok()?.take()
     }
 
     pub fn failure(&self) -> Option<StreamFailure> {
-        self.shared.failure.lock().ok()?.clone()
+        self.shared.failure.try_lock().ok()?.clone()
     }
 }
 

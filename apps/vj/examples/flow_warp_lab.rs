@@ -22,6 +22,9 @@ use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use makepad_widgets::*;
 use std::sync::mpsc::{channel, Receiver};
 
+#[path = "../src/clock.rs"]
+mod clock;
+
 // The lab compiles the flow modules standalone; host-facing API the lab
 // does not exercise (clear/output/seek — main.rs's surface) stays quiet.
 #[path = "../src/clock.rs"]
