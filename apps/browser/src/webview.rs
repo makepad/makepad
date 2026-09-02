@@ -11,9 +11,9 @@
 use crate::tabs::{TabId, TabModel, TabSummary};
 // The surface policy is the stock Browser widget's — one source of truth for
 // how a CEF page survives a resize.
-use makepad_widgets::browser::{
-    needs_new_surface, surface_alloc, Browser as BrowserKeys, RESIZE_INTERVAL, SETTLE,
-};
+#[cfg(target_os = "macos")]
+use makepad_widgets::browser::{needs_new_surface, surface_alloc, SETTLE};
+use makepad_widgets::browser::{Browser as BrowserKeys, RESIZE_INTERVAL};
 use makepad_widgets::image::DrawImage;
 use makepad_widgets::*;
 

@@ -68,19 +68,19 @@ pub const MOUSE_BUTTON_RIGHT: i32 = 2;
 
 pub const TEXT_INPUT_MODE_NONE: i32 = 1;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod ffi;
-#[cfg(target_os = "macos")]
-mod macos;
+#[cfg(any(target_os = "macos", windows))]
+mod native;
 
-#[cfg(target_os = "macos")]
-pub use macos::{
+#[cfg(any(target_os = "macos", windows))]
+pub use native::{
     accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
     is_initialized, prepare, reexec_into_app_bundle_if_needed, set_background_color, shutdown,
     startup_phases, AcceleratedStats, Browser, RenderMode,
 };
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     None,
@@ -88,7 +88,7 @@ pub enum RenderMode {
     Accelerated,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AcceleratedStats {
     pub frames: u64,
@@ -103,27 +103,27 @@ pub struct AcceleratedStats {
     pub last_copy_height: usize,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn accelerated_paint_requested() -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn set_background_color(_argb: u32) {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn background_color() -> u32 {
     0
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub struct Browser;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl Browser {
     pub fn new(_url: &str, _width: usize, _height: usize, _scale_factor: f32) -> Result<Self> {
         Err(Error::new(
-            "makepad-cef is only wired up for macOS right now",
+            "makepad-cef is only wired up for macOS and Windows right now",
         ))
     }
 
@@ -277,38 +277,38 @@ impl Browser {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn bootstrap() -> Result<BootstrapResult> {
     Ok(BootstrapResult::Continue)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn do_message_loop_work() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn initialize() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn prepare() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn is_initialized() -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn startup_phases() -> Option<(u128, u128)> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn shutdown() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
     Ok(())
 }
