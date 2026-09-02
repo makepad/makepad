@@ -360,6 +360,25 @@ pub struct SplatFrames {
 /// worst is kept beside it, because a stall that happened once still
 /// happened; but it cannot stand in for the live figure, which is what
 /// having only a high-water meant.
+/// Where one callback's time went, in nanoseconds.
+///
+/// Three phases, not five: the render is one frame loop with setup before
+/// it and bookkeeping after, and there is no sequential per-source block to
+/// time. Timing sources would mean a clock read per source per SAMPLE --
+/// at 48 kHz that costs more than the work it measures, and would cause
+/// the very dropouts it was added to explain. What this does answer is the
+/// question that matters when the budget climbs: is it the mixing, or is
+/// it the per-buffer overhead around it?
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct StageNanos {
+    /// Ramps, filter coefficients, lifting the deck sources out of the loop.
+    pub setup: u64,
+    /// The frame loop, which is nearly all of it.
+    pub mix: u64,
+    /// Meters, the cue publish, the per-deck snapshots, reaping.
+    pub publish: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AudioHealth {
     /// Whole buffers silenced by lock contention, since the app started.
@@ -378,6 +397,8 @@ pub struct AudioHealth {
     /// denominator of the budget.
     pub buffer_frames: u64,
     pub device_rate: f64,
+    /// Where the last buffer's time went.
+    pub stages: StageNanos,
 }
 
 impl AudioHealth {
@@ -1321,6 +1342,9 @@ pub struct Mixer {
     /// frame without touching the state lock. Written only from under that
     /// lock, which is what keeps it to one writer at a time.
     deck_snapshots: Arc<[Published<DeckSnapshot>; 2]>,
+    /// The last buffer's phase split, published by the callback and read by
+    /// the UI without ever taking the state lock.
+    stage_nanos: Arc<Published<StageNanos>>,
 }
 
 /// Infrequent UI-to-audio-state handoffs that carry prepared immutable
@@ -1372,6 +1396,7 @@ impl Mixer {
             render_nanos: Arc::new(AtomicU64::new(0)),
             buffer_frames: Arc::new(AtomicU64::new(0)),
             cue_ring: Arc::new(CueRing::new()),
+            stage_nanos: Arc::new(Published::new(StageNanos::default())),
             deck_snapshots: Arc::new([
                 Published::new(DeckSnapshot::default()),
                 Published::new(DeckSnapshot::default()),
@@ -1402,6 +1427,7 @@ impl Mixer {
     pub fn audio_health(&self) -> AudioHealth {
         AudioHealth {
             contended: self.contended_callbacks.load(Ordering::Relaxed),
+            stages: self.stage_nanos.read(),
             poisoned: self.poisoned_callbacks.load(Ordering::Relaxed),
             // The monitor counts its own: the ring is the only thing that
             // knows it could not fill a buffer.
@@ -2413,6 +2439,7 @@ impl Mixer {
             self.cue_ring.main_rate_bits.store(device_rate.to_bits(), Ordering::Relaxed);
         }
 
+        let mix_started = std::time::Instant::now();
         for frame in 0..frames {
             let output_frame = buffer_start.saturating_add(frame as u64);
             let starts_now = s.scheduled_video.is_some_and(|scheduled| {
@@ -2855,6 +2882,7 @@ impl Mixer {
             }
         }
 
+        let mix_nanos = mix_started.elapsed().as_nanos() as u64;
         // One cue publish per buffer: the phones consumer sees whole
         // buffers or nothing.
         if cue_armed {
@@ -2886,6 +2914,15 @@ impl Mixer {
         self.transition
             .publish_rendered_frame(self.device_frames.load(Ordering::Acquire));
         let cost = render_started.elapsed().as_nanos() as u64;
+        // Three clock reads a buffer, not three per sample: the split says
+        // whether the cost is the mixing or the per-buffer overhead around
+        // it, which is the question a climbing budget actually raises.
+        let setup_nanos = mix_started.duration_since(render_started).as_nanos() as u64;
+        self.stage_nanos.publish(StageNanos {
+            setup: setup_nanos,
+            mix: mix_nanos,
+            publish: cost.saturating_sub(setup_nanos).saturating_sub(mix_nanos),
+        });
         self.render_nanos.store(cost, Ordering::Relaxed);
         self.buffer_frames.store(frames as u64, Ordering::Relaxed);
         self.render_max_nanos.fetch_max(cost, Ordering::Relaxed);
@@ -3689,6 +3726,28 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_callback_says_where_its_time_went_and_the_phases_add_up() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        let health = mixer.audio_health();
+        let stages = health.stages;
+        assert!(stages.mix > 0, "the frame loop is nearly all of it");
+        let summed = stages.setup + stages.mix + stages.publish;
+        assert_eq!(
+            summed, health.render_nanos,
+            "the three phases ARE the callback, with nothing unaccounted for"
+        );
+        assert!(
+            stages.mix > stages.setup,
+            "mixing {} should outweigh the setup {} for a playing deck",
+            stages.mix,
+            stages.setup
+        );
     }
 
     #[test]

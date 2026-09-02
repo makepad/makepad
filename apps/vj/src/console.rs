@@ -202,6 +202,15 @@ pub fn detail_text(health: &AudioHealth, meters: &[f32; 5], decks: [f32; 2]) -> 
         health.render_nanos as f64 / 1e6,
         health.render_max_nanos as f64 / 1e6,
     ));
+    // Microseconds, not milliseconds: the setup and the bookkeeping are
+    // small next to the mixing, and rounding them to 0.00 ms would say
+    // nothing at all.
+    text.push_str(&format!(
+        "  setup {} us, mix {} us, after {} us\n",
+        health.stages.setup / 1_000,
+        health.stages.mix / 1_000,
+        health.stages.publish / 1_000,
+    ));
     // The poison count only appears once there is one: it means a panic
     // happened somewhere else in the app, and a permanent "poisoned 0"
     // would teach the eye to skip the line that matters.
@@ -252,6 +261,7 @@ mod tests {
     fn health() -> AudioHealth {
         AudioHealth {
             poisoned: 0,
+            stages: crate::mixer::StageNanos::default(),
             contended: 0,
             phones_starved: 0,
             render_nanos: 500_000,
@@ -268,6 +278,14 @@ mod tests {
         let line = summary_line(&health(), 0.5, false);
         assert!(line.starts_with("5%"), "the budget comes first: {line}");
         assert!(line.contains("512"), "and it says what buffer that was: {line}");
+    }
+
+    #[test]
+    fn the_numbers_say_where_the_callbacks_time_went() {
+        let mut health = health();
+        health.stages = crate::mixer::StageNanos { setup: 12_000, mix: 430_000, publish: 8_000 };
+        let text = detail_text(&health, &[0.0; 5], [0.0, 0.0]);
+        assert!(text.contains("setup 12 us, mix 430 us, after 8 us"), "{text}");
     }
 
     #[test]
