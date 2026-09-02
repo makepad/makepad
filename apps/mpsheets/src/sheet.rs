@@ -479,6 +479,7 @@ impl Default for Workbook {
 impl Workbook {
     /// A workbook holding the worked example, so a fresh window shows a real
     /// sheet rather than an empty void.
+    #[cfg(any(not(feature = "demo"), test))]
     pub fn with_demo() -> Self {
         Self {
             sheets: vec![demo_sheet()],
@@ -690,6 +691,7 @@ pub fn translate_input(input: &str, drow: isize, dcol: isize) -> String {
 
 /// Export the used range. Cells export as what they *show*, which is what
 /// every other program means by CSV.
+#[cfg(any(not(feature = "demo"), test))]
 pub fn to_csv(sheet: &Sheet) -> String {
     let Some(((r0, c0), (r1, c1))) = sheet.used_range() else {
         return String::new();
@@ -798,6 +800,7 @@ pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
 }
 
 /// A small worked example so a fresh window is not an empty void.
+#[cfg(any(not(feature = "demo"), test))]
 pub fn demo_sheet() -> Sheet {
     let mut s = Sheet::new("Budget");
     let mut set = |cell: &str, v: &str| {

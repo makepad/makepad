@@ -6,6 +6,7 @@
 //! is everything above that: which text a cell shows, the in-cell editor, the
 //! fill handle, paste, undo/redo, formatting and the chrome.
 
+use crate::docs;
 use crate::formula::{Value, FUNCTIONS};
 use crate::sheet::{self, HAlign, NumFormat, Pos, Workbook};
 use crate::theme;
@@ -160,6 +161,11 @@ script_mod! {
             path_input := FieldInput{
                 width: 190
                 empty_text: "sheet.csv"
+            }
+            demo_picker := DropDown{
+                width: 180 height: 24
+                labels: ["Household Budget"]
+                visible: false
             }
             Sep{}
             undo_btn := TBtn{text: "Undo"}
@@ -445,6 +451,20 @@ pub struct FillDrag {
     cur: Pos,
 }
 
+#[cfg(feature = "demo")]
+fn initial_workbook() -> Workbook {
+    let source = docs::docs();
+    let first = source.demos().first().expect("demo build needs a bundled sheet");
+    let mut wb = Workbook::default();
+    wb.sheets = vec![source.load(first.id).expect("first bundled sheet should load")];
+    wb
+}
+
+#[cfg(not(feature = "demo"))]
+fn initial_workbook() -> Workbook {
+    Workbook::with_demo()
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct MpSheets {
     #[deref]
@@ -452,7 +472,7 @@ pub struct MpSheets {
     #[live]
     draw_fill: DrawColor,
 
-    #[rust(Workbook::with_demo())]
+    #[rust(initial_workbook())]
     wb: Workbook,
     #[rust]
     editing: Option<Pos>,
@@ -776,12 +796,15 @@ impl MpSheets {
 
     fn copy_selection(&mut self, cx: &mut Cx) {
         let ((r0, c0), (r1, c1)) = self.selection_rect(cx);
-        let tsv = sheet::to_tsv(
-            self.wb.sheet(),
-            (r0, c0),
-            (r1.min(r0 + 500), c1.min(c0 + 200)),
-        );
-        cx.copy_to_clipboard(&tsv);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let tsv = sheet::to_tsv(
+                self.wb.sheet(),
+                (r0, c0),
+                (r1.min(r0 + 500), c1.min(c0 + 200)),
+            );
+            cx.copy_to_clipboard(&tsv);
+        }
         self.status = format!("Copied {}:{}", sheet::pos_name((r0, c0)), sheet::pos_name((r1, c1)));
         self.sync_chrome(cx);
     }
@@ -798,13 +821,8 @@ impl MpSheets {
 
     fn open_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let name = std::path::Path::new(&path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Imported".into());
-                let sheet = sheet::sheet_from_csv(&name, &text);
+        match docs::docs().load(&path) {
+            Ok(sheet) => {
                 self.wb.sheets.push(sheet);
                 self.wb.active = self.wb.sheets.len() - 1;
                 self.widths_applied = false;
@@ -817,12 +835,33 @@ impl MpSheets {
 
     fn save_csv(&mut self, cx: &mut Cx) {
         let path = self.csv_path(cx);
-        let text = sheet::to_csv(self.wb.sheet());
-        self.status = match std::fs::write(&path, text) {
+        self.status = match docs::docs().save(&path, self.wb.sheet()) {
             Ok(()) => format!("Saved {path}"),
             Err(e) => format!("Save failed: {e}"),
         };
         self.sync_chrome(cx);
+    }
+
+    fn open_demo(&mut self, cx: &mut Cx, index: usize) {
+        if self.wb.sheets.len() >= MAX_TABS {
+            self.status = format!("At most {MAX_TABS} sheets");
+            self.sync_chrome(cx);
+            return;
+        }
+        let source = docs::docs();
+        let Some(demo) = source.demos().get(index).copied() else {
+            return;
+        };
+        match source.load(demo.id) {
+            Ok(sheet) => {
+                self.wb.sheets.push(sheet);
+                self.wb.active = self.wb.sheets.len() - 1;
+                self.widths_applied = false;
+                self.status = format!("Loaded {} demo", demo.title);
+            }
+            Err(e) => self.status = format!("Demo unavailable: {e}"),
+        }
+        self.after_model_change(cx);
     }
 
     fn new_sheet_doc(&mut self, cx: &mut Cx) {
@@ -1183,6 +1222,18 @@ impl Widget for MpSheets {
             labels.push("fx".to_string());
             labels.extend(FUNCTIONS.iter().map(|(name, _)| name.to_string()));
             self.view.drop_down(cx, ids!(fx_menu)).set_labels(cx, labels);
+            let source = docs::docs();
+            let can_save = source.can_save();
+            self.view.widget(cx, ids!(open_btn)).set_visible(cx, can_save);
+            self.view.widget(cx, ids!(save_btn)).set_visible(cx, can_save);
+            self.view.widget(cx, ids!(path_input)).set_visible(cx, can_save);
+            self.view
+                .widget(cx, ids!(demo_picker))
+                .set_visible(cx, !can_save);
+            self.view.drop_down(cx, ids!(demo_picker)).set_labels(
+                cx,
+                source.demos().iter().map(|demo| demo.title.to_string()).collect(),
+            );
             self.sync_chrome(cx);
         }
         let grid = self.grid(cx);
@@ -1268,6 +1319,9 @@ impl Widget for MpSheets {
         }
         if self.view.button(cx, ids!(save_btn)).clicked(actions) {
             self.save_csv(cx);
+        }
+        if let Some(i) = self.view.drop_down(cx, ids!(demo_picker)).selected(actions) {
+            self.open_demo(cx, i);
         }
         if self.view.button(cx, ids!(undo_btn)).clicked(actions) {
             self.undo(cx);

@@ -14,6 +14,7 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 mod formula;
+mod docs;
 mod sheet;
 mod theme;
 mod view;

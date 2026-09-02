@@ -16,6 +16,10 @@ default-run = "mpsheets"
 name = "mpsheets"
 path = "src/main.rs"
 
+[features]
+default = []
+demo = []
+
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 mp-theme = { path = "../../libs/mp_theme" }
