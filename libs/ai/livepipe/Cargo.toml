@@ -1,0 +1,12 @@
+[package]
+name = "makepad-livepipe"
+version = "0.1.0"
+edition = "2021"
+description = "A live picture pipe to the ai-hub fleet: camera or still in, per-frame results back"
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets" }
+makepad-video = { package = "makepad-platform-video", path = "../../../platform/video" }
+makepad-ai-hub = { path = "../hub", default-features = false }
+
+[workspace]
