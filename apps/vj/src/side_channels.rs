@@ -49,7 +49,7 @@ pub enum FetchedSource {
 }
 
 impl FetchedSource {
-    fn read_all(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn read_all(&self) -> Result<Vec<u8>, String> {
         match self {
             Self::Path(path) => std::fs::read(path)
                 .map_err(|error| format!("{}: {error}", path.display())),

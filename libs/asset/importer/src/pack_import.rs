@@ -7345,6 +7345,8 @@ fn role_name(role: FileRole) -> &'static str {
         FileRole::StemVocals => "stem_vocals",
         FileRole::StemOther => "stem_other",
         FileRole::Lyrics => "lyrics",
+        FileRole::DjAnalysis => "dj_analysis",
+        FileRole::DjLoopSplat => "dj_loop_splat",
     }
 }
 

@@ -123,6 +123,7 @@ workspace.members = [
     "libs/audio_lyrics",
     # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
     "libs/audio_sidechannels",
+    "libs/vj_analysis",
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",

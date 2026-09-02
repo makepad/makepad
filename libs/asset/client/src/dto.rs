@@ -155,6 +155,8 @@ pub fn role_name(role: makepad_asset_data::FileRole) -> &'static str {
         R::StemVocals => "stem_vocals",
         R::StemOther => "stem_other",
         R::Lyrics => "lyrics",
+        R::DjAnalysis => "dj_analysis",
+        R::DjLoopSplat => "dj_loop_splat",
     }
 }
 
@@ -186,6 +188,8 @@ pub fn role_parse(s: &str) -> Option<FileRole> {
         "stem_vocals" => R::StemVocals,
         "stem_other" => R::StemOther,
         "lyrics" => R::Lyrics,
+        "dj_analysis" => R::DjAnalysis,
+        "dj_loop_splat" => R::DjLoopSplat,
         _ => return None,
     })
 }

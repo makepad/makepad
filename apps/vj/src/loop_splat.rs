@@ -107,6 +107,126 @@ pub struct SplatGrid {
     pub bars_per_col: [u8; SPLAT_COLS],
 }
 
+const CACHE_MAGIC: &[u8; 8] = b"VJSPLAT\0";
+const CACHE_VERSION: u32 = 1;
+
+/// Encode the derived grid as a bounded, versioned side-channel. This is the
+/// complete load-time loop-slicing result; live playback state is not part of
+/// it.
+pub fn encode_splat(grid: &SplatGrid) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128 + grid.sections.len() * 20 + SPLAT_ROWS * SPLAT_COLS * 24);
+    out.extend_from_slice(CACHE_MAGIC);
+    out.extend_from_slice(&CACHE_VERSION.to_le_bytes());
+    out.extend_from_slice(&grid.bpm.to_le_bytes());
+    out.extend_from_slice(&grid.bar_secs.to_le_bytes());
+    out.extend_from_slice(&grid.first_bar_secs.to_le_bytes());
+    out.push(grid.sections.len().min(SPLAT_COLS) as u8);
+    for section in grid.sections.iter().take(SPLAT_COLS) {
+        out.extend_from_slice(&section.start_secs.to_le_bytes());
+        out.extend_from_slice(&section.end_secs.to_le_bytes());
+        out.extend_from_slice(&section.bars.to_le_bytes());
+    }
+    out.extend_from_slice(&grid.bars_per_col);
+    for row in &grid.cells {
+        for cell in row {
+            match cell {
+                None => out.push(0),
+                Some(cell) => {
+                    out.push(1);
+                    out.extend_from_slice(&cell.span.start_secs.to_le_bytes());
+                    out.extend_from_slice(&cell.span.end_secs.to_le_bytes());
+                    out.push(cell.bars);
+                    out.extend_from_slice(&cell.energy.to_le_bytes());
+                    out.push(u8::from(cell.silent));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Decode a loop-splat side-channel. Invalid, oversized and newer payloads
+/// are refused so a web deck can settle to typed `Unavailable` immediately.
+pub fn decode_splat(bytes: &[u8]) -> Result<SplatGrid, String> {
+    let mut at = 0usize;
+    let mut take = |count: usize| -> Result<&[u8], String> {
+        let end = at.checked_add(count).ok_or("loop-splat length overflow")?;
+        if end > bytes.len() {
+            return Err("loop-splat cache truncated".into());
+        }
+        let value = &bytes[at..end];
+        at = end;
+        Ok(value)
+    };
+    if take(8)? != CACHE_MAGIC {
+        return Err("not a loop-splat cache file".into());
+    }
+    let version = u32::from_le_bytes(take(4)?.try_into().unwrap());
+    if version != CACHE_VERSION {
+        return Err(format!("loop-splat cache version {version}"));
+    }
+    let bpm = f64::from_le_bytes(take(8)?.try_into().unwrap());
+    let bar_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+    let first_bar_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+    if !bpm.is_finite() || !bar_secs.is_finite() || !first_bar_secs.is_finite() || bar_secs <= 0.0 {
+        return Err("loop-splat timing is invalid".into());
+    }
+    let section_count = take(1)?[0] as usize;
+    if section_count > SPLAT_COLS {
+        return Err("loop-splat section count out of range".into());
+    }
+    let mut sections = Vec::with_capacity(section_count);
+    for _ in 0..section_count {
+        let start_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+        let end_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+        let bars = u32::from_le_bytes(take(4)?.try_into().unwrap());
+        if !start_secs.is_finite() || !end_secs.is_finite() || end_secs <= start_secs || bars == 0 {
+            return Err("loop-splat section is invalid".into());
+        }
+        sections.push(SplatSection { start_secs, end_secs, bars });
+    }
+    let bars_per_col: [u8; SPLAT_COLS] = take(SPLAT_COLS)?.try_into().unwrap();
+    let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+    for row in &mut cells {
+        for cell in row {
+            let present = take(1)?[0];
+            if present == 0 {
+                continue;
+            }
+            if present != 1 {
+                return Err("loop-splat cell flag out of range".into());
+            }
+            let start_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+            let end_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
+            let bars = take(1)?[0];
+            let energy = f32::from_le_bytes(take(4)?.try_into().unwrap());
+            let silent = match take(1)?[0] {
+                0 => false,
+                1 => true,
+                _ => return Err("loop-splat silent flag out of range".into()),
+            };
+            if !start_secs.is_finite()
+                || !end_secs.is_finite()
+                || end_secs <= start_secs
+                || bars == 0
+                || !energy.is_finite()
+            {
+                return Err("loop-splat cell is invalid".into());
+            }
+            *cell = Some(SplatCell {
+                span: LoopSpan { start_secs, end_secs },
+                bars,
+                energy,
+                silent,
+            });
+        }
+    }
+    if at != bytes.len() {
+        return Err("loop-splat cache has trailing bytes".into());
+    }
+    Ok(SplatGrid { bpm, bar_secs, first_bar_secs, sections, cells, bars_per_col })
+}
+
 /// Per-beat mean level per stem. Beat `i` begins at
 /// `first_beat_secs + i * beat_secs`.
 #[derive(Clone, Debug, Default)]

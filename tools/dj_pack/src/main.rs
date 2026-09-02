@@ -15,8 +15,8 @@ use makepad_asset_store::{
     StaticExportOptions, Visibility,
 };
 use makepad_audio_decode::{decode_any, read_tags, DecodedAudio};
-use makepad_audio_sidechannels::{encode_stem_oggs, side_channel_files};
-use makepad_micro_serde::SerJson;
+use makepad_audio_sidechannels::{encode_stem_oggs, side_channel_files_with_analysis};
+use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson};
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,8 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STEM_OGG_NAMES: [&str; 4] = ["drums.ogg", "bass.ogg", "vocals.ogg", "other.ogg"];
+const DJ_ANALYSIS_NAME: &str = "analysis.wave";
+const DJ_LOOP_SPLAT_NAME: &str = "loop-splat.bin";
 const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 20;
 
 fn usage() -> &'static str {
@@ -35,10 +37,12 @@ USAGE:\n\
                        [--lyrics-cache <dir>] [--require-stems] [--dry-run] <audio>...\n\
 \n\
 stems decodes locally with makepad-audio-decode, sends 44.1 kHz stereo PCM\n\
-to the hub's stems capability, and writes VJ StemCache + four Ogg files. It\n\
-never loads or runs a separation model. --hub auto listens for fleet beacons.\n\
+to the hub's stems capability, and writes VJ StemCache + four Ogg files plus\n\
+the native beat/wave analysis and stem-aware loop-splat caches. It never loads\n\
+or runs a separation model. --hub auto listens for fleet beacons.\n\
 pack reads stem and lyrics caches only when their directories are explicitly\n\
-given, publishes the original audio plus available side channels, then exports\n\
+given, computes missing analysis without writing those caches, publishes the\n\
+original audio plus available side channels, then exports\n\
 /v1/health, catalogs, aliases, revisions and /v1/blobs for StaticStore."
 }
 
@@ -542,8 +546,22 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
         let pcm = model_pcm(&track);
         let header = CacheHeader::for_track(pcm.left.len() as u64);
         if makepad_ai_stems::cache_is_complete_on_disk(&args.out, &track.digest, &header) {
+            if service.is_none() {
+                service = Some(resolve_hub(&args.hub)?);
+            }
+            let resolved = service.as_ref().unwrap();
             ensure_cached_oggs(&args.out, &track.digest, &header, true)?;
-            println!("{}: cached {}", path.display(), track.digest);
+            let stems = cached_stem_set(&args.out, &track.digest, header.frames)?;
+            let (mut analysis, _) = analyze_track(&track, Some(&stems));
+            refine_analysis_through_hub(
+                &resolved.service,
+                &track,
+                resolved.max_job_body_bytes,
+                &mut analysis,
+            )?;
+            let splat = splat_for(&analysis, Some(&stems));
+            write_analysis_cache(&args.out, &track, &analysis, splat.as_ref())?;
+            println!("{}: cached {} + analysis", path.display(), track.digest);
             continue;
         }
         if service.is_none() {
@@ -570,9 +588,18 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
             }
             output
         };
+        let (mut analysis, _) = analyze_track(&track, Some(&stems));
+        refine_analysis_through_hub(
+            hub,
+            &track,
+            resolved.max_job_body_bytes,
+            &mut analysis,
+        )?;
+        let splat = splat_for(&analysis, Some(&stems));
         write_cache(&args.out, &track.digest, &stems)?;
         ensure_cached_oggs(&args.out, &track.digest, &header, true)?;
-        println!("{}: separated {}", path.display(), track.digest);
+        write_analysis_cache(&args.out, &track, &analysis, splat.as_ref())?;
+        println!("{}: separated {} + analysis", path.display(), track.digest);
     }
     Ok(())
 }
@@ -659,6 +686,72 @@ fn wait_for_stems(
     }
 }
 
+#[derive(DeJson)]
+struct BeatsArtifact {
+    bpm: f64,
+    confidence: f64,
+    beats: Vec<f64>,
+    downbeats: Vec<f64>,
+    frame_rate: f64,
+}
+
+fn refine_analysis_through_hub(
+    hub: &LocalService,
+    audio: &PreparedAudio,
+    body_limit: Option<u64>,
+    analysis: &mut makepad_vj_analysis::wave_analysis::TrackAnalysis,
+) -> Result<(), String> {
+    let has_beats = hub
+        .list_models()
+        .map_err(|error| format!("AI hub {} model query failed: {error}", hub.base_url()))?
+        .into_iter()
+        .any(|model| model.available && model.domain == Domain::Beats.as_str());
+    if !has_beats {
+        return Ok(());
+    }
+    let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
+        &audio.bytes,
+        &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
+    ))
+    .map_err(|_| "base64 encoder returned non-UTF-8".to_string())?;
+    let mut request = GenerateRequestJson::default();
+    request.model = "beat-this".to_string();
+    request.input_b64 = Some(input_b64);
+    request.input_content_type = Some(
+        match audio.media {
+            MediaType::Mp3 => "audio/mpeg",
+            MediaType::Ogg => "audio/ogg",
+            _ => "application/octet-stream",
+        }
+        .to_string(),
+    );
+    let request_bytes = request.serialize_json().len() as u64;
+    if body_limit.is_some_and(|limit| request_bytes > limit) {
+        return Err(format!(
+            "AI hub {} beat-analysis upload is {request_bytes} bytes, above max_job_body_bytes={}",
+            hub.base_url(),
+            body_limit.unwrap()
+        ));
+    }
+    let job = hub
+        .request(Domain::Beats, &request)
+        .map_err(|error| format!("AI hub {} beat-analysis submit failed: {error}", hub.base_url()))?;
+    let artifact = wait_for_stems(hub, &job)?;
+    if artifact.content_type != "application/json" {
+        return Err(format!(
+            "AI hub beat analysis returned {}, expected application/json",
+            artifact.content_type
+        ));
+    }
+    let text = std::str::from_utf8(&artifact.bytes)
+        .map_err(|_| "AI hub beat analysis returned non-UTF-8 JSON".to_string())?;
+    let beats = BeatsArtifact::deserialize_json(text)
+        .map_err(|error| format!("AI hub beat analysis JSON: {error:?}"))?;
+    let _summary = (beats.bpm, beats.confidence, beats.frame_rate);
+    analysis.refine_with_beats(&beats.beats, &beats.downbeats);
+    Ok(())
+}
+
 fn write_cache(root: &Path, digest: &str, stems: &StemSet) -> Result<(), String> {
     let frames = stems[0].left.len();
     if frames == 0
@@ -711,6 +804,126 @@ fn ensure_cached_oggs(
         }
     }
     Ok(oggs)
+}
+
+fn analysis_paths(root: &Path, digest: &str) -> (PathBuf, PathBuf) {
+    let dir = root.join(digest);
+    (dir.join(DJ_ANALYSIS_NAME), dir.join(DJ_LOOP_SPLAT_NAME))
+}
+
+fn analysis_pcm(audio: &PreparedAudio) -> makepad_vj_analysis::mixer::TrackPcm {
+    makepad_vj_analysis::mixer::TrackPcm {
+        frames: audio.frames.clone(),
+        sample_rate: audio.sample_rate,
+    }
+}
+
+fn cached_stem_set(root: &Path, digest: &str, frames: u64) -> Result<StemSet, String> {
+    let mut cache = StemCache::open(root, digest, CacheHeader::for_track(frames))
+        .map_err(|error| error.to_string())?;
+    if !cache.is_complete() {
+        return Err(format!("stem cache {digest} is incomplete"));
+    }
+    cache.read_all().map_err(|error| error.to_string())
+}
+
+fn analyze_track(
+    audio: &PreparedAudio,
+    stems: Option<&StemSet>,
+) -> (
+    makepad_vj_analysis::wave_analysis::TrackAnalysis,
+    Option<makepad_vj_analysis::loop_splat::SplatGrid>,
+) {
+    let pcm = analysis_pcm(audio);
+    let analysis = makepad_vj_analysis::wave_analysis::analyze(&pcm);
+    let splat = splat_for(&analysis, stems);
+    (analysis, splat)
+}
+
+fn splat_for(
+    analysis: &makepad_vj_analysis::wave_analysis::TrackAnalysis,
+    stems: Option<&StemSet>,
+) -> Option<makepad_vj_analysis::loop_splat::SplatGrid> {
+    use makepad_vj_analysis::loop_splat::{build_splat, StemLevels};
+    use makepad_vj_analysis::music_dsp::StemKind;
+    let levels = stems.map(|set| {
+        StemLevels::from_stems(
+            analysis.grid.beat_secs,
+            analysis.grid.first_beat_secs,
+            SAMPLE_RATE,
+            set[0].left.len(),
+            |stem, frame| {
+                let index = match stem {
+                    StemKind::Vocals => 3,
+                    StemKind::Drums => 0,
+                    StemKind::Bass => 1,
+                    StemKind::Other => 2,
+                };
+                Some([*set[index].left.get(frame)?, *set[index].right.get(frame)?])
+            },
+        )
+    });
+    build_splat(analysis, levels.as_ref())
+}
+
+fn load_or_analyze(
+    args: &PackArgs,
+    audio: &PreparedAudio,
+    stems_complete: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    let cached_analysis = args.stem_cache.as_ref().and_then(|root| {
+        let (analysis_path, splat_path) = analysis_paths(root, &audio.digest);
+        let bytes = std::fs::read(&analysis_path).ok()?;
+        let analysis = makepad_vj_analysis::wave_analysis::decode_analysis(&bytes).ok()?;
+        let splat = std::fs::read(&splat_path).ok().and_then(|bytes| {
+            makepad_vj_analysis::loop_splat::decode_splat(&bytes)
+                .ok()
+                .map(|_| bytes)
+        });
+        Some((bytes, analysis, splat))
+    });
+    if let Some((analysis, _, Some(splat))) = &cached_analysis {
+        return Ok((analysis.clone(), Some(splat.clone())));
+    }
+    let stems = match (args.stem_cache.as_ref(), stems_complete) {
+        (Some(root), true) => {
+            let frames = model_pcm(audio).left.len() as u64;
+            Some(cached_stem_set(root, &audio.digest, frames)?)
+        }
+        _ => None,
+    };
+    if let Some((bytes, analysis, None)) = cached_analysis {
+        let splat = splat_for(&analysis, stems.as_ref())
+            .as_ref()
+            .map(makepad_vj_analysis::loop_splat::encode_splat);
+        return Ok((bytes, splat));
+    }
+    let (analysis, splat) = analyze_track(audio, stems.as_ref());
+    let analysis = makepad_vj_analysis::wave_analysis::encode_analysis(&analysis);
+    let splat = splat
+        .as_ref()
+        .map(makepad_vj_analysis::loop_splat::encode_splat);
+    Ok((analysis, splat))
+}
+
+fn write_analysis_cache(
+    root: &Path,
+    audio: &PreparedAudio,
+    analysis: &makepad_vj_analysis::wave_analysis::TrackAnalysis,
+    splat: Option<&makepad_vj_analysis::loop_splat::SplatGrid>,
+) -> Result<(), String> {
+    let (analysis_path, splat_path) = analysis_paths(root, &audio.digest);
+    write_atomic(
+        &analysis_path,
+        &makepad_vj_analysis::wave_analysis::encode_analysis(analysis),
+    )?;
+    if let Some(splat) = splat {
+        write_atomic(
+            &splat_path,
+            &makepad_vj_analysis::loop_splat::encode_splat(splat),
+        )?;
+    }
+    Ok(())
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -788,7 +1001,8 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
             None
         };
         let lyrics = load_lyrics(&args, &audio.digest)?;
-        let side_files = side_channel_files(oggs, lyrics);
+        let (analysis, splat) = load_or_analyze(&args, &audio, stems_complete)?;
+        let side_files = side_channel_files_with_analysis(oggs, lyrics, Some(analysis), splat);
         let (rights, license_text) = load_rights(path)?;
         tracks.push(PackTrack { audio, alias, side_files, rights, license_text });
     }
@@ -1119,6 +1333,31 @@ mod tests {
     }
 
     #[test]
+    fn loop_splat_side_channel_round_trips() {
+        use makepad_vj_analysis::decks::LoopSpan;
+        use makepad_vj_analysis::loop_splat::{
+            decode_splat, encode_splat, SplatCell, SplatGrid, SplatSection, SPLAT_COLS,
+            SPLAT_ROWS,
+        };
+        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+        cells[0][0] = Some(SplatCell {
+            span: LoopSpan { start_secs: 1.0, end_secs: 9.0 },
+            bars: 4,
+            energy: 0.75,
+            silent: false,
+        });
+        let grid = SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs: 1.0,
+            sections: vec![SplatSection { start_secs: 1.0, end_secs: 17.0, bars: 8 }],
+            cells,
+            bars_per_col: [4, 0, 0, 0, 0, 0, 0, 0],
+        };
+        assert_eq!(decode_splat(&encode_splat(&grid)).unwrap(), grid);
+    }
+
+    #[test]
     fn thirty_second_tone_splits_and_stitches_without_a_seam() {
         let frames = SAMPLE_RATE as usize * 30;
         let body_limit = stems_request_body_len(3 * CHUNK_STEP).unwrap() as u64;
@@ -1194,6 +1433,7 @@ mod tests {
         assert!(static_manifest.contains("\"aliases\""));
         assert!(static_manifest.contains("\"revisions\""));
         assert!(static_manifest.contains("\"role\":\"lyrics\""));
+        assert!(static_manifest.contains("\"role\":\"dj_analysis\""));
         assert!(std::fs::read_dir(site.join("assets")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("revisions")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("blobs")).unwrap().next().is_some());
