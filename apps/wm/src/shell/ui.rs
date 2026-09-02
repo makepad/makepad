@@ -309,6 +309,11 @@ script_mod! {
             close +: {svg: crate_resource("self:resources/icons/close.svg")}
             search +: {svg: crate_resource("self:resources/icons/search.svg")}
             cpu +: {svg: crate_resource("self:resources/icons/cpu.svg")}
+            globe +: {svg: crate_resource("self:resources/icons/globe.svg")}
+            play +: {svg: crate_resource("self:resources/icons/play.svg")}
+            shirt +: {svg: crate_resource("self:resources/icons/shirt.svg")}
+            pulse +: {svg: crate_resource("self:resources/icons/pulse.svg")}
+            photo +: {svg: crate_resource("self:resources/icons/photo.svg")}
             speaker +: {svg: crate_resource("self:resources/icons/speaker.svg")}
             headphone +: {svg: crate_resource("self:resources/icons/headphone.svg")}
             lock +: {svg: crate_resource("self:resources/icons/lock.svg")}
@@ -407,6 +412,16 @@ pub struct ShellIcons {
     #[live]
     pub cpu: DrawSvg,
     #[live]
+    pub globe: DrawSvg,
+    #[live]
+    pub play: DrawSvg,
+    #[live]
+    pub shirt: DrawSvg,
+    #[live]
+    pub pulse: DrawSvg,
+    #[live]
+    pub photo: DrawSvg,
+    #[live]
     pub speaker: DrawSvg,
     #[live]
     pub headphone: DrawSvg,
@@ -451,6 +466,11 @@ pub enum Ico {
     Speaker,
     Headphone,
     Lock,
+    Globe,
+    Play,
+    Shirt,
+    Pulse,
+    Photo,
 }
 
 impl ShellIcons {
@@ -486,6 +506,11 @@ impl ShellIcons {
             Ico::Close => &mut self.close,
             Ico::Search => &mut self.search,
             Ico::Cpu => &mut self.cpu,
+            Ico::Globe => &mut self.globe,
+            Ico::Play => &mut self.play,
+            Ico::Shirt => &mut self.shirt,
+            Ico::Pulse => &mut self.pulse,
+            Ico::Photo => &mut self.photo,
             Ico::Speaker => &mut self.speaker,
             Ico::Headphone => &mut self.headphone,
             Ico::Lock => &mut self.lock,
