@@ -5,7 +5,7 @@
 //! owned bytes and reports exactly one completion for every accepted id.
 
 use crate::error::ClientError;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use std::collections::HashSet;
 
 pub const MAX_TRANSPORT_URL_BYTES: usize = 8 * 1024;
@@ -28,6 +28,9 @@ pub struct OwnedRequest {
     pub url_or_target: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Per-request response ceiling. Adapters also apply their own ceiling;
+    /// the smaller limit wins.
+    pub max_response_body_bytes: u64,
 }
 
 impl OwnedRequest {
@@ -37,6 +40,7 @@ impl OwnedRequest {
             url_or_target: url_or_target.into(),
             headers: Vec::new(),
             body: Vec::new(),
+            max_response_body_bytes: MAX_TRANSPORT_BODY_BYTES,
         }
     }
 
@@ -47,6 +51,11 @@ impl OwnedRequest {
 
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
+        self
+    }
+
+    pub fn max_response_body_bytes(mut self, max: u64) -> Self {
+        self.max_response_body_bytes = max;
         self
     }
 }
@@ -116,7 +125,7 @@ pub struct TransportCompletion {
     pub result: Result<OwnedResponse, TransportError>,
 }
 
-pub trait Transport {
+pub trait Transport: Send {
     fn start(&mut self, req: OwnedRequest) -> TransportId;
     fn cancel(&mut self, id: TransportId);
     fn poll(&mut self, out: &mut Vec<TransportCompletion>);
@@ -141,6 +150,11 @@ fn validate_request(req: &OwnedRequest, absolute_url: bool) -> Result<(), Transp
             limit: MAX_TRANSPORT_BODY_BYTES,
             found: req.body.len() as u64,
         });
+    }
+    if req.max_response_body_bytes == 0
+        || req.max_response_body_bytes > MAX_TRANSPORT_BODY_BYTES
+    {
+        return Err(TransportError::InvalidRequest { what: "response body limit" });
     }
     if !req.body.is_empty()
         && matches!(
@@ -226,6 +240,7 @@ fn normalize_response(
     }
     let mut normalized = Vec::new();
     let mut content_length = None;
+    let mut content_encoding = None;
     let mut total = 0usize;
     for (name, value) in headers {
         if normalized.len() >= MAX_TRANSPORT_HEADERS {
@@ -255,11 +270,23 @@ fn normalize_response(
             }
             content_length = Some(parse_content_length(&value)?);
         }
+        if name == "content-encoding" {
+            if content_encoding.is_some() {
+                return Err(TransportError::Protocol { what: "duplicate content-encoding" });
+            }
+            content_encoding = Some(value.to_ascii_lowercase());
+        }
         normalized.push((name, value));
     }
     let declared = content_length
         .ok_or(TransportError::Protocol { what: "content-length required" })?;
-    if !is_head_request && declared != body.len() as u64 {
+    // Browser fetch exposes decoded Brotli bytes but may retain the encoded
+    // representation's Content-Length. The caller still checks its exact
+    // decoded length and digest; ordinary responses remain strictly framed.
+    if !is_head_request
+        && declared != body.len() as u64
+        && content_encoding.as_deref() != Some("br")
+    {
         return Err(TransportError::Protocol { what: "content-length mismatch" });
     }
     Ok(OwnedResponse { status, headers: normalized, body })
@@ -284,7 +311,7 @@ fn header_name_byte_ok(b: u8) -> bool {
         | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 mod tcp {
     use super::*;
     use crate::http::{self, HttpLimits, Method, Request};
@@ -354,7 +381,7 @@ mod tcp {
             }
             let addr = self.addr;
             let limits = self.limits;
-            let max = self.max_response_body_bytes;
+            let max = self.max_response_body_bytes.min(req.max_response_body_bytes);
             let tx = self.tx.clone();
             let cancelled = Arc::clone(&self.cancelled);
             std::thread::spawn(move || {
@@ -453,10 +480,10 @@ mod tcp {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use tcp::TcpHttpTransport;
 
-#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[cfg(any(target_arch = "wasm32", feature = "native", feature = "web"))]
 mod platform {
     use super::*;
     use makepad_live_id::LiveId;
@@ -469,7 +496,7 @@ mod platform {
         runtime: NetworkRuntime,
         max_response_body_bytes: u64,
         next_id: u64,
-        active: std::collections::HashMap<TransportId, TransportMethod>,
+        active: std::collections::HashMap<TransportId, (TransportMethod, u64)>,
         ready: Vec<TransportCompletion>,
     }
 
@@ -511,7 +538,8 @@ mod platform {
     impl Transport for PlatformHttpTransport {
         fn start(&mut self, req: OwnedRequest) -> TransportId {
             let id = self.allocate();
-            self.active.insert(id, req.method);
+            let response_limit = self.max_response_body_bytes.min(req.max_response_body_bytes);
+            self.active.insert(id, (req.method, response_limit));
             if let Err(error) = validate_request(&req, true) {
                 self.ready.push(TransportCompletion { id, result: Err(error) });
                 return id;
@@ -524,7 +552,7 @@ mod platform {
                 TransportMethod::Delete => HttpMethod::DELETE,
             };
             let mut request = HttpRequest::new(req.url_or_target, method);
-            request.set_max_response_body_bytes(self.max_response_body_bytes);
+            request.set_max_response_body_bytes(response_limit);
             for (name, value) in req.headers {
                 request.set_header(name, value);
             }
@@ -561,7 +589,7 @@ mod platform {
                     NetworkResponse::HttpResponse { request_id, response }
                     | NetworkResponse::HttpStreamComplete { request_id, response } => {
                         let id = transport_id(request_id);
-                        let Some(method) = self.active.remove(&id) else { continue };
+                        let Some((method, response_limit)) = self.active.remove(&id) else { continue };
                         let headers = response.headers.into_iter().flat_map(|(name, values)| {
                             values.into_iter().map(move |value| (name.clone(), value))
                         });
@@ -569,19 +597,19 @@ mod platform {
                             response.status_code,
                             headers,
                             response.body.unwrap_or_default().to_vec(),
-                            self.max_response_body_bytes,
+                            response_limit,
                             matches!(method, TransportMethod::Head),
                         );
                         out.push(TransportCompletion { id, result });
                     }
                     NetworkResponse::HttpError { request_id, error } => {
                         let id = transport_id(request_id);
-                        if self.active.remove(&id).is_some() {
+                        if let Some((_, response_limit)) = self.active.remove(&id) {
                             let result = if error.message == HTTP_BODY_LIMIT_ERROR {
                                 Err(TransportError::OverBudget {
                                     what: "response body",
-                                    limit: self.max_response_body_bytes,
-                                    found: self.max_response_body_bytes.saturating_add(1),
+                                    limit: response_limit,
+                                    found: response_limit.saturating_add(1),
                                 })
                             } else {
                                 Err(TransportError::Network(error.message))
@@ -612,7 +640,7 @@ mod platform {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[cfg(any(target_arch = "wasm32", feature = "native", feature = "web"))]
 pub use platform::PlatformHttpTransport;
 
 #[cfg(test)]
@@ -729,5 +757,16 @@ mod tests {
             false,
         )
         .is_err());
+        assert!(normalize_response(
+            200,
+            [
+                ("content-length".to_string(), "3".to_string()),
+                ("content-encoding".to_string(), "br".to_string()),
+            ],
+            b"decoded".to_vec(),
+            16,
+            false,
+        )
+        .is_ok());
     }
 }

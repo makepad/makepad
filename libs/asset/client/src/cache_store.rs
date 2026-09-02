@@ -12,8 +12,37 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobContent {
     Bytes(Arc<[u8]>),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
     VerifiedPath(std::path::PathBuf),
+}
+
+impl BlobContent {
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+            Self::VerifiedPath(_) => None,
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+    pub fn as_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::VerifiedPath(path) => Some(path),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    /// Read the verified content regardless of the cache backend that owns it.
+    pub fn read_all(&self) -> ClientResult<Vec<u8>> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes.to_vec()),
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+            Self::VerifiedPath(path) => {
+                std::fs::read(path).map_err(crate::error::io_err("read verified cache blob"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,7 +59,7 @@ pub struct CacheStoreStats {
     pub resumable_across_reload: bool,
 }
 
-pub trait CacheStore {
+pub trait CacheStore: Send {
     fn get_verified(&mut self, digest: &[u8; 32]) -> ClientResult<Option<BlobContent>>;
     fn put_verified(&mut self, digest: &[u8; 32], bytes: &[u8]) -> ClientResult<()>;
     fn contains(&self, digest: &[u8; 32]) -> bool;
@@ -207,12 +236,12 @@ impl CacheStore for MemoryCacheStore {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub struct FsCacheStore {
     cache: crate::cache::ContentCache,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl FsCacheStore {
     pub fn open(
         root: &std::path::Path,
@@ -232,7 +261,7 @@ impl FsCacheStore {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl CacheStore for FsCacheStore {
     fn get_verified(&mut self, digest: &[u8; 32]) -> ClientResult<Option<BlobContent>> {
         self.cache
@@ -336,7 +365,7 @@ mod tests {
         assert_eq!(cache.stats().corruption_rejections, 1);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
     #[test]
     fn filesystem_adapter_preserves_verified_paths_pins_and_stats() {
         let root = std::env::temp_dir().join(format!(
@@ -361,7 +390,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
     #[test]
     fn filesystem_verified_put_repairs_same_length_corruption() {
         let root = std::env::temp_dir().join(format!(
@@ -390,7 +419,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
     #[test]
     fn filesystem_adapter_reopens_verified_objects() {
         let root = std::env::temp_dir().join(format!(

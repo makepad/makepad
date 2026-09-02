@@ -1,34 +1,11 @@
 //! Portable configuration and the deliberately unavailable blocking facade.
 
 use crate::error::{ClientError, ClientResult};
-use crate::location::{
-    ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_BLOCKING_API,
-    CAPABILITY_STATIC_SITE_SESSION,
-};
+use crate::location::{ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_BLOCKING_API};
 use std::path::PathBuf;
 use crate::api::{AnnotationUpload, CatalogQuery};
-use crate::dto::{AliasStatusDto, CatalogFacet, CatalogHit};
+use crate::dto::{AliasStatusDto, AssetRow, CatalogFacet, CatalogHit};
 use makepad_asset_data::{AssetAlias, AssetId, AssetManifest, AssetRevisionId, BlobId};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PageCursor {
-    server_id: [u8; 16],
-    token: String,
-}
-
-impl PageCursor {
-    pub fn server_id(&self) -> &[u8; 16] {
-        &self.server_id
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CatalogPage {
-    pub hits: Vec<CatalogHit>,
-    pub total: u64,
-    pub next: Option<PageCursor>,
-    pub facets: Vec<CatalogFacet>,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CacheBudgets {
@@ -139,7 +116,7 @@ impl ClientConfig {
         config
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    pub(crate) fn validate(&self) -> ClientResult<()> {
         self.cache.validate()?;
         self.http.validate()?;
         if self.max_transfer_attempts == 0 || self.blob_body_deadline_ms == 0 {
@@ -152,10 +129,45 @@ impl ClientConfig {
     }
 }
 
-/// Blocking client calls are intentionally absent on a single-threaded web
-/// target. This type keeps construction source-compatible and fails before
-/// performing I/O; the static runtime arrives in the next feature lane.
+/// Blocking client calls are intentionally absent in portable mode. This
+/// type keeps construction source-compatible and fails before performing
+/// I/O; static reads use the poll-driven [`crate::ClientRuntime`].
 pub struct AssetClient;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageCursor {
+    pub(crate) server_id: [u8; 16],
+    pub(crate) token: String,
+}
+
+impl PageCursor {
+    pub fn server_id(&self) -> &[u8; 16] { &self.server_id }
+    pub(crate) fn token(&self) -> &str { &self.token }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPage {
+    pub hits: Vec<CatalogHit>,
+    pub total: u64,
+    pub next: Option<PageCursor>,
+    pub facets: Vec<CatalogFacet>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetsPage {
+    pub assets: Vec<AssetRow>,
+    pub next: Option<PageCursor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogEventCursor {
+    pub(crate) server_id: [u8; 16],
+    pub(crate) token: String,
+}
+
+impl CatalogEventCursor {
+    pub fn server_id(&self) -> &[u8; 16] { &self.server_id }
+}
 
 impl AssetClient {
     pub fn connect(
@@ -169,11 +181,7 @@ impl AssetClient {
             .as_ref()
             .map(ClientLocation::mode)
             .unwrap_or(ClientMode::Native);
-        let capability = match mode {
-            ClientMode::Native => CAPABILITY_BLOCKING_API,
-            ClientMode::StaticWeb => CAPABILITY_STATIC_SITE_SESSION,
-        };
-        Err(ClientError::Unavailable { capability, mode })
+        Err(ClientError::Unavailable { capability: CAPABILITY_BLOCKING_API, mode })
     }
 
     fn unavailable<T>(&self, capability: &'static str) -> ClientResult<T> {

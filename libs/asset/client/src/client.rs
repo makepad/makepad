@@ -77,17 +77,17 @@ impl ClientConfig {
         }
     }
 
-    /// Select the credential-free portable HTTP + memory-cache pieces.
-    /// Static index/session execution is implemented by the next feature
-    /// lane, so connecting this configuration currently returns a typed
-    /// [`ClientError::Unavailable`].
+    /// Select the credential-free static HTTP + memory-cache runtime.
+    /// Drive it with [`crate::ClientRuntime::start_static`] and `poll`;
+    /// blocking [`AssetClient`] construction deliberately remains native-
+    /// server-only.
     pub fn static_site(base_url: BaseUrl) -> Self {
         let mut config = Self::new(PathBuf::new());
         config.location = Some(ClientLocation::StaticSite(base_url));
         config
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    pub(crate) fn validate(&self) -> ClientResult<()> {
         if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
             return Err(ClientError::InvalidInput { what: "static site bearer token" });
         }
@@ -105,13 +105,17 @@ impl ClientConfig {
 /// [`ClientError::WrongServerCursor`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageCursor {
-    server_id: [u8; 16],
-    token: String,
+    pub(crate) server_id: [u8; 16],
+    pub(crate) token: String,
 }
 
 impl PageCursor {
     pub fn server_id(&self) -> &[u8; 16] {
         &self.server_id
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 }
 

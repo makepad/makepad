@@ -38,6 +38,15 @@ impl ClientLocation {
     }
 }
 
+impl std::fmt::Display for ClientLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native(endpoints) => write!(f, "{}", endpoints.control),
+            Self::StaticSite(base) => base.fmt(f),
+        }
+    }
+}
+
 /// A normalized URL prefix for a credential-free static asset export.
 ///
 /// HTTPS is required except for loopback hosts used by desktop tests and
@@ -319,13 +328,9 @@ mod tests {
                 mode: ClientMode::StaticWeb,
             })
         ));
-        assert!(matches!(
-            SessionConnector::start(SessionConfig::static_site(base.clone())),
-            Err(ClientError::Unavailable {
-                capability: "static_site_session",
-                mode: ClientMode::StaticWeb,
-            })
-        ));
+        let connector = SessionConnector::start(SessionConfig::static_site(base.clone()))
+            .expect("static connector is poll driven");
+        connector.stop();
 
         let mut client = ClientConfig::static_site(base.clone());
         client.token = Some("must-not-leak".to_string());

@@ -22,15 +22,14 @@ use crate::api::ApiEndpoints;
 use crate::client::{AssetClient, ClientConfig};
 use crate::discovery::{content_client_caps, DiscoveryListener};
 use crate::error::{ClientError, ClientResult};
-use crate::location::{
-    BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
-};
+use crate::location::{BaseUrl, ClientLocation};
 use crate::runtime::{ClientRuntime, RuntimeConfig};
 use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
 use crate::util::now_ms;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -134,13 +133,20 @@ pub struct SessionHandles {
     pub subscriber: CatalogSubscriber,
     pub server_label: String,
     pub server_id: [u8; 16],
-    /// Control/data planes of the verified session — enough for a second
-    /// client (chat broker) without re-discovering.
-    pub endpoints: ApiEndpoints,
+    /// The verified source. Static sessions expose their real URL here;
+    /// socket endpoints exist only for native dynamic-server sessions.
+    pub location: ClientLocation,
+    pub endpoints: Option<ApiEndpoints>,
     pub token: Option<String>,
 }
 
 impl SessionHandles {
+    pub fn native_endpoints(&self) -> ClientResult<ApiEndpoints> {
+        self.endpoints.ok_or(ClientError::Unavailable {
+            capability: "native_endpoints",
+            mode: self.location.mode(),
+        })
+    }
     /// Deterministic teardown: stop the subscriber's long-poll, then join
     /// every runtime worker. Call from a background/exit path — the runtime
     /// joins wait out any in-flight transfer.
@@ -172,15 +178,31 @@ pub enum SessionMsg {
 pub struct SessionConnector {
     rx: Receiver<SessionMsg>,
     stopping: Arc<AtomicBool>,
+    static_runtime: Option<ClientRuntime>,
+    local_msgs: VecDeque<SessionMsg>,
 }
 
 impl SessionConnector {
     pub fn start(config: SessionConfig) -> ClientResult<SessionConnector> {
         config.validate()?;
-        if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
-            return Err(ClientError::Unavailable {
-                capability: CAPABILITY_STATIC_SITE_SESSION,
-                mode: ClientMode::StaticWeb,
+        if let Some(ClientLocation::StaticSite(base)) = config.location.clone() {
+            let mut client_config = ClientConfig::static_site(base.clone());
+            client_config.token = config.token.clone();
+            client_config.validate()?;
+            let store = crate::static_store::StaticStore::platform(
+                base.clone(), client_config.cache.max_ram_bytes,
+            )?;
+            let runtime = ClientRuntime::start_static_store(store, config.catalog_runtime)?;
+            let (_tx, rx) = channel();
+            let mut local_msgs = VecDeque::new();
+            local_msgs.push_back(SessionMsg::Status(SessionStatus::Connecting {
+                server: base.to_string(),
+            }));
+            return Ok(SessionConnector {
+                rx,
+                stopping: Arc::new(AtomicBool::new(false)),
+                static_runtime: Some(runtime),
+                local_msgs,
             });
         }
         let configured_endpoints = match config.location.as_ref() {
@@ -262,12 +284,40 @@ impl SessionConnector {
                 }
             })
             .map_err(|e| ClientError::Io { op: "spawn session connector", kind: e.kind() })?;
-        Ok(SessionConnector { rx, stopping })
+        Ok(SessionConnector {
+            rx, stopping, static_runtime: None, local_msgs: VecDeque::new(),
+        })
     }
 
     /// Drain pending status/handover messages without blocking a frame.
     pub fn poll(&mut self) -> Vec<SessionMsg> {
-        let mut out = Vec::new();
+        let mut out: Vec<_> = self.local_msgs.drain(..).collect();
+        if let Some(runtime) = &mut self.static_runtime {
+            let _ = runtime.poll();
+            if let Some(error) = runtime.connect_error().cloned() {
+                out.push(SessionMsg::Status(SessionStatus::Retrying {
+                    error: error.to_string(),
+                    in_secs: 0,
+                }));
+                self.static_runtime = None;
+            } else if runtime.is_ready() {
+                let runtime = self.static_runtime.take().expect("static runtime present");
+                let location = runtime.location().expect("static runtime location");
+                let server_id = runtime.server_id().expect("ready static identity");
+                let label = location.to_string();
+                out.push(SessionMsg::Up(Box::new(SessionHandles {
+                    catalog: runtime,
+                    media: Vec::new(),
+                    subscriber: CatalogSubscriber::null(),
+                    server_label: label.clone(),
+                    server_id,
+                    location,
+                    endpoints: None,
+                    token: None,
+                })));
+                out.push(SessionMsg::Status(SessionStatus::Connected { server: label }));
+            }
+        }
         loop {
             match self.rx.try_recv() {
                 Ok(msg) => out.push(msg),
@@ -374,7 +424,8 @@ fn connect_all(
         subscriber,
         server_label: format!("{}", endpoints.control),
         server_id,
-        endpoints,
+        location: ClientLocation::Native(endpoints),
+        endpoints: Some(endpoints),
         token: config.token.clone(),
     })
 }
