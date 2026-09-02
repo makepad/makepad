@@ -349,6 +349,8 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         request: request_tx,
         post_max_size: POST_MAX_SIZE,
         post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {addr}")))?;
 
@@ -487,6 +489,9 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
             } => {
                 let out = route_post_request(&shared, &headers, &body);
                 let _ = response.send(out);
+            }
+            HttpServerRequest::PostPending { body, .. } => {
+                body.reject(error_json(503, "POST pre-admission is not configured".into()));
             }
             // The only websocket endpoint is a live session's own path,
             // `/realtime/<job_id>` (see `route_post`'s `POST /realtime` and
@@ -2531,10 +2536,6 @@ mod lifecycle_tests {
             addr: "127.0.0.1:1".parse().unwrap(),
             addr_text: "127.0.0.1:1".to_string(),
             lines,
-            parsed_headers: bearer
-                .map(|value| ("authorization".to_string(), format!("Bearer {value}")))
-                .into_iter()
-                .collect(),
             verb: verb.to_string(),
             path: path.to_string(),
             path_no_slash: path.trim_start_matches('/').to_string(),

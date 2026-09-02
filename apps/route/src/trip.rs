@@ -4,6 +4,8 @@
 //! and legs by stable ids (`stop_2`, `leg_1`) and receives compact digests.
 //! Replans mutate this struct; the map mirrors it after every mutation.
 
+use makepad_map_nav::geo::{sample_polyline as sample_nav_polyline, LonLat};
+
 /// Stable-id trip stop. Ids are never reused after removal.
 #[derive(Clone, Debug)]
 pub struct Stop {
@@ -283,32 +285,14 @@ pub fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
 /// Sample a lon/lat polyline every `spacing_m` meters.
 /// Returns (lon, lat, meters_from_start).
 pub fn sample_polyline(line: &[(f64, f64)], spacing_m: f64) -> Vec<(f64, f64, f64)> {
-    let mut out = Vec::new();
-    if line.is_empty() || spacing_m <= 0.0 {
-        return out;
-    }
-    out.push((line[0].0, line[0].1, 0.0));
-    let mut cum = 0.0;
-    let mut next_at = spacing_m;
-    for w in line.windows(2) {
-        let seg = haversine_m(w[0], w[1]);
-        if seg <= 0.0 {
-            continue;
-        }
-        while next_at <= cum + seg {
-            let t = (next_at - cum) / seg;
-            let lon = w[0].0 + (w[1].0 - w[0].0) * t;
-            let lat = w[0].1 + (w[1].1 - w[0].1) * t;
-            out.push((lon, lat, next_at));
-            next_at += spacing_m;
-        }
-        cum += seg;
-    }
-    let end = *line.last().unwrap();
-    if cum - out.last().unwrap().2 > spacing_m * 0.5 {
-        out.push((end.0, end.1, cum));
-    }
-    out
+    let points = line
+        .iter()
+        .map(|&(lon, lat)| LonLat::new(lon, lat))
+        .collect::<Vec<_>>();
+    sample_nav_polyline(&points, spacing_m)
+        .into_iter()
+        .map(|(point, distance)| (point.lon, point.lat, distance))
+        .collect()
 }
 
 #[cfg(test)]

@@ -513,6 +513,12 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                         });
                     }
                 }
+                HttpServerRequest::PostPending { body, .. } => {
+                    body.reject(HttpServerResponse {
+                        header: "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                        body: Vec::new(),
+                    });
+                }
             }
         }
         i += 1;
@@ -797,6 +803,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 listen_address: options.listen.parse().unwrap(),
                 post_max_size: 1024 * 1024 * 10,
                 post_max_size_overrides: Vec::new(),
+                pre_admit_posts: false,
+                client_ip_resolver: None,
                 request: server_tx,
             };
 

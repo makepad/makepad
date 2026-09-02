@@ -31,6 +31,8 @@ pub fn run_with_registry(
         listen_address: listen,
         post_max_size: 2 * 1024 * 1024,
         post_max_size_overrides: vec![("/$report_error".into(), crate::static_files::REPORT_BODY_LIMIT as u64)],
+        pre_admit_posts: true,
+        client_ip_resolver: Some(crate::static_files::client_ip),
         request: request_sender,
     }) else {
         return Err(format!("failed to bind {listen}"));
@@ -55,6 +57,19 @@ pub fn run_with_registry(
                     registry.handle_post(&headers, body, &response);
                 } else if !static_handler.handle_post(&headers, &body, &response) {
                     static_handler.handle_get(&headers, &response);
+                }
+            }
+            HttpServerRequest::PostPending { headers, body, response } => {
+                if headers.path.starts_with("/api/") {
+                    registry.handle_post_pending(&headers, body, &response);
+                } else if let Err(body) = static_handler.handle_post_pending(&headers, body, &response) {
+                    body.reject(crate::http::response(
+                        405,
+                        Some("text/plain; charset=utf-8"),
+                        "no-store",
+                        "Allow: GET, HEAD, OPTIONS\r\n",
+                        b"method not allowed".to_vec(),
+                    ));
                 }
             }
             HttpServerRequest::ConnectWebSocket { response_sender, .. } => {

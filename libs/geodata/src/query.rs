@@ -14,6 +14,14 @@ use std::path::Path;
 /// unbounded dense cell. Services with a whole-request budget use
 /// `query_radius_with_budget` directly.
 pub const DEFAULT_RADIUS_SCAN_BUDGET: usize = 50_000;
+pub const MAX_RADIUS_RESULTS: usize = 50_000;
+
+fn radius_result_capacity(limit: usize, candidate_budget: usize) -> Result<usize, String> {
+    if limit > MAX_RADIUS_RESULTS {
+        return Err(format!("radius result limit exceeds {MAX_RADIUS_RESULTS}"));
+    }
+    Ok(limit.min(candidate_budget))
+}
 
 #[derive(Debug)]
 pub struct FeatureHit {
@@ -117,7 +125,8 @@ impl LayerDb {
         limit: usize,
         candidate_budget: &mut usize,
     ) -> Result<Vec<FeatureHit>, String> {
-        if limit == 0 || *candidate_budget == 0 {
+        let result_capacity = radius_result_capacity(limit, *candidate_budget)?;
+        if result_capacity == 0 {
             return Ok(Vec::new());
         }
         // Convert the radius to a degree bbox (safe overestimate at NL lat).
@@ -135,7 +144,7 @@ impl LayerDb {
         let cy0 = clamp(ny0).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
         let cy1 = clamp(ny1).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
         let origin = LonLat::new(lon, lat);
-        let mut hits: Vec<FeatureHit> = Vec::with_capacity(limit);
+        let mut hits: Vec<FeatureHit> = Vec::with_capacity(result_capacity);
         'cells: for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
                 if *candidate_budget == 0 {
@@ -201,13 +210,16 @@ impl LayerDb {
     /// Features covering a point. Exact for layers that store rings (and for
     /// grid layers whose bbox equals the cell); bbox containment otherwise.
     pub fn query_point(&mut self, lon: f64, lat: f64, limit: usize) -> Result<Vec<FeatureHit>, String> {
+        if limit > MAX_RADIUS_RESULTS {
+            return Err(format!("point result limit exceeds {MAX_RADIUS_RESULTS}"));
+        }
         let epsilon = 1e-9;
         let mut hits = self.query_bbox(
             lon - epsilon,
             lat - epsilon,
             lon + epsilon,
             lat + epsilon,
-            usize::MAX,
+            MAX_RADIUS_RESULTS,
         )?;
         for hit in &mut hits {
             hit.contains_point = match hit.attrs.get("__ring") {
@@ -218,6 +230,33 @@ impl LayerDb {
         hits.retain(|h| h.contains_point);
         hits.truncate(limit);
         Ok(hits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sidecar::SidecarBuilder;
+    use makepad_mbtile_reader::MbtilesWriter;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn radius_limit_is_capped_before_allocation() {
+        assert_eq!(radius_result_capacity(8, 3).unwrap(), 3);
+        assert!(radius_result_capacity(usize::MAX, DEFAULT_RADIUS_SCAN_BUDGET).is_err());
+
+        let path = std::env::temp_dir().join(format!(
+            "makepad-radius-limit-{}-{}.mbtiles",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        SidecarBuilder::new().write(&mut writer).unwrap();
+        writer.finish().unwrap();
+        let mut database = LayerDb::open(&path).unwrap();
+        assert!(database.query_radius(4.9, 52.3, 1_000.0, usize::MAX).is_err());
+        assert!(database.query_point(4.9, 52.3, usize::MAX).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }
 

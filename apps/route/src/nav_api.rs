@@ -4,7 +4,7 @@
 //! no response can accidentally complete a newer search or route request.
 
 use makepad_map_nav::{
-    geo::LonLat,
+    geo::{LonLat, MAX_ROUTE_POINTS},
     graph::{Route, TravelMode},
     nav::{Maneuver, ManeuverKind},
     search::{Category, SearchResult},
@@ -16,7 +16,6 @@ use std::collections::HashMap;
 const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 const MAX_RETRY_SECONDS: f64 = 30.0;
 const MAX_SEARCH_RESULTS: usize = 20;
-const MAX_ROUTE_POINTS: usize = 20_000;
 const MAX_ALONG_RESULTS: usize = 30;
 const MAX_WEATHER_SAMPLES: usize = 64;
 const MAX_RADAR_FRAMES: usize = 64;
