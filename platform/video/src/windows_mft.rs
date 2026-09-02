@@ -20,7 +20,6 @@
 //! list of hand-derived constants this implies.
 
 use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::Media::MediaFoundation::{
     ICodecAPI, IMFAttributes, IMFMediaType, IMFSample, IMFTransform, MFT_MESSAGE_TYPE, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_INFO,
@@ -165,13 +164,15 @@ pub(crate) unsafe fn process_output(
     (hr, buffer.dwStatus, sample)
 }
 
-/// `ICodecAPI::SetValue(guid, VT_BOOL)` on the transform — how the Microsoft
-/// codecs take their codec-level switches (`CODECAPI_AVLowLatencyMode`).
+/// `ICodecAPI::SetValue(guid, VT_UI4)` on the transform — how the Microsoft
+/// codecs take their codec-level switches. codecapi.h documents
+/// `CODECAPI_AVLowLatencyMode` as VT_BOOL, but the H.264 decoder rejects
+/// that with "VT_UI4 != pValue->vt"; it wants the number.
 /// Err when the MFT has no `ICodecAPI` or refuses the property.
-pub(crate) unsafe fn set_codec_api_bool(transform: &IMFTransform, property: &GUID, on: bool) -> windows::core::Result<()> {
+pub(crate) unsafe fn set_codec_api_u32(transform: &IMFTransform, property: &GUID, value: u32) -> windows::core::Result<()> {
     let codec_api: ICodecAPI = transform.cast()?;
-    let mut value = VARIANT::default();
-    (*value.Anonymous.Anonymous).vt = VARENUM(11); // VT_BOOL
-    (*value.Anonymous.Anonymous).Anonymous.boolVal = VARIANT_BOOL(if on { -1 } else { 0 });
-    codec_api.SetValue(property, &value)
+    let mut variant = VARIANT::default();
+    (*variant.Anonymous.Anonymous).vt = VARENUM(19); // VT_UI4
+    (*variant.Anonymous.Anonymous).Anonymous.ulVal = value;
+    codec_api.SetValue(property, &variant)
 }
