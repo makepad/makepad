@@ -40,6 +40,9 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--production" {
         enable_production_pipeline(config);
         true
+    } else if v == "--lto" {
+        config.lto = true;
+        true
     } else if v == "--wasm-opt" {
         config.wasm_opt = true;
         true
@@ -86,7 +89,7 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
 }
 
 fn apply_production_profile(config: &WasmConfig, args: Vec<String>) -> Vec<String> {
-    if !config.production || !config.threads {
+    if !config.production {
         return args;
     }
 
@@ -105,7 +108,11 @@ fn apply_production_profile(config: &WasmConfig, args: Vec<String>) -> Vec<Strin
         out.push(arg.clone());
         index += 1;
     }
-    out.push("--profile=small".to_string());
+    if config.lto && config.threads {
+        out.push("--profile=small".to_string());
+    } else {
+        out.push("--release".to_string());
+    }
     out
 }
 
@@ -131,6 +138,7 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         optimize_size: false,
         wasm_opt: false,
         production: false,
+        lto: false,
         no_location_detail: false,
         size_report: false,
         keep_names: false,
@@ -202,6 +210,7 @@ mod tests {
                 optimize_size: false,
                 wasm_opt: false,
                 production: false,
+                lto: false,
                 no_location_detail: false,
                 size_report: false,
                 keep_names: false,
@@ -240,6 +249,7 @@ mod tests {
                 optimize_size: false,
                 wasm_opt: false,
                 production: false,
+                lto: false,
                 no_location_detail: false,
                 size_report: false,
                 keep_names: false,
@@ -272,6 +282,7 @@ mod tests {
             optimize_size: false,
             wasm_opt: false,
             production: false,
+            lto: false,
             no_location_detail: false,
             size_report: false,
             keep_names: false,
@@ -303,6 +314,7 @@ mod tests {
             optimize_size: false,
             wasm_opt: false,
             production: false,
+            lto: false,
             no_location_detail: false,
             size_report: false,
             keep_names: false,
@@ -319,7 +331,7 @@ mod tests {
                 "--no-location-detail",
                 "--size-report",
                 "--keep-names",
-                "--release",
+                "--profile=small",
                 "-p",
                 "app",
             ]),
@@ -334,11 +346,12 @@ mod tests {
         assert!(config.no_location_detail);
         assert!(config.size_report);
         assert!(config.keep_names);
-        assert_eq!(cargo_args, vec!["-p", "app", "--profile=small"]);
+        assert!(!config.lto);
+        assert_eq!(cargo_args, vec!["-p", "app", "--release"]);
     }
 
     #[test]
-    fn production_does_not_force_small_profile_without_threads() {
+    fn production_lto_opts_into_small_profile() {
         let mut config = WasmConfig {
             strip: false,
             lan: false,
@@ -350,6 +363,7 @@ mod tests {
             optimize_size: false,
             wasm_opt: false,
             production: false,
+            lto: false,
             no_location_detail: false,
             size_report: false,
             keep_names: false,
@@ -361,13 +375,56 @@ mod tests {
         };
         let cargo_args = strip_wasm_options(
             &mut config,
-            &args(&["--production", "--no-threads", "--release", "-p", "app"]),
+            &args(&["--production", "--lto", "--release", "-p", "app"]),
         );
 
         assert_eq!(
             apply_production_profile(&config, cargo_args),
-            vec!["--release", "-p", "app"]
+            vec!["-p", "app", "--profile=small"]
+        );
+        assert!(config.lto);
+    }
+
+    #[test]
+    fn production_lto_does_not_force_small_profile_without_threads() {
+        let mut config = WasmConfig {
+            strip: false,
+            lan: false,
+            brotli: false,
+            port: None,
+            small_fonts: false,
+            bindgen: false,
+            threads: true,
+            optimize_size: false,
+            wasm_opt: false,
+            production: false,
+            lto: false,
+            no_location_detail: false,
+            size_report: false,
+            keep_names: false,
+            split: false,
+            split_auto: false,
+            split_functions: false,
+            split_functions_threshold: 200,
+            hot_reload: false,
+        };
+        let cargo_args = strip_wasm_options(
+            &mut config,
+            &args(&[
+                "--production",
+                "--lto",
+                "--no-threads",
+                "--profile=small",
+                "-p",
+                "app",
+            ]),
+        );
+
+        assert_eq!(
+            apply_production_profile(&config, cargo_args),
+            vec!["-p", "app", "--release"]
         );
         assert!(!config.threads);
+        assert!(config.lto);
     }
 }

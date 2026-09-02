@@ -72,7 +72,10 @@ fn show_help() {
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!(
-        "       --production                              Threaded size build: profile small, strip, Brotli, optional Binaryen -Oz"
+        "       --production                              Release profile, strip, Brotli, optional Binaryen -Oz"
+    );
+    println!(
+        "       --lto                                     With --production, opt into the small profile (fat LTO)"
     );
     println!(
         "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"

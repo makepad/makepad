@@ -35,6 +35,7 @@ pub struct WasmConfig {
     pub optimize_size: bool,
     pub wasm_opt: bool,
     pub production: bool,
+    pub lto: bool,
     pub no_location_detail: bool,
     pub size_report: bool,
     pub keep_names: bool,
@@ -760,8 +761,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     if profile == "small" && config.strip {
         env.push(("CARGO_PROFILE_SMALL_STRIP", "none"));
     }
-    // Production selects `profile.small` only for threaded builds. If a caller explicitly uses
-    // it with `--no-threads`, disable LTO: it is known to miscompile the script VM in wasm.
+    // If a caller explicitly uses profile.small with `--no-threads`, disable LTO: it is known
+    // to miscompile the script VM in wasm.
     if profile == "small" && !config.threads {
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
