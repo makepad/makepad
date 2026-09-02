@@ -21,12 +21,19 @@
 //! table, which is what lets `mkmap-extract` reverse a weave.
 
 use crate::{Error, Result, TileCodec};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 const MAGIC: &[u8; 8] = b"MKMAPIX1";
+#[cfg(not(target_arch = "wasm32"))]
 const SHARD_FILE_CACHE_CAPACITY: usize = 8;
 // v2: metadata section is varint KV (was JSON).
 const VERSION: u32 = 2;
@@ -448,13 +455,17 @@ impl MkmapLeaf {
 
 /// Positioned-read `.mkmap` consumer with the same surface the tile loader
 /// uses on `MbtilesReader`: metadata + per-tile decoded bytes.
+#[cfg(not(target_arch = "wasm32"))]
+mod file_reader {
+use super::*;
+
 pub struct MkmapReader {
     dir: PathBuf,
     root: MkmapRoot,
     /// Decoded leaf directories, keyed by root record index. A viewport's
     /// tiles are Hilbert-adjacent, so a handful of leaves covers a session.
     leaf_cache: HashMap<usize, MkmapLeaf>,
-    shard_files: HashMap<u32, File>,
+    pub(super) shard_files: HashMap<u32, File>,
     shard_file_lru: VecDeque<u32>,
 }
 
@@ -505,7 +516,7 @@ impl MkmapReader {
         self.root.shared_dict()
     }
 
-    fn read_range(&mut self, shard: u32, offset: u64, len: u64) -> Result<Vec<u8>> {
+    pub(super) fn read_range(&mut self, shard: u32, offset: u64, len: u64) -> Result<Vec<u8>> {
         if !self.shard_files.contains_key(&shard) {
             let path = self.dir.join(format!("tiles-{shard:03}.mkshard"));
             while self.shard_files.len() >= SHARD_FILE_CACHE_CAPACITY {
@@ -744,7 +755,90 @@ impl TileArchiveReader {
     }
 }
 
-#[cfg(test)]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_reader::{MkmapReader, TileArchiveReader};
+
+#[cfg(target_arch = "wasm32")]
+mod file_reader {
+    use super::*;
+
+    const UNSUPPORTED: &str = "local tile archive file access is unavailable on wasm32";
+
+    /// Type-preserving placeholder for the native local-file archive reader.
+    pub enum TileArchiveReader {
+        Unsupported,
+    }
+
+    impl TileArchiveReader {
+        pub fn is_mkmap_path(path: &Path) -> bool {
+            path.file_name().is_some_and(|name| name == "root.mkidx")
+                || path.extension().is_some_and(|extension| extension == "mkmap")
+        }
+
+        pub fn open(_path: &Path) -> Result<TileArchiveReader> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn get_metadata(&mut self) -> Result<HashMap<String, String>> {
+            match self {
+                TileArchiveReader::Unsupported => Err(Error::Unsupported(UNSUPPORTED)),
+            }
+        }
+
+        pub fn validated_zoom_range(&mut self) -> Option<(u32, u32)> {
+            match self {
+                TileArchiveReader::Unsupported => None,
+            }
+        }
+
+        pub fn get_tile_decoded(
+            &mut self,
+            _zoom: i64,
+            _column: i64,
+            _row: i64,
+        ) -> Result<Option<Vec<u8>>> {
+            match self {
+                TileArchiveReader::Unsupported => Err(Error::Unsupported(UNSUPPORTED)),
+            }
+        }
+
+        pub fn supports_direct_tile_lookup(&self) -> bool {
+            match self {
+                TileArchiveReader::Unsupported => false,
+            }
+        }
+
+        pub fn get_tile(
+            &mut self,
+            _zoom: i64,
+            _column: i64,
+            _row: i64,
+        ) -> Result<Option<Vec<u8>>> {
+            match self {
+                TileArchiveReader::Unsupported => Err(Error::Unsupported(UNSUPPORTED)),
+            }
+        }
+
+        pub fn decode_tile(&self, _bytes: &[u8]) -> Result<Vec<u8>> {
+            match self {
+                TileArchiveReader::Unsupported => Err(Error::Unsupported(UNSUPPORTED)),
+            }
+        }
+
+        pub fn get_tiles_at_zoom(&mut self, _zoom: i64) -> Result<Vec<crate::Tile>> {
+            match self {
+                TileArchiveReader::Unsupported => Err(Error::Unsupported(UNSUPPORTED)),
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use file_reader::TileArchiveReader;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

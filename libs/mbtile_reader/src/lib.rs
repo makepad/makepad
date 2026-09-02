@@ -24,15 +24,21 @@ pub use codec::{
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
 pub use mkmap::{
-    mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapReader, MkmapRoot,
-    MkmapTileRef, RootRecordRef, TileArchiveReader,
+    mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapRoot, MkmapTileRef,
+    RootRecordRef, TileArchiveReader,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use mkmap::MkmapReader;
 #[cfg(not(target_arch = "wasm32"))]
 pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
 
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_sqlite::btree::{IndexCursor, TableCursor};
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_sqlite::schema::{read_objects, SchemaObject};
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_sqlite::value::TextMode;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_sqlite::{Collation, Pager, Value as DbValue};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -44,6 +50,7 @@ pub use makepad_sqlite::value::TextEncoding;
 
 /// Text is decoded leniently here: historical mbtiles/GeoPackage archives in
 /// the wild are not always clean UTF-8 and readers must keep working.
+#[cfg(not(target_arch = "wasm32"))]
 const TEXT_MODE: TextMode = TextMode::Lossy;
 
 /// Compute the deterministic rowid used for Makepad-authored MBTiles files.
@@ -92,6 +99,7 @@ pub enum Error {
     InvalidInput(String),
     InvalidWriterState(&'static str),
     Codec(String),
+    Unsupported(&'static str),
     /// Anything the SQLite-format engine reported: corrupt pages, unsupported
     /// format features, IO below the page cache.
     Db(makepad_sqlite::Error),
@@ -112,6 +120,7 @@ impl std::fmt::Display for Error {
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::InvalidWriterState(msg) => write!(f, "invalid writer state: {msg}"),
             Error::Codec(msg) => write!(f, "codec: {msg}"),
+            Error::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Error::Db(e) => write!(f, "{e}"),
         }
     }
@@ -181,6 +190,7 @@ impl Value {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<DbValue> for Value {
     fn from(v: DbValue) -> Value {
         match v {
@@ -193,6 +203,7 @@ impl From<DbValue> for Value {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn convert(values: Vec<DbValue>) -> Vec<Value> {
     values.into_iter().map(Value::from).collect()
 }
@@ -207,6 +218,7 @@ pub struct SchemaEntry {
     pub sql: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<SchemaObject> for SchemaEntry {
     fn from(o: SchemaObject) -> SchemaEntry {
         SchemaEntry {
@@ -231,6 +243,10 @@ pub struct Tile {
 // ---------------------------------------------------------------------------
 // Reader
 // ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+mod sqlite_reader {
+use super::*;
 
 pub struct MbtilesReader {
     pager: Pager,
@@ -619,6 +635,94 @@ impl MbtilesReader {
         Ok(())
     }
 }
+
+}
+
+#[cfg(target_arch = "wasm32")]
+mod sqlite_reader {
+    use super::*;
+
+    const UNSUPPORTED: &str = "SQLite file access is unavailable on wasm32";
+
+    /// Type-preserving placeholder for native-only SQLite/MBTiles readers.
+    pub struct MbtilesReader;
+
+    impl MbtilesReader {
+        pub fn open(_path: &Path) -> Result<Self> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn open_sqlite(_path: &Path) -> Result<Self> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn schema_entries(&mut self) -> Result<Vec<SchemaEntry>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn get_metadata(&mut self) -> Result<HashMap<String, String>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn supports_direct_tile_lookup(&self) -> bool {
+            false
+        }
+
+        pub fn get_tile(
+            &mut self,
+            _zoom: i64,
+            _column: i64,
+            _row: i64,
+        ) -> Result<Option<Vec<u8>>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn decode_tile(&self, _bytes: &[u8]) -> Result<Vec<u8>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn get_tile_decoded(
+            &mut self,
+            _zoom: i64,
+            _column: i64,
+            _row: i64,
+        ) -> Result<Option<Vec<u8>>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn get_tiles_at_zoom(&mut self, _zoom: i64) -> Result<Vec<Tile>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn for_each_tile(&mut self, _callback: impl FnMut(Tile)) -> Result<()> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn tile_summary(&mut self) -> Result<Vec<(i64, usize)>> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn for_each_row(
+            &mut self,
+            _table: &str,
+            _callback: impl FnMut(i64, Vec<Value>),
+        ) -> Result<()> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+
+        pub fn for_each_row_in_range(
+            &mut self,
+            _table: &str,
+            _lo: i64,
+            _hi: i64,
+            _callback: impl FnMut(i64, Vec<Value>),
+        ) -> Result<()> {
+            Err(Error::Unsupported(UNSUPPORTED))
+        }
+    }
+}
+
+pub use sqlite_reader::MbtilesReader;
 
 // ---------------------------------------------------------------------------
 // Tests
