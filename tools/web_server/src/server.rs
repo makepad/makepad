@@ -34,6 +34,7 @@ pub fn run_with_registry(
         pre_admit_posts: true,
         client_ip_resolver: Some(crate::static_files::client_ip),
         trusted_proxy: Some(crate::static_files::cloudflare_peer),
+        allowed_methods: Some(allowed_methods),
         request: request_sender,
     }) else {
         return Err(format!("failed to bind {listen}"));
@@ -84,6 +85,16 @@ pub fn run_with_registry(
     Err("HTTP request channel closed".into())
 }
 
+fn allowed_methods(path: &str) -> &'static str {
+    match path {
+        "/api/along" => "POST, OPTIONS",
+        "/api/healthz" | "/api/search" | "/api/route" => "GET, HEAD, OPTIONS",
+        "/$report_error" => "GET, HEAD, POST, OPTIONS",
+        path if path.starts_with("/api/") => "GET, HEAD, POST, OPTIONS",
+        _ => "GET, HEAD, OPTIONS",
+    }
+}
+
 fn canonical_data_root(config: &Config, static_root: &std::path::Path) -> Result<Option<PathBuf>, String> {
     let Some(data_dir) = &config.data_dir else { return Ok(None) };
     let data_root = data_dir
@@ -129,5 +140,12 @@ mod tests {
             fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         }
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn method_policy_matches_resources() {
+        assert_eq!(allowed_methods("/api/along"), "POST, OPTIONS");
+        assert_eq!(allowed_methods("/api/search"), "GET, HEAD, OPTIONS");
+        assert_eq!(allowed_methods("/asset.wasm"), "GET, HEAD, OPTIONS");
     }
 }

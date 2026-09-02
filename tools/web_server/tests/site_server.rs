@@ -270,6 +270,12 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert!(compressed.headers.contains("Content-Encoding: br"));
     assert!(compressed.headers.contains("Vary: Accept-Encoding"));
     assert!(compressed.headers.contains("Cache-Control: public, max-age=31536000, immutable"));
+    let compressed_etag = compressed
+        .headers
+        .lines()
+        .find_map(|line| line.strip_prefix("ETag: "))
+        .unwrap();
+    assert!(compressed_etag.ends_with("-br\""));
     assert_eq!(
         get(address, "/app.0123456789abcdef.wasm", "Accept-Encoding: *;q=1\r\n").body,
         b"BR"
@@ -306,6 +312,7 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
         .lines()
         .find_map(|line| line.strip_prefix("ETag: "))
         .unwrap();
+    assert!(!etag.ends_with("-br\""));
     let last_modified = etag_response
         .headers
         .lines()
@@ -344,6 +351,24 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert!(options.headers.contains("Access-Control-Allow-Origin: *"));
     assert_eq!(get(address, "/missing.wasm", "").status, 404);
     assert_eq!(post(address, "/index.html", b"ignored").status, 405);
+    for (raw, allow) in [
+        (
+            &b"PUT /api/along HTTP/1.1\r\nHost: test\r\n\r\n"[..],
+            "POST, OPTIONS",
+        ),
+        (
+            &b"POST /api/search HTTP/1.1\r\nHost: test\r\n\r\n"[..],
+            "GET, HEAD, OPTIONS",
+        ),
+        (
+            &b"POST /index.html HTTP/1.1\r\nHost: test\r\n\r\n"[..],
+            "GET, HEAD, OPTIONS",
+        ),
+    ] {
+        let response = request(address, raw);
+        assert_eq!(response.status, 405);
+        assert!(response.headers.contains(&format!("Allow: {allow}\r\n")));
+    }
     assert_eq!(get(address, "/../index.html", "").status, 400);
     assert_eq!(get(address, "/$report_error?data=boom%0Aline", "").status, 204);
     assert_eq!(post(address, "/$report_error", b"post error").status, 204);

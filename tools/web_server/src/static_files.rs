@@ -294,7 +294,7 @@ impl StaticHandler {
         };
 
         let range_header = headers.header("Range");
-        let identity_etag = match etag(&mut original) {
+        let identity_etag = match etag(&mut original, false) {
             Ok(etag) => etag,
             Err(_) => {
                 send_response(sender, static_error(500, "internal error"));
@@ -330,7 +330,7 @@ impl StaticHandler {
         };
         let len = metadata.len();
         let etag = if use_brotli {
-            match etag(&mut selected) {
+            match etag(&mut selected, true) {
                 Ok(etag) => etag,
                 Err(_) => {
                     send_response(sender, static_error(500, "internal error"));
@@ -779,7 +779,7 @@ fn common_file_headers(etag: &str, last_modified: &str, encoded: bool, public: b
     )
 }
 
-pub fn etag(file: &mut File) -> std::io::Result<String> {
+pub fn etag(file: &mut File, encoded: bool) -> std::io::Result<String> {
     let position = file.stream_position()?;
     file.seek(std::io::SeekFrom::Start(0))?;
     let digest = (|| {
@@ -797,10 +797,13 @@ pub fn etag(file: &mut File) -> std::io::Result<String> {
     let restored = file.seek(std::io::SeekFrom::Start(position));
     let digest = digest?;
     restored?;
-    let mut value = String::with_capacity(66);
+    let mut value = String::with_capacity(69);
     value.push('"');
     for byte in digest {
         write!(&mut value, "{byte:02x}").expect("write to string");
+    }
+    if encoded {
+        value.push_str("-br");
     }
     value.push('"');
     Ok(value)
@@ -1250,7 +1253,10 @@ mod tests {
         fs::write(&path, b"AAA").unwrap();
         let modified = path.metadata().unwrap().modified().unwrap();
         let mut first_file = File::open(&path).unwrap();
-        let first = etag(&mut first_file).unwrap();
+        let first = etag(&mut first_file, false).unwrap();
+        let first_encoded = etag(&mut first_file, true).unwrap();
+        assert!(!first.ends_with("-br\""));
+        assert!(first_encoded.ends_with("-br\""));
         fs::write(&path, b"BBB").unwrap();
         File::options()
             .write(true)
@@ -1259,7 +1265,7 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(modified))
             .unwrap();
         let mut second_file = File::open(&path).unwrap();
-        let second = etag(&mut second_file).unwrap();
+        let second = etag(&mut second_file, false).unwrap();
         assert_eq!(path.metadata().unwrap().len(), 3);
         assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
         assert_ne!(first, second);

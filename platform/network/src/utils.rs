@@ -94,6 +94,15 @@ pub fn write_bytes_to_tcp_stream_until(
     true
 }
 
+pub fn http_method_not_allowed_out(tcp_stream: TcpStream, allow: &str) {
+    http_error_out_until(
+        tcp_stream,
+        405,
+        Some(allow),
+        Instant::now() + HTTP_ERROR_WRITE_TIMEOUT,
+    );
+}
+
 pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
     let line = inp.strip_suffix("\r\n").unwrap_or(inp);
     let (name, value) = line.split_once(':')?;

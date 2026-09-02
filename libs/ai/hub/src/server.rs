@@ -352,6 +352,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         pre_admit_posts: false,
         client_ip_resolver: None,
         trusted_proxy: None,
+        allowed_methods: None,
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {addr}")))?;
 

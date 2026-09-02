@@ -1890,6 +1890,7 @@ fn start_wasm_server(
         pre_admit_posts: false,
         client_ip_resolver: None,
         trusted_proxy: None,
+        allowed_methods: None,
         request: tx_request,
     });
     if _listen_thread.is_none() {

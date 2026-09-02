@@ -47,6 +47,7 @@ pub fn start_http_gateway(
         pre_admit_posts: false,
         client_ip_resolver: None,
         trusted_proxy: None,
+        allowed_methods: None,
     })
     .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
 
