@@ -2888,6 +2888,14 @@ impl Renderer {
         self.water_tiles.clear();
         if let Some(water) = water {
             for volume in &water.volumes {
+                // A physics-only volume draws NOTHING (`WaterVolume::draw_sheet`
+                // documents why a transparent sheet is not the same thing: this
+                // pass blends premultiplied, so alpha 0 adds instead of hides).
+                // A river's chain of axis-aligned boxes takes this branch; its
+                // channel-following ribbon is the visible surface.
+                if !volume.draw_sheet {
+                    continue;
+                }
                 let (vertices, indices, min, max) = water_sheet_data(volume);
                 if indices.is_empty() {
                     continue;
@@ -9173,6 +9181,7 @@ mod water_sheet_tests {
             waves: vec![wave],
             color: vec4(0.2, 0.5, 0.8, 0.6),
             entity: 0,
+            draw_sheet: true,
         }
     }
 
