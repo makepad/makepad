@@ -72,6 +72,13 @@ const RISE: f64 = 11.0;
 /// same points. Large on purpose: the 3d mode is the ortho map breathing,
 /// not a flyover.
 const PERSP_EYE: f64 = 1500.0;
+/// Faces are clipped this far in front of the perspective eye before their
+/// homogeneous `w` is divided through. Keeping the plane comfortably away
+/// from zero also bounds the screen coordinates of an intersection.
+const PERSP_NEAR: f64 = 8.0;
+/// The perspective eye is raised far enough along its view axis that its
+/// vertical height clears the tallest tile top by at least this much.
+const CAMERA_SURFACE_CLEARANCE: f64 = 24.0;
 /// Where the orbit starts and where Esc returns it: enough tilt that height
 /// reads immediately, nowhere near enough to hide the map behind itself.
 const DEFAULT_PITCH: f64 = 0.66;
@@ -100,13 +107,11 @@ script_mod! {
      * dense map readable: adjacent tiles of the same hue are separated by
      * their own shading even where there is no room for a border line.
      *
-     * The geometry is a free QUAD, not a rect: the orbit camera hands four
-     * projected screen corners per instance (c0 top-left, c1 top-right, c2
-     * bottom-right, c3 bottom-left) and the vertex stage interpolates them
-     * bilinearly, so one shared instance batch draws the flat map, the tilted
-     * plates and the prism walls alike. Because the corners are free, the
-     * usual vertex-clamp scissor would deform the shape — clipping happens in
-     * the fragment against the same draw_clip instead. */
+     * The geometry is a free QUAD, not a rect: an uncut face supplies its four
+     * projected corners, while a near-clipped face is triangle-fanned through
+     * degenerate quads. One shared instance batch still draws the flat map,
+     * tilted plates and prism walls alike. The panel scissor happens in the
+     * fragment because clamping these free vertices would deform the shape. */
     set_type_default() do #(DrawMapTile::script_shader(vm)) {
         ..mod.draw.DrawQuad
         /** the tile's own colour */
@@ -125,12 +130,13 @@ script_mod! {
                 mix(self.c3, self.c2, self.geom.pos.x)
                 self.geom.pos.y
             )
-            self.pos = self.geom.pos
-            self.scr = p
-            self.qsize = vec2(
-                max(length(self.c1 - self.c0), 1.0)
-                max(length(self.c3 - self.c0), 1.0)
+            self.pos = mix(
+                mix(self.u0, self.u1, self.geom.pos.x)
+                mix(self.u3, self.u2, self.geom.pos.x)
+                self.geom.pos.y
             )
+            self.scr = p
+            self.qsize = self.face_size
             let ps = p + self.draw_list.view_shift
             self.world = self.draw_list.view_transform * vec4(
                 ps.x
@@ -208,6 +214,19 @@ pub struct DrawMapTile {
     c2: Vec2f,
     #[live]
     c3: Vec2f,
+    /// UVs are explicit because a near-clipped polygon is emitted as a fan
+    /// of degenerate quads (one real triangle each).
+    #[live]
+    u0: Vec2f,
+    #[live]
+    u1: Vec2f,
+    #[live]
+    u2: Vec2f,
+    #[live]
+    u3: Vec2f,
+    /// Approximate full-face size used by the cushion and border shader.
+    #[live]
+    face_size: Vec2f,
 }
 
 /// What a press on the map means to the folder view around it.
@@ -578,27 +597,35 @@ struct Cam {
     sin_pitch: f64,
     cos_pitch: f64,
     persp: bool,
+    /// Distance from the pivot to the perspective eye along the view axis.
+    eye: f64,
 }
 
 impl Cam {
-    /// The layout point `p` at elevation `z`, on screen.
-    fn project(&self, p: DVec2, z: f64) -> DVec2 {
+    /// Transform a map point into eye-relative view coordinates. `w` is the
+    /// positive distance in front of the eye, i.e. `-view_z`; clipping at
+    /// `view_z = -PERSP_NEAR` is therefore `w >= PERSP_NEAR`.
+    fn view(&self, p: DVec2, z: f64, uv: DVec2) -> FaceVertex {
         let dx = p.x - self.pivot.x;
         let dy = p.y - self.pivot.y;
         let xr = dx * self.cos_yaw - dy * self.sin_yaw;
         let yr = dx * self.sin_yaw + dy * self.cos_yaw;
-        let vx = xr;
-        let vy = yr * self.cos_pitch - z * self.sin_pitch;
-        if !self.persp {
-            return dvec2(self.pivot.x + vx, self.pivot.y + vy);
-        }
+        let view = dvec2(xr, yr * self.cos_pitch - z * self.sin_pitch);
         let depth = yr * self.sin_pitch + z * self.cos_pitch;
-        let s = (PERSP_EYE / (PERSP_EYE - depth)).clamp(0.5, 2.5);
-        dvec2(self.pivot.x + vx * s, self.pivot.y + vy * s)
+        FaceVertex {
+            view,
+            w: if self.persp { self.eye - depth } else { 1.0 },
+            uv,
+        }
+    }
+
+    fn project_view(&self, vertex: FaceVertex) -> DVec2 {
+        let scale = if self.persp { self.eye / vertex.w } else { 1.0 };
+        self.pivot + vertex.view * scale
     }
 
     /// The ground point (z = 0) that projects to screen point `s` — the
-    /// exact inverse of [`Cam::project`], for both projections.
+    /// exact inverse of the camera projection, for both projections.
     fn unproject_ground(&self, s: DVec2) -> DVec2 {
         self.unproject_at(s, 0.0)
     }
@@ -622,15 +649,14 @@ impl Cam {
         } else {
             // vy·s = sy with s = E/(E − yr·sinφ − z·cosφ) and
             // vy = yr·cosφ − z·sinφ is linear in yr once multiplied out.
-            let denom = PERSP_EYE * self.cos_pitch + sy * self.sin_pitch;
+            let denom = self.eye * self.cos_pitch + sy * self.sin_pitch;
             yr = if denom.abs() < 1e-6 {
                 0.0
             } else {
-                (sy * PERSP_EYE - z * (sy * self.cos_pitch - PERSP_EYE * self.sin_pitch))
+                (sy * self.eye - z * (sy * self.cos_pitch - self.eye * self.sin_pitch))
                     / denom
             };
-            let sc = (PERSP_EYE / (PERSP_EYE - yr * self.sin_pitch - z * self.cos_pitch))
-                .clamp(0.5, 2.5);
+            let sc = self.eye / (self.eye - yr * self.sin_pitch - z * self.cos_pitch);
             xr = sx / sc;
         }
         let dx = xr * self.cos_yaw + yr * self.sin_yaw;
@@ -639,42 +665,114 @@ impl Cam {
     }
 }
 
-/// One projected face: four screen corners, top-left first, clockwise.
-#[derive(Clone, Copy)]
-struct Quad {
-    p: [DVec2; 4],
+#[derive(Clone, Copy, Default)]
+struct FaceVertex {
+    /// View-space x/y before the perspective divide.
+    view: DVec2,
+    /// Positive homogeneous clip coordinate (`-view_z`).
+    w: f64,
+    /// Coordinate on the original, unclipped quad.
+    uv: DVec2,
 }
 
-impl Quad {
-    fn of_rect(cam: &Cam, r: &MapRect, z: f64) -> Quad {
-        Quad {
-            p: [
-                cam.project(dvec2(r.x, r.y), z),
-                cam.project(dvec2(r.x + r.w, r.y), z),
-                cam.project(dvec2(r.x + r.w, r.y + r.h), z),
-                cam.project(dvec2(r.x, r.y + r.h), z),
+#[derive(Clone, Copy, Default)]
+struct ProjectedVertex {
+    screen: DVec2,
+    w: f64,
+    uv: DVec2,
+}
+
+/// A projected convex face after view-space near-plane clipping. A quad cut
+/// by one plane has at most five vertices.
+struct ProjectedFace {
+    vertices: [ProjectedVertex; 5],
+    len: usize,
+    clipped: bool,
+    size: DVec2,
+}
+
+impl ProjectedFace {
+    fn of_rect(cam: &Cam, r: &MapRect, z: f64) -> Option<Self> {
+        Self::from_corners(
+            cam,
+            [
+                (dvec2(r.x, r.y), z),
+                (dvec2(r.x + r.w, r.y), z),
+                (dvec2(r.x + r.w, r.y + r.h), z),
+                (dvec2(r.x, r.y + r.h), z),
             ],
+        )
+    }
+
+    fn from_corners(cam: &Cam, corners: [(DVec2, f64); 4]) -> Option<Self> {
+        let uvs = [
+            dvec2(0.0, 0.0),
+            dvec2(1.0, 0.0),
+            dvec2(1.0, 1.0),
+            dvec2(0.0, 1.0),
+        ];
+        let input = [
+            cam.view(corners[0].0, corners[0].1, uvs[0]),
+            cam.view(corners[1].0, corners[1].1, uvs[1]),
+            cam.view(corners[2].0, corners[2].1, uvs[2]),
+            cam.view(corners[3].0, corners[3].1, uvs[3]),
+        ];
+        let clipped = cam.persp && input.iter().any(|v| v.w < PERSP_NEAR);
+        let mut view_vertices = [FaceVertex::default(); 5];
+        let len = if clipped {
+            clip_near(&input, &mut view_vertices)
+        } else {
+            view_vertices[..4].copy_from_slice(&input);
+            4
+        };
+        if len < 3 {
+            return None;
         }
+
+        let mut vertices = [ProjectedVertex::default(); 5];
+        for (out, vertex) in vertices[..len].iter_mut().zip(&view_vertices[..len]) {
+            let screen = cam.project_view(*vertex);
+            if vertex.w <= 0.0 || !screen.x.is_finite() || !screen.y.is_finite() {
+                return None;
+            }
+            *out = ProjectedVertex { screen, w: vertex.w, uv: vertex.uv };
+        }
+        let mut face = Self {
+            vertices,
+            len,
+            clipped,
+            size: DVec2::default(),
+        };
+        let bounds = face.bounds();
+        face.size = if !clipped && len == 4 {
+            dvec2(
+                (vertices[1].screen - vertices[0].screen).length().max(1.0),
+                (vertices[3].screen - vertices[0].screen).length().max(1.0),
+            )
+        } else {
+            dvec2(bounds.size.x.max(1.0), bounds.size.y.max(1.0))
+        };
+        Some(face)
     }
 
     fn bounds(&self) -> Rect {
-        let mut min = self.p[0];
-        let mut max = self.p[0];
-        for p in &self.p[1..] {
-            min.x = min.x.min(p.x);
-            min.y = min.y.min(p.y);
-            max.x = max.x.max(p.x);
-            max.y = max.y.max(p.y);
+        let mut min = self.vertices[0].screen;
+        let mut max = min;
+        for vertex in &self.vertices[1..self.len] {
+            min.x = min.x.min(vertex.screen.x);
+            min.y = min.y.min(vertex.screen.y);
+            max.x = max.x.max(vertex.screen.x);
+            max.y = max.y.max(vertex.screen.y);
         }
         Rect { pos: min, size: max - min }
     }
 
-    /// Whether `at` is inside this (convex) face, either winding.
+    /// Whether `at` is inside this convex face, either winding.
     fn contains(&self, at: DVec2) -> bool {
         let mut sign = 0.0f64;
-        for i in 0..4 {
-            let a = self.p[i];
-            let b = self.p[(i + 1) % 4];
+        for i in 0..self.len {
+            let a = self.vertices[i].screen;
+            let b = self.vertices[(i + 1) % self.len].screen;
             let cross = (b.x - a.x) * (at.y - a.y) - (b.y - a.y) * (at.x - a.x);
             if cross.abs() < 1e-9 {
                 continue;
@@ -686,6 +784,53 @@ impl Quad {
             }
         }
         sign != 0.0
+    }
+}
+
+/// Sutherland-Hodgman clipping against `view_z = -PERSP_NEAR`, expressed as
+/// the equivalent positive-w half-space.
+fn clip_near(input: &[FaceVertex; 4], output: &mut [FaceVertex; 5]) -> usize {
+    let mut len = 0;
+    let mut previous = input[3];
+    let mut previous_inside = previous.w >= PERSP_NEAR;
+    for &current in input {
+        let current_inside = current.w >= PERSP_NEAR;
+        if previous_inside != current_inside {
+            let t = (PERSP_NEAR - previous.w) / (current.w - previous.w);
+            output[len] = FaceVertex {
+                view: previous.view + (current.view - previous.view) * t,
+                w: PERSP_NEAR,
+                uv: previous.uv + (current.uv - previous.uv) * t,
+            };
+            len += 1;
+        }
+        if current_inside {
+            output[len] = current;
+            len += 1;
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    len
+}
+
+/// One projected face: four screen corners, top-left first, clockwise.
+#[derive(Clone, Copy)]
+struct Quad {
+    p: [DVec2; 4],
+}
+
+impl Quad {
+    fn bounds(&self) -> Rect {
+        let mut min = self.p[0];
+        let mut max = self.p[0];
+        for p in &self.p[1..] {
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+        }
+        Rect { pos: min, size: max - min }
     }
 }
 
@@ -1355,6 +1500,13 @@ impl TreemapView {
             MapProjection::Flat => (0.0, 0.0),
             _ => (self.yaw, self.pitch),
         };
+        let max_surface = self
+            .cells
+            .iter()
+            .map(|cell| self.elev(cell.depth))
+            .chain(self.tween_from.values().map(|from| self.elev_f(from.depth)))
+            .chain(self.tween_leavers.iter().map(|(_, _, depth)| self.elev_f(*depth)))
+            .fold(0.0f64, f64::max);
         Cam {
             pivot: dvec2(
                 body.pos.x + body.size.x * 0.5,
@@ -1365,6 +1517,11 @@ impl TreemapView {
             sin_pitch: pitch.sin(),
             cos_pitch: pitch.cos(),
             persp: self.projection == MapProjection::Persp,
+            eye: if self.projection == MapProjection::Persp {
+                constrained_eye(pitch, max_surface)
+            } else {
+                PERSP_EYE
+            },
         }
     }
 
@@ -2028,12 +2185,12 @@ impl TreemapView {
             let cell = &self.cells[index];
             let rect = remap_rect(&cell.rect, rk, rb);
             let z = self.elev(cell.depth);
-            if Quad::of_rect(&cam, &rect, z).contains(pos) {
+            if ProjectedFace::of_rect(&cam, &rect, z).is_some_and(|face| face.contains(pos)) {
                 return Some(index);
             }
             if z > 0.0 {
                 for wall in wall_quads(&cam, &rect, z, rise.min(z)).into_iter().flatten() {
-                    if wall.quad.contains(pos) {
+                    if wall.face.contains(pos) {
                         return Some(index);
                     }
                 }
@@ -2133,12 +2290,14 @@ impl TreemapView {
                     self.tile_colors(cell, palette)
                 };
                 let z = if raised { self.elev_f(depth) } else { 0.0 };
-                let quad = Quad::of_rect(&cam, &rect, z);
+                let Some(projected) = ProjectedFace::of_rect(&cam, &rect, z) else {
+                    continue;
+                };
                 self.draw_tile.color = fade(fill, ghost);
                 self.draw_tile.edge = fade(border_ink, ghost);
                 self.draw_tile.cushion = 0.0;
                 self.draw_tile.border = 0.5;
-                face(&mut self.draw_tile, cx, &quad);
+                projected_face(&mut self.draw_tile, cx, &projected);
             }
         }
 
@@ -2156,16 +2315,23 @@ impl TreemapView {
                 continue;
             }
             let z = if raised { self.elev_f(vdepth) } else { 0.0 };
-            let quad = Quad::of_rect(&cam, &vrect, z);
-            let rect = quad.bounds();
+            let projected = ProjectedFace::of_rect(&cam, &vrect, z);
+            let walls = if raised && z > 0.0 {
+                wall_quads(&cam, &vrect, z, rise.min(z))
+            } else {
+                [None, None]
+            };
+            let Some(bounds) = visible_face_bounds(projected.as_ref(), &walls) else {
+                continue;
+            };
             // The cull margin was laid out to ride the remap, not to be
             // painted: whatever sits wholly off the panel is skipped, with
             // slack for the walls hanging below a plate.
             let slack = z + 4.0;
-            if rect.pos.x + rect.size.x < clip.pos.x - slack
-                || rect.pos.x > clip.pos.x + clip.size.x + slack
-                || rect.pos.y + rect.size.y < clip.pos.y - slack
-                || rect.pos.y > clip.pos.y + clip.size.y + slack
+            if bounds.pos.x + bounds.size.x < clip.pos.x - slack
+                || bounds.pos.x > clip.pos.x + clip.size.x + slack
+                || bounds.pos.y + bounds.size.y < clip.pos.y - slack
+                || bounds.pos.y > clip.pos.y + clip.size.y + slack
             {
                 continue;
             }
@@ -2180,15 +2346,19 @@ impl TreemapView {
             // they paint under their own plate but over everything already
             // painted, which is exactly what one shared instance batch in
             // paint order gives.
-            if raised && z > 0.0 {
-                for wall in wall_quads(&cam, &vrect, z, rise.min(z)).into_iter().flatten() {
-                    self.draw_tile.color = fade(scale_rgb(fill, wall.shade), alpha);
-                    self.draw_tile.edge = fade(border_ink, alpha);
-                    self.draw_tile.cushion = 0.0;
-                    self.draw_tile.border = 0.0;
-                    face(&mut self.draw_tile, cx, &wall.quad);
-                }
+            for wall in walls.iter().flatten() {
+                self.draw_tile.color = fade(scale_rgb(fill, wall.shade), alpha);
+                self.draw_tile.edge = fade(border_ink, alpha);
+                self.draw_tile.cushion = 0.0;
+                self.draw_tile.border = 0.0;
+                projected_face(&mut self.draw_tile, cx, &wall.face);
             }
+
+            // A top can be wholly behind the near plane while the lower edge
+            // of one wall is still visible. The wall was drawn above; only
+            // top-specific shading and labels stop here.
+            let Some(projected) = projected else { continue };
+            let rect = projected.bounds();
 
             // Hover is the outline only — a bright border flash, never a
             // relit tile: on a dense map a whole rectangle changing value
@@ -2218,7 +2388,7 @@ impl TreemapView {
             );
             self.draw_tile.cushion = cushion;
             self.draw_tile.border = border as f32;
-            face(&mut self.draw_tile, cx, &quad);
+            projected_face(&mut self.draw_tile, cx, &projected);
 
             if !live_labels || labels.len() >= LABEL_BUDGET {
                 continue;
@@ -2348,12 +2518,13 @@ impl TreemapView {
                 let (vrect, vdepth, _) = self.tweened(cell, t);
                 let vrect = remap_rect(&vrect, rk, rb);
                 let z = if raised { self.elev_f(vdepth) } else { 0.0 };
-                let quad = Quad::of_rect(&cam, &vrect, z);
-                self.draw_tile.color = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.0 };
-                self.draw_tile.edge = accent;
-                self.draw_tile.cushion = 0.0;
-                self.draw_tile.border = 2.0;
-                face(&mut self.draw_tile, cx, &quad);
+                if let Some(projected) = ProjectedFace::of_rect(&cam, &vrect, z) {
+                    self.draw_tile.color = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.0 };
+                    self.draw_tile.edge = accent;
+                    self.draw_tile.cushion = 0.0;
+                    self.draw_tile.border = 2.0;
+                    projected_face(&mut self.draw_tile, cx, &projected);
+                }
             }
         }
         cx.pop_clip_rect();
@@ -2782,7 +2953,11 @@ impl TreemapView {
             _ => self.elev(cell.depth),
         };
         let (rk, rb) = self.cam_remap();
-        let top = Quad::of_rect(&cam, &remap_rect(&cell.rect, rk, rb), z).bounds();
+        let Some(top) = ProjectedFace::of_rect(&cam, &remap_rect(&cell.rect, rk, rb), z)
+            .map(|face| face.bounds())
+        else {
+            return;
+        };
         let anchor = top.pos;
         let cell_h = top.size.y;
 
@@ -3329,6 +3504,56 @@ fn face(draw: &mut DrawMapTile, cx: &mut Cx2d, quad: &Quad) {
     draw.c1 = v2f(quad.p[1]);
     draw.c2 = v2f(quad.p[2]);
     draw.c3 = v2f(quad.p[3]);
+    draw.u0 = Vec2f { x: 0.0, y: 0.0 };
+    draw.u1 = Vec2f { x: 1.0, y: 0.0 };
+    draw.u2 = Vec2f { x: 1.0, y: 1.0 };
+    draw.u3 = Vec2f { x: 0.0, y: 1.0 };
+    draw.face_size = Vec2f {
+        x: (quad.p[1] - quad.p[0]).length().max(1.0) as f32,
+        y: (quad.p[3] - quad.p[0]).length().max(1.0) as f32,
+    };
+    draw.draw_abs(cx, quad.bounds());
+}
+
+/// Emit a near-clipped face. Uncut quads keep the original one-instance
+/// path; cut polygons are triangle-fanned through degenerate free quads.
+fn projected_face(draw: &mut DrawMapTile, cx: &mut Cx2d, face: &ProjectedFace) {
+    draw.face_size = v2f(face.size);
+    if !face.clipped && face.len == 4 {
+        projected_quad(draw, cx, [
+            face.vertices[0],
+            face.vertices[1],
+            face.vertices[2],
+            face.vertices[3],
+        ]);
+        return;
+    }
+    for index in 1..face.len - 1 {
+        projected_quad(draw, cx, [
+            face.vertices[0],
+            face.vertices[index],
+            face.vertices[index + 1],
+            face.vertices[index + 1],
+        ]);
+    }
+}
+
+fn projected_quad(draw: &mut DrawMapTile, cx: &mut Cx2d, vertices: [ProjectedVertex; 4]) {
+    debug_assert!(vertices.iter().all(|vertex| vertex.w > 0.0));
+    draw.c0 = v2f(vertices[0].screen);
+    draw.c1 = v2f(vertices[1].screen);
+    draw.c2 = v2f(vertices[2].screen);
+    draw.c3 = v2f(vertices[3].screen);
+    draw.u0 = v2f(vertices[0].uv);
+    draw.u1 = v2f(vertices[1].uv);
+    draw.u2 = v2f(vertices[2].uv);
+    draw.u3 = v2f(vertices[3].uv);
+    let quad = Quad { p: [
+        vertices[0].screen,
+        vertices[1].screen,
+        vertices[2].screen,
+        vertices[3].screen,
+    ] };
     draw.draw_abs(cx, quad.bounds());
 }
 
@@ -3337,6 +3562,11 @@ fn v2f(v: DVec2) -> Vec2f {
         x: v.x as f32,
         y: v.y as f32,
     }
+}
+
+fn constrained_eye(pitch: f64, max_surface: f64) -> f64 {
+    let vertical = pitch.cos().max(1e-6);
+    PERSP_EYE.max((max_surface.max(0.0) + CAMERA_SURFACE_CLEARANCE) / vertical)
 }
 
 /// `a`, wrapped into (-π, π] so a long orbit never accumulates.
@@ -3352,8 +3582,30 @@ fn wrap_angle(a: f64) -> f64 {
 
 /// One visible vertical face of a prism, and how brightly it is lit.
 struct Wall {
-    quad: Quad,
+    face: ProjectedFace,
     shade: f32,
+}
+
+fn visible_face_bounds(top: Option<&ProjectedFace>, walls: &[Option<Wall>; 2]) -> Option<Rect> {
+    let mut bounds = top.map(ProjectedFace::bounds);
+    for wall in walls.iter().flatten() {
+        let next = wall.face.bounds();
+        bounds = Some(match bounds {
+            Some(current) => {
+                let min = dvec2(current.pos.x.min(next.pos.x), current.pos.y.min(next.pos.y));
+                let max = dvec2(
+                    (current.pos.x + current.size.x).max(next.pos.x + next.size.x),
+                    (current.pos.y + current.size.y).max(next.pos.y + next.size.y),
+                );
+                Rect {
+                    pos: min,
+                    size: max - min,
+                }
+            }
+            None => next,
+        });
+    }
+    bounds
 }
 
 /// The walls of the prism standing on `r` between elevations `z - band` and
@@ -3375,19 +3627,17 @@ fn wall_quads(cam: &Cam, r: &MapRect, z: f64, band: f64) -> [Option<Wall>; 2] {
         if down <= 0.02 || slot >= 2 {
             continue;
         }
-        out[slot] = Some(Wall {
-            quad: Quad {
-                p: [
-                    cam.project(a, z),
-                    cam.project(b, z),
-                    cam.project(b, z - band),
-                    cam.project(a, z - band),
-                ],
-            },
-            // Faces turned toward the camera catch more of the light.
-            shade: 0.30 + 0.20 * down as f32,
-        });
-        slot += 1;
+        if let Some(face) = ProjectedFace::from_corners(
+            cam,
+            [(a, z), (b, z), (b, z - band), (a, z - band)],
+        ) {
+            out[slot] = Some(Wall {
+                face,
+                // Faces turned toward the camera catch more of the light.
+                shade: 0.30 + 0.20 * down as f32,
+            });
+            slot += 1;
+        }
     }
     out
 }
@@ -3818,9 +4068,10 @@ mod tests {
                     sin_pitch: f64::sin(pitch),
                     cos_pitch: f64::cos(pitch),
                     persp,
+                    eye: PERSP_EYE,
                 };
                 for p in [dvec2(0.0, 0.0), dvec2(731.0, 12.0), dvec2(400.0, 900.0)] {
-                    let s = cam.project(p, 0.0);
+                    let s = cam.project_view(cam.view(p, 0.0, DVec2::default()));
                     let back = cam.unproject_ground(s);
                     assert!(
                         (back - p).length() < 1e-6,
@@ -3832,12 +4083,75 @@ mod tests {
                 // perspective eye adds a radial swell on top, so the claim
                 // is ortho's alone.)
                 if !persp && pitch > 0.0 {
-                    let flat = cam.project(dvec2(600.0, 500.0), 0.0);
-                    let high = cam.project(dvec2(600.0, 500.0), 40.0);
+                    let flat = cam.project_view(cam.view(
+                        dvec2(600.0, 500.0),
+                        0.0,
+                        DVec2::default(),
+                    ));
+                    let high = cam.project_view(cam.view(
+                        dvec2(600.0, 500.0),
+                        40.0,
+                        DVec2::default(),
+                    ));
                     assert!(high.y < flat.y);
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_face_straddling_the_near_plane_is_clipped_before_projection() {
+        let pitch = 0.8f64;
+        let cam = Cam {
+            pivot: dvec2(0.0, 0.0),
+            sin_yaw: 0.0,
+            cos_yaw: 1.0,
+            sin_pitch: pitch.sin(),
+            cos_pitch: pitch.cos(),
+            persp: true,
+            eye: 100.0,
+        };
+        let rect = MapRect { x: -20.0, y: 60.0, w: 40.0, h: 60.0 };
+        let top = ProjectedFace::of_rect(&cam, &rect, 20.0)
+            .expect("part of the top face is visible");
+        let walls = wall_quads(&cam, &rect, 20.0, 20.0);
+        assert!(top.clipped);
+        assert!((3..=5).contains(&top.len));
+        assert!(walls.iter().flatten().any(|wall| wall.face.clipped));
+        for face in std::iter::once(&top).chain(walls.iter().flatten().map(|wall| &wall.face)) {
+            for vertex in &face.vertices[..face.len] {
+                assert!(vertex.w > 0.0);
+                assert!(vertex.w >= PERSP_NEAR);
+                assert!(vertex.screen.x.is_finite() && vertex.screen.y.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn a_face_fully_behind_the_near_plane_is_dropped() {
+        let pitch = 0.8f64;
+        let cam = Cam {
+            pivot: dvec2(0.0, 0.0),
+            sin_yaw: 0.0,
+            cos_yaw: 1.0,
+            sin_pitch: pitch.sin(),
+            cos_pitch: pitch.cos(),
+            persp: true,
+            eye: 100.0,
+        };
+        let rect = MapRect { x: -20.0, y: 170.0, w: 40.0, h: 20.0 };
+        assert!(ProjectedFace::of_rect(&cam, &rect, 20.0).is_none());
+        assert!(wall_quads(&cam, &rect, 20.0, 20.0)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn the_perspective_eye_clears_the_tallest_surface() {
+        let pitch = 1.1;
+        let top = 2100.0;
+        let eye = constrained_eye(pitch, top);
+        assert!(eye * pitch.cos() - top >= CAMERA_SURFACE_CLEARANCE - 1e-9);
     }
 
     // The bundle rectangle carries a kind no palette class answers to, and it
