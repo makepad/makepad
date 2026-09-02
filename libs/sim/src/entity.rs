@@ -163,6 +163,8 @@ pub struct Entity {
     /// Riding another entity (vehicle seats): physics skips this mover and
     /// pins it to the owner at the given offset. 0 = free.
     pub attached_to: u64,
+    /// The seat, in the OWNER'S frame: x to its right, y up, z forward. A
+    /// driver at (-0.4, -0.1, 0.2) stays at the wheel however the car turns.
     pub attach_offset: Vec3f,
     /// Ride mode ("ride" vs the default "seat"): a latched rider (headcrab).
     /// Seat riders face where their owner faces; ride riders spin their model

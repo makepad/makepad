@@ -11,15 +11,21 @@
 //! the slot is inert: the WM's own pane is the chat then, and it takes
 //! F10 before any tile sees it.
 //!
-//! Open, the overlay slides in from the right over the body (the WM
-//! pane's motion: easeOutQuint, 260 ms in, 200 ms out, 440 px clamped to
-//! 40 % of the window, a 2 px edge) and owns the pointer inside its rect
-//! and the keyboard through its composer. Requests from outside the widget
-//! tree — the bridge's `/ai` routes, the overlay's own Escape — come
-//! through [`AiSlotRequests`], a `Cx` global the slot drains on its next
-//! event, so nothing here is a static.
+//! Open, the overlay slides in on the LEFT and PUSHES the body in
+//! (decision 17): the slot reserves a strip — the body's left inset,
+//! animated with the slide (the WM pane's motion: easeOutQuint, 260 ms in,
+//! 200 ms out, 440 px clamped to 40 % of the window) — and the body is
+//! laid out beside it every frame, so nothing of the app is ever under
+//! the chat. The card fills the strip, a 2 px edge on its right, its
+//! ground the app's own `theme.color_bg_app` read when it opens (after
+//! any retint). It owns the pointer inside the strip and the keyboard
+//! through its composer. Requests from outside the widget tree — the
+//! bridge's `/ai` routes, the overlay's own Escape — come through
+//! [`AiSlotRequests`], a `Cx` global the slot drains on its next event,
+//! so nothing here is a static.
 
 use crate::{
+    keyboard_view::KeyboardView,
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::script_eval,
@@ -55,7 +61,7 @@ const PANE_WIDTH: f64 = 440.0;
 const PANE_MAX_FRACTION: f64 = 0.4;
 /// The narrowest the overlay ever gets.
 const PANE_MIN_WIDTH: f64 = 240.0;
-/// The edge on the overlay's left.
+/// The edge on the overlay's right.
 const EDGE: f64 = 2.0;
 
 /// A cubic bezier from (0,0) to (1,1) evaluated as y(x), like a CSS
@@ -151,17 +157,29 @@ impl SlideState {
         true
     }
 
-    /// The overlay's resting rect over `body`: right side, full height.
+    /// The overlay's resting rect beside `body` (the FULL body, before
+    /// the strip is taken from it): left side, full height.
     pub fn rest_rect(body: Rect) -> Rect {
         let w = PANE_WIDTH.min(body.size.x * PANE_MAX_FRACTION).max(PANE_MIN_WIDTH).min(body.size.x.max(1.0));
-        Rect { pos: dvec2(body.pos.x + body.size.x - w, body.pos.y), size: dvec2(w, body.size.y) }
+        Rect { pos: body.pos, size: dvec2(w, body.size.y) }
     }
 
-    /// The rect as drawn right now, slid by `t`.
+    /// The strip the body gives up right now: the card's width, eased —
+    /// zero hidden, the full width at rest.
+    pub fn strip(&self, body: Rect) -> f64 {
+        (ease_out_quint(self.t) * Self::rest_rect(body).size.x).max(0.0)
+    }
+
+    /// The rect as drawn right now: right-aligned in the strip, so it
+    /// slides in from off the body's left edge.
     pub fn slid_rect(&self, body: Rect) -> Rect {
         let rest = Self::rest_rect(body);
-        let off = (1.0 - ease_out_quint(self.t)) * rest.size.x;
-        Rect { pos: dvec2(rest.pos.x + off, rest.pos.y), size: rest.size }
+        Rect { pos: dvec2(rest.pos.x + self.strip(body) - rest.size.x, rest.pos.y), size: rest.size }
+    }
+
+    /// The body as it is laid out beside a strip that wide.
+    pub fn body_beside(body: Rect, strip: f64) -> Rect {
+        Rect { pos: dvec2(body.pos.x + strip, body.pos.y), size: dvec2((body.size.x - strip).max(0.0), body.size.y) }
     }
 }
 
@@ -188,10 +206,16 @@ pub struct AiChatSlot {
     missing_logged: bool,
     #[rust]
     slide: SlideState,
-    /// The window's body rect as the intercept last saw it: what the
-    /// overlay slides over.
+    /// The window's FULL body rect (before the strip is taken from it), as
+    /// the intercept last saw it: what the overlay slides in beside.
     #[rust]
     body_rect: Rect,
+    /// The left inset the body currently carries for the strip.
+    #[rust]
+    applied_inset: f64,
+    /// The app's ground colour, read from its theme when the slot opens.
+    #[rust]
+    ground: Option<Vec4f>,
     #[rust]
     next_frame: NextFrame,
     /// The composer was asked for the keyboard before the overlay had
@@ -219,9 +243,60 @@ impl AiChatSlot {
         self.slide.is_open() && self.slide.slid_rect(self.body_rect).contains(p)
     }
 
-    pub fn set_body_rect(&mut self, rect: Rect) {
-        if rect.size.x > 0.0 && rect.size.y > 0.0 {
-            self.body_rect = rect;
+    /// The body as it was drawn — beside whatever strip it carried then;
+    /// the full rect is that plus the strip.
+    pub fn set_body_rect(&mut self, drawn: Rect) {
+        if drawn.size.x + self.applied_inset > 0.0 && drawn.size.y > 0.0 {
+            self.body_rect = Rect {
+                pos: dvec2(drawn.pos.x - self.applied_inset, drawn.pos.y),
+                size: dvec2(drawn.size.x + self.applied_inset, drawn.size.y),
+            };
+        }
+    }
+
+    /// Hand the body its left inset for the strip as it is right now. The
+    /// parent reads the body's walk on every draw, so a changed inset is a
+    /// relayout of the whole window.
+    fn apply_inset(&mut self, cx: &mut Cx, window_view: &View) {
+        let strip = if self.showing() { self.slide.strip(self.body_rect) } else { 0.0 };
+        if (strip - self.applied_inset).abs() < 0.01 {
+            return;
+        }
+        if let Some((_, body)) = window_view.children.iter().find(|(id, _)| *id == live_id!(body)) {
+            if let Some(mut body) = body.borrow_mut::<KeyboardView>() {
+                body.set_left_inset(strip);
+            }
+        }
+        self.applied_inset = strip;
+        cx.redraw_all();
+    }
+
+    /// The app's ground, after its retint: `theme.color_bg_app` as the
+    /// running VM has it now — not as the slot's DSL captured it.
+    fn theme_ground(cx: &mut Cx) -> Option<Vec4f> {
+        cx.with_vm(|vm| {
+            let theme = vm.module(id!(theme));
+            let value = vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap);
+            value.as_color().map(|c| Vec4f {
+                x: ((c >> 24) & 0xff) as f32 / 255.0,
+                y: ((c >> 16) & 0xff) as f32 / 255.0,
+                z: ((c >> 8) & 0xff) as f32 / 255.0,
+                w: (c & 0xff) as f32 / 255.0,
+            })
+        })
+    }
+
+    /// The slide's clock: on the slot's next-frame event, advance and ask
+    /// for another while it moves. Called from the window intercept (which
+    /// sees every event first) and from the slot's own dispatch; the same
+    /// event advances the same way twice, so both may run.
+    fn advance(&mut self, cx: &mut Cx, event: &Event) {
+        if self.next_frame.is_event(event).is_some() {
+            let now = cx.seconds_since_app_start();
+            if self.slide.animate(now) {
+                self.next_frame = cx.new_next_frame();
+            }
+            cx.redraw_all();
         }
     }
 
@@ -281,8 +356,10 @@ impl AiChatSlot {
         cx.global::<AiSlotRequests>().is_open = open;
         self.next_frame = cx.new_next_frame();
         if open {
-            // The composer takes the keyboard once the overlay has drawn.
+            // The composer takes the keyboard once the overlay has drawn;
+            // the ground is the app's own, as its theme stands now.
             self.focus_pending = true;
+            self.ground = Self::theme_ground(cx);
         } else {
             self.focus_pending = false;
             // A hidden chat must not keep the keyboard.
@@ -359,12 +436,16 @@ pub fn window_intercept(
             return false;
         };
         s.take_requests(cx);
-        if !s.showing() {
-            return false;
-        }
-        // The body rect, live, for the draw and the hit test.
+        s.advance(cx, event);
+        // The body rect, live, for the strip, the draw and the hit test —
+        // then the strip goes onto the body as its left inset, every
+        // frame of the slide and once more when it has closed.
         if let Some((_, body)) = window_view.children.iter().find(|(id, _)| *id == live_id!(body)) {
             s.set_body_rect(body.area().clipped_rect(cx));
+        }
+        s.apply_inset(cx, window_view);
+        if !s.showing() {
+            return false;
         }
         let inside = match AiChatSlot::is_pointer_event(event) {
             Some(abs) => {
@@ -399,13 +480,7 @@ impl Widget for AiChatSlot {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Requests from outside the tree land here (or in the intercept).
         self.take_requests(cx);
-        if self.next_frame.is_event(event).is_some() {
-            let now = cx.seconds_since_app_start();
-            if self.slide.animate(now) {
-                self.next_frame = cx.new_next_frame();
-            }
-            cx.redraw_all();
-        }
+        self.advance(cx, event);
         // Once it exists the overlay keeps ticking whether or not the slot
         // shows it — a turn in flight finishes behind a closed slot, the way
         // the WM keeps its hidden pane's child running. Pointer events reach
@@ -423,11 +498,12 @@ impl Widget for AiChatSlot {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        // The window's body is a Fill child of a Down flow: the view draws
-        // it DEFERRED, after every other child, so ink in the ordinary list
-        // ends up under it. The window's overlay list composites over the
-        // body — the tweaker's and every popup's place — and is retained
-        // between frames, so once made it is begun and ended every draw,
+        // The body is laid out BESIDE the strip (its left inset), so the
+        // card never covers app content; it is still drawn in the window's
+        // retained overlay list — the tweaker's and every popup's place —
+        // because the body is a deferred Fill child of a Down flow, drawn
+        // after every other child, and ink in the ordinary list could sit
+        // under its clip. The list is begun and ended every draw once made,
         // empty while hidden, or the last picture would stay on screen.
         // Nothing exists until the first open: closed and never opened
         // costs nothing.
@@ -443,10 +519,15 @@ impl Widget for AiChatSlot {
         cx.begin_root_turtle(size, Layout::flow_down());
         if self.showing() {
             if let Some(overlay) = self.overlay.clone() {
+                // The card, right-aligned in the strip the body gave up:
+                // beside the body, never over it.
                 let r = self.slide.slid_rect(self.body_rect);
+                if let Some(ground) = self.ground {
+                    self.draw_card.color = ground;
+                }
                 self.draw_card.draw_abs(cx, r);
-                self.draw_edge.draw_abs(cx, Rect { pos: r.pos, size: dvec2(EDGE, r.size.y) });
-                let inner = Rect { pos: dvec2(r.pos.x + EDGE, r.pos.y), size: dvec2(r.size.x - EDGE, r.size.y) };
+                self.draw_edge.draw_abs(cx, Rect { pos: dvec2(r.pos.x + r.size.x - EDGE, r.pos.y), size: dvec2(EDGE, r.size.y) });
+                let inner = Rect { pos: r.pos, size: dvec2(r.size.x - EDGE, r.size.y) };
                 overlay.draw_walk_all(cx, scope, Walk::abs_rect(inner));
                 if self.focus_pending && self.slide.is_open() {
                     // The overlay just drew: its composer has an area to focus.
@@ -487,22 +568,42 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_rests_on_the_right_and_slides_in_from_off_screen() {
+    fn the_overlay_rests_on_the_left_and_slides_in_from_off_screen() {
         let body = Rect { pos: dvec2(0.0, 28.0), size: dvec2(1200.0, 800.0) };
         let rest = SlideState::rest_rect(body);
         assert_eq!(rest.size, dvec2(440.0, 800.0));
-        assert_eq!(rest.pos, dvec2(760.0, 28.0));
+        assert_eq!(rest.pos, dvec2(0.0, 28.0));
         // A narrow window: 40 % of it, never under the minimum.
         let narrow = SlideState::rest_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(800.0, 600.0) });
         assert_eq!(narrow.size.x, 320.0);
         let tiny = SlideState::rest_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(300.0, 600.0) });
         assert_eq!(tiny.size.x, 240.0);
-        // Hidden: fully off the right edge. Shown: at rest.
+        // Hidden: fully off the left edge, no strip. Shown: at rest, the
+        // strip is the card.
         let mut s = SlideState::default();
-        assert_eq!(s.slid_rect(body).pos.x, 1200.0);
+        assert_eq!(s.slid_rect(body).pos.x, -440.0);
+        assert_eq!(s.strip(body), 0.0);
         s.set_open(0.0, true);
         s.animate(SLIDE_IN + 0.01);
         assert_eq!(s.slid_rect(body), rest);
+        assert_eq!(s.strip(body), 440.0);
+    }
+
+    #[test]
+    fn the_body_is_laid_out_beside_the_strip() {
+        let body = Rect { pos: dvec2(0.0, 28.0), size: dvec2(1200.0, 800.0) };
+        let beside = SlideState::body_beside(body, 440.0);
+        assert_eq!(beside.pos, dvec2(440.0, 28.0));
+        assert_eq!(beside.size, dvec2(760.0, 800.0));
+        // Mid-slide the strip is between nothing and the card, and the
+        // card's right edge is exactly where the body begins.
+        let mut s = SlideState::default();
+        s.set_open(0.0, true);
+        s.animate(SLIDE_IN * 0.5);
+        let strip = s.strip(body);
+        assert!(strip > 0.0 && strip < 440.0, "{strip}");
+        let card = s.slid_rect(body);
+        assert_eq!(card.pos.x + card.size.x, SlideState::body_beside(body, strip).pos.x);
     }
 
     #[test]
