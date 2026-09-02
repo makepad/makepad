@@ -79,7 +79,7 @@ A "small car" = `world.spawn({model: "...", scale: 0.5})` or `scale: "small"`
 
 CITIES, VILLAGES, RACETRACKS, RAILWAYS, ROADS, FORESTS AND DUNGEONS ARE ONE CALL;
 never hand-place their tiles. They are deterministic from seed:
-- `game.city({seed, size, density})`, `game.village({seed, size})`, and
+- `game.city({seed, size, density, pos})`, `game.village({seed, size, pos})`, and
   `game.dungeon({kit, extent, seed})` build complete layouts.
 - `game.scatter({models, pos, size, spacing, count, seed})` builds forests
   or crowds while avoiding earlier roads/buildings.
@@ -103,6 +103,13 @@ never hand-place their tiles. They are deterministic from seed:
   AFTER it crosses on a BRIDGE automatically — deck clearing the water,
   piers standing in the shallows. Call game.river BEFORE the roads and
   railways that must bridge it; never ford a river with a flat road.
+  THE ENGINE KEEPS THE MAP SANE regardless of call order: a town whose
+  footprint touches a river slides to its bank (`pos` is the town CENTRE),
+  lots on water or on a road are left unbuilt, props and characters asked
+  for in water are steered to the shore, a river carved after a town bends
+  around it, and every corridor — city streets included — bridges water
+  with freeboard. Each repair is logged as an "assist" line; read them and
+  edit the plan rather than fighting them.
 - `game.racetrack({seed, size, complexity})` — a complete circuit as one
   generated road surface (true swept corners, graded, bridged) — returns
   slots, checkpoints, start and waypoints. A race's essential shape is:
@@ -128,6 +135,8 @@ never hand-place their tiles. They are deterministic from seed:
   railway at its own measured size (front faces -Z). A railway's
   essential shape is:
     game.traintrack({seed: 3, size: 90})
+  An authored `path` is an OPEN line unless you say `closed: true` (a
+  crossing line is two points; a loop needs three or more).
     game.train({cars: 4})
     game.race({laps: 3})
     game.player_character({pos: t.start, model: "kenney/mini-characters/character-male-b"})
@@ -231,6 +240,16 @@ game.follower(id, {target, near, far}) — companion; never attacks
 game.pacer(id, {speed, turn_at: ["wall","edge"]}) — walks a line, turns
   at walls/drop-offs; with hurt rules it is the classic 2D enemy
 game.patroller(id, {points | axis: "x" + span, pause, turn_at}) — routes
+game.pedestrians({count, near, range}) — walkers on the sidewalks: they
+  keep to the sidewalks, cross only at crosswalks on the walk phase, wait at
+  closed rail gates, and cars brake for them. NEVER script a stop or a
+  crossing — the corridor graph governs every agent automatically.
+game.route(id, {to}) — send a car or pedestrian to a point over the graph
+  (lanes, turns, lights obeyed). game.autodrive(car, {points, stops, dwell})
+  with streets under the points drives the LANES: right side, speed limits,
+  red lights, gates, the car ahead; stops+dwell make it a bus.
+game.train({..., pace, stops: [pos...], dwell}) — a timetable service: drives
+  itself, stops at its platforms, holds behind the train in the block ahead.
 game.wanderer(id, {home, range, pois: [tags]}) — ambler; pois = villager
 game.pickup(id, {give: {health, ammo, count, key, weapon}, respawn})
 game.hazard(id, {damage, period}) — a volume that hurts (lava, spikes)
