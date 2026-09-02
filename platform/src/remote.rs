@@ -60,7 +60,6 @@ mod imp {
     const MAX_LIVE_CONNS: usize = 24;
     const MAX_HEAD_BYTES: usize = 32 * 1024;
     const MAX_BODY_BYTES: usize = 1 << 20;
-    const LOG_RING_CAP: usize = 4000;
     const GRABS_KEPT_PER_WINDOW: usize = 32;
 
     fn queue() -> &'static Mutex<Vec<Cmd>> {
@@ -78,10 +77,6 @@ mod imp {
         G.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    fn log_ring() -> &'static Mutex<LogRing> {
-        static L: OnceLock<Mutex<LogRing>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(LogRing::default()))
-    }
 
     fn grab_dir() -> &'static Mutex<PathBuf> {
         static D: OnceLock<Mutex<PathBuf>> = OnceLock::new();
@@ -114,11 +109,6 @@ mod imp {
         y: f64,
     }
 
-    #[derive(Default)]
-    struct LogRing {
-        next_seq: u64,
-        lines: std::collections::VecDeque<(u64, String)>,
-    }
 
     struct GrabSink {
         window: Option<usize>,
@@ -493,19 +483,10 @@ mod imp {
     // log ring (filled from log.rs)
     // ------------------------------------------------------------------
 
+    /// The remote surface's own notes — a window the human closed, an HTTP
+    /// request — go in the same ring as everything the app logs.
     pub fn push_log_line(line: String) {
-        if !ACTIVE.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(mut ring) = log_ring().lock() else {
-            return;
-        };
-        let seq = ring.next_seq + 1;
-        ring.next_seq = seq;
-        ring.lines.push_back((seq, line));
-        while ring.lines.len() > LOG_RING_CAP {
-            ring.lines.pop_front();
-        }
+        crate::log_ring::push(crate::log::LogLevel::Log, line);
     }
 
     // ------------------------------------------------------------------
@@ -1513,25 +1494,21 @@ mod imp {
     }
 
     fn route_log(p: &Params) -> Out {
-        let ring = log_ring().lock().unwrap();
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
             .get(&["n", "count", "tail"])
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(50);
-        let mut selected: Vec<&(u64, String)> = match since {
-            Some(since) => ring.lines.iter().filter(|(seq, _)| *seq > since).collect(),
-            None => ring.lines.iter().collect(),
+        let (newest, lines) = match since {
+            Some(since) => crate::log_ring::read_since(since, usize::MAX),
+            None => crate::log_ring::read_since(0, count),
         };
-        if since.is_none() && selected.len() > count {
-            selected = selected.split_off(selected.len() - count);
-        }
-        let mut out = format!("{{\"n\":{},\"l\":[", ring.next_seq);
-        for (index, (_, line)) in selected.iter().enumerate() {
+        let mut out = format!("{{\"n\":{newest},\"l\":[");
+        for (index, line) in lines.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }
-            out.push_str(&json_str(line));
+            out.push_str(&json_str(&line.text));
         }
         out.push_str("]}");
         Out::Json(200, out)

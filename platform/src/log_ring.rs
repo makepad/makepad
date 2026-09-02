@@ -130,6 +130,30 @@ mod tests {
     }
 
     #[test]
+    fn a_line_the_app_logs_reaches_the_ring_with_no_remote_surface_running() {
+        let _serial = serial();
+        reset_for_test();
+        crate::log::log_with_level_makepad_platform(
+            "widgets/src/thing.rs",
+            41,
+            8,
+            41,
+            20,
+            "the thing happened".into(),
+            LogLevel::Warning,
+        );
+        let (_, lines) = read_since(0, 10);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].level, LogLevel::Warning);
+        assert!(
+            lines[0].text.contains("the thing happened")
+                && lines[0].text.contains("widgets/src/thing.rs"),
+            "the line carries where it came from: {}",
+            lines[0].text
+        );
+    }
+
+    #[test]
     fn a_cursor_older_than_the_forgotten_lines_still_answers() {
         let _serial = serial();
         reset_for_test();
