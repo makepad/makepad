@@ -6940,6 +6940,11 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// How far the console has read the process log, and the lines it kept.
+    #[rust]
+    console_log_cursor: u64,
+    #[rust]
+    console_lines: VecDeque<String>,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
     #[rust(TabStage::None)]
@@ -13811,6 +13816,28 @@ p2 {}
             let detail = crate::console::detail_text(&health, &meters, decks);
             self.set_status_label(cx, ids!(console_numbers), &detail);
         }
+        // Only while the pane is showing: an operator who never opens it
+        // pays one comparison a tick.
+        if self.console.panes().1 {
+            let (cursor, fresh) = makepad_widgets::makepad_platform::log_ring::read_since(
+                self.console_log_cursor,
+                200,
+            );
+            self.console_log_cursor = cursor;
+            for line in fresh {
+                self.console_lines.push_back(line.text);
+            }
+            while self.console_lines.len() > 400 {
+                self.console_lines.pop_front();
+            }
+            // The strip's extent as `paint_console` last worked it out.
+            // Measuring the column here would read its over-ask again.
+            let strip = self.console_points.map_or(crate::console::CLOSED_POINTS, |(_, s)| s);
+            let rows = ((strip - 60.0) / 14.0).max(1.0) as usize;
+            let lines: Vec<String> = self.console_lines.iter().cloned().collect();
+            let text = crate::console::pane_text(&lines, &self.console.filter, rows);
+            self.set_status_label(cx, ids!(console_log), &text);
+        }
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
         self.pump_import(cx);
@@ -17343,6 +17370,16 @@ p2 {}
                     changed = true;
                 }
             }
+        }
+        // The filter narrows the tail as it is typed; clearing drops what
+        // has been kept rather than what the process log holds.
+        if let Some(text) = self.ui.text_input(cx, ids!(console_filter)).changed(actions) {
+            self.console.filter = text;
+            changed = true;
+        }
+        if self.ui.button(cx, ids!(console_clear)).clicked(actions) {
+            self.console_lines.clear();
+            changed = true;
         }
         if changed {
             self.paint_console(cx);
