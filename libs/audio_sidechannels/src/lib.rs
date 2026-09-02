@@ -48,29 +48,39 @@ pub const STEM_ROLE_TO_SET: [(FileRole, usize); 4] = [
     (FileRole::StemOther, 2),
 ];
 
+fn encode_one_stem(buf: &makepad_ai_stems::StereoBuf, opts: &EncodeOptions) -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(buf.left.len() * 2);
+    for (l, r) in buf.left.iter().zip(buf.right.iter()) {
+        pcm.push(*l);
+        pcm.push(*r);
+    }
+    encode_vorbis(STEMS_RATE, 2, &pcm, opts).expect("stem encode")
+}
+
 /// Encode a full separated `StemSet` (at the model's 44.1 kHz) to four Ogg
-/// Vorbis streams, in [`FileRole::STEMS`] order, one thread per stem.
+/// Vorbis streams, in [`FileRole::STEMS`] order. Native uses one thread per
+/// stem; the web build has no `std::thread` workers, so it encodes in order.
 pub fn encode_stem_oggs(stems: &StemSet) -> [Vec<u8>; 4] {
     let opts = stem_encode_options();
     let mut out: [Vec<u8>; 4] = Default::default();
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (_, set_index) in STEM_ROLE_TO_SET {
             let buf = &stems[set_index];
             let opts = opts.clone();
-            handles.push(scope.spawn(move || {
-                let mut pcm = Vec::with_capacity(buf.left.len() * 2);
-                for (l, r) in buf.left.iter().zip(buf.right.iter()) {
-                    pcm.push(*l);
-                    pcm.push(*r);
-                }
-                encode_vorbis(STEMS_RATE, 2, &pcm, &opts).expect("stem encode")
-            }));
+            handles.push(scope.spawn(move || encode_one_stem(buf, &opts)));
         }
         for (slot, handle) in out.iter_mut().zip(handles) {
             *slot = handle.join().expect("stem encode worker");
         }
     });
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (slot, (_, set_index)) in out.iter_mut().zip(STEM_ROLE_TO_SET) {
+            *slot = encode_one_stem(&stems[set_index], &opts);
+        }
+    }
     out
 }
 

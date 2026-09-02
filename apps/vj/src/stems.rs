@@ -40,7 +40,9 @@ pub(crate) use makepad_ai_stems::SAMPLE_RATE as STEMS_RATE;
 use makepad_asset_data::Sha256;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::Duration;
 

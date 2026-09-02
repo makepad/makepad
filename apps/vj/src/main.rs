@@ -21742,6 +21742,7 @@ p2 {}
                 .collect::<Vec<_>>();
             return self.filter_sort_rows(rows);
         }
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
         let mut rows = self
             .music_model
             .tiles()
