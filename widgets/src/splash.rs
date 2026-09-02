@@ -174,25 +174,28 @@ impl Splash {
         };
 
         let vm_id = self.vm_id;
-        let new_view = cx.with_script_vm_id(vm_id, |vm| {
-            let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
-                vm.eval_with_append_source(script_mod, &code, NIL.into())
-            });
-            if !value.is_err() && !value.is_nil() {
-                Some(View::script_from_value(vm, value))
-            } else {
-                // A body that fails to evaluate leaves the Splash showing
-                // its previous view — or nothing at all. Say so: a silent
-                // blank widget is the hardest bug in this file to find.
-                if value.is_err() {
-                    for e in vm.take_errors() {
-                        log!("splash: {}", e);
-                    }
+        let mut new_view = None;
+        crate::widget_async::contain_isolate_panic("app source eval", || {
+            new_view = cx.with_script_vm_id(vm_id, |vm| {
+                let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+                    vm.eval_with_append_source(script_mod, &code, NIL.into())
+                });
+                if !value.is_err() && !value.is_nil() {
+                    Some(View::script_from_value(vm, value))
                 } else {
-                    log!("splash: script body evaluated to nothing (no root view)");
+                    // A body that fails to evaluate leaves the Splash showing
+                    // its previous view — or nothing at all. Say so: a silent
+                    // blank widget is the hardest bug in this file to find.
+                    if value.is_err() {
+                        for e in vm.take_errors() {
+                            log!("splash: {}", e);
+                        }
+                    } else {
+                        log!("splash: script body evaluated to nothing (no root view)");
+                    }
+                    None
                 }
-                None
-            }
+            });
         });
 
         if let Some(mut view) = new_view {
@@ -297,7 +300,9 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
         code: String::new(),
         values: vec![],
     };
-    let errors = cx.with_script_vm_id(vm_id, |vm| {
+    let mut errors_out = vec!["the script crashed its isolate during validation".to_string()];
+    crate::widget_async::contain_isolate_panic("validation eval", || {
+    errors_out = cx.with_script_vm_id(vm_id, |vm| {
         // Capture instead of logging: mid-eval errors otherwise go straight to
         // the error log (see `ScriptVm::take_errors`) and can't be returned.
         vm.bx.captured_errors = Some(Vec::new());
@@ -317,13 +322,14 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
         }
         errors
     });
+    });
     crate::widget_async::mark_splash_isolate_dead(vm_id);
     // Reclaim NOW (stops the isolate's top-level timers and drops its sandbox
     // root binding) so nothing can re-create the scratch dir after we remove
     // it; then delete last, and it stays deleted.
     crate::widget_async::gc_dead_splash_isolates(cx);
     let _ = std::fs::remove_dir_all(&scratch);
-    errors
+    errors_out
 }
 
 impl WidgetNode for Splash {
@@ -408,7 +414,9 @@ impl Splash {
         let Some(scope) = self.body_scope(cx) else {
             return false;
         };
-        cx.with_script_vm_id(self.vm_id, |vm| {
+        let mut called = false;
+        crate::widget_async::contain_isolate_panic("script hook call", || {
+        called = cx.with_script_vm_id(self.vm_id, |vm| {
             // NoTrap: this is an existence probe for an OPTIONAL hook. A
             // trapping lookup queues a NotFound into the error log even though
             // the miss is handled right here — every host broadcast (e.g.
@@ -422,7 +430,9 @@ impl Splash {
                 vm.call(fnval, args);
             });
             true
-        })
+        });
+        });
+        called
     }
 
     /// Like [`Self::call_script_fn`], but with string arguments — those are
@@ -433,7 +443,9 @@ impl Splash {
         let Some(scope) = self.body_scope(cx) else {
             return false;
         };
-        cx.with_script_vm_id(self.vm_id, |vm| {
+        let mut called = false;
+        crate::widget_async::contain_isolate_panic("script hook call", || {
+        called = cx.with_script_vm_id(self.vm_id, |vm| {
             let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
             if fnval.is_nil() || fnval.is_err() {
                 return false;
@@ -446,7 +458,9 @@ impl Splash {
                 vm.call(fnval, &vals);
             });
             true
-        })
+        });
+        });
+        called
     }
 
     /// Sets whether this Splash's isolate gets the networking runtime. Must be
