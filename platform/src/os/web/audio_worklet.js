@@ -108,6 +108,23 @@ class AudioWorklet extends AudioWorkletProcessor {
     }
 
     process(inputs, outputs, parameters) {
+        // A throw inside process() kills the processor silently (the page only sees an
+        // ErrorEvent without a message): report it once with the real text, then stop.
+        try {
+            return this.process_inner(inputs, outputs, parameters);
+        } catch (error) {
+            if (!this._reported) {
+                this._reported = true;
+                this.port.postMessage({
+                    message_type: "console_error",
+                    value: "audio worklet: process threw: " + (error && error.stack ? error.stack : error)
+                });
+            }
+            return false;
+        }
+    }
+
+    process_inner(inputs, outputs, parameters) {
         if (this._context !== undefined) {
             let context = this._context;
 
