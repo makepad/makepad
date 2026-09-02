@@ -228,6 +228,10 @@ impl<T> TaskState<T> {
             return false;
         }
         *slot = Some(result);
+        // Publish completion only after releasing the payload slot. In
+        // particular, a UI poll that observes `finished` must not race the
+        // producer while it still owns the mutex.
+        drop(slot);
         self.finished.store(true, Ordering::Release);
         self.wake.notify_all();
         true
@@ -263,7 +267,14 @@ impl<T> TaskHandle<T> {
         if !self.is_finished() {
             return None;
         }
-        let result = self.state.result.lock().unwrap().take();
+        // This method is polled by the browser UI thread. A contended wasm
+        // Mutex::lock lowers to Atomics.wait, which is forbidden there, so
+        // leave the result on the worker and retry on the next UI frame.
+        let result = match self.state.result.try_lock() {
+            Ok(mut slot) => slot.take(),
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().take(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
         #[cfg(not(target_arch = "wasm32"))]
         if result.is_some() {
             if let Some(join) = self.native_join.take() {
@@ -1361,10 +1372,12 @@ extern "C" {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_entrypoint"]
-pub unsafe extern "C" fn wasm_thread_entrypoint(request_id: u32, closure_ptr: u32) {
+pub unsafe extern "C" fn wasm_thread_entrypoint(_request_id: u32, closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut WebClosure);
     closure();
-    web_requests().lock().unwrap().remove(&request_id);
+    // JavaScript posts `finished` after this returns and that UI callback
+    // removes the request. Duplicating cleanup here only creates a
+    // worker/UI mutex race when the UI starts the next task.
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
@@ -1433,6 +1446,25 @@ mod tests {
 
         let handle = spawner.spawn(|| 7).unwrap();
         assert_eq!(handle.join(), Err(TaskError::WouldBlockUi));
+    }
+
+    #[test]
+    fn task_poll_retries_instead_of_waiting_for_the_result_mutex() {
+        let state = Arc::new(TaskState::default());
+        let mut handle = TaskHandle {
+            state: state.clone(),
+            token: CancellationToken::new(),
+            ui_thread: std::thread::current().id(),
+            priority_status: PriorityStatus::Applied,
+            native_join: None,
+        };
+        let mut slot = state.result.lock().unwrap();
+        *slot = Some(Ok(42));
+        state.finished.store(true, Ordering::Release);
+
+        assert!(handle.try_take().is_none());
+        drop(slot);
+        assert_eq!(handle.try_take().unwrap().unwrap(), 42);
     }
 
     #[test]
