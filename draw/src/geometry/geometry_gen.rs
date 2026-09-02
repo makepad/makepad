@@ -108,76 +108,54 @@ pub struct VectorVertexPacked {
     pub zbias: f32,
 }
 
-/// Map polygon fills need only their tile-local position, premultiplied
-/// colour, fill/material variant, AA coverage and the two depth ladders.
-/// The final slot bit-packs those ladders; see `pack_fill_record`.
-#[derive(Clone, Script, ScriptHook)]
+/// Typed map-fill vertex. Compact fields are converted to floats by vertex
+/// fetch; `pos` uses `MAP_VERTEX_POSITION_SCALE` fixed-point tile units.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
 #[repr(C)]
-pub struct FillVertexPacked {
+pub struct FillVertexTyped {
     #[live]
-    pub x: f32,
+    pub pos: I16x2,
     #[live]
-    pub y: f32,
-    /// unorm8 r|g|b|a
+    pub color: UNorm8x4,
     #[live]
-    pub color: f32,
-    /// f16(shape/material code) | f16(fill AA coverage)
+    pub params: F16x2,
     #[live]
-    pub params: f32,
-    /// u16 flat zbias ticks | u16 tilted param5 ticks
-    #[live]
-    pub zbias: f32,
-}
-/// Compact map-road vertex (32 bytes). The centerline anchor and deck height
-/// stay full precision; offset, depth and tessellator coordinates use f16
-/// pairs and colour uses unorm8x4.
-#[derive(Clone, Script, ScriptHook)]
-#[repr(C)]
-pub struct RoadVertexPacked {
-    #[live]
-    pub x: f32,
-    #[live]
-    pub y: f32,
-    /// f16(offset.x) | f16(offset.y) — baked half-width offset from the anchor
-    #[live]
-    pub off: f32,
-    /// unorm8 r|g|b|a
-    #[live]
-    pub color: f32,
-    /// f16(class + 8*material + 64*dash + 256*kind) | f16(pixel aux):
-    /// along-stroke distance, route-emissive strength, or coverage
-    #[live]
-    pub params: f32,
-    /// Exact per-vertex bridge/ramp deck height in metres
-    #[live]
-    pub deck: f32,
-    /// f16(param5 tilt depth) | f16(zbias in VECTOR_ZBIAS_STEP ticks)
-    #[live]
-    pub depth: f32,
-    /// f16(tessellator u) | f16(tessellator v); v carries round-cap coverage
-    #[live]
-    pub uv: f32,
+    pub zbias: U16x2,
 }
 
-/// Lifted map roofs keep exact tile-local position and metre height, while
-/// colour and the material/painter-order pair use the same compact encodings
-/// as the ground-fill layout.
-#[derive(Clone, Script, ScriptHook)]
+/// Typed map-road vertex. The deck remains exact `f32`; vertex fetch expands
+/// every compact field to the same logical float values used by the shader.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
 #[repr(C)]
-pub struct RoofVertexPacked {
+pub struct RoadVertexTyped {
     #[live]
-    pub x: f32,
+    pub pos: I16x2,
     #[live]
-    pub y: f32,
-    /// unorm8 r|g|b|a
+    pub off: F16x2,
     #[live]
-    pub color: f32,
-    /// Exact roof height in metres.
+    pub color: UNorm8x4,
+    #[live]
+    pub params: F16x2,
+    #[live]
+    pub deck: f32,
+    #[live]
+    pub depth: F16x2,
+    #[live]
+    pub uv: F16x2,
+}
+
+/// Typed roof vertex. Height stays exact so instanced `f32` walls meet roofs.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct RoofVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub color: UNorm8x4,
     #[live]
     pub height: f32,
-    /// f16(material) | f16(zbias ticks)
     #[live]
-    pub params: f32,
+    pub params: F16x2,
 }
 
 /// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
@@ -368,16 +346,16 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertexPacked);
     let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
     set_script_value!(vm, geom.VectorGeomPacked = vpgen);
-    set_script_value_to_pod!(vm, geom.FillVertexPacked);
-    let fpgen = shared(vm, id!(FillGeomPacked), GeometryGen::from_triangle_2d_fill_packed);
-    set_script_value!(vm, geom.FillGeomPacked = fpgen);
+    set_script_value_to_pod!(vm, geom.FillVertexTyped);
+    let fpgen = shared(vm, id!(FillGeomTyped), GeometryGen::from_triangle_2d_fill_typed);
+    set_script_value!(vm, geom.FillGeomTyped = fpgen);
     // Compact map-road geometry: vertex type + placeholder geom.
-    set_script_value_to_pod!(vm, geom.RoadVertexPacked);
-    let rpgen = shared(vm, id!(RoadGeomPacked), GeometryGen::from_triangle_2d_road_packed);
-    set_script_value!(vm, geom.RoadGeomPacked = rpgen);
-    set_script_value_to_pod!(vm, geom.RoofVertexPacked);
-    let rpgen = shared(vm, id!(RoofGeomPacked), GeometryGen::from_triangle_2d_roof_packed);
-    set_script_value!(vm, geom.RoofGeomPacked = rpgen);
+    set_script_value_to_pod!(vm, geom.RoadVertexTyped);
+    let rpgen = shared(vm, id!(RoadGeomTyped), GeometryGen::from_triangle_2d_road_typed);
+    set_script_value!(vm, geom.RoadGeomTyped = rpgen);
+    set_script_value_to_pod!(vm, geom.RoofVertexTyped);
+    let rpgen = shared(vm, id!(RoofGeomTyped), GeometryGen::from_triangle_2d_roof_typed);
+    set_script_value!(vm, geom.RoofGeomTyped = rpgen);
     // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
     set_script_value_to_pod!(vm, geom.IconVertexPacked);
     let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
@@ -465,56 +443,27 @@ impl GeometryGen {
         g
     }
 
-    pub fn from_triangle_2d_fill_packed() -> GeometryGen {
+    pub fn from_triangle_2d_fill_typed() -> GeometryGen {
         let mut g = Self::default();
-        let logical = [
-            0.0, 0.0, 0.5, 1.0,
-            1.0, 1.0, 1.0, 1.0,
-            1e6, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0,
-            0.0,
-        ];
         for _ in 0..3 {
-            g.vertices.extend_from_slice(
-                &crate::vector::pack_fill_record(&logical).expect("placeholder is a map fill"),
-            );
+            g.vertices.extend_from_slice(&[0.0; 4]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
     }
-    pub fn from_triangle_2d_road_packed() -> GeometryGen {
+    pub fn from_triangle_2d_road_typed() -> GeometryGen {
         let mut g = Self::default();
-        let logical = [
-            0.0, 0.0, 0.5, 1.0,
-            1.0, 1.0, 1.0, 1.0,
-            1e6, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0,
-            0.0,
-        ];
-        let packed = crate::vector::pack_road_vertices(&logical);
         for _ in 0..3 {
-            g.vertices.extend_from_slice(&packed);
+            g.vertices.extend_from_slice(&[0.0; 7]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
     }
 
-    pub fn from_triangle_2d_roof_packed() -> GeometryGen {
+    pub fn from_triangle_2d_roof_typed() -> GeometryGen {
         let mut g = Self::default();
-        let mut logical = [0.0; crate::vector::VECTOR_FLOATS_PER_VERTEX];
-        logical[2] = 0.5;
-        logical[3] = 1.0;
-        logical[4..8].fill(1.0);
-        logical[8] = 1e6;
-        logical[14] = crate::scene_sun::MAT_ROOF;
-        logical[16] = 0.5;
-        logical[17] = 90.0;
         for _ in 0..3 {
-            g.vertices.extend_from_slice(
-                &crate::vector::pack_roof_record(&logical).expect("placeholder is a map roof"),
-            );
+            g.vertices.extend_from_slice(&[0.0; 4]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

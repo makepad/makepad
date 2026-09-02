@@ -1,7 +1,7 @@
 //! Layout proof for compact vertex formats. No GPU.
 
 use crate::makepad_platform::*;
-use super::geometry_gen::VectorVertexPacked;
+use super::geometry_gen::{FillVertexTyped, RoadVertexTyped, RoofVertexTyped, VectorVertexPacked};
 use std::mem::{align_of, offset_of, size_of};
 
 #[repr(C)]
@@ -32,6 +32,9 @@ fn compact_fields_implement_script_traits() {
     assert_script_field::<UNorm8x4>();
     assert_script_field::<SNorm8x4>();
     assert_script_field::<ScriptTypedVertex>();
+    assert_script_field::<FillVertexTyped>();
+    assert_script_field::<RoadVertexTyped>();
+    assert_script_field::<RoofVertexTyped>();
 }
 
 #[test]
@@ -143,11 +146,10 @@ fn attribute_packing_compact_unorm_quad() {
 }
 
 #[test]
-fn mixed_compact_layout_uses_natural_alignment_for_whole_record() {
+fn typed_map_vertex_layouts_match_repr_c_records() {
     let mut inputs = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
     for (id, format) in [
-        (live_id!(x), DrawShaderAttrFormat::F32x1),
-        (live_id!(y), DrawShaderAttrFormat::F32x1),
+        (live_id!(pos), DrawShaderAttrFormat::I16x2),
         (live_id!(off), DrawShaderAttrFormat::F16x2),
         (live_id!(color), DrawShaderAttrFormat::U8x4Norm),
         (live_id!(params), DrawShaderAttrFormat::F16x2),
@@ -160,9 +162,30 @@ fn mixed_compact_layout_uses_natural_alignment_for_whole_record() {
     inputs.finalize();
     assert_eq!(
         inputs.inputs.iter().map(|input| input.byte_offset).collect::<Vec<_>>(),
-        vec![0, 4, 8, 12, 16, 20, 24, 28]
+        vec![0, 4, 8, 12, 16, 20, 24]
     );
-    assert_eq!(inputs.stride_bytes, 32);
+    assert_eq!(inputs.stride_bytes, 28);
+    assert_eq!(size_of::<RoadVertexTyped>(), 28);
+    assert_eq!(align_of::<RoadVertexTyped>(), 4);
+    assert_eq!(offset_of!(RoadVertexTyped, pos), 0);
+    assert_eq!(offset_of!(RoadVertexTyped, off), 4);
+    assert_eq!(offset_of!(RoadVertexTyped, color), 8);
+    assert_eq!(offset_of!(RoadVertexTyped, params), 12);
+    assert_eq!(offset_of!(RoadVertexTyped, deck), 16);
+    assert_eq!(offset_of!(RoadVertexTyped, depth), 20);
+    assert_eq!(offset_of!(RoadVertexTyped, uv), 24);
+
+    assert_eq!(size_of::<FillVertexTyped>(), 16);
+    assert_eq!(offset_of!(FillVertexTyped, pos), 0);
+    assert_eq!(offset_of!(FillVertexTyped, color), 4);
+    assert_eq!(offset_of!(FillVertexTyped, params), 8);
+    assert_eq!(offset_of!(FillVertexTyped, zbias), 12);
+
+    assert_eq!(size_of::<RoofVertexTyped>(), 16);
+    assert_eq!(offset_of!(RoofVertexTyped, pos), 0);
+    assert_eq!(offset_of!(RoofVertexTyped, color), 4);
+    assert_eq!(offset_of!(RoofVertexTyped, height), 8);
+    assert_eq!(offset_of!(RoofVertexTyped, params), 12);
 }
 
 #[test]

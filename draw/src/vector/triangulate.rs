@@ -1,15 +1,21 @@
 use makepad_svg::path::{LineCap, LineJoin, VectorPath};
 use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
+use crate::geometry::geometry_gen::{FillVertexTyped, RoadVertexTyped, RoofVertexTyped};
+use crate::makepad_platform::{F16x2, I16x2, U16x2, UNorm8x4};
 
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
 /// Packed GPU layout: see `pack_vector_record` / VectorVertexPacked.
 pub const VECTOR_PACKED_FLOATS_PER_VERTEX: usize = 12;
-/// Packed map-fill layout: xy, unorm8 colour, f16(code/coverage), depths.
-pub const FILL_PACKED_FLOATS_PER_VERTEX: usize = 5;
-/// Packed map-roof layout: xy, unorm8 colour, exact height, material/depth.
-pub const ROOF_PACKED_FLOATS_PER_VERTEX: usize = 5;
+pub const FILL_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<FillVertexTyped>();
+pub const ROOF_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<RoofVertexTyped>();
 const FILL_PARAM5_STEP: f32 = 0.00001;
-pub const ROAD_PACKED_FLOATS_PER_VERTEX: usize = 8;
+pub const ROAD_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<RoadVertexTyped>();
+
+/// Signed fixed-point units per tile unit for typed map anchors. The road
+/// clip domain `[-3, 259]` occupies `[-192, 16576]`; nearest rounding is at
+/// most 1/128 tile unit, or 0.125 px for a z14 tile viewed at z18 (16x).
+/// The shader uses this same value through a `script_mod!` Rust splice.
+pub const MAP_VERTEX_POSITION_SCALE: f32 = 64.0;
 
 // Road params.x is an exactly representable f16 integer. Its low six bits
 // retain the requested class + 8*material encoding; the upper bits carry the
@@ -116,50 +122,64 @@ pub fn map_fill_variant_code(record: &[f32]) -> Option<f32> {
 }
 
 #[inline]
-fn pack_fill_depths(zbias: f32, param5: f32) -> f32 {
-    let z = (zbias.max(0.0) / VECTOR_ZBIAS_STEP)
-        .round()
-        .min(u16::MAX as f32) as u32;
-    let p = (param5.max(0.0) / FILL_PARAM5_STEP)
-        .round()
-        .min(u16::MAX as f32) as u32;
-    f32::from_bits(z | (p << 16))
+fn pack_position(x: f32, y: f32) -> I16x2 {
+    let x = x * MAP_VERTEX_POSITION_SCALE;
+    let y = y * MAP_VERTEX_POSITION_SCALE;
+    debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&x));
+    debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&y));
+    I16x2::from_f32(x, y)
 }
 
-/// Decode the fixed-point depth pair carried in `FillVertexPacked::zbias`.
-/// Public for precision tests and CPU diagnostics; shaders perform the
-/// equivalent decode via `unpack4u8`.
 #[inline]
-pub fn unpack_fill_depths(value: f32) -> (f32, f32) {
-    let bits = value.to_bits();
+pub fn unpack_typed_position(pos: I16x2) -> (f32, f32) {
     (
-        (bits & 0xffff) as f32 * VECTOR_ZBIAS_STEP,
-        (bits >> 16) as f32 * FILL_PARAM5_STEP,
+        pos.x as f32 / MAP_VERTEX_POSITION_SCALE,
+        pos.y as f32 / MAP_VERTEX_POSITION_SCALE,
     )
 }
 
-/// One logical 19-float ground-fill record -> five GPU slots (20 bytes).
+#[inline]
+fn pack_fill_depths(zbias: f32, param5: f32) -> U16x2 {
+    let z = (zbias.max(0.0) / VECTOR_ZBIAS_STEP)
+        .round()
+        .min(u16::MAX as f32) as u16;
+    let p = (param5.max(0.0) / FILL_PARAM5_STEP)
+        .round()
+        .min(u16::MAX as f32) as u16;
+    U16x2::from_u16(z, p)
+}
+
+/// Decode the fixed-point depth pair carried in `FillVertexTyped::zbias`.
+#[inline]
+pub fn unpack_fill_depths(value: U16x2) -> (f32, f32) {
+    (
+        value.x as f32 * VECTOR_ZBIAS_STEP,
+        value.y as f32 * FILL_PARAM5_STEP,
+    )
+}
+
+/// One logical 19-float ground-fill record -> one 16-byte typed vertex.
 /// Returns `None` for strokes, lifted/decked geometry, gradients and any
 /// shape/material pair not handled by the compact fill shader.
 #[inline]
-pub fn pack_fill_record(record: &[f32]) -> Option<[f32; FILL_PACKED_FLOATS_PER_VERTEX]> {
+pub fn pack_fill_record(record: &[f32]) -> Option<FillVertexTyped> {
     let code = map_fill_variant_code(record)?;
-    Some([
-        record[0],
-        record[1],
-        pack_unorm8x4(record[4], record[5], record[6], record[7]),
-        pack_pair_f16(code, record[2]),
-        pack_fill_depths(record[18], record[16]),
-    ])
+    Some(FillVertexTyped {
+        pos: pack_position(record[0], record[1]),
+        color: UNorm8x4::from_f32(record[4], record[5], record[6], record[7]),
+        params: F16x2::from_f32(code, record[2]),
+        zbias: pack_fill_depths(record[18], record[16]),
+    })
 }
 
-/// Pack a buffer already classified as compact map fills.
-pub fn pack_fill_vertices(vertices: &[f32]) -> Vec<f32> {
+/// Pack a buffer already classified as typed map fills.
+pub fn pack_fill_vertices(vertices: &[f32]) -> Vec<u8> {
     let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
-    let mut out = Vec::with_capacity(count * FILL_PACKED_FLOATS_PER_VERTEX);
+    let mut out = Vec::with_capacity(count * FILL_TYPED_VERTEX_BYTES);
     for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
-        out.extend_from_slice(
-            &pack_fill_record(record).expect("non-fill record in compact map fill stream"),
+        append_fill_vertex(
+            &mut out,
+            pack_fill_record(record).expect("non-fill record in typed map fill stream"),
         );
     }
     out
@@ -169,86 +189,83 @@ pub fn pack_fill_vertices(vertices: &[f32]) -> Vec<f32> {
 /// Road z-bias is stored in these integer `VECTOR_ZBIAS_STEP` ticks.
 pub const ROAD_ZBIAS_MAX_EXACT_TICKS: f32 = 2048.0;
 
-/// Pack logical 19-float map-road records into the eight-slot road layout.
+/// Pack one logical 19-float map-road record into the 28-byte typed layout.
 /// Accepted records are GPU-expandable strokes (shape >= 100) and shape-0
 /// union faces. params.x is class + 8*material plus compact dash (the
 /// `get_stroke_mask` ids 10/11/12 as 1/2/3) and kind (stroke/fill/fringe)
 /// tags. params.y is along-stroke distance for strokes, route-emissive
 /// strength for material 7, and coverage otherwise; the tessellator's
 /// complete u/v pair has its own slot.
-pub fn pack_road_vertices(vertices: &[f32]) -> Vec<f32> {
+pub fn pack_road_record(record: &[f32]) -> RoadVertexTyped {
+    let expanded = record[10] >= EXPAND_STROKE_SHAPE_OFFSET - 0.5;
+    debug_assert!(expanded || record[10].abs() < 0.5);
+    let fringe = record[8] > 1.5e6;
+    let shape_id = if expanded {
+        record[10] - EXPAND_STROKE_SHAPE_OFFSET
+    } else {
+        0.0
+    };
+    let dash = if (shape_id - 10.0).abs() < 0.5 {
+        1.0
+    } else if (shape_id - 11.0).abs() < 0.5 {
+        2.0
+    } else if (shape_id - 12.0).abs() < 0.5 {
+        3.0
+    } else {
+        0.0
+    };
+    let kind = if fringe {
+        ROAD_KIND_FRINGE
+    } else if record[8] > 1e5 {
+        ROAD_KIND_FILL
+    } else {
+        ROAD_KIND_STROKE
+    };
+    let (class, material) = if expanded {
+        (record[14].round().clamp(0.0, 7.0), 0.0)
+    } else {
+        (0.0, record[14].round().clamp(0.0, 7.0))
+    };
+    let meta = class
+        + 8.0 * material
+        + ROAD_PARAM_DASH_SCALE * dash
+        + ROAD_PARAM_KIND_SCALE * kind
+        + if expanded { ROAD_PARAM_EXPANDED_FLAG } else { 0.0 };
+    let aux = if kind == ROAD_KIND_STROKE {
+        record[9]
+    } else if material > 6.5 {
+        record[12]
+    } else if fringe {
+        (record[2] + 1.0).clamp(0.0, 1.0)
+    } else {
+        record[2].clamp(0.0, 1.0)
+    };
+    let (off_x, off_y) = if expanded {
+        (record[12], record[13])
+    } else {
+        (0.0, 0.0)
+    };
+    let zbias_ticks = (record[18] / VECTOR_ZBIAS_STEP).round();
+    debug_assert!(
+        (0.0..=ROAD_ZBIAS_MAX_EXACT_TICKS).contains(&zbias_ticks),
+        "road zbias tick {zbias_ticks} exceeds the exact f16 range"
+    );
+    RoadVertexTyped {
+        pos: pack_position(record[0], record[1]),
+        off: F16x2::from_f32(off_x, off_y),
+        color: UNorm8x4::from_f32(record[4], record[5], record[6], record[7]),
+        params: F16x2::from_f32(meta, aux),
+        deck: record[15],
+        depth: F16x2::from_f32(record[16], zbias_ticks),
+        uv: F16x2::from_f32(record[2], record[3]),
+    }
+}
+
+pub fn pack_road_vertices(vertices: &[f32]) -> Vec<u8> {
     let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
-    let mut out = Vec::with_capacity(count * ROAD_PACKED_FLOATS_PER_VERTEX);
+    let mut out = Vec::with_capacity(count * ROAD_TYPED_VERTEX_BYTES);
     for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
-        let expanded = record[10] >= EXPAND_STROKE_SHAPE_OFFSET - 0.5;
-        debug_assert!(expanded || record[10].abs() < 0.5);
-        let fringe = record[8] > 1.5e6;
-        let shape_id = if expanded {
-            record[10] - EXPAND_STROKE_SHAPE_OFFSET
-        } else {
-            0.0
-        };
-        let dash = if (shape_id - 10.0).abs() < 0.5 {
-            1.0
-        } else if (shape_id - 11.0).abs() < 0.5 {
-            2.0
-        } else if (shape_id - 12.0).abs() < 0.5 {
-            3.0
-        } else {
-            0.0
-        };
-        // Dispatch on the pixel path, not on shape >= 100: morphable union
-        // faces are written as expandable records with stroke_mult = 1e6.
-        let kind = if fringe {
-            ROAD_KIND_FRINGE
-        } else if record[8] > 1e5 {
-            ROAD_KIND_FILL
-        } else {
-            ROAD_KIND_STROKE
-        };
-        let (class, material) = if expanded {
-            (record[14].round().clamp(0.0, 7.0), 0.0)
-        } else {
-            (0.0, record[14].round().clamp(0.0, 7.0))
-        };
-        let meta = class
-            + 8.0 * material
-            + ROAD_PARAM_DASH_SCALE * dash
-            + ROAD_PARAM_KIND_SCALE * kind
-            + if expanded { ROAD_PARAM_EXPANDED_FLAG } else { 0.0 };
-        // Strokes need distance along the path for their dash mask. Fills do
-        // not, so their half-lane remains the explicit coverage carried by
-        // the old road layout. Analytic fringes retain signed u in `uv` and
-        // also expose the convenient 1 -> 0 edge coverage here.
-        let aux = if kind == ROAD_KIND_STROKE {
-            record[9]
-        } else if material > 6.5 {
-            record[12]
-        } else if fringe {
-            (record[2] + 1.0).clamp(0.0, 1.0)
-        } else {
-            record[2].clamp(0.0, 1.0)
-        };
-        let (off_x, off_y) = if expanded {
-            (record[12], record[13])
-        } else {
-            (0.0, 0.0)
-        };
-        let zbias_ticks = (record[18] / VECTOR_ZBIAS_STEP).round();
-        debug_assert!(
-            (0.0..=ROAD_ZBIAS_MAX_EXACT_TICKS).contains(&zbias_ticks),
-            "road zbias tick {zbias_ticks} exceeds the exact f16 range"
-        );
-        out.extend_from_slice(&[
-            record[0],
-            record[1],
-            pack_pair_f16(off_x, off_y),
-            pack_unorm8x4(record[4], record[5], record[6], record[7]),
-            pack_pair_f16(meta, aux),
-            record[15],
-            pack_pair_f16(record[16], zbias_ticks),
-            pack_pair_f16(record[2], record[3]),
-        ]);
+        append_road_vertex(&mut out, pack_road_record(record));
     }
     out
 }
@@ -284,31 +301,140 @@ pub fn is_compact_roof_record(record: &[f32]) -> bool {
         && record[18] / VECTOR_ZBIAS_STEP <= 65504.0
 }
 
-/// One logical lifted shape-0 roof record -> five GPU slots (20 bytes).
+/// One logical lifted shape-0 roof record -> one 16-byte typed vertex.
 #[inline]
-pub fn pack_roof_record(record: &[f32]) -> Option<[f32; ROOF_PACKED_FLOATS_PER_VERTEX]> {
+pub fn pack_roof_record(record: &[f32]) -> Option<RoofVertexTyped> {
     if !is_compact_roof_record(record) {
         return None;
     }
-    Some([
-        record[0],
-        record[1],
-        pack_unorm8x4(record[4], record[5], record[6], record[7]),
-        record[15],
-        pack_pair_f16(record[14], (record[18] / VECTOR_ZBIAS_STEP).round()),
-    ])
+    Some(RoofVertexTyped {
+        pos: pack_position(record[0], record[1]),
+        color: UNorm8x4::from_f32(record[4], record[5], record[6], record[7]),
+        height: record[15],
+        params: F16x2::from_f32(record[14], (record[18] / VECTOR_ZBIAS_STEP).round()),
+    })
 }
 
 /// Pack a buffer already classified as compact map roofs.
-pub fn pack_roof_vertices(vertices: &[f32]) -> Vec<f32> {
+pub fn pack_roof_vertices(vertices: &[f32]) -> Vec<u8> {
     let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
-    let mut out = Vec::with_capacity(count * ROOF_PACKED_FLOATS_PER_VERTEX);
+    let mut out = Vec::with_capacity(count * ROOF_TYPED_VERTEX_BYTES);
     for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
-        out.extend_from_slice(
-            &pack_roof_record(record).expect("non-roof record in compact map roof stream"),
+        append_roof_vertex(
+            &mut out,
+            pack_roof_record(record).expect("non-roof record in typed map roof stream"),
         );
     }
     out
+}
+
+#[inline]
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn push_i16(out: &mut Vec<u8>, value: i16) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn push_f32(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn append_fill_vertex(out: &mut Vec<u8>, vertex: FillVertexTyped) {
+    push_i16(out, vertex.pos.x);
+    push_i16(out, vertex.pos.y);
+    out.extend_from_slice(&vertex.color.0);
+    push_u16(out, vertex.params.x);
+    push_u16(out, vertex.params.y);
+    push_u16(out, vertex.zbias.x);
+    push_u16(out, vertex.zbias.y);
+}
+
+fn append_road_vertex(out: &mut Vec<u8>, vertex: RoadVertexTyped) {
+    push_i16(out, vertex.pos.x);
+    push_i16(out, vertex.pos.y);
+    push_u16(out, vertex.off.x);
+    push_u16(out, vertex.off.y);
+    out.extend_from_slice(&vertex.color.0);
+    push_u16(out, vertex.params.x);
+    push_u16(out, vertex.params.y);
+    push_f32(out, vertex.deck);
+    push_u16(out, vertex.depth.x);
+    push_u16(out, vertex.depth.y);
+    push_u16(out, vertex.uv.x);
+    push_u16(out, vertex.uv.y);
+}
+
+fn append_roof_vertex(out: &mut Vec<u8>, vertex: RoofVertexTyped) {
+    push_i16(out, vertex.pos.x);
+    push_i16(out, vertex.pos.y);
+    out.extend_from_slice(&vertex.color.0);
+    push_f32(out, vertex.height);
+    push_u16(out, vertex.params.x);
+    push_u16(out, vertex.params.y);
+}
+
+#[inline]
+fn read_u16(bytes: &[u8], at: usize) -> u16 {
+    u16::from_ne_bytes([bytes[at], bytes[at + 1]])
+}
+
+#[inline]
+fn read_i16(bytes: &[u8], at: usize) -> i16 {
+    i16::from_ne_bytes([bytes[at], bytes[at + 1]])
+}
+
+#[inline]
+fn read_f32(bytes: &[u8], at: usize) -> f32 {
+    f32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+pub fn decode_fill_vertex(bytes: &[u8]) -> FillVertexTyped {
+    assert!(bytes.len() >= FILL_TYPED_VERTEX_BYTES);
+    FillVertexTyped {
+        pos: I16x2::from_i16(read_i16(bytes, 0), read_i16(bytes, 2)),
+        color: UNorm8x4(bytes[4..8].try_into().unwrap()),
+        params: F16x2 { x: read_u16(bytes, 8), y: read_u16(bytes, 10) },
+        zbias: U16x2::from_u16(read_u16(bytes, 12), read_u16(bytes, 14)),
+    }
+}
+
+pub fn decode_road_vertex(bytes: &[u8]) -> RoadVertexTyped {
+    assert!(bytes.len() >= ROAD_TYPED_VERTEX_BYTES);
+    RoadVertexTyped {
+        pos: I16x2::from_i16(read_i16(bytes, 0), read_i16(bytes, 2)),
+        off: F16x2 { x: read_u16(bytes, 4), y: read_u16(bytes, 6) },
+        color: UNorm8x4(bytes[8..12].try_into().unwrap()),
+        params: F16x2 { x: read_u16(bytes, 12), y: read_u16(bytes, 14) },
+        deck: read_f32(bytes, 16),
+        depth: F16x2 { x: read_u16(bytes, 20), y: read_u16(bytes, 22) },
+        uv: F16x2 { x: read_u16(bytes, 24), y: read_u16(bytes, 26) },
+    }
+}
+
+pub fn decode_roof_vertex(bytes: &[u8]) -> RoofVertexTyped {
+    assert!(bytes.len() >= ROOF_TYPED_VERTEX_BYTES);
+    RoofVertexTyped {
+        pos: I16x2::from_i16(read_i16(bytes, 0), read_i16(bytes, 2)),
+        color: UNorm8x4(bytes[4..8].try_into().unwrap()),
+        height: read_f32(bytes, 8),
+        params: F16x2 { x: read_u16(bytes, 12), y: read_u16(bytes, 14) },
+    }
+}
+
+fn fill_vertex_bytes(vertex: FillVertexTyped) -> [u8; FILL_TYPED_VERTEX_BYTES] {
+    let mut bytes = Vec::with_capacity(FILL_TYPED_VERTEX_BYTES);
+    append_fill_vertex(&mut bytes, vertex);
+    bytes.try_into().unwrap()
+}
+
+fn road_vertex_bytes(vertex: RoadVertexTyped) -> [u8; ROAD_TYPED_VERTEX_BYTES] {
+    let mut bytes = Vec::with_capacity(ROAD_TYPED_VERTEX_BYTES);
+    append_road_vertex(&mut bytes, vertex);
+    bytes.try_into().unwrap()
 }
 
 /// IEEE 754 binary16 decode — inverse of `f16_bits` above.
@@ -372,53 +498,60 @@ fn midpoint_packed_record(a: &[f32], b: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PE
     ]
 }
 
-fn midpoint_fill_packed_record(
-    a: &[f32],
-    b: &[f32],
-) -> [f32; FILL_PACKED_FLOATS_PER_VERTEX] {
+fn midpoint_fill_typed_record(
+    a: &[u8],
+    b: &[u8],
+) -> [u8; FILL_TYPED_VERTEX_BYTES] {
     let m = |x: f32, y: f32| (x + y) * 0.5;
-    let ac = unpack_unorm8x4(a[2]);
-    let bc = unpack_unorm8x4(b[2]);
-    let (acode, aaa) = unpack_pair_f16(a[3]);
-    let (bcode, baa) = unpack_pair_f16(b[3]);
-    let (az, ap) = unpack_fill_depths(a[4]);
-    let (bz, bp) = unpack_fill_depths(b[4]);
-    [
-        m(a[0], b[0]),
-        m(a[1], b[1]),
-        pack_unorm8x4(
-            m(ac[0], bc[0]),
-            m(ac[1], bc[1]),
-            m(ac[2], bc[2]),
-            m(ac[3], bc[3]),
+    let a = decode_fill_vertex(a);
+    let b = decode_fill_vertex(b);
+    let (ax, ay) = unpack_typed_position(a.pos);
+    let (bx, by) = unpack_typed_position(b.pos);
+    let ac = a.color.to_f32();
+    let bc = b.color.to_f32();
+    let ap = a.params.to_f32();
+    let bp = b.params.to_f32();
+    fill_vertex_bytes(FillVertexTyped {
+        pos: pack_position(m(ax, bx), m(ay, by)),
+        color: UNorm8x4::from_f32(
+            m(ac.0, bc.0),
+            m(ac.1, bc.1),
+            m(ac.2, bc.2),
+            m(ac.3, bc.3),
         ),
-        pack_pair_f16(m(acode, bcode), m(aaa, baa)),
-        pack_fill_depths(m(az, bz), m(ap, bp)),
-    ]
+        params: F16x2::from_f32(m(ap.0, bp.0), m(ap.1, bp.1)),
+        zbias: U16x2::from_f32(
+            m(a.zbias.x as f32, b.zbias.x as f32),
+            m(a.zbias.y as f32, b.zbias.y as f32),
+        ),
+    })
 }
 
-fn midpoint_road_record(a: &[f32], b: &[f32]) -> [f32; ROAD_PACKED_FLOATS_PER_VERTEX] {
+fn midpoint_road_record(a: &[u8], b: &[u8]) -> [u8; ROAD_TYPED_VERTEX_BYTES] {
     let m = |x: f32, y: f32| (x + y) * 0.5;
-    let pair = |x: f32, y: f32| {
-        let (x0, x1) = unpack_pair_f16(x);
-        let (y0, y1) = unpack_pair_f16(y);
-        pack_pair_f16(m(x0, y0), m(x1, y1))
+    let pair = |x: F16x2, y: F16x2| {
+        let x = x.to_f32();
+        let y = y.to_f32();
+        F16x2::from_f32(m(x.0, y.0), m(x.1, y.1))
     };
-    let color = |x: f32, y: f32| {
-        let xc = unpack_unorm8x4(x);
-        let yc = unpack_unorm8x4(y);
-        pack_unorm8x4(m(xc[0], yc[0]), m(xc[1], yc[1]), m(xc[2], yc[2]), m(xc[3], yc[3]))
+    let color = |x: UNorm8x4, y: UNorm8x4| {
+        let x = x.to_f32();
+        let y = y.to_f32();
+        UNorm8x4::from_f32(m(x.0, y.0), m(x.1, y.1), m(x.2, y.2), m(x.3, y.3))
     };
-    [
-        m(a[0], b[0]),
-        m(a[1], b[1]),
-        pair(a[2], b[2]),
-        color(a[3], b[3]),
-        pair(a[4], b[4]),
-        m(a[5], b[5]),
-        pair(a[6], b[6]),
-        pair(a[7], b[7]),
-    ]
+    let a = decode_road_vertex(a);
+    let b = decode_road_vertex(b);
+    let (ax, ay) = unpack_typed_position(a.pos);
+    let (bx, by) = unpack_typed_position(b.pos);
+    road_vertex_bytes(RoadVertexTyped {
+        pos: pack_position(m(ax, bx), m(ay, by)),
+        off: pair(a.off, b.off),
+        color: color(a.color, b.color),
+        params: pair(a.params, b.params),
+        deck: m(a.deck, b.deck),
+        depth: pair(a.depth, b.depth),
+        uv: pair(a.uv, b.uv),
+    })
 }
 
 /// Crack-free midpoint refinement of an already-PACKED tile mesh: every
@@ -440,14 +573,15 @@ pub fn subdivide_packed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, ma
 /// therefore stays on the main thread without restoring 19-float records.
 pub fn subdivide_fill_packed_mesh(
     indices: &mut Vec<u32>,
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<u8>,
     max_edge: f32,
 ) {
-    subdivide_packed_mesh_with::<FILL_PACKED_FLOATS_PER_VERTEX>(
+    subdivide_typed_mesh_with::<FILL_TYPED_VERTEX_BYTES>(
         indices,
         vertices,
         max_edge,
-        midpoint_fill_packed_record,
+        |record| unpack_typed_position(decode_fill_vertex(record).pos),
+        midpoint_fill_typed_record,
     );
 }
 
@@ -543,14 +677,96 @@ fn subdivide_packed_mesh_with<const S: usize>(
     }
 }
 
-/// Space-warp refinement for the eight-slot road layout. Subdivision happens
-/// after packing, but offsets, colour, params, deck, depth and uv are all
-/// unpacked/interpolated/repacked so the curved projection remains crack-free.
-pub fn subdivide_road_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, max_edge: f32) {
-    subdivide_packed_mesh_with::<ROAD_PACKED_FLOATS_PER_VERTEX>(
+fn subdivide_typed_mesh_with<const S: usize>(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<u8>,
+    max_edge: f32,
+    position: impl Fn(&[u8]) -> (f32, f32) + Copy,
+    midpoint_record: impl Fn(&[u8], &[u8]) -> [u8; S] + Copy,
+) {
+    use std::collections::HashMap;
+    if indices.is_empty() || vertices.len() < S || max_edge <= 0.0 {
+        return;
+    }
+    let max_edge_sq = max_edge * max_edge;
+    for _pass in 0..12 {
+        let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut out: Vec<u32> = Vec::with_capacity(indices.len());
+        let mut split_any = false;
+        let need_split = |vertices: &[u8], i: u32, j: u32| -> bool {
+            let (vi, vj) = (i as usize * S, j as usize * S);
+            let a = position(&vertices[vi..vi + S]);
+            let b = position(&vertices[vj..vj + S]);
+            (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) > max_edge_sq
+        };
+        for triangle in indices.chunks_exact(3) {
+            let (mut a, mut b, mut c) = (triangle[0], triangle[1], triangle[2]);
+            let (mut sab, mut sbc, mut sca) = (
+                need_split(vertices, a, b),
+                need_split(vertices, b, c),
+                need_split(vertices, c, a),
+            );
+            for _ in 0..2 {
+                let rotate = match (sab, sbc, sca) {
+                    (false, true, _) | (false, false, true) | (true, false, true) => true,
+                    _ => false,
+                };
+                if !rotate {
+                    break;
+                }
+                (a, b, c) = (b, c, a);
+                (sab, sbc, sca) = (sbc, sca, sab);
+            }
+            let mut mid = |i: u32, j: u32, vertices: &mut Vec<u8>| -> u32 {
+                let key = (i.min(j), i.max(j));
+                if let Some(&midpoint) = midpoints.get(&key) {
+                    return midpoint;
+                }
+                let (vi, vj) = (i as usize * S, j as usize * S);
+                let record = midpoint_record(&vertices[vi..vi + S], &vertices[vj..vj + S]);
+                vertices.extend_from_slice(&record);
+                let midpoint = (vertices.len() / S - 1) as u32;
+                midpoints.insert(key, midpoint);
+                midpoint
+            };
+            match (sab, sbc, sca) {
+                (false, false, false) => out.extend_from_slice(&[a, b, c]),
+                (true, false, false) => {
+                    let m = mid(a, b, vertices);
+                    out.extend_from_slice(&[a, m, c, m, b, c]);
+                    split_any = true;
+                }
+                (true, true, false) => {
+                    let m1 = mid(a, b, vertices);
+                    let m2 = mid(b, c, vertices);
+                    out.extend_from_slice(&[a, m1, c, m1, m2, c, m1, b, m2]);
+                    split_any = true;
+                }
+                (true, true, true) => {
+                    let m1 = mid(a, b, vertices);
+                    let m2 = mid(b, c, vertices);
+                    let m3 = mid(c, a, vertices);
+                    out.extend_from_slice(&[a, m1, m3, m1, b, m2, m3, m2, c, m1, m2, m3]);
+                    split_any = true;
+                }
+                _ => out.extend_from_slice(&[a, b, c]),
+            }
+        }
+        *indices = out;
+        if !split_any {
+            break;
+        }
+    }
+}
+
+/// Space-warp refinement for the typed road layout. Subdivision happens
+/// after packing; every record is decoded, interpolated and encoded again.
+pub fn subdivide_road_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_edge: f32) {
+    subdivide_typed_mesh_with::<ROAD_TYPED_VERTEX_BYTES>(
         indices,
         vertices,
         max_edge,
+        |record| unpack_typed_position(decode_road_vertex(record).pos),
         midpoint_road_record,
     );
 }
@@ -560,10 +776,22 @@ mod road_pack_tests {
     use super::*;
 
     #[test]
-    fn road_pack_round_trips_compact_fields() {
+    fn typed_map_anchor_precision_covers_clip_and_z18_overzoom() {
+        for value in [-3.0, -2.987, 0.0, 128.123, 256.25, 259.0] {
+            let packed = pack_position(value, value);
+            let (x, y) = unpack_typed_position(packed);
+            assert!((x - value).abs() <= 1.0 / 128.0 + f32::EPSILON);
+            assert!((y - value).abs() <= 1.0 / 128.0 + f32::EPSILON);
+            assert!((x - value).abs() * 16.0 <= 0.125 + f32::EPSILON);
+        }
+        assert_eq!(pack_position(-3.0, 259.0), I16x2::from_i16(-192, 16_576));
+    }
+
+    #[test]
+    fn road_pack_round_trips_logical_record() {
         let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
-        record[0] = 12.25;
-        record[1] = -3.5;
+        record[0] = 12.251;
+        record[1] = -2.997;
         record[2] = 0.375;
         record[3] = 0.625;
         record[4..8].copy_from_slice(&[0.2, 0.4, 0.6, 0.8]);
@@ -577,23 +805,29 @@ mod road_pack_tests {
         record[18] = 137.0 * VECTOR_ZBIAS_STEP;
 
         let packed = pack_road_vertices(&record);
-        assert_eq!(packed.len(), ROAD_PACKED_FLOATS_PER_VERTEX);
-        assert_eq!(&packed[..2], &record[..2]);
-        assert_eq!(packed[5], record[15]);
-        let (ox, oy) = unpack_pair_f16(packed[2]);
+        assert_eq!(packed.len(), ROAD_TYPED_VERTEX_BYTES);
+        let packed = decode_road_vertex(&packed);
+        let pos = unpack_typed_position(packed.pos);
+        assert!((pos.0 - record[0]).abs() <= 1.0 / 128.0 + f32::EPSILON);
+        assert!((pos.1 - record[1]).abs() <= 1.0 / 128.0 + f32::EPSILON);
+        assert_eq!(packed.deck, record[15]);
+        let (ox, oy) = packed.off.to_f32();
         assert!((ox - record[12]).abs() < 0.002);
         assert!((oy - record[13]).abs() < 0.002);
-        let rgba = unpack_unorm8x4(packed[3]);
-        for (actual, expected) in rgba.into_iter().zip(record[4..8].iter().copied()) {
+        let rgba = packed.color.to_f32();
+        for (actual, expected) in [rgba.0, rgba.1, rgba.2, rgba.3]
+            .into_iter()
+            .zip(record[4..8].iter().copied())
+        {
             assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
         }
-        let (meta, stroke_dist) = unpack_pair_f16(packed[4]);
+        let (meta, stroke_dist) = packed.params.to_f32();
         assert_eq!(meta, 2.0 + ROAD_PARAM_DASH_SCALE * 2.0 + ROAD_PARAM_EXPANDED_FLAG);
         assert_eq!(stroke_dist, record[9]);
-        let (param5, zbias_ticks) = unpack_pair_f16(packed[6]);
+        let (param5, zbias_ticks) = packed.depth.to_f32();
         assert!((param5 - record[16]).abs() < 0.0002);
         assert_eq!(zbias_ticks, 137.0);
-        let (u, v) = unpack_pair_f16(packed[7]);
+        let (u, v) = packed.uv.to_f32();
         assert!((u - record[2]).abs() < 0.001);
         assert!((v - record[3]).abs() < 0.001);
     }
@@ -615,13 +849,13 @@ mod road_pack_tests {
         record[8] = VECTOR_ANALYTIC_FRINGE_STROKE_MULT;
         record[10] = 0.0;
         record[14] = 3.0;
-        let packed = pack_road_vertices(&record);
-        let (meta, coverage) = unpack_pair_f16(packed[4]);
+        let packed = pack_road_record(&record);
+        let (meta, coverage) = packed.params.to_f32();
         assert_eq!(meta, 8.0 * 3.0 + ROAD_PARAM_KIND_SCALE * ROAD_KIND_FRINGE);
         assert_eq!(coverage, 0.0);
-        let (u, v) = unpack_pair_f16(packed[7]);
+        let (u, v) = packed.uv.to_f32();
         assert_eq!((u, v), (-1.0, 0.0));
-        let (ox, oy) = unpack_pair_f16(packed[2]);
+        let (ox, oy) = packed.off.to_f32();
         assert_eq!((ox, oy), (0.0, 0.0));
     }
 
@@ -637,14 +871,13 @@ mod road_pack_tests {
         record[12] = 9.0;
         record[13] = -3.0;
         record[14] = 0.0;
-        let packed = pack_road_vertices(&record);
-        let (ox, oy) = unpack_pair_f16(packed[2]);
+        let packed = pack_road_record(&record);
+        let (ox, oy) = packed.off.to_f32();
         assert_eq!((ox, oy), (0.0, 0.0));
-        let (meta, coverage) = unpack_pair_f16(packed[4]);
+        let (meta, coverage) = packed.params.to_f32();
         assert_eq!(meta, ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
         assert!((coverage - 0.5).abs() < 0.001);
-        let rgba = unpack_unorm8x4(packed[3]);
-        assert!((rgba[0] - 0.9).abs() <= 0.5 / 255.0 + f32::EPSILON);
+        assert!((packed.color.to_f32().0 - 0.9).abs() <= 0.5 / 255.0 + f32::EPSILON);
     }
 
     #[test]
@@ -655,12 +888,85 @@ mod road_pack_tests {
         record[12] = 1.5;
         record[13] = -0.75;
         record[14] = 4.0;
-        let packed = pack_road_vertices(&record);
-        let (ox, oy) = unpack_pair_f16(packed[2]);
+        let packed = pack_road_record(&record);
+        let (ox, oy) = packed.off.to_f32();
         assert!((ox - 1.5).abs() < 0.002);
         assert!((oy + 0.75).abs() < 0.002);
-        let (meta, _) = unpack_pair_f16(packed[4]);
+        let (meta, _) = packed.params.to_f32();
         assert_eq!(meta, 4.0 + ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL + ROAD_PARAM_EXPANDED_FLAG);
+    }
+
+    #[test]
+    fn typed_road_subdivision_decodes_interpolates_and_reencodes() {
+        let mut logical = Vec::new();
+        for (x, y, color) in [(0.0, 0.0, 0.0), (16.0, 0.0, 1.0), (0.0, 16.0, 0.5)] {
+            let mut record = [0.0; VECTOR_FLOATS_PER_VERTEX];
+            record[0] = x;
+            record[1] = y;
+            record[2] = 0.5;
+            record[4..8].copy_from_slice(&[color, color, color, 1.0]);
+            record[8] = 1e6;
+            logical.extend_from_slice(&record);
+        }
+        let mut vertices = pack_road_vertices(&logical);
+        let mut indices = vec![0, 1, 2];
+        subdivide_road_mesh(&mut indices, &mut vertices, 8.0);
+        assert!(vertices.len() > 3 * ROAD_TYPED_VERTEX_BYTES);
+        assert!(indices.len() > 3);
+        for vertex in vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+            let pos = unpack_typed_position(decode_road_vertex(vertex).pos);
+            assert_eq!(pos.0 * MAP_VERTEX_POSITION_SCALE, (pos.0 * MAP_VERTEX_POSITION_SCALE).round());
+            assert_eq!(pos.1 * MAP_VERTEX_POSITION_SCALE, (pos.1 * MAP_VERTEX_POSITION_SCALE).round());
+        }
+    }
+
+    #[test]
+    fn typed_fill_subdivision_decodes_interpolates_and_reencodes() {
+        let mut logical = Vec::new();
+        for (x, y, color) in [(0.0, 0.0, 0.0), (16.0, 0.0, 1.0), (0.0, 16.0, 0.5)] {
+            let mut record = [0.0; VECTOR_FLOATS_PER_VERTEX];
+            record[0] = x;
+            record[1] = y;
+            record[2] = color;
+            record[4..8].copy_from_slice(&[color, color, color, 1.0]);
+            record[8] = 1e6;
+            logical.extend_from_slice(&record);
+        }
+        let mut vertices = pack_fill_vertices(&logical);
+        let mut indices = vec![0, 1, 2];
+        subdivide_fill_packed_mesh(&mut indices, &mut vertices, 8.0);
+        assert!(vertices.len() > 3 * FILL_TYPED_VERTEX_BYTES);
+        assert!(indices.len() > 3);
+
+        let midpoint = vertices
+            .chunks_exact(FILL_TYPED_VERTEX_BYTES)
+            .map(decode_fill_vertex)
+            .find(|vertex| unpack_typed_position(vertex.pos) == (8.0, 0.0))
+            .expect("long edge midpoint");
+        assert!((midpoint.color.to_f32().0 - 0.5).abs() <= 0.5 / 255.0 + f32::EPSILON);
+        assert!((midpoint.params.to_f32().1 - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn typed_roof_byte_stream_keeps_exact_height() {
+        let mut record = [0.0; VECTOR_FLOATS_PER_VERTEX];
+        record[0] = 91.125;
+        record[1] = 37.875;
+        record[2] = 0.5;
+        record[3] = 1.0;
+        record[4..8].copy_from_slice(&[0.25, 0.5, 0.75, 1.0]);
+        record[8] = 1e6;
+        record[14] = crate::scene_sun::MAT_ROOF;
+        record[15] = 123.456;
+        record[16] = 0.8;
+        record[18] = 77.0 * VECTOR_ZBIAS_STEP;
+
+        let bytes = pack_roof_vertices(&record);
+        assert_eq!(bytes.len(), ROOF_TYPED_VERTEX_BYTES);
+        let roof = decode_roof_vertex(&bytes);
+        assert_eq!(unpack_typed_position(roof.pos), (record[0], record[1]));
+        assert_eq!(roof.height, record[15]);
+        assert_eq!(roof.params.to_f32(), (crate::scene_sun::MAT_ROOF, 77.0));
     }
 }
 
