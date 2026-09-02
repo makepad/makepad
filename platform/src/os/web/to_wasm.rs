@@ -569,6 +569,15 @@ pub struct ToWasmStorageResult {
     pub error: String,
 }
 
+#[derive(ToWasm)]
+pub struct ToWasmRenderTextureCapture {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmDataU8,
+    pub error: String,
+}
+
 // Keyboard API
 
 #[derive(ToWasm)]

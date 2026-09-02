@@ -65,9 +65,9 @@ mod nv12_view;
 // slots (EFFECT A | TRANSITION | EFFECT B) above the crossfader, loaded by
 // clicking FX tiles in the browse grid (see fx_slot.rs).
 mod fx_slot;
-// Lazy ANIMATED thumbnails for vjeffect tiles: a hidden slot-mode VjFxView
+// Lazy rendered thumbnails for vjeffect tiles: a hidden slot-mode VjFxView
 // renders each effect offscreen into a declared-cells sheet the grid
-// already knows how to animate (digest-keyed disk cache; see fx_thumbs.rs).
+// already knows how to animate (digest-keyed persistent cache; see fx_thumbs.rs).
 mod fx_thumbs;
 mod import_ui;
 mod pipelines;
@@ -5658,12 +5658,6 @@ const THUMB_TEX_BYTES: usize = fx_thumbs::CELL_W * fx_thumbs::CELL_H * 4;
 /// three thousand tiles must not queue three thousand blob fetches at once.
 const MAX_THUMB_REFETCH: usize = 48;
 
-/// Cached effect sheets handed to the decode lane in one fill tick while
-/// the operator is browsing. Reading a sheet's layout header is ~0.1ms of
-/// UI thread, so a whole page of them costs less than a frame; what stops
-/// this being unbounded is the decode lane's own pending cap.
-const MAX_FX_CACHE_DECODES_PER_TICK: usize = 48;
-
 const DEFAULT_LIGHT_MASTER: f32 = 0.26;
 
 /// UI-owned show state. Keeping this as a small Copy value lets pointer
@@ -6185,14 +6179,14 @@ pub struct App {
     /// resolved (the store's control plane is busy at boot — the observer
     /// reconcile — and a visible grid must not wait behind it).
     #[rust]
-    fx_heads: HashMap<String, (AssetRevisionId, bool)>,
+    fx_heads: HashMap<String, (AssetId, AssetRevisionId, bool)>,
     /// Revisions whose thumbnail bake FAILED — terminal per revision,
     /// mirrored from the render bank so the tile paints the failure.
     #[rust]
     fx_thumb_failed: HashSet<AssetRevisionId>,
     /// Sheet decodes handed to the thumb lane for rendered/cached effect
     /// thumbnails, by submit time — a decode the epoch guard dropped is
-    /// simply asked again a few seconds later (the cache file is idempotent).
+    /// simply asked again a few seconds later (the storage value is idempotent).
     #[rust]
     fx_decode_pending: HashMap<AssetRevisionId, f64>,
     /// EFFECT SLOTS (fx_slot.rs): assignment/arm/knob state for the three
@@ -14824,25 +14818,16 @@ p2 {}
                         if let Some(mut thumbs) =
                             widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
                         {
-                            // The bundled feed may have raced this fetch and
-                            // already baked the revision — a cache hit means
-                            // the sheet exists and a re-render would only
-                            // repaint the same file.
-                            let cached = thumbs.cache_dir().is_some_and(|dir| {
-                                fx_thumbs::cache_path(dir, &revision, transition).exists()
-                            });
-                            if !cached {
-                                thumbs.enqueue(
-                                    cx,
-                                    fx_thumbs::FxThumbJob {
-                                        asset,
-                                        revision,
-                                        title,
-                                        source,
-                                        transition,
-                                    },
-                                );
-                            }
+                            thumbs.enqueue(
+                                cx,
+                                fx_thumbs::FxThumbJob {
+                                    asset,
+                                    revision,
+                                    title,
+                                    source,
+                                    transition,
+                                },
+                            );
                         };
                     }
                     Err(error) => {
@@ -16711,18 +16696,15 @@ p2 {}
                         // republish heal itself.
                         self.thumb_inflight.remove(&revision);
                         // A rendered effect sheet that will not decode is a
-                        // bad cache file: drop it so the renderer writes a
+                        // bad cached value: drop it so the renderer writes a
                         // fresh one instead of resubmitting it forever.
                         if self.fx_decode_pending.remove(&revision).is_some() {
-                            let cache = service::session_config_from_env()
-                                .cache_parent
-                                .join("cache-vjfx-thumbs-30");
-                            let _ = std::fs::remove_file(fx_thumbs::cache_path(
-                                &cache, &revision, false,
-                            ));
-                            let _ = std::fs::remove_file(fx_thumbs::cache_path(
-                                &cache, &revision, true,
-                            ));
+                            let widget = self.ui.widget(cx, ids!(fx_thumbs));
+                            if let Some(mut thumbs) =
+                                widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
+                            {
+                                thumbs.invalidate_cache(cx, revision);
+                            }
                             log!("fx thumb: sheet decode FAILED {revision}: {e}");
                         }
                         if self.trace_thumbs {
@@ -16915,7 +16897,7 @@ p2 {}
         }
     }
 
-    /// Lazy ANIMATED thumbnails for vjeffect tiles (see fx_thumbs.rs).
+    /// Lazy rendered thumbnails for vjeffect tiles (see fx_thumbs.rs).
     ///
     /// Each pump tick: land any freshly rendered sheet in the thumb decode
     /// lane (the same lane store thumbnails ride, so the grid needs no new
@@ -16927,11 +16909,7 @@ p2 {}
     /// after seeding — no catalog paging in the way — and everything else
     /// (livecoded heads, imported or generated docs) bakes via the store
     /// fetch path the moment its tile resolves. A cached sheet decodes
-    /// straight from disk instead of rendering.
-    #[cfg(target_arch = "wasm32")]
-    fn pump_fx_thumbs(&mut self, _cx: &mut Cx) {}
-
-    #[cfg(not(target_arch = "wasm32"))]
+    /// straight from persistent storage instead of rendering.
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
         // THUMB LOAD PROFILE: one line a second from boot until the load
         // settles — which counter stalls IS the diagnosis (heads = the seed
@@ -16975,24 +16953,15 @@ p2 {}
         // resolves, and the thumbnail decode lane.
         self.sync_fill_politeness(performing);
         let widget = self.ui.widget(cx, ids!(fx_thumbs));
-        let (results, failures, render_disabled, cache_dir) = {
+        let (results, failures, render_disabled) = {
             let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() else {
                 return;
             };
-            if thumbs.cache_dir().is_none() {
-                thumbs.set_cache_dir(
-                    service::session_config_from_env()
-                        .cache_parent
-                        .join("cache-vjfx-thumbs-30"),
-                );
-            }
-            let Some(cache_dir) = thumbs.cache_dir().map(Path::to_path_buf) else { return };
             thumbs.set_full_speed(!performing);
             (
                 thumbs.take_results(),
                 thumbs.take_failures(),
                 thumbs.disabled_reason().is_some(),
-                cache_dir,
             )
         };
         // A failed bake is TERMINAL for its revision and the tile says so
@@ -17002,10 +16971,13 @@ p2 {}
             self.grids_dirty = true;
         }
         for sheet in results {
+            if sheet.encode_ms == 0.0 {
+                self.thumb_stats.fx_cache_submitted += 1;
+            }
             self.fx_decode_pending.insert(sheet.revision, now);
             self.decode.submit(DecodeJob::Thumb {
                 revision: sheet.revision,
-                source: sheet.path.into(),
+                source: media::DecodeSource::Bytes(Arc::from(sheet.jpeg)),
                 sheet: Some((sheet.cells, sheet.fps)),
                 legacy_may_be_sheet: false,
                 epoch: self.view_epoch,
@@ -17040,12 +17012,7 @@ p2 {}
                         let alias = crate::effects::seed::preset_alias(head.name);
                         let transition = Self::alias_is_transition(Some(&alias));
                         self.fx_heads
-                            .insert(alias, (head.revision, transition));
-                        if fx_thumbs::cache_path(&cache_dir, &head.revision, transition)
-                            .exists()
-                        {
-                            continue;
-                        }
+                            .insert(alias, (head.asset, head.revision, transition));
                         thumbs.enqueue(
                             cx,
                             fx_thumbs::FxThumbJob {
@@ -17091,7 +17058,7 @@ p2 {}
                     .get(pad)
                     .and_then(|alias| alias.as_ref())
                     .and_then(|alias| self.fx_heads.get(alias))
-                    .map(|(revision, _)| *revision)
+                    .map(|(_, revision, _)| *revision)
             })
             .collect();
         let open_tab = if self.grid_lane.is_effect_lane() {
@@ -17102,99 +17069,12 @@ p2 {}
         if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
             thumbs.set_priority(&visible, open_tab);
         }
-        // Cached sheets are a DISK READ AND A DECODE, not a render: on a
-        // warm relaunch there is no reason to meter them out six a tick.
-        // The lane's own width is the throttle, and the politeness verdict
-        // already narrowed that; here the only budget is the UI thread's,
-        // and reading a sheet's header costs ~0.1ms.
-        let cache_budget = if performing { 6 } else { MAX_FX_CACHE_DECODES_PER_TICK };
-        let mut cache_decodes = 0usize;
-        // THE FEED-DRIVEN WARM PASS, before the catalog is even asked:
-        // every bundled head whose sheet is on disk decodes straight off
-        // the alias -> revision map, visible pads first — the effect grid
-        // paints from prefab + cache alone, seconds before the store's
-        // busy boot (the observer reconcile) lets a single tile resolve.
-        if !self.fx_heads.is_empty() {
-            let visible_aliases: Vec<String> = {
-                let grid = self.ui.widget(cx, ids!(video_grid));
-                let pads = grid.borrow::<VjPadMatrix>();
-                pads.map(|pads| {
-                    (0..40)
-                        .filter_map(|pad| pads.visible_at(pad).map(|e| e.sub.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-            };
-            let mut feed: Vec<(AssetRevisionId, bool)> = Vec::new();
-            let mut in_feed: HashSet<AssetRevisionId> = HashSet::new();
-            for alias in &visible_aliases {
-                if let Some(&(revision, transition)) = self.fx_heads.get(alias) {
-                    if in_feed.insert(revision) {
-                        feed.push((revision, transition));
-                    }
-                }
-            }
-            for (revision, transition) in self.fx_heads.values() {
-                if in_feed.insert(*revision) {
-                    feed.push((*revision, *transition));
-                }
-            }
-            for (revision, transition) in feed {
-                if cache_decodes >= cache_budget {
-                    break;
-                }
-                if self.thumb_anims.contains_key(&revision) {
-                    continue;
-                }
-                if self
-                    .fx_decode_pending
-                    .get(&revision)
-                    .is_some_and(|at| now - at < 3.0)
-                {
-                    continue;
-                }
-                let held = widget
-                    .borrow::<fx_thumbs::VjFxThumbs>()
-                    .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
-                if held {
-                    continue;
-                }
-                let cache = fx_thumbs::cache_path(&cache_dir, &revision, transition);
-                if !cache.exists() {
-                    continue;
-                }
-                let t_read = crate::clock::Instant::now();
-                let layout = std::fs::read(&cache)
-                    .ok()
-                    .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
-                self.thumb_stats.fx_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
-                match layout {
-                    Some((cells, fps)) => {
-                        self.thumb_stats.fx_cache_submitted += 1;
-                        self.fx_decode_pending.insert(revision, now);
-                        self.decode.submit(DecodeJob::Thumb {
-                            revision,
-                            source: cache.into(),
-                            sheet: Some((cells, fps)),
-                            legacy_may_be_sheet: false,
-                            epoch: self.view_epoch,
-                        });
-                        self.thumb_decodes_out += 1;
-                        cache_decodes += 1;
-                    }
-                    None => {
-                        // Unreadable/unstamped cache file: drop it and let
-                        // the render path write a fresh one.
-                        let _ = std::fs::remove_file(&cache);
-                    }
-                }
-            }
-        }
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
         let mut seen: HashSet<AssetId> = HashSet::new();
+        let mut cache_probes = 0usize;
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -17209,7 +17089,7 @@ p2 {}
             if tile.thumb.as_ref().is_some_and(|t| t.anim.is_some()) {
                 continue;
             }
-            if self.thumb_anims.contains_key(&revision) {
+            if self.thumbs.contains_key(&revision) || self.thumb_anims.contains_key(&revision) {
                 continue;
             }
             if self
@@ -17228,42 +17108,15 @@ p2 {}
                 continue;
             }
             let transition = Self::alias_is_transition(tile.alias.as_deref());
-            let cache = fx_thumbs::cache_path(&cache_dir, &revision, transition);
-            if cache.exists() {
-                // A relaunch must not re-render: decode the digest-keyed
-                // sheet straight off disk, bounded per tick.
-                let t_read = crate::clock::Instant::now();
-                let layout = std::fs::read(&cache)
-                    .ok()
-                    .and_then(|png| makepad_asset_importer::anim_icon::read_layout(&png));
-                self.thumb_stats.fx_read_ms += t_read.elapsed().as_secs_f64() * 1000.0;
-                match layout {
-                    Some((cells, fps)) => {
-                        self.thumb_stats.fx_cache_submitted += 1;
-                        ThumbStats::stage_begin(
-                            &mut self.thumb_stats.dec_at,
-                            self.thumb_stats.on,
-                            revision,
-                        );
-                        self.fx_decode_pending.insert(revision, now);
-                        self.decode.submit(DecodeJob::Thumb {
-                            revision,
-                            source: cache.into(),
-                            sheet: Some((cells, fps)),
-                            legacy_may_be_sheet: false,
-                            epoch: self.view_epoch,
-                        });
-                        self.thumb_decodes_out += 1;
-                        cache_decodes += 1;
-                        if cache_decodes >= cache_budget {
-                            break;
-                        }
-                    }
-                    None => {
-                        // Unreadable/unstamped cache file: drop it and let
-                        // the render path write a fresh one next tick.
-                        let _ = std::fs::remove_file(&cache);
-                    }
+            let cache_missed = widget
+                .borrow_mut::<fx_thumbs::VjFxThumbs>()
+                .is_some_and(|mut thumbs| {
+                    thumbs.probe_cache(cx, asset, revision, transition)
+                });
+            if !cache_missed {
+                cache_probes += 1;
+                if cache_probes >= 16 {
+                    break;
                 }
                 continue;
             }
@@ -19497,7 +19350,7 @@ p2 {}
             // baked, fully cached library still trickled onto the grid at
             // catalog-resolve pace.
             if entry.frames.is_empty() {
-                if let Some((revision, _)) = self.fx_heads.get(&alias) {
+                if let Some((_, revision, _)) = self.fx_heads.get(&alias) {
                     if let Some((frames, fps)) = self.thumb_anims.get(revision) {
                         entry.frames = frames.clone();
                         entry.fps = *fps;

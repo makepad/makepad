@@ -41,6 +41,12 @@ impl Texture {
 pub struct CxTexturePool(pub(crate) IdPool<CxTexture>);
 
 impl CxTexturePool {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn id_at_index(&self, index: usize) -> Option<TextureId> {
+        let slot = self.0.pool.get(index)?;
+        (!self.0.is_free(index)).then_some(TextureId(index, slot.generation))
+    }
+
     // Allocates a new texture in the pool, potentially reusing an existing texture slot.
     ///
     /// This method attempts to find a compatible texture slot for reuse. If found, it preserves
