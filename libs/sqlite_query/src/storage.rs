@@ -6,7 +6,7 @@
 //! the same page-oriented API.
 
 use crate::lock::ProcessLock;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,10 +126,57 @@ impl<T: PageStoreSet + ?Sized> PageStoreSet for Arc<T> {
     }
 }
 
+pub const MEMORY_DIRTY_PAGE_BYTES: u64 = 4 * 1024;
+
+#[derive(Default)]
+struct MemoryFileState {
+    bytes: Vec<u8>,
+    dirty_pages: BTreeMap<u64, u64>,
+    mutation_epoch: u64,
+}
+
 #[derive(Default)]
 struct MemoryFile {
-    bytes: Mutex<Vec<u8>>,
+    state: Mutex<MemoryFileState>,
     locks: Mutex<Vec<MemoryLock>>,
+}
+
+/// A coherent copy of one in-memory SQLite sibling.
+///
+/// `dirty_pages` contains 4 KiB page indexes changed at or before
+/// `mutation_epoch`. A durability coordinator may clear precisely those
+/// changes with [`MemoryStoreSet::mark_snapshot_clean`] after its external
+/// commit succeeds; writes that raced the snapshot remain dirty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryStoreSnapshot {
+    pub kind: StoreKind,
+    pub bytes: Vec<u8>,
+    pub dirty_pages: Vec<u64>,
+    pub mutation_epoch: u64,
+}
+
+impl MemoryStoreSnapshot {
+    pub fn logical_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+}
+
+fn dirty_page_range(start: usize, end: usize) -> std::ops::RangeInclusive<u64> {
+    let first = start as u64 / MEMORY_DIRTY_PAGE_BYTES;
+    let last_byte = end.saturating_sub(1).max(start) as u64;
+    first..=last_byte / MEMORY_DIRTY_PAGE_BYTES
+}
+
+impl MemoryFile {
+    fn mutate(&self, range_start: usize, range_end: usize, update: impl FnOnce(&mut Vec<u8>)) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.mutation_epoch = state.mutation_epoch.wrapping_add(1).max(1);
+        let epoch = state.mutation_epoch;
+        for page in dirty_page_range(range_start, range_end) {
+            state.dirty_pages.insert(page, epoch);
+        }
+        update(&mut state.bytes);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -170,8 +217,8 @@ impl PageStore for MemoryPageStore {
         let end = start
             .checked_add(buf.len())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read is too large"))?;
-        let bytes = self.file.bytes.lock().unwrap_or_else(|e| e.into_inner());
-        let src = bytes
+        let state = self.file.state.lock().unwrap_or_else(|e| e.into_inner());
+        let src = state.bytes
             .get(start..end)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "short page-store read"))?;
         buf.copy_from_slice(src);
@@ -190,20 +237,22 @@ impl PageStore for MemoryPageStore {
         let end = start
             .checked_add(data.len())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write is too large"))?;
-        let mut bytes = self.file.bytes.lock().unwrap_or_else(|e| e.into_inner());
-        if bytes.len() < end {
-            bytes.resize(end, 0);
-        }
-        bytes[start..end].copy_from_slice(data);
+        self.file.mutate(start, end, |bytes| {
+            if bytes.len() < end {
+                bytes.resize(end, 0);
+            }
+            bytes[start..end].copy_from_slice(data);
+        });
         Ok(())
     }
 
     fn len(&self) -> io::Result<u64> {
         Ok(self
             .file
-            .bytes
+            .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .bytes
             .len() as u64)
     }
 
@@ -216,11 +265,10 @@ impl PageStore for MemoryPageStore {
         }
         let len = usize::try_from(len)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "length is too large"))?;
-        self.file
-            .bytes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .resize(len, 0);
+        let old_len = self.len()? as usize;
+        self.file.mutate(len.min(old_len), len.max(old_len), |bytes| {
+            bytes.resize(len, 0);
+        });
         Ok(())
     }
 
@@ -294,6 +342,63 @@ impl MemoryStoreSet {
             }),
         }
     }
+
+    /// Snapshot one sibling without exposing its mutable backing allocation.
+    pub fn snapshot(&self, kind: StoreKind) -> io::Result<Option<MemoryStoreSnapshot>> {
+        let file = self
+            .inner
+            .files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&kind)
+            .cloned();
+        let Some(file) = file else { return Ok(None) };
+        let state = file.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(Some(MemoryStoreSnapshot {
+            kind,
+            bytes: state.bytes.clone(),
+            dirty_pages: state.dirty_pages.keys().copied().collect(),
+            mutation_epoch: state.mutation_epoch,
+        }))
+    }
+
+    /// Hydrate or replace one sibling with externally verified bytes.
+    /// Restored bytes are clean: they describe the durable baseline.
+    pub fn restore(&self, kind: StoreKind, bytes: Vec<u8>) -> io::Result<()> {
+        let file = {
+            let mut files = self
+                .inner
+                .files
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            files
+                .entry(kind)
+                .or_insert_with(|| Arc::new(MemoryFile::default()))
+                .clone()
+        };
+        let mut state = file.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.bytes = bytes;
+        state.dirty_pages.clear();
+        state.mutation_epoch = state.mutation_epoch.wrapping_add(1).max(1);
+        Ok(())
+    }
+
+    /// Clear only dirtiness represented by `snapshot`.
+    pub fn mark_snapshot_clean(&self, snapshot: &MemoryStoreSnapshot) -> io::Result<()> {
+        let file = self
+            .inner
+            .files
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&snapshot.kind)
+            .cloned();
+        let Some(file) = file else { return Ok(()) };
+        let mut state = file.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .dirty_pages
+            .retain(|_, epoch| *epoch > snapshot.mutation_epoch);
+        Ok(())
+    }
 }
 
 impl Default for MemoryStoreSet {
@@ -319,10 +424,13 @@ impl PageStoreSet for MemoryStoreSet {
             None => return Ok(None),
         };
         if options.truncate {
-            file.bytes
+            let old_len = file
+                .state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .clear();
+                .bytes
+                .len();
+            file.mutate(0, old_len, Vec::clear);
         }
         let owner = self.inner.next_owner.fetch_add(1, Ordering::Relaxed);
         Ok(Some(Arc::new(MemoryPageStore {
@@ -371,5 +479,31 @@ mod tests {
         assert_eq!(first.len().unwrap(), 11, "locking at 1 GiB grew the store");
         first.unlock(lock_byte, 3).unwrap();
         assert!(second.lock(StoreLock::Shared, lock_byte, 3).unwrap());
+    }
+
+    #[test]
+    fn snapshots_track_pages_epochs_restore_and_precise_cleaning() {
+        let stores = MemoryStoreSet::new();
+        let main = stores
+            .open(StoreKind::Main, StoreOpenOptions::CREATE)
+            .unwrap()
+            .unwrap();
+        main.write_at(0, b"header").unwrap();
+        main.write_at(MEMORY_DIRTY_PAGE_BYTES + 7, b"page-one").unwrap();
+        let first = stores.snapshot(StoreKind::Main).unwrap().unwrap();
+        assert_eq!(first.dirty_pages, vec![0, 1]);
+        assert_eq!(first.logical_len(), MEMORY_DIRTY_PAGE_BYTES + 15);
+
+        main.write_at(MEMORY_DIRTY_PAGE_BYTES * 2, b"newer").unwrap();
+        stores.mark_snapshot_clean(&first).unwrap();
+        let second = stores.snapshot(StoreKind::Main).unwrap().unwrap();
+        assert_eq!(second.dirty_pages, vec![2]);
+        assert!(second.mutation_epoch > first.mutation_epoch);
+
+        let restored = MemoryStoreSet::new();
+        restored.restore(StoreKind::Main, first.bytes.clone()).unwrap();
+        let snapshot = restored.snapshot(StoreKind::Main).unwrap().unwrap();
+        assert_eq!(snapshot.bytes, first.bytes);
+        assert!(snapshot.dirty_pages.is_empty());
     }
 }

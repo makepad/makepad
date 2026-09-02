@@ -18,8 +18,8 @@ use {
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
         storage::{
-            StorageError, StorageList, StorageOp, StorageRequestId, StorageRequestKind,
-            StorageResult, StorageStat,
+            StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
+            StorageRequestKind, StorageResult, StorageStat,
         },
         thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
@@ -307,7 +307,11 @@ impl Cx {
                         continue;
                     };
                     let result = if !tw.error.is_empty() {
-                        Err(StorageError::Backend(tw.error))
+                        Err(if tw.error_kind == 1 {
+                            StorageError::QuotaExceeded(tw.error)
+                        } else {
+                            StorageError::Backend(tw.error)
+                        })
                     } else {
                         Ok(match op {
                             StorageOp::Get | StorageOp::GetRange => StorageResult::Value(
@@ -324,6 +328,10 @@ impl Cx {
                                         | ((tw.length_hi as u64) << 32),
                                 },
                             )),
+                            StorageOp::Estimate => StorageResult::Estimate(StorageEstimate {
+                                usage: tw.usage_lo as u64 | ((tw.usage_hi as u64) << 32),
+                                quota: tw.quota_lo as u64 | ((tw.quota_hi as u64) << 32),
+                            }),
                         })
                     };
                     if let Some(response) =
@@ -1020,6 +1028,13 @@ impl Cx {
                                 key,
                             });
                         }
+                        StorageRequestKind::Estimate => {
+                            self.os.from_wasm(FromWasmStorageEstimate {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                            });
+                        }
                     }
                 }
                 CxOsOp::StorageRequestError {
@@ -1308,6 +1323,7 @@ impl CxOsApi for Cx {
             FromWasmStorageList::to_js_code(),
             FromWasmStorageGetRange::to_js_code(),
             FromWasmStorageStat::to_js_code(),
+            FromWasmStorageEstimate::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
             FromWasmSetVirtualFileLimits::to_js_code(),

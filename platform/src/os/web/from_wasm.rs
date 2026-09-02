@@ -139,6 +139,13 @@ pub struct FromWasmStorageStat {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmStorageEstimate {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmOpenUrl {
     pub url: String,
     pub in_place: bool,

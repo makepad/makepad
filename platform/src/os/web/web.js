@@ -995,6 +995,11 @@ export class WasmWebBrowser extends WasmBridge {
             next: result.next || "",
             length_lo: result.length === undefined ? 0 : result.length >>> 0,
             length_hi: result.length === undefined ? 0 : Math.floor(result.length / 0x100000000),
+            usage_lo: result.usage === undefined ? 0 : result.usage >>> 0,
+            usage_hi: result.usage === undefined ? 0 : Math.floor(result.usage / 0x100000000),
+            quota_lo: result.quota === undefined ? 0 : result.quota >>> 0,
+            quota_hi: result.quota === undefined ? 0 : Math.floor(result.quota / 0x100000000),
+            error_kind: result.error_kind || 0,
             error: result.error || ""
         });
         this.do_wasm_pump();
@@ -1038,7 +1043,10 @@ export class WasmWebBrowser extends WasmBridge {
         })).then(() => {
             this.storage_send_result(args, 1);
         }).catch(error => {
-            this.storage_send_result(args, 1, { error: this.storage_error_text(error) });
+            this.storage_send_result(args, 1, {
+                error: this.storage_error_text(error),
+                error_kind: error && error.name === "QuotaExceededError" ? 1 : 0
+            });
         });
     }
 
@@ -1124,6 +1132,22 @@ export class WasmWebBrowser extends WasmBridge {
                 : { found: true, length: record.value.byteLength });
         }).catch(error => {
             this.storage_send_result(args, 5, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageEstimate(args) {
+        const estimate = navigator.storage && navigator.storage.estimate;
+        if (!estimate) {
+            this.storage_send_result(args, 6, { error: "storage estimate is unavailable" });
+            return;
+        }
+        navigator.storage.estimate().then(result => {
+            this.storage_send_result(args, 6, {
+                usage: Math.max(0, Math.floor(result.usage || 0)),
+                quota: Math.max(0, Math.floor(result.quota || 0))
+            });
+        }).catch(error => {
+            this.storage_send_result(args, 6, { error: this.storage_error_text(error) });
         });
     }
 

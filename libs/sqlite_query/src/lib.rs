@@ -71,7 +71,10 @@ pub use exec::Limits;
 pub use write::Connection;
 pub use pager::{DbHeader, Pager};
 pub use schema::{Column, IndexInfo, Schema, SchemaObject, TableInfo};
-pub use storage::{MemoryPageStore, MemoryStoreSet, PageStore, PageStoreSet, StoreKind, StoreLock, StoreOpenOptions};
+pub use storage::{
+    MemoryPageStore, MemoryStoreSet, MemoryStoreSnapshot, PageStore, PageStoreSet, StoreKind,
+    StoreLock, StoreOpenOptions, MEMORY_DIRTY_PAGE_BYTES,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{FilePageStore, FileStoreSet};
 pub use value::{Affinity, Collation, TextEncoding, TextMode, Value};

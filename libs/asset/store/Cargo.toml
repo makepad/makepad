@@ -16,7 +16,7 @@ native = [
     "dep:makepad-filesystem-watcher",
     "dep:jpeg-encoder",
 ]
-embedded = []
+embedded = ["dep:makepad-platform"]
 
 [lib]
 name = "makepad_asset_store"
@@ -50,6 +50,7 @@ makepad-asset-data = { path = "../data" }
 # watcher (FSEvents / inotify / ReadDirectoryChangesW) and the placeholder
 # thumbnail encoder every publication needs.
 brotli = "8.0"
+makepad-platform = { path = "../../../platform", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-asset-client = { path = "../client", optional = true }

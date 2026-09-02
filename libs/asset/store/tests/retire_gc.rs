@@ -322,15 +322,16 @@ fn a_crash_between_row_delete_and_unlink_leaves_a_consistent_store() {
         doomed_id = id;
         orphan = core.put_blob(b"CRASH-ORPHAN", NOW).unwrap().blob_id;
         core.catalog().retire_asset(&doomed_id, NOW + 1).unwrap();
-        // Simulate the crash window: the sweep's first transaction has
-        // committed (rows deleted, intents recorded) and the process dies
-        // before the unlinks. Reproduce it by hand on the real tables.
-        common::raw::exec(
-            &root.join("catalog.sqlite3"),
-            "INSERT INTO gc_pending_deletes(blob_id, size, queued_ms)
-                SELECT blob_id, size, 1 FROM blobs;
-             DELETE FROM blobs;",
-        );
+        // Simulate the crash window through the catalog-only E1 seam: rows
+        // and intents commit, while physical deletion has not started.
+        core.gc().begin(collect_cfg(false), NOW + 2).unwrap();
+        loop {
+            let step = core.gc().step_catalog(NOW + 2).unwrap();
+            if !step.deletes.is_empty() {
+                assert_eq!(step.deletes.len(), 3);
+                break;
+            }
+        }
     }
     // Restart: recovery resolves every intent, and the objects it unlinked
     // are the ones whose rows were gone.
@@ -359,12 +360,14 @@ fn recovery_keeps_bytes_that_were_re_uploaded_before_the_unlink() {
         core.put_blob(b"RESURRECTED", NOW).unwrap();
         // Crash window as above: row gone, intent recorded, object still on
         // disk.
-        common::raw::exec(
-            &root.join("catalog.sqlite3"),
-            "INSERT INTO gc_pending_deletes(blob_id, size, queued_ms)
-                SELECT blob_id, size, 1 FROM blobs;
-             DELETE FROM blobs;",
-        );
+        core.gc().begin(collect_cfg(false), NOW + 1).unwrap();
+        loop {
+            let step = core.gc().step_catalog(NOW + 1).unwrap();
+            if !step.deletes.is_empty() {
+                assert_eq!(step.deletes.len(), 1);
+                break;
+            }
+        }
     }
     let core = AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
     // Someone uploads the same bytes again before recovery runs: the CAS

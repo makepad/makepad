@@ -89,11 +89,7 @@ pub use core::{
     PublishBatchOutcome, SERVER_SCHEMA_VERSION,
 };
 #[cfg(any(target_arch = "wasm32", feature = "embedded"))]
-pub use embedded::{
-    BlobReadOperation, BlobUpload, CapabilityMode, ChunkProgress, EmbeddedStore, LongOperation,
-    OperationStage, PublishRequest, PublishStage, StoreCapability, StoreError, StoreResult,
-    StoreUnavailable,
-};
+pub use embedded::*;
 pub use error::{ServerError, ServerResult};
 pub use gc::{Gc, GcConfig, GcDeleteIntent, GcPhase, GcStatus, GcStep, PhysicalDelete};
 pub use imports::{ImportEntryRow, ImportReport, Imports};
