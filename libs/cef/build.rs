@@ -20,17 +20,6 @@ fn target_platform() -> Option<&'static str> {
     }
 }
 
-fn parse_api_version(include_dir: &Path) -> Option<String> {
-    let header = fs::read_to_string(include_dir.join("cef_api_versions.h")).ok()?;
-    for line in header.lines() {
-        let line = line.trim();
-        if let Some(value) = line.strip_prefix("#define CEF_API_VERSION_LAST CEF_API_VERSION_") {
-            return Some(value.trim().to_string());
-        }
-    }
-    None
-}
-
 /// `#define CEF_VERSION "138.0.59+g21d63d5+chromium-138.0.7204.306"` from the
 /// prebuilt's own header (authoritative for the binary we link).
 fn parse_cef_version(include_dir: &Path) -> Option<String> {
@@ -81,8 +70,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_PLATFORM");
     println!("cargo:rerun-if-changed=build_support/cef_dist.rs");
     println!("cargo:rerun-if-changed=helper_main_macos.c");
-    println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_13800)");
-    println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_14600)");
 
     // MAKEPAD_CEF_PLATFORM: a dry-run aid — resolve the index for another
     // platform from this host (what WOULD be fetched for linux64, say)
@@ -158,17 +145,6 @@ fn main() {
     );
     if let Some(cef_version) = parse_cef_version(&include_dir) {
         println!("cargo:rustc-env=MAKEPAD_CEF_VERSION={cef_version}");
-    }
-    if let Some(api_version) = parse_api_version(&include_dir) {
-        println!("cargo:rustc-env=MAKEPAD_CEF_API_VERSION={api_version}");
-        if let Ok(api_version_number) = api_version.parse::<u32>() {
-            if api_version_number >= 13800 {
-                println!("cargo:rustc-cfg=makepad_cef_api_ge_13800");
-            }
-            if api_version_number >= 14600 {
-                println!("cargo:rustc-cfg=makepad_cef_api_ge_14600");
-            }
-        }
     }
 
     if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("macos") {

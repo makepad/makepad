@@ -1,13 +1,19 @@
 use crate::{ffi, BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE};
 use libloading::Library;
+#[cfg(target_os = "macos")]
 use makepad_objc_sys::declare::ClassDecl;
+#[cfg(target_os = "macos")]
 use makepad_objc_sys::runtime::{self, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES};
+#[cfg(target_os = "macos")]
 use makepad_objc_sys::{class, msg_send, sel, sel_impl};
 use std::env;
 use std::ffi::{c_char, c_void, CString};
 use std::os::raw::c_int;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::symlink;
+#[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -15,15 +21,18 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(target_os = "macos")]
 extern "C" {
     static NSRunLoopCommonModes: ObjcId;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "Metal", kind = "framework")]
 extern "C" {
     fn MTLCreateSystemDefaultDevice() -> ObjcId;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "IOSurface", kind = "framework")]
 extern "C" {
     fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
@@ -31,6 +40,7 @@ extern "C" {
     fn IOSurfaceGetPixelFormat(surface: *mut c_void) -> u32;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
@@ -38,12 +48,18 @@ extern "C" {
 }
 
 // Metal constants (MTLPixelFormat / MTLTextureType / MTLStorageMode / MTLTextureUsage).
+#[cfg(target_os = "macos")]
 const MTL_PIXEL_FORMAT_BGRA8_UNORM: u64 = 80;
+#[cfg(target_os = "macos")]
 const MTL_TEXTURE_TYPE_2D: u64 = 2;
+#[cfg(target_os = "macos")]
 const MTL_STORAGE_MODE_SHARED: u64 = 0;
+#[cfg(target_os = "macos")]
 const MTL_TEXTURE_USAGE_SHADER_READ: u64 = 1;
+#[cfg(target_os = "macos")]
 const MTL_TEXTURE_USAGE_RENDER_TARGET: u64 = 4;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MTLOrigin {
@@ -52,6 +68,7 @@ struct MTLOrigin {
     z: u64,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MTLSize {
@@ -75,14 +92,18 @@ pub enum RenderMode {
 /// This is the system default device, i.e. the same GPU Makepad renders with;
 /// both sides talk to the same IOSurface memory, so no cross-device transfer
 /// is involved.
+#[cfg(target_os = "macos")]
 struct MetalBlit {
     device: usize,
     queue: usize,
 }
 
+#[cfg(target_os = "macos")]
 unsafe impl Send for MetalBlit {}
+#[cfg(target_os = "macos")]
 unsafe impl Sync for MetalBlit {}
 
+#[cfg(target_os = "macos")]
 impl MetalBlit {
     fn device(&self) -> ObjcId {
         self.device as ObjcId
@@ -93,6 +114,7 @@ impl MetalBlit {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn metal_blit() -> Option<&'static MetalBlit> {
     static METAL: OnceLock<Option<MetalBlit>> = OnceLock::new();
     METAL
@@ -115,6 +137,7 @@ fn metal_blit() -> Option<&'static MetalBlit> {
 
 /// Wrap an IOSurface in a Metal texture on our blit device. Returns a +1
 /// retained MTLTexture (caller releases).
+#[cfg(target_os = "macos")]
 unsafe fn metal_texture_for_iosurface(
     device: ObjcId,
     iosurface: *mut c_void,
@@ -150,6 +173,7 @@ unsafe fn metal_texture_for_iosurface(
 /// The client-owned copy destination for accelerated paints: an IOSurface
 /// created by the embedder (Makepad's `create_iosurface_render_texture`) that
 /// we keep retained, plus a Metal view of it on our blit device.
+#[cfg(target_os = "macos")]
 struct AccelTarget {
     iosurface: usize,
     texture: usize,
@@ -157,8 +181,10 @@ struct AccelTarget {
     height: usize,
 }
 
+#[cfg(target_os = "macos")]
 unsafe impl Send for AccelTarget {}
 
+#[cfg(target_os = "macos")]
 impl Drop for AccelTarget {
     fn drop(&mut self) {
         unsafe {
@@ -194,7 +220,13 @@ struct AccelStats {
     last_copy_height: usize,
 }
 
-const CEF_API_VERSION: c_int = parse_api_version(env!("MAKEPAD_CEF_API_VERSION"));
+/// The API version handed to `cef_api_hash`: the ABI layout the structs in
+/// `ffi.rs` were written for (the 138 distribution's last). A newer libcef
+/// (144, 151, …) keeps serving this layout when asked for it, so one set of
+/// structs works across dists; asking for a dist's own newest version would
+/// misalign `cef_browser_settings_t` (144 inserts `databases`).
+const CEF_API_VERSION: c_int = 13800;
+#[cfg(target_os = "macos")]
 const HELPER_APP_SUFFIXES: [(&str, &str); 5] = [
     ("", ""),
     (" (Alerts)", ".alerts"),
@@ -202,30 +234,25 @@ const HELPER_APP_SUFFIXES: [(&str, &str); 5] = [
     (" (Plugin)", ".plugin"),
     (" (Renderer)", ".renderer"),
 ];
+#[cfg(target_os = "macos")]
 const PKGINFO_CONTENTS: &str = "APPL????";
+#[cfg(target_os = "macos")]
 const RTLD_FIRST: c_int = 0x100;
+#[cfg(target_os = "macos")]
 const EXTERNAL_PUMP_TIMER_PLACEHOLDER: i64 = i32::MAX as i64;
+#[cfg(target_os = "macos")]
 const EXTERNAL_PUMP_MAX_DELAY_MS: i64 = 1000 / 30;
+#[cfg(target_os = "macos")]
 const MOCK_KEYCHAIN_SWITCH: &str = "use-mock-keychain";
 /// Set by measurement (see `use_angle_backend`): `metal` is the lowest-CPU
 /// backend that delivers IOSurfaces; `Some("gl")` was the pre-accelerated
 /// choice; `None` = Chromium's own default.
+#[cfg(target_os = "macos")]
 const DEFAULT_USE_ANGLE: Option<&str> = Some("metal");
+/// Chromium's own default (ANGLE over D3D11) on Windows.
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_USE_ANGLE: Option<&str> = None;
 const FAVICON_MAX_SIZE: u32 = 64;
-
-const fn parse_api_version(value: &str) -> c_int {
-    let bytes = value.as_bytes();
-    let mut out = 0_i32;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte >= b'0' && byte <= b'9' {
-            out = out * 10 + (byte - b'0') as i32;
-        }
-        index += 1;
-    }
-    out
-}
 
 struct CefApi {
     cef_api_hash: unsafe extern "C" fn(version: c_int, entry: c_int) -> *const c_char,
@@ -265,10 +292,21 @@ struct CefApi {
     ) -> c_int,
 }
 
+#[cfg(target_os = "macos")]
 struct RuntimePaths {
     framework_bin: PathBuf,
     framework_dir: PathBuf,
     _resources_dir: PathBuf,
+}
+
+/// The binary distribution as laid out on Windows: `Release/libcef.dll` with
+/// its sibling DLLs (the module dir), `Resources/` with the pak files,
+/// `icudtl.dat` and `locales/`.
+#[cfg(windows)]
+struct RuntimePaths {
+    libcef: PathBuf,
+    module_dir: PathBuf,
+    resources_dir: PathBuf,
 }
 
 struct Runtime {
@@ -285,6 +323,7 @@ struct RuntimeState {
     app: usize,
 }
 
+#[cfg(target_os = "macos")]
 struct SyntheticAppBundle {
     _bundle_dir: PathBuf,
     bundle_executable: PathBuf,
@@ -294,9 +333,18 @@ struct SyntheticAppBundle {
     log_file: PathBuf,
 }
 
+#[cfg(unix)]
 struct MainArgsStorage {
     _args: Vec<CString>,
     _ptrs: Vec<*mut c_char>,
+    main_args: ffi::cef_main_args_t,
+}
+
+/// Windows CEF takes the module handle and reads `GetCommandLineW` itself;
+/// the switches unix passes in argv go in through
+/// `app_on_before_command_line_processing`.
+#[cfg(windows)]
+struct MainArgsStorage {
     main_args: ffi::cef_main_args_t,
 }
 
@@ -312,6 +360,7 @@ struct SharedBrowserState {
     closing: AtomicBool,
     editable_focus: AtomicBool,
     /// Accelerated paint: the copy destination and the frame statistics.
+    #[cfg(target_os = "macos")]
     accel_target: Mutex<Option<AccelTarget>>,
     accel: Mutex<AccelStats>,
     accel_frames: AtomicU64,
@@ -507,6 +556,7 @@ struct AppHandler {
     browser_process_handler: *mut BrowserProcessHandler,
 }
 
+#[cfg(target_os = "macos")]
 struct ExternalPump {
     owner_thread: usize,
     handler: usize,
@@ -556,6 +606,7 @@ unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
     Ok(*symbol)
 }
 
+#[cfg(target_os = "macos")]
 fn framework_dir_for_bundle_executable(executable: &Path) -> Option<PathBuf> {
     let macos_dir = executable.parent()?;
     let contents_dir = macos_dir.parent()?;
@@ -579,6 +630,7 @@ fn framework_dir_for_bundle_executable(executable: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn distribution_runtime_paths() -> RuntimePaths {
     let framework_bin = env::var_os("MAKEPAD_CEF_FRAMEWORK_BIN")
         .map(PathBuf::from)
@@ -596,6 +648,7 @@ fn distribution_runtime_paths() -> RuntimePaths {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn runtime_paths() -> RuntimePaths {
     if let Ok(current_executable) = env::current_exe() {
         if let Some(framework_dir) = framework_dir_for_bundle_executable(&current_executable) {
@@ -614,16 +667,78 @@ fn runtime_paths() -> RuntimePaths {
     distribution_runtime_paths()
 }
 
+#[cfg(target_os = "macos")]
 fn helper_binary_source() -> PathBuf {
     env::var_os("MAKEPAD_CEF_HELPER_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_HELPER_BIN")))
 }
 
+#[cfg(windows)]
+fn runtime_paths() -> RuntimePaths {
+    let dist_dir = env::var_os("MAKEPAD_CEF_DIST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_DIST_DIR")));
+    let module_dir = dist_dir.join("Release");
+    RuntimePaths {
+        libcef: module_dir.join("libcef.dll"),
+        resources_dir: dist_dir.join("Resources"),
+        module_dir,
+    }
+}
+
+/// The Windows distribution keeps `Resources/` (icudtl.dat, the pak files,
+/// locales/) apart from `Release/` (libcef.dll), but libcef looks for them
+/// next to itself — icudtl.dat with no override at all ("Invalid file
+/// descriptor to ICU data received" and a breakpoint otherwise). Link the
+/// resources into the DLL's directory once, so the untouched download is a
+/// working layout.
+#[cfg(windows)]
+fn ensure_flat_layout(paths: &RuntimePaths) -> Result<()> {
+    link_tree(&paths.resources_dir, &paths.module_dir)
+}
+
+/// Every file under `source` appears under `target` (same relative path):
+/// a hard link when the volume allows it, a copy otherwise; files already
+/// there are left alone, so a second call is a cheap walk.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn link_tree(source: &Path, target: &Path) -> Result<()> {
+    std::fs::create_dir_all(target)
+        .map_err(|err| Error::new(format!("failed to create {}: {err}", target.display())))?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|err| Error::new(format!("failed to read {}: {err}", source.display())))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|err| Error::new(format!("failed to read {}: {err}", source.display())))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        if from.is_dir() {
+            link_tree(&from, &to)?;
+            continue;
+        }
+        if to.exists() {
+            continue;
+        }
+        if std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to).map_err(|err| {
+                Error::new(format!(
+                    "failed to place {} at {}: {err}",
+                    from.display(),
+                    to.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn runtime() -> Result<&'static Runtime> {
     static RUNTIME: OnceLock<Result<Runtime>> = OnceLock::new();
     let runtime_result = RUNTIME.get_or_init(|| {
         let paths = runtime_paths();
+        #[cfg(windows)]
+        ensure_flat_layout(&paths)?;
+        #[cfg(target_os = "macos")]
         let library = unsafe {
             libloading::os::unix::Library::open(
                 Some(&paths.framework_bin),
@@ -637,6 +752,19 @@ fn runtime() -> Result<&'static Runtime> {
                 paths.framework_bin.display()
             ))
         })?;
+        // libcef.dll imports chrome_elf.dll and friends from its own
+        // directory, which is not the executable's: search the DLL's
+        // directory as well as the defaults.
+        #[cfg(windows)]
+        let library = unsafe {
+            libloading::os::windows::Library::load_with_flags(
+                &paths.libcef,
+                libloading::os::windows::LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+                    | libloading::os::windows::LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+            .map(Library::from)
+        }
+        .map_err(|err| Error::new(format!("failed to load {}: {err}", paths.libcef.display())))?;
         let api = unsafe {
             CefApi {
                 cef_api_hash: load_symbol(&library, b"cef_api_hash\0")?,
@@ -673,6 +801,7 @@ fn runtime() -> Result<&'static Runtime> {
         .map_err(|err| Error::new(err.to_string()))
 }
 
+#[cfg(target_os = "macos")]
 fn objc_bool(value: bool) -> BOOL {
     if value {
         YES
@@ -681,14 +810,17 @@ fn objc_bool(value: bool) -> BOOL {
     }
 }
 
+#[cfg(target_os = "macos")]
 extern "C" fn cef_is_handling_send_event(_this: &Object, _cmd: Sel) -> BOOL {
     objc_bool(CEF_HANDLING_SEND_EVENT.load(Ordering::Acquire))
 }
 
+#[cfg(target_os = "macos")]
 extern "C" fn cef_set_handling_send_event(_this: &Object, _cmd: Sel, handling: BOOL) {
     CEF_HANDLING_SEND_EVENT.store(handling != NO, Ordering::Release);
 }
 
+#[cfg(target_os = "macos")]
 extern "C" fn cef_application_send_event(this: &Object, _cmd: Sel, event: ObjcId) {
     let previous = CEF_HANDLING_SEND_EVENT.swap(true, Ordering::AcqRel);
     unsafe {
@@ -697,6 +829,7 @@ extern "C" fn cef_application_send_event(this: &Object, _cmd: Sel, event: ObjcId
     CEF_HANDLING_SEND_EVENT.store(previous, Ordering::Release);
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_cef_application_class() -> Result<&'static Class> {
     static APP_CLASS: OnceLock<Result<&'static Class>> = OnceLock::new();
     APP_CLASS
@@ -729,6 +862,7 @@ fn ensure_cef_application_class() -> Result<&'static Class> {
         .map_err(|err| Error::new(err.to_string()))
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_cef_application_patch() -> Result<()> {
     static PATCH_RESULT: OnceLock<Result<()>> = OnceLock::new();
     PATCH_RESULT
@@ -762,8 +896,10 @@ fn ensure_cef_application_patch() -> Result<()> {
         .map_err(|err| Error::new(err.to_string()))
 }
 
+#[cfg(target_os = "macos")]
 static CEF_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "macos")]
 extern "C" fn external_pump_schedule_work(_this: &Object, _cmd: Sel, delay_ms: ObjcId) {
     let delay_ms = if delay_ms.is_null() {
         0
@@ -775,12 +911,14 @@ extern "C" fn external_pump_schedule_work(_this: &Object, _cmd: Sel, delay_ms: O
     }
 }
 
+#[cfg(target_os = "macos")]
 extern "C" fn external_pump_timer_fired(_this: &Object, _cmd: Sel, _timer: ObjcId) {
     if let Ok(pump) = external_pump() {
         pump.handle_timer_timeout();
     }
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_external_pump_class() -> Result<&'static Class> {
     static PUMP_CLASS: OnceLock<Result<&'static Class>> = OnceLock::new();
     PUMP_CLASS
@@ -806,6 +944,7 @@ fn ensure_external_pump_class() -> Result<&'static Class> {
         .map_err(|err| Error::new(err.to_string()))
 }
 
+#[cfg(target_os = "macos")]
 fn external_pump() -> Result<&'static ExternalPump> {
     static EXTERNAL_PUMP: OnceLock<Result<ExternalPump>> = OnceLock::new();
     let result = EXTERNAL_PUMP.get_or_init(|| unsafe {
@@ -829,6 +968,7 @@ fn external_pump() -> Result<&'static ExternalPump> {
     result.as_ref().map_err(|err| Error::new(err.to_string()))
 }
 
+#[cfg(target_os = "macos")]
 impl ExternalPump {
     fn owner_thread(&self) -> ObjcId {
         self.owner_thread as ObjcId
@@ -931,6 +1071,7 @@ impl ExternalPump {
     }
 }
 
+#[cfg(unix)]
 impl MainArgsStorage {
     fn current_process() -> Result<Self> {
         let args_os = env::args_os().collect::<Vec<_>>();
@@ -961,35 +1102,12 @@ impl MainArgsStorage {
             filtered_args.push(arg);
         }
 
-        // ANGLE backend selection. See `use_angle_backend`.
-        if !filtered_args
-            .iter()
-            .skip(1)
-            .any(|arg| arg.to_string_lossy().starts_with("--use-angle="))
-        {
-            if let Some(backend) = use_angle_backend() {
-                filtered_args.push(format!("--use-angle={backend}").into());
-            }
-        }
-        // No phoning home from an embedded page renderer: Chromium's push /
-        // GCM registration, sync and component updates only litter the log
-        // ("Registration response error message: PHONE_REGISTRATION_ERROR").
-        for switch in [
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-component-update",
-            "--disable-features=OptimizationHints,InterestFeedContentSuggestions",
-            // The GCM client still registers with the background-networking
-            // switch on; its endpoints are overridable, so they point at an
-            // unroutable local address instead of Google.
-            "--gcm-checkin-url=http://127.0.0.1:9/checkin",
-            "--gcm-registration-url=http://127.0.0.1:9/register",
-            "--gcm-mcs-endpoint=127.0.0.1:9",
-        ] {
+        for switch in chromium_switches() {
+            let name = switch.split('=').next().unwrap_or(&switch);
             if !filtered_args
                 .iter()
                 .skip(1)
-                .any(|arg| arg.to_string_lossy().starts_with(switch.split('=').next().unwrap()))
+                .any(|arg| arg.to_string_lossy().starts_with(name))
             {
                 filtered_args.push(switch.into());
             }
@@ -1020,6 +1138,103 @@ impl MainArgsStorage {
             main_args,
         })
     }
+}
+
+#[cfg(windows)]
+impl MainArgsStorage {
+    fn current_process() -> Result<Self> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+        }
+        let instance = unsafe { GetModuleHandleW(ptr::null()) };
+        if instance.is_null() {
+            return Err(Error::new("GetModuleHandleW(NULL) returned null"));
+        }
+        Ok(Self {
+            main_args: ffi::cef_main_args_t { instance },
+        })
+    }
+}
+
+/// The Chromium switches every browser process gets unless its command line
+/// already carries them: the ANGLE backend (see `use_angle_backend`) and no
+/// phoning home from an embedded page renderer — Chromium's push / GCM
+/// registration, sync and component updates only litter the log
+/// ("Registration response error message: PHONE_REGISTRATION_ERROR"). The
+/// GCM client still registers with the background-networking switch on; its
+/// endpoints are overridable, so they point at an unroutable local address
+/// instead of Google.
+fn chromium_switches() -> Vec<String> {
+    let mut switches = Vec::new();
+    if let Some(backend) = use_angle_backend() {
+        switches.push(format!("--use-angle={backend}"));
+    }
+    for switch in [
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-component-update",
+        "--disable-features=OptimizationHints,InterestFeedContentSuggestions",
+        "--gcm-checkin-url=http://127.0.0.1:9/checkin",
+        "--gcm-registration-url=http://127.0.0.1:9/register",
+        "--gcm-mcs-endpoint=127.0.0.1:9",
+    ] {
+        switches.push(switch.to_string());
+    }
+    switches
+}
+
+/// The cheap platform setup that must precede the embedder's windows: on
+/// macOS NSApp becomes the CEF-aware subclass and the external pump timer
+/// exists; Windows needs nothing — the embedder's own pump timer drives
+/// `cef_do_message_loop_work`.
+#[cfg(target_os = "macos")]
+fn platform_prepare() -> Result<()> {
+    ensure_cef_application_patch()?;
+    external_pump()?;
+    env::set_var("MallocNanoZone", "0");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn platform_prepare() -> Result<()> {
+    Ok(())
+}
+
+/// CEF asked for `cef_do_message_loop_work` within `delay_ms`
+/// (`on_schedule_message_pump_work`, and our own nudges after init and
+/// browser creation).
+#[cfg(target_os = "macos")]
+fn schedule_pump_work(delay_ms: i64) {
+    if let Ok(pump) = external_pump() {
+        pump.schedule(delay_ms);
+    }
+}
+
+/// No timer of its own on Windows: the embedder pumps at a fixed rate, at
+/// least as often as CEF asks for.
+#[cfg(windows)]
+fn schedule_pump_work(_delay_ms: i64) {}
+
+/// Whether browsers are created with `shared_texture_enabled`: requested and
+/// a Metal blit device exists. Windows paints in software (`on_paint`); the
+/// D3D11 shared-texture interop is not wired up.
+#[cfg(target_os = "macos")]
+fn accelerated_paint_available() -> bool {
+    accelerated_paint_requested() && metal_blit().is_some()
+}
+
+#[cfg(windows)]
+fn accelerated_paint_available() -> bool {
+    false
+}
+
+/// The user's home: `HOME`, or `USERPROFILE` on Windows.
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Whether detailed CEF tracing is enabled.
@@ -1143,21 +1358,12 @@ fn ensure_initialized() -> Result<()> {
         return Err(Error::new("CEF is shutting down"));
     }
 
-    ensure_cef_application_patch()?;
-    external_pump()?;
-    env::set_var("MallocNanoZone", "0");
+    platform_prepare()?;
 
     let args = MainArgsStorage::current_process()?;
     let current_exe = env::current_exe()
         .map_err(|err| Error::new(format!("failed to resolve current executable: {err}")))?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
-    let synthetic_bundle =
-        ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_exe)?;
-    let helper_executable = synthetic_bundle
-        .helper_executable
-        .to_string_lossy()
-        .to_string();
-    let log_file = synthetic_bundle.log_file.to_string_lossy().to_string();
     // A STABLE on-disk profile by default, so cookies/logins/localStorage
     // survive restarts (the per-pid temp dir made every launch incognito:
     // the Google cookie banner on each start). MAKEPAD_CEF_EPHEMERAL=1
@@ -1165,6 +1371,36 @@ fn ensure_initialized() -> Result<()> {
     // the location. Chromium locks the profile, so a second concurrent
     // instance of the same app should run ephemeral.
     let root_cache_path = profile_root_cache_path()?;
+    // macOS: Chromium's subprocesses are the helper app inside the synthetic
+    // bundle. Windows: this executable is its own subprocess — `bootstrap()`
+    // runs `cef_execute_process` before anything else.
+    #[cfg(target_os = "macos")]
+    let (helper_executable, log_file) = {
+        let synthetic_bundle =
+            ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_exe)?;
+        (
+            synthetic_bundle.helper_executable.to_string_lossy().to_string(),
+            synthetic_bundle.log_file.to_string_lossy().to_string(),
+        )
+    };
+    #[cfg(windows)]
+    let (helper_executable, log_file) = (
+        current_exe.to_string_lossy().to_string(),
+        root_cache_path.join("cef.log").to_string_lossy().to_string(),
+    );
+    // The resources sit beside libcef.dll (`ensure_flat_layout`); say so.
+    #[cfg(windows)]
+    let paths = runtime_paths();
+    #[cfg(windows)]
+    let resources_dir = CefString::new(&runtime.api, paths.module_dir.to_string_lossy())?;
+    #[cfg(windows)]
+    let locales_dir =
+        CefString::new(&runtime.api, paths.module_dir.join("locales").to_string_lossy())?;
+    #[cfg(windows)]
+    let (resources_dir_path, locales_dir_path) = (resources_dir.raw(), locales_dir.raw());
+    #[cfg(target_os = "macos")]
+    let (resources_dir_path, locales_dir_path) =
+        (ffi::cef_string_t::default(), ffi::cef_string_t::default());
 
     let browser_subprocess_path = CefString::new(&runtime.api, helper_executable)?;
     let log_file = CefString::new(&runtime.api, log_file)?;
@@ -1193,8 +1429,8 @@ fn ensure_initialized() -> Result<()> {
         log_severity: ffi::LOGSEVERITY_INFO,
         log_items: ffi::LOG_ITEMS_DEFAULT,
         javascript_flags: ffi::cef_string_t::default(),
-        resources_dir_path: ffi::cef_string_t::default(),
-        locales_dir_path: ffi::cef_string_t::default(),
+        resources_dir_path,
+        locales_dir_path,
         ..Default::default()
     };
 
@@ -1220,9 +1456,7 @@ fn ensure_initialized() -> Result<()> {
 
     state.app = app as usize;
     state.initialized = true;
-    if let Ok(pump) = external_pump() {
-        pump.schedule(0);
-    }
+    schedule_pump_work(0);
     Ok(())
 }
 
@@ -1258,7 +1492,7 @@ fn profile_root_cache_path() -> Result<PathBuf> {
             .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
         return Ok(path);
     }
-    let Ok(home) = env::var("HOME") else {
+    let Some(home) = home_dir() else {
         return temp_root_cache_path();
     };
     let exe = env::current_exe()
@@ -1268,11 +1502,14 @@ fn profile_root_cache_path() -> Result<PathBuf> {
         .and_then(|stem| stem.to_str())
         .unwrap_or("makepad-cef")
         .to_string();
-    let path = PathBuf::from(home).join(".makepad-cef").join(&stem);
+    let path = home.join(".makepad-cef").join(&stem);
     std::fs::create_dir_all(&path)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", path.display())))?;
-    // Live-lock check: Chromium's SingletonLock is a symlink "host-pid".
+    // Live-lock check: Chromium's SingletonLock is a symlink "host-pid"
+    // (unix; Windows: `lockfile`, below).
+    #[cfg(unix)]
     let lock = path.join("SingletonLock");
+    #[cfg(unix)]
     if let Ok(target) = std::fs::read_link(&lock) {
         let alive = target
             .to_string_lossy()
@@ -1287,10 +1524,22 @@ fn profile_root_cache_path() -> Result<PathBuf> {
         // Stale lock from a dead process: clear it.
         let _ = std::fs::remove_file(&lock);
     }
+    // Windows: Chromium's ProcessSingleton keeps `lockfile` open (delete-on-
+    // close, no delete sharing) for the profile's lifetime, so it exists
+    // only while a live sibling owns the profile — and cannot be removed
+    // while it does. A stale one removes fine.
+    #[cfg(windows)]
+    {
+        let lock = path.join("lockfile");
+        if lock.exists() && std::fs::remove_file(&lock).is_err() {
+            return temp_root_cache_path();
+        }
+    }
     Ok(path)
 }
 
 /// True when `pid` is alive (signal 0 probe).
+#[cfg(unix)]
 unsafe fn libc_kill_probe(pid: i32) -> bool {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
@@ -1298,6 +1547,7 @@ unsafe fn libc_kill_probe(pid: i32) -> bool {
     kill(pid, 0) == 0
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_symlink(source: &PathBuf, destination: &PathBuf) -> Result<()> {
     if source == destination {
         return Ok(());
@@ -1352,6 +1602,7 @@ fn ensure_symlink(source: &PathBuf, destination: &PathBuf) -> Result<()> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn write_if_changed(path: &PathBuf, content: &str) -> Result<()> {
     match std::fs::read_to_string(path) {
         Ok(existing) if existing == content => return Ok(()),
@@ -1361,6 +1612,7 @@ fn write_if_changed(path: &PathBuf, content: &str) -> Result<()> {
         .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))
 }
 
+#[cfg(target_os = "macos")]
 fn copy_executable(source: &PathBuf, destination: &PathBuf) -> Result<()> {
     if source == destination {
         return Ok(());
@@ -1438,6 +1690,7 @@ fn copy_executable(source: &PathBuf, destination: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn bundle_id_component(name: &str) -> String {
     name.chars()
         .map(|ch| {
@@ -1450,6 +1703,7 @@ fn bundle_id_component(name: &str) -> String {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn main_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1491,6 +1745,7 @@ fn main_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id: &
     )
 }
 
+#[cfg(target_os = "macos")]
 fn helper_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1536,6 +1791,7 @@ fn helper_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id:
     )
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_framework_bundle_layout(
     source_framework_dir: &PathBuf,
     framework_dir: &PathBuf,
@@ -1598,6 +1854,7 @@ fn ensure_framework_bundle_layout(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_synthetic_app_bundle(
     runtime_paths: &RuntimePaths,
     main_executable: &PathBuf,
@@ -1698,6 +1955,7 @@ fn ensure_synthetic_app_bundle(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn is_running_inside_app_bundle(executable: &PathBuf) -> bool {
     let Some(macos_dir) = executable.parent() else {
         return false;
@@ -1731,6 +1989,7 @@ pub fn startup_phases() -> Option<(u128, u128)> {
     Some((bundle_ms, now.saturating_sub(exec_at)))
 }
 
+#[cfg(target_os = "macos")]
 pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
     let current_executable = env::current_exe()
         .map_err(|err| Error::new(format!("failed to resolve current executable: {err}")))?;
@@ -1770,6 +2029,13 @@ pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
     )))
 }
 
+/// Nothing to re-exec into on Windows: Chromium's subprocesses are this
+/// executable.
+#[cfg(windows)]
+pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
+    Ok(())
+}
+
 pub fn initialize() -> Result<()> {
     ensure_initialized()
 }
@@ -1780,10 +2046,7 @@ pub fn initialize() -> Result<()> {
 /// spawn, GPU bring-up) is left to `initialize()` / the first `Browser::new`,
 /// so a window can be on screen first.
 pub fn prepare() -> Result<()> {
-    ensure_cef_application_patch()?;
-    external_pump()?;
-    env::set_var("MallocNanoZone", "0");
-    Ok(())
+    platform_prepare()
 }
 
 /// True once `cef_initialize` has run.
@@ -1977,9 +2240,7 @@ unsafe extern "system" fn browser_process_on_schedule_message_pump_work(
     _self: *mut ffi::cef_browser_process_handler_t,
     delay_ms: i64,
 ) {
-    if let Ok(pump) = external_pump() {
-        pump.schedule(delay_ms);
-    }
+    schedule_pump_work(delay_ms);
 }
 
 unsafe extern "system" fn app_add_ref(self_: *mut ffi::cef_base_ref_counted_t) {
@@ -2033,7 +2294,7 @@ unsafe extern "system" fn app_get_browser_process_handler(
 
 unsafe extern "system" fn app_on_before_command_line_processing(
     _self: *mut ffi::cef_app_t,
-    _process_type: *const ffi::cef_string_t,
+    process_type: *const ffi::cef_string_t,
     command_line: *mut ffi::cef_command_line_t,
 ) {
     if command_line.is_null() {
@@ -2042,12 +2303,81 @@ unsafe extern "system" fn app_on_before_command_line_processing(
     let Ok(runtime) = runtime() else {
         return;
     };
-    let Ok(switch_name) = CefString::new(&runtime.api, MOCK_KEYCHAIN_SWITCH) else {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = process_type;
+        let Ok(switch_name) = CefString::new(&runtime.api, MOCK_KEYCHAIN_SWITCH) else {
+            return;
+        };
+        let switch_name_raw = switch_name.raw();
+        if let Some(append_switch) = (*command_line).append_switch {
+            append_switch(command_line, &switch_name_raw);
+        }
+    }
+    // Windows CEF parses `GetCommandLineW` itself, so the switches unix
+    // hands over in argv are appended here — browser process only (an empty
+    // process type); Chromium forwards what its subprocesses need.
+    #[cfg(windows)]
+    {
+        if !process_type.is_null() && (*process_type).length > 0 {
+            return;
+        }
+        for switch in chromium_switches() {
+            append_chromium_switch(&runtime.api, command_line, &switch, false);
+        }
+        for switch in extra_chromium_switches() {
+            append_chromium_switch(&runtime.api, command_line, &switch, true);
+        }
+    }
+}
+
+/// `--name=value` → `("name", Some("value"))`, `--name` → `("name", None)`;
+/// the first `=` splits, so a value may hold its own.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn split_switch(switch: &str) -> (&str, Option<&str>) {
+    let body = switch.trim_start_matches('-');
+    match body.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (body, None),
+    }
+}
+
+/// `--name` / `--name=value` onto a CEF command line; `replace` overrides a
+/// switch already present (the defaults never do — the command line wins).
+#[cfg(windows)]
+unsafe fn append_chromium_switch(
+    api: &CefApi,
+    command_line: *mut ffi::cef_command_line_t,
+    switch: &str,
+    replace: bool,
+) {
+    let (name, value) = split_switch(switch);
+    let Ok(name) = CefString::new(api, name) else {
         return;
     };
-    let switch_name_raw = switch_name.raw();
-    if let Some(append_switch) = (*command_line).append_switch {
-        append_switch(command_line, &switch_name_raw);
+    let name_raw = name.raw();
+    if !replace {
+        if let Some(has_switch) = (*command_line).has_switch {
+            if has_switch(command_line, &name_raw) != 0 {
+                return;
+            }
+        }
+    }
+    match value {
+        Some(value) => {
+            let Ok(value) = CefString::new(api, value) else {
+                return;
+            };
+            let value_raw = value.raw();
+            if let Some(append_switch_with_value) = (*command_line).append_switch_with_value {
+                append_switch_with_value(command_line, &name_raw, &value_raw);
+            }
+        }
+        None => {
+            if let Some(append_switch) = (*command_line).append_switch {
+                append_switch(command_line, &name_raw);
+            }
+        }
     }
 }
 
@@ -2237,6 +2567,7 @@ unsafe extern "system" fn render_on_paint(
 /// into the client-owned IOSurface the embedder registered with
 /// `Browser::set_accelerated_target`. The blit is waited on: the pool may
 /// hand the same surface to the next frame the moment this returns.
+#[cfg(target_os = "macos")]
 unsafe extern "system" fn render_on_accelerated_paint(
     self_: *mut ffi::cef_render_handler_t,
     browser: *mut ffi::cef_browser_t,
@@ -2730,7 +3061,10 @@ impl RenderHandler {
                 on_popup_show: Some(render_on_popup_show),
                 on_popup_size: Some(render_on_popup_size),
                 on_paint: Some(render_on_paint),
+                #[cfg(target_os = "macos")]
                 on_accelerated_paint: Some(render_on_accelerated_paint),
+                #[cfg(not(target_os = "macos"))]
+                on_accelerated_paint: None,
                 get_touch_handle_size: None,
                 on_touch_handle_state_changed: None,
                 start_dragging: None,
@@ -2893,27 +3227,44 @@ impl Browser {
             load_handler,
             life_span_handler,
         );
-        let accelerated = accelerated_paint_requested() && metal_blit().is_some();
+        let accelerated = accelerated_paint_available();
 
         let url = CefString::new(
             &runtime.api,
             if url.is_empty() { "about:blank" } else { url },
         )?;
+        let bounds = ffi::cef_rect_t {
+            x: 0,
+            y: 0,
+            width: logical.width as c_int,
+            height: logical.height as c_int,
+        };
+        #[cfg(target_os = "macos")]
         let mut window_info = ffi::cef_window_info_t {
             size: std::mem::size_of::<ffi::cef_window_info_t>(),
             window_name: ffi::cef_string_t::default(),
-            bounds: ffi::cef_rect_t {
-                x: 0,
-                y: 0,
-                width: logical.width as c_int,
-                height: logical.height as c_int,
-            },
+            bounds,
             hidden: 0,
             parent_view: ptr::null_mut(),
             windowless_rendering_enabled: 1,
             shared_texture_enabled: accelerated as c_int,
             external_begin_frame_enabled: 0,
             view: ptr::null_mut(),
+            runtime_style: 0,
+        };
+        #[cfg(windows)]
+        let mut window_info = ffi::cef_window_info_t {
+            size: std::mem::size_of::<ffi::cef_window_info_t>(),
+            ex_style: 0,
+            window_name: ffi::cef_string_t::default(),
+            style: 0,
+            bounds,
+            parent_window: ptr::null_mut(),
+            menu: ptr::null_mut(),
+            windowless_rendering_enabled: 1,
+            shared_texture_enabled: accelerated as c_int,
+            external_begin_frame_enabled: 0,
+            window: ptr::null_mut(),
             runtime_style: 0,
         };
         let mut browser_settings = ffi::cef_browser_settings_t {
@@ -2956,9 +3307,7 @@ impl Browser {
             hidden: false,
         };
         let _ = this.resize(width, height, scale_factor);
-        if let Ok(pump) = external_pump() {
-            pump.schedule(0);
-        }
+        schedule_pump_work(0);
         Ok(this)
     }
 
@@ -3008,6 +3357,7 @@ impl Browser {
     /// blank frame) at every step. A newly registered surface starts blank:
     /// `target_frames` counts blits into it, so keep showing the previous one
     /// until it is non-zero.
+    #[cfg(target_os = "macos")]
     pub fn set_accelerated_target(
         &mut self,
         iosurface: *mut c_void,
@@ -3071,6 +3421,7 @@ impl Browser {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     pub fn clear_accelerated_target(&mut self) {
         *self.state.accel_target.lock().unwrap() = None;
     }
@@ -3430,4 +3781,78 @@ pub fn shutdown() {
         }
     }
     state.initialized = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_switch_separates_name_and_value_at_the_first_equals() {
+        assert_eq!(split_switch("--disable-sync"), ("disable-sync", None));
+        assert_eq!(
+            split_switch("--gcm-checkin-url=http://127.0.0.1:9/checkin"),
+            ("gcm-checkin-url", Some("http://127.0.0.1:9/checkin"))
+        );
+        assert_eq!(
+            split_switch("--disable-features=A,B=c"),
+            ("disable-features", Some("A,B=c"))
+        );
+        assert_eq!(split_switch("bare"), ("bare", None));
+    }
+
+    #[test]
+    fn chromium_switches_keep_the_renderer_off_the_network() {
+        let switches = chromium_switches();
+        for expected in [
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-component-update",
+            "--gcm-mcs-endpoint=127.0.0.1:9",
+        ] {
+            assert!(switches.iter().any(|s| s == expected), "missing {expected}");
+        }
+        // Every entry is a well-formed `--switch[=value]`.
+        for switch in &switches {
+            assert!(switch.starts_with("--"), "{switch}");
+            let (name, _) = split_switch(switch);
+            assert!(!name.is_empty() && !name.contains('='), "{switch}");
+        }
+        // The ANGLE backend is a switch exactly when one is configured.
+        let angle = switches.iter().filter(|s| s.starts_with("--use-angle=")).count();
+        assert_eq!(angle, usize::from(use_angle_backend().is_some()));
+    }
+
+    #[test]
+    fn link_tree_places_every_file_and_is_idempotent() {
+        let root = env::temp_dir().join(format!("makepad-cef-link-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("Resources");
+        let target = root.join("Release");
+        std::fs::create_dir_all(source.join("locales")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(source.join("icudtl.dat"), b"icu").unwrap();
+        std::fs::write(source.join("locales").join("en-US.pak"), b"en").unwrap();
+        std::fs::write(target.join("libcef.dll"), b"dll").unwrap();
+
+        link_tree(&source, &target).unwrap();
+        assert_eq!(std::fs::read(target.join("icudtl.dat")).unwrap(), b"icu");
+        assert_eq!(
+            std::fs::read(target.join("locales").join("en-US.pak")).unwrap(),
+            b"en"
+        );
+        assert_eq!(std::fs::read(target.join("libcef.dll")).unwrap(), b"dll");
+
+        // A second walk changes nothing and touches nothing already there.
+        std::fs::write(target.join("icudtl.dat"), b"kept").unwrap();
+        link_tree(&source, &target).unwrap();
+        assert_eq!(std::fs::read(target.join("icudtl.dat")).unwrap(), b"kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn api_version_is_pinned_to_the_ffi_layout() {
+        // `ffi.rs` is the 138 layout; a newer libcef serves it when asked.
+        assert_eq!(CEF_API_VERSION, 13800);
+    }
 }
