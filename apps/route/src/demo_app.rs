@@ -1,6 +1,6 @@
 use crate::{
     clock,
-    nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest},
+    nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest, RouteRequestContext},
     provisioner::MapProvisioner,
     side_panel::{AlongKind, PanelAction, PanelController},
     trip::{Leg, TripModel},
@@ -58,7 +58,7 @@ pub struct App {
     #[rust]
     position: Option<LocationUpdateEvent>,
     #[rust]
-    pending_destination: Option<makepad_map_nav::search::SearchResult>,
+    route_origin: Option<LonLat>,
     #[rust]
     trip: TripModel,
     #[rust]
@@ -70,9 +70,15 @@ pub struct App {
     #[rust]
     reroute_in_flight: bool,
     #[rust]
+    route_generation: u64,
+    #[rust]
+    route_generation_counter: u64,
+    #[rust]
     radar_manifest: Option<RadarManifest>,
     #[rust]
     radar_frames: BTreeMap<i64, Vec<u32>>,
+    #[rust]
+    radar_hires_stamp: Option<String>,
     #[rust]
     rain_enabled: bool,
     #[rust]
@@ -91,6 +97,12 @@ impl App {
         self.started = true;
         let map = self.ui.map_view(cx, ids!(map));
         self.provisioner.ensure_source(cx, &map);
+        if self.route_origin.is_none() {
+            self.route_origin = map
+                .center()
+                .map(|(lon, lat)| LonLat::new(lon, lat))
+                .or_else(|| Some(LonLat::new(AMSTERDAM_CENTER.0, AMSTERDAM_CENTER.1)));
+        }
         self.api = NavApi::new(self.provisioner.api_url());
         cx.start_location_updates();
         self.api
@@ -98,11 +110,21 @@ impl App {
     }
 
     fn current_position(&self, cx: &mut Cx) -> LonLat {
-        self.position
+        choose_route_origin(
+            self.position
             .as_ref()
-            .map(|fix| LonLat::new(fix.lon, fix.lat))
-            .or_else(|| self.ui.map_view(cx, ids!(map)).center().map(|(lon, lat)| LonLat::new(lon, lat)))
-            .unwrap_or_else(|| LonLat::new(AMSTERDAM_CENTER.0, AMSTERDAM_CENTER.1))
+            .map(|fix| LonLat::new(fix.lon, fix.lat)),
+            self.route_origin,
+            self.ui
+                .map_view(cx, ids!(map))
+                .center()
+                .map(|(lon, lat)| LonLat::new(lon, lat)),
+        )
+    }
+
+    fn allocate_route_generation(&mut self) -> u64 {
+        self.route_generation_counter = self.route_generation_counter.wrapping_add(1).max(1);
+        self.route_generation_counter
     }
 
     fn map_center(&self, cx: &mut Cx) -> LonLat {
@@ -136,7 +158,7 @@ impl App {
                     let Some(destination) = self.panel.result(index).cloned() else {
                         continue;
                     };
-                    self.pending_destination = Some(destination.clone());
+                    let generation = self.allocate_route_generation();
                     self.reroute_in_flight = true;
                     self.panel
                         .set_search_status(cx, &self.ui, "Routing on makepad.nl…");
@@ -146,6 +168,10 @@ impl App {
                         from,
                         destination.pos,
                         makepad_map_nav::graph::TravelMode::Car,
+                        RouteRequestContext::Initial {
+                            generation,
+                            destination: destination.clone(),
+                        },
                     );
                     self.api.weather_now(cx, destination.pos);
                 }
@@ -164,7 +190,8 @@ impl App {
                     };
                     self.panel
                         .set_along_status(cx, &self.ui, "Searching along the route…");
-                    self.api.along(cx, route, kinds, 10.0, 50.0, 12);
+                    self.api
+                        .along(cx, route, kinds, 10.0, 50.0, 12, self.route_generation);
                 }
                 PanelAction::Rain(on) => self.set_rain(cx, on),
                 PanelAction::Wind(on) => self.set_wind(cx, on),
@@ -183,9 +210,11 @@ impl App {
             self.panel
                 .set_weather(cx, &self.ui, "Rain radar: loading manifest…");
         } else {
+            self.api.cancel_rain(cx);
             cx.stop_timer(self.radar_timer);
             self.radar_timer = Timer::empty();
             self.radar_frames.clear();
+            self.radar_hires_stamp = None;
             let bbox = self
                 .radar_manifest
                 .as_ref()
@@ -225,15 +254,16 @@ impl App {
     fn handle_api_event(&mut self, cx: &mut Cx, event: NavApiEvent) {
         match event {
             NavApiEvent::Search(results) => self.panel.set_results(cx, &self.ui, results),
-            NavApiEvent::Route(route) => {
+            NavApiEvent::Route { context, route } => {
+                if context.generation() < self.route_generation {
+                    return;
+                }
+                self.api.cancel_along(cx);
                 self.reroute_in_flight = false;
-                let destination = self.pending_destination.take();
+                self.route_generation = context.generation();
                 let from = route.points.first().copied().unwrap_or_else(|| self.current_position(cx));
                 let to = route.points.last().copied().unwrap_or(from);
-                let destination_name = destination
-                    .as_ref()
-                    .map(|result| result.name.clone())
-                    .unwrap_or_else(|| "Destination".to_string());
+                let destination_name = route_destination_name(&context, &self.trip);
                 self.trip = TripModel::from_waypoints(&[
                     ("Current position".to_string(), from.lon, from.lat),
                     (destination_name.clone(), to.lon, to.lat),
@@ -246,13 +276,7 @@ impl App {
                 let points = self.trip.full_polyline();
                 let map = self.ui.map_view(cx, ids!(map));
                 map.set_route(cx, &points);
-                map.set_markers(
-                    cx,
-                    vec![
-                        MapMarker::new(1, from.lon, from.lat, vec4(0.10, 0.55, 0.95, 1.0)),
-                        MapMarker::new(2, to.lon, to.lat, vec4(0.95, 0.30, 0.20, 1.0)),
-                    ],
-                );
+                map.set_markers(cx, endpoint_markers(&route));
                 self.nav_session = Some(NavSession::new(route.clone()));
                 self.nav_started = Some(clock::monotonic_now(cx));
                 self.route = Some(route);
@@ -268,19 +292,17 @@ impl App {
                 self.panel
                     .set_along_status(cx, &self.ui, "Choose chargers or museums.");
             }
-            NavApiEvent::Along(results) => {
-                let markers = results
-                    .iter()
-                    .enumerate()
-                    .map(|(index, result)| {
-                        MapMarker::new(
-                            100 + index as u64,
-                            result.pos.lon,
-                            result.pos.lat,
-                            vec4(0.15, 0.70, 0.35, 1.0),
-                        )
-                    })
-                    .collect();
+            NavApiEvent::Along {
+                route_generation,
+                results,
+            } => {
+                if route_generation != self.route_generation {
+                    return;
+                }
+                let Some(route) = self.route.as_ref() else {
+                    return;
+                };
+                let markers = along_markers(route, &results);
                 self.ui.map_view(cx, ids!(map)).set_markers(cx, markers);
                 let text = if results.is_empty() {
                     "No matching places along this route".to_string()
@@ -313,11 +335,32 @@ impl App {
                 if !self.rain_enabled {
                     return;
                 }
-                self.radar_frames.clear();
-                for minute in manifest.minutes.iter().copied() {
+                if !radar_manifest_compatible(self.radar_manifest.as_ref(), &manifest) {
+                    return;
+                }
+                let new_stamp = update_radar_cache_for_manifest(
+                    self.radar_manifest.as_ref(),
+                    &manifest,
+                    &mut self.radar_frames,
+                    &mut self.radar_hires_stamp,
+                );
+                if new_stamp {
+                    self.api.cancel_radar_frames(cx);
+                    self.ui
+                        .map_view(cx, ids!(map))
+                        .set_rain_now_hires(cx, None);
+                }
+                for minute in manifest
+                    .minutes
+                    .iter()
+                    .copied()
+                    .filter(|minute| !self.radar_frames.contains_key(minute))
+                {
                     self.api.radar_frame(cx, &manifest.stamp, minute, false);
                 }
-                if manifest.minutes.contains(&0) {
+                if manifest.minutes.contains(&0)
+                    && self.radar_hires_stamp.as_deref() != Some(&manifest.stamp)
+                {
                     self.api.radar_frame(cx, &manifest.stamp, 0, true);
                 }
                 self.radar_manifest = Some(manifest);
@@ -328,22 +371,31 @@ impl App {
                 hires,
                 png,
             } => {
-                if !self.rain_enabled {
-                    return;
-                }
-                let Some(manifest) = self
-                    .radar_manifest
-                    .as_ref()
-                    .filter(|manifest| manifest.stamp == stamp)
+                let Some(manifest) = matching_radar_manifest(
+                    self.rain_enabled,
+                    self.radar_manifest.as_ref(),
+                    &stamp,
+                    minute,
+                    hires,
+                )
                 else {
                     return;
                 };
                 let Ok(image) = ImageBuffer::from_png(&png) else {
                     return;
                 };
+                if !radar_dimensions_match(manifest, hires, image.width, image.height) {
+                    self.panel.set_weather(
+                        cx,
+                        &self.ui,
+                        "Rain radar: server image dimensions did not match the manifest.",
+                    );
+                    return;
+                }
                 let map = self.ui.map_view(cx, ids!(map));
                 if hires {
                     map.set_rain_now_hires(cx, Some((image.data, image.width, image.height)));
+                    self.radar_hires_stamp = Some(stamp);
                 } else {
                     self.radar_frames.insert(minute, image.data);
                     map.set_rain_frames(
@@ -366,9 +418,25 @@ impl App {
                 operation,
                 status,
                 message,
+                route_context,
+                route_generation,
+                retrying,
             } => {
-                if operation == ApiOperation::Route && status != Some(503) {
-                    self.reroute_in_flight = false;
+                if operation == ApiOperation::Along
+                    && route_generation != Some(self.route_generation)
+                {
+                    return;
+                }
+                if operation == ApiOperation::Route {
+                    if route_context
+                        .as_ref()
+                        .is_some_and(|context| context.generation() < self.route_generation)
+                    {
+                        return;
+                    }
+                    if !retrying {
+                        self.reroute_in_flight = false;
+                    }
                 }
                 if (matches!(operation, ApiOperation::RadarManifest | ApiOperation::RadarFrame)
                     && !self.rain_enabled)
@@ -403,9 +471,10 @@ impl App {
                     return;
                 }
                 let text = if matches!(operation, ApiOperation::Search | ApiOperation::Route | ApiOperation::Along)
-                    && status == Some(503)
+                    && matches!(status, Some(429 | 503))
+                    && retrying
                 {
-                    format!("{operation:?} service is starting; retrying automatically…")
+                    format!("{operation:?}: {message}; retrying automatically…")
                 } else {
                     format!("{operation:?}: {message}")
                 };
@@ -426,7 +495,9 @@ impl App {
             cx,
             Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
         );
-        if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started) {
+        let reroute = if let (Some(session), Some(started)) =
+            (&mut self.nav_session, self.nav_started)
+        {
             let status = session.update(
                 LonLat::new(fix.lon, fix.lat),
                 (clock::monotonic_now(cx) - started).max(0.0),
@@ -437,16 +508,23 @@ impl App {
                 .partition_point(|distance| *distance < status.progress_m);
             map.set_route_progress(cx, progress);
             if status.needs_reroute && !self.reroute_in_flight {
-                if let Some(destination) = route.points.last().copied() {
-                    self.reroute_in_flight = true;
-                    self.api.route(
-                        cx,
-                        LonLat::new(fix.lon, fix.lat),
-                        destination,
-                        route.mode,
-                    );
-                }
+                route.points.last().copied().map(|destination| (destination, route.mode))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some((destination, mode)) = reroute {
+            let generation = self.allocate_route_generation();
+            self.reroute_in_flight = true;
+            self.api.route(
+                cx,
+                LonLat::new(fix.lon, fix.lat),
+                destination,
+                mode,
+                RouteRequestContext::Reroute { generation },
+            );
         }
     }
 }
@@ -480,9 +558,220 @@ impl AppMain for App {
         }
         if let Event::LocationUpdate(fix) = event {
             self.position = Some(fix.clone());
+            self.route_origin = Some(LonLat::new(fix.lon, fix.lat));
             self.update_location(cx, fix);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+fn choose_route_origin(
+    location: Option<LonLat>,
+    preserved: Option<LonLat>,
+    camera: Option<LonLat>,
+) -> LonLat {
+    location
+        .or(preserved)
+        .or(camera)
+        .unwrap_or_else(|| LonLat::new(AMSTERDAM_CENTER.0, AMSTERDAM_CENTER.1))
+}
+
+fn endpoint_markers(route: &Route) -> Vec<MapMarker> {
+    let Some((from, to)) = route.points.first().zip(route.points.last()) else {
+        return Vec::new();
+    };
+    vec![
+        MapMarker::new(1, from.lon, from.lat, vec4(0.10, 0.55, 0.95, 1.0)),
+        MapMarker::new(2, to.lon, to.lat, vec4(0.95, 0.30, 0.20, 1.0)),
+    ]
+}
+
+fn route_destination_name(context: &RouteRequestContext, trip: &TripModel) -> String {
+    match context {
+        RouteRequestContext::Initial { destination, .. } => destination.name.clone(),
+        RouteRequestContext::Reroute { .. } => trip
+            .stops
+            .last()
+            .map(|stop| stop.name.clone())
+            .unwrap_or_else(|| "Destination".to_string()),
+    }
+}
+
+fn along_markers(route: &Route, results: &[crate::nav_api::AlongResult]) -> Vec<MapMarker> {
+    let mut markers = endpoint_markers(route);
+    markers.extend(results.iter().enumerate().map(|(index, result)| {
+        MapMarker::new(
+            100 + index as u64,
+            result.pos.lon,
+            result.pos.lat,
+            vec4(0.15, 0.70, 0.35, 1.0),
+        )
+    }));
+    markers
+}
+
+fn matching_radar_manifest<'a>(
+    rain_enabled: bool,
+    manifest: Option<&'a RadarManifest>,
+    stamp: &str,
+    minute: i64,
+    hires: bool,
+) -> Option<&'a RadarManifest> {
+    rain_enabled
+        .then_some(manifest)
+        .flatten()
+        .filter(|manifest| {
+            manifest.stamp == stamp
+                && manifest.minutes.contains(&minute)
+                && (!hires || minute == 0)
+        })
+}
+
+fn radar_manifest_compatible(
+    current: Option<&RadarManifest>,
+    incoming: &RadarManifest,
+) -> bool {
+    current.is_none_or(|current| {
+        current.stamp != incoming.stamp
+            || (current.bbox == incoming.bbox
+                && current.display == incoming.display
+                && current.hires_now == incoming.hires_now)
+    })
+}
+
+fn radar_dimensions_match(
+    manifest: &RadarManifest,
+    hires: bool,
+    width: usize,
+    height: usize,
+) -> bool {
+    let expected = if hires {
+        manifest.hires_now
+    } else {
+        manifest.display
+    };
+    (width, height) == expected
+}
+
+fn update_radar_cache_for_manifest(
+    current: Option<&RadarManifest>,
+    incoming: &RadarManifest,
+    frames: &mut BTreeMap<i64, Vec<u32>>,
+    hires_stamp: &mut Option<String>,
+) -> bool {
+    let new_stamp = current.is_none_or(|current| current.stamp != incoming.stamp);
+    if new_stamp {
+        frames.clear();
+        *hires_stamp = None;
+    } else {
+        frames.retain(|minute, _| incoming.minutes.contains(minute));
+    }
+    new_stamp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_preview_camera_does_not_replace_preserved_route_origin() {
+        let origin = LonLat::new(4.8952, 52.3702);
+        let preview_destination = LonLat::new(5.1214, 52.0872);
+        assert_eq!(
+            choose_route_origin(None, Some(origin), Some(preview_destination)),
+            origin
+        );
+    }
+
+    #[test]
+    fn radar_images_must_match_their_manifest_quality_exactly() {
+        let manifest = RadarManifest {
+            stamp: "stamp".to_string(),
+            bbox: (0.0, 48.0, 10.0, 56.0),
+            minutes: vec![0],
+            display: (1024, 1280),
+            hires_now: (2048, 2560),
+        };
+        assert!(radar_dimensions_match(&manifest, false, 1024, 1280));
+        assert!(radar_dimensions_match(&manifest, true, 2048, 2560));
+        assert!(!radar_dimensions_match(&manifest, false, 2048, 2560));
+    }
+
+    #[test]
+    fn same_stamp_manifest_retains_downloaded_frames() {
+        let manifest = RadarManifest {
+            stamp: "stamp".to_string(),
+            bbox: (0.0, 48.0, 10.0, 56.0),
+            minutes: vec![0, 5],
+            display: (1, 1),
+            hires_now: (1, 1),
+        };
+        let mut frames = BTreeMap::from([(0, vec![1]), (10, vec![2])]);
+        let mut hires_stamp = Some("stamp".to_string());
+        assert!(!update_radar_cache_for_manifest(
+            Some(&manifest),
+            &manifest,
+            &mut frames,
+            &mut hires_stamp,
+        ));
+        assert!(frames.contains_key(&0));
+        assert!(!frames.contains_key(&10));
+        assert_eq!(hires_stamp.as_deref(), Some("stamp"));
+    }
+
+    #[test]
+    fn disabled_rain_rejects_matching_in_flight_frames() {
+        let manifest = RadarManifest {
+            stamp: "stamp".to_string(),
+            bbox: (0.0, 48.0, 10.0, 56.0),
+            minutes: vec![0],
+            display: (1, 1),
+            hires_now: (1, 1),
+        };
+        assert!(matching_radar_manifest(false, Some(&manifest), "stamp", 0, false).is_none());
+        assert!(matching_radar_manifest(true, Some(&manifest), "old", 0, false).is_none());
+        assert!(matching_radar_manifest(true, Some(&manifest), "stamp", 5, false).is_none());
+        assert!(matching_radar_manifest(true, Some(&manifest), "stamp", 0, false).is_some());
+    }
+
+    #[test]
+    fn along_markers_keep_route_endpoints() {
+        let route = Route {
+            mode: makepad_map_nav::graph::TravelMode::Car,
+            points: vec![LonLat::new(4.0, 52.0), LonLat::new(5.0, 52.1)],
+            cum_dist_m: vec![0.0, 1.0],
+            length_m: 1.0,
+            duration_s: 1.0,
+            maneuvers: Vec::new(),
+        };
+        let results = vec![crate::nav_api::AlongResult {
+            name: "Charger".to_string(),
+            kind: "charger".to_string(),
+            pos: LonLat::new(4.5, 52.05),
+            km_along: 0.5,
+            detour_min: 1.0,
+            extra: String::new(),
+        }];
+        let markers = along_markers(&route, &results);
+        assert_eq!(
+            markers.iter().map(|marker| marker.id).collect::<Vec<_>>(),
+            vec![1, 2, 100]
+        );
+    }
+
+    #[test]
+    fn reroute_keeps_the_active_destination_name() {
+        let trip = TripModel::from_waypoints(&[
+            ("Origin".to_string(), 4.0, 52.0),
+            ("Utrecht".to_string(), 5.1, 52.1),
+        ]);
+        assert_eq!(
+            route_destination_name(
+                &RouteRequestContext::Reroute { generation: 2 },
+                &trip,
+            ),
+            "Utrecht"
+        );
     }
 }

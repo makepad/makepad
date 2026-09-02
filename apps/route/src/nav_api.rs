@@ -15,6 +15,15 @@ use std::collections::HashMap;
 
 const REQUEST_TIMEOUT_SECONDS: f64 = 20.0;
 const MAX_RETRY_SECONDS: f64 = 30.0;
+const MAX_SEARCH_RESULTS: usize = 20;
+const MAX_ROUTE_POINTS: usize = 20_000;
+const MAX_ALONG_RESULTS: usize = 30;
+const MAX_WEATHER_SAMPLES: usize = 64;
+const MAX_RADAR_FRAMES: usize = 64;
+const MAX_RADAR_DIMENSION: usize = 8_192;
+const MAX_RADAR_PIXELS: usize = 32 * 1024 * 1024;
+const MAX_WIND_DIMENSION: usize = 2_048;
+const MAX_WIND_CELLS: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiOperation {
@@ -25,6 +34,25 @@ pub enum ApiOperation {
     RadarManifest,
     RadarFrame,
     Wind,
+}
+
+#[derive(Clone, Debug)]
+pub enum RouteRequestContext {
+    Initial {
+        generation: u64,
+        destination: SearchResult,
+    },
+    Reroute {
+        generation: u64,
+    },
+}
+
+impl RouteRequestContext {
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Initial { generation, .. } | Self::Reroute { generation } => *generation,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,8 +101,14 @@ pub struct WindField {
 #[derive(Debug)]
 pub enum NavApiEvent {
     Search(Vec<SearchResult>),
-    Route(Route),
-    Along(Vec<AlongResult>),
+    Route {
+        context: RouteRequestContext,
+        route: Route,
+    },
+    Along {
+        route_generation: u64,
+        results: Vec<AlongResult>,
+    },
     Weather(WeatherNow),
     RadarManifest(RadarManifest),
     RadarFrame {
@@ -88,14 +122,17 @@ pub enum NavApiEvent {
         operation: ApiOperation,
         status: Option<u16>,
         message: String,
+        route_context: Option<RouteRequestContext>,
+        route_generation: Option<u64>,
+        retrying: bool,
     },
 }
 
 #[derive(Clone, Debug)]
 enum PendingRequest {
     Search,
-    Route,
-    Along,
+    Route(RouteRequestContext),
+    Along { route_generation: u64 },
     Weather,
     RadarManifest,
     RadarFrame {
@@ -124,12 +161,26 @@ impl PendingRequest {
     fn operation(&self) -> ApiOperation {
         match self {
             Self::Search => ApiOperation::Search,
-            Self::Route => ApiOperation::Route,
-            Self::Along => ApiOperation::Along,
+            Self::Route(_) => ApiOperation::Route,
+            Self::Along { .. } => ApiOperation::Along,
             Self::Weather => ApiOperation::Weather,
             Self::RadarManifest => ApiOperation::RadarManifest,
             Self::RadarFrame { .. } => ApiOperation::RadarFrame,
             Self::Wind => ApiOperation::Wind,
+        }
+    }
+
+    fn route_context(&self) -> Option<RouteRequestContext> {
+        match self {
+            Self::Route(context) => Some(context.clone()),
+            _ => None,
+        }
+    }
+
+    fn route_generation(&self) -> Option<u64> {
+        match self {
+            Self::Along { route_generation } => Some(*route_generation),
+            _ => None,
         }
     }
 }
@@ -235,7 +286,14 @@ impl NavApi {
         self.send(cx, PendingRequest::Search, json_request(url, HttpMethod::GET));
     }
 
-    pub fn route(&mut self, cx: &mut Cx, from: LonLat, to: LonLat, mode: TravelMode) {
+    pub fn route(
+        &mut self,
+        cx: &mut Cx,
+        from: LonLat,
+        to: LonLat,
+        mode: TravelMode,
+        context: RouteRequestContext,
+    ) {
         if !valid_point(from) || !valid_point(to) {
             return;
         }
@@ -248,7 +306,11 @@ impl NavApi {
             "{}/route?from={:.7},{:.7}&to={:.7},{:.7}&mode={mode}",
             self.base_url, from.lon, from.lat, to.lon, to.lat
         );
-        self.send(cx, PendingRequest::Route, json_request(url, HttpMethod::GET));
+        self.send(
+            cx,
+            PendingRequest::Route(context),
+            json_request(url, HttpMethod::GET),
+        );
     }
 
     pub fn along(
@@ -259,6 +321,7 @@ impl NavApi {
         max_detour_min: f64,
         min_kw: f64,
         limit: usize,
+        route_generation: u64,
     ) {
         let body = along_request_json(
             route,
@@ -269,7 +332,7 @@ impl NavApi {
         );
         let mut request = json_request(format!("{}/along", self.base_url), HttpMethod::POST);
         request.set_body_string(&body);
-        self.send(cx, PendingRequest::Along, request);
+        self.send(cx, PendingRequest::Along { route_generation }, request);
     }
 
     pub fn weather_now(&mut self, cx: &mut Cx, at: LonLat) {
@@ -286,6 +349,9 @@ impl NavApi {
     }
 
     pub fn radar_frame(&mut self, cx: &mut Cx, stamp: &str, minute: i64, hires: bool) {
+        if self.has_radar_frame_request(stamp, minute, hires) {
+            return;
+        }
         let quality = if hires { "hires" } else { "display" };
         let url = format!(
             "{}/radar/frame?stamp={}&minute={minute}&quality={quality}",
@@ -311,6 +377,34 @@ impl NavApi {
         );
     }
 
+    pub fn cancel_radar_frames(&mut self, cx: &mut Cx) {
+        self.cancel_operation(cx, ApiOperation::RadarFrame);
+    }
+
+    pub fn cancel_along(&mut self, cx: &mut Cx) {
+        self.cancel_operation(cx, ApiOperation::Along);
+    }
+
+    pub fn cancel_rain(&mut self, cx: &mut Cx) {
+        self.cancel_operation(cx, ApiOperation::RadarManifest);
+        self.cancel_radar_frames(cx);
+    }
+
+    fn has_radar_frame_request(&self, stamp: &str, minute: i64, hires: bool) -> bool {
+        let matches = |request: &PendingRequest| {
+            matches!(
+                request,
+                PendingRequest::RadarFrame {
+                    stamp: pending_stamp,
+                    minute: pending_minute,
+                    hires: pending_hires,
+                } if pending_stamp == stamp && *pending_minute == minute && *pending_hires == hires
+            )
+        };
+        self.pending.values().any(|call| matches(&call.request_kind))
+            || self.retries.iter().any(|call| matches(&call.request_kind))
+    }
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<NavApiEvent> {
         let timed_out = self
             .pending
@@ -321,10 +415,15 @@ impl NavApi {
         let mut events = Vec::new();
         for request_id in timed_out {
             if let Some(call) = self.pending.remove(&request_id) {
+                let route_context = call.request_kind.route_context();
+                let route_generation = call.request_kind.route_generation();
                 events.push(NavApiEvent::Failed {
                     operation: call.request_kind.operation(),
                     status: None,
                     message: "request timed out".to_string(),
+                    route_context,
+                    route_generation,
+                    retrying: false,
                 });
             }
         }
@@ -352,22 +451,27 @@ impl NavApi {
                         continue;
                     };
                     cx.stop_timer(call.timeout);
-                    if response.status_code == 503
-                        && retryable_operation(call.request_kind.operation())
-                    {
+                    let retrying = retryable_status(response.status_code)
+                        && retryable_operation(call.request_kind.operation());
+                    if retrying {
                         self.schedule_retry(cx, &call);
                     }
-                    events.push(parse_response(call.request_kind, response));
+                    events.push(parse_response(call.request_kind, response, retrying));
                 }
                 NetworkResponse::HttpError { request_id, error } => {
                     let Some(call) = self.pending.remove(request_id) else {
                         continue;
                     };
                     cx.stop_timer(call.timeout);
+                    let route_context = call.request_kind.route_context();
+                    let route_generation = call.request_kind.route_generation();
                     events.push(NavApiEvent::Failed {
                         operation: call.request_kind.operation(),
                         status: None,
                         message: error.message.clone(),
+                        route_context,
+                        route_generation,
+                        retrying: false,
                     });
                 }
                 _ => {}
@@ -379,6 +483,10 @@ impl NavApi {
 
 fn retryable_operation(operation: ApiOperation) -> bool {
     matches!(operation, ApiOperation::Search | ApiOperation::Route | ApiOperation::Along)
+}
+
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 429 | 503)
 }
 
 fn retry_delay_seconds(attempt: u8) -> f64 {
@@ -397,19 +505,35 @@ fn json_request(url: String, method: HttpMethod) -> HttpRequest {
     request
 }
 
-fn parse_response(pending: PendingRequest, response: &HttpResponse) -> NavApiEvent {
+fn parse_response(
+    pending: PendingRequest,
+    response: &HttpResponse,
+    retrying: bool,
+) -> NavApiEvent {
     let operation = pending.operation();
+    let route_context = pending.route_context();
+    let route_generation = pending.route_generation();
     if !(200..300).contains(&response.status_code) {
         return NavApiEvent::Failed {
             operation,
             status: Some(response.status_code),
-            message: format!("API returned HTTP {}", response.status_code),
+            message: parse_error_message(response),
+            route_context,
+            route_generation,
+            retrying,
         };
     }
     let parsed = match pending {
         PendingRequest::Search => parse_search(body_text(response)).map(NavApiEvent::Search),
-        PendingRequest::Route => parse_route(body_text(response)).map(NavApiEvent::Route),
-        PendingRequest::Along => parse_along(body_text(response)).map(NavApiEvent::Along),
+        PendingRequest::Route(context) => parse_route(body_text(response)).map(|route| {
+            NavApiEvent::Route { context, route }
+        }),
+        PendingRequest::Along { route_generation } => {
+            parse_along(body_text(response)).map(|results| NavApiEvent::Along {
+                route_generation,
+                results,
+            })
+        }
         PendingRequest::Weather => parse_weather(body_text(response)).map(NavApiEvent::Weather),
         PendingRequest::RadarManifest => {
             parse_radar_manifest(body_text(response)).map(NavApiEvent::RadarManifest)
@@ -434,7 +558,25 @@ fn parse_response(pending: PendingRequest, response: &HttpResponse) -> NavApiEve
         operation,
         status: Some(response.status_code),
         message,
+        route_context,
+        route_generation,
+        retrying: false,
     })
+}
+
+fn parse_error_message(response: &HttpResponse) -> String {
+    if let Ok(wire) = ErrorResponseWire::deserialize_json(body_text(response)) {
+        if !wire.error.code.is_empty() || !wire.error.message.is_empty() {
+            return format!(
+                "{}: {}",
+                truncate_utf8(&wire.error.code, 64),
+                truncate_utf8(&wire.error.message, 256)
+            )
+            .trim_matches(|ch: char| ch == ':' || ch.is_whitespace())
+            .to_string();
+        }
+    }
+    format!("API returned HTTP {}", response.status_code)
 }
 
 fn body_text(response: &HttpResponse) -> &str {
@@ -446,6 +588,20 @@ fn body_text(response: &HttpResponse) -> &str {
 
 fn parse_search(json: &str) -> Result<Vec<SearchResult>, String> {
     let wire = SearchResponseWire::deserialize_json(json).map_err(json_error)?;
+    if wire.results.len() > MAX_SEARCH_RESULTS {
+        return Err("search response has too many results".to_string());
+    }
+    for result in &wire.results {
+        let point = LonLat::new(result.lon, result.lat);
+        if !valid_point(point)
+            || !result.score.is_finite()
+            || result
+                .distance_m
+                .is_some_and(|distance| !distance.is_finite() || distance < 0.0)
+        {
+            return Err("search response contains an invalid result".to_string());
+        }
+    }
     Ok(wire
         .results
         .into_iter()
@@ -470,8 +626,42 @@ fn parse_route(json: &str) -> Result<Route, String> {
         "foot" => TravelMode::Foot,
         other => return Err(format!("unknown route mode {other:?}")),
     };
+    if !(2..=MAX_ROUTE_POINTS).contains(&wire.points.len()) {
+        return Err("route point count is outside 2..=20000".to_string());
+    }
     if wire.points.len() != wire.cum_dist_m.len() {
         return Err("route points and cumulative distances differ in length".to_string());
+    }
+    if wire.maneuvers.len() > wire.points.len() {
+        return Err("route has too many maneuvers".to_string());
+    }
+    if !wire.length_m.is_finite()
+        || wire.length_m < 0.0
+        || !wire.duration_s.is_finite()
+        || wire.duration_s < 0.0
+        || wire
+            .points
+            .iter()
+            .any(|point| !valid_point(LonLat::new(point[0], point[1])))
+        || wire
+            .cum_dist_m
+            .iter()
+            .any(|distance| !distance.is_finite() || *distance < 0.0)
+        || wire
+            .cum_dist_m
+            .windows(2)
+            .any(|pair| pair[0] > pair[1])
+    {
+        return Err("route contains invalid coordinates or distances".to_string());
+    }
+    for maneuver in &wire.maneuvers {
+        if maneuver.point_index >= wire.points.len()
+            || !valid_point(LonLat::new(maneuver.lon, maneuver.lat))
+            || !maneuver.dist_m.is_finite()
+            || maneuver.dist_m < 0.0
+        {
+            return Err("route contains an invalid maneuver".to_string());
+        }
     }
     let points: Vec<LonLat> = wire
         .points
@@ -503,6 +693,18 @@ fn parse_route(json: &str) -> Result<Route, String> {
 
 fn parse_along(json: &str) -> Result<Vec<AlongResult>, String> {
     let wire = AlongResponseWire::deserialize_json(json).map_err(json_error)?;
+    if wire.results.len() > MAX_ALONG_RESULTS {
+        return Err("along response has too many results".to_string());
+    }
+    if wire.results.iter().any(|result| {
+        !valid_point(LonLat::new(result.lon, result.lat))
+            || !result.km_along.is_finite()
+            || result.km_along < 0.0
+            || !result.detour_min.is_finite()
+            || result.detour_min < 0.0
+    }) {
+        return Err("along response contains an invalid result".to_string());
+    }
     Ok(wire
         .results
         .into_iter()
@@ -519,6 +721,15 @@ fn parse_along(json: &str) -> Result<Vec<AlongResult>, String> {
 
 fn parse_weather(json: &str) -> Result<WeatherNow, String> {
     let wire = WeatherResponseWire::deserialize_json(json).map_err(json_error)?;
+    if wire.samples.len() > MAX_WEATHER_SAMPLES
+        || !valid_point(LonLat::new(wire.at[0], wire.at[1]))
+        || wire
+            .samples
+            .iter()
+            .any(|sample| sample.minute < 0 || !sample.mm_h.is_finite() || sample.mm_h < 0.0)
+    {
+        return Err("weather response contains invalid samples".to_string());
+    }
     Ok(WeatherNow {
         stamp: wire.stamp,
         at: LonLat::new(wire.at[0], wire.at[1]),
@@ -536,9 +747,20 @@ fn parse_weather(json: &str) -> Result<WeatherNow, String> {
 
 fn parse_radar_manifest(json: &str) -> Result<RadarManifest, String> {
     let wire = RadarManifestWire::deserialize_json(json).map_err(json_error)?;
+    let bbox = (wire.bbox[0], wire.bbox[1], wire.bbox[2], wire.bbox[3]);
+    if wire.stamp.is_empty()
+        || wire.stamp.len() > 64
+        || !valid_bbox(bbox)
+        || wire.minutes.len() > MAX_RADAR_FRAMES
+        || wire.minutes.iter().any(|minute| !(0..=1440).contains(minute))
+        || !valid_radar_size(wire.display.width, wire.display.height)
+        || !valid_radar_size(wire.hires_now.width, wire.hires_now.height)
+    {
+        return Err("radar manifest contains invalid bounds".to_string());
+    }
     Ok(RadarManifest {
         stamp: wire.stamp,
-        bbox: (wire.bbox[0], wire.bbox[1], wire.bbox[2], wire.bbox[3]),
+        bbox,
         minutes: wire.minutes,
         display: (wire.display.width, wire.display.height),
         hires_now: (wire.hires_now.width, wire.hires_now.height),
@@ -547,12 +769,21 @@ fn parse_radar_manifest(json: &str) -> Result<RadarManifest, String> {
 
 fn parse_wind(json: &str) -> Result<WindField, String> {
     let wire = WindResponseWire::deserialize_json(json).map_err(json_error)?;
-    if wire.u.len() != wire.v.len() || wire.u.len() != wire.nx.saturating_mul(wire.ny) {
+    let bbox = (wire.bbox[0], wire.bbox[1], wire.bbox[2], wire.bbox[3]);
+    let cells = wire.nx.checked_mul(wire.ny);
+    if !valid_bbox(bbox)
+        || !(1..=MAX_WIND_DIMENSION).contains(&wire.nx)
+        || !(1..=MAX_WIND_DIMENSION).contains(&wire.ny)
+        || cells.is_none_or(|cells| cells > MAX_WIND_CELLS)
+        || wire.u.len() != wire.v.len()
+        || Some(wire.u.len()) != cells
+        || wire.u.iter().chain(&wire.v).any(|value| !value.is_finite())
+    {
         return Err("wind grid dimensions do not match vector arrays".to_string());
     }
     Ok(WindField {
         stamp_unix: wire.stamp_unix,
-        bbox: (wire.bbox[0], wire.bbox[1], wire.bbox[2], wire.bbox[3]),
+        bbox,
         nx: wire.nx,
         ny: wire.ny,
         u: wire.u,
@@ -626,6 +857,21 @@ fn valid_point(point: LonLat) -> bool {
         && point.lat.is_finite()
         && (-180.0..=180.0).contains(&point.lon)
         && (-90.0..=90.0).contains(&point.lat)
+}
+
+fn valid_bbox(bbox: (f64, f64, f64, f64)) -> bool {
+    valid_point(LonLat::new(bbox.0, bbox.1))
+        && valid_point(LonLat::new(bbox.2, bbox.3))
+        && bbox.0 < bbox.2
+        && bbox.1 < bbox.3
+}
+
+fn valid_radar_size(width: usize, height: usize) -> bool {
+    (1..=MAX_RADAR_DIMENSION).contains(&width)
+        && (1..=MAX_RADAR_DIMENSION).contains(&height)
+        && width
+            .checked_mul(height)
+            .is_some_and(|pixels| pixels <= MAX_RADAR_PIXELS)
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
@@ -785,6 +1031,17 @@ struct WindResponseWire {
     v: Vec<f32>,
 }
 
+#[derive(DeJson)]
+struct ErrorResponseWire {
+    error: ErrorWire,
+}
+
+#[derive(DeJson)]
+struct ErrorWire {
+    code: String,
+    message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,9 +1085,196 @@ mod tests {
 
     #[test]
     fn hosted_service_retry_backoff_is_bounded() {
+        assert!(retryable_status(429));
+        assert!(retryable_status(503));
+        assert!(!retryable_status(500));
         assert_eq!(retry_delay_seconds(1), 1.0);
         assert_eq!(retry_delay_seconds(2), 2.0);
         assert_eq!(retry_delay_seconds(6), 30.0);
         assert_eq!(retry_delay_seconds(u8::MAX), 30.0);
+    }
+
+    #[test]
+    fn route_validation_rejects_unsafe_geometry_and_maneuvers() {
+        assert!(parse_route(
+            r#"{"graph":"x","mode":"car","length_m":0.0,"duration_s":0.0,"points":[],"cum_dist_m":[],"maneuvers":[]}"#,
+        )
+        .is_err());
+        assert!(parse_route(
+            r#"{"graph":"x","mode":"car","length_m":2.0,"duration_s":1.0,"points":[[4.0,52.0],[4.1,52.1],[4.2,52.2]],"cum_dist_m":[0.0,2.0,1.0],"maneuvers":[]}"#,
+        )
+        .is_err());
+        assert!(parse_route(
+            r#"{"graph":"x","mode":"car","length_m":1.0,"duration_s":1.0,"points":[[4.0,52.0],[4.1,52.1]],"cum_dist_m":[0.0,1.0],"maneuvers":[{"kind":"arrive","roundabout_exit":null,"lon":4.1,"lat":52.1,"name":"","dist_m":1.0,"point_index":2,"text":"Arrive"}]}"#,
+        )
+        .is_err());
+        assert!(parse_route(
+            r#"{"graph":"x","mode":"car","length_m":1.0,"duration_s":1.0,"points":[[181.0,52.0],[4.1,52.1]],"cum_dist_m":[0.0,1.0],"maneuvers":[]}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn route_validation_caps_polyline_size() {
+        let points = std::iter::repeat_n("[4.0,52.0]", MAX_ROUTE_POINTS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let cumulative = std::iter::repeat_n("0.0", MAX_ROUTE_POINTS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"graph":"x","mode":"car","length_m":0.0,"duration_s":0.0,"points":[{points}],"cum_dist_m":[{cumulative}],"maneuvers":[]}}"#
+        );
+        assert!(parse_route(&json).is_err());
+    }
+
+    #[test]
+    fn hosted_array_and_layer_bounds_are_enforced() {
+        let search_item = r#"{"name":"x","secondary":"","category":"city","lon":4.0,"lat":52.0,"distance_m":null,"score":1.0}"#;
+        let search = format!(
+            r#"{{"query":"x","results":[{}]}}"#,
+            std::iter::repeat_n(search_item, MAX_SEARCH_RESULTS + 1)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_search(&search).is_err());
+
+        let along_item = r#"{"name":"x","kind":"charger","lon":4.0,"lat":52.0,"km_along":1.0,"detour_min":1.0,"extra":""}"#;
+        let along = format!(
+            r#"{{"results":[{}]}}"#,
+            std::iter::repeat_n(along_item, MAX_ALONG_RESULTS + 1)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_along(&along).is_err());
+
+        let samples = (0..=MAX_WEATHER_SAMPLES)
+            .map(|minute| format!(r#"{{"minute":{minute},"mm_h":0.0,"class":"dry"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_weather(&format!(
+            r#"{{"stamp":"x","at":[4.0,52.0],"samples":[{samples}]}}"#
+        ))
+        .is_err());
+
+        let minutes = (0..=MAX_RADAR_FRAMES)
+            .map(|minute| minute.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_radar_manifest(&format!(
+            r#"{{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[{minutes}],"display":{{"width":1,"height":1}},"hires_now":{{"width":1,"height":1}}}}"#
+        ))
+        .is_err());
+        assert!(parse_radar_manifest(
+            r#"{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[0],"display":{"width":0,"height":1},"hires_now":{"width":1,"height":1}}"#,
+        )
+        .is_err());
+        assert!(parse_wind(
+            r#"{"stamp_unix":1,"bbox":[2.0,48.0,9.0,56.0],"nx":2049,"ny":1,"u":[],"v":[]}"#,
+        )
+        .is_err());
+        assert!(parse_wind(
+            r#"{"stamp_unix":1,"bbox":[9.0,48.0,2.0,56.0],"nx":1,"ny":1,"u":[1.0],"v":[1.0]}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn route_and_along_events_preserve_their_generation_context() {
+        let destination = SearchResult {
+            doc_id: 7,
+            name: "Utrecht".to_string(),
+            secondary: String::new(),
+            category: Category::City,
+            pos: LonLat::new(5.1214, 52.0872),
+            distance_m: None,
+            score: 1.0,
+        };
+        let route_response = HttpResponse::new(
+            LiveId(0),
+            200,
+            Default::default(),
+            Some(br#"{"graph":"x","mode":"car","length_m":1.0,"duration_s":1.0,"points":[[4.0,52.0],[5.0,52.1]],"cum_dist_m":[0.0,1.0],"maneuvers":[]}"#.to_vec()),
+        );
+        let event = parse_response(
+            PendingRequest::Route(RouteRequestContext::Initial {
+                generation: 11,
+                destination,
+            }),
+            &route_response,
+            false,
+        );
+        assert!(matches!(
+            event,
+            NavApiEvent::Route {
+                context: RouteRequestContext::Initial { generation: 11, .. },
+                ..
+            }
+        ));
+
+        let along_response = HttpResponse::new(
+            LiveId(0),
+            200,
+            Default::default(),
+            Some(br#"{"results":[]}"#.to_vec()),
+        );
+        assert!(matches!(
+            parse_response(
+                PendingRequest::Along {
+                    route_generation: 11,
+                },
+                &along_response,
+                false,
+            ),
+            NavApiEvent::Along {
+                route_generation: 11,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn http_failure_parses_error_body_and_keeps_retry_context() {
+        let response = HttpResponse::new(
+            LiveId(0),
+            429,
+            Default::default(),
+            Some(br#"{"error":{"code":"busy","message":"route queue is full"}}"#.to_vec()),
+        );
+        let event = parse_response(
+            PendingRequest::Route(RouteRequestContext::Reroute { generation: 12 }),
+            &response,
+            true,
+        );
+        assert!(matches!(
+            event,
+            NavApiEvent::Failed {
+                status: Some(429),
+                message,
+                route_context: Some(RouteRequestContext::Reroute { generation: 12 }),
+                retrying: true,
+                ..
+            } if message == "busy: route queue is full"
+        ));
+    }
+
+    #[test]
+    fn duplicate_in_flight_radar_frame_is_detected() {
+        let mut api = NavApi::new("https://example.invalid");
+        api.pending.insert(
+            LiveId(1),
+            PendingCall {
+                request: HttpRequest::new(String::new(), HttpMethod::GET),
+                request_kind: PendingRequest::RadarFrame {
+                    stamp: "stamp".to_string(),
+                    minute: 5,
+                    hires: false,
+                },
+                attempt: 0,
+                timeout: Timer::empty(),
+            },
+        );
+        assert!(api.has_radar_frame_request("stamp", 5, false));
+        assert!(!api.has_radar_frame_request("stamp", 5, true));
     }
 }
