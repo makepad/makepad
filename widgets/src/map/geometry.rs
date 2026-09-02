@@ -1688,22 +1688,44 @@ pub fn road_endpoint_is_clip_cut(point: (f32, f32), clip: GeoBounds) -> bool {
 
 // --- Shared tag helpers ---
 
-pub fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
+/// Read-only tag access shared by owned JSON maps and the MVT layer arena.
+/// Keeping consumers generic lets the tile decoder retain one copy of each
+/// layer string instead of materialising a `HashMap<String, String>` for
+/// every feature.
+pub trait TagLookup {
+    fn get(&self, key: &str) -> Option<&str>;
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl TagLookup for HashMap<String, String> {
+    fn get(&self, key: &str) -> Option<&str> {
+        HashMap::get(self, key).map(String::as_str)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        HashMap::contains_key(self, key)
+    }
+}
+
+pub fn tag_is(tags: &impl TagLookup, key: &str, value: &str) -> bool {
     tags.get(key).is_some_and(|v| v == value)
 }
 
-pub fn tag_is_truthy(tags: &HashMap<String, String>, key: &str) -> bool {
+pub fn tag_is_truthy(tags: &impl TagLookup, key: &str) -> bool {
     let Some(value) = tags.get(key) else {
         return false;
     };
-    !matches!(value.as_str(), "" | "0" | "false" | "False" | "no")
+    !matches!(value, "" | "0" | "false" | "False" | "no")
 }
 
 pub fn is_road_polygon_layer(layer: &str) -> bool {
     matches!(layer, "street_polygons" | "streets_polygons_labels")
 }
 
-pub fn select_label_text(tags: &HashMap<String, String>) -> Option<String> {
+pub fn select_label_text(tags: &impl TagLookup) -> Option<String> {
     for key in ["name", "name:latin", "name:en", "name_int"] {
         if let Some(value) = tags.get(key) {
             let trimmed = value.trim();
