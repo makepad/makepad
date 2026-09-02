@@ -16,6 +16,18 @@ pub trait CxGameInputApi {
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState>;
     fn game_input_states(&mut self) -> &[GameInputState];
     fn game_input_states_mut(&mut self) -> &mut [GameInputState];
+    /// Device identities parallel to `game_input_states()` (same index order).
+    fn game_input_infos(&mut self) -> Vec<crate::event::game_input::GameInputInfo> {
+        Vec::new()
+    }
+    /// An output-report handle for the device with `id`, when the platform
+    /// drives it over raw HID (a force-feedback wheel). None elsewhere.
+    fn game_input_output(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+    ) -> Option<crate::event::game_input::GameInputOutput> {
+        None
+    }
 }
 
 #[cfg(any(
