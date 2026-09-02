@@ -95,6 +95,7 @@ struct ArchiveTileParts {
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct ArchiveWatchResult {
     path: String,
     mtime: Option<std::time::SystemTime>,
@@ -1695,8 +1696,10 @@ pub struct MapView {
     archive_pending_tiles: HashMap<TileKey, ArchiveTileParts>,
     #[rust]
     archive_worker_pool: Option<ArchiveWorkerPool>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_rx: ToUIReceiver<ArchiveWatchResult>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_in_flight: bool,
 
@@ -1836,8 +1839,10 @@ pub struct MapView {
     zoom_settle_timer: Timer,
     #[rust]
     tile_fade_timer: Timer,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_timer: Timer,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_mtime: Option<std::time::SystemTime>,
     // Label placement cache: while panning at the same zoom over the same
@@ -2049,79 +2054,7 @@ impl Widget for MapView {
             self.retune_rain_timer(cx);
             self.redraw(cx);
         }
-        while let Ok(watch) = self.archive_watch_rx.try_recv() {
-            self.archive_watch_in_flight = false;
-            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
-                continue;
-            }
-            if let Some(range) = watch.zoom_range {
-                self.local_source_zoom_range = Some(range);
-                self.local_source_zoom_range_checked = true;
-            }
-            if watch.mtime != self.archive_watch_mtime {
-                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
-                self.archive_watch_mtime = watch.mtime;
-                if had {
-                    if let Some(config) = self.tile_source_config.clone() {
-                        self.install_archive_source(cx, config);
-                    }
-                    self.local_requested_tiles.clear();
-                    let before = self.tiles.len();
-                    self.tiles
-                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
-                    if self.tiles.len() != before {
-                        log!(
-                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
-                            before - self.tiles.len()
-                        );
-                    }
-                    self.redraw(cx);
-                }
-            }
-        }
-        // Growing-archive watch: both directory probing and metadata stay on
-        // the persistent archive pool; the UI only consumes the timestamp.
-        if self.is_local_archive()
-            && (self.archive_watch_timer.is_event(event).is_some()
-                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
-        {
-            if !self.archive_watch_in_flight {
-                self.archive_watch_in_flight = true;
-                let path = self.active_mbtiles_path().to_string();
-                let sender = self.archive_watch_rx.sender();
-                let workers = self.ensure_archive_worker_pool(cx);
-                workers.execute_rev(next_archive_task_token(), move |_| {
-                    let archive_path = std::path::PathBuf::from(&path);
-                    let probe = if is_mkmap_path_shape(&path) {
-                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
-                            archive_path
-                        } else {
-                            archive_path.join("root.mkidx")
-                        }
-                    } else {
-                        archive_path
-                    };
-                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
-                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
-                        Path::new(&path),
-                    )
-                    .ok()
-                    .and_then(|mut reader| reader.get_metadata().ok())
-                    .and_then(|metadata| {
-                        Some((
-                            metadata.get("minzoom")?.parse().ok()?,
-                            metadata.get("maxzoom")?.parse().ok()?,
-                        ))
-                    });
-                    let _ = sender.send(ArchiveWatchResult {
-                        path,
-                        mtime,
-                        zoom_range,
-                    });
-                });
-            }
-            self.archive_watch_timer = cx.start_timeout(5.0);
-        }
+        self.handle_archive_watch(cx, event);
         if self.tile_fade_timer.is_event(event).is_some() {
             self.redraw(cx);
             if self.tiles.values().any(|entry| entry.fade.is_some()) {
@@ -3177,6 +3110,91 @@ impl WidgetMatchEvent for MapView {
         self.update_status_text();
         self.redraw(cx);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MapView {
+    fn handle_archive_watch(&mut self, cx: &mut Cx, event: &Event) {
+        while let Ok(watch) = self.archive_watch_rx.try_recv() {
+            self.archive_watch_in_flight = false;
+            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
+                continue;
+            }
+            if let Some(range) = watch.zoom_range {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+            }
+            if watch.mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
+                self.archive_watch_mtime = watch.mtime;
+                if had {
+                    if let Some(config) = self.tile_source_config.clone() {
+                        self.install_archive_source(cx, config);
+                    }
+                    self.local_requested_tiles.clear();
+                    let before = self.tiles.len();
+                    self.tiles
+                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
+                    if self.tiles.len() != before {
+                        log!(
+                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
+                            before - self.tiles.len()
+                        );
+                    }
+                    self.redraw(cx);
+                }
+            }
+        }
+
+        // Growing-archive watch: both directory probing and metadata stay on
+        // the persistent archive pool; the UI only consumes the timestamp.
+        if self.is_local_archive()
+            && (self.archive_watch_timer.is_event(event).is_some()
+                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
+        {
+            if !self.archive_watch_in_flight {
+                self.archive_watch_in_flight = true;
+                let path = self.active_mbtiles_path().to_string();
+                let sender = self.archive_watch_rx.sender();
+                let workers = self.ensure_archive_worker_pool(cx);
+                workers.execute_rev(next_archive_task_token(), move |_| {
+                    let archive_path = std::path::PathBuf::from(&path);
+                    let probe = if is_mkmap_path_shape(&path) {
+                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
+                            archive_path
+                        } else {
+                            archive_path.join("root.mkidx")
+                        }
+                    } else {
+                        archive_path
+                    };
+                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
+                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
+                        Path::new(&path),
+                    )
+                    .ok()
+                    .and_then(|mut reader| reader.get_metadata().ok())
+                    .and_then(|metadata| {
+                        Some((
+                            metadata.get("minzoom")?.parse().ok()?,
+                            metadata.get("maxzoom")?.parse().ok()?,
+                        ))
+                    });
+                    let _ = sender.send(ArchiveWatchResult {
+                        path,
+                        mtime,
+                        zoom_range,
+                    });
+                });
+            }
+            self.archive_watch_timer = cx.start_timeout(5.0);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MapView {
+    fn handle_archive_watch(&mut self, _cx: &mut Cx, _event: &Event) {}
 }
 
 // --- MapView impl ---

@@ -1,5 +1,7 @@
 use super::codec::{compress_tile, compression_metadata_rows};
-use super::{local_payload_size, Error, PageType, Result, TileCompression, SQLITE_MAGIC};
+use super::{
+    local_payload_size, tile_rowid_xyz, Error, PageType, Result, TileCompression, SQLITE_MAGIC,
+};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -779,34 +781,6 @@ fn write_varint(value: u64, output: &mut Vec<u8>) {
         }
         output.push(byte);
     }
-}
-
-/// Compute the deterministic rowid used for Makepad-authored MBTiles files.
-///
-/// Coordinates are ordered by zoom, then 256×256 block row and column, then
-/// local row and column. This matches the order in a VersaTiles v02 archive.
-pub fn tile_rowid_xyz(zoom: u8, x: u32, y: u32) -> Option<i64> {
-    if zoom > 31 {
-        return None;
-    }
-    let axis = 1_u64 << zoom;
-    if u64::from(x) >= axis || u64::from(y) >= axis {
-        return None;
-    }
-
-    let zoom_capacity = 1_u128 << (u32::from(zoom) * 2);
-    let prefix = (zoom_capacity - 1) / 3;
-    let within_zoom = if zoom <= 8 {
-        u128::from(y) * u128::from(axis) + u128::from(x)
-    } else {
-        let blocks_per_axis = 1_u128 << (zoom - 8);
-        let block_x = u128::from(x >> 8);
-        let block_y = u128::from(y >> 8);
-        let local_x = u128::from(x & 255);
-        let local_y = u128::from(y & 255);
-        ((block_y * blocks_per_axis + block_x) << 16) + (local_y << 8) + local_x
-    };
-    i64::try_from(prefix + within_zoom + 1).ok()
 }
 
 #[cfg(test)]

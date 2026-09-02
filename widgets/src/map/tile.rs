@@ -3274,34 +3274,23 @@ pub struct TileWay {
 
 /// Stage clock for `map.tile_profile`: per-stage wall time, so the
 /// generator's cost distribution is measurable headless and in-app alike.
-#[cfg(not(target_arch = "wasm32"))]
-struct ProfileClock(std::time::Instant);
-
-#[cfg(target_arch = "wasm32")]
-struct ProfileClock;
+struct ProfileClock(f64);
 
 impl ProfileClock {
     fn now() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self(std::time::Instant::now())
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self
-        }
+        Self(Cx::monotonic_now())
     }
 
     fn elapsed_seconds(&self) -> f64 {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.0.elapsed().as_secs_f64()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            0.0
-        }
+        Cx::monotonic_now() - self.0
     }
+}
+
+#[cfg(test)]
+#[test]
+fn profile_clock_elapsed_is_non_negative() {
+    let clock = ProfileClock::now();
+    assert!(clock.elapsed_seconds() >= 0.0);
 }
 
 struct TileProfiler {
@@ -8229,11 +8218,11 @@ mod local_archive_regression_tests {
     use makepad_mbtile_reader::MbtilesWriter;
 
     fn test_mbtiles(name: &str, with_tile: bool) -> std::path::PathBuf {
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
+        let id = Cx::time_now().to_bits();
+        let path = std::env::temp_dir().join(format!(
+            "makepad-map-{name}-{}-{id}.mbtiles",
+            std::process::id()
+        ));
         let mut writer = MbtilesWriter::create(&path).unwrap();
         writer.set_metadata("minzoom", "0");
         writer.set_metadata("maxzoom", "0");
@@ -11445,7 +11434,7 @@ mod bridge_probe_tests {
             let dzt = dz.get_tile(z as i64, tx, tms).ok().flatten();
             for render_zoom in [14u32, 17] {
                 let key = TileKey { z, x: tx as i32, y: ty as i32 };
-                let clock = std::time::Instant::now();
+                let clock = Cx::monotonic_now();
                 let buffers = build_tile_buffers_from_mvt(
                     key,
                     &raw,
@@ -11459,8 +11448,8 @@ mod bridge_probe_tests {
                     true,
                 )
                 .unwrap();
-                let full_ms = clock.elapsed().as_secs_f64() * 1000.0;
-                let overlay_clock = std::time::Instant::now();
+                let full_ms = (Cx::monotonic_now() - clock) * 1000.0;
+                let overlay_clock = Cx::monotonic_now();
                 let overlay = build_tile_buffers_from_mvt(
                     key,
                     &raw,
@@ -11474,7 +11463,7 @@ mod bridge_probe_tests {
                     false,
                 )
                 .unwrap();
-                let overlay_ms = overlay_clock.elapsed().as_secs_f64() * 1000.0;
+                let overlay_ms = (Cx::monotonic_now() - overlay_clock) * 1000.0;
                 assert!(overlay.mode_overlay_only);
                 assert!(overlay.casing_vertices.is_empty());
                 assert!(overlay.stroke_vertices.is_empty());
@@ -12370,9 +12359,9 @@ mod bridge_probe_tests {
                 println!("{:<16} missing", format!("z{z} {x}/{y}"));
                 continue;
             };
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             let raw = reader.decode_tile(&blob).unwrap();
-            let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let decode_ms = (Cx::monotonic_now() - t0) * 1e3;
             let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
             let mut best = f64::MAX;
             let mut last = None;
@@ -12404,7 +12393,7 @@ mod bridge_probe_tests {
                 let mut best = f64::MAX;
                 let mut last = None;
                 for _ in 0..reps {
-                    let t1 = std::time::Instant::now();
+                    let t1 = Cx::monotonic_now();
                     // Combined archives are their own detail source (the
                     // app passes the same path for both).
                     let detail_env = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE").ok();
@@ -12425,7 +12414,7 @@ mod bridge_probe_tests {
                         true,
                     )
                     .unwrap();
-                    best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                    best = best.min((Cx::monotonic_now() - t1) * 1e3);
                     last = loaded.into_iter().next().map(|t| t.buffers);
                 }
                 let Some(buffers) = last else {
@@ -12450,7 +12439,7 @@ mod bridge_probe_tests {
                 dr.decode_tile(&blob).ok()
             });
             for _ in 0..reps {
-                let t1 = std::time::Instant::now();
+                let t1 = Cx::monotonic_now();
                 let detail = if detail_reader.is_some() {
                     // Old two-archive pattern: detail strictly from its own
                     // archive (may be absent for a tile).
@@ -12471,7 +12460,7 @@ mod bridge_probe_tests {
                     true,
                 )
                 .unwrap();
-                best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                best = best.min((Cx::monotonic_now() - t1) * 1e3);
                 last = Some(buffers);
             }
             let buffers = last.unwrap();
