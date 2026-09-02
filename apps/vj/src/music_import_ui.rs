@@ -18,12 +18,20 @@
 //! than a status line that waits forever: the channel disconnecting
 //! mid-run is itself the error.
 
-use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
-use makepad_asset_importer::music_import::{self, MusicProgress, MusicReport, MusicStage};
+use makepad_asset_client::{
+    ApiEndpoints, AssetClient, ClientConfig, PublishRequest, StoreCapabilities,
+};
+use makepad_asset_data::BlobId;
+use makepad_asset_importer::music_import::{
+    self, MusicProgress, MusicReport, MusicStage, TrackOutcome,
+};
+use makepad_widgets::makepad_platform::file_dialogs::VirtualFile;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 /// Namespace imported tracks land in. The asset UI's music importer uses
@@ -33,6 +41,17 @@ pub const MUSIC_NAMESPACE: &str = "music";
 /// Most failure notes kept. A folder of ten thousand broken files must not
 /// become ten thousand lines of UI state.
 const MAX_NOTES: usize = 24;
+
+/// Keep one selected song comfortably below the platform's broad virtual
+/// file ceiling. It is held encoded while its thumbnail is baked and again
+/// while the publish request is in flight.
+pub const MAX_MUSIC_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct PreparedMusicImport {
+    pub name: String,
+    pub request: PublishRequest,
+}
 
 /// What the importer is doing right now. The two working phases are the
 /// importer's own two passes over the tree, reported separately so one bar
@@ -122,12 +141,29 @@ fn summary_line(verb: &str, summary: &MusicImportSummary) -> String {
     if summary.skipped > 0 {
         line.push_str(&format!(" · {} skipped", summary.skipped));
     }
+    if summary.landed() == 0 {
+        if let Some(note) = summary.notes.first() {
+            line.push_str(" · ");
+            line.push_str(note);
+        }
+    }
     line
 }
 
 enum Msg {
     Phase(MusicImportPhase),
+    Prepared {
+        imports: VecDeque<PreparedMusicImport>,
+        summary: MusicImportSummary,
+        cancelled: bool,
+    },
     Finished(MusicImportPhase),
+}
+
+/// The single gate used before any stem fetch or local separation is
+/// submitted. Store capability wins over the deck's persisted mode.
+pub fn stems_may_run(capabilities: StoreCapabilities, mode: crate::decks::ProcessMode) -> bool {
+    capabilities.ai && mode.computes()
 }
 
 /// The DJ importer's whole state.
@@ -136,6 +172,11 @@ pub struct MusicImporter {
     pub phase: MusicImportPhase,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Msg>>,
+    prepared: VecDeque<PreparedMusicImport>,
+    prepared_inflight: bool,
+    prepared_done: usize,
+    prepared_total: usize,
+    prepared_summary: Option<MusicImportSummary>,
 }
 
 impl MusicImporter {
@@ -178,6 +219,7 @@ impl MusicImporter {
             return Err(self.refuse("no asset server session yet"));
         };
         self.cancel = Arc::new(AtomicBool::new(false));
+        self.clear_prepared();
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
@@ -191,6 +233,71 @@ impl MusicImporter {
             })
             .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
         Ok(())
+    }
+
+    /// Prepare browser/file-dialog bytes for publication through the
+    /// app's already connected client runtime. This is the same importer
+    /// bake and request builder as the path worker; only the filesystem read
+    /// at the front is absent.
+    pub fn start_files(&mut self, files: Vec<VirtualFile>) -> Result<(), String> {
+        if self.busy() {
+            return Err("an import is already running".to_string());
+        }
+        if files.is_empty() {
+            return Err(self.refuse("nothing to import"));
+        }
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.clear_prepared();
+        self.phase = MusicImportPhase::Reading {
+            done: 0,
+            total: files.len(),
+            current: String::new(),
+        };
+        let cancel = self.cancel.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        launch_file_preparation(files, tx, cancel)
+            .map_err(|error| self.refuse(format!("cannot start the import: {error}")))?;
+        Ok(())
+    }
+
+    pub fn take_prepared(&mut self) -> Option<PreparedMusicImport> {
+        if self.prepared_inflight {
+            return None;
+        }
+        let prepared = self.prepared.pop_front()?;
+        self.prepared_inflight = true;
+        self.phase = MusicImportPhase::Publishing {
+            done: self.prepared_done,
+            total: self.prepared_total,
+            current: prepared.name.clone(),
+        };
+        Some(prepared)
+    }
+
+    pub fn prepared_settled(&mut self, outcome: TrackOutcome) {
+        let Some(summary) = self.prepared_summary.as_mut() else { return };
+        match outcome {
+            TrackOutcome::Published => summary.published += 1,
+            TrackOutcome::Updated => summary.updated += 1,
+            TrackOutcome::Unchanged => summary.unchanged += 1,
+        }
+        self.prepared_done += 1;
+        self.prepared_inflight = false;
+        if self.prepared_done >= self.prepared_total {
+            self.finish_prepared();
+        }
+    }
+
+    pub fn prepared_failed(&mut self, name: &str, error: impl AsRef<str>) {
+        let Some(summary) = self.prepared_summary.as_mut() else { return };
+        summary.failed += 1;
+        push_note(summary, name, error.as_ref());
+        self.prepared_done += 1;
+        self.prepared_inflight = false;
+        if self.prepared_done >= self.prepared_total {
+            self.finish_prepared();
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -209,6 +316,27 @@ impl MusicImporter {
                 Ok(Msg::Phase(phase)) => {
                     self.phase = phase;
                     changed = true;
+                }
+                Ok(Msg::Prepared { imports, summary, cancelled }) => {
+                    self.rx = None;
+                    self.prepared = imports;
+                    self.prepared_total = self.prepared.len();
+                    self.prepared_summary = Some(summary);
+                    if cancelled {
+                        let summary = self.prepared_summary.take().unwrap_or_default();
+                        self.phase = MusicImportPhase::Cancelled(summary);
+                        self.prepared.clear();
+                    } else if self.prepared_total == 0 {
+                        self.finish_prepared();
+                    } else {
+                        self.phase = MusicImportPhase::Publishing {
+                            done: 0,
+                            total: self.prepared_total,
+                            current: String::new(),
+                        };
+                    }
+                    changed = true;
+                    break;
                 }
                 Ok(Msg::Finished(phase)) => {
                     self.phase = phase;
@@ -237,6 +365,130 @@ impl MusicImporter {
         self.phase = MusicImportPhase::Failed(why.clone());
         why
     }
+
+    fn clear_prepared(&mut self) {
+        self.prepared.clear();
+        self.prepared_inflight = false;
+        self.prepared_done = 0;
+        self.prepared_total = 0;
+        self.prepared_summary = None;
+    }
+
+    fn finish_prepared(&mut self) {
+        let summary = self.prepared_summary.take().unwrap_or_default();
+        self.phase = MusicImportPhase::Done(summary);
+        self.prepared.clear();
+        self.prepared_inflight = false;
+    }
+}
+
+fn push_note(summary: &mut MusicImportSummary, name: &str, error: &str) {
+    if summary.notes.len() < MAX_NOTES {
+        summary.notes.push(format!("{name}: {error}"));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn launch_file_preparation(
+    files: Vec<VirtualFile>,
+    tx: mpsc::Sender<Msg>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("vj-music-import-bytes".into())
+        .spawn(move || {
+            let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
+            let _ = tx.send(Msg::Prepared {
+                imports,
+                summary,
+                cancelled,
+            });
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Browser builds without workers still have to import selected bytes. The
+/// preparation stays behind this executor seam, outside handler routing; a
+/// worker-backed implementation can replace it without changing publishing.
+#[cfg(target_arch = "wasm32")]
+fn launch_file_preparation(
+    files: Vec<VirtualFile>,
+    tx: mpsc::Sender<Msg>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
+    tx.send(Msg::Prepared {
+        imports,
+        summary,
+        cancelled,
+    })
+    .map_err(|_| "import result receiver closed".to_string())
+}
+
+fn prepare_files(
+    files: Vec<VirtualFile>,
+    tx: &mpsc::Sender<Msg>,
+    cancel: &AtomicBool,
+) -> (VecDeque<PreparedMusicImport>, MusicImportSummary, bool) {
+    let total = files.len();
+    let rights = music_import::personal_library_rights(std::path::Path::new("selected-files"));
+    let mut imports = VecDeque::new();
+    let mut summary = MusicImportSummary::default();
+    let mut digests = HashSet::new();
+    for (index, file) in files.into_iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            return (imports, summary, true);
+        }
+        let _ = tx.send(Msg::Phase(MusicImportPhase::Reading {
+            done: index,
+            total,
+            current: file.name.clone(),
+        }));
+        let byte_len = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
+        let error = if file.size != byte_len {
+            Some(format!("size says {} bytes, received {byte_len}", file.size))
+        } else if byte_len > MAX_MUSIC_FILE_BYTES {
+            Some(format!(
+                "too big: {byte_len} bytes (limit {MAX_MUSIC_FILE_BYTES})"
+            ))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            summary.failed += 1;
+            push_note(&mut summary, &file.name, &error);
+            continue;
+        }
+        if music_import::Container::from_name_mime(&file.name, &file.mime).is_none() {
+            summary.skipped += 1;
+            push_note(&mut summary, &file.name, "unsupported audio format");
+            continue;
+        }
+        let digest = BlobId::hash_of(&file.bytes);
+        if !digests.insert(digest) {
+            summary.skipped += 1;
+            push_note(&mut summary, &file.name, "duplicate file in this import");
+            continue;
+        }
+        match music_import::publish_request_from_bytes(
+            &file.name,
+            &file.mime,
+            file.bytes.to_vec(),
+            MUSIC_NAMESPACE,
+            &rights,
+        ) {
+            Ok(request) => imports.push_back(PreparedMusicImport {
+                name: file.name,
+                request,
+            }),
+            Err(error) => {
+                summary.failed += 1;
+                push_note(&mut summary, &file.name, &error);
+            }
+        }
+    }
+    (imports, summary, false)
 }
 
 /// The worker body. Everything expensive lives here.
@@ -331,6 +583,66 @@ fn common_root(paths: &[PathBuf]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_asset_data::MediaType;
+    use makepad_audio_encode::{encode_vorbis, EncodeOptions};
+
+    fn virtual_file(name: &str, mime: &str, bytes: Vec<u8>) -> VirtualFile {
+        VirtualFile {
+            name: name.into(),
+            mime: mime.into(),
+            size: bytes.len() as u64,
+            bytes: Arc::from(bytes),
+        }
+    }
+
+    fn mp3_file() -> Vec<u8> {
+        let mut frame = vec![0xFF, 0xFB, 0x90, 0x04];
+        frame.resize(417, 0);
+        frame
+    }
+
+    fn wav_file() -> Vec<u8> {
+        let rate = 8_000u32;
+        let mut data = Vec::new();
+        for sample in 0..800i16 {
+            data.extend_from_slice(&sample.wrapping_mul(31).to_le_bytes());
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    fn ogg_file() -> Vec<u8> {
+        let pcm: Vec<f32> = (0..2_048)
+            .map(|sample| ((sample as f32) * 0.04).sin() * 0.25)
+            .collect();
+        encode_vorbis(
+            8_000,
+            1,
+            &pcm,
+            &EncodeOptions { threads: 1, ..Default::default() },
+        )
+        .unwrap()
+    }
+
+    fn prepared(files: Vec<VirtualFile>) -> (VecDeque<PreparedMusicImport>, MusicImportSummary) {
+        let (tx, _rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
+        assert!(!cancelled);
+        (imports, summary)
+    }
 
     #[test]
     fn a_reading_phase_names_its_half_of_the_run() {
@@ -389,5 +701,66 @@ mod tests {
             base.join("Lib")
         );
         assert_eq!(common_root(&[]), std::path::PathBuf::new());
+    }
+
+    #[test]
+    fn byte_first_import_prepares_mp3_ogg_and_wav_publish_requests() {
+        let (imports, summary) = prepared(vec![
+            virtual_file("first.mp3", "audio/mpeg", mp3_file()),
+            virtual_file("second.ogg", "audio/ogg", ogg_file()),
+            virtual_file("third.wav", "audio/wav", wav_file()),
+        ]);
+        assert_eq!(summary, MusicImportSummary::default());
+        assert_eq!(imports.len(), 3);
+        let media: Vec<_> = imports
+            .iter()
+            .map(|prepared| prepared.request.artifact.media)
+            .collect();
+        assert_eq!(media, [MediaType::Mp3, MediaType::Ogg, MediaType::Wav]);
+        assert!(imports.iter().all(|prepared| {
+            prepared.request.alias.is_some()
+                && prepared.request.tags.iter().any(|tag| tag == "music")
+                && prepared.request.artifact.media_millis > 0
+        }));
+    }
+
+    #[test]
+    fn digest_dedup_prepares_the_same_file_only_once() {
+        let bytes = wav_file();
+        let (imports, summary) = prepared(vec![
+            virtual_file("same.wav", "audio/wav", bytes.clone()),
+            virtual_file("copy.wav", "audio/wav", bytes),
+        ]);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.notes[0].contains("duplicate file"));
+    }
+
+    #[test]
+    fn bad_selected_bytes_become_bounded_status_notes() {
+        let (imports, summary) = prepared(vec![
+            virtual_file("broken.wav", "audio/wav", b"RIFFnope".to_vec()),
+            virtual_file("future.flac", "audio/flac", vec![1, 2, 3]),
+        ]);
+        assert!(imports.is_empty());
+        assert_eq!((summary.failed, summary.skipped), (1, 1));
+        assert_eq!(summary.notes.len(), 2);
+        assert!(describe(&MusicImportPhase::Done(summary)).contains("broken.wav"));
+    }
+
+    #[test]
+    fn a_store_without_ai_short_circuits_live_stems() {
+        assert!(!stems_may_run(
+            StoreCapabilities::browser(),
+            crate::decks::ProcessMode::Live,
+        ));
+        assert!(!stems_may_run(
+            StoreCapabilities::native(),
+            crate::decks::ProcessMode::Off,
+        ));
+        assert!(stems_may_run(
+            StoreCapabilities::native(),
+            crate::decks::ProcessMode::Live,
+        ));
     }
 }

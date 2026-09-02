@@ -77,6 +77,7 @@ pub struct SessionHandles {
     pub location: ClientLocation,
     pub endpoints: Option<ApiEndpoints>,
     pub token: Option<String>,
+    pub capabilities: crate::location::StoreCapabilities,
 }
 
 impl SessionHandles {
@@ -142,9 +143,11 @@ impl SessionConnector {
                 let location = runtime.location().unwrap();
                 let server_id = runtime.server_id().unwrap();
                 let label = location.to_string();
+                let capabilities = location.capabilities();
                 out.push(SessionMsg::Up(Box::new(SessionHandles {
                     catalog: runtime, media: Vec::new(), subscriber: CatalogSubscriber::null(),
                     server_label: label.clone(), server_id, location, endpoints: None, token: None,
+                    capabilities,
                 })));
                 out.push(SessionMsg::Status(SessionStatus::Connected { server: label }));
             }

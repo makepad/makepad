@@ -83,3 +83,6 @@ makepad-video-flow = { path = "../../libs/video_flow" }
 makepad-archive-org = { path = "../../libs/archive_org" }
 # The streaming swatch's MP4 index: per-sample byte ranges for range play.
 makepad-mp4-index = { path = "../../libs/mp4_index" }
+
+[dev-dependencies]
+makepad-audio-encode = { path = "../../libs/audio_encode" }
