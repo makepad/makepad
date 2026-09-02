@@ -18985,6 +18985,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -18993,6 +18994,7 @@ p2 {}
             u8::from(self.decks.repeat),
             u8::from(self.decks.shuffle),
             u8::from(self.auto_pick),
+            u8::from(self.autopilot.pick_exit),
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19029,6 +19031,7 @@ p2 {}
         // Appended after the file's first six lines: an older settings file
         // is missing it and reads as off, which is what the tab did before.
         self.auto_pick = next(0) == 1;
+        self.autopilot.pick_exit = next(0) == 1;
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -20180,6 +20183,14 @@ p2 {}
             );
             self.autopilot.shape_ready(done.gen, shape);
             self.autopilot.changes_ready(done.gen, done.analysis.changes_secs.clone());
+            self.autopilot.bars_ready(
+                done.gen,
+                crate::mix_facts::bar_rows(
+                    &done.analysis.tiles.zoom,
+                    &done.analysis.grid,
+                    done.analysis.duration_secs,
+                ),
+            );
             self.deck_analysis[index] = Some(done.analysis);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
                 self.submit_splat_refinement(deck, done.gen);
@@ -21953,6 +21964,7 @@ p2 {}
         self.paint_lit(cx, ids!(auto_vocal), self.autopilot.vocal_guard);
         self.paint_lit(cx, ids!(auto_phrase), self.autopilot.phrase_snap);
         self.paint_lit(cx, ids!(auto_choose), self.auto_pick);
+        self.paint_lit(cx, ids!(auto_exit), self.autopilot.pick_exit);
         self.paint_lit(cx, ids!(queue_repeat), self.decks.repeat);
         self.paint_lit(cx, ids!(queue_shuffle), self.decks.shuffle);
         // The AUTO DJ button IS the status line, the SYNC-button pattern:
@@ -24419,6 +24431,12 @@ p2 {}
         if self.ui.button(cx, ids!(auto_choose)).clicked(actions) {
             // Off, the queue plays in the order the operator wrote it.
             self.auto_pick = !self.auto_pick;
+            self.save_autopilot_settings();
+        }
+        if self.ui.button(cx, ids!(auto_exit)).clicked(actions) {
+            // Off, the transition fires at the envelope's outro as before.
+            let on = !self.autopilot.pick_exit;
+            self.autopilot.set_pick_exit(on);
             self.save_autopilot_settings();
         }
         self.handle_wave_input(cx);

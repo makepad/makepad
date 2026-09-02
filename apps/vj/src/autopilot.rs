@@ -200,6 +200,11 @@ pub struct AutoPilot {
     brain_seed: u64,
     pub vocal_guard: bool,
     pub phrase_snap: bool,
+    /// Choose where to leave the outgoing record from its own shape,
+    /// instead of always taking the outro the envelope found.
+    pub pick_exit: bool,
+    /// Bars per load generation, same lifecycle as the sung maps.
+    bars: Vec<(DeckGen, Vec<crate::mix_facts::BarRow>)>,
     /// Sung intervals per load generation, same lifecycle as `shapes`.
     vocals: Vec<(DeckGen, SungMap)>,
     /// Phrase boundaries per load generation, same lifecycle as `shapes`.
@@ -231,6 +236,8 @@ impl AutoPilot {
             brain_seed: 0x9E37_79B9_7F4A_7C15,
             vocal_guard: true,
             phrase_snap: true,
+            pick_exit: false,
+            bars: Vec::new(),
             vocals: Vec::new(),
             changes: Vec::new(),
             blend_dirty: false,
@@ -334,6 +341,33 @@ impl AutoPilot {
 
     /// Phrase boundaries for a load, off the published analysis. Late
     /// arrivals re-plan for the same reason sung maps do.
+    pub fn set_pick_exit(&mut self, on: bool) {
+        self.pick_exit = on;
+        self.replan();
+    }
+
+    /// Per-bar rows for a load, off the published analysis. Late arrivals
+    /// re-plan for the same reason the sung maps and the changes do: the
+    /// shape of the outgoing record decides where the transition goes.
+    pub fn bars_ready(&mut self, gen: DeckGen, bars: Vec<crate::mix_facts::BarRow>) {
+        self.bars.retain(|(g, _)| *g != gen);
+        self.bars.push((gen, bars));
+        while self.bars.len() > 8 {
+            self.bars.remove(0);
+        }
+        if self.pick_exit {
+            self.replan();
+        }
+    }
+
+    fn bars_of(&self, gen: DeckGen) -> &[crate::mix_facts::BarRow] {
+        self.bars
+            .iter()
+            .find(|(g, _)| *g == gen)
+            .map(|(_, bars)| bars.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn changes_ready(&mut self, gen: DeckGen, changes: Vec<f64>) {
         self.changes.retain(|(g, _)| *g != gen);
         self.changes.push((gen, changes));
@@ -392,6 +426,7 @@ impl AutoPilot {
         self.shapes.retain(|(g, _)| gens.contains(g));
         self.vocals.retain(|(g, _)| gens.contains(g));
         self.changes.retain(|(g, _)| gens.contains(g));
+        self.bars.retain(|(g, _)| gens.contains(g));
         self.fired.retain(|g| gens.contains(g));
         self.ran_out.retain(|g| gens.contains(g));
         // Witness every load seen PLAYING within reach of its own end: only
@@ -496,11 +531,26 @@ impl AutoPilot {
         // length converts to wall seconds at fire time from the rates then.
         let knob = obs.fade_secs_knob.max(0.05);
         let lead = o.bar_secs_src.unwrap_or(NO_GRID_MARGIN_SECS);
+        // Where to leave the outgoing record. The envelope's outro is the
+        // answer the tab has always given; asked to, the planner reads the
+        // record's own bars instead and takes the best moment they offer.
+        let leave_at = if self.pick_exit {
+            blend::exits(
+                self.bars_of(o.gen),
+                self.changes_of(o.gen),
+                o.duration_secs,
+                o.bar_secs_src.unwrap_or(NO_GRID_MARGIN_SECS),
+            )
+            .into_iter()
+            .find(|exit| exit.at_secs > o.position_secs)
+            .map(|exit| exit.at_secs)
+            .unwrap_or(out_shape.outro_start_secs)
+        } else {
+            out_shape.outro_start_secs
+        };
         let fire_raw = match self.style {
-            AutoStyle::Outro => out_shape.outro_start_secs,
-            AutoStyle::Body => {
-                out_shape.outro_start_secs - knob as f64 * o.rate.max(0.05)
-            }
+            AutoStyle::Outro => leave_at,
+            AutoStyle::Body => leave_at - knob as f64 * o.rate.max(0.05),
         };
         // A trigger already behind the playhead fires one bar from now,
         // never on the spot — a beat of grace for the hand.
@@ -1441,6 +1491,60 @@ mod tests {
         assert!(
             *gain > 0.0 && *gain < 1.0,
             "a duck, not a kill: {gain}"
+        );
+    }
+
+    #[test]
+    fn the_exit_chooser_leaves_where_the_record_lets_go_not_where_the_envelope_said() {
+        // The fixture record's envelope puts its outro at 280. Its bars say
+        // the energy falls away at 240, which is where a hand would leave.
+        // Asked to read the record rather than the envelope, the transition
+        // moves — and the tab's old answer is what it gives when not asked.
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        pilot.pick_exit = true;
+        let bars: Vec<crate::mix_facts::BarRow> = (0..150)
+            .map(|bar| crate::mix_facts::BarRow {
+                start_secs: bar as f64 * 2.0,
+                energy: if (bar as f64 * 2.0) < 240.0 { 0.9 } else { 0.2 },
+                low: 0.5,
+            })
+            .collect();
+        pilot.bars_ready(1, bars);
+        w.obs.decks[0].position_secs = 200.0;
+
+        w.run_until_cmds(&mut pilot, 4000); // prep
+        let (cmds, _) = w.run_until_cmds(&mut pilot, 200);
+        assert!(matches!(cmds[0], AutoCmd::PlayIn { .. }), "{cmds:?}");
+        let fired_at = w.obs.decks[0].position_secs;
+        assert!(
+            (fired_at - 240.0).abs() <= 2.5,
+            "the fall is at 240 s, fired at {fired_at}"
+        );
+    }
+
+    #[test]
+    fn without_the_exit_chooser_the_transition_is_where_it_always_was() {
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        // Bars that would move it, and a pilot that was not asked to look.
+        let bars: Vec<crate::mix_facts::BarRow> = (0..150)
+            .map(|bar| crate::mix_facts::BarRow {
+                start_secs: bar as f64 * 2.0,
+                energy: if (bar as f64 * 2.0) < 240.0 { 0.9 } else { 0.2 },
+                low: 0.5,
+            })
+            .collect();
+        pilot.bars_ready(1, bars);
+        w.obs.decks[0].position_secs = 200.0;
+
+        w.run_until_cmds(&mut pilot, 4000);
+        let (cmds, _) = w.run_until_cmds(&mut pilot, 400);
+        assert!(matches!(cmds[0], AutoCmd::PlayIn { .. }), "{cmds:?}");
+        let fired_at = w.obs.decks[0].position_secs;
+        assert!(
+            (fired_at - 280.0).abs() <= 0.5,
+            "the envelope's outro is 280 s, fired at {fired_at}"
         );
     }
 

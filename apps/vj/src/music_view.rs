@@ -3367,6 +3367,7 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         auto_choose := MusicButton{width: 110 height: 22 text: "CHOOSE NEXT"}
+                        auto_exit := MusicButton{width: 110 height: 22 text: "PICK EXIT"}
                     }
                     View{
                         width: Fill
