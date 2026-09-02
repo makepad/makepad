@@ -300,10 +300,19 @@ fn learned_trend_gate() {
     // trustworthy first-second decay (2026-08-30) necessarily moved the
     // physical model away from it. Anchor re-measured; the other five
     // keys' aggregates moved < 2 dB in the same pass.
+    // key 48 hi re-measured 2026-09-01 (+3.4 -> +9.8) after the bass
+    // hammer/decay pass: the aggregate moved with the phantom-bank gain
+    // cut (0.25 -> 0.08) and the wound-loss re-pin — each alone accounts
+    // for the margin — while the model's C3 itself, measured against the
+    // real Salamander C3 with the pass's own harness, moved TOWARD the
+    // recording (partials 8-20 rel strongest at 100 ms, ff: -23.3 ->
+    // -27.7 dB, real -35.3). The learned C3 target sits between the two;
+    // this 31 ms window with a +-0.45 f0 peak search is the same
+    // noise-sensitive measure the notes above already flag.
     const ANCHORS: &[(u8, f64, f64, f64)] = &[
         (30, -0.7, 18.3, 8.2),
         (36, 7.4, 10.1, 4.4),
-        (48, 3.4, -0.3, 4.0),
+        (48, 9.8, -0.3, 4.0),
         (60, -0.2, -3.4, -4.2),
         (72, 2.1, 3.5, 8.2),
         // (hi re-measured again 2026-08-31: the normal-mode reduction

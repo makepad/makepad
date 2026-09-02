@@ -16,6 +16,8 @@ use crate::params::Voicing;
 pub struct NoiseBurst {
     pos: u32,
     len: u32,
+    /// samples still to wait before the burst begins (see `start`)
+    delay: u32,
     rng: u32,
     lp: f32,
     lp2: f32,
@@ -25,12 +27,16 @@ pub struct NoiseBurst {
 
 impl NoiseBurst {
     pub fn new() -> Self {
-        Self { pos: 0, len: 0, rng: 1, lp: 0.0, lp2: 0.0, lp_c: 0.1, amp: 0.0 }
+        Self { pos: 0, len: 0, delay: 0, rng: 1, lp: 0.0, lp2: 0.0, lp_c: 0.1, amp: 0.0 }
     }
 
-    pub fn start(&mut self, len: u32, amp: f32, lp_c: f32, seed: u32) {
+    /// Arms a burst of `len` samples that begins `delay` samples from now.
+    /// The delay is consumed sample by sample inside `render_add`, so it
+    /// is exact to the sample and independent of host block boundaries.
+    pub fn start(&mut self, len: u32, amp: f32, lp_c: f32, seed: u32, delay: u32) {
         self.pos = 0;
         self.len = len.max(1);
+        self.delay = delay;
         self.rng = seed | 1;
         self.lp = 0.0;
         self.lp2 = 0.0;
@@ -43,7 +49,12 @@ impl NoiseBurst {
         if self.pos >= self.len {
             return;
         }
-        for slot in out.iter_mut().take(n) {
+        let mut skip = 0usize;
+        if self.delay > 0 {
+            skip = (self.delay as usize).min(n);
+            self.delay -= skip as u32;
+        }
+        for slot in out.iter_mut().take(n).skip(skip) {
             if self.pos >= self.len {
                 break;
             }
@@ -413,7 +424,23 @@ impl Voice {
         // both are what a plucked string does NOT have.
         let amp = vc.attack_noise * if soft_pedal { 0.7 } else { 1.0 } * key.thump_amp * self.vel_norm.powf(key.thump_vpow);
         let seed = (self.key_idx as u32).wrapping_mul(0x9e37_79b9) ^ self.strike_count.wrapping_mul(0x85eb_ca6b);
-        self.thump.start(key.thump_len, amp, key.thump_lp_c, seed);
+        // Key-bottom lag. The hammer leaves the jack ~1-2 mm before the
+        // string, and the key still has its aftertouch (~1 mm) to travel
+        // at roughly 1/5.5 of the hammer speed, so the key bottoms — and
+        // the thump and the action-rail resonances it pumps happen —
+        // 1-10 ms AFTER the string is struck: nearly coincident at
+        // forte, well behind at piano (Askenfelt & Jansson, "From touch
+        // to string vibrations"; Goebl, Bresin & Galembo 2005 measure the
+        // hammer-string to key-bottom interval at a few ms). Firing them
+        // at t = 0 put a case-radiated click 10-15 dB above the
+        // recordings in the first 5 ms of every bass note, before the
+        // string's own wave had even reached the bridge (the modal sum
+        // is wave-exact: A0's bridge force starts 16 ms after the strike,
+        // C2's after 7 ms) — a pick-like precursor the real instrument
+        // does not have (Salamander bass onsets sit at -33..-40 dB re
+        // peak at 2 ms).
+        let key_lag = ((0.0066 / speed).clamp(0.0010, 0.012) * sample_rate) as u32;
+        self.thump.start(key.thump_len, amp, key.thump_lp_c, seed, key_lag);
         // Key/action resonance burst: darker and longer than a click — a
         // ~9 ms noise burst low-passed near the top of the measured
         // key-resonance cluster.
@@ -428,7 +455,9 @@ impl Voice {
         let camp = vc.attack_noise * if soft_pedal { 0.5 } else { 1.0 } * key.click_amp * self.vel_norm.powf(key.click_vpow);
         let cseed = seed ^ 0x00c0_ffee;
         let clp = if soft_pedal { key.click_lp_c * 0.68 } else { key.click_lp_c };
-        self.click.start(key.click_len, camp, clp, cseed);
+        // the action-rail resonance cluster is re-excited at key bottom
+        // (Askenfelt & Jansson), so it shares the key-bottom lag
+        self.click.start(key.click_len, camp, clp, cseed, key_lag);
     }
 
     /// Render `n` samples of bridge force into self.acc and mechanical noise
