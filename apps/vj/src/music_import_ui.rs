@@ -20,7 +20,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
-use makepad_asset_client::{PublishRequest, StoreCapabilities};
+use makepad_asset_client::PublishRequest;
 use makepad_asset_data::BlobId;
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_asset_importer::music_import::{
@@ -164,12 +164,6 @@ enum Msg {
         cancelled: bool,
     },
     Finished(MusicImportPhase),
-}
-
-/// The single gate used before any stem fetch or local separation is
-/// submitted. Store capability wins over the deck's persisted mode.
-pub fn stems_may_run(capabilities: StoreCapabilities, mode: crate::decks::ProcessMode) -> bool {
-    capabilities.ai && mode.computes()
 }
 
 /// The DJ importer's whole state.
@@ -742,23 +736,4 @@ mod tests {
         assert!(describe(&MusicImportPhase::Done(summary)).contains("broken.wav"));
     }
 
-    #[test]
-    fn a_store_without_ai_short_circuits_live_stems() {
-        assert!(!stems_may_run(
-            StoreCapabilities::browser(),
-            crate::decks::ProcessMode::Live,
-        ));
-        assert!(!stems_may_run(
-            StoreCapabilities::native(),
-            crate::decks::ProcessMode::Off,
-        ));
-        assert!(stems_may_run(
-            StoreCapabilities::native(),
-            crate::decks::ProcessMode::Live,
-        ));
-        assert!(!stems_may_run(
-            StoreCapabilities::static_site(),
-            crate::decks::ProcessMode::Live,
-        ));
-    }
 }

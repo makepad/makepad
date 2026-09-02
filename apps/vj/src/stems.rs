@@ -46,6 +46,52 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Where a missing set of stems may be computed. This is operator-owned
+/// state; capability discovery may make a choice unavailable, but never
+/// changes it or falls it back to another machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StemSeparation {
+    Off,
+    #[default]
+    AiHub,
+    Local,
+}
+
+/// The complete deck-load decision. Keeping `Unavailable` typed is what
+/// prevents a missing hub (and wasm's lack of a local model) from quietly
+/// becoming a local run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeparationAction {
+    SideChannel,
+    Off,
+    Hub,
+    Local,
+    Unavailable,
+}
+
+pub const fn separation_action(
+    setting: StemSeparation,
+    side_channel_present: bool,
+    hub_reachable: bool,
+) -> SeparationAction {
+    if side_channel_present {
+        return SeparationAction::SideChannel;
+    }
+    match setting {
+        StemSeparation::Off => SeparationAction::Off,
+        StemSeparation::AiHub if hub_reachable => SeparationAction::Hub,
+        StemSeparation::AiHub => SeparationAction::Unavailable,
+        StemSeparation::Local if cfg!(not(target_arch = "wasm32")) => SeparationAction::Local,
+        StemSeparation::Local => SeparationAction::Unavailable,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeparationBackend {
+    Hub,
+    Local,
+}
+
 /// Published chunk length, seconds of track time. Small enough that the
 /// knobs go live seconds after a load, big enough that the chunk table
 /// stays short for a long track.
@@ -425,6 +471,29 @@ impl ChunkWriter {
         }
         false
     }
+
+    /// Publish the final short track chunk. Demixer spans normally carry
+    /// enough overlap to fill it; a whole-track hub artifact is exact-length
+    /// and therefore needs this explicit tail.
+    fn finish(&mut self, deck: DeckId, gen: u64, out: &Sender<StemsMsg>) -> bool {
+        if self.pending[0].is_empty() {
+            return false;
+        }
+        let index = self.base / self.chunk_frames;
+        if index >= self.chunk_count {
+            return false;
+        }
+        let lanes = std::array::from_fn(|lane| Arc::new(std::mem::take(&mut self.pending[lane])));
+        out.send(StemsMsg::Chunk(Box::new(StemChunk {
+            deck,
+            gen,
+            index,
+            chunk_frames: self.chunk_frames,
+            chunk_count: self.chunk_count,
+            lanes,
+        })))
+        .is_err()
+    }
 }
 
 /// Read the four sidecar stems beside a track, if they are all there.
@@ -772,6 +841,149 @@ fn run_demixer(
     Ok(())
 }
 
+/// Send one whole-track separation to the discovered AI fleet and translate
+/// its transport artifact back into the deck's streaming chunk vocabulary.
+/// There is deliberately no local fallback anywhere in this path.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_hub(job: &StemsJob, root: &Path, out: &Sender<StemsMsg>) -> Result<(), String> {
+    use makepad_ai_hub::client::ContentProvider;
+    use makepad_ai_hub::protocol::{
+        decode_stems_artifact, GenerateRequestJson, JOB_STATE_CANCELLED, JOB_STATE_DONE,
+        JOB_STATE_ERROR,
+    };
+    use makepad_ai_hub::registry::Domain;
+
+    let service = makepad_asset_creator::runner::pick_node("stems")
+        .map_err(|error| error.to_string())?;
+    let node = service.base_url().to_string();
+    if job.gen == PREFETCH_GEN {
+        makepad_widgets::log!("stems prefetch via hub {node}");
+    } else {
+        makepad_widgets::log!("deck {:?}: stems via hub {node}", job.deck);
+    }
+    let _ = out.send(StemsMsg::Status {
+        deck: job.deck,
+        gen: job.gen,
+        text: format!("stems: via hub {node}"),
+        working: true,
+    });
+
+    let track = to_stereo_buf(&job.pcm);
+    let wav = makepad_ai_hub::wav::encode_wav_pcm16_stereo(
+        &track.left,
+        &track.right,
+        STEMS_RATE,
+    );
+    let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
+        &wav,
+        &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
+    ))
+    .map_err(|_| "hub WAV base64 was not utf-8".to_string())?;
+    let request = GenerateRequestJson {
+        model: makepad_ai_stems::MODEL_ID.to_string(),
+        input_b64: Some(input_b64),
+        input_content_type: Some("audio/wav".to_string()),
+        ..Default::default()
+    };
+    let remote = service
+        .request(Domain::Stems, &request)
+        .map_err(|error| error.to_string())?;
+    let artifact_ref = loop {
+        let status = service.poll(&remote).map_err(|error| error.to_string())?;
+        match status.state.as_str() {
+            JOB_STATE_DONE => break status
+                .artifacts
+                .first()
+                .cloned()
+                .ok_or_else(|| "hub stem job finished without an artifact".to_string())?,
+            JOB_STATE_ERROR => {
+                return Err(status.error.unwrap_or_else(|| "hub stem job failed".to_string()))
+            }
+            JOB_STATE_CANCELLED => return Err("hub stem job was cancelled".to_string()),
+            _ => {
+                let stage = status.stage.as_deref().unwrap_or("queued");
+                let _ = out.send(StemsMsg::Status {
+                    deck: job.deck,
+                    gen: job.gen,
+                    text: format!("stems: via hub · {stage}"),
+                    working: true,
+                });
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    };
+    let fetched = service
+        .fetch_artifact(&artifact_ref.id)
+        .map_err(|error| format!("hub artifact: {error}"))?;
+    makepad_ai_hub::client::verify_artifact_bytes(&fetched.bytes, &artifact_ref)
+        .map_err(|error| error.to_string())?;
+    let artifact = decode_stems_artifact(&fetched.bytes)?;
+    if artifact.sample_rate != STEMS_RATE || artifact.frames != track.frames() {
+        return Err(format!(
+            "hub stems shape {} Hz/{} frames, expected {} Hz/{} frames",
+            artifact.sample_rate,
+            artifact.frames,
+            STEMS_RATE,
+            track.frames()
+        ));
+    }
+    let [drums_l, drums_r, bass_l, bass_r, other_l, other_r, vocals_l, vocals_r] =
+        artifact.channels;
+    let stems: StemSet = [
+        StereoBuf { left: drums_l, right: drums_r },
+        StereoBuf { left: bass_l, right: bass_r },
+        StereoBuf { left: other_l, right: other_r },
+        StereoBuf { left: vocals_l, right: vocals_r },
+    ];
+
+    let digest = track_digest(&job.pcm);
+    let frames = track.frames() as u64;
+    let mut cache = open_cache(root, &job.pcm, &digest);
+    if let Some(cache) = cache.as_mut() {
+        for span in 0..cache.span_count() {
+            let start = span * CHUNK_STEP;
+            let end = (start + CHUNK_STEP).min(artifact.frames);
+            let block: StemSet = std::array::from_fn(|stem| StereoBuf {
+                left: stems[stem].left[start..end].to_vec(),
+                right: stems[stem].right[start..end].to_vec(),
+            });
+            cache.write_span(start, &block).map_err(|error| error.to_string())?;
+        }
+    }
+    let complete = cache.as_ref().is_some_and(StemCache::is_complete);
+    let _ = out.send(StemsMsg::Coverage {
+        deck: job.deck,
+        gen: job.gen,
+        digest: digest.clone(),
+        model_frames: frames,
+        complete,
+    });
+
+    if job.gen == PREFETCH_GEN {
+        let _ = out.send(StemsMsg::PrefetchDone { digest, model_frames: frames, complete });
+        return Ok(());
+    }
+    let track_rate = job.pcm.sample_rate.max(1) as f64;
+    let model_rate = STEMS_RATE as f64;
+    let mut writer = ChunkWriter::new(
+        chunk_frames(job.pcm.sample_rate.max(1)),
+        chunk_count(job.pcm.frames.len(), job.pcm.sample_rate.max(1)),
+    );
+    writer.restart(0);
+    publish_span(
+        &stems,
+        &mut writer,
+        model_rate,
+        track_rate,
+        span_resample_kernel(track_rate, model_rate).as_ref(),
+    );
+    if !writer.drain(job.deck, job.gen, out) {
+        writer.finish(job.deck, job.gen, out);
+    }
+    let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
+    Ok(())
+}
+
 /// Keep the cache root inside its budget, pinning whatever is on a deck.
 /// Runs on the worker, once per job, before any span is written: the moment a
 /// track arrives is the moment we know what may go.
@@ -795,12 +1007,12 @@ fn prune_cache(root: &Path, budget_bytes: u64, pinned: &[Option<String>; 2]) {
 /// One separation thread. The model is thread-affine and expensive to load,
 /// so it lives here and nowhere else.
 pub struct StemsPool {
-    tx: Sender<StemsJob>,
+    tx: Sender<(StemsJob, SeparationBackend)>,
     /// The BACKGROUND inbox. Kept apart from `tx` so the two lanes cannot
     /// spoil each other: deck jobs are latest-wins and would otherwise
     /// discard a queued track's work, and a queued track must never sit in
     /// front of the deck the operator is about to play.
-    prefetch_tx: Sender<StemsJob>,
+    prefetch_tx: Sender<(StemsJob, SeparationBackend)>,
     /// Raised the instant a deck job is posted and lowered when the worker
     /// takes one. A background run reads it at every span boundary and
     /// lets go. Racing it costs at most one needless yield.
@@ -816,6 +1028,11 @@ impl Default for StemsPool {
 
 impl StemsPool {
     pub fn new() -> StemsPool {
+        // Start listening before the first deck asks. Fleet beacons are
+        // periodic, so discovery begun only at submit time can miss a hub
+        // that was reachable throughout the load.
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = makepad_ai_hub::discovery::start_listener();
         StemsPool::with_paths(cache_dir(), checkpoint_path(), cache_budget_bytes())
     }
 
@@ -824,8 +1041,8 @@ impl StemsPool {
     /// sight, and that is only provable if the checkpoint can be pointed
     /// somewhere it certainly is not.
     pub fn with_paths(root: PathBuf, checkpoint: PathBuf, budget_bytes: u64) -> StemsPool {
-        let (tx, jobs) = channel::<StemsJob>();
-        let (prefetch_tx, prefetch_jobs) = channel::<StemsJob>();
+        let (tx, jobs) = channel::<(StemsJob, SeparationBackend)>();
+        let (prefetch_tx, prefetch_jobs) = channel::<(StemsJob, SeparationBackend)>();
         let (out, rx) = channel::<StemsMsg>();
         let deck_waiting = Arc::new(AtomicBool::new(false));
         #[cfg(not(target_arch = "wasm32"))]
@@ -843,7 +1060,7 @@ impl StemsPool {
                     // THE DECK INBOX IS SERVED FIRST, ALWAYS. Only when it
                     // has stayed empty for a moment does the background one
                     // get a look, and then for exactly one track.
-                    let job = match jobs.recv_timeout(Duration::from_millis(DECK_INBOX_WAIT_MS)) {
+                    let (job, backend) = match jobs.recv_timeout(Duration::from_millis(DECK_INBOX_WAIT_MS)) {
                         Ok(job) => {
                             waiting.store(false, Ordering::SeqCst);
                             // Latest-wins: only the newest request per deck
@@ -895,6 +1112,30 @@ impl StemsPool {
                             }
                             continue;
                         }
+                    }
+                    if backend == SeparationBackend::Hub {
+                        if let Err(error) = run_hub(&job, &root, &out) {
+                            if job.gen == PREFETCH_GEN {
+                                makepad_widgets::log!("stems prefetch: hub unavailable ({error})");
+                                let _ = out.send(StemsMsg::PrefetchDone {
+                                    digest: track_digest(&job.pcm),
+                                    model_frames: model_frames(&job.pcm) as u64,
+                                    complete: false,
+                                });
+                            } else {
+                                makepad_widgets::log!(
+                                    "deck {:?}: stems: unavailable ({error})",
+                                    job.deck
+                                );
+                                let _ = out.send(StemsMsg::Status {
+                                    deck: job.deck,
+                                    gen: job.gen,
+                                    text: "stems: unavailable".to_string(),
+                                    working: false,
+                                });
+                            }
+                        }
+                        continue;
                     }
                     // Whatever a previous session separated is free. Serve it
                     // first, from the playhead forward: the knobs go live on
@@ -1057,24 +1298,50 @@ impl StemsPool {
         StemsPool { tx, prefetch_tx, deck_waiting, rx }
     }
 
-    pub fn submit(&self, job: StemsJob) {
+    fn submit_to(&self, job: StemsJob, backend: SeparationBackend) {
         // Raised BEFORE the send, so a background run cannot read the flag
         // between the job arriving and the worker noticing it.
         self.deck_waiting.store(true, Ordering::SeqCst);
-        let _ = self.tx.send(job);
+        let _ = self.tx.send((job, backend));
+    }
+
+    pub fn submit_local(&self, job: StemsJob) {
+        self.submit_to(job, SeparationBackend::Local);
+    }
+
+    pub fn submit_hub(&self, job: StemsJob) {
+        self.submit_to(job, SeparationBackend::Hub);
+    }
+
+    #[cfg(test)]
+    fn submit(&self, job: StemsJob) {
+        self.submit_local(job);
     }
 
     /// Warm a queued track's stem cache while nothing is asking for the
     /// worker. The job carries [`PREFETCH_GEN`], which is what keeps its
     /// audio out of every deck.
-    pub fn submit_prefetch(&self, pcm: Arc<TrackPcm>, source: Option<PathBuf>) {
-        let _ = self.prefetch_tx.send(StemsJob {
-            deck: DeckId::A,
-            gen: PREFETCH_GEN,
-            pcm,
-            source,
-            start_secs: 0.0,
-        });
+    pub fn submit_prefetch(
+        &self,
+        pcm: Arc<TrackPcm>,
+        source: Option<PathBuf>,
+        action: SeparationAction,
+    ) {
+        let backend = match action {
+            SeparationAction::Hub => SeparationBackend::Hub,
+            SeparationAction::Local => SeparationBackend::Local,
+            _ => return,
+        };
+        let _ = self.prefetch_tx.send((
+            StemsJob {
+                deck: DeckId::A,
+                gen: PREFETCH_GEN,
+                pcm,
+                source,
+                start_secs: 0.0,
+            },
+            backend,
+        ));
     }
 
     pub fn poll(&self) -> Vec<StemsMsg> {
@@ -1092,6 +1359,33 @@ impl StemsPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separation_choice_is_explicit_and_side_channels_always_win() {
+        use SeparationAction::{Hub, Local, Off, SideChannel, Unavailable};
+        use StemSeparation::{AiHub, Local as LocalSetting, Off as OffSetting};
+
+        for setting in [OffSetting, AiHub, LocalSetting] {
+            for hub_reachable in [false, true] {
+                assert_eq!(
+                    separation_action(setting, true, hub_reachable),
+                    SideChannel,
+                    "{setting:?}, hub={hub_reachable}"
+                );
+            }
+        }
+        assert_eq!(separation_action(OffSetting, false, false), Off);
+        assert_eq!(separation_action(OffSetting, false, true), Off);
+        assert_eq!(separation_action(AiHub, false, false), Unavailable);
+        assert_eq!(separation_action(AiHub, false, true), Hub);
+        if cfg!(target_arch = "wasm32") {
+            assert_eq!(separation_action(LocalSetting, false, false), Unavailable);
+            assert_eq!(separation_action(LocalSetting, false, true), Unavailable);
+        } else {
+            assert_eq!(separation_action(LocalSetting, false, false), Local);
+            assert_eq!(separation_action(LocalSetting, false, true), Local);
+        }
+    }
 
     #[test]
     fn chunk_geometry_covers_the_whole_track() {

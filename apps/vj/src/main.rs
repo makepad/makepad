@@ -163,7 +163,9 @@ use crate::music_view::{
 use crate::lyrics::{
     KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
 };
-use crate::stems::{StemsJob, StemsMsg, StemsPool};
+use crate::stems::{
+    separation_action, SeparationAction, StemSeparation, StemsJob, StemsMsg, StemsPool,
+};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
 use crate::loop_scan::LoopScanPool;
 use crate::loop_scan::ScanSettings;
@@ -4469,8 +4471,8 @@ impl DeckLoadProgress {
         };
     }
 
-    /// A side-channel miss falls back to optional local separation; the
-    /// playable track itself is ready and should no longer look blocked.
+    /// A side-channel miss falls through to the operator's separation
+    /// choice; the playable track itself is ready and no longer blocked.
     fn stems_unavailable(&mut self, gen: u64) {
         if self.gen != gen {
             return;
@@ -6915,6 +6917,10 @@ pub struct App {
     /// Source separation, off-thread, per deck.
     #[rust(StemsPool::new())]
     stems: StemsPool,
+    /// The operator's one global placement choice for missing stems. Hub is
+    /// the safe default: its failure is unavailable, never a local model run.
+    #[rust(StemSeparation::AiHub)]
+    stem_separation: StemSeparation,
     /// The other way to get stems: precomputed ones off the store, decoded
     /// on their own worker so a deck load never waits behind a model.
     #[rust(SideChannelPool::new())]
@@ -13960,21 +13966,26 @@ p2 {}
                             // clicked: a deck whose side-channel fetch is
                             // armed for this generation never loads the
                             // separation model at all. The fetch's own
-                            // failure paths fall back here.
+                            // failure paths return to this same choice.
                             let mode = self.decks.deck(deck).stems_mode;
+                            let separation = separation_action(
+                                self.stem_separation,
+                                self.side_channels_armed(deck, key.1),
+                                self.stem_hub_reachable(),
+                            );
                             if !mode.shows() {
                                 // Off: this track never costs a separation,
                                 // and nothing of it would be heard anyway.
                                 self.deck_stem_status[deck.index()] =
                                     String::new();
                                 self.deck_stem_busy[deck.index()] = None;
-                            } else if self.side_channels_armed(deck, key.1) {
+                            } else if separation == SeparationAction::SideChannel {
                                 self.deck_stem_status[deck.index()] =
                                     "stems: fetching…".to_string();
                                 self.deck_stem_busy[deck.index()] = Some(true);
                                 self.try_start_side_channels(deck, key.1);
                             } else if mode.computes() {
-                                self.submit_separation(deck, pcm);
+                                self.submit_separation_action(deck, pcm, separation);
                             } else {
                                 // Cached: a fetch of work already done is
                                 // welcome, starting the machine is not.
@@ -14487,6 +14498,17 @@ p2 {}
         self.up
             .as_ref()
             .is_some_and(|up| up.capabilities.ai)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stem_hub_reachable(&self) -> bool {
+        self.store_ai_available()
+            && !makepad_ai_hub::discovery::start_listener().nodes().is_empty()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn stem_hub_reachable(&self) -> bool {
+        false
     }
 
     /// Apply store capabilities to durable deck state and to the controls
@@ -16705,11 +16727,23 @@ p2 {}
                 // must never reach `deck_incoming`.
                 DecodeDone::Deck { gen, result, .. } if gen == stems::PREFETCH_GEN => {
                     match result {
-                        Ok((pcm, _peaks)) if self.store_ai_available() => {
-                            self.stems.submit_prefetch(pcm, self.prefetch.source.clone());
-                            self.prefetch.stage = PrefetchStage::Separating;
+                        Ok((pcm, _peaks)) => {
+                            let action = separation_action(
+                                self.stem_separation,
+                                false,
+                                self.stem_hub_reachable(),
+                            );
+                            if matches!(action, SeparationAction::Hub | SeparationAction::Local) {
+                                self.stems.submit_prefetch(
+                                    pcm,
+                                    self.prefetch.source.clone(),
+                                    action,
+                                );
+                                self.prefetch.stage = PrefetchStage::Separating;
+                            } else {
+                                self.prefetch_release(false);
+                            }
                         }
-                        Ok(_) => self.prefetch_release(false),
                         Err(error) => {
                             log!("prefetch: decode failed: {error}");
                             self.prefetch_release(true);
@@ -19235,9 +19269,9 @@ p2 {}
         }
     }
 
-    /// The AUTO DJ panel survives restarts: brain, style, guard, snap and
-    /// the queue's repeat/shuffle. The ON latch is deliberately absent —
-    /// an armed action boots off, always.
+    /// The AUTO DJ panel survives restarts: brain, style, guard, snap,
+    /// repeat/shuffle and the stem-separation placement. The ON latch is
+    /// deliberately absent — an armed action boots off, always.
     fn save_autopilot_settings(&self) {
         let brain = match self.autopilot.brain {
             MixBrain::Fade => 0,
@@ -19256,6 +19290,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -19263,6 +19298,11 @@ p2 {}
             u8::from(self.autopilot.phrase_snap),
             u8::from(self.decks.repeat),
             u8::from(self.decks.shuffle),
+            match self.stem_separation {
+                StemSeparation::Off => 0,
+                StemSeparation::AiHub => 1,
+                StemSeparation::Local => 2,
+            },
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19296,6 +19336,11 @@ p2 {}
         self.autopilot.phrase_snap = next(1) == 1;
         self.decks.repeat = next(0) == 1;
         self.decks.shuffle = next(0) == 1;
+        self.stem_separation = match next(1) {
+            0 => StemSeparation::Off,
+            2 => StemSeparation::Local,
+            _ => StemSeparation::AiHub,
+        };
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -19313,6 +19358,14 @@ p2 {}
         self.ui
             .check_box(cx, ids!(auto_style))
             .set_active(cx, body, Animate::No);
+        let separation = match self.stem_separation {
+            StemSeparation::Off => 0,
+            StemSeparation::AiHub => 1,
+            StemSeparation::Local => 2,
+        };
+        self.ui
+            .drop_down(cx, ids!(stem_separation))
+            .set_selected_item(cx, separation);
     }
 
     /// The gen panel survives restarts: pipe, length, CONT arm and the
@@ -20788,8 +20841,8 @@ p2 {}
     }
 
     /// A side-channel file is not coming. Missing lyrics only cost the words;
-    /// a missing stem costs the whole set, and the deck separates locally
-    /// after all.
+    /// a missing stem costs the whole set, and the deck returns to the
+    /// operator-selected separation path.
     fn side_channel_failed(&mut self, deck: DeckId, gen: u64, stem: bool, error: &str) {
         if !self.side_channels_armed(deck, gen) {
             return;
@@ -20805,7 +20858,7 @@ p2 {}
             return;
         }
         self.deck_side_channels[index] = None;
-        log!("deck {deck:?}: side-channel stem fetch failed ({error}); separating locally");
+        log!("deck {deck:?}: side-channel stem fetch failed ({error})");
         self.deck_load_progress[index].stems_unavailable(gen);
         self.fall_back_to_separation(deck, gen);
     }
@@ -20842,9 +20895,9 @@ p2 {}
         state.load_gen == gen && state.is_loaded() && self.deck_tracks[deck.index()].is_some()
     }
 
-    /// Separate locally after all: the fetched side-channel never arrived or
-    /// would not decode. When the track has not installed yet there is
-    /// nothing to do here — the arming is gone, so `InstallTrack` separates.
+    /// Use the operator-selected separation path after a fetched side-channel
+    /// did not arrive or decode. When the track has not installed yet there
+    /// is nothing to do here — `InstallTrack` makes the same decision later.
     fn fall_back_to_separation(&mut self, deck: DeckId, gen: u64) {
         if !self.deck_track_is(deck, gen) {
             return;
@@ -20857,32 +20910,69 @@ p2 {}
     /// Ask the separator for this deck's stems, starting where the
     /// playhead is so the knobs go live where they are needed first.
     fn submit_separation(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let capabilities = self
-            .up
-            .as_ref()
-            .map(|up| up.capabilities)
-            .unwrap_or_default();
-        if !crate::music_import_ui::stems_may_run(
-            capabilities,
-            self.decks.deck(deck).stems_mode,
-        ) {
-            self.deck_stem_status[deck.index()] = String::new();
+        if !self.decks.deck(deck).stems_mode.computes() {
             self.deck_stem_busy[deck.index()] = None;
             return;
+        }
+        let action = separation_action(
+            self.stem_separation,
+            false,
+            self.stem_hub_reachable(),
+        );
+        self.submit_separation_action(deck, pcm, action);
+    }
+
+    fn submit_separation_action(
+        &mut self,
+        deck: DeckId,
+        pcm: Arc<TrackPcm>,
+        action: SeparationAction,
+    ) {
+        match action {
+            SeparationAction::Off => {
+                log!("deck {deck:?}: stems: separation off");
+                self.deck_stem_status[deck.index()] = "stems: separation off".to_string();
+                self.deck_stem_busy[deck.index()] = None;
+                self.deck_load_progress[deck.index()]
+                    .stems_unavailable(self.decks.deck(deck).load_gen);
+                return;
+            }
+            SeparationAction::Unavailable => {
+                log!("deck {deck:?}: stems: unavailable");
+                self.deck_stem_status[deck.index()] = "stems: unavailable".to_string();
+                self.deck_stem_busy[deck.index()] = Some(false);
+                self.deck_load_progress[deck.index()]
+                    .stems_unavailable(self.decks.deck(deck).load_gen);
+                return;
+            }
+            SeparationAction::Hub | SeparationAction::Local => {}
+            SeparationAction::SideChannel => unreachable!("side-channel handled before submit"),
         }
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let source = self.local_by_asset.get(&item.asset).cloned();
         let (position, _duration, _playing) = self.mixer.deck_position(deck);
-        self.deck_stem_status[deck.index()] = "stems: queued".to_string();
+        self.deck_stem_status[deck.index()] = match action {
+            SeparationAction::Hub => "stems: queued on hub".to_string(),
+            SeparationAction::Local => "stems: queued locally".to_string(),
+            _ => unreachable!(),
+        };
         self.deck_stem_busy[deck.index()] = Some(true);
-        self.stems.submit(StemsJob {
+        let job = StemsJob {
             deck,
             gen: state.load_gen,
             pcm,
             source,
             start_secs: position,
-        });
+        };
+        match action {
+            SeparationAction::Hub => self.stems.submit_hub(job),
+            SeparationAction::Local => {
+                log!("deck {deck:?}: stems locally");
+                self.stems.submit_local(job);
+            }
+            _ => unreachable!(),
+        }
     }
 
     // ---- first-use model install (stem splitter + whisper) ----
@@ -21199,9 +21289,6 @@ p2 {}
     /// Start warming the next queued track, if this is a moment to do it.
     /// Cheap when it is not: two array reads and a queue peek.
     fn pump_prefetch(&mut self) {
-        if !self.store_ai_available() {
-            return;
-        }
         if !self.prefetch.may_start(Instant::now()) {
             return;
         }
@@ -21211,6 +21298,24 @@ p2 {}
         let Some(item) = self.decks.queue().first().cloned() else { return };
         if self.prefetch.done.contains(&item.asset) {
             return;
+        }
+        let action = separation_action(
+            self.stem_separation,
+            item.side.stems.is_some(),
+            self.stem_hub_reachable(),
+        );
+        match action {
+            // Nothing to warm: the side-channel rides with the real load.
+            SeparationAction::SideChannel => {
+                self.prefetch.asset = Some(item.asset);
+                self.prefetch_release(true);
+                return;
+            }
+            SeparationAction::Hub | SeparationAction::Local => {}
+            SeparationAction::Off | SeparationAction::Unavailable => {
+                self.prefetch_release(false);
+                return;
+            }
         }
         // A file on this machine decodes straight off disk, exactly as a
         // deck load of the same track would.
@@ -21303,9 +21408,9 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
             }
         }
-        // Two sources, one vocabulary: the local separator and the fetched
-        // side-channel publish the same chunks and the same status lines, so
-        // everything below this point is blind to which one served the deck.
+        // Three sources, one vocabulary: hub/local separation and the fetched
+        // side-channel publish the same chunks and status lines, so everything
+        // below this point is blind to which one served the deck.
         let mut messages = self.stems.poll();
         for message in self.sidechan.poll() {
             match message {
@@ -21325,7 +21430,7 @@ p2 {}
                     }
                 }
                 SideChannelMsg::Fallback { deck, gen, reason } => {
-                    log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
+                    log!("deck {deck:?}: side-channel unusable ({reason})");
                     self.set_web_status_error(format!("music side-channel decode: {reason}"));
                     self.deck_side_channels[deck.index()] = None;
                     self.deck_load_progress[deck.index()].stems_unavailable(gen);
@@ -21589,7 +21694,7 @@ p2 {}
 
     // ---- music mode: giving the analysis back ------------------------------
 
-    /// Offer a locally separated store track's stems back to the store.
+    /// Offer a newly separated store track's stems back to the store.
     ///
     /// Everything about this is deliberately timid. It runs ONLY for a track
     /// that came from the store (a local file has no asset to attach to),
@@ -24500,6 +24605,15 @@ p2 {}
             }
             self.save_autopilot_settings();
         }
+        if let Some(index) = self.ui.drop_down(cx, ids!(stem_separation)).selected(actions) {
+            self.stem_separation = match index {
+                0 => StemSeparation::Off,
+                2 => StemSeparation::Local,
+                _ => StemSeparation::AiHub,
+            };
+            self.save_autopilot_settings();
+            self.refresh_models_row(cx);
+        }
         if self.ui.button(cx, ids!(auto_vocal)).clicked(actions) {
             let on = !self.autopilot.vocal_guard;
             self.autopilot.set_vocal_guard(on);
@@ -25401,8 +25515,8 @@ p2 {}
             media_blob: digest,
             media_len: 0,
             media: MediaType::Wav,
-            // A file on this machine has no revision on any store: it
-            // separates locally, exactly as it always has.
+            // A file on this machine has no revision on any store. Its
+            // missing stems follow the same explicit setting as store audio.
             side: TrackSideChannels::default(),
         })
     }
