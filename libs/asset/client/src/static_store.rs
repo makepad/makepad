@@ -17,7 +17,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::location::{BaseUrl, ClientMode};
 use crate::transport::{
     OwnedRequest, OwnedResponse, Transport, TransportCompletion, TransportError, TransportId,
-    TransportMethod,
+    TransportMethod, TransportProgress,
 };
 use crate::util::from_hex_exact;
 use makepad_asset_data::{
@@ -32,6 +32,7 @@ pub const MAX_STATIC_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STATIC_ITEMS: usize = 100_000;
 const MAX_STATIC_STRING_BYTES: usize = 16 * 1024;
 const MAX_COMPLETIONS_PER_POLL: usize = 64;
+const PROGRESS_STRIDE_BYTES: u64 = 256 * 1024;
 
 pub type StaticFetchId = u64;
 
@@ -57,6 +58,7 @@ pub enum StaticFetchOutput {
 pub enum StaticStoreEvent {
     Ready,
     Failed(ClientError),
+    FetchProgress { id: StaticFetchId, bytes: u64, total: u64 },
     FetchDone { id: StaticFetchId, output: StaticFetchOutput },
     FetchFailed { id: StaticFetchId, error: ClientError },
 }
@@ -151,6 +153,7 @@ struct InFlight {
     digest: [u8; 32],
     file: FileMeta,
     waiters: Vec<Waiter>,
+    progress: u64,
 }
 
 /// One static snapshot and its page-lifetime verified cache.
@@ -228,6 +231,11 @@ impl StaticStore {
     pub fn poll(&mut self) -> Vec<StaticStoreEvent> {
         let mut incoming = Vec::new();
         self.transport.poll(&mut incoming);
+        let mut progress = Vec::new();
+        self.transport.poll_progress(&mut progress);
+        for progress in progress {
+            self.note_progress(progress);
+        }
         self.completions.extend(incoming);
         for _ in 0..MAX_COMPLETIONS_PER_POLL {
             let Some(completion) = self.completions.pop_front() else { break };
@@ -440,7 +448,11 @@ impl StaticStore {
         let transport_id = self.start_get(&path, file.byte_len)?;
         self.pending.insert(transport_id, Pending::Fetch(digest));
         self.inflight.insert(digest, InFlight {
-            transport_id, digest, file, waiters: vec![Waiter { id, fetch }],
+            transport_id,
+            digest,
+            file,
+            waiters: vec![Waiter { id, fetch }],
+            progress: 0,
         });
         Ok(id)
     }
@@ -517,6 +529,21 @@ impl StaticStore {
                 }
             }
             Pending::Fetch(digest) => self.finish_fetch(&digest, completion.result),
+        }
+    }
+
+    fn note_progress(&mut self, progress: TransportProgress) {
+        let Some(Pending::Fetch(digest)) = self.pending.get(&progress.id) else { return };
+        let Some(active) = self.inflight.get_mut(digest) else { return };
+        let total = if progress.total > 0 { progress.total } else { active.file.byte_len };
+        let bytes = progress.bytes.min(total);
+        if bytes < total && bytes < active.progress.saturating_add(PROGRESS_STRIDE_BYTES) {
+            return;
+        }
+        active.progress = bytes;
+        let waiters: Vec<_> = active.waiters.iter().map(|waiter| waiter.id).collect();
+        for id in waiters {
+            self.ready_events.push_back(StaticStoreEvent::FetchProgress { id, bytes, total });
         }
     }
 

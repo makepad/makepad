@@ -4382,6 +4382,211 @@ struct PendingSideChannels {
     lyrics: Option<FetchedSource>,
 }
 
+/// Generation-safe presentation state for a deck's fetch, decode and
+/// precomputed-stem load. Transport details stay out of the deck engine.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum DeckLoadPhase {
+    #[default]
+    Idle,
+    Fetching { bytes: u64, total: u64 },
+    /// `None` until a decoder offers work-unit progress.
+    Decoding { progress: Option<(u64, u64)> },
+    Stems,
+    Ready,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DeckLoadProgress {
+    gen: u64,
+    phase: DeckLoadPhase,
+    stem_bytes: [u64; 4],
+    stem_totals: [u64; 4],
+    wants_stems: bool,
+}
+
+impl DeckLoadProgress {
+    fn begin(&mut self, gen: u64, total: u64) {
+        *self = Self {
+            gen,
+            phase: DeckLoadPhase::Fetching { bytes: 0, total },
+            stem_bytes: [0; 4],
+            stem_totals: [0; 4],
+            wants_stems: false,
+        };
+    }
+
+    fn fetch_progress(&mut self, gen: u64, bytes: u64, total: u64) {
+        if self.gen != gen {
+            return;
+        }
+        if let DeckLoadPhase::Fetching { total: expected, .. } = self.phase {
+            let total = if total > 0 { total } else { expected };
+            self.phase = DeckLoadPhase::Fetching {
+                bytes: if total > 0 { bytes.min(total) } else { bytes },
+                total,
+            };
+        }
+    }
+
+    fn arm_stems(&mut self, gen: u64, totals: [u64; 4]) {
+        if self.gen == gen && !matches!(self.phase, DeckLoadPhase::Failed(_)) {
+            self.stem_totals = totals;
+            self.wants_stems = true;
+        }
+    }
+
+    fn decoding(&mut self, gen: u64) {
+        if self.gen == gen && !matches!(self.phase, DeckLoadPhase::Failed(_)) {
+            self.phase = DeckLoadPhase::Decoding { progress: None };
+        }
+    }
+
+    fn stem_progress(&mut self, gen: u64, index: usize, bytes: u64, total: u64) {
+        if self.gen != gen || index >= self.stem_bytes.len() {
+            return;
+        }
+        if total > 0 {
+            self.stem_totals[index] = total;
+        }
+        self.stem_bytes[index] = bytes.min(self.stem_totals[index]);
+    }
+
+    fn stem_complete(&mut self, gen: u64, index: usize) {
+        if self.gen == gen && index < self.stem_bytes.len() {
+            self.stem_bytes[index] = self.stem_totals[index];
+        }
+    }
+
+    fn decoded(&mut self, gen: u64) {
+        if self.gen != gen || matches!(self.phase, DeckLoadPhase::Failed(_)) {
+            return;
+        }
+        self.phase = if self.wants_stems {
+            DeckLoadPhase::Stems
+        } else {
+            DeckLoadPhase::Ready
+        };
+    }
+
+    /// A side-channel miss falls back to optional local separation; the
+    /// playable track itself is ready and should no longer look blocked.
+    fn stems_unavailable(&mut self, gen: u64) {
+        if self.gen != gen {
+            return;
+        }
+        self.wants_stems = false;
+        if matches!(self.phase, DeckLoadPhase::Stems) {
+            self.phase = DeckLoadPhase::Ready;
+        }
+    }
+
+    fn stems_ready(&mut self, gen: u64) {
+        if self.gen == gen && matches!(self.phase, DeckLoadPhase::Stems) {
+            self.phase = DeckLoadPhase::Ready;
+        }
+    }
+
+    fn failed(&mut self, gen: u64, error: String) {
+        if self.gen == gen {
+            self.phase = DeckLoadPhase::Failed(error);
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn text(&self) -> Option<String> {
+        match &self.phase {
+            DeckLoadPhase::Idle | DeckLoadPhase::Ready => None,
+            DeckLoadPhase::Fetching { bytes, total } if *total > 0 => Some(format!(
+                "fetching {:.1} / {:.1} MB",
+                *bytes as f64 / (1024.0 * 1024.0),
+                *total as f64 / (1024.0 * 1024.0),
+            )),
+            DeckLoadPhase::Fetching { .. } => Some("fetching".to_string()),
+            DeckLoadPhase::Decoding { .. } => Some("decoding".to_string()),
+            DeckLoadPhase::Stems => Some("stems".to_string()),
+            DeckLoadPhase::Failed(error) => Some(format!("failed: {error}")),
+        }
+    }
+
+    /// `(phase, fraction, indeterminate)` for the waveform strip. Fetch is
+    /// phase 1, decode 2, stems 3 and failure 4.
+    fn visual(&self) -> Option<(f32, f32, f32)> {
+        let fraction = |done: u64, total: u64| {
+            if total > 0 {
+                (done as f64 / total as f64).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            }
+        };
+        match &self.phase {
+            DeckLoadPhase::Idle | DeckLoadPhase::Ready => None,
+            DeckLoadPhase::Fetching { bytes, total } => Some((
+                1.0,
+                fraction(*bytes, *total),
+                if *total == 0 { 1.0 } else { 0.0 },
+            )),
+            DeckLoadPhase::Decoding { progress } => match progress {
+                Some((done, total)) if *total > 0 => {
+                    Some((2.0, fraction(*done, *total), 0.0))
+                }
+                _ => Some((2.0, 0.0, 1.0)),
+            },
+            DeckLoadPhase::Stems => {
+                let done = self.stem_bytes.iter().sum();
+                let total = self.stem_totals.iter().sum();
+                Some((
+                    3.0,
+                    fraction(done, total),
+                    if total == 0 || done >= total { 1.0 } else { 0.0 },
+                ))
+            }
+            DeckLoadPhase::Failed(_) => Some((4.0, 1.0, 0.0)),
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(self.phase, DeckLoadPhase::Failed(_))
+    }
+}
+
+#[cfg(test)]
+mod deck_load_progress_tests {
+    use super::{DeckLoadPhase, DeckLoadProgress};
+
+    #[test]
+    fn fetching_decoding_stems_then_ready_or_failed() {
+        let mib = 1024 * 1024;
+        let mut load = DeckLoadProgress::default();
+        load.begin(7, 32 * mib);
+        load.arm_stems(7, [mib, 2 * mib, mib, 4 * mib]);
+        load.fetch_progress(7, 12 * mib, 32 * mib);
+        assert_eq!(load.text().as_deref(), Some("fetching 12.0 / 32.0 MB"));
+        assert_eq!(load.visual(), Some((1.0, 0.375, 0.0)));
+
+        load.decoding(7);
+        assert_eq!(load.phase, DeckLoadPhase::Decoding { progress: None });
+        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0)));
+        load.stem_progress(7, 0, mib, mib);
+        load.decoded(7);
+        assert_eq!(load.phase, DeckLoadPhase::Stems);
+        assert_eq!(load.visual(), Some((3.0, 0.125, 0.0)));
+        load.stems_ready(7);
+        assert_eq!(load.phase, DeckLoadPhase::Ready);
+
+        load.begin(8, 10 * mib);
+        load.decoding(8);
+        load.failed(8, "bad audio".to_string());
+        assert_eq!(load.text().as_deref(), Some("failed: bad audio"));
+        assert_eq!(load.visual(), Some((4.0, 1.0, 0.0)));
+        load.stems_ready(7); // stale completion cannot clear the failure
+        assert!(load.is_failed());
+    }
+}
+
 /// A wasm deck's read-only demo-cache lookup. Missing and failed payloads
 /// settle to `Unavailable`; they are never converted into local analysis
 /// jobs, so a static-site miss cannot leave the deck waiting forever.
@@ -6588,6 +6793,8 @@ pub struct App {
     // Decks.
     #[rust]
     deck_incoming: HashMap<(usize, u64), (Arc<TrackPcm>, Vec<(f32, f32)>)>,
+    #[rust]
+    deck_load_progress: [DeckLoadProgress; 2],
     #[rust]
     deck_tracks: [Option<(Arc<TrackPcm>, Vec<(f32, f32)>)>; 2],
     #[rust]
@@ -13595,13 +13802,18 @@ p2 {}
                     // A new load supersedes whatever the last one was still
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
-                    self.deck_side_channels[deck.index()] = None;
-                    self.deck_demo_analysis[deck.index()] =
+                    let index = deck.index();
+                    self.deck_side_channels[index] = None;
+                    self.deck_load_progress[index].begin(gen, item.media_len);
+                    self.deck_demo_analysis[index] =
                         DemoCacheValue::Unavailable { gen };
-                    self.deck_demo_splat[deck.index()] =
+                    self.deck_demo_splat[index] =
                         DemoCacheValue::Unavailable { gen };
                     #[cfg(target_arch = "wasm32")]
                     if let Some(track) = self.browser_store.track(&item.asset).cloned() {
+                        // This fast path has no side-channel fetch attached.
+                        self.deck_load_progress[index].stems_unavailable(gen);
+                        self.deck_load_progress[index].decoding(gen);
                         self.decode.submit(DecodeJob::Deck {
                             deck,
                             gen,
@@ -13624,6 +13836,10 @@ p2 {}
                             Some("mp3") => MediaType::Mp3,
                             _ => MediaType::Mp4,
                         };
+                        // Local files decode directly; store side-channels are
+                        // not part of this path even if stale metadata says so.
+                        self.deck_load_progress[index].stems_unavailable(gen);
+                        self.deck_load_progress[index].decoding(gen);
                         self.decode.submit(DecodeJob::Deck {
                             deck,
                             gen,
@@ -13633,14 +13849,22 @@ p2 {}
                         continue;
                     }
                     let Some(up) = self.up.as_mut() else {
-                        log!("deck-load: request stopped deck={deck:?} gen={gen}: no session");
+                        let error = "asset session is unavailable".to_string();
+                        log!("deck-load: request stopped deck={deck:?} gen={gen}: {error}");
+                        self.deck_load_progress[index].failed(gen, error.clone());
+                        let cmds = self.decks.track_failed(deck, gen, error);
+                        self.run_deck_cmds(cx, cmds);
                         continue;
                     };
                     let Some(runtime) = up.media.get_mut(AUDIO_LANE) else {
-                        log!(
-                            "deck-load: request stopped deck={deck:?} gen={gen}: audio lane {AUDIO_LANE} absent (lanes={})",
+                        let error = format!(
+                            "audio lane {AUDIO_LANE} is unavailable (lanes={})",
                             up.media.len()
                         );
+                        log!("deck-load: request stopped deck={deck:?} gen={gen}: {error}");
+                        self.deck_load_progress[index].failed(gen, error.clone());
+                        let cmds = self.decks.track_failed(deck, gen, error);
+                        self.run_deck_cmds(cx, cmds);
                         continue;
                     };
                     match runtime.submit(ClientRequest::FetchBlob {
@@ -13656,12 +13880,20 @@ p2 {}
                         }
                         Err(error) => {
                             log!("deck {deck:?} gen {gen}: fetch request failed: {error}");
+                            let error = error.to_string();
+                            self.deck_load_progress[index].failed(gen, error.clone());
+                            let cmds = self.decks.track_failed(deck, gen, error);
+                            self.run_deck_cmds(cx, cmds);
+                            continue;
                         }
                     }
                     // Whatever the store already knows about this track rides
                     // along with the audio: a few hundred kilobytes of stems
                     // instead of a third of the track's duration on the GPU.
                     self.begin_side_channel_fetch(deck, gen, &item);
+                    if !self.side_channels_armed(deck, gen) {
+                        self.deck_load_progress[index].stems_unavailable(gen);
+                    }
                 }
                 DeckCmd::InstallTrack { deck } => {
                     let key = self
@@ -13824,6 +14056,7 @@ p2 {}
                 DeckCmd::SwapVoices => {
                     self.mixer.swap_decks();
                     self.deck_tracks.swap(0, 1);
+                    self.deck_load_progress.swap(0, 1);
                     self.deck_analysis.swap(0, 1);
                     self.deck_demo_analysis.swap(0, 1);
                     self.deck_demo_splat.swap(0, 1);
@@ -13857,6 +14090,7 @@ p2 {}
                     self.deck_side_channels[index] = None;
                     self.deck_stem_status[index] = String::new();
                     self.deck_stem_busy[index] = None;
+                    self.deck_load_progress[index].clear();
                     self.push_deck_wave(cx, deck);
                 }
             }
@@ -15244,7 +15478,27 @@ p2 {}
                 let id = event.id();
                 match event {
                     ClientEvent::Started { .. } => {}
-                    ClientEvent::Progress { .. } => {}
+                    ClientEvent::Progress { bytes, total, .. } => {
+                        let progress = self.media_reqs.get(&(lane, id)).and_then(|purpose| {
+                            match purpose {
+                                MediaPurpose::Deck { deck, gen, .. } => {
+                                    Some((*deck, *gen, None))
+                                }
+                                MediaPurpose::DeckStem { deck, gen, index } => {
+                                    Some((*deck, *gen, Some(*index)))
+                                }
+                                _ => None,
+                            }
+                        });
+                        if let Some((deck, gen, slot)) = progress {
+                            match slot {
+                                Some(slot) => self.deck_load_progress[deck.index()]
+                                    .stem_progress(gen, slot, bytes, total),
+                                None => self.deck_load_progress[deck.index()]
+                                    .fetch_progress(gen, bytes, total),
+                            }
+                        }
+                    }
                     ClientEvent::Done { output, .. } => {
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
                             continue;
@@ -15300,12 +15554,14 @@ p2 {}
                                 }
                             }
                             MediaPurpose::Deck { deck, gen, media } => {
+                                self.deck_load_progress[deck.index()].decoding(gen);
                                 self.decode.submit(DecodeJob::Deck { deck, gen, source, media });
                             }
                             MediaPurpose::Preview { gen, media } => {
                                 self.decode.submit(DecodeJob::Preview { gen, source, media });
                             }
                             MediaPurpose::DeckStem { deck, gen, index } => {
+                                self.deck_load_progress[deck.index()].stem_complete(gen, index);
                                 self.side_channel_landed(deck, gen, Some(index), source);
                             }
                             MediaPurpose::DeckLyrics { deck, gen } => {
@@ -15388,6 +15644,7 @@ p2 {}
             MediaPurpose::Deck { deck, gen, .. } => {
                 log!("deck-load: failed deck={deck:?} gen={gen}: fetch {error}");
                 self.set_web_status_error(format!("music load: {error}"));
+                self.deck_load_progress[deck.index()].failed(gen, error.clone());
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
             }
@@ -16499,6 +16756,8 @@ p2 {}
                         let installed = !cmds.is_empty();
                         if !installed {
                             self.deck_incoming.remove(&(deck.index(), gen));
+                        } else {
+                            self.deck_load_progress[deck.index()].decoded(gen);
                         }
                         self.run_deck_cmds(cx, cmds);
                         self.run_deck_cmds(cx, trim_cmds);
@@ -16546,6 +16805,7 @@ p2 {}
                     Err(error) => {
                         log!("deck-load: failed deck={deck:?} gen={gen}: {error}");
                         self.set_web_status_error(format!("music decode: {error}"));
+                        self.deck_load_progress[deck.index()].failed(gen, error.clone());
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
                     }
@@ -20182,6 +20442,7 @@ p2 {}
                 pending.want_lyrics = true;
             }
         }
+        self.deck_load_progress[index].arm_stems(gen, stems.map(|(_, len)| len));
         self.deck_side_channels[index] = Some(pending);
     }
 
@@ -20416,6 +20677,7 @@ p2 {}
         }
         self.deck_side_channels[index] = None;
         log!("deck {deck:?}: side-channel stem fetch failed ({error}); separating locally");
+        self.deck_load_progress[index].stems_unavailable(gen);
         self.fall_back_to_separation(deck, gen);
     }
 
@@ -20937,6 +21199,7 @@ p2 {}
                     log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
                     self.set_web_status_error(format!("music side-channel decode: {reason}"));
                     self.deck_side_channels[deck.index()] = None;
+                    self.deck_load_progress[deck.index()].stems_unavailable(gen);
                     self.fall_back_to_separation(deck, gen);
                 }
             }
@@ -20953,6 +21216,9 @@ p2 {}
                     // had no room. Latching it here is what keeps the reason
                     // on screen instead of behind the next karaoke line.
                     self.deck_stem_busy[deck.index()] = Some(working);
+                    if !working {
+                        self.deck_load_progress[deck.index()].stems_unavailable(gen);
+                    }
                 }
                 StemsMsg::Done { deck, gen } => {
                     if self.decks.deck(deck).load_gen != gen {
@@ -20960,6 +21226,7 @@ p2 {}
                     }
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
                     self.deck_stem_busy[deck.index()] = None;
+                    self.deck_load_progress[deck.index()].stems_ready(gen);
                     if self.deck_stem_coverage[deck.index()]
                         .is_some_and(|(_, complete)| complete)
                     {
@@ -21712,14 +21979,18 @@ p2 {}
             self.deck_splat_snapshot_seen[index] = snapshot.splat.is_some();
             self.decks.observe_splat(deck, snapshot.splat);
             let state = self.decks.deck(deck);
-            let (title, artist) = match &state.load {
+            let (title, fallback_status) = match &state.load {
                 DeckLoad::Empty => ("empty".to_string(), String::new()),
-                DeckLoad::Loading { item, .. } => {
-                    (item.title.clone(), "loading…".to_string())
-                }
+                DeckLoad::Loading { item, .. } => (item.title.clone(), "loading…".to_string()),
                 DeckLoad::Loaded { item } => (item.title.clone(), String::new()),
                 DeckLoad::Failed { item, error } => (item.title.clone(), error.clone()),
             };
+            let load_failed = self.deck_load_progress[index].is_failed()
+                || matches!(&state.load, DeckLoad::Failed { .. });
+            let load_visual = self.deck_load_progress[index].visual();
+            let artist = self.deck_load_progress[index]
+                .text()
+                .unwrap_or(fallback_status);
             // Copy what the paint pass needs: `paint_lit` takes &mut self.
             let grid = state.grid;
             let rate = state.rate;
@@ -21771,6 +22042,10 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
+            refs.artist.set_text_color(
+                cx,
+                Vec4f::from_u32(if load_failed { 0xe5484dff } else { 0xa6b1bdff }),
+            );
             self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate));
             self.set_label(
                 cx,
@@ -21921,6 +22196,7 @@ p2 {}
                 strip.set_found_loops(cx, &found_loops);
                 strip.set_cue_marker(cx, cue_secs);
                 strip.set_snap_grid(cx, grid, self.decks.snap_beats);
+                strip.set_load(cx, load_visual);
             };
             self.music_refs.decks[index] = refs;
         }

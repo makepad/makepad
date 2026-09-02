@@ -1755,11 +1755,17 @@ script_mod! {
             new_batch: true
             deck_a_well := DeckWell{
                 width: Fill
-                deck_a_overview := mod.widgets.VjWaveOverview{height: Fill}
+                deck_a_overview := mod.widgets.VjWaveOverview{
+                    height: Fill
+                    draw_load +: {color: #xff5c39}
+                }
             }
             deck_b_well := DeckWell{
                 width: Fill
-                deck_b_overview := mod.widgets.VjWaveOverview{height: Fill}
+                deck_b_overview := mod.widgets.VjWaveOverview{
+                    height: Fill
+                    draw_load +: {color: #x6aa8ff}
+                }
             }
         }
 
@@ -4194,6 +4200,12 @@ impl Widget for VjWaveScroll {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+struct WaveLoadView {
+    phase: f32,
+    progress: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverviewEvent {
     /// The green marker was clicked: keep the running loop as a blue one.
     SaveLoop,
@@ -4244,6 +4256,10 @@ pub struct VjWaveOverview {
     /// the strip stays the reference picture of the song.
     #[live]
     draw_lane: DrawWaveLane,
+    /// Direct-drawn over the same strip: no extra layout and no
+    /// platform-specific path. Each deck gives it its header accent.
+    #[live]
+    draw_load: DrawColor,
     #[rust]
     area: Area,
     #[rust]
@@ -4325,9 +4341,28 @@ pub struct VjWaveOverview {
     snap_beats: u32,
     #[rust]
     events: Vec<OverviewEvent>,
+    #[rust]
+    load: Option<WaveLoadView>,
+    #[rust]
+    load_frame: NextFrame,
 }
 
 impl VjWaveOverview {
+    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32)>) {
+        let load = visual.map(|(phase, progress, indeterminate)| WaveLoadView {
+            phase,
+            progress: (indeterminate < 0.5).then_some(progress),
+        });
+        if self.load == load {
+            return;
+        }
+        self.load = load;
+        self.area.redraw(cx);
+        if self.load.is_some_and(|load| load.progress.is_none()) {
+            self.load_frame = cx.new_next_frame();
+        }
+    }
+
     pub fn set_track(
         &mut self,
         cx: &mut Cx,
@@ -4509,6 +4544,12 @@ impl WidgetNode for VjWaveOverview {
 
 impl Widget for VjWaveOverview {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.load_frame.is_event(event).is_some()
+            && self.load.is_some_and(|load| load.progress.is_none())
+        {
+            self.area.redraw(cx);
+            self.load_frame = cx.new_next_frame();
+        }
         match event.hits(cx, self.area) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 // Marker strip first: a chip click is neither a seek nor a
@@ -4708,6 +4749,46 @@ impl Widget for VjWaveOverview {
         self.draw_lane.head_col = (self.head * self.cols.max(1) as f64) as f32;
         self.draw_lane.head_on = if self.pyramid.is_some() { 1.0 } else { 0.0 };
         self.draw_lane.draw_abs(cx, rect);
+        if let Some(load) = self.load {
+            let accent = self.draw_load.color;
+            self.draw_load.color = Vec4f::from_u32(0x090c10d9);
+            self.draw_load.draw_abs(cx, rect);
+            let track = Rect {
+                pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
+                size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+            };
+            self.draw_load.color = Vec4f::from_u32(0x2a323cff);
+            self.draw_load.draw_abs(cx, track);
+            self.draw_load.color = match load.phase as u32 {
+                2 => Vec4f::from_u32(0xf5c542ff),
+                3 => Vec4f::from_u32(0x35c05fff),
+                4 => Vec4f::from_u32(0xe5484dff),
+                _ => accent,
+            };
+            let fill = match load.progress {
+                Some(progress) => Rect {
+                    pos: track.pos,
+                    size: dvec2(
+                        track.size.x * progress.clamp(0.0, 1.0) as f64,
+                        track.size.y,
+                    ),
+                },
+                None => {
+                    let t = (cx.seconds_since_app_start() * 0.8).rem_euclid(2.0);
+                    let sweep = if t < 1.0 { t } else { 2.0 - t };
+                    let width = (track.size.x * 0.22).clamp(28.0, 84.0).min(track.size.x);
+                    self.load_frame = cx.new_next_frame();
+                    Rect {
+                        pos: dvec2(track.pos.x + (track.size.x - width) * sweep, track.pos.y),
+                        size: dvec2(width, track.size.y),
+                    }
+                }
+            };
+            if fill.size.x > 0.0 {
+                self.draw_load.draw_abs(cx, fill);
+            }
+            self.draw_load.color = accent;
+        }
         // The marker chips ride the top edge, each over its loop's IN.
         // NO chip ever moves with the pointer: hover scales one up, a
         // press takes it back to normal (the pressed-down feel), and a

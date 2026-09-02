@@ -125,10 +125,18 @@ pub struct TransportCompletion {
     pub result: Result<OwnedResponse, TransportError>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportProgress {
+    pub id: TransportId,
+    pub bytes: u64,
+    pub total: u64,
+}
+
 pub trait Transport: Send {
     fn start(&mut self, req: OwnedRequest) -> TransportId;
     fn cancel(&mut self, id: TransportId);
     fn poll(&mut self, out: &mut Vec<TransportCompletion>);
+    fn poll_progress(&mut self, _out: &mut Vec<TransportProgress>) {}
 }
 
 fn validate_request(req: &OwnedRequest, absolute_url: bool) -> Result<(), TransportError> {
@@ -498,6 +506,7 @@ mod platform {
         next_id: u64,
         active: std::collections::HashMap<TransportId, (TransportMethod, u64)>,
         ready: Vec<TransportCompletion>,
+        progress: Vec<TransportProgress>,
     }
 
     impl Default for PlatformHttpTransport {
@@ -525,6 +534,7 @@ mod platform {
                 next_id: 1,
                 active: std::collections::HashMap::new(),
                 ready: Vec::new(),
+                progress: Vec::new(),
             }
         }
 
@@ -641,14 +651,27 @@ mod platform {
                             });
                         }
                     }
+                    NetworkResponse::HttpProgress { request_id, progress } => {
+                        let id = transport_id(request_id);
+                        if self.active.contains_key(&id) {
+                            self.progress.push(TransportProgress {
+                                id,
+                                bytes: progress.loaded,
+                                total: progress.total,
+                            });
+                        }
+                    }
                     NetworkResponse::HttpStreamChunk { .. }
-                    | NetworkResponse::HttpProgress { .. }
                     | NetworkResponse::WsOpened { .. }
                     | NetworkResponse::WsMessage { .. }
                     | NetworkResponse::WsClosed { .. }
                     | NetworkResponse::WsError { .. } => {}
                 }
             }
+        }
+
+        fn poll_progress(&mut self, out: &mut Vec<TransportProgress>) {
+            out.append(&mut self.progress);
         }
     }
 
