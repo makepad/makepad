@@ -177,6 +177,18 @@ impl WebView {
         self.tabs.summaries()
     }
 
+    /// Title, URL and active marker for the browser's AI `tabs` tool.
+    pub fn ai_tabs(&self) -> Vec<(String, String, bool)> {
+        self.tabs
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                (tab.display_title(), tab.url.clone(), index == self.tabs.active)
+            })
+            .collect()
+    }
+
     pub fn active_info(&self) -> ActiveInfo {
         let Some(tab) = self.tabs.active() else {
             return ActiveInfo::default();
