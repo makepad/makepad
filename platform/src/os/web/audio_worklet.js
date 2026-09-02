@@ -96,7 +96,22 @@ class AudioWorklet extends AudioWorkletProcessor {
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
 
-            let output_ptr = context.exports.wasm_audio_output_entrypoint(context.context_ptr, frames, channels);
+            let output_ptr = context.exports.wasm_audio_output_entrypoint(
+                context.context_ptr,
+                frames,
+                channels,
+                sampleRate,
+            );
+
+            if (!this._callback_started) {
+                this._callback_started = true;
+                this.port.postMessage({
+                    message_type: "audio_callback_started",
+                    sample_rate: sampleRate,
+                    frames,
+                    channels,
+                });
+            }
 
             if (context.buffer_ref_len_check != context.memory.buffer.byteLength) {
                 context.f32 = new Float32Array(context.memory.buffer);

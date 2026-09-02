@@ -478,6 +478,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
+        this.audio_context = null;
+        this.audio_worklet = null;
+        this.audio_callback_started = false;
+        this.audio_callback_watchdog = null;
 
         this.dispatch_first_msg();
     }
@@ -1220,31 +1224,107 @@ export class WasmWebBrowser extends WasmBridge {
         if (!this.audio_context) {
             return
         }
-        this.audio_context.close();
+        if (this.audio_callback_watchdog !== null) {
+            clearTimeout(this.audio_callback_watchdog);
+            this.audio_callback_watchdog = null;
+        }
+        if (this.audio_worklet) {
+            this.audio_worklet.disconnect();
+            this.audio_worklet = null;
+        }
+        const audio_context = this.audio_context;
         this.audio_context = null;
+        audio_context.close().catch(error => {
+            console.error(`web audio: close failed: ${error}`);
+        });
+    }
+
+    watch_audio_callback(audio_context) {
+        if (!this.audio_worklet
+            || this.audio_callback_started
+            || this.audio_callback_watchdog !== null) {
+            return;
+        }
+        this.audio_callback_watchdog = setTimeout(() => {
+            this.audio_callback_watchdog = null;
+            if (this.audio_context === audio_context && !this.audio_callback_started) {
+                console.error(
+                    `web audio: callback never called state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+                );
+            }
+        }, 3000);
+    }
+
+    resume_audio_from_gesture() {
+        const audio_context = this.audio_context;
+        if (!audio_context) {
+            return;
+        }
+        if (audio_context.state === "running") {
+            this.watch_audio_callback(audio_context);
+            return;
+        }
+        if (audio_context.state !== "suspended" || audio_context._makepad_resume_pending) {
+            return;
+        }
+        audio_context._makepad_resume_pending = true;
+        audio_context.resume().then(() => {
+            audio_context._makepad_resume_pending = false;
+            if (this.audio_context !== audio_context) {
+                return;
+            }
+            console.log(
+                `web audio: resume state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+            );
+            if (audio_context.state === "running") {
+                this.watch_audio_callback(audio_context);
+            } else {
+                console.error(
+                    `web audio: context suspended after canvas gesture state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+                );
+            }
+        }).catch(error => {
+            audio_context._makepad_resume_pending = false;
+            console.error(
+                `web audio: resume failed state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending: ${error}`,
+            );
+        });
     }
 
     FromWasmStartAudioOutput(args) {
         if (this.audio_context) {
             return
         }
+        let audio_context;
+        try {
+            audio_context = new AudioContext({
+                latencyHint: "interactive"
+            });
+        } catch (error) {
+            console.error(`web audio: context creation failed: ${error}`);
+            return;
+        }
+        this.audio_context = audio_context;
+        this.audio_callback_started = false;
+        console.log(
+            `web audio: context created state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+        );
+
         const start_worklet = async () => {
             if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
             }
             if (!this.wasm._has_thread_support) {
-                console.warn("FromWasmStartAudioOutput skipped: wasm threading support is unavailable");
-                return;
+                throw new Error("wasm threading support is unavailable");
             }
             const thread_info = this.alloc_thread_stack(args.context_ptr);
             if (!thread_info) {
-                console.warn("FromWasmStartAudioOutput skipped: thread stack allocation prerequisites are unavailable");
-                return;
+                throw new Error("thread stack allocation prerequisites are unavailable");
             }
 
-            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
+            await audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
 
-            const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
+            const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
@@ -1261,51 +1341,75 @@ export class WasmWebBrowser extends WasmBridge {
                     case "console_error":
                         console.error(data.value);
                         break;
+
+                    case "audio_callback_started":
+                        this.audio_callback_started = true;
+                        if (this.audio_callback_watchdog !== null) {
+                            clearTimeout(this.audio_callback_watchdog);
+                            this.audio_callback_watchdog = null;
+                        }
+                        console.log(
+                            `web audio: callback running state=${audio_context.state} sample_rate=${data.sample_rate} buffer=${data.frames}x${data.channels}`,
+                        );
+                        break;
                 }
             };
             audio_worklet.onprocessorerror = (err) => {
-                console.error(err);
+                console.error(`web audio: processor failed: ${err}`);
             }
-            audio_worklet.connect(this.audio_context.destination);
+            audio_worklet.connect(audio_context.destination);
 
             return audio_worklet;
         };
 
-        let user_interact_hook = (arg) => {
-            if (this.audio_context.state === "suspended") {
-                this.audio_context.resume();
+        start_worklet().then(audio_worklet => {
+            if (this.audio_context !== audio_context) {
+                audio_worklet.disconnect();
+                return;
             }
-        }
-        this.audio_context = new AudioContext({
-            latencyHint: "interactive",
-            sampleRate: 48000
-        });
-        start_worklet().catch(err => console.error(err));
-        window.addEventListener('mousedown', user_interact_hook)
-        window.addEventListener('touchstart', user_interact_hook)
+            this.audio_worklet = audio_worklet;
+            if (audio_context.state === "running") {
+                this.watch_audio_callback(audio_context);
+            }
+        }).catch(error => console.error(`web audio: start failed: ${error}`));
     }
 
     FromWasmQueryAudioDevices(args) {
-        navigator.mediaDevices?.enumerateDevices().then((devices_enum) => {
+        const publish_devices = (devices_enum) => {
             let devices = []
             for (let device of devices_enum) {
-                if (device.kind == "audiooutput" || device.kind == "audioinput") {
+                if (device.kind == "audioinput") {
                     devices.push({
                         web_device_id: "" + device.deviceId,
                         label: "" + device.label,
-                        is_output: device.kind == "audiooutput"
+                        is_output: false
                     });
                 }
             }
-            // safari doesnt report any outputs
+            // AudioContext.destination is the browser-selected output. Until
+            // this backend supports setSinkId, expose that one honest route
+            // instead of device choices FromWasmStartAudioOutput cannot use.
+            const output = devices_enum.find(device =>
+                device.kind == "audiooutput" && device.deviceId == "default"
+            ) || devices_enum.find(device => device.kind == "audiooutput");
             devices.push({
-                web_device_id: "",
-                label: "",
+                web_device_id: output ? "" + output.deviceId : "default",
+                label: output && output.label ? "" + output.label : "Browser audio",
                 is_output: true
             });
             this.to_wasm.ToWasmAudioDeviceList({ devices });
             this.do_wasm_pump();
-        })
+        };
+        const query = navigator.mediaDevices?.enumerateDevices();
+        if (!query) {
+            console.warn("web audio: device enumeration unavailable; using browser default");
+            publish_devices([]);
+            return;
+        }
+        query.then(publish_devices).catch(error => {
+            console.warn(`web audio: device enumeration failed; using browser default: ${error}`);
+            publish_devices([]);
+        });
     }
 
     FromWasmUseMidiInputs(args) {
@@ -2669,12 +2773,17 @@ export class WasmWebBrowser extends WasmBridge {
         }
         //let current_mouse_down = null;
         this.handlers.on_mouse_down = e => {
+            this.resume_audio_from_gesture();
             e.preventDefault();
             this.focus_keyboard_input();
             //if (current_mouse_down === null || current_mouse_down === e.button){
             //    current_mouse_down = e.button;
             this.to_wasm.ToWasmMouseDown({ mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
+            // The gesture can synchronously cause the app to open its first
+            // output. Resume that newly-created context before returning to
+            // the browser and losing user activation.
+            this.resume_audio_from_gesture();
             //}
         }
 
@@ -2752,6 +2861,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
 
         this.handlers.on_touchstart = e => {
+            this.resume_audio_from_gesture();
             e.preventDefault()
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp / 1000.0,
@@ -2759,6 +2869,7 @@ export class WasmWebBrowser extends WasmBridge {
                 touches: touches_to_wasm_wtouches(e, 1)
             });
             this.do_wasm_pump();
+            this.resume_audio_from_gesture();
             return false
         }
 
@@ -3064,6 +3175,7 @@ export class WasmWebBrowser extends WasmBridge {
         var ugly_ime_hack = false;
 
         this.handlers.on_keydown = e => {
+            this.resume_audio_from_gesture();
             let code = e.keyCode;
 
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
@@ -3107,6 +3219,7 @@ export class WasmWebBrowser extends WasmBridge {
             })
 
             this.do_wasm_pump();
+            this.resume_audio_from_gesture();
         };
 
         ta.addEventListener('keydown', e => this.handlers.on_keydown(e));

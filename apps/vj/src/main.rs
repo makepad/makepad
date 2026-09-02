@@ -6907,6 +6907,12 @@ pub struct App {
     audio_contended_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
+    /// Wasm play-to-device watchdog. Both values come from atomics/the UI
+    /// clock, so checking it never waits on the audio callback's state lock.
+    #[rust]
+    audio_play_watch: Option<(Instant, u64)>,
+    #[rust]
+    audio_enable_hint: bool,
     /// Last lit/unlit state pushed into each chrome button.
     #[rust]
     lit_state: HashMap<u64, bool>,
@@ -13679,7 +13685,29 @@ p2 {}
                         }
                     }
                 }
-                DeckCmd::SetPlaying { deck, playing } => self.mixer.set_deck_playing(deck, playing),
+                DeckCmd::SetPlaying { deck, playing } => {
+                    self.mixer.set_deck_playing(deck, playing);
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let frames = self.mixer.rendered_output_frames();
+                        let source_rate = self.deck_tracks[deck.index()]
+                            .as_ref()
+                            .map(|(pcm, _)| pcm.sample_rate)
+                            .unwrap_or(0);
+                        log!(
+                            "audio: deck {deck:?} transport playing={playing} source_rate={source_rate} device_frames={frames}"
+                        );
+                        if playing {
+                            self.audio_play_watch = Some((Instant::now(), frames));
+                            self.audio_enable_hint = false;
+                        } else if !self.decks.deck(DeckId::A).playing
+                            && !self.decks.deck(DeckId::B).playing
+                        {
+                            self.audio_play_watch = None;
+                            self.audio_enable_hint = false;
+                        }
+                    }
+                }
                 DeckCmd::SeekFraction { deck, fraction } => {
                     self.mixer.seek_deck_fraction(deck, fraction)
                 }
@@ -13929,6 +13957,8 @@ p2 {}
             );
             self.audio_render_max_seen = render_max;
         }
+        #[cfg(target_arch = "wasm32")]
+        self.pump_web_audio_watch();
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
         self.pump_import(cx);
@@ -14035,6 +14065,36 @@ p2 {}
             .iter()
             .map(|s| self.model_ref(*s).resolve_backlog())
             .sum();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pump_web_audio_watch(&mut self) {
+        let Some((started, frames_at_play)) = self.audio_play_watch else { return };
+        let rendered = self.mixer.rendered_output_frames();
+        if self.audio_enable_hint {
+            if rendered > frames_at_play {
+                self.audio_enable_hint = false;
+                self.audio_play_watch = None;
+                log!("audio: output callback recovered after canvas gesture");
+            }
+            return;
+        }
+        if self.mixer.has_produced_non_silent() {
+            self.audio_play_watch = None;
+            return;
+        }
+        if started.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        if rendered == frames_at_play {
+            self.audio_enable_hint = true;
+            log!(
+                "audio: callback never called after play; context suspended or no output device"
+            );
+        } else {
+            self.audio_play_watch = None;
+            log!("audio: callback is running but mixer stayed silent after play");
+        }
     }
 
     fn rebuild_grids_if_dirty(&mut self, cx: &mut Cx) {
@@ -21651,6 +21711,12 @@ p2 {}
                 &self.deck_lyrics_status[index],
                 stems_ready,
             );
+            #[cfg(target_arch = "wasm32")]
+            let stem_text = if self.audio_enable_hint && playing {
+                "click to enable audio".to_string()
+            } else {
+                stem_text
+            };
             if self.set_label(cx, base + 7, &refs.stem_state, &stem_text) {
                 self.ui
                     .widget(cx, ids.stem_state)
