@@ -86,12 +86,18 @@ pub enum TileLoadState {
         /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
         /// only when the view can actually reveal them.
         icon_high_geometry: Option<Geometry>,
+        /// Instanced POI symbols (records only; the meshes are shared per
+        /// slot on the view), same band split as the vertex streams.
+        icon_instances: Vec<IconInstances>,
+        icon_high_instances: Vec<IconInstances>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
         fringe_geometry: Option<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
         fill_3d_geometry: Option<Geometry>,
         wall_geometry: Option<Geometry>,
+        /// Building walls as instance records (see `WALL_INSTANCE_FLOATS`).
+        wall_instances: Vec<f32>,
         tree_geometry: Option<Geometry>,
         tree_cross_geometry: Option<Geometry>,
         feature_count: usize,
@@ -151,6 +157,9 @@ pub struct TileFade {
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
     pub icon_geometry: Option<Geometry>,
+    /// The outgoing generation's instanced symbols (low band only: the
+    /// street band is gated by zoom, not faded).
+    pub icon_instances: Vec<IconInstances>,
 }
 
 #[derive(Debug)]
@@ -293,6 +302,31 @@ fn split_band_by(
     (high_vertices, high_indices)
 }
 
+/// Floats per icon instance: anchor xy, screen-px offset xy, scale, the
+/// param4 composite (zoom floor + pin lift), zbias, unorm8x4 colour.
+pub const ICON_INSTANCE_FLOATS: usize = 8;
+
+/// Floats per building-wall instance: edge a xy, edge b xy, base m, top m,
+/// outward normal xy, bottom AO, unorm8x4 colour, zbias. The wall quad is
+/// extruded from this record in the vertex shader (`DrawMapWall`) — the
+/// bake no longer writes four 48-byte vertices per footprint edge.
+pub const WALL_INSTANCE_FLOATS: usize = 11;
+
+/// One symbol mesh drawn N times: the mesh lives once on the GPU (per
+/// registry slot), every placement is an 8-float instance record instead of
+/// a copy of the tessellated SVG at 48 bytes a vertex.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct IconInstances {
+    pub mesh_slot: u16,
+    pub data: Vec<f32>,
+}
+
+impl IconInstances {
+    pub fn count(&self) -> usize {
+        self.data.len() / ICON_INSTANCE_FLOATS
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
@@ -302,6 +336,8 @@ pub struct TileBuffers {
     pub casing_vertices: Vec<f32>,
     pub stroke_indices: Vec<u32>,
     pub stroke_vertices: Vec<f32>,
+    /// Vertex-baked symbols that must ride the map plane: road-surface
+    /// decals (oneway arrows). Free-standing POI symbols are instances.
     pub icon_indices: Vec<u32>,
     pub icon_vertices: Vec<f32>,
     /// Street-band icons (per-vertex zoom floor > ICON_HIGH_BAND_FLOOR):
@@ -310,6 +346,10 @@ pub struct TileBuffers {
     /// band below the floor instead of vertex-processing it every frame.
     pub icon_high_indices: Vec<u32>,
     pub icon_high_vertices: Vec<f32>,
+    /// Instanced POI symbols, grouped per mesh slot; the same band split as
+    /// the vertex streams (floor <= ICON_HIGH_BAND_FLOOR here).
+    pub icon_instances: Vec<IconInstances>,
+    pub icon_high_instances: Vec<IconInstances>,
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
     pub fringe_indices: Vec<u32>,
     pub fringe_vertices: Vec<f32>,
@@ -320,6 +360,9 @@ pub struct TileBuffers {
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
     pub wall_indices: Vec<u32>,
     pub wall_vertices: Vec<f32>,
+    /// Building walls as instanced edge records (`WALL_INSTANCE_FLOATS` each);
+    /// drawn with the wall band's LOD gate.
+    pub wall_instances: Vec<f32>,
     /// Full canopy balls (MAT_CANOPY) — near ring only.
     pub tree_indices: Vec<u32>,
     pub tree_vertices: Vec<f32>,
@@ -368,8 +411,19 @@ impl TileBuffers {
             + self.tree_cross_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
-            + self.road_icon_vertices.len())
+            + self.road_icon_vertices.len()
+            + self.wall_instances.len()
+            + self.icon_instance_floats())
             * 4
+    }
+
+    /// Instance floats across both icon bands.
+    pub fn icon_instance_floats(&self) -> usize {
+        self.icon_instances
+            .iter()
+            .chain(self.icon_high_instances.iter())
+            .map(|group| group.data.len())
+            .sum()
     }
 
     /// Restore the cached road decals after a mode-only overlay bake. Road
@@ -2933,6 +2987,38 @@ fn append_wall_quad(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
+/// One building wall edge as an instance record (`WALL_INSTANCE_FLOATS`):
+/// the shader builds the quad, lifts the top by the height and shades the
+/// bottom by the AO term — the same vertices `append_wall_quad` used to
+/// write. Takes the same zbias step so sibling geometry keeps its order.
+#[allow(clippy::too_many_arguments)]
+fn push_wall_instance(
+    out: &mut Vec<f32>,
+    a: (f32, f32),
+    b: (f32, f32),
+    base_m: f32,
+    height_m: f32,
+    color: [f32; 4],
+    ao_bottom: f32,
+    normal: (f32, f32),
+    zbias: &mut f32,
+) {
+    out.extend_from_slice(&[
+        a.0,
+        a.1,
+        b.0,
+        b.1,
+        base_m,
+        height_m,
+        normal.0,
+        normal.1,
+        ao_bottom,
+        crate::makepad_draw::vector::pack_unorm8x4(color[0], color[1], color[2], color[3]),
+        *zbias,
+    ]);
+    *zbias += VECTOR_ZBIAS_STEP;
+}
+
 /// T3 contact-shadow decal: a radial-gradient dark disc on the ground
 /// (alpha `strength` at center, 0 at the rim), material 6 so its darkness
 /// rides the live shadow uniform. A triangle fan — no tessellator involved.
@@ -3800,6 +3886,8 @@ fn build_tile_buffers_from_features_profiled(
     let mut stroke_vertices = Vec::<f32>::new();
     let mut icon_indices = Vec::<u32>::new();
     let mut icon_vertices = Vec::<f32>::new();
+    // Building walls as instance records; see WALL_INSTANCE_FLOATS.
+    let mut wall_instances = Vec::<f32>::new();
     let mut road_icon_indices = Vec::<u32>::new();
     let mut road_icon_vertices = Vec::<f32>::new();
     let mut fill_zbias = 0.0_f32;
@@ -4974,7 +5062,8 @@ fn build_tile_buffers_from_features_profiled(
                         roof_color[2] * shade,
                         1.0,
                     ];
-                    append_wall_quad(
+                    push_wall_instance(
+                        &mut wall_instances,
                         a,
                         b,
                         job.base_m,
@@ -4982,9 +5071,6 @@ fn build_tile_buffers_from_features_profiled(
                         wall_color,
                         wall_ao(job.base_m),
                         (nx, ny),
-                        MAT_WALL,
-                        &mut fill_vertices,
-                        &mut fill_indices,
                         &mut fill_zbias,
                     );
                 }
@@ -6247,12 +6333,15 @@ fn build_tile_buffers_from_features_profiled(
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            icon_instances: Vec::new(),
+            icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
             fringe_vertices: Vec::new(),
             fill_3d_indices: Vec::new(),
             fill_3d_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
+            wall_instances: Vec::new(),
             tree_indices: Vec::new(),
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),
@@ -6983,6 +7072,8 @@ fn build_tile_buffers_from_features_profiled(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
+    // Instanced: the mesh lives once on the GPU, each placement is a record.
+    let mut icon_groups = Vec::<IconInstances>::new();
     for (job_index, (anchor, mesh, color_class, _, _, two_tone, kw, stalls, zoom_floor, _)) in
         icon_jobs.iter().enumerate()
     {
@@ -6990,25 +7081,27 @@ fn build_tile_buffers_from_features_profiled(
         // The lift rides in param4's hundreds (0.25 m quanta) so the zoom
         // floor keeps its low digits.
         let param4_encoded = zoom_floor + (pin_lift_m * 4.0).round() * 100.0;
-        append_icon_mesh(
+        push_icon_instance(
+            &mut icon_groups,
             mesh,
             *anchor,
+            (0.0, 0.0),
+            1.0,
             hex_to_premul_rgba(poi_class_hex(*color_class), 1.0),
             param4_encoded,
-            &mut icon_vertices,
-            &mut icon_indices,
             &mut icon_zbias,
         );
         // carto trees: light canopy disc with a dark center dot.
         if *two_tone == 1 {
             if let Some(core) = icon_mesh("tree_core") {
-                append_icon_mesh(
+                push_icon_instance(
+                    &mut icon_groups,
                     core,
                     *anchor,
+                    (0.0, 0.0),
+                    1.0,
                     hex_to_premul_rgba(0x4c7a4c, 1.0),
                     param4_encoded,
-                    &mut icon_vertices,
-                    &mut icon_indices,
                     &mut icon_zbias,
                 );
             }
@@ -7020,13 +7113,14 @@ fn build_tile_buffers_from_features_profiled(
         if *two_tone == 2 || *two_tone == 3 {
             let bolt_name = if *two_tone == 2 { "charger_bolt_fast" } else { "charger_bolt_ac" };
             if let Some(bolt) = icon_mesh(bolt_name) {
-                append_icon_mesh(
+                push_icon_instance(
+                    &mut icon_groups,
                     bolt,
                     *anchor,
+                    (0.0, 0.0),
+                    1.0,
                     hex_to_premul_rgba(0xffffff, 1.0),
                     param4_encoded,
-                    &mut icon_vertices,
-                    &mut icon_indices,
                     &mut icon_zbias,
                 );
             }
@@ -7202,6 +7296,7 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
         split_icon_band(&mut icon_vertices, &mut icon_indices);
+    let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
     let (fringe_vertices, fringe_indices) =
@@ -7246,12 +7341,15 @@ fn build_tile_buffers_from_features_profiled(
         icon_vertices,
         icon_high_indices,
         icon_high_vertices,
+        icon_instances,
+        icon_high_instances,
         fringe_indices,
         fringe_vertices,
         fill_3d_indices,
         fill_3d_vertices,
         wall_indices,
         wall_vertices,
+        wall_instances,
         tree_indices,
         tree_vertices,
         tree_cross_indices,
@@ -7461,137 +7559,81 @@ fn append_oneway_arrow(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-fn append_icon_mesh(
-    mesh: &IconMesh,
-    anchor: (f32, f32),
-    color: [f32; 4],
-    min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    append_icon_mesh_offset(
-        mesh,
-        anchor,
-        (0.0, 0.0),
-        color,
-        min_zoom,
-        out_vertices,
-        out_indices,
-        zbias,
-    )
-}
+/// Tilt depth of a free-standing symbol: a SMALL camera-ward bias, enough to
+/// clear the marker's own ground pixel, small enough that buildings
+/// meaningfully in front still occlude. The instanced icon shader carries it
+/// as a constant; keep the two in lockstep.
+pub const ICON_INSTANCE_DEPTH_BIAS: f32 = 0.35;
+/// Clip radius (screen px) of a free-standing symbol: generous, avoids
+/// view-edge pop-in. Shader twin in `DrawMapIcon`.
+pub const ICON_INSTANCE_CLIP_RADIUS: f32 = 24.0;
 
-/// Like append_icon_mesh with an extra SCREEN-px offset added to every
-/// vertex — lets shared meshes (digits) compose inside a pin badge while
-/// staying zoom-constant with it.
-#[allow(clippy::too_many_arguments)]
-fn append_icon_mesh_offset(
-    mesh: &IconMesh,
-    anchor: (f32, f32),
-    screen_offset: (f32, f32),
-    color: [f32; 4],
-    min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    append_icon_mesh_offset_scaled(
-        mesh,
-        anchor,
-        screen_offset,
-        1.0,
-        color,
-        min_zoom,
-        out_vertices,
-        out_indices,
-        zbias,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_icon_mesh_offset_scaled(
+/// One symbol placement: the mesh stays on the GPU, this is the 8-float
+/// instance record (see `ICON_INSTANCE_FLOATS`). Every placement still takes
+/// its own zbias step so draw order matches the vertex-baked path.
+fn push_icon_instance(
+    groups: &mut Vec<IconInstances>,
     mesh: &IconMesh,
     anchor: (f32, f32),
     screen_offset: (f32, f32),
     scale: f32,
     color: [f32; 4],
     min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    // Template cache: for a given (mesh, color, scale, offset) every
-    // instance differs only in anchor, zoom floor and zbias. City-center
-    // tiles at the icon horizon write tens of MB of icon vertices — the
-    // per-vertex construction loop was ~half of the emit stage. Build the
-    // 19-float block once, memcpy, patch 4 slots.
-    thread_local! {
-        static ICON_TEMPLATES: std::cell::RefCell<
-            HashMap<(usize, [u32; 4], u32, u32, u32), Vec<f32>>,
-        > = std::cell::RefCell::new(HashMap::new());
-    }
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let key = (
-        mesh as *const IconMesh as usize,
-        [
-            color[0].to_bits(),
-            color[1].to_bits(),
-            color[2].to_bits(),
-            color[3].to_bits(),
-        ],
-        scale.to_bits(),
-        screen_offset.0.to_bits(),
-        screen_offset.1.to_bits(),
-    );
-    ICON_TEMPLATES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let template = cache.entry(key).or_insert_with(|| {
-            let mut block = Vec::with_capacity(mesh.verts.len() * VECTOR_FLOATS_PER_VERTEX);
-            for vertex in &mesh.verts {
-                block.extend_from_slice(&[
-                    0.0,
-                    0.0,
-                    vertex.u,
-                    vertex.v,
-                    color[0],
-                    color[1],
-                    color[2],
-                    color[3],
-                    1e6, // stroke_mult: fill
-                    vertex.stroke_dist,
-                    ICON_SHAPE_ID,
-                    0.0, // param0: solid color
-                    // param1/2: screen-px offset from the anchor
-                    vertex.x * scale + screen_offset.0,
-                    vertex.y * scale + screen_offset.1,
-                    0.0,
-                    // param4: per-instance view-zoom floor (patched); the
-                    // shader collapses the vertex below it.
-                    0.0,
-                    // Tilt depth: a SMALL camera-ward bias -- enough to
-                    // clear the marker's own ground pixel, small enough
-                    // that buildings meaningfully in FRONT still occlude.
-                    0.35,
-                    24.0, // clip_radius: generous, avoids view-edge pop-in
-                    0.0,
-                ]);
-            }
-            block
-        });
-        let start = out_vertices.len();
-        out_vertices.extend_from_slice(template);
-        for record in out_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX) {
-            record[0] = anchor.0;
-            record[1] = anchor.1;
-            record[15] = min_zoom;
-            record[18] = *zbias;
+    let mesh_slot = icon_mesh_slot(mesh);
+    let group = match groups.iter_mut().position(|group| group.mesh_slot == mesh_slot) {
+        Some(index) => &mut groups[index],
+        None => {
+            groups.push(IconInstances {
+                mesh_slot,
+                data: Vec::new(),
+            });
+            groups.last_mut().unwrap()
         }
-    });
-    for index in &mesh.indices {
-        out_indices.push(base + index);
-    }
+    };
+    group.data.extend_from_slice(&[
+        anchor.0,
+        anchor.1,
+        screen_offset.0,
+        screen_offset.1,
+        scale,
+        min_zoom,
+        *zbias,
+        crate::makepad_draw::vector::pack_unorm8x4(color[0], color[1], color[2], color[3]),
+    ]);
     *zbias += VECTOR_ZBIAS_STEP;
+}
+
+/// Split instance groups into the two icon bands by the record's zoom floor
+/// (param4 composite), mirroring `split_icon_band` for vertex streams.
+fn split_icon_instance_band(groups: Vec<IconInstances>) -> (Vec<IconInstances>, Vec<IconInstances>) {
+    let mut low = Vec::new();
+    let mut high = Vec::new();
+    for group in groups {
+        let mut low_data = Vec::new();
+        let mut high_data = Vec::new();
+        for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
+            if record[5] > ICON_HIGH_BAND_FLOOR {
+                high_data.extend_from_slice(record);
+            } else {
+                low_data.extend_from_slice(record);
+            }
+        }
+        if !low_data.is_empty() {
+            low.push(IconInstances {
+                mesh_slot: group.mesh_slot,
+                data: low_data,
+            });
+        }
+        if !high_data.is_empty() {
+            high.push(IconInstances {
+                mesh_slot: group.mesh_slot,
+                data: high_data,
+            });
+        }
+    }
+    (low, high)
 }
 
 fn project_way_points_with_nodes(
@@ -8250,7 +8292,14 @@ mod local_archive_regression_tests {
         name: &str,
         tile: Option<&[u8]>,
     ) -> std::path::PathBuf {
-        let id = Cx::time_now().to_bits();
+        // Unique per process AND per call: tests run in parallel, and a
+        // wall-clock nonce collides within the same tick.
+        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = format!(
+            "{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
         let mut writer = MbtilesWriter::create(&path).unwrap();
         writer.set_metadata("minzoom", "0");
@@ -10481,12 +10530,15 @@ mod bridge_probe_tests {
             icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            icon_instances: Vec::new(),
+            icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
             fringe_vertices: Vec::new(),
             fill_3d_indices: Vec::new(),
             fill_3d_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
+            wall_instances: Vec::new(),
             tree_indices: Vec::new(),
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),

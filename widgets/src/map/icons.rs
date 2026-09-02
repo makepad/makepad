@@ -135,6 +135,42 @@ pub fn icon_mesh(name: &str) -> Option<&'static IconMesh> {
     icons().get(name)
 }
 
+/// Every symbol mesh in one stable order, so a tile can name a mesh by slot
+/// and the view binds one shared GPU copy per slot for instanced draws.
+struct IconSlots {
+    meshes: Vec<&'static IconMesh>,
+    by_address: HashMap<usize, u16>,
+}
+
+fn icon_slots() -> &'static IconSlots {
+    static SLOTS: OnceLock<IconSlots> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let registry = icons();
+        let mut names: Vec<&&str> = registry.keys().collect();
+        names.sort_unstable();
+        let meshes: Vec<&'static IconMesh> = names.iter().map(|name| &registry[**name]).collect();
+        let by_address = meshes
+            .iter()
+            .enumerate()
+            .map(|(slot, mesh)| (*mesh as *const IconMesh as usize, slot as u16))
+            .collect();
+        IconSlots { meshes, by_address }
+    })
+}
+
+/// The slot of a registry mesh (every mesh `icon_mesh` hands out has one).
+pub fn icon_mesh_slot(mesh: &IconMesh) -> u16 {
+    icon_slots()
+        .by_address
+        .get(&(mesh as *const IconMesh as usize))
+        .copied()
+        .expect("icon mesh outside the registry")
+}
+
+pub fn icon_mesh_by_slot(slot: u16) -> Option<&'static IconMesh> {
+    icon_slots().meshes.get(slot as usize).copied()
+}
+
 fn transform_coord(value: f32, center: f32, scale: f32) -> f32 {
     (value - center) * scale
 }

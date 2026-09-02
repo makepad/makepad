@@ -1,6 +1,6 @@
 use super::archive::*;
 use super::geometry::*;
-use super::icons::ICON_MIN_ZOOM;
+use super::icons::{icon_mesh_by_slot, ICON_MIN_ZOOM};
 use super::label::*;
 use super::overlay::*;
 use super::style::*;
@@ -908,6 +908,269 @@ script_mod! {
         }
     }
 
+    // Instanced POI symbols: one shared mesh per symbol slot, an 8-float
+    // record per placement (anchor, screen offset, scale, the zoom-floor /
+    // pin-lift composite, zbias, colour). This is DrawMapVector's shape-20
+    // vertex path with the per-placement slots read from the instance —
+    // keep the two in LOCKSTEP; the pixel side is inherited unchanged.
+    mod.draw.DrawMapIcon = mod.std.set_type_default() do #(DrawMapIcon::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.IconVertexPacked, geom.IconGeomPacked)
+
+        vertex: fn() {
+            var transformed = self.inst_anchor * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // param4 = zoom_floor + pin_lift_m*100: markers fly at their
+            // encoded height (0 for grounded icons).
+            let icon_floor = modf(self.inst_param4, 100.0);
+            let lift_m = (self.inst_param4 - icon_floor) * 0.0025 * self.height_grow + ground_m;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+            // 0.6 grace below the floor: markers fade out on a zoom
+            // gesture instead of vanishing the instant the tier line is
+            // crossed. FAIL-OPEN when the icon_zoom uniform has not landed.
+            if self.icon_zoom > 1.0 && icon_floor > self.icon_zoom + 0.6 {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+            // Zoom-constant symbol: the mesh vertex is a screen-px offset
+            // from the anchor, added after the map transform.
+            let off = vec2(self.geom.x, self.geom.y) * self.inst_scale + self.inst_offset;
+            transformed = transformed + off;
+
+            let g_uv = unpack2f16(self.geom.uv)
+            self.v_tcoord = vec2(g_uv.x, g_uv.y);
+            self.v_color = unpack4u8(self.inst_color);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
+            self.v_shape_id = 20.0;
+            self.v_param0 = 0.0;
+            self.v_param1 = off.x;
+            self.v_param2 = off.y;
+            self.v_param3 = 0.0;
+            self.v_param4 = self.inst_param4;
+            // Tilt depth bias of a free-standing symbol (ICON_INSTANCE_DEPTH_BIAS).
+            self.v_param5 = 0.35;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+
+            // Clip radius of a symbol (ICON_INSTANCE_CLIP_RADIUS) in view px.
+            let cr = 24.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.35 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced building walls: the unit quad is extruded per footprint edge
+    // in the vertex shader from an 11-float record (edge a/b, base/top metres,
+    // outward normal, bottom AO, colour, zbias). Varyings match the vertices
+    // `append_wall_quad` used to bake (fill, material MAT_WALL, height in
+    // param4, BUILDING_SURFACE_DEPTH in param5) — keep in LOCKSTEP with
+    // DrawMapVector's fill path; the pixel side is inherited unchanged.
+    mod.draw.DrawMapWall = mod.std.set_type_default() do #(DrawMapWall::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let along = self.geom.pos.x;
+            let up = self.geom.pos.y;
+            let pos = mix(self.inst_a, self.inst_b, along);
+            let h = mix(self.inst_heights.x, self.inst_heights.y, up);
+            let ao = mix(self.inst_ao, 1.0, up);
+            var transformed = pos * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // Fills ride the terrain by terrain_fill_lift; the height grows
+            // with the 2D->3D reveal.
+            let lift_m = h * self.height_grow + ground_m * self.terrain_fill_lift;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+
+            let color = unpack4u8(self.inst_color);
+            self.v_tcoord = vec2(0.5, 1.0);
+            self.v_color = vec4(color.x * ao, color.y * ao, color.z * ao, color.w);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = 0.0;
+            self.v_shape_id = 0.0;
+            self.v_param0 = 0.0;
+            // Outward normal, material MAT_WALL, height, surface depth: the
+            // slots the wall pixel path reads.
+            self.v_param1 = self.inst_normal.x;
+            self.v_param2 = self.inst_normal.y;
+            self.v_param3 = 1.0;
+            self.v_param4 = h;
+            self.v_param5 = 0.5;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+
+            // Clip radius of a wall vertex (90 units) in view px.
+            let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.5 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
     // Terrain hillshade: plain textured quad (RGBA baked CPU-side),
     // drawn between the land fills and the road network.
     mod.draw.DrawTerrainOverlay = mod.std.set_type_default() do #(DrawTerrainOverlay::script_shader(vm)){
@@ -1510,116 +1773,31 @@ impl DrawMapVector {
         pass_depth: f32,
         terrain_fill_lift: f32,
     ) {
-        // Casings/centers/icons ride far above the displaced terrain
-        // surface: quad-twist between the GPU bilinear lift and the mesh
-        // triangles is bounded well below this.
         self.draw_super.draw_depth = pass_depth;
         self.map_scale = map_scale;
         self.map_offset = map_offset;
         self.tile_fade = fade;
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tile_fade), &[fade]);
-        self.draw_super.draw_vars.set_uniform(
+        stamp_map_uniforms(
+            &mut self.draw_super.draw_vars,
             cx.cx,
-            live_id!(map_scale),
-            &[map_scale.x, map_scale.y],
+            &MapDrawUniforms {
+                map_scale,
+                map_offset,
+                fade,
+                width_correction,
+                view_rot,
+                rot_pivot,
+                tilt_params,
+                icon_zoom,
+                height_grow,
+                terrain_org,
+                terrain_span,
+                terrain_uvfit,
+                terrain_fill_lift,
+            },
+            &self.shiny,
+            terrain_tex,
         );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(map_offset),
-            &[map_offset.x, map_offset.y],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(width_correction),
-            &width_correction,
-        );
-        let face_correction: [f32; 4] = [
-            width_correction[0].max(1.0),
-            width_correction[1].max(1.0),
-            width_correction[2].max(1.0),
-            width_correction[3].max(1.0),
-        ];
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(face_correction),
-            &face_correction,
-        );
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(view_rot), &view_rot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(rot_pivot), &rot_pivot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tilt_params), &tilt_params);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(icon_zoom), &[icon_zoom]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(height_grow), &[height_grow]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_org), &terrain_org);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_span), &terrain_span);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_uvfit), &terrain_uvfit);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_fill_lift), &[terrain_fill_lift]);
-        let shiny = &self.shiny;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates),
-            &[
-                if shiny.water_fx { 1.0 } else { 0.0 },
-                if shiny.building_sheen { shiny.gloss } else { 0.0 },
-                if shiny.foliage_fx { 1.0 } else { 0.0 },
-                if shiny.route_glow { 1.0 } else { 0.0 },
-            ],
-        );
-        // Water/green noise anchors physically to the map: scale the
-        // baked view-px UV by exp2(16 - view_zoom) so ripple size tracks
-        // meters, not screen pixels. The lower bound keeps refining well
-        // past z20 (the shaders gate their finest octaves on this value);
-        // the upper bound keeps far-out zooms from going sub-pixel.
-        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.03, 1.25);
-        // Wide-range variant for patterns that stay physical further out
-        // (shrub fills) and want to know the true zoom for LOD blending.
-        let mat_uv_wide = (16.0 - icon_zoom).exp2().clamp(0.03, 8.0);
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates2),
-            &[
-                if shiny.dynamic_sun { 1.0 } else { 0.0 },
-                shiny.sun.shadow_alpha,
-                mat_uv_scale,
-                mat_uv_wide,
-            ],
-        );
-        let sun = &shiny.sun;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_dir),
-            &[sun.dir.x, sun.dir.y, sun.dir.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_color),
-            &[sun.color.x, sun.color.y, sun.color.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_sky),
-            &[sun.sky.x, sun.sky.y, sun.sky.z],
-        );
-        self.draw_super.draw_vars.set_texture(1, terrain_tex);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -1627,6 +1805,242 @@ impl DrawMapVector {
             self.draw_super.draw_vars.area =
                 cx.update_area_refs(self.draw_super.draw_vars.area, new_area);
         }
+    }
+}
+
+/// The per-draw view state every map shader stamps as uniforms: one struct
+/// so the vector and the instanced-icon draws cannot drift apart.
+#[derive(Clone, Copy)]
+pub(crate) struct MapDrawUniforms {
+    pub map_scale: Vec2f,
+    pub map_offset: Vec2f,
+    pub fade: f32,
+    pub width_correction: [f32; 4],
+    pub view_rot: [f32; 2],
+    pub rot_pivot: [f32; 2],
+    pub tilt_params: [f32; 4],
+    pub icon_zoom: f32,
+    pub height_grow: f32,
+    pub terrain_org: [f32; 2],
+    pub terrain_span: [f32; 2],
+    pub terrain_uvfit: [f32; 4],
+    pub terrain_fill_lift: f32,
+}
+
+fn stamp_map_uniforms(
+    draw_vars: &mut DrawVars,
+    cx: &Cx,
+    u: &MapDrawUniforms,
+    shiny: &ShinyConfig,
+    terrain_tex: &Texture,
+) {
+    draw_vars.set_uniform(cx, live_id!(tile_fade), &[u.fade]);
+    draw_vars.set_uniform(cx, live_id!(map_scale), &[u.map_scale.x, u.map_scale.y]);
+    draw_vars.set_uniform(cx, live_id!(map_offset), &[u.map_offset.x, u.map_offset.y]);
+    draw_vars.set_uniform(cx, live_id!(width_correction), &u.width_correction);
+    // Face variant, clamped >= 1: union faces may only WIDEN (inward morph
+    // inverts narrow features); stale cross-band tiles render at keyframe
+    // width magnified instead of garbling.
+    let face_correction: [f32; 4] = [
+        u.width_correction[0].max(1.0),
+        u.width_correction[1].max(1.0),
+        u.width_correction[2].max(1.0),
+        u.width_correction[3].max(1.0),
+    ];
+    draw_vars.set_uniform(cx, live_id!(face_correction), &face_correction);
+    draw_vars.set_uniform(cx, live_id!(view_rot), &u.view_rot);
+    draw_vars.set_uniform(cx, live_id!(rot_pivot), &u.rot_pivot);
+    draw_vars.set_uniform(cx, live_id!(tilt_params), &u.tilt_params);
+    draw_vars.set_uniform(cx, live_id!(icon_zoom), &[u.icon_zoom]);
+    draw_vars.set_uniform(cx, live_id!(height_grow), &[u.height_grow]);
+    draw_vars.set_uniform(cx, live_id!(terrain_org), &u.terrain_org);
+    draw_vars.set_uniform(cx, live_id!(terrain_span), &u.terrain_span);
+    draw_vars.set_uniform(cx, live_id!(terrain_uvfit), &u.terrain_uvfit);
+    draw_vars.set_uniform(cx, live_id!(terrain_fill_lift), &[u.terrain_fill_lift]);
+    draw_vars.set_uniform(
+        cx,
+        live_id!(shiny_gates),
+        &[
+            if shiny.water_fx { 1.0 } else { 0.0 },
+            if shiny.building_sheen { shiny.gloss } else { 0.0 },
+            if shiny.foliage_fx { 1.0 } else { 0.0 },
+            if shiny.route_glow { 1.0 } else { 0.0 },
+        ],
+    );
+    // Water/green noise anchors physically to the map: scale the baked
+    // view-px UV by exp2(16 - view_zoom) so ripple size tracks meters, not
+    // screen pixels. The lower bound keeps refining well past z20 (the
+    // shaders gate their finest octaves on this value); the upper bound
+    // keeps far-out zooms from going sub-pixel.
+    let mat_uv_scale = (16.0 - u.icon_zoom).exp2().clamp(0.03, 1.25);
+    // Wide-range variant for patterns that stay physical further out
+    // (shrub fills) and want to know the true zoom for LOD blending.
+    let mat_uv_wide = (16.0 - u.icon_zoom).exp2().clamp(0.03, 8.0);
+    draw_vars.set_uniform(
+        cx,
+        live_id!(shiny_gates2),
+        &[
+            if shiny.dynamic_sun { 1.0 } else { 0.0 },
+            shiny.sun.shadow_alpha,
+            mat_uv_scale,
+            mat_uv_wide,
+        ],
+    );
+    let sun = &shiny.sun;
+    draw_vars.set_uniform(cx, live_id!(sun_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+    draw_vars.set_uniform(cx, live_id!(sun_color), &[sun.color.x, sun.color.y, sun.color.z]);
+    draw_vars.set_uniform(cx, live_id!(sun_sky), &[sun.sky.x, sun.sky.y, sun.sky.z]);
+    draw_vars.set_texture(1, terrain_tex);
+}
+
+/// Instanced POI symbols: the registry mesh is bound as the geometry (one
+/// GPU copy per slot, see `MapView::icon_mesh_geometries`), every placement
+/// is one instance of `DrawMapIcon`'s per-instance fields. The shader is
+/// `DrawMapVector`'s icon path (see the script twin).
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapIcon {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_anchor: Vec2f,
+    #[live]
+    pub inst_offset: Vec2f,
+    #[live(1.0)]
+    pub inst_scale: f32,
+    #[live]
+    pub inst_param4: f32,
+    #[live]
+    pub inst_zbias: f32,
+    #[live]
+    pub inst_color: f32,
+}
+
+impl DrawMapIcon {
+    /// Draw every instance group of one tile: one draw call per symbol mesh.
+    fn draw_groups(
+        &mut self,
+        cx: &mut Cx2d,
+        groups: &[IconInstances],
+        mesh_geometries: &mut HashMap<u16, Geometry>,
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        for group in groups {
+            if group.data.is_empty() {
+                continue;
+            }
+            let Some(mesh) = icon_mesh_by_slot(group.mesh_slot) else {
+                continue;
+            };
+            let geometry = mesh_geometries.entry(group.mesh_slot).or_insert_with(|| {
+                let geometry = Geometry::new(cx.cx);
+                geometry.update(
+                    cx.cx,
+                    mesh.indices.clone(),
+                    crate::makepad_draw::vector::pack_icon_vertices(&mesh.verts),
+                );
+                geometry
+            });
+            stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+            self.draw_vars.geometry_id = Some(geometry.geometry_id());
+            cx.new_draw_call(&self.draw_vars);
+            let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+                continue;
+            };
+            for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
+                self.inst_anchor = vec2(record[0], record[1]);
+                self.inst_offset = vec2(record[2], record[3]);
+                self.inst_scale = record[4];
+                self.inst_param4 = record[5];
+                self.inst_zbias = record[6];
+                self.inst_color = record[7];
+                instances.instances.extend_from_slice(self.draw_vars.as_slice());
+            }
+            let new_area = cx.end_many_instances(instances);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
+
+/// Instanced building walls: the shared unit quad is the geometry, every
+/// footprint edge is one instance (see `WALL_INSTANCE_FLOATS`); the shader is
+/// `DrawMapWall` in the script block.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapWall {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_a: Vec2f,
+    #[live]
+    pub inst_b: Vec2f,
+    /// x = base metres, y = top metres.
+    #[live]
+    pub inst_heights: Vec2f,
+    #[live]
+    pub inst_normal: Vec2f,
+    #[live(1.0)]
+    pub inst_ao: f32,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapWall {
+    /// Draw one tile's wall edges as a single instanced call.
+    fn draw_edges(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[f32],
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+        for record in records.chunks_exact(WALL_INSTANCE_FLOATS) {
+            self.inst_a = vec2(record[0], record[1]);
+            self.inst_b = vec2(record[2], record[3]);
+            self.inst_heights = vec2(record[4], record[5]);
+            self.inst_normal = vec2(record[6], record[7]);
+            self.inst_ao = record[8];
+            self.inst_color = record[9];
+            self.inst_zbias = record[10];
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        let new_area = cx.end_many_instances(instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
     }
 }
 
@@ -1654,6 +2068,16 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_map: DrawMapVector,
+    #[redraw]
+    #[live]
+    draw_icon: DrawMapIcon,
+    #[redraw]
+    #[live]
+    draw_wall: DrawMapWall,
+    /// One GPU copy of every symbol mesh the resident tiles reference,
+    /// keyed by registry slot; instanced draws bind these.
+    #[rust]
+    icon_mesh_geometries: HashMap<u16, Geometry>,
     #[redraw]
     #[live]
     draw_label: DrawRotatedText,
@@ -2445,6 +2869,8 @@ impl Widget for MapView {
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
         // shiny.md gates + sun for the material dispatch, per active theme.
         self.draw_map.shiny = self.active_style().shiny;
+        self.draw_icon.shiny = self.draw_map.shiny;
+        self.draw_wall.shiny = self.draw_map.shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
         // relief actually in view: the margin exists to beat interpolation
         // twist (which grows with relief), but a flat-city boost lets
@@ -2527,6 +2953,7 @@ impl Widget for MapView {
                     fringe_geometry,
                     fill_3d_geometry,
                     wall_geometry,
+                    wall_instances,
                     tree_geometry,
                     tree_cross_geometry,
                     ..
@@ -2720,6 +3147,35 @@ impl Widget for MapView {
                             terrain_fill_lift,
                         );
                     }
+                    // Instanced walls follow the wall band's LOD gate.
+                    if lod > 0.55 && !wall_instances.is_empty() {
+                        self.draw_wall.draw_edges(
+                            cx,
+                            wall_instances,
+                            &MapDrawUniforms {
+                                map_scale,
+                                map_offset: screen_offset,
+                                fade: fade_alpha,
+                                width_correction: stroke_width_correction(entry.bucket, view_zoom),
+                                view_rot: view_rot_uniform,
+                                rot_pivot: rot_pivot_uniform,
+                                tilt_params: tilt_uniform,
+                                icon_zoom: view_zoom as f32,
+                                height_grow: lod
+                                    * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                        fade_alpha
+                                    } else {
+                                        1.0
+                                    },
+                                terrain_org,
+                                terrain_span,
+                                terrain_uvfit,
+                                terrain_fill_lift,
+                            },
+                            &terrain_tex,
+                            0.0,
+                        );
+                    }
                 }
                 // AA fringes ride the casing pass, but only where 1px edge
                 // AA is visible: at strong tilt the tilt-shift blur and
@@ -2780,6 +3236,8 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    icon_instances,
+                    icon_high_instances,
                     ..
                 } = &entry.state
                 else {
@@ -2855,6 +3313,67 @@ impl Widget for MapView {
                                 0.0
                             },
                             terrain_fill_lift,
+                        );
+                    }
+                }
+                // Instanced POI symbols ride the same pass as the vertex-baked
+                // decals: the outgoing generation first (cross-fade), then the
+                // resident groups.
+                if pass >= 3 {
+                    let pass_depth = if tilt_rad > 1e-4 {
+                        pass_boost + (pass - 1) as f32 * 0.02
+                    } else {
+                        0.0
+                    };
+                    let mut uniforms = MapDrawUniforms {
+                        map_scale,
+                        map_offset: screen_offset,
+                        fade: 1.0,
+                        width_correction: stroke_width_correction(entry.bucket, view_zoom),
+                        view_rot: view_rot_uniform,
+                        rot_pivot: rot_pivot_uniform,
+                        tilt_params: tilt_uniform,
+                        icon_zoom: view_zoom as f32,
+                        height_grow: 1.0,
+                        terrain_org,
+                        terrain_span,
+                        terrain_uvfit,
+                        terrain_fill_lift,
+                    };
+                    if pass == 3 {
+                        if let Some(fade) = &entry.fade {
+                            if !fade.icon_instances.is_empty() {
+                                uniforms.width_correction =
+                                    stroke_width_correction(fade.bucket, view_zoom);
+                                self.draw_icon.draw_groups(
+                                    cx,
+                                    &fade.icon_instances,
+                                    &mut self.icon_mesh_geometries,
+                                    &uniforms,
+                                    &terrain_tex,
+                                    pass_depth,
+                                );
+                                uniforms.width_correction =
+                                    stroke_width_correction(entry.bucket, view_zoom);
+                            }
+                        }
+                    }
+                    let groups = if pass == 3 { icon_instances } else { icon_high_instances };
+                    if !groups.is_empty() {
+                        uniforms.fade = fade_alpha;
+                        uniforms.height_grow =
+                            if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                fade_alpha
+                            } else {
+                                1.0
+                            };
+                        self.draw_icon.draw_groups(
+                            cx,
+                            groups,
+                            &mut self.icon_mesh_geometries,
+                            &uniforms,
+                            &terrain_tex,
+                            pass_depth,
                         );
                     }
                 }
@@ -3413,6 +3932,7 @@ impl MapView {
             old_road_core_cached,
             old_road_icon_indices,
             old_road_icon_vertices,
+            old_icon_instances,
         ) = match old_entry {
             Some(TileEntry {
                 state:
@@ -3421,6 +3941,7 @@ impl MapView {
                         casing_geometry,
                         stroke_geometry,
                         icon_geometry,
+                        icon_instances,
                 feature_count,
                 ..
             },
@@ -3443,6 +3964,7 @@ impl MapView {
                 road_core_cached,
                 road_icon_indices,
                 road_icon_vertices,
+                icon_instances,
             ),
             _ => (
                 buffers.render_zoom,
@@ -3454,6 +3976,7 @@ impl MapView {
                 0,
                 0,
                 false,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -3609,6 +4132,7 @@ impl MapView {
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
         let fade = if old_fill.is_some()
             || old_icon.is_some()
+            || !old_icon_instances.is_empty()
             || fade_casing_geometry.is_some()
             || fade_stroke_geometry.is_some()
         {
@@ -3623,6 +4147,7 @@ impl MapView {
                 casing_geometry: fade_casing_geometry,
                 stroke_geometry: fade_stroke_geometry,
                 icon_geometry: old_icon,
+                icon_instances: old_icon_instances,
             })
         } else {
             Some(TileFade {
@@ -3634,6 +4159,7 @@ impl MapView {
                 casing_geometry: None,
                 stroke_geometry: None,
                 icon_geometry: None,
+                icon_instances: Vec::new(),
             })
         };
         // In an established 3D scene tiles snap in whole: any fade of
@@ -3652,9 +4178,12 @@ impl MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    icon_instances: buffers.icon_instances,
+                    icon_high_instances: buffers.icon_high_instances,
                     fringe_geometry,
                     fill_3d_geometry,
                     wall_geometry,
+                    wall_instances: buffers.wall_instances,
                     tree_geometry,
                     tree_cross_geometry,
                     feature_count: if reuse_road_core {
@@ -4930,6 +5459,7 @@ impl MapView {
                     && fade.casing_geometry.is_none()
                     && fade.stroke_geometry.is_none()
                     && fade.icon_geometry.is_none()
+                    && fade.icon_instances.is_empty()
             })
         })
     }

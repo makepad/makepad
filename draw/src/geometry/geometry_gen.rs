@@ -108,6 +108,22 @@ pub struct VectorVertexPacked {
     pub zbias: f32,
 }
 
+/// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
+/// instance anchor, f16 uv pair, stroke distance. 16 bytes; the anchor,
+/// colour, zoom floor and depth ride the instance instead of every vertex.
+#[derive(Clone, Script, ScriptHook)]
+pub struct IconVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    #[live]
+    pub stroke_dist: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct PbrVertex {
     #[live]
@@ -280,6 +296,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertexPacked);
     let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
     set_script_value!(vm, geom.VectorGeomPacked = vpgen);
+    // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
+    set_script_value_to_pod!(vm, geom.IconVertexPacked);
+    let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
+    set_script_value!(vm, geom.IconGeomPacked = ipgen);
     // PBR geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.PbrVertex);
     let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
@@ -349,6 +369,15 @@ impl GeometryGen {
                 0.0,
                 0.0,
             ]));
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_icon_packed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0, 0.0, crate::vector::pack_pair_f16(0.5, 1.0), 0.0]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
