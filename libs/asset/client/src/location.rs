@@ -22,6 +22,31 @@ pub enum ClientMode {
 pub const CAPABILITY_BLOCKING_API: &str = "blocking_api";
 pub const CAPABILITY_STATIC_SITE_SESSION: &str = "static_site_session";
 
+/// Capabilities of the store behind one connected session. UI code uses
+/// these construction-time facts instead of target checks: a browser-local
+/// store can publish without having a filesystem or AI worker, while a
+/// static export has none of the three.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreCapabilities {
+    pub filesystem: bool,
+    pub publish: bool,
+    pub ai: bool,
+}
+
+impl StoreCapabilities {
+    pub const fn native() -> Self {
+        Self { filesystem: true, publish: true, ai: true }
+    }
+
+    pub const fn browser() -> Self {
+        Self { filesystem: false, publish: true, ai: false }
+    }
+
+    pub const fn static_site() -> Self {
+        Self { filesystem: false, publish: false, ai: false }
+    }
+}
+
 /// Where a client obtains its immutable asset data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientLocation {
@@ -34,6 +59,13 @@ impl ClientLocation {
         match self {
             Self::Native(_) => ClientMode::Native,
             Self::StaticSite(_) => ClientMode::StaticWeb,
+        }
+    }
+
+    pub fn capabilities(&self) -> StoreCapabilities {
+        match self {
+            Self::Native(_) => StoreCapabilities::native(),
+            Self::StaticSite(_) => StoreCapabilities::static_site(),
         }
     }
 }

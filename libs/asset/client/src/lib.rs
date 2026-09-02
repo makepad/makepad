@@ -142,7 +142,7 @@ pub use dto::{
 pub use error::{ClientError, ClientResult};
 pub use location::{
     ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_BLOCKING_API,
-    CAPABILITY_STATIC_SITE_SESSION,
+    CAPABILITY_STATIC_SITE_SESSION, StoreCapabilities,
 };
 pub use transport::{
     OwnedRequest, OwnedResponse, Transport, TransportCompletion, TransportError, TransportId,

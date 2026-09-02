@@ -20,10 +20,12 @@
 pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_widgets::value_input::{ValueInput, ValueInputAction};
-use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
+use makepad_widgets::makepad_platform::file_dialogs::{
+    FileDialog, FileDialogAction, VirtualFile,
+};
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
-use crate::music_import_ui::MusicImporter;
+use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
 
 mod apc40;
 mod archive_stream;
@@ -4004,6 +4006,19 @@ enum ImportPicker {
     Dj,
 }
 
+fn music_dialog_files(
+    picker: ImportPicker,
+    action: &FileDialogAction,
+) -> Option<Vec<VirtualFile>> {
+    if picker != ImportPicker::Dj {
+        return None;
+    }
+    match action {
+        FileDialogAction::FileLoaded { files, .. } => Some(files.clone()),
+        _ => None,
+    }
+}
+
 /// How far along the background warm-up of the next queued track is.
 ///
 /// One track at a time and never more: the point of this work is that
@@ -4254,6 +4269,14 @@ enum CatPurpose {
     /// Offering this machine's locally computed stems/lyrics back to the
     /// store. Fire and forget: one line either way, never a dialog.
     SideChannelPublish { asset: AssetId },
+    /// Byte-first music import: resolve the stable alias, compare its head,
+    /// then publish only when the content differs.
+    MusicImportAlias { prepared: PreparedMusicImport },
+    MusicImportManifest {
+        prepared: PreparedMusicImport,
+        asset: AssetId,
+    },
+    MusicImportPublish { name: String, updating: bool },
 }
 
 /// Where the pre-listen mini player lives — a preference in the headphones
@@ -13831,6 +13854,42 @@ p2 {}
         }
     }
 
+    fn store_ai_available(&self) -> bool {
+        self.up
+            .as_ref()
+            .is_some_and(|up| up.capabilities.ai)
+    }
+
+    /// Apply store capabilities to durable deck state and to the controls
+    /// which could otherwise start unavailable work. This is called for
+    /// every new session, so switching from a native store to the browser
+    /// store cannot leave a live separation mode behind.
+    fn apply_store_capabilities(&mut self, cx: &mut Cx) {
+        if !self.store_ai_available() {
+            if let Some(install) = &self.model_install {
+                install.cancel();
+            }
+            self.model_install = None;
+            self.model_install_note.clear();
+            self.prefetch.release(false, Instant::now());
+            for deck in [DeckId::A, DeckId::B] {
+                let index = deck.index();
+                self.decks
+                    .set_stems_mode(deck, crate::decks::ProcessMode::Off);
+                self.mixer.clear_deck_stems(deck);
+                self.deck_stems[index] = None;
+                self.deck_stem_coverage[index] = None;
+                self.deck_stem_tex[index] = None;
+                self.deck_stem_tiles[index].clear();
+                self.deck_side_channels[index] = None;
+                self.deck_stem_status[index].clear();
+                self.deck_stem_busy[index] = None;
+            }
+        }
+        self.paint_deck_sections(cx);
+        self.refresh_models_row(cx);
+    }
+
     fn pump_session(&mut self, cx: &mut Cx) {
         let Some(connector) = self.connector.as_mut() else { return };
         for msg in connector.poll() {
@@ -13850,6 +13909,7 @@ p2 {}
                 SessionMsg::Up(up) => {
                     self.status_text = format!("connected {}", up.server_label);
                     self.up = Some(*up);
+                    self.apply_store_capabilities(cx);
                     // The pipeline transport rides the same verified session
                     // on its own thread. Re-pointed on every reconnect: a run
                     // declared before the drop keeps being read and can still
@@ -14228,6 +14288,24 @@ p2 {}
                             log!("side-channels: {asset} refused: {error}");
                             self.side_channel_publish_settled(asset);
                         }
+                        CatPurpose::MusicImportAlias { prepared } => {
+                            if matches!(error, ClientError::NotFound { .. }) {
+                                self.submit_music_publish(cx, prepared, false);
+                            } else {
+                                self.music_import_run
+                                    .prepared_failed(&prepared.name, error.to_string());
+                                self.sync_music_import_run(cx);
+                            }
+                        }
+                        CatPurpose::MusicImportManifest { prepared, .. } => {
+                            self.music_import_run
+                                .prepared_failed(&prepared.name, error.to_string());
+                            self.sync_music_import_run(cx);
+                        }
+                        CatPurpose::MusicImportPublish { name, .. } => {
+                            self.music_import_run.prepared_failed(&name, error.to_string());
+                            self.sync_music_import_run(cx);
+                        }
                     }
                 }
             }
@@ -14539,6 +14617,75 @@ p2 {}
                 self.thumb_decodes_out += 1;
             }
             (
+                CatPurpose::MusicImportAlias { prepared },
+                ClientOutput::Alias(alias),
+            ) => {
+                let Some(up) = self.up.as_mut() else {
+                    self.music_import_run
+                        .prepared_failed(&prepared.name, "asset store disconnected");
+                    self.sync_music_import_run(cx);
+                    return;
+                };
+                match up.catalog.submit(ClientRequest::FetchAssetManifest {
+                    rev: alias.head_revision,
+                }) {
+                    Ok(id) => {
+                        self.cat_reqs.insert(
+                            id,
+                            CatPurpose::MusicImportManifest {
+                                prepared,
+                                asset: alias.asset_id,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        self.music_import_run
+                            .prepared_failed(&prepared.name, error.to_string());
+                        self.sync_music_import_run(cx);
+                    }
+                }
+            }
+            (
+                CatPurpose::MusicImportManifest { mut prepared, asset, .. },
+                ClientOutput::AssetManifest(manifest),
+            ) => {
+                let audio = BlobId::hash_of(&prepared.request.artifact.bytes);
+                let thumbnail = BlobId::hash_of(&prepared.request.thumbnail.bytes);
+                let unchanged = manifest
+                    .files
+                    .iter()
+                    .any(|file| file.role == FileRole::Audio && file.blob == audio)
+                    && manifest
+                        .thumbnail
+                        .as_ref()
+                        .is_some_and(|stored| stored.blob == thumbnail);
+                if unchanged {
+                    self.music_import_run.prepared_settled(
+                        makepad_asset_importer::music_import::TrackOutcome::Unchanged,
+                    );
+                    self.sync_music_import_run(cx);
+                } else {
+                    prepared.request.asset_id = Some(asset);
+                    self.submit_music_publish(cx, prepared, true);
+                }
+            }
+            (
+                CatPurpose::MusicImportPublish { updating, .. },
+                ClientOutput::Published(_published),
+            ) => {
+                let outcome = if updating {
+                    makepad_asset_importer::music_import::TrackOutcome::Updated
+                } else {
+                    makepad_asset_importer::music_import::TrackOutcome::Published
+                };
+                self.music_import_run.prepared_settled(outcome);
+                // Browser-local stores do not need a separate subscription
+                // hop to make their own publish visible in the explorer.
+                self.music_model.event_touch(Some(AssetKind::Audio));
+                self.grids_dirty = true;
+                self.sync_music_import_run(cx);
+            }
+            (
                 CatPurpose::DreamThumb { revision },
                 ClientOutput::AssetManifest(manifest),
             ) => {
@@ -14590,6 +14737,21 @@ p2 {}
                     }
                 }
                 self.side_channel_publish_settled(asset);
+            }
+            (CatPurpose::MusicImportAlias { prepared }, output)
+            | (CatPurpose::MusicImportManifest { prepared, .. }, output) => {
+                self.music_import_run.prepared_failed(
+                    &prepared.name,
+                    format!("asset store returned unexpected {output:?}"),
+                );
+                self.sync_music_import_run(cx);
+            }
+            (CatPurpose::MusicImportPublish { name, .. }, output) => {
+                self.music_import_run.prepared_failed(
+                    &name,
+                    format!("asset store returned unexpected {output:?}"),
+                );
+                self.sync_music_import_run(cx);
             }
             _ => {}
         }
@@ -14795,7 +14957,18 @@ p2 {}
                 .name("vj-session-teardown".into())
                 .spawn(move || up.shutdown());
         }
+        let lost_music_import = self.cat_reqs.values().find_map(|purpose| match purpose {
+            CatPurpose::MusicImportAlias { prepared }
+            | CatPurpose::MusicImportManifest { prepared, .. } => Some(prepared.name.clone()),
+            CatPurpose::MusicImportPublish { name, .. } => Some(name.clone()),
+            _ => None,
+        });
         self.cat_reqs.clear();
+        if let Some(name) = lost_music_import {
+            self.music_import_run
+                .prepared_failed(&name, "asset store connection lost");
+            self.sync_music_import_run(cx);
+        }
         // Side-channel offers die with the session that was carrying them.
         // Nothing retries a write-back: the assets stay marked, and the next
         // machine to separate this track makes the offer instead.
@@ -14877,19 +15050,38 @@ p2 {}
         self.sync_import_ui(cx);
     }
 
-    /// The DJ page's IMPORT: pick a folder and go. There is no ARMED step
-    /// here because the thing it guards — the VFR video conversion, which
-    /// costs minutes per clip — does not apply to audio, and the panel it
-    /// draws lives on the VJ page, where the operator explicitly does not
-    /// want to be sent.
+    /// The DJ page's IMPORT: a filesystem-backed session keeps the native
+    /// folder workflow; a byte-backed store asks the platform for one or
+    /// more audio files and receives `FileLoaded` on every platform.
     fn open_music_import_picker(&mut self, cx: &mut Cx) {
         if self.import_picker != ImportPicker::None {
             return;
         }
+        let Some(up) = self.up.as_ref() else {
+            self.set_music_import_status(cx, "no asset store session yet");
+            return;
+        };
+        if !up.capabilities.publish {
+            self.set_music_import_status(cx, "this asset store is read-only");
+            return;
+        }
         self.import_picker = ImportPicker::Dj;
-        cx.open_select_folder_dialog(
-            FileDialog::new().set_title("Choose music to import".into()),
-        );
+        if up.capabilities.filesystem {
+            cx.open_select_folder_dialog(
+                FileDialog::new().set_title("Choose music to import".into()),
+            );
+        } else {
+            cx.open_select_file_dialog(
+                FileDialog::new()
+                    .set_title("Choose music to import".into())
+                    .add_filter(
+                        "Audio".into(),
+                        vec!["mp3".into(), "ogg".into(), "oga".into(), "wav".into(), "wave".into()],
+                    )
+                    .set_multiple(true)
+                    .want_bytes(true),
+            );
+        }
     }
 
     /// Start a music import of exactly these files and folders. Both the
@@ -14899,6 +15091,10 @@ p2 {}
             self.set_music_import_status(cx, "no asset server session yet");
             return;
         };
+        if !up.capabilities.publish {
+            self.set_music_import_status(cx, "this asset store is read-only");
+            return;
+        }
         let Some(endpoints) = up.endpoints else {
             self.set_music_import_status(cx, "imports are unavailable from a static asset site");
             return;
@@ -14915,12 +15111,39 @@ p2 {}
         self.paint_lit(cx, ids!(music_import), self.music_import_run.busy());
     }
 
+    fn start_music_import_files(&mut self, cx: &mut Cx, files: Vec<VirtualFile>) {
+        let publish = self
+            .up
+            .as_ref()
+            .is_some_and(|up| up.capabilities.publish);
+        if !publish {
+            self.set_music_import_status(cx, "this asset store is read-only");
+            return;
+        }
+        if let Err(error) = self.music_import_run.start_files(files) {
+            crate::log!("music import refused: {error}");
+        }
+        self.sync_music_import_run(cx);
+        self.pump_music_import(cx);
+    }
+
     /// Drain the music import worker and repaint its one line. Cheap when
     /// idle.
     fn pump_music_import(&mut self, cx: &mut Cx) {
-        if !self.music_import_run.poll() {
+        let changed = self.music_import_run.poll();
+        let submitted = if let Some(prepared) = self.music_import_run.take_prepared() {
+            self.submit_prepared_music_import(cx, prepared);
+            true
+        } else {
+            false
+        };
+        if !changed && !submitted {
             return;
         }
+        self.sync_music_import_run(cx);
+    }
+
+    fn sync_music_import_run(&mut self, cx: &mut Cx) {
         let line = self.music_import_run.status();
         self.set_music_import_status(cx, &line);
         self.paint_lit(cx, ids!(music_import), self.music_import_run.busy());
@@ -14934,6 +15157,55 @@ p2 {}
             self.music_model.event_touch(None);
             self.music_rows.clear();
             self.grids_dirty = true;
+        }
+    }
+
+    fn submit_prepared_music_import(&mut self, cx: &mut Cx, prepared: PreparedMusicImport) {
+        let Some(alias) = prepared.request.alias.clone() else {
+            self.music_import_run
+                .prepared_failed(&prepared.name, "prepared track has no alias");
+            self.sync_music_import_run(cx);
+            return;
+        };
+        let Some(up) = self.up.as_mut() else {
+            self.music_import_run
+                .prepared_failed(&prepared.name, "asset store disconnected");
+            self.sync_music_import_run(cx);
+            return;
+        };
+        match up.catalog.submit(ClientRequest::ResolveAlias { alias }) {
+            Ok(id) => {
+                self.cat_reqs.insert(id, CatPurpose::MusicImportAlias { prepared });
+            }
+            Err(error) => {
+                self.music_import_run.prepared_failed(&prepared.name, error.to_string());
+                self.sync_music_import_run(cx);
+            }
+        }
+    }
+
+    fn submit_music_publish(
+        &mut self,
+        cx: &mut Cx,
+        prepared: PreparedMusicImport,
+        updating: bool,
+    ) {
+        let name = prepared.name;
+        let Some(up) = self.up.as_mut() else {
+            self.music_import_run.prepared_failed(&name, "asset store disconnected");
+            self.sync_music_import_run(cx);
+            return;
+        };
+        match up.catalog.submit(ClientRequest::PublishArtifact {
+            request: Box::new(prepared.request),
+        }) {
+            Ok(id) => {
+                self.cat_reqs.insert(id, CatPurpose::MusicImportPublish { name, updating });
+            }
+            Err(error) => {
+                self.music_import_run.prepared_failed(&name, error.to_string());
+                self.sync_music_import_run(cx);
+            }
         }
     }
 
@@ -14961,16 +15233,11 @@ p2 {}
         .collect()
     }
 
-    /// Anything a deck can actually play. Wider than what the store can
-    /// publish: the platform decoder handles flac, m4a and the rest, and a
-    /// file on this machine never goes through the store to reach a deck.
-    fn is_playable_audio(path: &Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .is_some_and(|e| {
-                e == "wave" || wave_analysis::LOCAL_AUDIO_EXTENSIONS.contains(&e.as_str())
-            })
+    fn is_importable_audio(path: &Path) -> bool {
+        makepad_asset_importer::music_import::is_audio_candidate(
+            &path.to_string_lossy(),
+            "",
+        )
     }
 
     /// External file paths out of a drag payload, in drop order. An item
@@ -14989,31 +15256,32 @@ p2 {}
             .collect()
     }
 
-    /// Whether a drag holds anything this page wants. ANY external file
-    /// counts, deliberately.
-    ///
-    /// This used to answer only for a playable extension or a directory,
-    /// and that was the wrong shape of answer: on Windows an unanswered
-    /// hover makes the OS refuse the drop outright, so no `Event::Drop`
-    /// ever arrives and the page cannot say a word about why. Dropping a
-    /// folder of FLACs, an `.opus`, or a whole mixed selection looked
-    /// exactly like the feature being broken. Accepting every file and
-    /// then reporting what actually came of it is the honest trade: the
-    /// operator learns "nothing importable here" instead of learning
-    /// nothing at all.
-    fn dj_drag_is_acceptable(items: &[DragItem]) -> bool {
-        !Self::dropped_paths(items).is_empty()
+    fn dropped_files(items: &[DragItem]) -> Vec<VirtualFile> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                DragItem::VirtualFile(file) => Some(file.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Why a deck or the queue turned a drop away — which is never just
-    /// "no": a folder and an unplayable file are refused for different
-    /// reasons and both have somewhere else to go.
-    fn nothing_to_play_here(paths: &[PathBuf]) -> &'static str {
-        if paths.iter().any(|path| path.is_dir()) {
-            "drop folders on the library to import them"
-        } else {
-            "nothing playable here — drop it on the library to import"
-        }
+    fn dj_drag_is_acceptable(items: &[DragItem]) -> bool {
+        items.iter().any(|item| match item {
+            DragItem::FilePath { path, internal_id } => {
+                internal_id.is_none()
+                    && !path.is_empty()
+                    && (Path::new(path).is_dir() || Self::is_importable_audio(Path::new(path)))
+            }
+            DragItem::VirtualFile(file) => {
+                (file.name.is_empty() && file.mime.is_empty() && file.size == 0)
+                    || makepad_asset_importer::music_import::is_audio_candidate(
+                        &file.name,
+                        &file.mime,
+                    )
+            }
+            DragItem::String { .. } => false,
+        })
     }
 
     fn handle_dj_drag(&mut self, cx: &mut Cx, event: &Event, de: &DragEvent) {
@@ -15064,6 +15332,11 @@ p2 {}
         // "put this in my collection" is the one thing a drop can mean
         // when it does not mean a specific deck.
         let zone = hit_zone.unwrap_or(DjDropZone::Library);
+        let files = Self::dropped_files(&de.items);
+        if !files.is_empty() {
+            self.start_music_import_files(cx, files);
+            return;
+        }
         let paths = Self::dropped_paths(&de.items);
         self.drop_paths_on_dj(cx, zone, paths);
     }
@@ -15390,61 +15663,16 @@ p2 {}
     }
 
     fn drop_paths_on_dj(&mut self, cx: &mut Cx, zone: DjDropZone, paths: Vec<PathBuf>) {
+        let paths: Vec<_> = paths
+            .into_iter()
+            .filter(|path| path.is_dir() || Self::is_importable_audio(path))
+            .collect();
         if paths.is_empty() {
+            self.set_music_import_status(cx, "nothing importable in this drop");
             return;
         }
-        match zone {
-            DjDropZone::Library => self.start_music_import(cx, paths),
-            DjDropZone::DeckA | DjDropZone::DeckB => {
-                let target =
-                    if zone == DjDropZone::DeckA { DeckTarget::A } else { DeckTarget::B };
-                let mut playable = paths.iter().filter(|path| Self::is_playable_audio(path));
-                let Some(first) = playable.next() else {
-                    let why = Self::nothing_to_play_here(&paths);
-                    self.set_music_import_status(cx, why);
-                    return;
-                };
-                let first = first.clone();
-                // A deck holds one track; the rest of a selection is
-                // plainly meant to follow it. Collected here so the borrow
-                // of `paths` ends before the `&mut self` calls below.
-                let rest: Vec<PathBuf> = playable.cloned().collect();
-                // Loading over a playing deck is what clicking a row does,
-                // and a drop is the same gesture with a different hand.
-                if let Some(item) = self.local_track_item(&first) {
-                    self.deck_hands_on();
-                    let cmds = self.decks.click(item, target);
-                    self.run_deck_cmds(cx, cmds);
-                }
-                for path in rest {
-                    if let Some(item) = self.local_track_item(&path) {
-                        let cmds = self.decks.enqueue(item);
-                        self.run_deck_cmds(cx, cmds);
-                    }
-                }
-                self.music_rows.clear();
-                self.queue_rows.clear();
-            }
-            DjDropZone::Queue => {
-                let playable: Vec<PathBuf> = paths
-                    .iter()
-                    .filter(|path| Self::is_playable_audio(path))
-                    .cloned()
-                    .collect();
-                if playable.is_empty() {
-                    let why = Self::nothing_to_play_here(&paths);
-                    self.set_music_import_status(cx, why);
-                    return;
-                }
-                for path in playable {
-                    if let Some(item) = self.local_track_item(&path) {
-                        let cmds = self.decks.enqueue(item);
-                        self.run_deck_cmds(cx, cmds);
-                    }
-                }
-                self.queue_rows.clear();
-            }
-        }
+        let _ = zone;
+        self.start_music_import(cx, paths);
     }
 
     /// Light the hovered zone and put the others out. Each zone's REST
@@ -15644,10 +15872,11 @@ p2 {}
                 // must never reach `deck_incoming`.
                 DecodeDone::Deck { gen, result, .. } if gen == stems::PREFETCH_GEN => {
                     match result {
-                        Ok((pcm, _peaks)) => {
+                        Ok((pcm, _peaks)) if self.store_ai_available() => {
                             self.stems.submit_prefetch(pcm, self.prefetch.source.clone());
                             self.prefetch.stage = PrefetchStage::Separating;
                         }
+                        Ok(_) => self.prefetch_release(false),
                         Err(error) => {
                             log!("prefetch: decode failed: {error}");
                             self.prefetch_release(true);
@@ -16880,6 +17109,7 @@ p2 {}
     /// chevron the way its block will go.
     fn paint_deck_sections(&mut self, cx: &mut Cx) {
         let folded = self.deck_sections.folded();
+        let ai = self.store_ai_available();
         // The deck region's 330-point floor is there to keep a readable
         // karaoke box under the knobs. Folded, there is no karaoke box under
         // the knobs — so the floor comes down with it, and the height goes
@@ -16900,7 +17130,8 @@ p2 {}
         }
         drop(region_ref);
         for (head, chev, body, section) in Self::deck_blocks() {
-            let shows = self.deck_sections.shows(section);
+            let available = section != DeckSection::Stems || ai;
+            let shows = available && self.deck_sections.shows(section);
             let body_view = self.ui.widget(cx, body);
             if body_view.visible() != shows {
                 body_view.set_visible(cx, shows);
@@ -16912,6 +17143,11 @@ p2 {}
                 let head_view = self.ui.view(cx, head);
                 if head_view.visible() != folded {
                     head_view.set_visible(cx, folded);
+                }
+            } else if section == DeckSection::Stems {
+                let head_view = self.ui.widget(cx, head);
+                if head_view.visible() != available {
+                    head_view.set_visible(cx, available);
                 }
             }
 
@@ -16928,10 +17164,11 @@ p2 {}
             // anywhere across the pair lands.
             for (mark, inked) in [(chev.0, shows), (chev.1, !shows)] {
                 let view = self.ui.widget(cx, mark);
-                if view.visible() != folded {
-                    view.set_visible(cx, folded);
+                let visible = folded && available;
+                if view.visible() != visible {
+                    view.set_visible(cx, visible);
                 }
-                if folded {
+                if visible {
                     self.paint_icon_color(cx, mark, if inked { 0x8e9aa7ff } else { 0x00000000 });
                 }
             }
@@ -16974,6 +17211,9 @@ p2 {}
         // both folded a block and flipped stem processing would be one
         // gesture doing two jobs.
         for (_, chev, _, section) in Self::deck_blocks() {
+            if section == DeckSection::Stems && !self.store_ai_available() {
+                continue;
+            }
             let pressed = self.ui.button(cx, chev.0).clicked(actions)
                 || self.ui.button(cx, chev.1).clicked(actions);
             if pressed && self.deck_sections.press(section) {
@@ -19399,6 +19639,9 @@ p2 {}
     /// deck stays on the local path, because three stems out of four is not
     /// a stem mix. The lyrics document is optional in both directions.
     fn begin_side_channel_fetch(&mut self, deck: DeckId, gen: u64, item: &TrackItem) {
+        if !self.store_ai_available() {
+            return;
+        }
         let index = deck.index();
         let Some(stems) = item.side.stems else { return };
         let lyrics = item.side.lyrics;
@@ -19492,6 +19735,10 @@ p2 {}
     /// use without the other. Called from both sides; whichever completes
     /// last is the one that starts the job.
     fn try_start_side_channels(&mut self, deck: DeckId, gen: u64) {
+        if !self.store_ai_available() {
+            self.deck_side_channels[deck.index()] = None;
+            return;
+        }
         let index = deck.index();
         if !self.deck_side_channels[index]
             .as_ref()
@@ -19533,7 +19780,15 @@ p2 {}
     /// Ask the separator for this deck's stems, starting where the
     /// playhead is so the knobs go live where they are needed first.
     fn submit_separation(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        if !self.decks.deck(deck).stems_mode.computes() {
+        let capabilities = self
+            .up
+            .as_ref()
+            .map(|up| up.capabilities)
+            .unwrap_or_default();
+        if !crate::music_import_ui::stems_may_run(
+            capabilities,
+            self.decks.deck(deck).stems_mode,
+        ) {
             self.deck_stem_status[deck.index()] = String::new();
             self.deck_stem_busy[deck.index()] = None;
             return;
@@ -19691,6 +19946,9 @@ p2 {}
     /// INSTALL MODELS opens the what-will-download dialog; while a download
     /// runs the same button reads CANCEL and pulls the cord instead.
     fn models_install_clicked(&mut self, cx: &mut Cx) {
+        if !self.store_ai_available() {
+            return;
+        }
         if let Some(install) = &self.model_install {
             install.cancel();
             self.model_install_note = "models: cancelling…".to_string();
@@ -19713,6 +19971,9 @@ p2 {}
     }
 
     fn start_model_install(&mut self, cx: &mut Cx) {
+        if !self.store_ai_available() {
+            return;
+        }
         let missing = models::missing();
         if missing.is_empty() {
             self.refresh_models_row(cx);
@@ -19728,6 +19989,11 @@ p2 {}
     /// while the install worker runs.
     fn refresh_models_row(&mut self, cx: &mut Cx) {
         if !self.ensure_music_refs(cx) {
+            return;
+        }
+        if !self.store_ai_available() {
+            self.ui.view(cx, ids!(models_row)).set_visible(cx, false);
+            self.music_refs.models_install.set_visible(cx, false);
             return;
         }
         let installing = self.model_install.is_some();
@@ -19769,6 +20035,9 @@ p2 {}
     /// model lands, separate whatever the decks are holding — the stems
     /// worker re-probes the checkpoint per job, so no restart is needed.
     fn pump_model_install(&mut self, cx: &mut Cx) {
+        if !self.store_ai_available() {
+            return;
+        }
         if !self.models_row_synced && self.ensure_music_refs(cx) {
             self.models_row_synced = true;
             self.refresh_models_row(cx);
@@ -19853,6 +20122,9 @@ p2 {}
     /// Start warming the next queued track, if this is a moment to do it.
     /// Cheap when it is not: two array reads and a queue peek.
     fn pump_prefetch(&mut self) {
+        if !self.store_ai_available() {
+            return;
+        }
         if !self.prefetch.may_start(Instant::now()) {
             return;
         }
@@ -19935,6 +20207,11 @@ p2 {}
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
+        if !self.store_ai_available() {
+            let _ = self.stems.poll();
+            let _ = self.sidechan.poll();
+            return;
+        }
         let mut touched = [false; 2];
         for done in self.splat_refine.poll() {
             if self.deck_splat_refining[done.deck.index()] == Some(done.gen) {
@@ -22800,7 +23077,7 @@ p2 {}
                 }
                 self.mixer.set_deck_cue(deck, on);
             }
-            if refs.stem_state_btn.clicked(actions) {
+            if refs.stem_state_btn.clicked(actions) && self.store_ai_available() {
                 let mode = self.decks.deck(deck).stems_mode.next();
                 self.decks.set_stems_mode(deck, mode);
                 let index = deck.index();
@@ -25392,6 +25669,17 @@ impl MatchEvent for App {
                 FileDialogAction::FolderCancelled => {
                     self.import_picker = ImportPicker::None;
                 }
+                FileDialogAction::FileLoaded { .. } => {
+                    let picker = std::mem::take(&mut self.import_picker);
+                    if let Some(files) = music_dialog_files(picker, picked) {
+                        self.start_music_import_files(cx, files);
+                    }
+                }
+                FileDialogAction::FileCancelled { .. } => {
+                    if self.import_picker == ImportPicker::Dj {
+                        self.import_picker = ImportPicker::None;
+                    }
+                }
                 // Import drives folder selection only; the platform's file
                 // and save panels answer elsewhere.
                 _ => {}
@@ -25827,6 +26115,65 @@ impl Drop for App {
             lighting.set_power(false);
             drop(lighting);
         }
+    }
+}
+
+#[cfg(test)]
+mod music_import_route_tests {
+    use super::*;
+
+    fn virtual_file(name: &str, mime: &str, byte: u8) -> VirtualFile {
+        VirtualFile {
+            name: name.into(),
+            mime: mime.into(),
+            bytes: Arc::from(vec![byte]),
+            size: 1,
+        }
+    }
+
+    #[test]
+    fn drop_routes_every_external_audio_item() {
+        let items = vec![
+            DragItem::VirtualFile(virtual_file("one.mp3", "audio/mpeg", 1)),
+            DragItem::VirtualFile(virtual_file("two.bin", "audio/ogg", 2)),
+            DragItem::FilePath { path: "three.wav".into(), internal_id: None },
+            DragItem::FilePath { path: "inside.mp3".into(), internal_id: Some(LiveId(9)) },
+            DragItem::String { value: "not a file".into(), internal_id: None },
+        ];
+        assert!(App::dj_drag_is_acceptable(&items));
+        assert_eq!(App::dropped_files(&items).len(), 2);
+        assert_eq!(App::dropped_paths(&items), vec![PathBuf::from("three.wav")]);
+        assert!(App::dj_drag_is_acceptable(&[DragItem::VirtualFile(virtual_file(
+            "future.flac",
+            "audio/flac",
+            3,
+        ))]));
+        assert!(App::dj_drag_is_acceptable(&[DragItem::VirtualFile(VirtualFile {
+            name: String::new(),
+            mime: String::new(),
+            bytes: Arc::from(Vec::<u8>::new()),
+            size: 0,
+        })]));
+        assert!(!App::dj_drag_is_acceptable(&[DragItem::VirtualFile(virtual_file(
+            "notes.txt",
+            "text/plain",
+            4,
+        ))]));
+    }
+
+    #[test]
+    fn only_the_dj_byte_dialog_routes_to_music_import() {
+        let files = vec![virtual_file("picked.ogg", "audio/ogg", 1)];
+        let loaded = FileDialogAction::FileLoaded { id: LiveId(7), files: files.clone() };
+        assert_eq!(music_dialog_files(ImportPicker::Dj, &loaded), Some(files));
+        assert_eq!(music_dialog_files(ImportPicker::Vj, &loaded), None);
+        assert_eq!(
+            music_dialog_files(
+                ImportPicker::Dj,
+                &FileDialogAction::FileCancelled { id: LiveId(7) },
+            ),
+            None,
+        );
     }
 }
 

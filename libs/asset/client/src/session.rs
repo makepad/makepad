@@ -138,6 +138,7 @@ pub struct SessionHandles {
     pub location: ClientLocation,
     pub endpoints: Option<ApiEndpoints>,
     pub token: Option<String>,
+    pub capabilities: crate::location::StoreCapabilities,
 }
 
 impl SessionHandles {
@@ -305,6 +306,7 @@ impl SessionConnector {
                 let location = runtime.location().expect("static runtime location");
                 let server_id = runtime.server_id().expect("ready static identity");
                 let label = location.to_string();
+                let capabilities = location.capabilities();
                 out.push(SessionMsg::Up(Box::new(SessionHandles {
                     catalog: runtime,
                     media: Vec::new(),
@@ -314,6 +316,7 @@ impl SessionConnector {
                     location,
                     endpoints: None,
                     token: None,
+                    capabilities,
                 })));
                 out.push(SessionMsg::Status(SessionStatus::Connected { server: label }));
             }
@@ -418,14 +421,17 @@ fn connect_all(
         .map_err(|e| e.to_string())?;
     let catalog = ClientRuntime::start_with(catalog_client, config.catalog_runtime)
         .map_err(|e| e.to_string())?;
+    let location = ClientLocation::Native(endpoints);
+    let capabilities = location.capabilities();
     Ok(SessionHandles {
         catalog,
         media,
         subscriber,
         server_label: format!("{}", endpoints.control),
         server_id,
-        location: ClientLocation::Native(endpoints),
+        location,
         endpoints: Some(endpoints),
         token: config.token.clone(),
+        capabilities,
     })
 }

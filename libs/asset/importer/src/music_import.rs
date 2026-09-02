@@ -29,7 +29,7 @@ use makepad_asset_client::{
 };
 use makepad_asset_data::limits::MAX_ALIAS_BYTES;
 use makepad_asset_data::{
-    AssetAlias, AssetKind, BlobId, FileRole, MediaType, ThumbnailMedia, ThumbnailView,
+    AssetAlias, AssetId, AssetKind, BlobId, FileRole, MediaType, ThumbnailMedia, ThumbnailView,
     ThumbnailViewKind,
 };
 use std::path::{Path, PathBuf};
@@ -85,12 +85,44 @@ impl Container {
             _ => None,
         }
     }
+
+    /// Identify a selected file by either its name or the MIME supplied by
+    /// the platform. Browser drag-hover placeholders do not carry bytes yet,
+    /// so this deliberately does not inspect the payload.
+    pub fn from_name_mime(name: &str, mime: &str) -> Option<Container> {
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        Self::from_ext(&extension).or_else(|| match mime.trim().to_ascii_lowercase().as_str() {
+            "audio/mpeg" | "audio/mp3" => Some(Self::Mp3),
+            "audio/ogg" | "application/ogg" => Some(Self::Ogg),
+            "audio/wav" | "audio/wave" | "audio/x-wav" => Some(Self::Wav),
+            _ => None,
+        })
+    }
 }
 
 /// Audio-shaped extensions this importer recognises but cannot publish yet.
 /// Listing them is the point: a library is half FLAC and the user must see
 /// that those files were found and deliberately left alone.
 const UNSUPPORTED_EXTS: &[&str] = &["flac", "m4a", "aac", "alac", "aiff", "aif", "wma", "opus"];
+
+/// Whether a drag item looks like audio and should be accepted so the
+/// importer can either publish it or report a useful unsupported error.
+pub fn is_audio_candidate(name: &str, mime: &str) -> bool {
+    if Container::from_name_mime(name, mime).is_some()
+        || mime.trim().to_ascii_lowercase().starts_with("audio/")
+    {
+        return true;
+    }
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| UNSUPPORTED_EXTS.contains(&extension.as_str()))
+}
 
 /// One audio file found under the picked root.
 ///
@@ -1533,6 +1565,13 @@ pub struct BakedTrack {
 /// client: this is the part that fans out across cores.
 pub fn bake_track(track: &PlannedTrack) -> Result<BakedTrack, String> {
     let bytes = std::fs::read(&track.path).map_err(|e| format!("read: {e}"))?;
+    bake_track_bytes(track, bytes)
+}
+
+/// Decode, measure and picture an already resident track. File-dialog and
+/// browser-drop imports enter the ordinary publisher here, below the sole
+/// filesystem read in [`bake_track`].
+pub fn bake_track_bytes(track: &PlannedTrack, bytes: Vec<u8>) -> Result<BakedTrack, String> {
     if bytes.is_empty() {
         return Err("empty file".into());
     }
@@ -1547,6 +1586,54 @@ pub fn bake_track(track: &PlannedTrack) -> Result<BakedTrack, String> {
         dims: (picture.width, picture.height),
         views: picture.views,
     })
+}
+
+/// Prepare one selected-file payload for the normal asset-client publish
+/// request. The caller may submit the returned request through a
+/// [`makepad_asset_client::ClientRuntime`] on platforms without a blocking
+/// client or filesystem.
+pub fn publish_request_from_bytes(
+    name: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+    namespace: &str,
+    rights: &PublishRights,
+) -> Result<PublishRequest, String> {
+    let container = Container::from_name_mime(name, mime)
+        .ok_or_else(|| format!("unsupported audio file '{name}'"))?;
+    let file_name = Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name);
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name)
+        .to_string();
+    let tags = match container {
+        Container::Mp3 => read_id3(&bytes),
+        Container::Ogg => read_vorbis_comments(&bytes),
+        Container::Wav => TrackTags::default(),
+    };
+    let title = tags
+        .title
+        .clone()
+        .unwrap_or_else(|| sanitize_text(stem.trim(), MAX_TITLE));
+    let artist = tags.artist.unwrap_or_default();
+    let album = tags.album.unwrap_or_default();
+    let title = if title.is_empty() { stem } else { title };
+    let track = PlannedTrack {
+        rel: file_name.to_string(),
+        path: PathBuf::new(),
+        container,
+        title: title.clone(),
+        artist: artist.clone(),
+        album: album.clone(),
+        alias: music_alias(namespace, &artist, &title, None),
+        tags: music_tags(&[], &artist, &album),
+    };
+    let baked = bake_track_bytes(&track, bytes)?;
+    build_publish_request(&track, baked, namespace, rights, None)
 }
 
 pub fn publish_track(
@@ -1569,15 +1656,14 @@ pub fn publish_baked(
 ) -> Result<TrackOutcome, String> {
     let alias = AssetAlias::from_str(&track.alias)
         .map_err(|e| format!("{}: alias {}: {e}", track.rel, track.alias))?;
-    let BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h), views } = baked;
-    let audio_blob = BlobId::hash_of(&bytes);
+    let audio_blob = BlobId::hash_of(&baked.bytes);
     // The picture is baked BEFORE anything is decided: a re-import is how a
     // track gets today's imagery, so "unchanged" has to mean the audio AND
     // the picture are what this importer produces now. Comparing the baked
     // bytes is exact — no version marker to forget to bump, and no shape
     // heuristic that loops forever on a track whose picture legitimately is
     // not a spectrogram.
-    let thumbnail_blob = BlobId::hash_of(&thumbnail_bytes);
+    let thumbnail_blob = BlobId::hash_of(&baked.thumbnail_bytes);
     let existing = match client.resolve_alias(&alias) {
         Ok(head) => {
             // A head this build cannot read (an older schema) counts as
@@ -1606,6 +1692,29 @@ pub fn publish_baked(
         Err(ClientError::NotFound { .. }) => None,
         Err(error) => return Err(format!("alias probe: {error}")),
     };
+    let request = build_publish_request(track, baked, namespace, rights, existing)?;
+    client
+        .publish_artifact(&request)
+        .map_err(|e| format!("publish: {e}"))?;
+    Ok(if existing.is_some() {
+        TrackOutcome::Updated
+    } else {
+        TrackOutcome::Published
+    })
+}
+
+/// Turn a baked track into the exact request used by both the blocking
+/// native importer and event-loop runtimes.
+pub fn build_publish_request(
+    track: &PlannedTrack,
+    baked: BakedTrack,
+    namespace: &str,
+    rights: &PublishRights,
+    asset_id: Option<AssetId>,
+) -> Result<PublishRequest, String> {
+    let alias = AssetAlias::from_str(&track.alias)
+        .map_err(|e| format!("{}: alias {}: {e}", track.rel, track.alias))?;
+    let BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h), views } = baked;
     let thumbnail = PublishThumbnail {
         bytes: thumbnail_bytes,
         media: ThumbnailMedia::Jpeg,
@@ -1628,7 +1737,7 @@ pub fn publish_baked(
     );
     request.description = sanitize_text(&describe(track), MAX_DESCRIPTION);
     request.alias = Some(alias);
-    request.asset_id = existing;
+    request.asset_id = asset_id;
     request.categories = vec![MUSIC_CATEGORY.into()];
     request.tags = track.tags.clone();
     request.creator = sanitize_text(&track.artist, MAX_TITLE);
@@ -1637,14 +1746,7 @@ pub fn publish_baked(
     request.model = sanitize_text(&track.album, MAX_TITLE);
     request.provenance = sanitize_text(&format!("music-import {}", track.rel), MAX_DESCRIPTION);
     request.rights = rights.clone();
-    client
-        .publish_artifact(&request)
-        .map_err(|e| format!("publish: {e}"))?;
-    Ok(if existing.is_some() {
-        TrackOutcome::Updated
-    } else {
-        TrackOutcome::Published
-    })
+    Ok(request)
 }
 
 /// Duration + envelope for one container.
