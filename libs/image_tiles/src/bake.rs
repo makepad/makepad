@@ -84,8 +84,17 @@ pub fn parse_manifest(text: &str) -> Vec<Source> {
 }
 
 /// GET with a bounded body and a short redirect chain; the platform client
-/// does one hop at a time and never follows a redirect on its own.
+/// does one hop at a time and never follows a redirect on its own. A
+/// source that is not a URL — `file://…`, or a bare path — is read from
+/// disk instead, so a manifest can name pictures already on this machine.
 pub fn fetch_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    if let Some(path) = local_source_path(url) {
+        let meta = std::fs::metadata(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if meta.len() as usize > max_bytes {
+            return Err(format!("read {}: {} bytes is over the {max_bytes} byte cap", path.display(), meta.len()));
+        }
+        return std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()));
+    }
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let limits = Limits { max_body_bytes: max_bytes, total_timeout: Duration::from_secs(120), ..Limits::default() };
@@ -112,6 +121,21 @@ pub fn fetch_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         }
     }
     Err(format!("GET {url}: too many redirects"))
+}
+
+/// The on-disk path a manifest source names, when it is not a URL:
+/// `file:///abs/pic.png`, or a bare path (absolute, or relative to the
+/// working directory). Anything with another scheme is fetched.
+pub fn local_source_path(source: &str) -> Option<std::path::PathBuf> {
+    let s = source.trim();
+    if let Some(rest) = s.strip_prefix("file://") {
+        return Some(std::path::PathBuf::from(rest));
+    }
+    let scheme = s.find("://").map(|i| &s[..i]).unwrap_or("");
+    if !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.') {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
 }
 
 struct Baked {
@@ -337,4 +361,34 @@ pub fn bake(
         summary.shards_sealed
     ));
     Ok(summary)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn a_manifest_may_name_pictures_on_this_disk() {
+        let sources = parse_manifest("/tmp/a.png\tA\thttps://x/a\nfile:///tmp/b.gif\nhttps://h/c.jpg\tC\n");
+        assert_eq!(sources.len(), 3);
+        assert_eq!(local_source_path(&sources[0].url).unwrap(), std::path::PathBuf::from("/tmp/a.png"));
+        assert_eq!(sources[0].title, "A");
+        assert_eq!(local_source_path(&sources[1].url).unwrap(), std::path::PathBuf::from("/tmp/b.gif"));
+        assert_eq!(sources[1].title, "b.gif", "a bare path is titled by its file name");
+        assert!(local_source_path(&sources[2].url).is_none(), "a URL is fetched, never read");
+        assert!(local_source_path("relative/pic.png").is_some());
+    }
+
+    #[test]
+    fn a_local_source_is_read_and_capped() {
+        let dir = std::env::temp_dir().join(format!("image-tiles-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pic.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        assert_eq!(fetch_bytes(path.to_str().unwrap(), 64).unwrap(), b"hello");
+        assert!(fetch_bytes(&format!("file://{}", path.display()), 64).is_ok());
+        assert!(fetch_bytes(path.to_str().unwrap(), 2).unwrap_err().contains("cap"));
+        assert!(fetch_bytes(dir.join("missing.bin").to_str().unwrap(), 64).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

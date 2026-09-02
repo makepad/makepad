@@ -1619,6 +1619,15 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Startup = event {
             self.startup(cx);
+            // The bar shows our title when the window manager hosts us.
+            makepad_wm_api::set_title(cx, "Fabric");
+        }
+        // The window manager asked politely (SUPER+W): go now.
+        if let Event::Custom(json) = event {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
+                cx.quit();
+                return;
+            }
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
