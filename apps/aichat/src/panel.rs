@@ -132,7 +132,7 @@ script_mod! {
                     width: Fill
                     height: 2
                     margin: Inset{top: 3}
-                    draw_bg +: { color: theme.color_label_focus }
+                    draw_bg +: { color: theme.color_text_hl }
                 }
                 tool_detail := Line{
                     visible: false
@@ -163,7 +163,7 @@ script_mod! {
             SystemRow := Row{
                 system_text := Line{
                     draw_text +: {
-                        color: theme.color_label_focus
+                        color: theme.color_text_hl
                         text_style: theme.font_regular{font_size: 8.5}
                     }
                 }
