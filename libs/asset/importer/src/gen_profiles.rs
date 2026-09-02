@@ -290,6 +290,7 @@ mod tests {
                 capabilities: None,
                 vram_reserve_mb: Some(2048),
                 queue_limit: Some(8),
+                max_job_body_bytes: None,
                 fleet: None,
                 lanes: None,
                 realtime: None,

@@ -16,12 +16,15 @@ use makepad_asset_store::{
 };
 use makepad_audio_decode::{decode_any, read_tags, DecodedAudio};
 use makepad_audio_sidechannels::{encode_stem_oggs, side_channel_files};
+use makepad_micro_serde::SerJson;
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STEM_OGG_NAMES: [&str; 4] = ["drums.ogg", "bass.ogg", "vocals.ogg", "other.ogg"];
+const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 20;
 
 fn usage() -> &'static str {
     "makepad-dj-pack — bake web-DJ tracks through the AI hub and export a static store\n\
@@ -316,14 +319,14 @@ fn model_pcm(track: &PreparedAudio) -> StereoBuf {
     }
 }
 
-fn encode_f32_wav(stereo: &StereoBuf) -> Result<Vec<u8>, String> {
+fn encode_pcm16_wav(stereo: &StereoBuf) -> Result<Vec<u8>, String> {
     if stereo.left.len() != stereo.right.len() || stereo.left.is_empty() {
         return Err("PCM must be non-empty stereo".to_string());
     }
     let data_len = stereo
         .left
         .len()
-        .checked_mul(8)
+        .checked_mul(4)
         .and_then(|len| u32::try_from(len).ok())
         .ok_or("PCM WAV exceeds RIFF size")?;
     let mut out = Vec::with_capacity(44 + data_len as usize);
@@ -331,19 +334,205 @@ fn encode_f32_wav(stereo: &StereoBuf) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&(36u32 + data_len).to_le_bytes());
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&3u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&2u16.to_le_bytes());
     out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    out.extend_from_slice(&(SAMPLE_RATE * 8).to_le_bytes());
-    out.extend_from_slice(&8u16.to_le_bytes());
-    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&(SAMPLE_RATE * 4).to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
     for (left, right) in stereo.left.iter().zip(&stereo.right) {
-        out.extend_from_slice(&left.to_le_bytes());
-        out.extend_from_slice(&right.to_le_bytes());
+        for sample in [left, right] {
+            let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            out.extend_from_slice(&value.to_le_bytes());
+        }
     }
     Ok(out)
+}
+
+fn stems_request(input_b64: String) -> GenerateRequestJson {
+    let mut request = GenerateRequestJson::default();
+    request.model = "bs-roformer-4stem".to_string();
+    request.input_b64 = Some(input_b64);
+    request.input_content_type = Some("audio/wav".to_string());
+    request
+}
+
+/// Exact serialized size: standard base64 contains no JSON escape characters.
+fn stems_request_body_len(frames: usize) -> Result<usize, String> {
+    let wav_bytes = frames
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(44))
+        .ok_or("stems request size overflow")?;
+    let base64_bytes = wav_bytes
+        .checked_add(2)
+        .and_then(|bytes| bytes.checked_div(3))
+        .and_then(|groups| groups.checked_mul(4))
+        .ok_or("stems request size overflow")?;
+    stems_request(String::new())
+        .serialize_json()
+        .len()
+        .checked_add(base64_bytes)
+        .ok_or_else(|| "stems request size overflow".to_string())
+}
+
+fn max_window_frames_for_body(limit: u64) -> Result<usize, String> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let envelope = stems_request(String::new()).serialize_json().len();
+    let encoded_capacity = limit.saturating_sub(envelope) / 4 * 4;
+    let wav_capacity = encoded_capacity / 4 * 3;
+    let frames = wav_capacity.saturating_sub(44) / 4;
+    Ok((frames / CHUNK_STEP) * CHUNK_STEP)
+}
+
+fn split_stem_windows(frames: usize, max_window_frames: usize) -> Result<Vec<Range<usize>>, String> {
+    if frames == 0 {
+        return Err("cannot split empty PCM".to_string());
+    }
+    if frames <= max_window_frames {
+        return Ok(vec![0..frames]);
+    }
+    if max_window_frames <= CHUNK_STEP || max_window_frames % CHUNK_STEP != 0 {
+        return Err(format!(
+            "AI hub job-body limit cannot hold two {CHUNK_STEP}-frame stems spans"
+        ));
+    }
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    loop {
+        let end = start.saturating_add(max_window_frames).min(frames);
+        windows.push(start..end);
+        if end == frames {
+            break;
+        }
+        start = end - CHUNK_STEP;
+    }
+    Ok(windows)
+}
+
+fn stem_windows(frames: usize, body_limit: Option<u64>) -> Result<Vec<Range<usize>>, String> {
+    let fits_body = match body_limit {
+        Some(limit) => stems_request_body_len(frames)? as u64 <= limit,
+        None => true,
+    };
+    if frames <= MAX_STEMS_JOB_FRAMES && fits_body {
+        return Ok(vec![0..frames]);
+    }
+    let backend_window = (MAX_STEMS_JOB_FRAMES / CHUNK_STEP) * CHUNK_STEP;
+    let body_window = match body_limit {
+        Some(limit) => max_window_frames_for_body(limit)?,
+        None => usize::MAX,
+    };
+    split_stem_windows(frames, backend_window.min(body_window))
+}
+
+fn stitch_stem_window(
+    output: &mut StemSet,
+    filled: &mut usize,
+    range: &Range<usize>,
+    window: &StemSet,
+) -> Result<(), String> {
+    let frames = range.end.saturating_sub(range.start);
+    if range.start > *filled
+        || range.end > output[0].left.len()
+        || window
+            .iter()
+            .any(|stem| stem.left.len() != frames || stem.right.len() != frames)
+    {
+        return Err("invalid stems window geometry while stitching".to_string());
+    }
+    let overlap = filled.saturating_sub(range.start).min(frames);
+    for stem in 0..output.len() {
+        for (dst, src) in [
+            (&mut output[stem].left, &window[stem].left),
+            (&mut output[stem].right, &window[stem].right),
+        ] {
+            for index in 0..overlap {
+                let mix = (index + 1) as f32 / (overlap + 1) as f32;
+                let at = range.start + index;
+                dst[at] = dst[at] * (1.0 - mix) + src[index] * mix;
+            }
+            dst[range.start + overlap..range.end].copy_from_slice(&src[overlap..]);
+        }
+    }
+    *filled = (*filled).max(range.end);
+    Ok(())
+}
+
+fn upload_was_rejected_early(error: &str) -> bool {
+    error.contains("http 413")
+        || error.contains("request body write")
+        || error.contains("Broken pipe")
+        || error.contains("connection closed in headers")
+        || error.contains("WinHttpSendRequest failed")
+}
+
+fn separate_stems_window(
+    hub: &LocalService,
+    pcm: &StereoBuf,
+    body_limit: Option<u64>,
+) -> Result<StemSet, String> {
+    let wav = encode_pcm16_wav(pcm)?;
+    let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
+        &wav,
+        &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
+    ))
+    .map_err(|_| "base64 encoder returned non-UTF-8".to_string())?;
+    drop(wav);
+    let request = stems_request(input_b64);
+    let body_bytes = stems_request_body_len(pcm.left.len())?;
+    if body_limit.is_some_and(|limit| body_bytes as u64 > limit) {
+        return Err(format!(
+            "AI hub {} stems upload is {body_bytes} bytes, above max_job_body_bytes={}",
+            hub.base_url(),
+            body_limit.unwrap()
+        ));
+    }
+    let job = hub.request(Domain::Stems, &request).map_err(|error| {
+        let error = error.to_string();
+        if upload_was_rejected_early(&error) {
+            let limit = body_limit
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "not advertised".to_string());
+            format!(
+                "AI hub {} rejected a {body_bytes}-byte stems upload before it finished (max_job_body_bytes={limit}): {error}",
+                hub.base_url()
+            )
+        } else {
+            format!("AI hub {} submit failed: {error}", hub.base_url())
+        }
+    })?;
+    let artifact = wait_for_stems(hub, &job)?;
+    if artifact.content_type != STEMS_ARTIFACT_CONTENT_TYPE {
+        return Err(format!(
+            "AI hub returned {}, expected {STEMS_ARTIFACT_CONTENT_TYPE}",
+            artifact.content_type
+        ));
+    }
+    let wire = decode_stems_artifact(&artifact.bytes)
+        .map_err(|error| format!("AI hub stems artifact: {error}"))?;
+    if wire.sample_rate != SAMPLE_RATE || wire.frames != pcm.left.len() {
+        return Err(format!(
+            "AI hub stems geometry mismatch: {} Hz/{} frames, expected {} Hz/{} frames",
+            wire.sample_rate,
+            wire.frames,
+            SAMPLE_RATE,
+            pcm.left.len()
+        ));
+    }
+    let [drums_l, drums_r, bass_l, bass_r, other_l, other_r, vocals_l, vocals_r] = wire.channels;
+    Ok([
+        StereoBuf { left: drums_l, right: drums_r },
+        StereoBuf { left: bass_l, right: bass_r },
+        StereoBuf { left: other_l, right: other_r },
+        StereoBuf { left: vocals_l, right: vocals_r },
+    ])
+}
+
+struct ResolvedHub {
+    service: LocalService,
+    max_job_body_bytes: Option<u64>,
 }
 
 fn run_stems(args: StemsArgs) -> Result<(), String> {
@@ -360,46 +549,27 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
         if service.is_none() {
             service = Some(resolve_hub(&args.hub)?);
         }
-        let hub = service.as_ref().unwrap();
-        let wav = encode_f32_wav(&pcm)?;
-        let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
-            &wav,
-            &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
-        ))
-        .map_err(|_| "base64 encoder returned non-UTF-8".to_string())?;
-        let mut request = GenerateRequestJson::default();
-        request.model = "bs-roformer-4stem".to_string();
-        request.input_b64 = Some(input_b64);
-        request.input_content_type = Some("audio/wav".to_string());
-        let job = hub
-            .request(Domain::Stems, &request)
-            .map_err(|error| format!("AI hub {} submit failed: {error}", hub.base_url()))?;
-        let artifact = wait_for_stems(hub, &job)?;
-        if artifact.content_type != STEMS_ARTIFACT_CONTENT_TYPE {
-            return Err(format!(
-                "AI hub returned {}, expected {STEMS_ARTIFACT_CONTENT_TYPE}",
-                artifact.content_type
-            ));
-        }
-        let wire = decode_stems_artifact(&artifact.bytes)
-            .map_err(|error| format!("AI hub stems artifact: {error}"))?;
-        if wire.sample_rate != SAMPLE_RATE || wire.frames != pcm.left.len() {
-            return Err(format!(
-                "AI hub stems geometry mismatch: {} Hz/{} frames, expected {} Hz/{} frames",
-                wire.sample_rate,
-                wire.frames,
-                SAMPLE_RATE,
-                pcm.left.len()
-            ));
-        }
-        let [drums_l, drums_r, bass_l, bass_r, other_l, other_r, vocals_l, vocals_r] =
-            wire.channels;
-        let stems = [
-            StereoBuf { left: drums_l, right: drums_r },
-            StereoBuf { left: bass_l, right: bass_r },
-            StereoBuf { left: other_l, right: other_r },
-            StereoBuf { left: vocals_l, right: vocals_r },
-        ];
+        let resolved = service.as_ref().unwrap();
+        let hub = &resolved.service;
+        let windows = stem_windows(pcm.left.len(), resolved.max_job_body_bytes)?;
+        let stems = if windows.len() == 1 {
+            separate_stems_window(hub, &pcm, resolved.max_job_body_bytes)?
+        } else {
+            let mut output = makepad_ai_stems::model::empty_stem_set(pcm.left.len());
+            let mut filled = 0;
+            for range in &windows {
+                let window_pcm = StereoBuf {
+                    left: pcm.left[range.clone()].to_vec(),
+                    right: pcm.right[range.clone()].to_vec(),
+                };
+                let window = separate_stems_window(hub, &window_pcm, resolved.max_job_body_bytes)?;
+                stitch_stem_window(&mut output, &mut filled, range, &window)?;
+            }
+            if filled != pcm.left.len() {
+                return Err(format!("stems stitching stopped at frame {filled}"));
+            }
+            output
+        };
         write_cache(&args.out, &track.digest, &stems)?;
         ensure_cached_oggs(&args.out, &track.digest, &header, true)?;
         println!("{}: separated {}", path.display(), track.digest);
@@ -407,14 +577,17 @@ fn run_stems(args: StemsArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_hub(requested: &str) -> Result<LocalService, String> {
+fn resolve_hub(requested: &str) -> Result<ResolvedHub, String> {
     if requested != "auto" {
         let service = LocalService::new(requested);
-        service
+        let health = service
             .health()
             .map_err(|error| format!("AI hub {requested} is unreachable: {error}"))?;
         ensure_stems_capability(&service)?;
-        return Ok(service);
+        return Ok(ResolvedHub {
+            service,
+            max_job_body_bytes: health.max_job_body_bytes,
+        });
     }
     let discovered = makepad_ai_hub::discovery::start_listener();
     let deadline = std::time::Instant::now() + Duration::from_secs(7);
@@ -423,8 +596,13 @@ fn resolve_hub(requested: &str) -> Result<LocalService, String> {
         nodes.sort_by(|a, b| a.base_url.cmp(&b.base_url));
         for node in nodes {
             let service = LocalService::new(&node.base_url);
-            if service.health().is_ok() && ensure_stems_capability(&service).is_ok() {
-                return Ok(service);
+            if let Ok(health) = service.health() {
+                if ensure_stems_capability(&service).is_ok() {
+                    return Ok(ResolvedHub {
+                        service,
+                        max_job_body_bytes: health.max_job_body_bytes,
+                    });
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
@@ -938,6 +1116,40 @@ mod tests {
     fn resample_uses_vj_frame_geometry() {
         assert_eq!(resample(&vec![0.0; 48_000], 48_000.0, 44_100.0).len(), 44_100);
         assert_eq!(resample(&vec![0.0; 32_000], 32_000.0, 44_100.0).len(), 44_100);
+    }
+
+    #[test]
+    fn thirty_second_tone_splits_and_stitches_without_a_seam() {
+        let frames = SAMPLE_RATE as usize * 30;
+        let body_limit = stems_request_body_len(3 * CHUNK_STEP).unwrap() as u64;
+        let windows = stem_windows(frames, Some(body_limit)).unwrap();
+        assert!(windows.len() > 1);
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].end - pair[1].start, CHUNK_STEP);
+            assert_eq!(pair[1].start % CHUNK_STEP, 0);
+        }
+
+        let tone: Vec<f32> = (0..frames)
+            .map(|frame| {
+                (2.0 * std::f32::consts::PI * 330.0 * frame as f32 / SAMPLE_RATE as f32).sin()
+                    * 0.2
+            })
+            .collect();
+        let mut stitched = makepad_ai_stems::model::empty_stem_set(frames);
+        let mut filled = 0;
+        for range in &windows {
+            let samples = tone[range.clone()].to_vec();
+            let window: StemSet = std::array::from_fn(|_| StereoBuf {
+                left: samples.clone(),
+                right: samples.clone(),
+            });
+            stitch_stem_window(&mut stitched, &mut filled, range, &window).unwrap();
+        }
+        assert_eq!(filled, frames);
+        for frame in (0..frames).step_by(997) {
+            assert!((stitched[0].left[frame] - tone[frame]).abs() < 1e-6);
+            assert!((stitched[3].right[frame] - tone[frame]).abs() < 1e-6);
+        }
     }
 
     #[test]

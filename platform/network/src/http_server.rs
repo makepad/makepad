@@ -285,7 +285,20 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
     let ip_connections = Arc::new(Mutex::new(HashMap::new()));
     let body_ip_connections = Arc::new(Mutex::new(HashMap::new()));
     let in_flight_body_bytes = Arc::new(AtomicUsize::new(0));
-    let body_budget_limit = MAX_IN_FLIGHT_BODY_BYTES;
+    // A configured per-request limit must be possible to admit. The shared
+    // budget remains the ordinary floor, but grows for servers that explicitly
+    // opt an endpoint into larger bodies.
+    let body_budget_limit = usize::try_from(
+        http_server
+            .post_max_size_overrides
+            .iter()
+            .map(|(_, limit)| *limit)
+            .chain(std::iter::once(http_server.post_max_size))
+            .max()
+            .unwrap_or(0),
+    )
+    .unwrap_or(usize::MAX)
+    .max(MAX_IN_FLIGHT_BODY_BYTES);
     let listen_thread = {
         std::thread::spawn(move || {
             let mut connection_counter = 0u64;
