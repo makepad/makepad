@@ -287,6 +287,9 @@ pub const RECIPE: u32 = 8;
 // 2: deck A's stand-in moved from warm slate to the darkened key colour.
 pub const DECK_RECIPE: u32 = 2;
 
+const CACHE_SWEEP_LIST_LIMIT: u32 = 256;
+const CACHE_SWEEP_DELETE_BATCH: usize = 16;
+
 /// Browser and native use the same namespace/key contract. The immutable
 /// revision is the thumbnail version; recipe and dimensions invalidate any
 /// change in rendering without scanning or deleting old entries.
@@ -303,6 +306,15 @@ pub fn cache_key(
     format!(
         "{asset}/{revision}-{mode}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
     )
+}
+
+fn is_stale_cache_key(key: &str) -> bool {
+    let suffix = format!("-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg");
+    let Some(prefix) = key.strip_suffix(&suffix) else {
+        return true;
+    };
+    !(prefix.ends_with("-effect")
+        || prefix.ends_with(&format!("-transition-d{DECK_RECIPE}")))
 }
 
 /// The declared layout every sheet this module writes carries.
@@ -528,6 +540,18 @@ fn trans_pair(trans_tex: &mut Vec<[Option<Texture>; 2]>, step: usize) -> &mut [O
     &mut trans_tex[step]
 }
 
+#[derive(Default)]
+struct CacheSweep {
+    started: bool,
+    finished: bool,
+    listing_done: bool,
+    list_request: Option<StorageRequestId>,
+    pending_deletes: Vec<String>,
+    delete_requests: HashSet<StorageRequestId>,
+    stale_count: usize,
+    error: Option<String>,
+}
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct VjFxThumbs {
     #[uid]
@@ -566,6 +590,8 @@ pub struct VjFxThumbs {
     next_frame: NextFrame,
     #[rust]
     storage: Option<StorageHandle>,
+    #[rust]
+    cache_sweep: CacheSweep,
     /// IndexedDB/native-storage reads in flight. A lookup may carry the
     /// complete render job (bundled feed) or be a cheap catalog probe.
     #[rust]
@@ -642,9 +668,41 @@ impl VjFxThumbs {
     }
 
     fn storage(&mut self, cx: &mut Cx) -> StorageHandle {
-        self.storage
+        let storage = self.storage
             .get_or_insert_with(|| cx.storage("vj-fx-thumbs"))
-            .clone()
+            .clone();
+        if !self.cache_sweep.started {
+            self.cache_sweep.started = true;
+            self.cache_sweep.list_request =
+                Some(storage.list(cx, "", None, CACHE_SWEEP_LIST_LIMIT));
+        }
+        storage
+    }
+
+    fn finish_cache_sweep_if_ready(&mut self) {
+        if self.cache_sweep.finished
+            || !self.cache_sweep.listing_done
+            || !self.cache_sweep.pending_deletes.is_empty()
+            || !self.cache_sweep.delete_requests.is_empty()
+        {
+            return;
+        }
+        self.cache_sweep.finished = true;
+        if let Some(error) = self.cache_sweep.error.as_deref() {
+            log!("fx thumbs: sweep failed: {error}");
+        } else {
+            log!("fx thumbs: swept {} stale entries", self.cache_sweep.stale_count);
+        }
+    }
+
+    fn sweep_delete_batch(&mut self, cx: &mut Cx) {
+        let Some(storage) = self.storage.clone() else { return };
+        for _ in 0..CACHE_SWEEP_DELETE_BATCH {
+            let Some(key) = self.cache_sweep.pending_deletes.pop() else { break };
+            let request = storage.delete(cx, &key);
+            self.cache_sweep.delete_requests.insert(request);
+        }
+        self.finish_cache_sweep_if_ready();
     }
 
     /// Start a cache-only lookup before fetching an effect's source. Returns
@@ -803,6 +861,54 @@ impl VjFxThumbs {
         let Event::Storage(responses) = event else { return };
         let mut changed = false;
         for response in responses {
+            if self.cache_sweep.list_request == Some(response.request_id) {
+                self.cache_sweep.list_request = None;
+                match &response.result {
+                    Ok(StorageResult::List(page)) => {
+                        let stale = page
+                            .keys
+                            .iter()
+                            .filter(|key| is_stale_cache_key(key))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.cache_sweep.stale_count += stale.len();
+                        self.cache_sweep.pending_deletes.extend(stale);
+                        if let Some(cursor) = page.next_cursor.clone() {
+                            let storage = self.storage(cx);
+                            self.cache_sweep.list_request = Some(storage.list(
+                                cx,
+                                "",
+                                Some(cursor),
+                                CACHE_SWEEP_LIST_LIMIT,
+                            ));
+                        } else {
+                            self.cache_sweep.listing_done = true;
+                        }
+                    }
+                    Ok(_) => {
+                        self.cache_sweep.listing_done = true;
+                        self.cache_sweep.error.get_or_insert_with(|| {
+                            "storage list returned the wrong payload".to_string()
+                        });
+                    }
+                    Err(error) => {
+                        self.cache_sweep.listing_done = true;
+                        self.cache_sweep.error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+                if !self.cache_sweep.pending_deletes.is_empty() {
+                    self.next_frame = cx.new_next_frame();
+                }
+                self.finish_cache_sweep_if_ready();
+                continue;
+            }
+            if self.cache_sweep.delete_requests.remove(&response.request_id) {
+                if let Err(error) = &response.result {
+                    self.cache_sweep.error.get_or_insert_with(|| error.to_string());
+                }
+                self.finish_cache_sweep_if_ready();
+                continue;
+            }
             if let Some(read) = self.cache_reads.remove(&response.request_id) {
                 match &response.result {
                     Ok(StorageResult::Value(Some(jpeg)))
@@ -1756,6 +1862,9 @@ impl WidgetNode for VjFxThumbs {
 
 impl Widget for VjFxThumbs {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if matches!(event, Event::Startup) {
+            self.storage(cx);
+        }
         self.handle_storage(cx, event);
         // The hosts run on the manual clock (this widget drives every frame
         // they render), but they are still widgets: forward the event.
@@ -1765,9 +1874,12 @@ impl Widget for VjFxThumbs {
         self.fx3.handle_event(cx, event, scope);
         self.fx4.handle_event(cx, event, scope);
         self.fx5.handle_event(cx, event, scope);
-        if self.next_frame.is_event(event).is_some() && !self.is_idle() {
-            self.area.redraw(cx);
-            self.next_frame = cx.new_next_frame();
+        if self.next_frame.is_event(event).is_some() {
+            self.sweep_delete_batch(cx);
+            if !self.is_idle() || !self.cache_sweep.pending_deletes.is_empty() {
+                self.area.redraw(cx);
+                self.next_frame = cx.new_next_frame();
+            }
         }
     }
 
@@ -1895,6 +2007,30 @@ pub struct DrawVjFxThumbCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fx_thumb_cache_key_staleness_tracks_all_recipe_inputs() {
+        let base = "0123456789abcdef/abcdef0123456789";
+        assert!(!is_stale_cache_key(&format!(
+            "{base}-effect-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
+        )));
+        assert!(!is_stale_cache_key(&format!(
+            "{base}-transition-d{DECK_RECIPE}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-effect-r{}-{SHEET_W}x{SHEET_H}.jpg",
+            RECIPE - 1
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-effect-r{RECIPE}-{}x{SHEET_H}.jpg",
+            SHEET_W / 2
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-transition-d{}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg",
+            DECK_RECIPE - 1
+        )));
+        assert!(is_stale_cache_key("unrecognized-key"));
+    }
 
     #[test]
     fn sheet_geometry_declares_exactly_what_the_gpu_packs() {
