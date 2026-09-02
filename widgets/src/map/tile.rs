@@ -7606,6 +7606,124 @@ fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
     (parse("minzoom", 0), parse("maxzoom", 30))
 }
 
+/// Build one tile from bytes already supplied by the asynchronous `.mkmap`
+/// archive. Local MBTiles bridge/overlay sidecars remain worker-only inputs.
+pub fn build_local_tile_from_archive_bytes(
+    tile_key: TileKey,
+    base: Option<Vec<u8>>,
+    detail: Option<Vec<u8>>,
+    bridge_dz_mbtiles_path: Option<&Path>,
+    overlay_paths: &[String],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+) -> Result<Option<LoadedLocalTile>, String> {
+    let mut bridge_dz = bridge_dz_mbtiles_path
+        .filter(|path| path.is_file())
+        .and_then(|path| MbtilesReader::open(path).ok())
+        .and_then(|mut reader| {
+            let meta = reader.get_metadata().unwrap_or_default();
+            let zoom = meta.get("minzoom").and_then(|z| z.parse::<u32>().ok())?;
+            let bounds: Vec<f64> = meta
+                .get("bounds")?
+                .split(',')
+                .filter_map(|value| value.trim().parse().ok())
+                .collect();
+            (bounds.len() == 4)
+                .then_some((reader, zoom, [bounds[0], bounds[1], bounds[2], bounds[3]]))
+        });
+    let (bridge_dz_raw, bridge_dz_covered) = if let Some((reader, zoom, bounds)) = bridge_dz.as_mut()
+    {
+        if tile_key.z == *zoom {
+            let n = (1_u64 << tile_key.z) as f64;
+            let west = tile_key.x as f64 / n * 360.0 - 180.0;
+            let east = (tile_key.x as f64 + 1.0) / n * 360.0 - 180.0;
+            let lat = |y: f64| {
+                (std::f64::consts::PI * (1.0 - 2.0 * y / n))
+                    .sinh()
+                    .atan()
+                    .to_degrees()
+            };
+            let north = lat(tile_key.y as f64);
+            let south = lat(tile_key.y as f64 + 1.0);
+            let covered = west >= bounds[0]
+                && east <= bounds[2]
+                && south >= bounds[1]
+                && north <= bounds[3];
+            if covered {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                (
+                    reader
+                        .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                        .ok()
+                        .flatten(),
+                    true,
+                )
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        }
+    } else {
+        (None, false)
+    };
+
+    let mut overlay_tiles = Vec::new();
+    for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
+        let (file, filter) = match path.split_once('?') {
+            Some((file, "fast")) => (file, 1_u8),
+            Some((file, "slow")) => (file, 2),
+            Some((file, _)) => (file, 0),
+            None => (path.as_str(), 0),
+        };
+        let Ok(mut reader) = MbtilesReader::open(Path::new(file)) else {
+            continue;
+        };
+        let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
+        if tile_key.z < min_zoom {
+            continue;
+        }
+        let shift = tile_key.z.saturating_sub(max_zoom);
+        let fetch_z = tile_key.z - shift;
+        let fetch_x = (tile_key.x as u32 >> shift) as i64;
+        let fetch_y = (tile_key.y as u32 >> shift) as i64;
+        let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
+        if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
+            overlay_tiles.push(OverlayTileData {
+                raw,
+                shift,
+                quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
+                quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
+                filter,
+                has_chargers: file.contains("chargers"),
+            });
+        }
+    }
+
+    let Some(base) = base.or_else(|| (!overlay_tiles.is_empty()).then(Vec::new)) else {
+        return Ok(None);
+    };
+    let detail_needed = render_zoom >= ICON_MIN_ZOOM
+        || render_zoom >= 16
+        || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
+        || !bridge_dz_covered;
+    let buffers = build_tile_buffers_from_mvt(
+        tile_key,
+        &base,
+        detail_needed.then_some(detail.as_deref()).flatten(),
+        bridge_dz_raw.as_deref(),
+        bridge_dz_covered,
+        &overlay_tiles,
+        theme,
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+    )?;
+    Ok(Some(LoadedLocalTile { tile_key, buffers }))
+}
+
 pub fn load_local_tile_batch(
     mbtiles_path: &Path,
     detail_mbtiles_path: Option<&Path>,
