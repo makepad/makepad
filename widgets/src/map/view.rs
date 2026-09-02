@@ -908,6 +908,128 @@ script_mod! {
         }
     }
 
+    // Ground polygon fills: 20-byte vertices. Their UVs are map-anchored
+    // position, and all other generic-vector channels are constants. The
+    // inherited fragment/material/pattern path remains the source of truth.
+    mod.draw.DrawMapFill = mod.std.set_type_default() do #(DrawMapFill::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.FillVertexPacked, geom.FillGeomPacked)
+
+        vertex: fn() {
+            let pos = vec2(self.geom.x, self.geom.y)
+            let fill = unpack2f16(self.geom.params)
+            let color = unpack4u8(self.geom.color)
+            let depth = unpack4u8(self.geom.zbias) * 255.0
+            let flat_zbias = (depth.x + depth.y * 256.0) * 0.000001
+            let param5 = (depth.z + depth.w * 256.0) * 0.00001
+            var shape_id = 0.0
+            var material = fill.x
+            if fill.x > 29.5 {
+                shape_id = fill.x
+                material = 0.0
+            }
+
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let lift_m = ground_m * self.terrain_fill_lift
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            self.v_tcoord = vec2(fill.y, 1.0)
+            self.v_color = color
+            self.v_stroke_mult = 1e6
+            self.v_stroke_dist = 0.0
+            self.v_shape_id = shape_id
+            self.v_param0 = 0.0
+            if shape_id > 29.5 || (material > 2.5 && material < 3.5)
+                || (material > 4.5 && material < 5.5) {
+                let map_uv = pos * self.map_scale
+                self.v_param1 = map_uv.x
+                self.v_param2 = map_uv.y
+            } else {
+                self.v_param1 = 0.0
+                self.v_param2 = 0.0
+            }
+            self.v_param3 = material
+            self.v_param4 = 0.0
+            self.v_param5 = param5
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + flat_zbias,
+                        param5 + (ground_rel_y + lift_m * self.tilt_params.y)
+                            * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
     // Instanced POI symbols: one shared mesh per symbol slot, an 8-float
     // record per placement (anchor, screen offset, scale, the zoom-floor /
     // pin-lift composite, zbias, colour). This is DrawMapVector's shape-20
@@ -1949,6 +2071,44 @@ fn stamp_map_uniforms(
     draw_vars.set_texture(1, terrain_tex);
 }
 
+/// Compact ground fills. Unlike the generic vector drawer this has no
+/// per-instance channels; every varying is reconstructed from five geometry
+/// slots in the script vertex function above.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapFill {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+}
+
+impl DrawMapFill {
+    fn draw_geometry(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+        self.draw_vars.geometry_id = Some(geometry_id);
+        cx.new_draw_call(&self.draw_vars);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
 /// Instanced POI symbols: the registry mesh is bound as the geometry (one
 /// GPU copy per slot, see `MapView::icon_mesh_geometries`), every placement
 /// is one instance of `DrawMapIcon`'s per-instance fields. The shader is
@@ -2124,6 +2284,9 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_map: DrawMapVector,
+    #[redraw]
+    #[live]
+    draw_fill: DrawMapFill,
     #[redraw]
     #[live]
     draw_icon: DrawMapIcon,
@@ -2925,6 +3088,7 @@ impl Widget for MapView {
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
         // shiny.md gates + sun for the material dispatch, per active theme.
         self.draw_map.shiny = self.active_style().shiny;
+        self.draw_fill.shiny = self.draw_map.shiny;
         self.draw_icon.shiny = self.draw_map.shiny;
         self.draw_wall.shiny = self.draw_map.shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
@@ -3002,6 +3166,7 @@ impl Widget for MapView {
                 };
                 let TileLoadState::Ready {
                     fill_geometry,
+                    fill_misc_geometry,
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
@@ -3031,6 +3196,7 @@ impl Widget for MapView {
                 if pass == 0 {
                     for geometry in [
                         fill_geometry,
+                        fill_misc_geometry,
                         casing_geometry,
                         stroke_geometry,
                         icon_geometry,
@@ -3078,7 +3244,6 @@ impl Widget for MapView {
                     continue;
                 }
                 let geometry = match pass {
-                    0 => fill_geometry,
                     1 => casing_geometry,
                     2 => stroke_geometry,
                     3 => icon_geometry,
@@ -3103,14 +3268,58 @@ impl Widget for MapView {
                     fade_alpha = (((perf_start - fade.started).max(0.0) / TILE_FADE_SECONDS)
                         as f32)
                         .clamp(0.0, 1.0);
-                    let outgoing = match pass {
-                        0 => &fade.fill_geometry,
+                    if pass == 0 {
+                        let uniforms = MapDrawUniforms {
+                            map_scale,
+                            map_offset: screen_offset,
+                            fade: 1.0,
+                            width_correction: stroke_width_correction(fade.bucket, view_zoom),
+                            view_rot: view_rot_uniform,
+                            rot_pivot: rot_pivot_uniform,
+                            tilt_params: tilt_uniform,
+                            icon_zoom: view_zoom as f32,
+                            height_grow: 1.0,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            terrain_fill_lift,
+                        };
+                        if let Some(outgoing) = &fade.fill_geometry {
+                            self.draw_fill.draw_geometry(
+                                cx,
+                                outgoing.geometry_id(),
+                                &uniforms,
+                                &terrain_tex,
+                                0.0,
+                            );
+                        }
+                        if let Some(outgoing) = &fade.fill_misc_geometry {
+                            self.draw_map.draw_geometry(
+                                cx,
+                                outgoing.geometry_id(),
+                                map_scale,
+                                screen_offset,
+                                1.0,
+                                uniforms.width_correction,
+                                view_rot_uniform,
+                                rot_pivot_uniform,
+                                tilt_uniform,
+                                view_zoom as f32,
+                                1.0,
+                                terrain_org,
+                                terrain_span,
+                                terrain_uvfit,
+                                &terrain_tex,
+                                0.0,
+                                terrain_fill_lift,
+                            );
+                        }
+                    } else if let Some(outgoing) = match pass {
                         1 => &fade.casing_geometry,
                         2 => &fade.stroke_geometry,
                         3 => &fade.icon_geometry,
                         _ => &None,
-                    };
-                    if let Some(outgoing) = outgoing {
+                    } {
                         let outgoing_id = outgoing.geometry_id();
                         self.draw_map.draw_geometry(
                             cx,
@@ -3142,39 +3351,90 @@ impl Widget for MapView {
                         .fade
                         .as_ref()
                         .is_some_and(|fade| fade.reuse_road_core);
-                let Some(geometry) = geometry else {
-                    continue;
+                let incoming_fade = if reused_road_pass { 1.0 } else { fade_alpha };
+                let height_grow = if reused_road_pass {
+                    1.0
+                } else if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                    fade_alpha
+                } else {
+                    1.0
                 };
-                let geometry_id = geometry.geometry_id();
-                self.draw_map.draw_geometry(
-                    cx,
-                    geometry_id,
-                    map_scale,
-                    screen_offset,
-                    if reused_road_pass { 1.0 } else { fade_alpha },
-                    stroke_width_correction(entry.bucket, view_zoom),
-                    view_rot_uniform,
-                    rot_pivot_uniform,
-                    tilt_uniform,
-                    view_zoom as f32,
-                    if reused_road_pass {
-                        1.0
-                    } else if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
-                        fade_alpha
-                    } else {
-                        1.0
-                    },
-                    terrain_org,
-                    terrain_span,
-                    terrain_uvfit,
-                    &terrain_tex,
-                    if tilt_rad > 1e-4 && pass != 0 {
-                                pass_boost + (pass - 1) as f32 * 0.02
-                            } else {
-                                0.0
-                            },
-                    terrain_fill_lift,
-                );
+                let width_correction = stroke_width_correction(entry.bucket, view_zoom);
+                let pass_depth = if tilt_rad > 1e-4 && pass != 0 {
+                    pass_boost + (pass - 1) as f32 * 0.02
+                } else {
+                    0.0
+                };
+                if pass == 0 {
+                    let uniforms = MapDrawUniforms {
+                        map_scale,
+                        map_offset: screen_offset,
+                        fade: incoming_fade,
+                        width_correction,
+                        view_rot: view_rot_uniform,
+                        rot_pivot: rot_pivot_uniform,
+                        tilt_params: tilt_uniform,
+                        icon_zoom: view_zoom as f32,
+                        height_grow,
+                        terrain_org,
+                        terrain_span,
+                        terrain_uvfit,
+                        terrain_fill_lift,
+                    };
+                    if let Some(geometry) = fill_geometry {
+                        self.draw_fill.draw_geometry(
+                            cx,
+                            geometry.geometry_id(),
+                            &uniforms,
+                            &terrain_tex,
+                            pass_depth,
+                        );
+                    }
+                    if let Some(geometry) = fill_misc_geometry {
+                        self.draw_map.draw_geometry(
+                            cx,
+                            geometry.geometry_id(),
+                            map_scale,
+                            screen_offset,
+                            incoming_fade,
+                            width_correction,
+                            view_rot_uniform,
+                            rot_pivot_uniform,
+                            tilt_uniform,
+                            view_zoom as f32,
+                            height_grow,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            &terrain_tex,
+                            pass_depth,
+                            terrain_fill_lift,
+                        );
+                    }
+                } else {
+                    let Some(geometry) = geometry else {
+                        continue;
+                    };
+                    self.draw_map.draw_geometry(
+                        cx,
+                        geometry.geometry_id(),
+                        map_scale,
+                        screen_offset,
+                        incoming_fade,
+                        width_correction,
+                        view_rot_uniform,
+                        rot_pivot_uniform,
+                        tilt_uniform,
+                        view_zoom as f32,
+                        height_grow,
+                        terrain_org,
+                        terrain_span,
+                        terrain_uvfit,
+                        &terrain_tex,
+                        pass_depth,
+                        terrain_fill_lift,
+                    );
+                }
                 // 3D volume rides the fill pass with a ground-circle
                 // distance fade from the view focus: the far field under
                 // tilt (the blurred zone) skips walls/trees/roofs — the
@@ -4068,6 +4328,7 @@ impl MapView {
             old_bucket,
             old_baked_3d,
             old_fill,
+            old_fill_misc,
             old_casing,
             old_stroke,
             old_icon,
@@ -4082,6 +4343,7 @@ impl MapView {
                 state:
                     TileLoadState::Ready {
                         fill_geometry,
+                        fill_misc_geometry,
                         casing_geometry,
                         stroke_geometry,
                         icon_geometry,
@@ -4100,6 +4362,7 @@ impl MapView {
                 bucket,
                 baked_3d,
                 fill_geometry,
+                fill_misc_geometry,
                 casing_geometry,
                 stroke_geometry,
                 icon_geometry,
@@ -4113,6 +4376,7 @@ impl MapView {
             _ => (
                 buffers.render_zoom,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -4155,9 +4419,14 @@ impl MapView {
         if self.space_warp_want {
             let scale = (self.view_zoom() - tile_key.z as f64).exp2().max(1.0);
             let max_edge = (64.0 / scale).clamp(4.0, 64.0) as f32;
-            crate::makepad_draw::vector::subdivide_packed_mesh(
+            crate::makepad_draw::vector::subdivide_fill_packed_mesh(
                 &mut buffers.fill_indices,
                 &mut buffers.fill_vertices,
+                max_edge,
+            );
+            crate::makepad_draw::vector::subdivide_packed_mesh(
+                &mut buffers.fill_misc_indices,
+                &mut buffers.fill_misc_vertices,
                 max_edge,
             );
             crate::makepad_draw::vector::subdivide_packed_mesh(
@@ -4180,6 +4449,15 @@ impl MapView {
         {
             let geometry = Geometry::new(cx);
             geometry.update(cx, buffers.fill_indices, buffers.fill_vertices);
+            Some(geometry)
+        } else {
+            None
+        };
+        let fill_misc_geometry = if !buffers.fill_misc_indices.is_empty()
+            && !buffers.fill_misc_vertices.is_empty()
+        {
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, buffers.fill_misc_indices, buffers.fill_misc_vertices);
             Some(geometry)
         } else {
             None
@@ -4281,6 +4559,7 @@ impl MapView {
                 .values()
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
         let fade = if old_fill.is_some()
+            || old_fill_misc.is_some()
             || old_icon.is_some()
             || !old_icon_instances.is_empty()
             || fade_casing_geometry.is_some()
@@ -4292,6 +4571,7 @@ impl MapView {
                 grow_heights: new_baked_3d && !old_baked_3d && !three_d_established,
                 reuse_road_core,
                 fill_geometry: old_fill,
+                fill_misc_geometry: old_fill_misc,
                 // Stable road geometry stays current across a mode switch;
                 // drawing it again as outgoing fade would darken the roads.
                 casing_geometry: fade_casing_geometry,
@@ -4306,6 +4586,7 @@ impl MapView {
                 grow_heights: new_baked_3d && !three_d_established,
                 reuse_road_core: false,
                 fill_geometry: None,
+                fill_misc_geometry: None,
                 casing_geometry: None,
                 stroke_geometry: None,
                 icon_geometry: None,
@@ -4324,6 +4605,7 @@ impl MapView {
             TileEntry {
                 state: TileLoadState::Ready {
                     fill_geometry,
+                    fill_misc_geometry,
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
@@ -5609,6 +5891,7 @@ impl MapView {
         self.tiles.get(&key).is_some_and(|entry| {
             entry.fade.as_ref().is_some_and(|fade| {
                 fade.fill_geometry.is_none()
+                    && fade.fill_misc_geometry.is_none()
                     && fade.casing_geometry.is_none()
                     && fade.stroke_geometry.is_none()
                     && fade.icon_geometry.is_none()
