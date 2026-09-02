@@ -22126,6 +22126,13 @@ p2 {}
                 refs.sync.set_text(cx, &sync_text);
             }
             self.paint_lit(cx, ids.sync, mode != SyncMode::Off || synced);
+            // The lock's own word: which key it will hold, shown whether it
+            // is engaged or not. `paint_lit` still says whether it is.
+            let keylock_text = self.decks.deck(deck).keylock_mode.label();
+            if self.label_cache.get(&(base + 10)).map(String::as_str) != Some(keylock_text) {
+                self.label_cache.insert(base + 10, keylock_text.to_string());
+                refs.keylock.set_text(cx, keylock_text);
+            }
             self.paint_lit(cx, ids.loop_scan, self.scan_busy[index]);
             self.paint_lit(cx, ids.keylock, keylock);
             self.paint_phones_lit(cx, ids.hp, self.phones_deck[index]);
@@ -24518,9 +24525,17 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
-            if refs.keylock.clicked(actions) {
-                let cmds = self.decks.toggle_keylock(deck);
+            // Alt walks which key the lock holds, the same modifier trick
+            // SYNC uses for EXT twenty lines above. The word on the button
+            // says which, so the choice can be made before pressing.
+            if let Some(modifiers) = refs.keylock.clicked_modifiers(actions) {
+                let cmds = if modifiers.alt {
+                    self.decks.cycle_keylock_mode(deck)
+                } else {
+                    self.decks.toggle_keylock(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
+                self.sync_deck_knobs(cx, deck);
             }
             if refs.key_up.clicked(actions) {
                 let cmds = self.decks.nudge_key_shift(deck, 1.0);

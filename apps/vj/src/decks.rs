@@ -269,6 +269,52 @@ pub const RATE_MAX: f64 = 4.0;
 /// that a mix has left the track behind anyway.
 pub const KEY_SHIFT_MAX: f64 = 12.0;
 
+/// Which key the lock holds, and what letting go does with it.
+///
+/// Three flat states rather than two switches: `Original` captures
+/// nothing, so it has only one way to be released, and a fourth state
+/// would show the operator two that behave identically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeylockMode {
+    /// The track's own key, whatever the tempo is doing. What the tab has
+    /// always done.
+    #[default]
+    Original,
+    /// The key that was already sounding when the lock went on, given back
+    /// when it comes off.
+    Current,
+    /// The same anchor, but the borrowed semitones stay in the shift knob
+    /// afterwards, as an interval the operator now owns.
+    CurrentKept,
+}
+
+impl KeylockMode {
+    /// The word the button wears. It names the key the lock will hold, so
+    /// the mode can be picked before anything is pressed.
+    pub fn label(self) -> &'static str {
+        match self {
+            KeylockMode::Original => "KEY",
+            KeylockMode::Current => "NOW",
+            KeylockMode::CurrentKept => "NOW+",
+        }
+    }
+
+    pub fn cycled(self) -> KeylockMode {
+        match self {
+            KeylockMode::Original => KeylockMode::Current,
+            KeylockMode::Current => KeylockMode::CurrentKept,
+            KeylockMode::CurrentKept => KeylockMode::Original,
+        }
+    }
+}
+
+/// A tempo ratio said as the interval it shifts the pitch by: double speed
+/// is an octave up. The floor is belt-and-braces -- the rate is clamped to
+/// RATE_MIN everywhere it is set, but a log of zero would poison the knob.
+fn semitones_of_rate(rate: f64) -> f64 {
+    12.0 * rate.max(f64::MIN_POSITIVE).log2()
+}
+
 /// What the pointer is doing to a deck's waveform.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScratchMotion {
@@ -626,6 +672,15 @@ pub struct DeckState {
     /// the lock on, from the track's own key; with it off, from whatever the
     /// tempo already did to the pitch.
     pub keylock: bool,
+    /// Which key the lock holds. See `KeylockMode`.
+    pub keylock_mode: KeylockMode,
+    /// The semitones the lock folded into `key_shift` when it engaged.
+    ///
+    /// Recorded rather than recomputed on release: the tempo may have moved
+    /// while the lock was holding, and giving back an interval worked out
+    /// against the NEW tempo would leave the key somewhere nobody asked
+    /// for. Zero whenever no lock is holding a borrowed interval.
+    pub keylock_offset: f64,
     /// Operator key shift in SEMITONES: pitch without tempo. 0 = the track's
     /// own key.
     pub key_shift: f64,
@@ -685,6 +740,8 @@ impl Default for DeckState {
             ext_sync: false,
             auto_opt_out: false,
             keylock: true,
+            keylock_mode: KeylockMode::default(),
+            keylock_offset: 0.0,
             key_shift: 0.0,
             scratching: false,
             eq: [1.0; 3],
@@ -2361,6 +2418,11 @@ impl DeckEngine {
 
     /// Back to the track's own key.
     pub fn reset_key_shift(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        // The readout is the way back to the track's own key and it has to
+        // mean it: leaving a debt standing here would drive the shift
+        // NEGATIVE at the next release. `nudge_key_shift` deliberately does
+        // not do this, so a step taken while the lock holds survives it.
+        self.deck_mut(deck).keylock_offset = 0.0;
         self.set_key_shift(deck, 0.0)
     }
 
@@ -2370,7 +2432,46 @@ impl DeckEngine {
     pub fn toggle_keylock(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
         state.keylock = !state.keylock;
-        vec![DeckCmd::SetKeylock { deck, on: state.keylock }]
+        let engaged = state.keylock;
+        let mode = state.keylock_mode;
+        let mut cmds = vec![DeckCmd::SetKeylock { deck, on: engaged }];
+        if engaged {
+            if mode == KeylockMode::Original {
+                return cmds;
+            }
+            // Hand the tempo's own interval to the shift knob, and the
+            // render path then holds precisely the key that was already
+            // sounding. The STANDING tempo, not the bent one: a lean held
+            // across the press must not become a permanent anchor.
+            let rate = self.deck(deck).rate;
+            let before = self.deck(deck).key_shift;
+            cmds.extend(self.set_key_shift(deck, before + semitones_of_rate(rate)));
+            // Recorded AFTER the clamp, so the give-back is exact even at
+            // the rail.
+            let after = self.deck(deck).key_shift;
+            self.deck_mut(deck).keylock_offset = after - before;
+            return cmds;
+        }
+        // Letting go. Both conditions matter: `Current` alone would emit a
+        // pointless shift of nothing in the default mode, and a standing
+        // debt alone would take back semitones the operator was told they
+        // could keep.
+        let owed = self.deck(deck).keylock_offset;
+        if mode == KeylockMode::Current && owed != 0.0 {
+            let now = self.deck(deck).key_shift;
+            cmds.extend(self.set_key_shift(deck, now - owed));
+        }
+        self.deck_mut(deck).keylock_offset = 0.0;
+        cmds
+    }
+
+    /// Walk the three keys the lock can hold. Moves no pitch and sends no
+    /// command: it says what the NEXT press will do, and the button reads
+    /// it out so the choice can be made before anything is pressed.
+    pub fn cycle_keylock_mode(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.keylock_mode = state.keylock_mode.cycled();
+        Vec::new()
     }
 
     /// Pointer on the waveform. A grab suspends the phase lock; the release
@@ -3966,6 +4067,135 @@ mod tests {
         load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
         assert_eq!(e.deck(DeckId::A).rate, 1.0, "asked for, so even the hand's tempo goes");
         assert_eq!(e.deck(DeckId::A).pitch, 0.0);
+    }
+
+    // ---- which key the lock holds ---------------------------------------
+
+    #[test]
+    fn the_default_mode_holds_the_tracks_own_key_and_touches_no_knob() {
+        // The mode that has always shipped. The lock starts ON, so the
+        // first press is a release.
+        let mut e = DeckEngine::new();
+        assert_eq!(e.deck(DeckId::A).keylock_mode, KeylockMode::Original);
+        assert!(e.deck(DeckId::A).keylock, "on by default");
+        e.set_pitch(DeckId::A, 1.0);
+        let released = e.toggle_keylock(DeckId::A);
+        assert_eq!(released, vec![DeckCmd::SetKeylock { deck: DeckId::A, on: false }]);
+        let engaged = e.toggle_keylock(DeckId::A);
+        assert_eq!(engaged, vec![DeckCmd::SetKeylock { deck: DeckId::A, on: true }]);
+        assert_eq!(e.deck(DeckId::A).key_shift, 0.0, "nothing borrowed, nothing owed");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+    }
+
+    #[test]
+    fn holding_the_key_that_was_sounding_folds_the_tempos_own_interval_into_the_knob() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A); // off
+        e.set_pitch(DeckId::A, 1.0); // the widest the default range reaches
+        let rate = e.deck(DeckId::A).rate;
+        let want = 12.0 * rate.log2();
+        e.toggle_keylock(DeckId::A); // on
+        assert!(
+            (e.deck(DeckId::A).key_shift - want).abs() < 1e-9,
+            "the knob holds the interval the tempo was making: {} against {want}",
+            e.deck(DeckId::A).key_shift
+        );
+        assert!((e.deck(DeckId::A).keylock_offset - want).abs() < 1e-9);
+    }
+
+    #[test]
+    fn letting_go_gives_back_exactly_what_was_borrowed() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        // The tempo moves WHILE the lock holds, which is the whole reason
+        // the borrowed amount is recorded rather than recomputed.
+        e.set_pitch(DeckId::A, -0.4);
+        e.toggle_keylock(DeckId::A);
+        assert!(
+            e.deck(DeckId::A).key_shift.abs() < 1e-9,
+            "back to the track's own key, not to an interval worked out against a tempo that moved: {}",
+            e.deck(DeckId::A).key_shift
+        );
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+    }
+
+    #[test]
+    fn the_keeping_mode_leaves_the_borrowed_semitones_in_the_knob() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::CurrentKept;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        let held = e.deck(DeckId::A).key_shift;
+        assert!(held > 0.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, held, "the interval is the operator's now");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0, "and nothing is owed");
+    }
+
+    #[test]
+    fn a_key_step_taken_while_the_lock_holds_survives_letting_go() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        e.nudge_key_shift(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        assert!(
+            (e.deck(DeckId::A).key_shift - 1.0).abs() < 1e-9,
+            "the borrow goes back, the operator's own step stays: {}",
+            e.deck(DeckId::A).key_shift
+        );
+    }
+
+    #[test]
+    fn zeroing_the_key_clears_the_debt_so_the_next_release_cannot_go_negative() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        e.reset_key_shift(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, 0.0, "and it stays at the track's own key");
+    }
+
+    #[test]
+    fn cycling_names_the_key_the_next_press_will_hold_and_moves_nothing() {
+        let mut e = DeckEngine::new();
+        e.set_pitch(DeckId::A, 1.0);
+        let before = e.deck(DeckId::A).key_shift;
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "KEY");
+        assert!(e.cycle_keylock_mode(DeckId::A).is_empty(), "it sends nothing");
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "NOW");
+        e.cycle_keylock_mode(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "NOW+");
+        e.cycle_keylock_mode(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_mode, KeylockMode::Original, "three, then round");
+        assert_eq!(e.deck(DeckId::A).key_shift, before, "and no pitch moved");
+    }
+
+    #[test]
+    fn a_borrow_clamped_at_the_rail_is_given_back_only_as_far_as_it_went() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_key_shift(DeckId::A, KEY_SHIFT_MAX);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, KEY_SHIFT_MAX, "the knob was already at the rail");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0, "so nothing was actually borrowed");
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(
+            e.deck(DeckId::A).key_shift, KEY_SHIFT_MAX,
+            "and letting go must not take back semitones it never got"
+        );
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
