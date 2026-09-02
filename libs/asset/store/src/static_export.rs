@@ -5,7 +5,7 @@
 //! by rewriting the complete dependency graph; legally material rights are
 //! retained unchanged.
 
-use crate::error::{io_err, ServerError, ServerResult};
+use crate::error::{content_err_at, io_err, ServerError, ServerResult};
 use crate::host::api::{asset_manifest_value, kind_str, media_str, role_str};
 use crate::host::json::{obj, s, Value};
 use crate::static_export_core::{brotli_bytes, ExportEntry, ExportPlan, ExportSink, ExportStep};
@@ -256,7 +256,9 @@ fn load_revision(
             found: *found.as_bytes(),
         });
     }
-    let manifest = AssetManifest::from_canonical_bytes(&bytes)?;
+    let manifest = AssetManifest::from_canonical_bytes(&bytes).map_err(|error| {
+        content_err_at("catalog.sqlite3 asset_revisions.manifest", &bytes, error)
+    })?;
     if manifest.asset_id != target.asset_id {
         return Err(ServerError::Conflict { what: "static export dependency asset" });
     }
@@ -365,7 +367,9 @@ fn discover_variants(
                         found: *VariantSetId::hash_of(&bytes).as_bytes(),
                     });
                 }
-                let original = VariantSetManifest::from_canonical_bytes(&bytes)?;
+                let original = VariantSetManifest::from_canonical_bytes(&bytes).map_err(|error| {
+                    content_err_at("catalog.sqlite3 variant_sets.manifest", &bytes, error)
+                })?;
                 if original.base != base {
                     return Err(ServerError::Conflict { what: "static export variant base" });
                 }
@@ -383,7 +387,14 @@ fn discover_variants(
                             found: *found.as_bytes(),
                         });
                     }
-                    let mut manifest = DerivedVariantManifest::from_canonical_bytes(&bytes)?;
+                    let mut manifest = DerivedVariantManifest::from_canonical_bytes(&bytes)
+                        .map_err(|error| {
+                            content_err_at(
+                                "catalog.sqlite3 derived_variants.manifest",
+                                &bytes,
+                                error,
+                            )
+                        })?;
                     if !matches!(
                         manifest.rights.redistribution,
                         Redistribution::Allowed | Redistribution::AttributionRequired

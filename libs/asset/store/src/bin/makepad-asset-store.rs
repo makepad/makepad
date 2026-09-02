@@ -66,6 +66,11 @@ fn fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+fn runtime_fail(msg: &str) -> ! {
+    eprintln!("makepad-asset-store: {msg}");
+    std::process::exit(1);
+}
+
 fn parse_config() -> ServerConfig {
     let mut args = std::env::args().skip(1);
     let mut root: Option<PathBuf> = None;
@@ -203,9 +208,9 @@ fn run_export() {
         }
     }
     let core = AssetServerCore::open_read_only(&root, Budgets::default_v1())
-        .unwrap_or_else(|error| fail(&format!("cannot open store: {error}")));
+        .unwrap_or_else(|error| runtime_fail(&format!("cannot open store: {error}")));
     let report = export_static(&core, &out, &options)
-        .unwrap_or_else(|error| fail(&format!("static export failed: {error}")));
+        .unwrap_or_else(|error| runtime_fail(&format!("static export failed: {error}")));
     println!(
         "exported {} assets, {} revisions, {} aliases, {} blobs ({} omitted) as snapshot {}; considered-live={}; excluded: namespace={}, no-published-revisions={}, kind={}, rights={}, budget={}, limit={}",
         report.assets,

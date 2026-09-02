@@ -75,7 +75,8 @@ pub fn serve_request(
             if let Fail::Srv(
                 e @ (ServerError::Io { .. }
                 | ServerError::Db { .. }
-                | ServerError::UnsupportedSchema { .. }),
+                | ServerError::UnsupportedSchema { .. }
+                | ServerError::UnsupportedContentSchema { .. }),
             ) = &f
             {
                 // The client sees an opaque 500; the operator sees the cause.
