@@ -85,6 +85,7 @@ pub struct Cx {
     /// caches. Web startup replaces the native default with the shared wasm
     /// memory limit reported by the JS bridge.
     pub(crate) memory_budget_bytes: usize,
+    pub(crate) memory_budget_initialized: bool,
     pub(crate) thread_spawner: crate::thread::ThreadSpawner,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
@@ -406,12 +407,205 @@ impl OsType {
     }
 }
 
+const DEFAULT_MEMORY_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+#[allow(dead_code)]
+const LOW_MEMORY_DEVICE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+#[allow(dead_code)]
+const MIN_MOBILE_MEMORY_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
+#[allow(dead_code)]
+const MAX_MOBILE_MEMORY_BUDGET_BYTES: u64 = 1536 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum MemoryBudgetPolicy {
+    Desktop,
+    Mobile,
+}
+
+/// Turns the platform's one physical-memory measurement into the process
+/// envelope used by elastic subsystems. Device discovery stays platform
+/// specific; all policy lives here.
+#[allow(dead_code)]
+fn memory_budget_from_physical_memory(
+    physical_memory_bytes: u64,
+    policy: MemoryBudgetPolicy,
+) -> usize {
+    let budget = match policy {
+        MemoryBudgetPolicy::Desktop if physical_memory_bytes < LOW_MEMORY_DEVICE_BYTES => {
+            physical_memory_bytes / 4
+        }
+        MemoryBudgetPolicy::Desktop => DEFAULT_MEMORY_BUDGET_BYTES as u64,
+        MemoryBudgetPolicy::Mobile => (physical_memory_bytes / 4).clamp(
+            MIN_MOBILE_MEMORY_BUDGET_BYTES,
+            MAX_MOBILE_MEMORY_BUDGET_BYTES,
+        ),
+    };
+    budget.min(usize::MAX as u64) as usize
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn apple_physical_memory_bytes() -> Option<u64> {
+    use makepad_objc_sys::{class, msg_send, runtime::Object, sel, sel_impl};
+
+    unsafe {
+        let process_info: *mut Object = msg_send![class!(NSProcessInfo), processInfo];
+        if process_info.is_null() {
+            None
+        } else {
+            let bytes: u64 = msg_send![process_info, physicalMemory];
+            (bytes != 0).then_some(bytes)
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn linux_physical_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim() == "MemTotal")
+    })?;
+    let mut fields = line.split_once(':')?.1.split_whitespace();
+    let kib = fields.next()?.parse::<u64>().ok()?;
+    (fields.next() == Some("kB"))
+        .then(|| kib.checked_mul(1024))
+        .flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_physical_memory_bytes() -> Option<u64> {
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dwLength: u32,
+        dwMemoryLoad: u32,
+        ullTotalPhys: u64,
+        ullAvailPhys: u64,
+        ullTotalPageFile: u64,
+        ullAvailPageFile: u64,
+        ullTotalVirtual: u64,
+        ullAvailVirtual: u64,
+        ullAvailExtendedVirtual: u64,
+    }
+
+    windows_core::link!("kernel32.dll" "system" fn GlobalMemoryStatusEx(
+        status: *mut MemoryStatusEx
+    ) -> windows_core::BOOL);
+
+    let mut status = MemoryStatusEx {
+        dwLength: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dwMemoryLoad: 0,
+        ullTotalPhys: 0,
+        ullAvailPhys: 0,
+        ullTotalPageFile: 0,
+        ullAvailPageFile: 0,
+        ullTotalVirtual: 0,
+        ullAvailVirtual: 0,
+        ullAvailExtendedVirtual: 0,
+    };
+    unsafe {
+        (GlobalMemoryStatusEx(&mut status).0 != 0 && status.ullTotalPhys != 0)
+            .then_some(status.ullTotalPhys)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_memory_budget(web_memory_bytes: usize) -> (usize, &'static str) {
+    (web_memory_bytes, "wasm memory maximum")
+}
+
+#[cfg(target_os = "macos")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    apple_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "ProcessInfo.processInfo.physicalMemory",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "ios")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    apple_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Mobile),
+                "ProcessInfo.processInfo.physicalMemory",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "android")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    crate::os::linux::android::android_jni::physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Mobile),
+                "ActivityManager.MemoryInfo.totalMem",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    windows_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "GlobalMemoryStatusEx",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    linux_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "/proc/meminfo MemTotal",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos")),
+)))]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    (default, "default")
+}
+
 impl Cx {
     /// A conservative process-wide memory envelope for cache/batch budgets.
     /// Native keeps a generous fixed ceiling; web reports the shared wasm
     /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
     pub fn memory_budget_bytes(&self) -> usize {
         self.memory_budget_bytes
+    }
+
+    pub(crate) fn initialize_memory_budget(&mut self) {
+        if self.memory_budget_initialized {
+            return;
+        }
+        self.memory_budget_initialized = true;
+        let (budget, source) = platform_memory_budget(self.memory_budget_bytes);
+        self.memory_budget_bytes = budget;
+        crate::log!(
+            "memory budget: {} MiB ({})",
+            budget / (1024 * 1024),
+            source
+        );
     }
 
     /// Select the application's font policy before script/theme registration.
@@ -499,7 +693,8 @@ impl Cx {
             null_texture,
             null_cube_texture,
             cpu_cores: crate::thread::available_parallelism().get(),
-            memory_budget_bytes: 1536 * 1024 * 1024,
+            memory_budget_bytes: DEFAULT_MEMORY_BUDGET_BYTES,
+            memory_budget_initialized: false,
             thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
                 crate::thread::available_parallelism().get(),
             ),
@@ -689,6 +884,54 @@ pub fn startup_trace_flush(phase: &str) {
             "startup",
             "{:<28}  {:8.2} ms total over {} ({})",
             bucket, ms, n, phase
+        );
+    }
+}
+
+#[cfg(test)]
+mod memory_budget_tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn low_memory_desktop_uses_one_quarter_of_physical_ram() {
+        assert_eq!(
+            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Desktop),
+            (1 * GIB) as usize
+        );
+    }
+
+    #[test]
+    fn desktop_at_threshold_keeps_the_default_budget() {
+        assert_eq!(
+            memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Desktop),
+            DEFAULT_MEMORY_BUDGET_BYTES
+        );
+    }
+
+    #[test]
+    fn small_mobile_is_clamped_to_the_minimum() {
+        assert_eq!(
+            memory_budget_from_physical_memory(1 * GIB, MemoryBudgetPolicy::Mobile),
+            (384 * MIB) as usize
+        );
+    }
+
+    #[test]
+    fn mid_sized_mobile_uses_one_quarter_of_physical_ram() {
+        assert_eq!(
+            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Mobile),
+            (1 * GIB) as usize
+        );
+    }
+
+    #[test]
+    fn large_mobile_is_clamped_to_the_maximum() {
+        assert_eq!(
+            memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Mobile),
+            DEFAULT_MEMORY_BUDGET_BYTES
         );
     }
 }

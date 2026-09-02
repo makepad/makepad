@@ -1,6 +1,8 @@
 use makepad_svg::path::{LineCap, LineJoin, VectorPath};
 use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
-use crate::geometry::geometry_gen::{FillVertexTyped, RoadVertexTyped, RoofVertexTyped};
+use crate::geometry::geometry_gen::{
+    FaceVertexTyped, FillVertexTyped, RoadVertexTyped, RoofVertexTyped,
+};
 use crate::makepad_platform::{F16x2, I16x2, U16x2, UNorm8x4};
 
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
@@ -10,6 +12,7 @@ pub const FILL_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<FillVertexTyped>(
 pub const ROOF_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<RoofVertexTyped>();
 const FILL_PARAM5_STEP: f32 = 0.00001;
 pub const ROAD_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<RoadVertexTyped>();
+pub const FACE_TYPED_VERTEX_BYTES: usize = std::mem::size_of::<FaceVertexTyped>();
 
 /// Signed fixed-point units per tile unit for typed map anchors. The road
 /// clip domain `[-3, 259]` occupies `[-192, 16576]`; nearest rounding is at
@@ -269,6 +272,78 @@ pub fn pack_road_vertices(vertices: &[f32]) -> Vec<u8> {
     }
     out
 }
+
+/// The road-shader inputs a `FaceVertexTyped` record carries implicitly.
+/// The face shader substitutes exactly these values, so a road record
+/// holding them bit-for-bit draws identically from the 16-byte layout.
+pub const FACE_IMPLICIT_OFF: F16x2 = F16x2 { x: 0, y: 0 };
+pub const FACE_IMPLICIT_DECK: f32 = 0.0;
+pub const FACE_IMPLICIT_UV: (f32, f32) = (0.5, 1.0);
+
+/// Project a packed road record onto the face layout. `None` when the
+/// record is a GPU-expandable stroke or when any dropped field differs from
+/// its implicit value (a lifted face, a deck fascia wall, an AA fringe):
+/// those stay on the road layout. The kept fields are copied bit-exact.
+#[inline]
+pub fn face_record_from_road(road: RoadVertexTyped) -> Option<FaceVertexTyped> {
+    let (meta, _) = road.params.to_f32();
+    if meta >= ROAD_PARAM_EXPANDED_FLAG
+        || road.off != FACE_IMPLICIT_OFF
+        || road.deck.to_bits() != FACE_IMPLICIT_DECK.to_bits()
+        || road.uv != F16x2::from_f32(FACE_IMPLICIT_UV.0, FACE_IMPLICIT_UV.1)
+    {
+        return None;
+    }
+    Some(FaceVertexTyped {
+        pos: road.pos,
+        color: road.color,
+        params: road.params,
+        depth: road.depth,
+    })
+}
+
+/// The 28-byte road record a face record stands for: the kept fields plus
+/// the implicit constants. `face_record_from_road` inverts it exactly.
+#[inline]
+pub fn road_record_from_face(face: FaceVertexTyped) -> RoadVertexTyped {
+    RoadVertexTyped {
+        pos: face.pos,
+        off: FACE_IMPLICIT_OFF,
+        color: face.color,
+        params: face.params,
+        deck: FACE_IMPLICIT_DECK,
+        depth: face.depth,
+        uv: F16x2::from_f32(FACE_IMPLICIT_UV.0, FACE_IMPLICIT_UV.1),
+    }
+}
+
+/// One logical 19-float road-pass record -> one 16-byte face vertex, when
+/// its road packing projects losslessly (see `face_record_from_road`).
+#[inline]
+pub fn pack_face_record(record: &[f32]) -> Option<FaceVertexTyped> {
+    face_record_from_road(pack_road_record(record))
+}
+
+/// Whether a road-pass record can move to the face stream without changing
+/// what the road shader would have computed for it.
+#[inline]
+pub fn is_compact_face_record(record: &[f32]) -> bool {
+    record.len() >= VECTOR_FLOATS_PER_VERTEX && pack_face_record(record).is_some()
+}
+
+/// Pack a buffer already classified as compact road-union faces.
+pub fn pack_face_vertices(vertices: &[f32]) -> Vec<u8> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * FACE_TYPED_VERTEX_BYTES);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        append_face_vertex(
+            &mut out,
+            pack_face_record(record).expect("non-face record in typed map face stream"),
+        );
+    }
+    out
+}
+
 /// Whether a logical vector record can use the compact roof shader without
 /// dropping any channel that its vertex/fragment paths observe. Parapet AO
 /// records carry a distinct tilted depth and therefore stay on the generic
@@ -368,6 +443,16 @@ fn append_road_vertex(out: &mut Vec<u8>, vertex: RoadVertexTyped) {
     push_u16(out, vertex.uv.y);
 }
 
+fn append_face_vertex(out: &mut Vec<u8>, vertex: FaceVertexTyped) {
+    push_i16(out, vertex.pos.x);
+    push_i16(out, vertex.pos.y);
+    out.extend_from_slice(&vertex.color.0);
+    push_u16(out, vertex.params.x);
+    push_u16(out, vertex.params.y);
+    push_u16(out, vertex.depth.x);
+    push_u16(out, vertex.depth.y);
+}
+
 fn append_roof_vertex(out: &mut Vec<u8>, vertex: RoofVertexTyped) {
     push_i16(out, vertex.pos.x);
     push_i16(out, vertex.pos.y);
@@ -415,6 +500,16 @@ pub fn decode_road_vertex(bytes: &[u8]) -> RoadVertexTyped {
     }
 }
 
+pub fn decode_face_vertex(bytes: &[u8]) -> FaceVertexTyped {
+    assert!(bytes.len() >= FACE_TYPED_VERTEX_BYTES);
+    FaceVertexTyped {
+        pos: I16x2::from_i16(read_i16(bytes, 0), read_i16(bytes, 2)),
+        color: UNorm8x4(bytes[4..8].try_into().unwrap()),
+        params: F16x2 { x: read_u16(bytes, 8), y: read_u16(bytes, 10) },
+        depth: F16x2 { x: read_u16(bytes, 12), y: read_u16(bytes, 14) },
+    }
+}
+
 pub fn decode_roof_vertex(bytes: &[u8]) -> RoofVertexTyped {
     assert!(bytes.len() >= ROOF_TYPED_VERTEX_BYTES);
     RoofVertexTyped {
@@ -434,6 +529,12 @@ fn fill_vertex_bytes(vertex: FillVertexTyped) -> [u8; FILL_TYPED_VERTEX_BYTES] {
 fn road_vertex_bytes(vertex: RoadVertexTyped) -> [u8; ROAD_TYPED_VERTEX_BYTES] {
     let mut bytes = Vec::with_capacity(ROAD_TYPED_VERTEX_BYTES);
     append_road_vertex(&mut bytes, vertex);
+    bytes.try_into().unwrap()
+}
+
+fn face_vertex_bytes(vertex: FaceVertexTyped) -> [u8; FACE_TYPED_VERTEX_BYTES] {
+    let mut bytes = Vec::with_capacity(FACE_TYPED_VERTEX_BYTES);
+    append_face_vertex(&mut bytes, vertex);
     bytes.try_into().unwrap()
 }
 
@@ -552,6 +653,18 @@ fn midpoint_road_record(a: &[u8], b: &[u8]) -> [u8; ROAD_TYPED_VERTEX_BYTES] {
         depth: pair(a.depth, b.depth),
         uv: pair(a.uv, b.uv),
     })
+}
+
+/// The road midpoint, projected: a refined face record is exactly what the
+/// same refinement of its 28-byte form would have been. The implicit fields
+/// midpoint to themselves, so the projection cannot fail.
+fn midpoint_face_record(a: &[u8], b: &[u8]) -> [u8; FACE_TYPED_VERTEX_BYTES] {
+    let a = road_vertex_bytes(road_record_from_face(decode_face_vertex(a)));
+    let b = road_vertex_bytes(road_record_from_face(decode_face_vertex(b)));
+    let midpoint = decode_road_vertex(&midpoint_road_record(&a, &b));
+    face_vertex_bytes(
+        face_record_from_road(midpoint).expect("face midpoint keeps its implicit fields"),
+    )
 }
 
 /// Crack-free midpoint refinement of an already-PACKED tile mesh: every
@@ -771,6 +884,18 @@ pub fn subdivide_road_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_e
     );
 }
 
+/// Space-warp refinement for the typed road-union face layout; the same
+/// split rule and midpoint arithmetic as `subdivide_road_mesh`.
+pub fn subdivide_face_typed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_edge: f32) {
+    subdivide_typed_mesh_with::<FACE_TYPED_VERTEX_BYTES>(
+        indices,
+        vertices,
+        max_edge,
+        |record| unpack_typed_position(decode_face_vertex(record).pos),
+        midpoint_face_record,
+    );
+}
+
 #[cfg(test)]
 mod road_pack_tests {
     use super::*;
@@ -878,6 +1003,119 @@ mod road_pack_tests {
         assert_eq!(meta, ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
         assert!((coverage - 0.5).abs() < 0.001);
         assert!((packed.color.to_f32().0 - 0.9).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+
+    /// A grounded union face as the Boolean emits it: fill sentinel, the
+    /// tessellator's (0.5, 1) uv, shape 0, no deck.
+    fn union_face_record(material: f32, emissive: f32) -> [f32; VECTOR_FLOATS_PER_VERTEX] {
+        let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+        record[0] = 131.015625;
+        record[1] = -2.5;
+        record[2] = 0.5;
+        record[3] = 1.0;
+        record[4..8].copy_from_slice(&[0.9, 0.8, 0.1, 1.0]);
+        record[8] = 1e6;
+        record[12] = emissive;
+        record[14] = material;
+        record[16] = 0.14196777;
+        record[18] = 3195.0 * VECTOR_ZBIAS_STEP;
+        record
+    }
+
+    #[test]
+    fn face_pack_is_the_road_pack_minus_its_implicit_fields() {
+        assert_eq!(FACE_TYPED_VERTEX_BYTES, 16);
+        for (material, emissive) in [(0.0, 0.0), (7.0, 0.75)] {
+            let record = union_face_record(material, emissive);
+            let road = pack_road_record(&record);
+            let face = pack_face_record(&record).expect("union face projects");
+            assert_eq!(face.pos, road.pos);
+            assert_eq!(face.color, road.color);
+            assert_eq!(face.params, road.params);
+            assert_eq!(face.depth, road.depth);
+            assert_eq!(road_record_from_face(face), road);
+            let bytes = pack_face_vertices(&record);
+            assert_eq!(bytes.len(), FACE_TYPED_VERTEX_BYTES);
+            assert_eq!(decode_face_vertex(&bytes), face);
+            // Ticks beyond f16's exact integer range round exactly as the
+            // road layout rounds them: the face stream never re-quantizes.
+            assert_eq!(face.depth.to_f32().1, 3196.0);
+            let (meta, aux) = face.params.to_f32();
+            assert_eq!(meta, 8.0 * material + ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
+            assert_eq!(aux, if material > 6.5 { emissive } else { 0.5 });
+        }
+    }
+
+    #[test]
+    fn face_pack_keeps_every_record_the_face_shader_cannot_substitute() {
+        let mut lifted = union_face_record(0.0, 0.0);
+        lifted[15] = 2.5;
+        let mut fascia = union_face_record(0.0, 0.0);
+        fascia[3] = 0.25;
+        fascia[15] = 1.4;
+        let mut fringe = union_face_record(0.0, 0.0);
+        fringe[2] = -0.5;
+        fringe[8] = VECTOR_ANALYTIC_FRINGE_STROKE_MULT;
+        let mut stroke = union_face_record(0.0, 0.0);
+        stroke[8] = 1.0;
+        stroke[10] = 100.0;
+        stroke[12] = 1.5;
+        let mut morph_face = union_face_record(0.0, 0.0);
+        morph_face[10] = 100.0;
+        morph_face[14] = 4.0;
+        for record in [lifted, fascia, fringe, stroke, morph_face] {
+            assert!(!is_compact_face_record(&record));
+            assert!(face_record_from_road(pack_road_record(&record)).is_none());
+        }
+        assert!(!is_compact_face_record(&[0.0; 3]));
+        assert!(is_compact_face_record(&union_face_record(0.0, 0.0)));
+    }
+
+    #[test]
+    fn face_midpoint_is_the_projected_road_midpoint() {
+        let mut far = union_face_record(0.0, 0.0);
+        far[0] = 200.0;
+        far[1] = 40.0;
+        far[4..8].copy_from_slice(&[0.1, 0.2, 0.3, 1.0]);
+        far[16] = 0.3022461;
+        far[18] = 12.0 * VECTOR_ZBIAS_STEP;
+        let near = union_face_record(0.0, 0.0);
+        let road_mid = midpoint_road_record(
+            &pack_road_vertices(&near),
+            &pack_road_vertices(&far),
+        );
+        let face_mid = midpoint_face_record(
+            &pack_face_vertices(&near),
+            &pack_face_vertices(&far),
+        );
+        assert_eq!(
+            road_record_from_face(decode_face_vertex(&face_mid)),
+            decode_road_vertex(&road_mid)
+        );
+
+        let mut indices = vec![0, 1, 2];
+        let mut road = pack_road_vertices(&near);
+        road.extend(pack_road_vertices(&far));
+        road.extend(pack_road_vertices(&{
+            let mut third = union_face_record(0.0, 0.0);
+            third[0] = 200.0;
+            third
+        }));
+        let mut face_indices = indices.clone();
+        let mut face: Vec<u8> = road
+            .chunks_exact(ROAD_TYPED_VERTEX_BYTES)
+            .flat_map(|record| {
+                face_vertex_bytes(face_record_from_road(decode_road_vertex(record)).unwrap())
+            })
+            .collect();
+        subdivide_road_mesh(&mut indices, &mut road, 24.0);
+        subdivide_face_typed_mesh(&mut face_indices, &mut face, 24.0);
+        assert_eq!(face_indices, indices);
+        let projected: Vec<u8> = face
+            .chunks_exact(FACE_TYPED_VERTEX_BYTES)
+            .flat_map(|record| road_vertex_bytes(road_record_from_face(decode_face_vertex(record))))
+            .collect();
+        assert_eq!(projected, road);
     }
 
     #[test]

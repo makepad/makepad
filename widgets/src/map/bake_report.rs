@@ -13,8 +13,9 @@ use super::tile::{
     load_local_tile_batch, TileBuffers, SHADOW_DISC_INSTANCE_FLOATS,
 };
 use crate::makepad_draw::vector::{
-    decode_fill_vertex, decode_road_vertex, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
-    ROOF_TYPED_VERTEX_BYTES, VECTOR_FLOATS_PER_VERTEX, VECTOR_PACKED_FLOATS_PER_VERTEX,
+    decode_face_vertex, decode_fill_vertex, decode_road_vertex, FACE_TYPED_VERTEX_BYTES,
+    FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES, ROOF_TYPED_VERTEX_BYTES,
+    VECTOR_FLOATS_PER_VERTEX, VECTOR_PACKED_FLOATS_PER_VERTEX,
 };
 use makepad_mbtile_reader::TileArchiveReader;
 use std::path::{Path, PathBuf};
@@ -66,7 +67,7 @@ fn start_view_tiles() -> Vec<TileKey> {
 
 /// Every vertex/index stream of a bake, in the order the tile struct lists
 /// them: (name, vertex count, index count, real upload bytes).
-fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
+fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 14] {
     let bytes = b.stream_bytes();
     let streams = [
         ("fill", b.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES, b.fill_indices.len()),
@@ -75,6 +76,7 @@ fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
             b.fill_misc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             b.fill_misc_indices.len(),
         ),
+        ("face", b.face_vertices.len() / FACE_TYPED_VERTEX_BYTES, b.face_indices.len()),
         ("casing", b.casing_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.casing_indices.len()),
         ("stroke", b.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.stroke_indices.len()),
         ("fringe", b.fringe_vertices.len() / ROAD_TYPED_VERTEX_BYTES, b.fringe_indices.len()),
@@ -124,6 +126,18 @@ fn classify_fill_packed(
     }
 }
 
+/// Face records are shape-0 fills by construction; the split is by material.
+fn classify_face_packed(
+    vertices: &[u8],
+    into: &mut std::collections::BTreeMap<(i32, i32), usize>,
+) {
+    for record in vertices.chunks_exact(FACE_TYPED_VERTEX_BYTES) {
+        let meta = decode_face_vertex(record).params.to_f32().0;
+        let material = ((meta % 64.0) / 8.0).floor() as i32;
+        *into.entry((0, material)).or_default() += FACE_TYPED_VERTEX_BYTES;
+    }
+}
+
 fn classify_road_packed(
     vertices: &[u8],
     into: &mut std::collections::BTreeMap<(i32, i32), usize>,
@@ -165,7 +179,7 @@ fn amsterdam_start_view_bake_report() {
         RENDER_ZOOM
     );
     println!(
-        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc casing stroke fringe icon icon_hi road_ic fill3d fill3d_misc wall tree treeX) + instances (icons count/KiB, shadow discs count/KiB)",
+        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc face casing stroke fringe icon icon_hi road_ic fill3d fill3d_misc wall tree treeX) + instances (icons count/KiB, shadow discs count/KiB)",
         "tile", "raw KiB", "mvt KiB", "feats", "bake MiB", "verts", "labels", "icons", "ms"
     );
     let mut total_raw = 0usize;
@@ -175,7 +189,7 @@ fn amsterdam_start_view_bake_report() {
     let mut flat_total_bytes = 0usize;
     let mut flat_fringe_bytes = 0usize;
     let mut flat_baked = 0usize;
-    let mut stream_totals = [0usize; 13];
+    let mut stream_totals = [0usize; 14];
     let mut total_icon_instance_bytes = 0usize;
     let mut total_shadow_disc_instance_bytes = 0usize;
     let mut total_shadow_disc_instances = 0usize;
@@ -183,6 +197,7 @@ fn amsterdam_start_view_bake_report() {
     let mut total_tree_instance_bytes = 0usize;
     let mut icon_kinds = std::collections::BTreeMap::new();
     let mut fill_kinds = std::collections::BTreeMap::new();
+    let mut face_kinds = std::collections::BTreeMap::new();
     let mut casing_kinds = std::collections::BTreeMap::new();
     let mut baked = 0usize;
     for key in &keys {
@@ -283,6 +298,7 @@ fn amsterdam_start_view_bake_report() {
             * 4;
         classify_packed(&b.icon_vertices, &mut icon_kinds);
         classify_fill_packed(&b.fill_vertices, &mut fill_kinds);
+        classify_face_packed(&b.face_vertices, &mut face_kinds);
         classify_road_packed(&b.casing_vertices, &mut casing_kinds);
         println!(
             "{:>14} {:>8} {:>8} {:>7} {:>9.1} {:>8} {:>7} {:>8} {:>8.0} | {} + {} / {:.0}, {} / {:.0}",
@@ -312,7 +328,7 @@ fn amsterdam_start_view_bake_report() {
         mib(total_mvt),
         mib(total_bytes),
         total_bytes as f64 / total_raw.max(1) as f64,
-        mib(stream_totals[4]),
+        mib(stream_totals[5]),
         total_ms,
         total_ms / baked.max(1) as f64
     );
@@ -323,8 +339,8 @@ fn amsterdam_start_view_bake_report() {
         flat_baked,
     );
     let names = [
-        "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "road_icon",
-        "fill_3d", "fill_3d_misc", "wall", "tree", "tree_cross",
+        "fill", "fill_misc", "face", "casing", "stroke", "fringe", "icon", "icon_high",
+        "road_icon", "fill_3d", "fill_3d_misc", "wall", "tree", "tree_cross",
     ];
     for (name, bytes) in names.iter().zip(stream_totals.iter()) {
         println!(
@@ -359,7 +375,12 @@ fn amsterdam_start_view_bake_report() {
         mib(total_tree_instance_bytes),
         total_tree_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
     );
-    for (name, kinds) in [("icon", &icon_kinds), ("fill", &fill_kinds), ("casing", &casing_kinds)] {
+    for (name, kinds) in [
+        ("icon", &icon_kinds),
+        ("fill", &fill_kinds),
+        ("face", &face_kinds),
+        ("casing", &casing_kinds),
+    ] {
         println!("== {name} stream vertex bytes by (shape, material) ==");
         let mut rows: Vec<_> = kinds.iter().collect();
         rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(**bytes));
