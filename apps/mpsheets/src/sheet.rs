@@ -479,7 +479,6 @@ impl Default for Workbook {
 impl Workbook {
     /// A workbook holding the worked example, so a fresh window shows a real
     /// sheet rather than an empty void.
-    #[cfg(any(not(feature = "demo"), test))]
     pub fn with_demo() -> Self {
         Self {
             sheets: vec![demo_sheet()],
@@ -523,6 +522,13 @@ impl Workbook {
         self.sheets.remove(index);
         self.active = self.active.min(self.sheets.len() - 1);
         // Undo history refers to sheet indices, which just shifted.
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    pub fn open_loaded_sheet(&mut self, sheet: Sheet) {
+        self.sheets.push(sheet);
+        self.active = self.sheets.len() - 1;
         self.undo.clear();
         self.redo.clear();
     }
@@ -691,7 +697,6 @@ pub fn translate_input(input: &str, drow: isize, dcol: isize) -> String {
 
 /// Export the used range. Cells export as what they *show*, which is what
 /// every other program means by CSV.
-#[cfg(any(not(feature = "demo"), test))]
 pub fn to_csv(sheet: &Sheet) -> String {
     let Some(((r0, c0), (r1, c1))) = sheet.used_range() else {
         return String::new();
@@ -800,7 +805,6 @@ pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
 }
 
 /// A small worked example so a fresh window is not an empty void.
-#[cfg(any(not(feature = "demo"), test))]
 pub fn demo_sheet() -> Sheet {
     let mut s = Sheet::new("Budget");
     let mut set = |cell: &str, v: &str| {
@@ -1104,6 +1108,23 @@ mod tests {
         wb.undo();
         assert!(wb.can_redo());
         wb.set_input(at("A1"), "9");
+        assert!(!wb.can_redo());
+    }
+
+    #[test]
+    fn opening_a_loaded_sheet_activates_it_and_clears_history() {
+        let mut wb = Workbook::default();
+        wb.set_input(at("A1"), "1");
+        wb.set_input(at("A1"), "2");
+        assert!(wb.undo());
+        assert!(wb.can_undo());
+        assert!(wb.can_redo());
+
+        wb.open_loaded_sheet(Sheet::new("Loaded"));
+
+        assert_eq!(wb.active, 1);
+        assert_eq!(wb.sheet().name, "Loaded");
+        assert!(!wb.can_undo());
         assert!(!wb.can_redo());
     }
 

@@ -156,16 +156,23 @@ script_mod! {
             draw_bg +: {color: mod.sheets.bg_dark}
 
             new_btn := TBtn{text: "New"}
-            open_btn := TBtn{text: "Open"}
-            save_btn := TBtn{text: "Save"}
-            path_input := FieldInput{
-                width: 190
-                empty_text: "sheet.csv"
+            disk_controls := View{
+                width: Fit height: Fit
+                flow: Right spacing: 3
+                open_btn := TBtn{text: "Open"}
+                save_btn := TBtn{text: "Save"}
+                path_input := FieldInput{
+                    width: 190
+                    empty_text: "sheet.csv"
+                }
             }
-            demo_picker := DropDown{
-                width: 180 height: 24
-                labels: ["Household Budget"]
+            demo_pick := View{
+                width: Fit height: Fit
                 visible: false
+                demo_picker := DropDown{
+                    width: 180 height: 24
+                    labels: ["Open demo..."]
+                }
             }
             Sep{}
             undo_btn := TBtn{text: "Undo"}
@@ -451,18 +458,8 @@ pub struct FillDrag {
     cur: Pos,
 }
 
-#[cfg(feature = "demo")]
 fn initial_workbook() -> Workbook {
-    let source = docs::docs();
-    let first = source.demos().first().expect("demo build needs a bundled sheet");
-    let mut wb = Workbook::default();
-    wb.sheets = vec![source.load(first.id).expect("first bundled sheet should load")];
-    wb
-}
-
-#[cfg(not(feature = "demo"))]
-fn initial_workbook() -> Workbook {
-    Workbook::with_demo()
+    docs::docs().initial()
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -650,7 +647,7 @@ impl MpSheets {
 
         let msg = if self.status.is_empty() {
             format!(
-                "{}  ·  {} cell{} selected  ·  ⌘C/⌘V copy paste · ⌘Z undo · drag the corner handle to fill",
+                "{} | {} cell{} selected | Cmd/Ctrl+C copy | Cmd/Ctrl+V paste | Cmd/Ctrl+Z undo | drag the corner handle to fill",
                 self.wb.sheet().name,
                 cells.len(),
                 if cells.len() == 1 { "" } else { "s" }
@@ -773,6 +770,13 @@ impl MpSheets {
         self.view.redraw(cx);
     }
 
+    fn reset_loaded_sheet_view(&mut self, cx: &mut Cx) {
+        self.widths_applied = false;
+        let grid = self.grid(cx);
+        grid.set_selection(cx, Some(GridSelection::single(0, 0)));
+        grid.scroll_cell_into_view(cx, 0, 0);
+    }
+
     fn paste_clipboard(&mut self, cx: &mut Cx, text: &str) {
         let rows = sheet::parse_tsv(text);
         if rows.is_empty() {
@@ -796,15 +800,12 @@ impl MpSheets {
 
     fn copy_selection(&mut self, cx: &mut Cx) {
         let ((r0, c0), (r1, c1)) = self.selection_rect(cx);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let tsv = sheet::to_tsv(
-                self.wb.sheet(),
-                (r0, c0),
-                (r1.min(r0 + 500), c1.min(c0 + 200)),
-            );
-            cx.copy_to_clipboard(&tsv);
-        }
+        let tsv = sheet::to_tsv(
+            self.wb.sheet(),
+            (r0, c0),
+            (r1.min(r0 + 500), c1.min(c0 + 200)),
+        );
+        docs::copy_text(cx, &tsv);
         self.status = format!("Copied {}:{}", sheet::pos_name((r0, c0)), sheet::pos_name((r1, c1)));
         self.sync_chrome(cx);
     }
@@ -823,9 +824,8 @@ impl MpSheets {
         let path = self.csv_path(cx);
         match docs::docs().load(&path) {
             Ok(sheet) => {
-                self.wb.sheets.push(sheet);
-                self.wb.active = self.wb.sheets.len() - 1;
-                self.widths_applied = false;
+                self.wb.open_loaded_sheet(sheet);
+                self.reset_loaded_sheet_view(cx);
                 self.status = format!("Opened {path}");
             }
             Err(e) => self.status = format!("Open failed: {e}"),
@@ -854,9 +854,8 @@ impl MpSheets {
         };
         match source.load(demo.id) {
             Ok(sheet) => {
-                self.wb.sheets.push(sheet);
-                self.wb.active = self.wb.sheets.len() - 1;
-                self.widths_applied = false;
+                self.wb.open_loaded_sheet(sheet);
+                self.reset_loaded_sheet_view(cx);
                 self.status = format!("Loaded {} demo", demo.title);
             }
             Err(e) => self.status = format!("Demo unavailable: {e}"),
@@ -1224,16 +1223,15 @@ impl Widget for MpSheets {
             self.view.drop_down(cx, ids!(fx_menu)).set_labels(cx, labels);
             let source = docs::docs();
             let can_save = source.can_save();
-            self.view.widget(cx, ids!(open_btn)).set_visible(cx, can_save);
-            self.view.widget(cx, ids!(save_btn)).set_visible(cx, can_save);
-            self.view.widget(cx, ids!(path_input)).set_visible(cx, can_save);
+            let has_demos = !source.demos().is_empty();
             self.view
-                .widget(cx, ids!(demo_picker))
-                .set_visible(cx, !can_save);
-            self.view.drop_down(cx, ids!(demo_picker)).set_labels(
-                cx,
-                source.demos().iter().map(|demo| demo.title.to_string()).collect(),
-            );
+                .widget(cx, ids!(disk_controls))
+                .set_visible(cx, can_save);
+            self.view.widget(cx, ids!(demo_pick)).set_visible(cx, has_demos);
+            let mut demo_labels = Vec::with_capacity(source.demos().len() + 1);
+            demo_labels.push("Open demo...".to_string());
+            demo_labels.extend(source.demos().iter().map(|demo| demo.title.to_string()));
+            self.view.drop_down(cx, ids!(demo_picker)).set_labels(cx, demo_labels);
             self.sync_chrome(cx);
         }
         let grid = self.grid(cx);
@@ -1321,7 +1319,10 @@ impl Widget for MpSheets {
             self.save_csv(cx);
         }
         if let Some(i) = self.view.drop_down(cx, ids!(demo_picker)).selected(actions) {
-            self.open_demo(cx, i);
+            if i > 0 {
+                self.open_demo(cx, i - 1);
+            }
+            self.view.drop_down(cx, ids!(demo_picker)).set_selected_item(cx, 0);
         }
         if self.view.button(cx, ids!(undo_btn)).clicked(actions) {
             self.undo(cx);
