@@ -682,6 +682,7 @@ impl Pager {
             return Ok(());
         }
         let writable = self.write.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
         let deadline = std::time::Instant::now() + self.busy_timeout;
         let guard = loop {
             if let Some(g) = ShmGuard::acquire_with(self.stores.clone(), writable)? {
@@ -692,12 +693,20 @@ impl Pager {
                 // it: frames are checksum-validated either way.
                 break None;
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(Error::Busy(
-                    "another connection is using this database's write-ahead log".into(),
-                ));
+            // The browser store has one owner: nobody else can be holding the log.
+            #[cfg(target_arch = "wasm32")]
+            return Err(Error::Busy(
+                "another connection is using this database's write-ahead log".into(),
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Busy(
+                        "another connection is using this database's write-ahead log".into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
-            std::thread::sleep(Duration::from_millis(2));
         };
         self.shm = guard;
         if !writable {
