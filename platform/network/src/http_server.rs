@@ -21,11 +21,12 @@ use std::time::{Duration, Instant};
 /// from outside while established flows stay fine. Bound every socket wait.
 const API_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// File responses may use this entire write window only if they sustain at
-/// least 32 KiB/s. Small files get 60 seconds; even huge files get at most an
+/// File responses get their size-at-32-KiB/s budget plus a short scheduling
+/// grace period. Small files get 60 seconds; even huge files get at most an
 /// hour, so slow readers remain bounded without truncating ordinary shards.
 const MIN_STATIC_WRITE_RATE: u64 = 32 * 1024;
 const MIN_STATIC_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const STATIC_WRITE_TIMEOUT_SLACK_SECS: u64 = 30;
 const MAX_STATIC_WRITE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Concurrent connection threads (process-wide). Over the cap, new
 /// connections are shed with an inline 503 — cheap and honest — instead of
@@ -152,10 +153,11 @@ pub struct HttpServer {
     /// after the header is read, the ordinary cap is charged to the resolved
     /// client instead.
     pub trusted_proxy: Option<fn(IpAddr) -> bool>,
-    /// Returns the comma-separated methods accepted for a request path. When
-    /// present, unsupported methods are rejected before application dispatch
-    /// (and, for POST, before the declared body is allocated or read).
-    pub allowed_methods: Option<fn(&str) -> &'static str>,
+    /// Returns the comma-separated methods accepted for a known request path.
+    /// Unsupported methods are rejected before application dispatch (and, for
+    /// POST, before the declared body is allocated or read). Returning `None`
+    /// leaves unknown paths to the application, including upgrade requests.
+    pub allowed_methods: Option<fn(&str) -> Option<&'static str>>,
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
@@ -372,7 +374,27 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     };
 
                     let deadline = started + API_CONNECTION_TIMEOUT;
-                    if headers.sec_websocket_key.is_some() {
+                    let allow = http_server
+                        .allowed_methods
+                        .and_then(|allowed_methods| allowed_methods(&headers.path));
+                    if let Some(allow) = allow {
+                        if !allow.split(',').any(|method| method.trim() == headers.verb) {
+                            return http_method_not_allowed_out(tcp_stream, allow);
+                        }
+                    } else if http_server.allowed_methods.is_none() && !matches!(
+                        headers.verb.as_str(),
+                        "GET" | "HEAD" | "POST" | "OPTIONS"
+                    ) {
+                        return http_error_out_until(
+                            tcp_stream,
+                            405,
+                            Some("GET, HEAD, POST, OPTIONS"),
+                            deadline,
+                        );
+                    }
+                    if headers.sec_websocket_key.is_some()
+                        && (http_server.allowed_methods.is_none() || allow.is_some())
+                    {
                         if headers.verb != "GET" {
                             return http_error_out_until(
                                 tcp_stream,
@@ -387,22 +409,6 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                             headers,
                             body_prefix,
                             connection_counter,
-                            deadline,
-                        );
-                    }
-                    if let Some(allowed_methods) = http_server.allowed_methods {
-                        let allow = allowed_methods(&headers.path);
-                        if !allow.split(',').any(|method| method.trim() == headers.verb) {
-                            return http_method_not_allowed_out(tcp_stream, allow);
-                        }
-                    } else if !matches!(
-                        headers.verb.as_str(),
-                        "GET" | "HEAD" | "POST" | "OPTIONS"
-                    ) {
-                        return http_error_out_until(
-                            tcp_stream,
-                            405,
-                            Some("GET, HEAD, POST, OPTIONS"),
                             deadline,
                         );
                     }
@@ -773,25 +779,15 @@ fn write_response(
     deadline: Instant,
     is_static: bool,
 ) {
-    let file_len = if is_static {
-        match &response.payload {
-            HttpServerResponsePayload::File(file_response) => Some(
-                file_response
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .len,
-            ),
-            HttpServerResponsePayload::Bytes => None,
-        }
-    } else {
-        None
-    };
-    let deadline = response_write_deadline(
-        Instant::now(),
-        deadline,
-        file_len,
-    );
-    if !write_bytes_until(tcp_stream, response.header.as_bytes(), deadline) {
+    let response_len = is_static.then(|| match &response.payload {
+        HttpServerResponsePayload::File(file_response) => file_response
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len,
+        HttpServerResponsePayload::Bytes => response.body.len() as u64,
+    });
+    let write_deadline = response_write_deadline(Instant::now(), deadline, response_len);
+    if !write_bytes_until(tcp_stream, response.header.as_bytes(), write_deadline) {
         return;
     }
     if suppress_body {
@@ -809,14 +805,14 @@ fn write_response(
             while left > 0 {
                 let amount = left.min(buffer.len() as u64) as usize;
                 let Ok(read) = file_response.file.read(&mut buffer[..amount]) else { break };
-                if read == 0 || !write_bytes_until(tcp_stream, &buffer[..read], deadline) {
+                if read == 0 || !write_bytes_until(tcp_stream, &buffer[..read], write_deadline) {
                     break;
                 }
                 left -= read as u64;
             }
         }
     } else {
-        let _ = write_bytes_until(tcp_stream, &response.body, deadline);
+        let _ = write_bytes_until(tcp_stream, &response.body, write_deadline);
     }
 }
 
@@ -829,10 +825,10 @@ fn response_write_deadline(
     now + static_write_timeout(file_len)
 }
 
-fn static_write_timeout(file_len: u64) -> Duration {
-    let seconds = file_len
-        .saturating_add(MIN_STATIC_WRITE_RATE - 1)
-        / MIN_STATIC_WRITE_RATE;
+fn static_write_timeout(response_len: u64) -> Duration {
+    let transfer_seconds =
+        response_len.saturating_add(MIN_STATIC_WRITE_RATE - 1) / MIN_STATIC_WRITE_RATE;
+    let seconds = transfer_seconds.saturating_add(STATIC_WRITE_TIMEOUT_SLACK_SECS);
     Duration::from_secs(seconds).clamp(MIN_STATIC_WRITE_TIMEOUT, MAX_STATIC_WRITE_TIMEOUT)
 }
 
@@ -925,15 +921,21 @@ mod tests {
     }
 
     #[test]
-    fn file_write_deadline_scales_with_size_but_api_deadline_stays_short() {
+    fn range_write_deadline_has_slack_and_stalled_peers_remain_capped() {
         let now = Instant::now();
         let api_deadline = now + API_CONNECTION_TIMEOUT;
         assert_eq!(response_write_deadline(now, api_deadline, None), api_deadline);
         assert_eq!(static_write_timeout(1), MIN_STATIC_WRITE_TIMEOUT);
+        let range_len = 64 * 1024 * 1024;
+        let timeout = static_write_timeout(range_len);
+        assert_eq!(timeout, Duration::from_secs(2_078));
         assert_eq!(
-            static_write_timeout(64 * 1024 * 1024),
-            Duration::from_secs(2_048)
+            response_write_deadline(now, api_deadline, Some(range_len)),
+            now + timeout
         );
+        let transfer_at_50_kib_per_second =
+            Duration::from_secs_f64(range_len as f64 / (50 * 1024) as f64);
+        assert!(timeout > transfer_at_50_kib_per_second);
         assert_eq!(static_write_timeout(u64::MAX), MAX_STATIC_WRITE_TIMEOUT);
     }
 }

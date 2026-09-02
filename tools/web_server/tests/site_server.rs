@@ -374,11 +374,22 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
             &b"POST /index.html HTTP/1.1\r\nHost: test\r\n\r\n"[..],
             "GET, HEAD, OPTIONS",
         ),
+        (
+            &b"BREW /api/search HTTP/1.1\r\nHost: test\r\n\r\n"[..],
+            "GET, HEAD, OPTIONS",
+        ),
+        (
+            &b"POST /ws HTTP/1.1\r\nHost: test\r\nSec-WebSocket-Key: fixture\r\n\r\n"[..],
+            "GET, HEAD, OPTIONS",
+        ),
     ] {
         let response = request(address, raw);
         assert_eq!(response.status, 405);
         assert!(response.headers.contains(&format!("Allow: {allow}\r\n")));
     }
+    let missing_api = request(address, b"DELETE /api/not-real HTTP/1.1\r\nHost: test\r\n\r\n");
+    assert_eq!(missing_api.status, 404);
+    assert!(String::from_utf8_lossy(&missing_api.body).contains("API endpoint not found"));
     assert_eq!(get(address, "/../index.html", "").status, 400);
     assert_eq!(get(address, "/$report_error?data=boom%0Aline", "").status, 204);
     assert_eq!(post(address, "/$report_error", b"post error").status, 204);

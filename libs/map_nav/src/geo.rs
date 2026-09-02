@@ -3,6 +3,7 @@
 //! point (norm × 2³²) in the file formats.
 
 pub const EQUATOR_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
 pub const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
 /// Maximum route geometry accepted on either side of the hosted API.
 pub const MAX_ROUTE_POINTS: usize = 20_000;
@@ -55,7 +56,6 @@ pub fn fixed_to_lon_lat(x: u32, y: u32) -> LonLat {
 
 /// Great-circle distance in meters.
 pub fn haversine_m(a: LonLat, b: LonLat) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6_371_008.8;
     let (lat1, lat2) = (a.lat.to_radians(), b.lat.to_radians());
     let dlat = lat2 - lat1;
     let dlon = (b.lon - a.lon).to_radians();
@@ -225,5 +225,12 @@ mod tests {
         let samples = sample_polyline(&line, 3_000.0);
         assert_eq!(samples[1].1, 3_000.0);
         assert!(samples[1].0.lon < line[1].lon, "3 km must land in the first segment");
+    }
+
+    #[test]
+    fn sampling_half_spacing_boundary_uses_shared_earth_radius() {
+        let line = [LonLat::new(0.0, 0.0), LonLat::new(0.004496606231, 0.0)];
+        assert!(haversine_m(line[0], line[1]) < 500.0);
+        assert_eq!(sample_polyline(&line, 1_000.0), vec![(line[0], 0.0)]);
     }
 }
