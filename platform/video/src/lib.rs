@@ -47,6 +47,7 @@
 pub mod annex_b;
 pub mod mp4_first_frame;
 pub mod nv12;
+pub mod stream_debug;
 pub mod stream_decoder;
 pub mod stream_encoder;
 

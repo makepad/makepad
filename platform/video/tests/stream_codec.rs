@@ -1,9 +1,10 @@
 //! Round-trip test for the low-latency hardware stream encoder/decoder
 //! (`VideoStreamEncoder` / `VideoStreamDecoder`, VideoToolbox on macOS /
-//! an H.264 MFT on Windows). Only run for real on macOS (the platform this
-//! agent can execute on) — see the `#[cfg]` gate below. The Windows backend
-//! is compile-checked only (`cargo check -p makepad-platform-video --target
-//! x86_64-pc-windows-msvc`), never exercised by this test.
+//! the H.264 MFTs on Windows). Runs wherever a backend exists; on Windows
+//! that is a real Media Foundation pass (run it on a fleet box). The
+//! captured-stream test replays access units another machine's encoder
+//! produced (`MAKEPAD_H264_DEBUG` dumps them next to its trace) so a
+//! cross-platform wire problem can be reproduced offline.
 
 use makepad_video::{
     annex_b, StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions,
@@ -48,7 +49,40 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     20.0 * 255f64.log10() - 10.0 * mse.log10()
 }
 
-#[cfg(target_os = "macos")]
+/// `MAKEPAD_H264_SAMPLE_DIR=<dir>` holds `*.h264` access units (one file
+/// each, sorted by name = send order); every one is pushed and the decoder
+/// must yield at least one picture per AU after the first two.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn decode_captured_access_units() {
+    let Ok(dir) = std::env::var("MAKEPAD_H264_SAMPLE_DIR") else {
+        eprintln!("decode_captured_access_units: MAKEPAD_H264_SAMPLE_DIR unset, skipping");
+        return;
+    };
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("sample dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "h264"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no *.h264 access units in {dir}");
+    let mut decoder = VideoStreamDecoder::new(StreamVideoCodec::H264).expect("decoder creation");
+    let mut decoded = 0usize;
+    for (index, path) in files.iter().enumerate() {
+        let au = std::fs::read(path).expect("read au");
+        let frames = decoder.push_packet(&au, index as i64 * HNS_PER_FRAME).expect("decode packet");
+        eprintln!("au {index} ({} bytes) -> {} frame(s)", au.len(), frames.len());
+        decoded += frames.len();
+    }
+    decoded += decoder.flush().expect("flush").len();
+    assert!(
+        decoded + 2 >= files.len(),
+        "decoded {decoded} pictures from {} access units",
+        files.len()
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
 fn encode_decode_round_trip_psnr_and_keyframes() {
     let mut encoder = VideoStreamEncoder::new(VideoStreamEncoderOptions {
