@@ -172,6 +172,9 @@ fn amsterdam_start_view_bake_report() {
     let mut total_mvt = 0usize;
     let mut total_bytes = 0usize;
     let mut total_ms = 0.0f64;
+    let mut flat_total_bytes = 0usize;
+    let mut flat_fringe_bytes = 0usize;
+    let mut flat_baked = 0usize;
     let mut stream_totals = [0usize; 13];
     let mut total_icon_instance_bytes = 0usize;
     let mut total_shadow_disc_instance_bytes = 0usize;
@@ -213,6 +216,7 @@ fn amsterdam_start_view_bake_report() {
             &theme,
             RENDER_ZOOM,
             true,
+            false,
             true,
         )
         .expect("bake");
@@ -226,6 +230,25 @@ fn amsterdam_start_view_bake_report() {
             continue;
         };
         let b = &tile.buffers;
+        let (flat_loaded, _) = load_local_tile_batch(
+            &archive,
+            Some(&archive),
+            None,
+            &[],
+            &[*key],
+            &theme,
+            RENDER_ZOOM,
+            false,
+            true,
+            true,
+        )
+        .expect("flat bake");
+        if let Some(flat) = flat_loaded.first() {
+            flat_total_bytes += flat.buffers.byte_size();
+            flat_fringe_bytes +=
+                (flat.buffers.fringe_vertices.len() + flat.buffers.fringe_indices.len()) * 4;
+            flat_baked += 1;
+        }
         let per_stream = streams(b);
         let bytes = b.byte_size();
         let verts: usize = per_stream.iter().map(|(_, vertices, _, _)| vertices).sum();
@@ -284,13 +307,20 @@ fn amsterdam_start_view_bake_report() {
     }
     println!("== totals: {} tiles baked ==", baked);
     println!(
-        "raw {:.1} MiB  mvt {:.1} MiB  baked {:.1} MiB ({:.0}x the raw bytes)  bake {:.0} ms total, {:.0} ms/tile",
+        "tilted raw {:.1} MiB  mvt {:.1} MiB  baked {:.1} MiB ({:.0}x raw), fringe {:.1} MiB  bake {:.0} ms total, {:.0} ms/tile",
         mib(total_raw),
         mib(total_mvt),
         mib(total_bytes),
         total_bytes as f64 / total_raw.max(1) as f64,
+        mib(stream_totals[4]),
         total_ms,
         total_ms / baked.max(1) as f64
+    );
+    println!(
+        "flat baked {:.1} MiB, fringe {:.1} MiB ({} tiles)",
+        mib(flat_total_bytes),
+        mib(flat_fringe_bytes),
+        flat_baked,
     );
     let names = [
         "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "road_icon",

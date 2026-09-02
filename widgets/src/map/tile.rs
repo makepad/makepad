@@ -139,8 +139,11 @@ pub struct TileEntry {
     pub bucket: u32,
     /// This bake carries 3D extrusions (buildings/trees/signals).
     pub baked_3d: bool,
+    /// This bake carries the analytic road-fringe stream.
+    pub baked_fringe: bool,
     /// Whether casing/stroke GPU geometry and the CPU road-arrow subset are
-    /// available for a same-bucket 2D/3D overlay-only rebake.
+    /// available for a same-bucket 2D/3D overlay-only rebake when the fringe
+    /// mode also matches.
     pub road_core_cached: bool,
     pub road_icon_indices: Vec<u32>,
     pub road_icon_vertices: Vec<f32>,
@@ -254,7 +257,53 @@ fn split_fringe_band(
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) -> (Vec<f32>, Vec<u32>) {
-    split_band_by(vertices, indices, |record| record[8] > 1.5e6)
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let is_fringe = vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .map(|record| record[8] > 1.5e6)
+        .collect::<Vec<_>>();
+    if !is_fringe.iter().any(|&fringe| fringe) {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut casing_vertices = Vec::new();
+    let mut fringe_vertices = Vec::new();
+    let mut casing_remap = vec![u32::MAX; vert_count];
+    let mut fringe_remap = vec![u32::MAX; vert_count];
+    let mut referenced = vec![false; vert_count];
+    for &index in indices.iter() {
+        referenced[index as usize] = true;
+    }
+    for (index, record) in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX).enumerate() {
+        if is_fringe[index] && !referenced[index] {
+            continue;
+        }
+        let (output, remap) = if is_fringe[index] {
+            (&mut fringe_vertices, &mut fringe_remap)
+        } else {
+            (&mut casing_vertices, &mut casing_remap)
+        };
+        remap[index] = (output.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        output.extend_from_slice(record);
+    }
+
+    let mut casing_indices = Vec::new();
+    let mut fringe_indices = Vec::new();
+    for triangle in indices.chunks_exact(3) {
+        let fringe = is_fringe[triangle[0] as usize];
+        debug_assert!(triangle
+            .iter()
+            .all(|&index| is_fringe[index as usize] == fringe));
+        let (output, remap) = if fringe {
+            (&mut fringe_indices, &fringe_remap)
+        } else {
+            (&mut casing_indices, &casing_remap)
+        };
+        output.extend(triangle.iter().map(|&index| remap[index as usize]));
+    }
+    *vertices = casing_vertices;
+    *indices = casing_indices;
+    (fringe_vertices, fringe_indices)
 }
 
 fn split_band_by(
@@ -1902,6 +1951,7 @@ pub fn build_tile_buffers_from_mvt(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
@@ -2044,6 +2094,7 @@ pub fn build_tile_buffers_from_mvt(
         theme,
         render_zoom,
         buildings_3d,
+        want_fringe,
         build_road_core,
         bridge_corridors,
         bridge_dz_covered,
@@ -3399,6 +3450,65 @@ fn split_fringe_band_then_road_pack_round_trips() {
 
 #[cfg(test)]
 #[test]
+fn fringe_free_bake_keeps_road_core_byte_identical() {
+    let build = |want_fringe| {
+        let ways = vec![
+            TileWay {
+                points: vec![(24.0, 128.0), (232.0, 128.0)],
+                tags: HashMap::from([
+                    ("layer".to_string(), "streets".to_string()),
+                    ("highway".to_string(), "primary".to_string()),
+                ]),
+                closed: false,
+                dz: None,
+                fidx: None,
+            },
+            TileWay {
+                points: vec![(24.0, 80.0), (232.0, 80.0)],
+                tags: HashMap::from([
+                    ("layer".to_string(), "streets".to_string()),
+                    ("highway".to_string(), "tram".to_string()),
+                    ("rail".to_string(), "true".to_string()),
+                ]),
+                closed: false,
+                dz: None,
+                fidx: None,
+            },
+        ];
+        build_tile_buffers_from_features_profiled(
+            TileProfiler::new(),
+            TileKey { z: 14, x: 0, y: 0 },
+            ways,
+            Vec::new(),
+            &probe_compiled_theme(),
+            16,
+            false,
+            want_fringe,
+            true,
+            Vec::new(),
+            false,
+            false,
+            Vec::new(),
+            None,
+        )
+    };
+
+    let with_fringe = build(true);
+    let without_fringe = build(false);
+    assert!(!with_fringe.fringe_vertices.is_empty());
+    assert!(!with_fringe.fringe_indices.is_empty());
+    assert!(!with_fringe.stroke_vertices.is_empty());
+    assert!(!with_fringe.stroke_indices.is_empty());
+    assert!(without_fringe.fringe_vertices.is_empty());
+    assert!(without_fringe.fringe_indices.is_empty());
+    assert_eq!(without_fringe.casing_vertices, with_fringe.casing_vertices);
+    assert_eq!(without_fringe.casing_indices, with_fringe.casing_indices);
+    assert_eq!(without_fringe.stroke_vertices, with_fringe.stroke_vertices);
+    assert_eq!(without_fringe.stroke_indices, with_fringe.stroke_indices);
+}
+
+#[cfg(test)]
+#[test]
 fn compact_roof_record_keeps_exact_height_and_rejects_extra_depth() {
     use crate::makepad_draw::vector::{
         pack_roof_record, unpack_typed_position,
@@ -3514,6 +3624,7 @@ fn build_tile_buffers_from_features(
         theme,
         render_zoom,
         buildings_3d,
+        true,
         build_road_core,
         bridge_corridors,
         bridge_dz_covered,
@@ -3535,6 +3646,7 @@ fn build_tile_buffers_from_features_profiled(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
     bridge_corridors: Vec<BridgeCorridor>,
     bridge_dz_covered: bool,
@@ -3591,7 +3703,11 @@ fn build_tile_buffers_from_features_profiled(
     // Four bucket pixels still project to at least ~0.59 px at the maximum
     // 78-degree pitch (including half-bucket underscale); signed-u/fwidth
     // keeps only the final one-pixel coverage ramp visible.
-    let analytic_fringe_units = ANALYTIC_FRINGE_CARRIER_PX / render_scale;
+    let analytic_fringe_units = if want_fringe {
+        ANALYTIC_FRINGE_CARRIER_PX / render_scale
+    } else {
+        0.0
+    };
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
@@ -6457,7 +6573,7 @@ fn build_tile_buffers_from_features_profiled(
                 let face_clock = ProfileClock::now();
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
-                if !face.fringe_verts.is_empty() {
+                if want_fringe && !face.fringe_verts.is_empty() {
                     let mut fringe_verts;
                     let mut fringe_indices;
                     let (fr_verts, fr_indices, fr_deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
@@ -6557,8 +6673,10 @@ fn build_tile_buffers_from_features_profiled(
                             fr_deck.as_deref(),
                         );
                     }
-                    casing_zbias += VECTOR_ZBIAS_STEP;
                 }
+                // Reserve the fringe's rank even when this bake omits its
+                // geometry, keeping every later road-core record identical.
+                casing_zbias += VECTOR_ZBIAS_STEP;
                 prof_fringe_ms += face_clock.elapsed_seconds() * 1e3;
                 prof_face_arm_ms += whole_face_clock.elapsed_seconds() * 1e3;
                 feature_count += 1;
@@ -6907,8 +7025,11 @@ fn build_tile_buffers_from_features_profiled(
     let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
-    let (fringe_vertices, fringe_indices) =
-        split_fringe_band(&mut casing_vertices, &mut casing_indices);
+    let (fringe_vertices, fringe_indices) = if want_fringe {
+        split_fringe_band(&mut casing_vertices, &mut casing_indices)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     // 3D band sub-splits by material (param3, slot 14): walls skip at the
     // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
     // out. Materials were authored per-append so the predicate is exact.
@@ -7361,6 +7482,7 @@ pub fn build_local_tile_from_archive_bytes(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
 ) -> Result<Option<LoadedLocalTile>, String> {
     let mut overlay_tiles = Vec::new();
@@ -7409,6 +7531,7 @@ pub fn build_local_tile_from_archive_bytes(
             theme,
             render_zoom,
             buildings_3d,
+            want_fringe,
             build_road_core,
         )?;
         return Ok(Some(LoadedLocalTile { tile_key, buffers }));
@@ -7493,6 +7616,7 @@ pub fn build_local_tile_from_archive_bytes(
         theme,
         render_zoom,
         buildings_3d,
+        want_fringe,
         build_road_core,
     )?;
     Ok(Some(LoadedLocalTile { tile_key, buffers }))
@@ -7507,6 +7631,7 @@ pub fn load_local_tile_batch(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
 ) -> Result<(Vec<LoadedLocalTile>, Vec<TileKey>), String> {
     if requested.is_empty() {
@@ -7687,6 +7812,7 @@ pub fn load_local_tile_batch(
                         theme,
                         render_zoom,
                         buildings_3d,
+                        want_fringe,
                         build_road_core,
                     ) {
                         Ok(buffers) => loaded.push(LoadedLocalTile { tile_key, buffers }),
@@ -7731,6 +7857,7 @@ pub fn load_local_tile_batch(
                     theme,
                     render_zoom,
                     buildings_3d,
+                    want_fringe,
                     build_road_core,
                 ) {
                     Ok(buffers) => {
@@ -7893,6 +8020,7 @@ pub fn load_local_tile_batch(
                 theme,
                 render_zoom,
                 buildings_3d,
+                want_fringe,
                 build_road_core,
             ) {
                 Ok(buffers) => {
@@ -8013,6 +8141,7 @@ mod local_archive_regression_tests {
                 &CompiledMapTheme::default(),
                 0,
                 false,
+                true,
                 false,
             )
             .unwrap()
@@ -8028,6 +8157,7 @@ mod local_archive_regression_tests {
             &CompiledMapTheme::default(),
             0,
             false,
+            true,
             false,
         )
         .unwrap();
@@ -8457,6 +8587,7 @@ pub fn try_bake_tile_paint_faces(
         // 3D build: the shadow pass (and the detail buildings feeding it)
         // only runs there, and v3 buckets carry its dissolved output. Road
         // tier inputs — the faces signature — are building-independent.
+        true,
         true,
         true,
     );
@@ -10068,11 +10199,11 @@ mod bridge_probe_tests {
                 let parsed = parse_baked_faces(&with_field, bucket).expect("parse baked");
                 assert_eq!(parsed.regions.len(), region_count);
                 let runtime = build_tile_buffers_from_mvt(
-                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true, true,
                 )
                 .unwrap();
                 let runtime2 = build_tile_buffers_from_mvt(
-                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true, true,
                 )
                 .unwrap();
                 let baked_build = build_tile_buffers_from_mvt(
@@ -10085,6 +10216,7 @@ mod bridge_probe_tests {
                     &theme,
                     bucket,
                     false,
+                    true,
                     true,
                 )
                 .unwrap();
@@ -11271,6 +11403,7 @@ mod bridge_probe_tests {
                     render_zoom,
                     true,
                     true,
+                    true,
                 )
                 .unwrap();
                 let full_ms = (Cx::monotonic_now() - clock) * 1000.0;
@@ -11285,6 +11418,7 @@ mod bridge_probe_tests {
                     &theme,
                     render_zoom,
                     false,
+                    true,
                     false,
                 )
                 .unwrap();
@@ -11398,6 +11532,7 @@ mod bridge_probe_tests {
             18,
             true,
             true,
+            true,
         )
         .unwrap();
         let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
@@ -11471,6 +11606,7 @@ mod bridge_probe_tests {
             &[],
             &theme,
             18,
+            true,
             true,
             true,
         )
@@ -11646,6 +11782,7 @@ mod bridge_probe_tests {
                 &theme,
                 8,
                 false,
+                true,
                 false,
             )
             .unwrap();
@@ -11697,6 +11834,7 @@ mod bridge_probe_tests {
             &keys,
             &theme,
             17,
+            true,
             true,
             true,
         )
@@ -11978,6 +12116,7 @@ mod bridge_probe_tests {
                 z as u32,
                 false,
                 true,
+                true,
             )
             .unwrap();
             let places: Vec<&TileLabel> = buffers
@@ -12023,6 +12162,7 @@ mod bridge_probe_tests {
             &theme,
             12,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -12073,6 +12213,7 @@ mod bridge_probe_tests {
             &theme,
             12,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -12246,6 +12387,7 @@ mod bridge_probe_tests {
                         render_zoom,
                         force_3d,
                         true,
+                        true,
                     )
                     .unwrap();
                     best = best.min((Cx::monotonic_now() - t1) * 1e3);
@@ -12291,6 +12433,7 @@ mod bridge_probe_tests {
                     &theme,
                     render_zoom,
                     force_3d,
+                    true,
                     true,
                 )
                 .unwrap();
@@ -12358,6 +12501,7 @@ mod bridge_probe_tests {
                 .ok()
                 .and_then(|z| z.parse().ok())
                 .unwrap_or(17),
+            true,
             true,
             true,
         )
@@ -12495,6 +12639,7 @@ mod bridge_probe_tests {
             17,
             true,
             true,
+            true,
         )
         .unwrap();
         println!(
@@ -12530,6 +12675,7 @@ mod bridge_probe_tests {
             &theme,
             17,
             false,
+            true,
             true,
         )
         .unwrap();

@@ -39,6 +39,16 @@ fn is_mkmap_path_shape(path: &str) -> bool {
         || path.file_name().is_some_and(|name| name == "root.mkidx")
 }
 
+fn want_fringe_for_tilt(tilt: f64, currently_baked: bool) -> bool {
+    if tilt < 30.0 {
+        true
+    } else if tilt > 40.0 {
+        false
+    } else {
+        currently_baked
+    }
+}
+
 fn detail_matches_base(config: &TileSourceConfig) -> bool {
     match config {
         TileSourceConfig::LocalArchive {
@@ -3453,6 +3463,9 @@ pub struct MapView {
     /// are detected in `ensure_visible_tiles`, the single invalidation owner.
     #[rust]
     baked_3d_mode: bool,
+    /// Whether the current tile set was baked with analytic road fringes.
+    #[rust]
+    baked_fringe_mode: bool,
     #[rust]
     compiled_style_light: CompiledMapTheme,
     #[rust]
@@ -5679,6 +5692,7 @@ impl MapView {
             && !self.tiles.get(&tile_key).is_some_and(|entry| {
                 entry.bucket == buffers.render_zoom
                     && entry.road_core_cached
+                    && entry.baked_fringe == self.baked_fringe_mode
                     && matches!(entry.state, TileLoadState::Ready { .. })
             })
         {
@@ -6039,6 +6053,7 @@ impl MapView {
                 bytes: tile_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: !buffers.mode_overlay_only || reuse_road_core,
                 road_icon_indices: buffers.road_icon_indices,
                 road_icon_vertices: buffers.road_icon_vertices,
@@ -6417,10 +6432,12 @@ impl MapView {
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
         let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+        let want_fringe = self.baked_fringe_mode;
         let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
             matches!(entry.state, TileLoadState::Ready { .. })
                 && entry.bucket == bucket
                 && entry.road_core_cached
+                && entry.baked_fringe == want_fringe
         });
         let (detail_path, bridge_dz_path, overlay_paths) = match self.tile_source_config.as_ref() {
             Some(TileSourceConfig::LocalArchive {
@@ -6456,6 +6473,7 @@ impl MapView {
                 &theme_style,
                 bucket,
                 buildings_3d,
+                want_fringe,
                 build_road_core,
             );
             match result {
@@ -6511,11 +6529,13 @@ impl MapView {
                 .map(|path| path.trim().to_string())
                 .collect::<Vec<_>>();
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+            let want_fringe = self.baked_fringe_mode;
             let theme_style = self.active_style().clone();
             let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
                 matches!(entry.state, TileLoadState::Ready { .. })
                     && entry.bucket == bucket
                     && entry.road_core_cached
+                    && entry.baked_fringe == want_fringe
             });
             if let Err(error) = self.submit_tile_job(cx, key, move || {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
@@ -6529,6 +6549,7 @@ impl MapView {
                     &theme_style,
                     bucket,
                     buildings_3d,
+                    want_fringe,
                     build_road_core,
                 ) {
                     Ok((loaded, failed)) => {
@@ -6660,11 +6681,12 @@ impl MapView {
             if let Some(entry) = self.tiles.get(key) {
                 match &entry.state {
                     // Stale geometry stays drawable but gets rebuilt. A
-                    // same-bucket mode flip can retain the stable road core;
-                    // zoom/style rebuilds cannot.
+                    // same-bucket 2D/3D flip can retain the stable road core;
+                    // fringe, zoom, and style rebuilds cannot.
                     TileLoadState::Ready { .. }
                         if entry.bucket != bucket
                             || entry.baked_3d != self.baked_3d_mode
+                            || entry.baked_fringe != self.baked_fringe_mode
                             || !entry.road_core_cached =>
                     {
                         if zoom_settling {
@@ -6753,6 +6775,7 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        baked_fringe: self.baked_fringe_mode,
                         road_core_cached: false,
                         road_icon_indices: Vec::new(),
                         road_icon_vertices: Vec::new(),
@@ -6922,6 +6945,7 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: false,
                 road_icon_indices: Vec::new(),
                 road_icon_vertices: Vec::new(),
@@ -7047,11 +7071,14 @@ impl MapView {
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         let now_seconds = cx.seconds_since_app_start();
-        // This is the sole owner of the 2D/3D tile transition. `set_tilt`
-        // only updates the camera and redraws, avoiding duplicate restyles.
+        // This is the sole owner of tilt-dependent tile-mode transitions.
+        // `set_tilt` only updates the camera and redraws, avoiding duplicate
+        // restyles.
         let mode_3d = self.buildings_3d && self.tilt > 0.0;
-        if mode_3d != self.baked_3d_mode {
+        let fringe_mode = want_fringe_for_tilt(self.tilt, self.baked_fringe_mode);
+        if mode_3d != self.baked_3d_mode || fringe_mode != self.baked_fringe_mode {
             self.baked_3d_mode = mode_3d;
+            self.baked_fringe_mode = fringe_mode;
             self.restyle_mode_overlay_keep_stale(cx);
         }
         // Read the archive's declared zoom range BEFORE computing visible
@@ -7420,6 +7447,7 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        baked_fringe: self.baked_fringe_mode,
                         road_core_cached: false,
                         road_icon_indices: Vec::new(),
                         road_icon_vertices: Vec::new(),
@@ -7485,6 +7513,7 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: false,
                 road_icon_indices: Vec::new(),
                 road_icon_vertices: Vec::new(),
@@ -9059,9 +9088,9 @@ impl MapView {
         self.redraw(cx);
     }
 
-    /// Invalidate only the tilt-dependent tile overlay. Ready tiles retain
-    /// their bucket and stable road-core cache, while the epoch bump rejects
-    /// any in-flight bake from the previous camera mode.
+    /// Invalidate tilt-dependent baked data. Ready tiles retain their bucket;
+    /// a 3D-only change can reuse the road core, while a fringe change forces
+    /// it to rebuild. The epoch bump rejects in-flight work from the old mode.
     fn restyle_mode_overlay_keep_stale(&mut self, cx: &mut Cx) {
         self.style_epoch = self.style_epoch.wrapping_add(1);
         if self.style_epoch == 0 {
@@ -9965,6 +9994,25 @@ mod tests {
 
     fn temp_mbtiles(name: &str) -> std::path::PathBuf {
         temp_mbtiles_with_zoom(name, "0", "0", 0)
+    }
+
+    #[test]
+    fn fringe_bake_mode_hysteresis_table() {
+        let cases = [
+            (0.0, true, true),
+            (24.9, true, true),
+            (25.0, true, true),
+            (29.9, true, true),
+            (30.0, false, true),
+            (35.0, false, true),
+            (40.0, false, true),
+            (40.1, false, false),
+            (60.0, false, false),
+        ];
+        for (tilt, from_false, from_true) in cases {
+            assert_eq!(want_fringe_for_tilt(tilt, false), from_false, "tilt {tilt} from false");
+            assert_eq!(want_fringe_for_tilt(tilt, true), from_true, "tilt {tilt} from true");
+        }
     }
 
     #[test]
