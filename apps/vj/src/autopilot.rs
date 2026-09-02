@@ -647,6 +647,16 @@ impl AutoPilot {
                     lane: Lane::Band(0),
                     gain: 0.0,
                 });
+                if plan.duck_offset_src.is_some() {
+                    // No vocal lane to hold down, so the band a voice lives
+                    // in gives way instead — leaned on, not killed, because
+                    // the mids carry the rest of the record with them.
+                    cmds.push(AutoCmd::Blend {
+                        deck: plan.incoming,
+                        lane: Lane::Band(1),
+                        gain: blend::EQ_VOCAL_DUCK,
+                    });
+                }
                 self.blend_dirty = true;
             }
             Medium::Stems => {
@@ -1394,6 +1404,44 @@ mod tests {
         );
         w.run_until_cmds(&mut pilot, 60);
         assert_eq!(pilot.status(), "fading (eq — stems not ready)");
+    }
+
+    #[test]
+    fn an_eq_transition_ducks_the_incoming_mid_when_the_clash_cannot_be_dodged() {
+        // The guard runs on every transition, not only the ones with stems.
+        // When no shift clears the singers it reports a duck window, and
+        // without a vocal lane to hold down the EQ leans on the mid band
+        // instead — pre-set at prep, like the low band it sits beside, so
+        // the incoming record never arrives on top of the outgoing phrase.
+        let mut w = world();
+        let mut pilot = armed_pilot(&mut w);
+        pilot.brain = MixBrain::Eq;
+        // OUT sings straight through every candidate fire point and IN sings
+        // from its cue, so there is no clean window to move to.
+        pilot.vocals_ready(1, SungMap(vec![(270.0, 300.0)]));
+        pilot.vocals_ready(2, SungMap(vec![(0.0, 30.0)]));
+        w.obs.decks[0].position_secs = 270.0;
+
+        let (cmds, _) = w.run_until_cmds(&mut pilot, 300);
+        assert!(
+            cmds.contains(&AutoCmd::Blend {
+                deck: DeckId::B,
+                lane: Lane::Band(0),
+                gain: 0.0
+            }),
+            "the low band is still pre-muted: {cmds:?}"
+        );
+        let duck = cmds.iter().find(|c| {
+            matches!(c, AutoCmd::Blend { lane: Lane::Band(1), .. })
+        });
+        let Some(AutoCmd::Blend { deck, gain, .. }) = duck else {
+            panic!("no mid-band duck in the prep: {cmds:?}");
+        };
+        assert_eq!(*deck, DeckId::B, "the incoming record gives way");
+        assert!(
+            *gain > 0.0 && *gain < 1.0,
+            "a duck, not a kill: {gain}"
+        );
     }
 
     #[test]

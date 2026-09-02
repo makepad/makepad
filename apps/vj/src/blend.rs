@@ -52,6 +52,11 @@ pub enum Lane {
 pub const VOCALS: usize = 0;
 pub const BASS: usize = 2;
 
+/// How far the incoming mid band gives way when the EQ medium has to dodge
+/// a singer. Roughly -6 dB: enough to let the outgoing phrase finish on
+/// top, and not so much that the incoming record arrives hollow.
+pub const EQ_VOCAL_DUCK: f32 = 0.5;
+
 /// One gain move in a transition's schedule.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlendStep {
@@ -120,22 +125,19 @@ pub fn choreography(
         BlendStep { at_wall: swap, role: Role::Out, lane: low, gain: 0.0 },
         BlendStep { at_wall: swap, role: Role::In, lane: low, gain: 1.0 },
     ];
-    if medium == Medium::Stems {
-        if let Some(duck) = duck_vocals_until {
-            let release = duck.clamp(bar, fade_wall);
-            steps.push(BlendStep {
-                at_wall: 0.0,
-                role: Role::In,
-                lane: Lane::Stem(VOCALS),
-                gain: 0.0,
-            });
-            steps.push(BlendStep {
-                at_wall: release,
-                role: Role::In,
-                lane: Lane::Stem(VOCALS),
-                gain: 1.0,
-            });
-        }
+    // The guard measures a clash on every transition, whatever the medium
+    // carries the blend. Stems can hold the singer down and nothing else;
+    // the EQ can only lean on the band a voice lives in, so it leans rather
+    // than kills — the mids carry the whole record.
+    if let Some(duck) = duck_vocals_until {
+        let (lane, held) = match medium {
+            Medium::Stems => (Lane::Stem(VOCALS), 0.0),
+            Medium::Eq => (Lane::Band(1), EQ_VOCAL_DUCK),
+            Medium::Fade => unreachable!("a plain fade returned above"),
+        };
+        let release = duck.clamp(bar, fade_wall);
+        steps.push(BlendStep { at_wall: 0.0, role: Role::In, lane, gain: held });
+        steps.push(BlendStep { at_wall: release, role: Role::In, lane, gain: 1.0 });
     }
     steps.sort_by(|a, b| a.at_wall.total_cmp(&b.at_wall));
     steps
@@ -307,6 +309,37 @@ mod tests {
         // The bass swap uses the stem lane, not the EQ band.
         assert!(steps.iter().any(|s| s.lane == Lane::Stem(BASS)));
         assert!(!steps.iter().any(|s| matches!(s.lane, Lane::Band(_))));
+    }
+
+    #[test]
+    fn the_eq_medium_ducks_the_incoming_mid_when_the_singers_would_stack() {
+        // Without stems there is no vocal lane to hold down, but the guard
+        // has still measured a clash and the fire point could not dodge it.
+        // A voice lives in the mid band, so the incoming one gives way there
+        // — partly, never fully: the mids carry the whole record, and
+        // killing them would leave a hole where a duck was wanted.
+        let steps = choreography(Medium::Eq, 12.0, 2.0, Some(5.0));
+        let duck: Vec<&BlendStep> =
+            steps.iter().filter(|s| s.lane == Lane::Band(1)).collect();
+        assert_eq!(duck.len(), 2, "a duck and its release");
+        assert!((duck[0].at_wall - 0.0).abs() < 1e-9);
+        assert!(
+            duck[0].gain > 0.0 && duck[0].gain < 1.0,
+            "a duck, not a kill: {}",
+            duck[0].gain
+        );
+        assert!((duck[1].at_wall - 5.0).abs() < 1e-9);
+        assert!((duck[1].gain - 1.0).abs() < 1e-6);
+
+        // The release clamps inside the fade, as the stem duck does.
+        let long = choreography(Medium::Eq, 12.0, 2.0, Some(40.0));
+        let release =
+            long.iter().filter(|s| s.lane == Lane::Band(1)).last().unwrap();
+        assert!((release.at_wall - 12.0).abs() < 1e-9);
+
+        // No clash measured, no duck: an untouched mid band stays untouched.
+        let clean = choreography(Medium::Eq, 12.0, 2.0, None);
+        assert!(!clean.iter().any(|s| s.lane == Lane::Band(1)));
     }
 
     #[test]
