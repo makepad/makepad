@@ -3675,11 +3675,18 @@ mod tests {
         render(&mixer, 48_000.0, 512);
         let before = mixer.audio_health();
         let held = mixer.clone();
+        let (holding, now_held) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let _guard = held.state.lock().unwrap();
+            holding.send(()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(120));
         });
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Wait for the lock to BE held, not for a stretch of time to pass:
+        // under a loaded parallel run the holder may not have been scheduled
+        // by the time a bare sleep runs out, and the callback then finds the
+        // lock free and renders after all. The word comes from inside the
+        // holder's own guard, so there is nothing left to race.
+        now_held.recv().unwrap();
         render(&mixer, 48_000.0, 512);
         let after = mixer.audio_health();
         assert_eq!(after.contended, before.contended + 1, "the silence is counted");
