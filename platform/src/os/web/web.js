@@ -454,6 +454,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.network_web_sockets = {};
         this.network_http_requests = new Map();
+        this.network_http_hosts = new Map();
         this.storage_db_promise = null;
         this.window_info = {}
         this.xr_capabilities = {
@@ -1663,11 +1664,8 @@ export class WasmWebBrowser extends WasmBridge {
         let method = this.u8_to_string(method_ptr, method_len);
         let headers_raw = this.u8_to_string(headers_ptr, headers_len);
         let body = body_len > 0 ? this.u8_to_array(body_ptr, body_len) : undefined;
-        let controller = new AbortController();
         let request_key = this.id_to_key(request_id_lo, request_id_hi);
         let max_body = max_body_lo + max_body_hi * 4294967296;
-        this.network_http_requests.set(request_key, controller);
-
         let headers = new Headers();
         for (let line of headers_raw.split("\r\n")) {
             if (!line) {
@@ -1689,21 +1687,137 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
 
-        console.log("[makepad][http][req]", method, url);
-        fetch(url, {
+        let parsed_url;
+        try {
+            parsed_url = new URL(url, window.location.href);
+        }
+        catch (_error) {
+            parsed_url = new URL(window.location.href);
+        }
+        const telemetry = new URLSearchParams(parsed_url.hash.slice(1));
+        const is_archive = telemetry.get("makepad-http") === "archive";
+        const is_archive_range = is_archive && telemetry.get("range") === "1";
+        const tile_keys = telemetry.get("tiles") || "-";
+        const priority = Number(telemetry.get("priority") || Number.MAX_SAFE_INTEGER);
+        const range_bytes = Number(telemetry.get("bytes") || 0);
+        parsed_url.hash = "";
+        const fetch_url = parsed_url.href;
+        const host_key = parsed_url.origin;
+        const entry = {
+            request_key,
+            request_id_lo,
+            request_id_hi,
+            metadata_id_lo,
+            metadata_id_hi,
+            fetch_url,
             method,
             headers,
             body,
-            signal: controller.signal,
+            max_body,
+            host_key,
+            is_archive,
+            is_archive_range,
+            tile_keys,
+            priority,
+            range_bytes,
+            state: "queued",
+            controller: null,
+            stall_timer: null,
+            started_at: 0,
+            response_bytes: 0,
+        };
+        this.network_http_requests.set(request_key, entry);
+        if (!is_archive) {
+            this.network_http_dispatch(entry);
+            return;
+        }
+        let host = this.network_http_hosts.get(host_key);
+        if (!host) {
+            host = { active: 0, pending: 0, queue: [], round: null };
+            this.network_http_hosts.set(host_key, host);
+        }
+        host.pending += 1;
+        host.queue.push(entry);
+        host.queue.sort((left, right) =>
+            left.priority - right.priority
+            || right.range_bytes - left.range_bytes
+            || left.fetch_url.localeCompare(right.fetch_url)
+        );
+        this.network_http_pump(host_key);
+    }
+
+    network_http_pump(host_key) {
+        const host = this.network_http_hosts.get(host_key);
+        if (!host) {
+            return;
+        }
+        while (host.active < 5 && host.queue.length > 0) {
+            const entry = host.queue.shift();
+            if (this.network_http_requests.get(entry.request_key) !== entry) {
+                continue;
+            }
+            host.active += 1;
+            this.network_http_dispatch(entry);
+        }
+    }
+
+    network_http_dispatch(entry) {
+        entry.state = "active";
+        entry.controller = new AbortController();
+        entry.started_at = performance.now();
+        if (entry.is_archive_range) {
+            let host = this.network_http_hosts.get(entry.host_key);
+            if (!host.round) {
+                host.round = {
+                    started_at: entry.started_at,
+                    ranges: 0,
+                    bytes: 0,
+                    tiles: new Set(),
+                };
+            }
+            host.round.ranges += 1;
+            for (const key of entry.tile_keys.split(",")) {
+                if (key && key !== "-") {
+                    host.round.tiles.add(key);
+                }
+            }
+        }
+        const arm_stall_timer = () => {
+            if (entry.stall_timer !== null) {
+                window.clearTimeout(entry.stall_timer);
+            }
+            entry.stall_timer = window.setTimeout(() => {
+                entry.controller.abort("HTTP request stalled for 20 seconds after dispatch");
+            }, 20000);
+        };
+        arm_stall_timer();
+        this.exports.wasm_network_http_progress(
+            entry.request_id_lo,
+            entry.request_id_hi,
+            0,
+            0
+        );
+        console.log(
+            "[makepad][http][req]",
+            entry.method,
+            entry.fetch_url,
+            `tiles=${entry.tile_keys}`
+        );
+        fetch(entry.fetch_url, {
+            method: entry.method,
+            headers: entry.headers,
+            body: entry.body,
+            signal: entry.controller.signal,
             redirect: "manual",
         }).then(async response => {
+            arm_stall_timer();
             let response_headers = "";
             response.headers.forEach((value, key) => {
                 response_headers += `${key}: ${value}\r\n`;
             });
             const declared = response.headers.get("content-length");
-            if (method !== "HEAD" && declared !== null && Number(declared) > max_body) {
-                controller.abort();
+            if (entry.method !== "HEAD" && declared !== null && Number(declared) > entry.max_body) {
+                entry.controller.abort();
                 throw "response body exceeds configured limit";
             }
             let chunks = [];
@@ -1715,9 +1829,10 @@ export class WasmWebBrowser extends WasmBridge {
                     if (item.done) {
                         break;
                     }
+                    arm_stall_timer();
                     response_body_len += item.value.byteLength;
-                    if (response_body_len > max_body) {
-                        controller.abort();
+                    if (response_body_len > entry.max_body) {
+                        entry.controller.abort();
                         throw "response body exceeds configured limit";
                     }
                     chunks.push(item.value);
@@ -1731,12 +1846,20 @@ export class WasmWebBrowser extends WasmBridge {
             }
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
-            console.log("[makepad][http][res]", response.status, url, response_body.length);
+            entry.response_bytes = response_body.length;
+            console.log(
+                "[makepad][http][res]",
+                response.status,
+                entry.fetch_url,
+                response_body.length,
+                `tiles=${entry.tile_keys}`,
+                `ms=${Math.round(performance.now() - entry.started_at)}`
+            );
             this.exports.wasm_network_http_response(
-                request_id_lo,
-                request_id_hi,
-                metadata_id_lo,
-                metadata_id_hi,
+                entry.request_id_lo,
+                entry.request_id_hi,
+                entry.metadata_id_lo,
+                entry.metadata_id_hi,
                 response.status,
                 headers_u8.ptr,
                 headers_u8.len,
@@ -1744,28 +1867,113 @@ export class WasmWebBrowser extends WasmBridge {
                 body_u8.len
             );
         }).catch(error => {
-            console.error("[makepad][http][err]", method, url, "" + error);
+            console.error(
+                "[makepad][http][err]",
+                entry.method,
+                entry.fetch_url,
+                "" + error,
+                `tiles=${entry.tile_keys}`
+            );
             let message_u8 = this.string_to_u8("" + error);
             this.exports.wasm_network_http_error(
-                request_id_lo,
-                request_id_hi,
-                metadata_id_lo,
-                metadata_id_hi,
+                entry.request_id_lo,
+                entry.request_id_hi,
+                entry.metadata_id_lo,
+                entry.metadata_id_hi,
                 message_u8.ptr,
                 message_u8.len
             );
         }).finally(() => {
-            this.network_http_requests.delete(request_key);
+            this.network_http_finish(entry);
         });
+    }
+
+    network_http_finish(entry) {
+        if (entry.stall_timer !== null) {
+            window.clearTimeout(entry.stall_timer);
+            entry.stall_timer = null;
+        }
+        if (this.network_http_requests.get(entry.request_key) === entry) {
+            this.network_http_requests.delete(entry.request_key);
+        }
+        entry.state = "done";
+        if (!entry.is_archive) {
+            return;
+        }
+        const host = this.network_http_hosts.get(entry.host_key);
+        if (!host) {
+            return;
+        }
+        host.active = Math.max(0, host.active - 1);
+        host.pending = Math.max(0, host.pending - 1);
+        if (host.round && entry.is_archive_range) {
+            host.round.bytes += entry.response_bytes;
+        }
+        this.network_http_pump(entry.host_key);
+        if (host.pending === 0) {
+            if (host.round) {
+                const tiles = Array.from(host.round.tiles).sort().join(",");
+                console.log(
+                    "[makepad][http][round]",
+                    entry.host_key,
+                    `ranges=${host.round.ranges}`,
+                    `bytes=${host.round.bytes}`,
+                    `ms=${Math.round(performance.now() - host.round.started_at)}`,
+                    `tiles=${tiles}`
+                );
+                host.round = null;
+            }
+            if (host.active === 0 && host.queue.length === 0) {
+                this.network_http_hosts.delete(entry.host_key);
+            }
+        }
     }
 
     js_network_http_cancel(request_id_lo, request_id_hi) {
         let request_key = this.id_to_key(request_id_lo, request_id_hi);
-        let controller = this.network_http_requests.get(request_key);
-        if (controller) {
-            controller.abort();
-            this.network_http_requests.delete(request_key);
+        let entry = this.network_http_requests.get(request_key);
+        if (!entry) {
+            return;
         }
+        if (entry.is_archive && entry.state === "queued") {
+            const host = this.network_http_hosts.get(entry.host_key);
+            if (host) {
+                host.queue = host.queue.filter(item => item !== entry);
+                host.pending = Math.max(0, host.pending - 1);
+                if (host.pending === 0 && host.round) {
+                    const tiles = Array.from(host.round.tiles).sort().join(",");
+                    console.log(
+                        "[makepad][http][round]",
+                        entry.host_key,
+                        `ranges=${host.round.ranges}`,
+                        `bytes=${host.round.bytes}`,
+                        `ms=${Math.round(performance.now() - host.round.started_at)}`,
+                        `tiles=${tiles}`
+                    );
+                    host.round = null;
+                }
+            }
+            this.network_http_requests.delete(request_key);
+            entry.state = "cancelled";
+            const message_u8 = this.string_to_u8("HTTP request cancelled before dispatch");
+            this.exports.wasm_network_http_error(
+                entry.request_id_lo,
+                entry.request_id_hi,
+                entry.metadata_id_lo,
+                entry.metadata_id_hi,
+                message_u8.ptr,
+                message_u8.len
+            );
+            if (host && host.pending === 0 && host.active === 0) {
+                this.network_http_hosts.delete(entry.host_key);
+            }
+            return;
+        }
+        if (entry.is_archive && entry.state === "active") {
+            return;
+        }
+        entry.controller.abort();
+        this.network_http_requests.delete(request_key);
     }
 
     js_network_ws_open(socket_id_lo, socket_id_hi, url_ptr, url_len, _headers_ptr, _headers_len) {

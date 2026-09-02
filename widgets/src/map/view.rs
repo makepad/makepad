@@ -1245,6 +1245,43 @@ const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 const MISSING_RECHECK_FRAMES: u64 = 1800;
 const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
 
+fn tile_screen_priority(
+    key: TileKey,
+    zoom: u32,
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) -> u64 {
+    let tile_count = (1_u64 << zoom.min(30)) as f64;
+    let center = center_norm * tile_count;
+    let mut dx = key.x as f64 + 0.5 - center.x;
+    if dx > tile_count * 0.5 {
+        dx -= tile_count;
+    } else if dx < -tile_count * 0.5 {
+        dx += tile_count;
+    }
+    let dy = key.y as f64 + 0.5 - center.y;
+    let sx = dx * rotation.0 - dy * rotation.1;
+    let sy = (dx * rotation.1 + dy * rotation.0) * tilt_cos.clamp(0.001, 1.0);
+    ((sx * sx + sy * sy) * 4096.0).max(0.0) as u64
+}
+
+fn sort_tiles_center_out(
+    tiles: &mut [TileKey],
+    zoom: u32,
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) {
+    tiles.sort_unstable_by_key(|key| {
+        (
+            tile_screen_priority(*key, zoom, center_norm, rotation, tilt_cos),
+            key.y,
+            key.x,
+        )
+    });
+}
+
 /// Camera tilt ceiling (degrees from top-down). Flat enough to read
 /// terrain relief against the horizon without the far plane exploding.
 /// This is the BASE cap — the near-ground regime (street-level zoom)
@@ -4162,6 +4199,31 @@ impl MapView {
         // current visible set may not start or retain an in-flight slot.
         let request_zoom = self.request_zoom_level();
         let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
+        let rotation = self.screen_rotation();
+        let tilt_cos = self.tilt_cos();
+        let mut priority_order = self.visible_tiles.clone();
+        sort_tiles_center_out(
+            &mut priority_order,
+            request_zoom,
+            self.center_norm,
+            rotation,
+            tilt_cos,
+        );
+        let priorities = priority_order
+            .iter()
+            .map(|key| {
+                (
+                    *key,
+                    tile_screen_priority(
+                        *key,
+                        request_zoom,
+                        self.center_norm,
+                        rotation,
+                        tilt_cos,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let obsolete_archive: Vec<TileKey> = self
             .archive_pending_tiles
             .keys()
@@ -4178,6 +4240,18 @@ impl MapView {
             {
                 self.tiles.remove(&key);
             }
+        }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.reprioritize_tiles(&priorities);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.reprioritize_tiles(&priorities);
+        }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.flush(cx);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.flush(cx);
         }
         if let Some(pool) = self.tile_thread_pool.as_ref() {
             let dropped = pool
@@ -4247,34 +4321,13 @@ impl MapView {
         // Load center-out: visible_tiles is generated row-major, and with
         // only max_in_flight slots per frame the top-left corner otherwise
         // fills before what the user is actually looking at.
-        {
-            let zoom = self.request_zoom_level();
-            let center = self.center_norm * tile_world_size(zoom) / TILE_SIZE as f64;
-            if self.tilt > 0.0 {
-                // Screen-space priority under tilt: the flat grid distance
-                // ranks the near field (screen-bottom, LARGEST on screen)
-                // no better than the compressed far field, so it loaded
-                // last. Project tile centers through the camera rotation +
-                // tilt foreshortening and give toward-camera tiles a
-                // tilt-scaled head start. Untilted behavior is unchanged.
-                let (rot_cos, rot_sin) = self.screen_rotation();
-                let tilt_cos = self.tilt.to_radians().cos().clamp(0.2, 1.0);
-                missing.sort_by_key(|key| {
-                    let dx = (key.x as f64 + 0.5) - center.x;
-                    let dy = (key.y as f64 + 0.5) - center.y;
-                    let sx = dx * rot_cos - dy * rot_sin;
-                    let sy = (dx * rot_sin + dy * rot_cos) * tilt_cos;
-                    let near_bias = sy.max(0.0) * (1.0 - tilt_cos) * 3.0;
-                    (((sx * sx + sy * sy).sqrt() - near_bias) * 4096.0) as i64
-                });
-            } else {
-                missing.sort_by_key(|key| {
-                    let dx = (key.x as f64 + 0.5) - center.x;
-                    let dy = (key.y as f64 + 0.5) - center.y;
-                    ((dx * dx + dy * dy) * 4096.0) as i64
-                });
-            }
-        }
+        sort_tiles_center_out(
+            &mut missing,
+            request_zoom,
+            self.center_norm,
+            rotation,
+            tilt_cos,
+        );
         // Dispatch each tile as its own worker job so builds run in parallel
         // across the pool; keep enough in flight to cover a viewport restyle.
         // While a zoom gesture is live, dispatch only the innermost tiles:
@@ -4295,7 +4348,12 @@ impl MapView {
             })
             .count();
         let restyle_burst = stale_rebuilds * 2 >= missing.len();
-        let slot_cap = if zoom_settling && !restyle_burst {
+        let slot_cap = if matches!(
+            self.tile_source_config,
+            Some(TileSourceConfig::HttpArchive { .. })
+        ) {
+            64usize
+        } else if zoom_settling && !restyle_burst {
             4usize
         } else {
             12usize
@@ -4351,6 +4409,7 @@ impl MapView {
         let detail_required = detail_needed && self.detail_archive.is_some();
         let generation = self.archive_generation;
         for key in missing {
+            let priority = priorities.get(&key).copied().unwrap_or(u64::MAX);
             self.archive_pending_tiles.insert(
                 key,
                 ArchiveTileParts {
@@ -4362,18 +4421,30 @@ impl MapView {
                 },
             );
             if let Some(archive) = self.base_archive.as_mut() {
-                archive.request_tile(cx, key, generation);
+                archive.request_tile(cx, key, generation, priority);
             }
             if detail_required {
                 if let Some(archive) = self.detail_archive.as_mut() {
-                    archive.request_tile(cx, key, generation);
+                    archive.request_tile(cx, key, generation, priority);
                 }
             }
+        }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.flush(cx);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.flush(cx);
         }
         self.sync_archive_request_watchdog(cx);
     }
 
     fn expire_archive_requests(&mut self, cx: &mut Cx) {
+        // Hosted archives have their dispatch-aware stall clock in the web
+        // transport. A tile can wait here for a browser connection without
+        // becoming eligible for cancellation.
+        if !self.is_local_archive() {
+            return;
+        }
         let now = cx.seconds_since_app_start();
         let timed_out: Vec<TileKey> = self
             .local_requested_tiles
@@ -4399,6 +4470,10 @@ impl MapView {
     }
 
     fn sync_archive_request_watchdog(&mut self, cx: &mut Cx) {
+        if !self.is_local_archive() {
+            self.archive_request_watchdog_handle = None;
+            return;
+        }
         if self.local_requested_tiles.is_empty() {
             self.archive_request_watchdog_handle = None;
         } else if self.archive_request_watchdog_handle.is_none()
@@ -7469,6 +7544,24 @@ mod tests {
     }
 
     #[test]
+    fn archive_priority_is_centre_out_in_tilted_screen_space() {
+        let mut tiles = vec![
+            TileKey { z: 2, x: 2, y: 1 },
+            TileKey { z: 2, x: 1, y: 2 },
+            TileKey { z: 2, x: 1, y: 1 },
+        ];
+        sort_tiles_center_out(&mut tiles, 2, dvec2(0.375, 0.375), (1.0, 0.0), 0.25);
+        assert_eq!(
+            tiles,
+            [
+                TileKey { z: 2, x: 1, y: 1 },
+                TileKey { z: 2, x: 1, y: 2 },
+                TileKey { z: 2, x: 2, y: 1 },
+            ]
+        );
+    }
+
+    #[test]
     fn tile_span_keeps_exactly_one_prefetch_tile_for_partial_edge_tiles() {
         let (min, max) =
             tile_span_with_prefetch(TILE_SIZE * 0.25, TILE_SIZE * 1.75);
@@ -7684,7 +7777,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_watchdog_cancels_never_completing_archive_without_draws() {
+    fn http_archive_waiting_for_dispatch_has_no_enqueue_watchdog() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut map = test_map(&mut cx);
         map.zoom = 1.0;
@@ -7696,20 +7789,8 @@ mod tests {
         map.visible_tiles = vec![key];
         map.request_visible_tiles_from_local_source(&mut cx);
         assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 1);
-        assert!(map.archive_request_watchdog_handle.is_some());
-        *map.local_requested_tiles.get_mut(&key).unwrap() =
-            cx.seconds_since_app_start() - ARCHIVE_REQUEST_TIMEOUT_SECONDS;
-        map.archive_request_watchdog_rx.sender().send(()).unwrap();
-        <MapView as Widget>::handle_event(
-            &mut map,
-            &mut cx,
-            &Event::Signal,
-            &mut Scope::empty(),
-        );
-        assert!(map.local_requested_tiles.is_empty());
-        assert!(map.archive_pending_tiles.is_empty());
-        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 0);
-        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 0);
-        assert!(!map.tiles.contains_key(&key));
+        assert!(map.archive_request_watchdog_handle.is_none());
+        assert!(map.local_requested_tiles.contains_key(&key));
+        assert!(map.archive_pending_tiles.contains_key(&key));
     }
 }
