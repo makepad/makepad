@@ -2,6 +2,8 @@ use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
 use makepad_script::*;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct CxScriptTimer {
@@ -114,11 +116,30 @@ pub fn script_mod(vm: &mut ScriptVm) {
         x
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn fresh_seed() -> u64 {
-        let mut seed = Cx::time_now().to_bits();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut seed = (nanos >> 64) as u64 ^ (nanos as u64);
         seed ^= std::process::id() as u64;
         if seed == 0 {
             seed = 0x9e37_79b9_7f4a_7c15;
+        }
+        seed
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn fresh_seed() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut seed = Cx::monotonic_now().to_bits()
+            ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        if seed == 0 {
+            seed = sequence.max(1);
         }
         seed
     }

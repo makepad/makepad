@@ -511,9 +511,8 @@ impl MacosApp {
                     // `MacosEvent::AppQuitRequested` from the main loop —
                     // i.e. *outside* any in-flight event handler — so apps
                     // can call `cx.request_quit` from their `QuitRequested`
-                    // arm without re-entering `call_event_handler` and
-                    // panicking on `event_handler.take().unwrap()`. Other
-                    // commands keep going through `menuAction:` →
+                    // arm without a rejected synchronous re-entry into
+                    // `call_event_handler`. Other commands keep going through `menuAction:` →
                     // `Event::MacosMenuCommand`.
                     let is_quit = *command == live_id!(quit);
                     let action = if is_quit {

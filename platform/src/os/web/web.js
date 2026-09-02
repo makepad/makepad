@@ -48,6 +48,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.dispatch_first_msg();
     }
 
+    js_monotonic_now() {
+        return performance.now() / 1000.0;
+    }
+
     emit_app_lifecycle(state) {
         this.to_wasm.ToWasmAppLifecycle({ state });
     }

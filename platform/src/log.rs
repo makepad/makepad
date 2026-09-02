@@ -194,14 +194,14 @@ pub struct ProfileStart {
 #[cfg(target_arch = "wasm32")]
 impl ProfileStart {
     pub fn elapsed(&self) -> Duration {
-        Duration::from_secs_f64((Cx::time_now() - self.started_at).max(0.0))
+        Duration::from_secs_f64((Cx::monotonic_now() - self.started_at).max(0.0))
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn profile_start() -> ProfileStart {
     ProfileStart {
-        started_at: Cx::time_now(),
+        started_at: Cx::monotonic_now(),
     }
 }
 

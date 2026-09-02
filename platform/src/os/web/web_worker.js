@@ -89,6 +89,10 @@ onmessage = async function (e) {
             return Date.now() / 1000.0;
         },
 
+        js_monotonic_now() {
+            return performance.now() / 1000.0;
+        },
+
         js_open_web_socket: (id, url_ptr, url_len) => {
             let url = u8_to_string(url_ptr, url_len);
             let web_socket = new WebSocket(url);

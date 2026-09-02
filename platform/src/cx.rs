@@ -38,7 +38,7 @@ use {
     },
     std::{
         any::{Any, TypeId},
-        cell::RefCell,
+        cell::{Cell, RefCell, UnsafeCell},
         collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
         sync::Arc,
@@ -123,7 +123,8 @@ pub struct Cx {
 
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
-    pub(crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+    pub(crate) event_handler: Rc<UnsafeCell<Box<dyn FnMut(&mut Cx, &Event)>>>,
+    pub(crate) event_handler_dispatch_active: Rc<Cell<bool>>,
 
     pub(crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
@@ -502,7 +503,8 @@ impl Cx {
 
             os: CxOs::default(),
 
-            event_handler: Some(event_handler),
+            event_handler: Rc::new(UnsafeCell::new(event_handler)),
+            event_handler_dispatch_active: Rc::new(Cell::new(false)),
 
             debug: Default::default(),
 

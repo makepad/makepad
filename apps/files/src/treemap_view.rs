@@ -839,7 +839,7 @@ impl TreemapView {
             // and the signal clock live behind one lock. Waking the UI is the
             // expensive half and is what gets rate-limited; the steps
             // themselves queue as fast as the disk produces them.
-            let gate = Mutex::new(Cx::time_now());
+            let gate = Mutex::new(Cx::monotonic_now());
             let sink = |step: ScanStep| {
                 if sender
                     .send(ScanMessage {
@@ -852,7 +852,7 @@ impl TreemapView {
                     return;
                 }
                 let mut due = gate.lock().unwrap_or_else(|e| e.into_inner());
-                let now = Cx::time_now();
+                let now = Cx::monotonic_now();
                 if now >= *due {
                     *due = now + SIGNAL_EVERY.as_secs_f64();
                     SignalToUI::set_ui_signal();

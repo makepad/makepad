@@ -426,7 +426,7 @@ impl Progress {
             total,
             done: Cell::new(0),
             bytes_since_emit: Cell::new(0),
-            last_emit: Cell::new(Cx::time_now()),
+            last_emit: Cell::new(Cx::monotonic_now()),
             current: RefCell::new(String::new()),
             updates,
             notify,
@@ -447,7 +447,7 @@ impl Progress {
         let done = self.done.get() + delta;
         self.done.set(done);
         let since = self.bytes_since_emit.get() + delta;
-        let now = Cx::time_now();
+        let now = Cx::monotonic_now();
         if since >= 1_000_000 || now - self.last_emit.get() >= 0.032 {
             self.bytes_since_emit.set(0);
             self.last_emit.set(now);
@@ -1041,7 +1041,7 @@ fn run_undo_created(
     // there is no dedicated `OpKind` for "delete" to report instead.
     let total = paths.len() as u64;
     let mut done = 0u64;
-    let mut last_emit = Cx::time_now();
+    let mut last_emit = Cx::monotonic_now();
     let mut removed = Vec::new();
     let mut cancelled = false;
     let mut failure = None;
@@ -1054,7 +1054,7 @@ fn run_undo_created(
             Ok(()) => {
                 removed.push(path.clone());
                 done += 1;
-                let now = Cx::time_now();
+                let now = Cx::monotonic_now();
                 if done == total || now - last_emit >= 0.032 {
                     last_emit = now;
                     push_update(
@@ -1167,7 +1167,7 @@ mod tests {
     /// by `timeout` so a bug in the engine fails the test instead of
     /// hanging the suite.
     fn wait_for_done(ops: &Ops, id: u64, timeout: Duration) -> OpUpdate {
-        let start = Cx::time_now();
+        let start = Cx::monotonic_now();
         loop {
             for update in ops.drain() {
                 let is_match = match &update {
@@ -1178,7 +1178,7 @@ mod tests {
                     return update;
                 }
             }
-            if Cx::time_now() - start > timeout.as_secs_f64() {
+            if Cx::monotonic_now() - start > timeout.as_secs_f64() {
                 panic!("timed out waiting for update {id}");
             }
             thread::sleep(Duration::from_millis(5));

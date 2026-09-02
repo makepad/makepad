@@ -101,6 +101,9 @@ impl Cx {
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
+        // A panic=abort trap cannot run dispatch guards. Every JS ingress is
+        // a fresh top-level dispatch, so clear the bookkeeping it may leave.
+        self.reset_event_dispatch_state();
         let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         let mut network_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
@@ -938,7 +941,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
-        self.os.start_time = Self::time_now();
+        self.os.start_time = Self::monotonic_now();
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
@@ -1041,7 +1044,7 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
-        (Self::time_now() - self.os.start_time).max(0.0)
+        (Self::monotonic_now() - self.os.start_time).max(0.0)
     }
 
     #[cfg(target_feature = "atomics")]
@@ -1138,11 +1141,16 @@ impl Cx {
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
     }
+
+    pub fn monotonic_now() -> f64 {
+        unsafe { js_monotonic_now() }
+    }
 }
 
 #[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_time_now() -> f64;
+    pub fn js_monotonic_now() -> f64;
 }
 
 #[export_name = "wasm_thread_entrypoint"]

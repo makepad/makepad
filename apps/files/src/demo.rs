@@ -1351,12 +1351,12 @@ mod tests {
 
     #[test]
     fn generator_shape_sizes_and_timings_meet_the_demo_contract() {
-        let generated_at = makepad_widgets::Cx::time_now();
+        let generated_at = makepad_widgets::Cx::monotonic_now();
         let vfs = DemoVfs::new();
-        let generation = makepad_widgets::Cx::time_now() - generated_at;
-        let scan_at = makepad_widgets::Cx::time_now();
+        let generation = makepad_widgets::Cx::monotonic_now() - generated_at;
+        let scan_at = makepad_widgets::Cx::monotonic_now();
         let node = full_scan(&vfs);
-        let scan = makepad_widgets::Cx::time_now() - scan_at;
+        let scan = makepad_widgets::Cx::monotonic_now() - scan_at;
         let mut stats = (0usize, 0usize, 0usize, 0usize);
         let total = scan_stats(&node, 0, &mut stats);
         eprintln!("files demo generator: {generation:.3}s; full inline scan: {scan:.3}s");
