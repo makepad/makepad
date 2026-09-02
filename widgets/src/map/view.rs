@@ -9,7 +9,9 @@ use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
-use crate::makepad_draw::vector::{FACE_IMPLICIT_UV, MAP_VERTEX_POSITION_SCALE};
+use crate::makepad_draw::vector::{
+    FACE_IMPLICIT_UV, MAP_VERTEX_POSITION_SCALE, VECTOR_ZBIAS_STEP,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -1826,8 +1828,8 @@ script_mod! {
     }
 
     // Instanced building walls: the unit quad is extruded per footprint edge
-    // in the vertex shader from an 11-float record (edge a/b, base/top metres,
-    // outward normal, bottom AO, colour, zbias). Varyings match the vertices
+    // from a compact typed record. Its canonical edge direction lets the
+    // shader derive the outward normal. Varyings match the vertices
     // `append_wall_quad` used to bake (fill, material MAT_WALL, height in
     // param4, BUILDING_SURFACE_DEPTH in param5) — keep in LOCKSTEP with
     // DrawMapVector's fill path; the pixel side is inherited unchanged.
@@ -1839,6 +1841,8 @@ script_mod! {
             let along = self.geom.pos.x;
             let up = self.geom.pos.y;
             let pos = mix(self.inst_a, self.inst_b, along);
+            let edge = self.inst_b - self.inst_a;
+            let normal = vec2(edge.y, 0.0 - edge.x) / max(length(edge), 0.0001);
             let h = mix(self.inst_heights.x, self.inst_heights.y, up);
             let ao = mix(self.inst_ao, 1.0, up);
             var transformed = pos * self.map_scale + self.map_offset;
@@ -1915,8 +1919,8 @@ script_mod! {
             self.v_param0 = 0.0;
             // Outward normal, material MAT_WALL, height, surface depth: the
             // slots the wall pixel path reads.
-            self.v_param1 = self.inst_normal.x;
-            self.v_param2 = self.inst_normal.y;
+            self.v_param1 = normal.x;
+            self.v_param2 = normal.y;
             self.v_param3 = 1.0;
             self.v_param4 = h;
             self.v_param5 = 0.5;
@@ -1956,7 +1960,7 @@ script_mod! {
         }
     }
 
-    // Instanced building-wall shadow casters: the same 11-float wall
+    // Instanced building-wall shadow casters: the same compact wall
     // records, extruded along the sun on the ground (no building lift).
     mod.draw.DrawMapShadow = mod.std.set_type_default() do #(DrawMapShadow::script_shader(vm)){
         ..mod.draw.DrawMapVector
@@ -3420,8 +3424,8 @@ impl DrawMapProp {
 
 
 /// Instanced building walls: the shared unit quad is the geometry, every
-/// footprint edge is one instance (see `WALL_INSTANCE_FLOATS`); the shader is
-/// `DrawMapWall` in the script block.
+/// footprint edge is one compact typed instance; the shader is `DrawMapWall`
+/// in the script block.
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawMapWall {
@@ -3444,8 +3448,6 @@ pub struct DrawMapWall {
     /// x = base metres, y = top metres.
     #[live]
     pub inst_heights: Vec2f,
-    #[live]
-    pub inst_normal: Vec2f,
     #[live(1.0)]
     pub inst_ao: f32,
     #[live]
@@ -3459,7 +3461,7 @@ impl DrawMapWall {
     fn draw_edges(
         &mut self,
         cx: &mut Cx2d,
-        records: &[f32],
+        records: &[MapWallInstance],
         uniforms: &MapDrawUniforms,
         terrain_tex: &Texture,
         pass_depth: f32,
@@ -3480,14 +3482,15 @@ impl DrawMapWall {
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
         };
-        for record in records.chunks_exact(WALL_INSTANCE_FLOATS) {
-            self.inst_a = vec2(record[0], record[1]);
-            self.inst_b = vec2(record[2], record[3]);
-            self.inst_heights = vec2(record[4], record[5]);
-            self.inst_normal = vec2(record[6], record[7]);
-            self.inst_ao = record[8];
-            self.inst_color = record[9];
-            self.inst_zbias = record[10];
+        for record in records {
+            self.inst_a = MapWallInstance::unpack_position(record.a);
+            self.inst_b = MapWallInstance::unpack_position(record.b);
+            let (base_m, height_m) = record.unpack_heights();
+            self.inst_heights = vec2(base_m, height_m);
+            let (ao, zbias_ticks) = record.ao_zbias.to_f32();
+            self.inst_ao = ao;
+            self.inst_color = f32::from_bits(u32::from_le_bytes(record.color.0));
+            self.inst_zbias = zbias_ticks * VECTOR_ZBIAS_STEP;
             instances.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         let new_area = cx.end_many_instances(instances);
@@ -3519,12 +3522,6 @@ pub struct DrawMapShadow {
     #[live]
     pub inst_heights: Vec2f,
     #[live]
-    pub inst_normal: Vec2f,
-    #[live(1.0)]
-    pub inst_ao: f32,
-    #[live]
-    pub inst_color: f32,
-    #[live]
     pub inst_zbias: f32,
 }
 
@@ -3532,7 +3529,7 @@ impl DrawMapShadow {
     fn draw_edges(
         &mut self,
         cx: &mut Cx2d,
-        records: &[f32],
+        records: &[MapWallInstance],
         uniforms: &MapDrawUniforms,
         terrain_tex: &Texture,
         pass_depth: f32,
@@ -3553,14 +3550,12 @@ impl DrawMapShadow {
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
         };
-        for record in records.chunks_exact(WALL_INSTANCE_FLOATS) {
-            self.inst_a = vec2(record[0], record[1]);
-            self.inst_b = vec2(record[2], record[3]);
-            self.inst_heights = vec2(record[4], record[5]);
-            self.inst_normal = vec2(record[6], record[7]);
-            self.inst_ao = record[8];
-            self.inst_color = record[9];
-            self.inst_zbias = record[10];
+        for record in records {
+            self.inst_a = MapWallInstance::unpack_position(record.a);
+            self.inst_b = MapWallInstance::unpack_position(record.b);
+            let (base_m, height_m) = record.unpack_heights();
+            self.inst_heights = vec2(base_m, height_m);
+            self.inst_zbias = record.ao_zbias.to_f32().1 * VECTOR_ZBIAS_STEP;
             instances.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         let new_area = cx.end_many_instances(instances);
@@ -10605,6 +10600,10 @@ mod tests {
         let roof = geometry_layout(&cx, &map.draw_roof.draw_vars).expect("roof shader initialised");
         let prop_shader = map.draw_prop.draw_vars.draw_shader_id.expect("prop shader initialised");
         let prop_instances = &cx.draw_shaders[prop_shader.index].mapping.instances;
+        let wall_shader = map.draw_wall.draw_vars.draw_shader_id.expect("wall shader initialised");
+        let wall_instances = &cx.draw_shaders[wall_shader.index].mapping.instances;
+        let shadow_shader = map.draw_shadow.draw_vars.draw_shader_id.expect("wall shadow shader initialised");
+        let shadow_instances = &cx.draw_shaders[shadow_shader.index].mapping.instances;
         assert_eq!(fill.stride_bytes, 16);
         assert_eq!(face.stride_bytes, 16);
         assert_eq!(road.stride_bytes, 28);
@@ -10661,6 +10660,31 @@ mod tests {
                 .map(|input| input.attr_format),
             Some(DrawShaderAttrFormat::F32x1),
         );
+        for (id, format) in [
+            (live_id!(inst_a), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_b), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_heights), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_ao), DrawShaderAttrFormat::F32x1),
+            (live_id!(inst_color), DrawShaderAttrFormat::F32x1),
+            (live_id!(inst_zbias), DrawShaderAttrFormat::F32x1),
+        ] {
+            assert_eq!(
+                wall_instances.inputs.iter().find(|input| input.id == id).map(|input| input.attr_format),
+                Some(format),
+            );
+        }
+        for (id, format) in [
+            (live_id!(inst_a), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_b), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_heights), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_zbias), DrawShaderAttrFormat::F32x1),
+        ] {
+            assert_eq!(
+                shadow_instances.inputs.iter().find(|input| input.id == id).map(|input| input.attr_format),
+                Some(format),
+            );
+        }
+        assert_eq!(MAP_WALL_INSTANCE_BYTES, 20);
     }
 
     fn temp_mbtiles_with_zoom(

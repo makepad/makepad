@@ -10,7 +10,8 @@
 use super::geometry::{lon_lat_to_normalized, tile_world_size, TileKey, TILE_SIZE};
 use super::style::probe_compiled_theme;
 use super::tile::{
-    load_local_tile_batch, TileBuffers, MAP_PROP_INSTANCE_BYTES, SHADOW_DISC_INSTANCE_FLOATS,
+    load_local_tile_batch, TileBuffers, MAP_PROP_INSTANCE_BYTES, MAP_WALL_INSTANCE_BYTES,
+    SHADOW_DISC_INSTANCE_FLOATS,
 };
 use crate::makepad_draw::vector::{
     decode_face_vertex, decode_fill_vertex, decode_road_vertex, FACE_TYPED_VERTEX_BYTES,
@@ -293,7 +294,7 @@ fn amsterdam_start_view_bake_report() {
         total_shadow_disc_instance_bytes += b.shadow_disc_instances.len() * 4;
         total_shadow_disc_instances +=
             b.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS;
-        total_wall_instance_bytes += b.wall_instances.len() * 4;
+        total_wall_instance_bytes += b.wall_instances.len() * MAP_WALL_INSTANCE_BYTES;
         total_tree_instance_bytes += (b.tree_instances.len()
             + b.tree_template_indices.len()
             + b.tree_template_vertices.len()
