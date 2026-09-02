@@ -1,7 +1,10 @@
 //! The standalone Asset Server binary: parse flags into a `ServerConfig`,
 //! start the runtime, and wait for SIGINT/SIGTERM to shut down cleanly.
 
-use makepad_asset_store::{AssetServer, DiscoveryConfig, ServerConfig};
+use makepad_asset_store::{
+    export_static, kind_parse, AssetServer, AssetServerCore, Budgets, DiscoveryConfig,
+    ServerConfig, StaticExportOptions,
+};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +12,7 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 makepad-asset-store --root <dir> [options]
+makepad-asset-store export-static <store-root> <out-dir> [options]
 
 Options:
   --root <dir>             Server root directory (catalog, CAS, tokens). Required.
@@ -20,6 +24,15 @@ Options:
   --discovery-ip <ip>      Beacon destination IP (default 255.255.255.255)
   --quiet                  No stderr logging
   --help                   This text
+
+Static export options:
+  --ns <namespace>                  Include one namespace
+  --kind <kind>                     Include one asset kind
+  --limit <n>                       Maximum root assets
+  --max-bytes-per-asset <bytes>     Per-root unique blob budget
+  --max-total-bytes <bytes>         Snapshot unique blob budget
+  --include-video-up-to <bytes>     Include each video blob through this size
+                                    (default 33554432)
 ";
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -124,7 +137,89 @@ fn parse_config() -> ServerConfig {
     cfg
 }
 
+fn parse_u64(name: &str, value: String) -> u64 {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        fail(&format!("malformed {name}"));
+    }
+    value.parse().unwrap_or_else(|_| fail(&format!("malformed {name}")))
+}
+
+fn run_export() {
+    let mut args = std::env::args().skip(2);
+    let first = args
+        .next()
+        .unwrap_or_else(|| fail("export-static needs <store-root>"));
+    if matches!(first.as_str(), "--help" | "-h") {
+        println!("{USAGE}");
+        return;
+    }
+    let root = PathBuf::from(first);
+    let out = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fail("export-static needs <out-dir>"));
+    if !root.is_dir() {
+        fail("export-static store root is not a directory");
+    }
+    let value_of = |name: &str, args: &mut dyn Iterator<Item = String>| -> String {
+        args.next().unwrap_or_else(|| fail(&format!("{name} needs a value")))
+    };
+    let mut options = StaticExportOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--ns" => options.namespace = Some(value_of("--ns", &mut args)),
+            "--kind" => {
+                let value = value_of("--kind", &mut args);
+                options.kind = Some(kind_parse(&value).unwrap_or_else(|| fail("malformed --kind")));
+            }
+            "--limit" => {
+                options.limit = Some(parse_u64("--limit", value_of("--limit", &mut args)))
+            }
+            "--max-bytes-per-asset" => {
+                options.max_bytes_per_asset = parse_u64(
+                    "--max-bytes-per-asset",
+                    value_of("--max-bytes-per-asset", &mut args),
+                )
+            }
+            "--max-total-bytes" => {
+                options.max_total_bytes = parse_u64(
+                    "--max-total-bytes",
+                    value_of("--max-total-bytes", &mut args),
+                )
+            }
+            "--include-video-up-to" => {
+                options.include_video_up_to = parse_u64(
+                    "--include-video-up-to",
+                    value_of("--include-video-up-to", &mut args),
+                )
+            }
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return;
+            }
+            other => fail(&format!("unknown export-static flag {other}")),
+        }
+    }
+    let core = AssetServerCore::open(&root, Budgets::default_v1())
+        .unwrap_or_else(|error| fail(&format!("cannot open store: {error}")));
+    let report = export_static(&core, &out, &options)
+        .unwrap_or_else(|error| fail(&format!("static export failed: {error}")));
+    println!(
+        "exported {} assets, {} revisions, {} aliases, {} blobs ({} omitted) as snapshot {}",
+        report.assets,
+        report.revisions,
+        report.aliases,
+        report.blobs_present,
+        report.blobs_omitted,
+        report.snapshot_id,
+    );
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("export-static") {
+        run_export();
+        return;
+    }
     let cfg = parse_config();
     install_signal_handlers();
     let mut server = match AssetServer::start(cfg) {

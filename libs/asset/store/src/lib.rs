@@ -60,6 +60,7 @@ pub mod observe;
 pub mod search;
 pub mod seed;
 pub mod server;
+pub mod static_export;
 pub mod variants;
 mod sqlite;
 mod synonyms;
@@ -83,8 +84,10 @@ pub use search::{
 pub use seed::{stock_asset_id, SeedAsset, SeedReport, StockSeedSource};
 pub use server::{
     AssetServerCore, BlobRefCommit, PublishBatchItem, PublishBatchOutcome, RecoverReport,
-    RefRescanPage, SERVER_SCHEMA_VERSION,
+    PublicAliasHead, PublicExportAsset, PublicExportFilter, PublicExportPage,
+    PublicSearchProjection, PublicSearchTerm, RefRescanPage, SERVER_SCHEMA_VERSION,
 };
+pub use static_export::{export_static, StaticExportOptions, StaticExportReport};
 
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.
 pub mod host;
