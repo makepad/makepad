@@ -25,8 +25,12 @@
 use crate::native;
 use crate::progress::Report;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const BAKE_COMPLETE_MARKER: &str = "bake.complete.json";
+const BAKE_LOCK: &str = ".bake.lock";
 
 /// Where the extract comes from. BBBike cuts city extracts daily and keeps
 /// an MD5 sidecar next to each one; the Amsterdam box reaches from the dune
@@ -81,6 +85,14 @@ impl TestMapPaths {
 
     pub fn search(&self) -> PathBuf {
         self.nav_basename.with_extension("search")
+    }
+
+    fn bake_complete(&self) -> PathBuf {
+        self.store.join(BAKE_COMPLETE_MARKER)
+    }
+
+    fn bake_lock(&self) -> PathBuf {
+        self.store.join(BAKE_LOCK)
     }
 
     /// True when every artifact the app opens is on disk. The scratch store
@@ -224,21 +236,50 @@ pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<BakeStats, S
         fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
 
+    let disposition = scratch_disposition(options);
+    if matches!(disposition, ScratchDisposition::Skip)
+        || (outputs_complete(options) && !paths.store.exists())
+    {
+        crate::step!("nav", "test map already built: {}", paths.archive.display());
+        return Ok(BakeStats::default());
+    }
+    let _lock = BakeLock::acquire(paths)?;
+    if paths.bake_complete().exists() && !matches!(disposition, ScratchDisposition::Skip) {
+        fs::remove_file(paths.bake_complete())
+            .map_err(|error| format!("remove stale completion marker: {error}"))?;
+    }
+    match &disposition {
+        ScratchDisposition::Resume(stage) => {
+            crate::step!("detail", "resuming unfinished bake at stage {stage}");
+        }
+        ScratchDisposition::Clean => {
+            crate::step!("detail", "resuming unfinished bake at stage detail pass 1");
+            crate::note!("detail", "  no durable scratch stage; starting clean");
+            clean_scratch_for_restart(paths)?;
+        }
+        ScratchDisposition::Fresh | ScratchDisposition::Skip => {}
+    }
+
+    // All artifacts may have landed before a crash just ahead of the final
+    // marker. Commit that state now instead of repeating any expensive pass.
+    if outputs_complete(options) {
+        write_bake_complete(options)?;
+        remove_scratch_after_success(options);
+        crate::step!("nav", "test map already built: {}", paths.archive.display());
+        return Ok(BakeStats::default());
+    }
+
     fetch_stage(options, fetch)?;
     detail_stage(options)?;
     base_stage(options)?;
     nav_stage(options)?;
     let skipped_tiles = faces_stage(options)?;
 
-    if !options.keep_store && paths.store.exists() {
-        // Only now, with every artifact written and verified present: the
-        // store is the one big thing worth reclaiming.
-        crate::note!("nav", "  removing scratch store {}", paths.store.display());
-        let _ = fs::remove_dir_all(&paths.store);
-    }
-    if !paths.is_complete() {
+    if !outputs_complete(options) {
         return Err("bake finished but an artifact is missing".to_string());
     }
+    write_bake_complete(options)?;
+    remove_scratch_after_success(options);
     crate::step!(
         "nav",
         "test map ready in {:.0}s — {:.1} GiB on disk",
@@ -246,6 +287,236 @@ pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<BakeStats, S
         paths.bytes_on_disk() as f64 / (1024.0 * 1024.0 * 1024.0)
     );
     Ok(BakeStats { skipped_tiles })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScratchDisposition {
+    Fresh,
+    Resume(&'static str),
+    Clean,
+    Skip,
+}
+
+fn scratch_disposition(options: &BakeOptions) -> ScratchDisposition {
+    let paths = &options.paths;
+    if !paths.store.exists() {
+        return ScratchDisposition::Fresh;
+    }
+    if paths.bake_complete().is_file() && outputs_complete(options) {
+        return ScratchDisposition::Skip;
+    }
+    if paths.store.join("spool.complete.json").is_file() {
+        if !paths.archive.is_file() {
+            return ScratchDisposition::Resume("base");
+        }
+        if !paths.graph().is_file() || !paths.search().is_file() {
+            return ScratchDisposition::Resume("nav");
+        }
+        return ScratchDisposition::Resume("faces");
+    }
+    if paths.store.join("spool.pass3.json").is_file() {
+        return ScratchDisposition::Resume("detail pass 4");
+    }
+    if paths.store.join("spool.pass2.json").is_file() {
+        return ScratchDisposition::Resume("detail pass 3");
+    }
+    ScratchDisposition::Clean
+}
+
+fn outputs_complete(options: &BakeOptions) -> bool {
+    if !options.paths.is_complete() {
+        return false;
+    }
+    #[cfg(feature = "faces")]
+    if options.faces && !crate::faces::archive_has_faces(&options.paths.archive) {
+        return false;
+    }
+    true
+}
+
+fn clean_scratch_for_restart(paths: &TestMapPaths) -> Result<(), String> {
+    for entry in fs::read_dir(&paths.store)
+        .map_err(|err| format!("read {}: {err}", paths.store.display()))?
+    {
+        let entry = entry.map_err(|err| format!("read {}: {err}", paths.store.display()))?;
+        if entry.file_name() == BAKE_LOCK {
+            continue;
+        }
+        let path = entry.path();
+        if entry
+            .file_type()
+            .map_err(|err| format!("stat {}: {err}", path.display()))?
+            .is_dir()
+        {
+            fs::remove_dir_all(&path)
+                .map_err(|err| format!("remove {}: {err}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|err| format!("remove {}: {err}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_bake_complete(options: &BakeOptions) -> Result<(), String> {
+    let paths = &options.paths;
+    for path in [&paths.archive, &paths.graph(), &paths.search()] {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|err| format!("fsync {}: {err}", path.display()))?;
+    }
+    if let Some(parent) = paths.archive.parent() {
+        sync_dir(parent)?;
+    }
+    let marker = serde_json::json!({
+        "format": "makepad-testmap-bake-v1",
+        "source": paths.pbf.display().to_string(),
+        "archive": paths.archive.display().to_string(),
+        "graph": paths.graph().display().to_string(),
+        "search": paths.search().display().to_string(),
+    });
+    let bytes = serde_json::to_vec_pretty(&marker)
+        .map_err(|err| format!("serialize bake completion marker: {err}"))?;
+    let path = paths.bake_complete();
+    let partial = paths.store.join("bake.complete.partial");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&partial)
+        .map_err(|err| format!("create {}: {err}", partial.display()))?;
+    file.write_all(&bytes)
+        .map_err(|err| format!("write {}: {err}", partial.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("fsync {}: {err}", partial.display()))?;
+    fs::rename(&partial, &path)
+        .map_err(|err| format!("publish {}: {err}", path.display()))?;
+    sync_dir(&paths.store)
+}
+
+fn remove_scratch_after_success(options: &BakeOptions) {
+    if !options.keep_store && options.paths.store.exists() {
+        crate::note!(
+            "nav",
+            "  removing scratch store {}",
+            options.paths.store.display()
+        );
+        let _ = fs::remove_dir_all(&options.paths.store);
+    }
+}
+
+struct BakeLock {
+    path: PathBuf,
+    contents: String,
+}
+
+impl BakeLock {
+    fn acquire(paths: &TestMapPaths) -> Result<Self, String> {
+        fs::create_dir_all(&paths.store)
+            .map_err(|err| format!("create {}: {err}", paths.store.display()))?;
+        let path = paths.bake_lock();
+        for _ in 0..4 {
+            let pid = std::process::id();
+            let started = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let contents = format!("pid={pid}\nstarted={started}\n");
+            match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(contents.as_bytes())
+                        .map_err(|err| format!("write {}: {err}", path.display()))?;
+                    file.sync_all()
+                        .map_err(|err| format!("fsync {}: {err}", path.display()))?;
+                    sync_dir(&paths.store)?;
+                    return Ok(Self { path, contents });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    let existing_pid = lock_value(&existing, "pid").and_then(|v| v.parse().ok());
+                    if existing_pid.is_some_and(pid_is_alive) {
+                        let since = lock_value(&existing, "started").unwrap_or("unknown");
+                        return Err(format!(
+                            "scratch {} is locked by pid {} since {}; refusing concurrent bake",
+                            paths.store.display(),
+                            existing_pid.unwrap(),
+                            since
+                        ));
+                    }
+                    crate::note!("detail", "  clearing stale scratch lock {}", path.display());
+                    match fs::remove_file(&path) {
+                        Ok(()) => continue,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => return Err(format!("remove stale {}: {err}", path.display())),
+                    }
+                }
+                Err(error) => return Err(format!("create {}: {error}", path.display())),
+            }
+        }
+        Err(format!("scratch lock {} changed too often", path.display()))
+    }
+}
+
+impl Drop for BakeLock {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(&self.contents) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn lock_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    let result = unsafe { kill(pid as i32, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn GetExitCodeProcess(process: *mut std::ffi::c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let mut code = 0;
+    let alive = unsafe { GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE };
+    unsafe { CloseHandle(process) };
+    alive
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_is_alive(pid: u32) -> bool {
+    pid == std::process::id()
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|err| format!("fsync {}: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn fetch_stage(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> {
@@ -295,6 +566,10 @@ fn fetch_stage(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), Strin
 
 fn detail_stage(options: &BakeOptions) -> Result<(), String> {
     let paths = &options.paths;
+    if paths.archive.is_file() {
+        crate::step!("detail", "detail scratch no longer needed; archive already here");
+        return Ok(());
+    }
     // The store carries its own completion marker; convert_detail resumes
     // from whichever pass it reached, so there is nothing to skip by hand.
     let mut detail = native::default_detail_options(
@@ -419,6 +694,29 @@ fn faces_stage(options: &BakeOptions) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn fixture(name: &str) -> (PathBuf, BakeOptions) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = PathBuf::from("target/map-build-test-fixtures").join(format!(
+            "{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut options = BakeOptions::amsterdam();
+        options.paths = TestMapPaths::in_dir(&root, "fixture");
+        options.faces = false;
+        (root, options)
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"fixture").unwrap();
+    }
 
     #[test]
     fn paths_describe_the_artifact_set() {
@@ -449,5 +747,62 @@ mod tests {
         assert_eq!(last, 1.0);
         // An unknown stage must not panic or wind the bar back.
         assert_eq!(overall_fraction("nonsense", 0.0), 0.0);
+    }
+
+    #[test]
+    fn unfinished_scratch_resumes_the_last_durable_stage() {
+        let (root, options) = fixture("resume");
+        touch(&options.paths.store.join("spool.pass2.json"));
+        touch(&options.paths.store.join("ways.dat"));
+        assert_eq!(
+            scratch_disposition(&options),
+            ScratchDisposition::Resume("detail pass 3")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scratch_without_a_durable_stage_is_cleaned() {
+        let (root, options) = fixture("clean");
+        touch(&options.paths.store.join("ways.dat"));
+        touch(&options.paths.bake_lock());
+        assert_eq!(scratch_disposition(&options), ScratchDisposition::Clean);
+        clean_scratch_for_restart(&options.paths).unwrap();
+        assert!(!options.paths.store.join("ways.dat").exists());
+        assert!(options.paths.bake_lock().exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completed_scratch_and_outputs_skip_the_bake() {
+        let (root, options) = fixture("skip");
+        for path in [
+            options.paths.archive.clone(),
+            options.paths.graph(),
+            options.paths.search(),
+            options.paths.bake_complete(),
+        ] {
+            touch(&path);
+        }
+        assert_eq!(scratch_disposition(&options), ScratchDisposition::Skip);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_lock_refuses_and_dead_lock_is_cleared() {
+        let (root, options) = fixture("locked");
+        let guard = BakeLock::acquire(&options.paths).unwrap();
+        let error = BakeLock::acquire(&options.paths).err().unwrap();
+        assert!(error.contains("refusing concurrent bake"));
+        drop(guard);
+
+        fs::write(
+            options.paths.bake_lock(),
+            format!("pid={}\nstarted=1\n", u32::MAX),
+        )
+        .unwrap();
+        let stale_replaced = BakeLock::acquire(&options.paths).unwrap();
+        drop(stale_replaced);
+        fs::remove_dir_all(root).unwrap();
     }
 }

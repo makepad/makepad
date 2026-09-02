@@ -15,15 +15,15 @@ use makepad_map_nav::search::{SearchIndex, SearchResult};
 use makepad_map_nav::searchdb::SearchDb;
 use makepad_map_nav::search_service::merge_search_results;
 use makepad_widgets::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The production nav pair (see `examples/map`). When it is absent the app
 /// falls back to whatever test map was baked on this machine — same
 /// formats, one city instead of a province.
-const NAV_DATA_BASENAME: &str = "local/maps/noord-holland";
-const EUROPE_PLACES_PATH: &str = "local/maps/europe-places.search";
-const EUROPE_SEARCHDB_PATH: &str = "local/maps/europe.searchdb";
-const EUROPE_MAJOR_GRAPH_PATH: &str = "local/maps/europe-major.graph";
+const NAV_DATA_BASENAME: &str = "noord-holland";
+const EUROPE_PLACES_PATH: &str = "europe-places.search";
+const EUROPE_SEARCHDB_PATH: &str = "europe.searchdb";
+const EUROPE_MAJOR_GRAPH_PATH: &str = "europe-major.graph";
 const CHARGERS_MBTILES_PATH: &str = "local/overlays/nl-chargers.mbtiles";
 const RADAR_CACHE_DIR: &str = "local/overlays/radar";
 
@@ -38,6 +38,7 @@ pub struct NavData {
     pub major_graph: Option<RouteGraph>,
     major_graph_attempted: bool,
     pub chargers: Option<LayerDb>,
+    maps_root: PathBuf,
 }
 
 pub enum NavLoad {
@@ -47,10 +48,10 @@ pub enum NavLoad {
 
 /// The nav artifacts to load, production first, test map second. `None`
 /// means this machine has neither and the caller should offer to bake one.
-pub fn nav_basename() -> Option<String> {
+pub fn nav_basename(maps_root: &Path) -> Option<String> {
     for basename in [
-        NAV_DATA_BASENAME.to_string(),
-        makepad_map_build::testmap::TestMapPaths::amsterdam()
+        maps_root.join(NAV_DATA_BASENAME).to_string_lossy().into_owned(),
+        makepad_map_build::testmap::TestMapPaths::in_dir(maps_root, "amsterdam")
             .nav_basename
             .to_string_lossy()
             .into_owned(),
@@ -66,6 +67,10 @@ pub fn nav_basename() -> Option<String> {
 
 pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
     std::thread::spawn(move || {
+        let maps_root = Path::new(&basename)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         let t0 = Cx::monotonic_now();
         let nh_search = match std::fs::read(format!("{basename}.search"))
             .map_err(|e| e.to_string())
@@ -91,11 +96,11 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
                 return;
             }
         };
-        let searchdb = SearchDb::open(Path::new(EUROPE_SEARCHDB_PATH)).ok();
+        let searchdb = SearchDb::open(&maps_root.join(EUROPE_SEARCHDB_PATH)).ok();
         let places = if searchdb.is_some() {
             None
         } else {
-            std::fs::read(EUROPE_PLACES_PATH)
+            std::fs::read(maps_root.join(EUROPE_PLACES_PATH))
                 .ok()
                 .and_then(|d| SearchIndex::deserialize(&d).ok())
         };
@@ -119,6 +124,7 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
                 major_graph: None,
                 major_graph_attempted: false,
                 chargers,
+                maps_root,
             }),
             stats,
         });
@@ -150,7 +156,7 @@ impl NavData {
         if self.major_graph.is_none() && !self.major_graph_attempted {
             self.major_graph_attempted = true;
             let t0 = Cx::monotonic_now();
-            self.major_graph = std::fs::read(EUROPE_MAJOR_GRAPH_PATH)
+            self.major_graph = std::fs::read(self.maps_root.join(EUROPE_MAJOR_GRAPH_PATH))
                 .ok()
                 .and_then(|d| RouteGraph::deserialize(&d).ok());
             if self.major_graph.is_some() {
