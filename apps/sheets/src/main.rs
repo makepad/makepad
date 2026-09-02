@@ -94,6 +94,7 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.ai_port = AiServicePort::open(cx, ai::manifest());
+        makepad_wm_api::set_title(cx, "Sheets");
     }
 
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
@@ -114,6 +115,13 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // The window manager asked politely (SUPER+W): go now.
+        if let Event::Custom(json) = event {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
+                cx.quit();
+                return;
+            }
+        }
         self.drain_ai_port(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

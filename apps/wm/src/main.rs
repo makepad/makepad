@@ -742,7 +742,13 @@ impl App {
                 self.warm_pool.note_spawned(app_id, id);
                 log!("wm: warming {} as client {}", app_id, id);
             }
-            Err(err) => log!("wm: warming {} failed: {}", app_id, err),
+            Err(err) => {
+                // A spawn that cannot even start (an installed layout without
+                // this binary) counts as a crash: the budget gives the app up
+                // after a few, instead of retrying it on every tick forever.
+                self.warm_pool.note_crash(app_id, host::now());
+                log!("wm: warming {} failed: {}", app_id, err);
+            }
         }
     }
 
@@ -1409,9 +1415,7 @@ impl App {
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
             desk.remove_client(client);
         }
-        if let Some(focus) = self.state_mut().layout.focused_client() {
-            self.focus_client(cx, focus);
-        }
+        self.focus_after_layout(cx);
         self.redraw_all(cx);
     }
 
@@ -2734,7 +2738,19 @@ impl App {
         }
     }
 
+    /// The layout picked a new focus on its own (a window closed, a client
+    /// died): the bar follows it, and the keyboard goes to that tile —
+    /// UNLESS the AI pane is open. The person typing in the chat asked for
+    /// the close; an automatic refocus must not take their keys away
+    /// mid-line (an `os.close` used to send the next console line into a
+    /// sheet). A click on a tile still moves focus: that comes through
+    /// `focus_client` directly, never through here.
     fn focus_after_layout(&mut self, cx: &mut Cx) {
+        if self.ai_pane_is_open(cx) {
+            self.update_bar(cx);
+            self.focus_pane(cx);
+            return;
+        }
         if let Some(focus) = self.state_mut().layout.focused_client() {
             self.focus_client(cx, focus);
         }

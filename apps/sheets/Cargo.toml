@@ -26,7 +26,7 @@ default = ["standalone"]
 demo = []
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-wm) leaves this off and gets the lib only.
-standalone = ["dep:makepad-aichat"]
+standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
@@ -34,6 +34,9 @@ makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the one read tool the
 # sheet exposes to it (src/ai.rs).
 makepad-aichat = { path = "../aichat", optional = true }
+# The window manager's vocabulary for the standalone window: the bar's
+# title and the polite close (the module has no window of its own).
+makepad-wm-api = { path = "../../libs/wm_api", optional = true }
 makepad-ai-services = { path = "../../libs/ai/services" }
 # The module contract: what the window manager seats in-process (src/module.rs).
 makepad-app-module = { path = "../../libs/app_module" }
