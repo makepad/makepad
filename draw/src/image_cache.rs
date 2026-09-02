@@ -2018,7 +2018,7 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                             continue;
                         }
                         cache.map.remove(&image_path);
-                        decode_queue.push((image_path, Arc::new(body.clone())));
+                        decode_queue.push((image_path, Arc::new(body.to_vec())));
                     } else {
                         cache.map.remove(&image_path);
                     }

@@ -568,7 +568,7 @@ mod platform {
                         let result = normalize_response(
                             response.status_code,
                             headers,
-                            response.body.unwrap_or_default(),
+                            response.body.unwrap_or_default().to_vec(),
                             self.max_response_body_bytes,
                             matches!(method, TransportMethod::Head),
                         );

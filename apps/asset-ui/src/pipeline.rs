@@ -3381,7 +3381,7 @@ impl Pipeline {
             } => {
                 let bytes = response
                     .filter(|response| !failed && response.status_code == 200)
-                    .and_then(|response| response.body.clone());
+                    .and_then(|response| response.body.as_deref().map(<[u8]>::to_vec));
                 let Some(bytes) = bytes else {
                     return self.candidate_failed(
                         cx,
@@ -3589,7 +3589,7 @@ impl Pipeline {
             Req::Artifact(stage, artifact) => {
                 let bytes = response
                     .filter(|r| !failed && r.status_code == 200)
-                    .and_then(|r| r.body.clone());
+                    .and_then(|r| r.body.as_deref().map(<[u8]>::to_vec));
                 let Some(bytes) = bytes else {
                     return self.fail_stage_or_skip_expander(
                         cx,

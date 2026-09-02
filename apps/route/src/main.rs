@@ -2405,24 +2405,16 @@ mod tests {
     }
 
     #[test]
-    fn http_archive_configuration_keeps_detail_and_local_sidecars() {
-        let config = TileSourceConfig::HttpArchive {
-            root_url: "https://tiles.example/world.mkmap".to_string(),
-            detail_root_url: "https://tiles.example/detail.mkmap".to_string(),
-            overlay_mbtiles_paths: "local/maps/ocean.mbtiles".to_string(),
-            bridge_dz_path: "local/maps/bridge-dz.mbtiles".to_string(),
-        };
-        let TileSourceConfig::HttpArchive {
-            detail_root_url,
-            overlay_mbtiles_paths,
-            bridge_dz_path,
-            ..
-        } = config
-        else {
-            unreachable!()
-        };
-        assert_eq!(detail_root_url, "https://tiles.example/detail.mkmap");
-        assert_eq!(overlay_mbtiles_paths, "local/maps/ocean.mbtiles");
-        assert_eq!(bridge_dz_path, "local/maps/bridge-dz.mbtiles");
+    fn demo_provisioner_configuration_installs_on_real_map_view() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut map = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            MapView::script_new_with_default(vm)
+        });
+        let config = crate::provisioner::demo::hosted_tile_source();
+        map.set_source_config(&mut cx, config.clone());
+        assert_eq!(map.source_config(), Some(&config));
+        assert_eq!(config, TileSourceConfig::http_archive(crate::provisioner::demo::HOSTED_CONFIG.tiles));
     }
 }

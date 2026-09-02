@@ -203,7 +203,7 @@ struct WayData {
 
 /// A tappable pin baked into a tile: normalized world position + the
 /// attributes the info bubble shows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PinHit {
     pub norm: (f64, f64),
     pub info: Vec<(String, String)>,
@@ -293,7 +293,7 @@ fn split_band_by(
     (high_vertices, high_indices)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
     pub fill_indices: Vec<u32>,
@@ -7640,8 +7640,8 @@ fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
 /// archive. Local MBTiles bridge/overlay sidecars remain worker-only inputs.
 pub fn build_local_tile_from_archive_bytes(
     tile_key: TileKey,
-    base: Option<Vec<u8>>,
-    detail: Option<Vec<u8>>,
+    base: Option<std::sync::Arc<[u8]>>,
+    detail: Option<std::sync::Arc<[u8]>>,
     detail_mbtiles_path: Option<&Path>,
     bridge_dz_mbtiles_path: Option<&Path>,
     overlay_paths: &[String],
@@ -7765,6 +7765,7 @@ pub fn build_local_tile_from_archive_bytes(
                     .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
                     .ok()
                     .flatten()
+                    .map(std::sync::Arc::from)
             })
     } else {
         detail
@@ -8218,46 +8219,67 @@ mod local_archive_regression_tests {
     use makepad_mbtile_reader::MbtilesWriter;
 
     fn test_mbtiles(name: &str, with_tile: bool) -> std::path::PathBuf {
+        test_mbtiles_with_payload(name, with_tile.then_some(&[][..]))
+    }
+
+    fn test_mbtiles_with_payload(
+        name: &str,
+        tile: Option<&[u8]>,
+    ) -> std::path::PathBuf {
         let id = Cx::time_now().to_bits();
-        let path = std::env::temp_dir().join(format!(
-            "makepad-map-{name}-{}-{id}.mbtiles",
-            std::process::id()
-        ));
+        let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
         let mut writer = MbtilesWriter::create(&path).unwrap();
         writer.set_metadata("minzoom", "0");
         writer.set_metadata("maxzoom", "0");
-        if with_tile {
-            writer.write_tile_encoded(0, 0, 0, &[]).unwrap();
+        if let Some(tile) = tile {
+            writer.write_tile_encoded(0, 0, 0, tile).unwrap();
         }
         writer.finish().unwrap();
         path
     }
 
-    #[test]
-    fn legacy_mbtiles_still_uses_the_original_reader_batch_path() {
-        let path = test_mbtiles("legacy-map-source", true);
-        let key = TileKey { z: 0, x: 0, y: 0 };
-        let (loaded, failed) = load_local_tile_batch(
-            &path,
-            None,
-            None,
-            &[],
-            &[key],
-            &CompiledMapTheme::default(),
-            0,
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert!(failed.is_empty());
-        std::fs::remove_file(path).unwrap();
+    fn protobuf_varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn protobuf_varint_field(field: u64, value: u64, out: &mut Vec<u8>) {
+        protobuf_varint(field << 3, out);
+        protobuf_varint(value, out);
+    }
+
+    fn protobuf_bytes_field(field: u64, value: &[u8], out: &mut Vec<u8>) {
+        protobuf_varint((field << 3) | 2, out);
+        protobuf_varint(value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn nonempty_polygon_mvt() -> Vec<u8> {
+        let mut geometry = Vec::new();
+        for value in [9, 20, 20, 26, 200, 0, 0, 200, 199, 0, 15] {
+            protobuf_varint(value, &mut geometry);
+        }
+        let mut feature = Vec::new();
+        protobuf_varint_field(3, 3, &mut feature);
+        protobuf_bytes_field(4, &geometry, &mut feature);
+        let mut layer = Vec::new();
+        protobuf_bytes_field(1, b"natura2000", &mut layer);
+        protobuf_bytes_field(2, &feature, &mut layer);
+        protobuf_varint_field(5, 4096, &mut layer);
+        protobuf_varint_field(15, 2, &mut layer);
+        let mut tile = Vec::new();
+        protobuf_bytes_field(3, &layer, &mut tile);
+        tile
     }
 
     #[test]
     fn archive_overlay_only_build_ignores_detail_like_legacy_branch() {
         let base = test_mbtiles("archive-missing-base", false);
-        let overlay = test_mbtiles("archive-overlay", true);
+        let overlay_payload = nonempty_polygon_mvt();
+        let overlay = test_mbtiles_with_payload("archive-overlay", Some(&overlay_payload));
         let overlay_paths = vec![overlay.to_string_lossy().into_owned()];
         let key = TileKey { z: 0, x: 0, y: 0 };
         let build = |detail| {
@@ -8290,13 +8312,16 @@ mod local_archive_regression_tests {
         )
         .unwrap();
         assert!(failed.is_empty());
-        let legacy = legacy.pop().unwrap().buffers;
-        let archive = build(None);
-        let with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff]));
-        assert_eq!(legacy.feature_count, archive.feature_count);
-        assert_eq!(legacy.byte_size(), archive.byte_size());
-        assert_eq!(archive.feature_count, with_unusable_detail.feature_count);
-        assert_eq!(archive.byte_size(), with_unusable_detail.byte_size());
+        let mut legacy = legacy.pop().unwrap().buffers;
+        let mut archive = build(None);
+        let mut with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff].into()));
+        assert!(legacy.feature_count > 0);
+        assert!(!legacy.fill_vertices.is_empty());
+        legacy.stage_summary.clear();
+        archive.stage_summary.clear();
+        with_unusable_detail.stage_summary.clear();
+        assert_eq!(legacy, archive);
+        assert_eq!(archive, with_unusable_detail);
         std::fs::remove_file(base).unwrap();
         std::fs::remove_file(overlay).unwrap();
     }

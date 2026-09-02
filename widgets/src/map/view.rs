@@ -12,7 +12,10 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
+/// Tile payload sources only. Navigation data is deliberately outside this
+/// contract; applications layer routing datasets over MapView separately.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TileSourceConfig {
     LocalArchive {
@@ -88,8 +91,8 @@ impl TileSourceConfig {
 #[derive(Debug)]
 struct ArchiveTileParts {
     generation: u64,
-    base: Option<Result<Option<Vec<u8>>, String>>,
-    detail: Option<Result<Option<Vec<u8>>, String>>,
+    base: Option<Result<Option<Arc<[u8]>>, String>>,
+    detail: Option<Result<Option<Arc<[u8]>>, String>>,
     detail_required: bool,
     reuse_base_as_detail: bool,
 }
@@ -1230,6 +1233,7 @@ script_mod! {
 const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
+const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
 
 /// Camera tilt ceiling (degrees from top-down). Flat enough to read
 /// terrain relief against the horizon without the far plane exploding.
@@ -1734,12 +1738,10 @@ pub struct MapView {
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
     #[rust]
     tile_thread_pool: Option<TagThreadPool<TileKey>>,
-    /// Last (request zoom, bucket, 3D mode, epoch) the worker queue was
-    /// pruned for — obsolete queued jobs are dropped when this changes.
     #[rust]
-    last_pool_prune: Option<(u32, u32, bool, u64)>,
+    local_requested_tiles: HashMap<TileKey, f64>,
     #[rust]
-    local_requested_tiles: HashMap<TileKey, u64>,
+    archive_request_watchdog_timer: Timer,
     #[rust]
     /// Tiles the archive reported absent, stamped with the frame we learned
     /// it — re-checked after MISSING_RECHECK_FRAMES so a rebuilt/replaced
@@ -2030,6 +2032,15 @@ impl Widget for MapView {
             self.handle_archive_events(cx, event);
         }
         self.handle_tile_worker_messages(cx);
+        if self
+            .archive_request_watchdog_timer
+            .is_event(event)
+            .is_some()
+        {
+            self.archive_request_watchdog_timer = Timer::empty();
+            self.expire_archive_requests(cx);
+        }
+        self.sync_archive_request_watchdog(cx);
         self.widget_match_event(cx, event, scope);
 
         if self.wind_timer.is_event(event).is_some() && self.wind_field.is_some() {
@@ -2057,7 +2068,76 @@ impl Widget for MapView {
             self.retune_rain_timer(cx);
             self.redraw(cx);
         }
-        self.handle_archive_watch(cx, event);
+        while let Ok(watch) = self.archive_watch_rx.try_recv() {
+            self.archive_watch_in_flight = false;
+            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
+                continue;
+            }
+            if let Some(range) = watch
+                .zoom_range
+                .filter(|(min, max)| min <= max && *max <= 30)
+            {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+            }
+            if watch.mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
+                self.archive_watch_mtime = watch.mtime;
+                if had {
+                    if let Some(config) = self.tile_source_config.clone() {
+                        self.install_archive_source(cx, config);
+                    }
+                    self.local_requested_tiles.clear();
+                    let before = self.tiles.len();
+                    self.tiles
+                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
+                    if self.tiles.len() != before {
+                        log!(
+                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
+                            before - self.tiles.len()
+                        );
+                    }
+                    self.redraw(cx);
+                }
+            }
+        }
+        // Growing-archive watch: both directory probing and metadata stay on
+        // the persistent archive pool; the UI only consumes the timestamp.
+        if self.is_local_archive()
+            && (self.archive_watch_timer.is_event(event).is_some()
+                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
+        {
+            if !self.archive_watch_in_flight {
+                self.archive_watch_in_flight = true;
+                let path = self.active_mbtiles_path().to_string();
+                let sender = self.archive_watch_rx.sender();
+                let workers = self.ensure_archive_worker_pool(cx);
+                workers.execute_rev(next_archive_task_token(), move |_| {
+                    let archive_path = std::path::PathBuf::from(&path);
+                    let probe = if is_mkmap_path_shape(&path) {
+                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
+                            archive_path
+                        } else {
+                            archive_path.join("root.mkidx")
+                        }
+                    } else {
+                        archive_path
+                    };
+                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
+                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
+                        Path::new(&path),
+                    )
+                    .ok()
+                    .and_then(|mut reader| reader.validated_zoom_range());
+                    let _ = sender.send(ArchiveWatchResult {
+                        path,
+                        mtime,
+                        zoom_range,
+                    });
+                });
+            }
+            self.archive_watch_timer = cx.start_timeout(5.0);
+        }
         if self.tile_fade_timer.is_event(event).is_some() {
             self.redraw(cx);
             if self.tiles.values().any(|entry| entry.fade.is_some()) {
@@ -3976,8 +4056,8 @@ impl MapView {
         &mut self,
         cx: &mut Cx,
         key: TileKey,
-        base: Option<Vec<u8>>,
-        detail: Option<Vec<u8>>,
+        base: Option<Arc<[u8]>>,
+        detail: Option<Arc<[u8]>>,
     ) {
         self.ensure_tile_thread_pool(cx);
         let pool = self.tile_thread_pool.as_ref().unwrap();
@@ -4126,14 +4206,10 @@ impl MapView {
         self.ensure_archive_source(cx);
 
         let bucket = self.render_bucket();
-        // OBSOLETE-WORK CANCELLATION: when the request context changes
-        // (zoom gesture reversed, bucket advanced, 2D/3D flip, restyle),
-        // queued builds for the dead context would hold every pool slot
-        // ahead of current work — running jobs finish, but nothing stale
-        // may START. Drop queued jobs for keys outside the current visible
-        // set and free their in-flight slots.
+        // OBSOLETE-WORK CANCELLATION runs on every viewport pass, including
+        // same-zoom pans. Running jobs finish, but queued jobs outside the
+        // current visible set may not start or retain an in-flight slot.
         let request_zoom = self.request_zoom_level();
-        let prune_sig = (request_zoom, bucket, self.baked_3d_mode, self.style_epoch);
         let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
         let obsolete_archive: Vec<TileKey> = self
             .archive_pending_tiles
@@ -4152,46 +4228,23 @@ impl MapView {
                 self.tiles.remove(&key);
             }
         }
-        if self.last_pool_prune != Some(prune_sig) {
-            self.last_pool_prune = Some(prune_sig);
-            if let Some(pool) = self.tile_thread_pool.as_ref() {
-                let dropped =
-                    pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
-                for key in dropped {
-                    self.local_requested_tiles.remove(&key);
-                    // A queued-then-dropped placeholder must not linger as
-                    // Loading forever; keep-stale Ready entries stay.
-                    if self
-                        .tiles
-                        .get(&key)
-                        .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
-                    {
-                        self.tiles.remove(&key);
-                    }
+        if let Some(pool) = self.tile_thread_pool.as_ref() {
+            let dropped = pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
+            for key in dropped {
+                self.local_requested_tiles.remove(&key);
+                // A queued-then-dropped placeholder must not linger as
+                // Loading forever; keep-stale Ready entries stay.
+                if self
+                    .tiles
+                    .get(&key)
+                    .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+                {
+                    self.tiles.remove(&key);
                 }
             }
         }
-        // Watchdog: a worker job that dies (or a lost message) would leak its
-        // key here forever and choke the 12-slot in-flight cap; time out and
-        // retry, clearing any stuck Loading placeholder so it can re-request.
+        self.sync_archive_request_watchdog(cx);
         let now = self.frame_counter;
-        let timed_out: Vec<TileKey> = self
-            .local_requested_tiles
-            .iter()
-            .filter(|(_, started)| now.saturating_sub(**started) > 600)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in timed_out {
-            self.local_requested_tiles.remove(&key);
-            self.cancel_archive_tile(cx, key);
-            if self
-                .tiles
-                .get(&key)
-                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
-            {
-                self.tiles.remove(&key);
-            }
-        }
         // Absent tiles get re-checked after a while: our mbtiles archives
         // are rebuilt in place during development, and a one-off read
         // glitch must not leave a permanent hole.
@@ -4304,7 +4357,8 @@ impl MapView {
         }
 
         for key in &missing {
-            self.local_requested_tiles.insert(*key, self.frame_counter);
+            self.local_requested_tiles
+                .insert(*key, cx.seconds_since_app_start());
             let prev_attempts = self.tiles.get(key).map_or(0, |entry| entry.attempts);
             let keep_stale = self
                 .tiles
@@ -4329,6 +4383,7 @@ impl MapView {
                 );
             }
         }
+        self.sync_archive_request_watchdog(cx);
 
         if self.base_archive.is_none() {
             self.dispatch_legacy_tile_builds(cx, missing, bucket);
@@ -4362,6 +4417,50 @@ impl MapView {
                     archive.request_tile(cx, key, generation);
                 }
             }
+        }
+        self.sync_archive_request_watchdog(cx);
+    }
+
+    fn expire_archive_requests(&mut self, cx: &mut Cx) {
+        let now = cx.seconds_since_app_start();
+        let timed_out: Vec<TileKey> = self
+            .local_requested_tiles
+            .iter()
+            .filter(|(_, started)| now - **started >= ARCHIVE_REQUEST_TIMEOUT_SECONDS)
+            .map(|(key, _)| *key)
+            .collect();
+        let expired_any = !timed_out.is_empty();
+        for key in timed_out {
+            self.local_requested_tiles.remove(&key);
+            self.cancel_archive_tile(cx, key);
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
+            }
+        }
+        if expired_any {
+            self.redraw(cx);
+        }
+    }
+
+    fn sync_archive_request_watchdog(&mut self, cx: &mut Cx) {
+        if self.local_requested_tiles.is_empty() {
+            if !self.archive_request_watchdog_timer.is_empty() {
+                cx.stop_timer(self.archive_request_watchdog_timer);
+                self.archive_request_watchdog_timer = Timer::empty();
+            }
+        } else if self.archive_request_watchdog_timer.is_empty() {
+            let now = cx.seconds_since_app_start();
+            let deadline = self
+                .local_requested_tiles
+                .values()
+                .copied()
+                .fold(f64::INFINITY, f64::min)
+                + ARCHIVE_REQUEST_TIMEOUT_SECONDS;
+            self.archive_request_watchdog_timer = cx.start_timeout((deadline - now).max(0.001));
         }
     }
 
@@ -6068,10 +6167,15 @@ impl MapView {
             // Honor the archive's declared zoom range: a single-zoom detail
             // archive (minzoom=maxzoom=14) must never be asked for z13/z12 —
             // those rows cannot exist and only produce missing-tile spam.
-            let (min_zoom, max_zoom) = self
+            let range = self
                 .local_source_zoom_range
                 .unwrap_or((LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM));
-            zoom = zoom.clamp(min_zoom, max_zoom);
+            let (min_zoom, max_zoom) = if range.0 <= range.1 && range.1 <= 30 {
+                range
+            } else {
+                (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM)
+            };
+            zoom = zoom.max(min_zoom).min(max_zoom);
         }
         zoom
     }
@@ -6422,6 +6526,10 @@ impl MapView {
         self.local_source_zoom_range_path = None;
         self.local_source_zoom_range_checked = false;
         self.redraw(cx);
+    }
+
+    pub fn source_config(&self) -> Option<&TileSourceConfig> {
+        self.tile_source_config.as_ref()
     }
 
     pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
@@ -7311,10 +7419,42 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        detail_matches_base, is_mkmap_path_shape, needs_separate_detail_archive,
-        tile_span_with_prefetch, TileSourceConfig, TILE_SIZE,
-    };
+    use super::*;
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn test_map(cx: &mut Cx) -> MapView {
+        cx.init_cx_os();
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            MapView::script_new_with_default(vm)
+        })
+    }
+
+    fn temp_mbtiles_with_zoom(
+        name: &str,
+        min_zoom: &str,
+        max_zoom: &str,
+        tile_zoom: u8,
+    ) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!("target/{name}-{nonce}.mbtiles"));
+        std::fs::create_dir_all("target").unwrap();
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", min_zoom);
+        writer.set_metadata("maxzoom", max_zoom);
+        writer
+            .write_tile_encoded(tile_zoom, 0, 0, &[])
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    fn temp_mbtiles(name: &str) -> std::path::PathBuf {
+        temp_mbtiles_with_zoom(name, "0", "0", 0)
+    }
 
     #[test]
     fn tile_span_keeps_exactly_one_prefetch_tile_for_partial_edge_tiles() {
@@ -7330,19 +7470,232 @@ mod tests {
     }
 
     #[test]
-    fn source_shape_keeps_mbtiles_on_legacy_path_and_deduplicates_detail() {
+    fn source_shape_recognizes_archive_formats() {
         assert!(!is_mkmap_path_shape("local/maps/example-base.mbtiles"));
         assert!(is_mkmap_path_shape("local/maps/world.mkmap"));
         assert!(is_mkmap_path_shape("local/maps/world/root.mkidx"));
-        let config = TileSourceConfig::HttpArchive {
-            root_url: "https://tiles.example/world.mkmap".to_string(),
-            detail_root_url: "https://tiles.example/world.mkmap".to_string(),
-            overlay_mbtiles_paths: "local/maps/ocean.mbtiles".to_string(),
-            bridge_dz_path: "local/maps/bridge.mbtiles".to_string(),
+    }
+
+    #[test]
+    fn malformed_zoom_state_cannot_invert_request_clamping() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.use_local_mbtiles = true;
+        map.zoom = 17.0;
+        map.local_source_zoom_range = Some((20, 3));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+        map.local_source_zoom_range = Some((0, 31));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+    }
+
+    #[test]
+    fn archive_watcher_rejects_malformed_mbtiles_zoom_metadata() {
+        let path = temp_mbtiles_with_zoom("map-view-invalid-watch-zoom", "20", "3", 0);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((4, 6));
+        map.local_source_zoom_range_checked = true;
+        map.archive_watch_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+        <MapView as Widget>::handle_event(
+            &mut map,
+            &mut cx,
+            &Event::Startup,
+            &mut Scope::empty(),
+        );
+        assert!(map.archive_watch_in_flight);
+        for _ in 0..2_000 {
+            <MapView as Widget>::handle_event(
+                &mut map,
+                &mut cx,
+                &Event::Startup,
+                &mut Scope::empty(),
+            );
+            if !map.archive_watch_in_flight {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!map.archive_watch_in_flight);
+        assert_eq!(map.local_source_zoom_range, Some((4, 6)));
+        map.zoom = 5.0;
+        assert!((4..=6).contains(&map.request_zoom_level()));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_mbtiles_installed_on_map_view_dispatches_legacy_worker() {
+        let path = temp_mbtiles("map-view-legacy-dispatch");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 0.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((0, 0));
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.base_archive.is_none());
+        assert!(map.archive_pending_tiles.is_empty());
+        let mut message = None;
+        for _ in 0..2_000 {
+            if let Ok(received) = map.tile_worker_rx.try_recv() {
+                message = Some(received);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(matches!(
+            message,
+            Some(TileWorkerMessage::LocalBatchLoaded { loaded, .. }) if loaded.len() == 1
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn map_view_source_switch_reuses_archive_pool_and_thread_count() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://one.invalid/map"));
+        let first = map.archive_worker_pool.as_ref().unwrap().clone();
+        let thread_count = first.thread_count();
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://two.invalid/map"));
+        let second = map.archive_worker_pool.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&first, second));
+        assert_eq!(second.thread_count(), thread_count);
+        assert_eq!(thread_count, 2);
+    }
+
+    #[test]
+    fn detail_equal_to_base_issues_one_archive_request() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 14.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://tiles.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 14, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.detail_archive.is_none());
+        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 1);
+        assert!(map.archive_pending_tiles[&key].reuse_base_as_detail);
+    }
+
+    #[test]
+    fn same_zoom_pan_prunes_queued_build_and_loading_placeholder() {
+        let path = temp_mbtiles_with_zoom("map-view-same-zoom-prune", "3", "3", 3);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 3.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((3, 3));
+        map.ensure_tile_thread_pool(&mut cx);
+        let thread_count = map.tile_thread_pool.as_ref().unwrap().thread_count();
+        let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        for index in 0..thread_count {
+            let reached = reached.clone();
+            let release = release.clone();
+            map.tile_thread_pool.as_ref().unwrap().execute_rev(
+                TileKey { z: 30, x: index as i32, y: 0 },
+                move |_| {
+                    reached.wait();
+                    release.wait();
+                },
+            );
+        }
+        reached.wait();
+        let rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(64.0, 64.0),
         };
-        assert!(detail_matches_base(&config));
-        assert!(!needs_separate_detail_archive(&config));
-        let archive_request_count = 1 + usize::from(needs_separate_detail_archive(&config));
-        assert_eq!(archive_request_count, 1);
+        map.set_center(&mut cx, -90.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let requested_before = map
+            .local_requested_tiles
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(!requested_before.is_empty());
+
+        map.set_center(&mut cx, 0.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let stale = requested_before
+            .into_iter()
+            .filter(|key| !map.visible_tiles.contains(key))
+            .collect::<Vec<_>>();
+        assert!(!stale.is_empty());
+        for key in stale {
+            assert!(!map.local_requested_tiles.contains_key(&key));
+            assert!(!map.tiles.contains_key(&key));
+        }
+        assert!(map
+            .local_requested_tiles
+            .keys()
+            .any(|key| map.visible_tiles.contains(key)));
+
+        map.visible_tiles.clear();
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.local_requested_tiles.is_empty());
+        release.wait();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn real_timer_cancels_never_completing_archive_without_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 1.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://never.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 1);
+        *map.local_requested_tiles.get_mut(&key).unwrap() =
+            cx.seconds_since_app_start() - ARCHIVE_REQUEST_TIMEOUT_SECONDS;
+        let timer_id = map.archive_request_watchdog_timer.0;
+        <MapView as Widget>::handle_event(
+            &mut map,
+            &mut cx,
+            &Event::Timer(TimerEvent {
+                time: None,
+                timer_id,
+            }),
+            &mut Scope::empty(),
+        );
+        assert!(map.local_requested_tiles.is_empty());
+        assert!(map.archive_pending_tiles.is_empty());
+        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 0);
+        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 0);
+        assert!(!map.tiles.contains_key(&key));
     }
 }

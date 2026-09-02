@@ -13,6 +13,10 @@ pub const HOSTED_CONFIG: HostedConfig = HostedConfig {
     api: "https://makepad.nl/api",
 };
 
+pub fn hosted_tile_source() -> TileSourceConfig {
+    TileSourceConfig::http_archive(HOSTED_CONFIG.tiles)
+}
+
 /// Hosted demo provisioning has no modal, filesystem probes, or bake state.
 #[derive(Default)]
 pub struct MapProvisioner {
@@ -25,7 +29,7 @@ impl MapProvisioner {
             return;
         }
         self.installed = true;
-        map.set_source_config(cx, TileSourceConfig::http_archive(HOSTED_CONFIG.tiles));
+        map.set_source_config(cx, hosted_tile_source());
     }
 
     pub fn handle_event(&mut self) {}
