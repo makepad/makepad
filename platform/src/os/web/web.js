@@ -1342,6 +1342,11 @@ export class WasmWebBrowser extends WasmBridge {
                         console.error(data.value);
                         break;
 
+                    case "wake_ui":
+                        // the audio thread raised the UI signal (meters, transport state): pump like a wake
+                        this.do_wasm_pump();
+                        break;
+
                     case "audio_callback_started":
                         this.audio_callback_started = true;
                         if (this.audio_callback_watchdog !== null) {
