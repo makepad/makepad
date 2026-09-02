@@ -171,10 +171,13 @@ const SLOT_H: f64 = (CELL_H * SUPERSAMPLE) as f64;
 /// operator judged the earlier 6 fps sheet "a bit too low framerate" —
 /// half a bar of genuinely smooth motion beats a whole bar of slideshow.
 const CAPTURE_SPAN: f64 = 1.0;
-/// Document time between captured frames — and the exact `dt` each rendered
-/// frame is told passed, so the sheet plays back at the rate it was
-/// simulated at, on any machine.
-const FRAME_STEP: f64 = CAPTURE_SPAN / FRAME_COUNT as f64;
+/// The effect is always simulated at native's 30 Hz capture cadence. Web
+/// stores one representative cell, but that storage optimization must not
+/// turn the simulation step into one second or collapse feedback preroll.
+const TIMELINE_FRAMES: usize = 30;
+/// Document time between native timeline frames — and the exact `dt` each
+/// rendered frame is told passed, on every target.
+const FRAME_STEP: f64 = CAPTURE_SPAN / TIMELINE_FRAMES as f64;
 /// Document time to run before the first captured frame, so effects that
 /// build (emitter plumes, feedback trails, growth ramps) are underway.
 const PREROLL_SECS: f64 = 0.9;
@@ -269,7 +272,9 @@ pub struct FxThumbSheet {
 //    gate and decodes clean), so every r4 file retires and re-proves.
 // 7: cache payload is a portable JPEG atlas in Cx storage; web and native
 //    now share the same key/value path.
-pub const RECIPE: u32 = 7;
+// 8: web keeps native's 30 Hz timeline and 27-step feedback preroll even
+//    though it stores one representative cell.
+pub const RECIPE: u32 = 8;
 
 /// The same lever for the TWO-DECK STAND-INS alone
 /// ([`crate::effects::deck_pattern`]). A transition sheet is a picture OF
