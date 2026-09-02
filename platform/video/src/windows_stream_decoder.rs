@@ -119,7 +119,7 @@ impl WindowsStreamDecoder {
                 }
                 Err(e) => dbg::log(|| format!("h264dec: GetAttributes failed {e:?} (no low-latency mode)")),
             }
-            let codec_api = windows_mft::set_codec_api_bool(&transform, &CODECAPI_AV_LOW_LATENCY_MODE, true);
+            let codec_api = windows_mft::set_codec_api_u32(&transform, &CODECAPI_AV_LOW_LATENCY_MODE, 1);
             dbg::log(|| format!("h264dec: CODECAPI_AVLowLatencyMode set -> {codec_api:?}"));
             let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType(in)", e))?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| hr_err("set in major type", e))?;
