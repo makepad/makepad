@@ -96,8 +96,10 @@ pub(crate) unsafe fn process_input(transform: &IMFTransform, sample: &IMFSample)
     (vtbl.ProcessInput)(Interface::as_raw(transform), 0, Interface::as_raw(sample), 0)
 }
 
-/// Pulls one output sample. `provided_sample` must be `Some` (pre-allocated
-/// by the caller, sized from `get_output_stream_info().cbSize`) unless
+/// Pulls one output sample. Before the output type is negotiated the caller
+/// passes `None` so the MFT can report `MF_E_TRANSFORM_STREAM_CHANGE`.
+/// Afterwards, `provided_sample` must be `Some` (pre-allocated by the caller,
+/// sized from `get_output_stream_info().cbSize`) unless
 /// `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES` is set, in which case it must be
 /// `None`. Returns the raw HRESULT (compare against
 /// [`MF_E_TRANSFORM_NEED_MORE_INPUT`] for the loop's exit condition) and the
