@@ -2808,6 +2808,19 @@ pub(crate) mod fixtures {
         buffer
     }
 
+    /// The biggest jump between neighbouring samples in a rendered block.
+    ///
+    /// A click IS a step: the ear hears the discontinuity, not the level. Any
+    /// gain, band or lane move performed on an audible strip has to glide,
+    /// and this is how a test says so in one number. Measure it over a flat
+    /// signal and whatever comes back belongs to the move under test.
+    pub(crate) fn worst_adjacent_step(samples: &[f32]) -> f32 {
+        samples
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
     /// A tone at `frequency`, as a deck would hold it.
     pub(crate) fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
         let len = (rate as f64 * seconds) as usize;
@@ -2828,6 +2841,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
     use super::fixtures::*;
+    use crate::blend::EQ_VOCAL_DUCK;
 
     fn local_drum_bank() -> Option<Arc<SampleBank>> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3572,6 +3586,54 @@ mod tests {
     }
 
     #[test]
+    fn releasing_the_vocal_duck_is_click_free() {
+        // The EQ medium holds the incoming mid band down at prep and lets it
+        // go part-way through the fade, by which time that deck is audible.
+        // A gain move on a live strip is exactly where a click comes from,
+        // so the release has to glide.
+        //
+        // The signal has to live in the band under test — a flat one is all
+        // low band and would sail through this while hearing nothing — so a
+        // tone carries a step of its own, and the control block is what
+        // separates that from the move.
+        let settle = |mixer: &Mixer| {
+            mixer.set_master(1.0);
+            mixer.install_deck(DeckId::A, tone_pcm(800.0, 48_000, 10.0));
+            mixer.set_crossfader(0.0);
+            mixer.set_deck_playing(DeckId::A, true);
+        };
+
+        // The control sits at the gain the release LANDS on: a tone twice as
+        // loud steps twice as far all by itself, and comparing against the
+        // ducked block would read that as a click.
+        let control = Mixer::new();
+        settle(&control);
+        render(&control, 48_000.0, 8192);
+        let untouched = worst_adjacent_step(render(&control, 48_000.0, 8192).channel(0));
+
+        let mixer = Mixer::new();
+        settle(&mixer);
+        mixer.set_blend_band(DeckId::A, 1, EQ_VOCAL_DUCK);
+        render(&mixer, 48_000.0, 8192); // let the duck seat
+        mixer.set_blend_band(DeckId::A, 1, 1.0);
+        let out = render(&mixer, 48_000.0, 8192);
+        let released = worst_adjacent_step(out.channel(0));
+
+        assert!(
+            released < untouched * 1.5,
+            "the release must glide: {released} against {untouched} standing still"
+        );
+        // And it really did travel: a release that never moved would pass
+        // this for the wrong reason.
+        let quietest = out.channel(0).iter().copied().fold(f32::MAX, f32::min);
+        let loudest = out.channel(0).iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            loudest - quietest > 0.05,
+            "the mid band should climb back over the block, {quietest}..{loudest}"
+        );
+    }
+
+    #[test]
     fn crossing_into_a_loop_is_click_free() {
         let mixer = Mixer::new();
         mixer.set_master(1.0);
@@ -3585,10 +3647,7 @@ mod tests {
         // patient rule exists for.
         mixer.seek_deck_seconds(DeckId::A, 5.0 - 512.0 / 48_000.0);
         let out = render(&mixer, 48_000.0, 1024);
-        let mut worst = 0.0f32;
-        for i in 1..1024 {
-            worst = worst.max((out.channel(0)[i] - out.channel(0)[i - 1]).abs());
-        }
+        let worst = worst_adjacent_step(out.channel(0));
         assert!(
             worst < 0.02,
             "crossing IN must be continuous, biggest adjacent step {worst}"
