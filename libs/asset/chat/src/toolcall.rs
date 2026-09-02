@@ -339,24 +339,50 @@ fn first_json_object(s: &str) -> Option<&str> {
 /// capability text (advertised profiles, or why none are available).
 pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
     let mut out = String::new();
-    out.push_str(
-        "You are Qwen, the generation assistant for Makepad AI Content.\n\
-         You do work ONLY by emitting a tool call. Never claim an image, video, \
-         mesh, or other artifact exists unless a tool result said ok.\n\
-         If you reason, put ALL reasoning inside <think>...</think>. \
-         After </think>, emit exactly ONE tool call and STOP. \
-         Never put a tool call, backticks, or JSON examples inside thinking.\n",
-    );
+    // An AGENTIC session is one that advertises world tools — a running
+    // game. It legitimately carries image.generate too (missing art), so
+    // the presence of a generation tool must not decide the persona: a
+    // game session rendered as "the generation assistant", with its
+    // doctrine appended 19k characters later, answered "I can build that
+    // for you." and stopped (observed live 2026-09-02 against the exact
+    // prompt; the same request with the doctrine first emitted the call).
+    let agentic = defs.iter().any(|d| d.name.starts_with("world."));
+    // The executor's doctrine (BASE + profile brief for a game) is the
+    // most important text the model reads; it goes FIRST, before the
+    // protocol and the tool list, and is not repeated at the end.
+    let doctrine_first = agentic && !capabilities.trim().is_empty();
+    if doctrine_first {
+        out.push_str(capabilities.trim_end());
+        out.push_str("\n\n");
+    }
+    if agentic {
+        out.push_str(
+            "You are the in-game builder of the running Makepad sandbox game above. \
+             You do work ONLY by emitting a tool call; the world changes only when a \
+             tool result comes back.\n\
+             If you reason, put ALL reasoning inside <think>...</think>. \
+             After </think>, emit exactly ONE tool call and STOP. \
+             Never put a tool call, backticks, or JSON examples inside thinking.\n",
+        );
+    } else {
+        out.push_str(
+            "You are Qwen, the generation assistant for Makepad AI Content.\n\
+             You do work ONLY by emitting a tool call. Never claim an image, video, \
+             mesh, or other artifact exists unless a tool result said ok.\n\
+             If you reason, put ALL reasoning inside <think>...</think>. \
+             After </think>, emit exactly ONE tool call and STOP. \
+             Never put a tool call, backticks, or JSON examples inside thinking.\n",
+        );
+    }
     // Format + guidance follow the ADVERTISED surface. Generation sessions
     // (asset UI) keep the original `<<tool>>` JSON line unchanged; agentic
     // (game) sessions are taught the model's TRAINED tool template — the
     // format it reverts to under pressure anyway (harness law). The
     // extractor hears both either way.
-    let generation = defs.iter().any(|d| d.name == "image.generate");
-    if generation {
-        render_generation_guidance(&mut out);
-    } else {
+    if agentic {
         render_agentic_guidance(&mut out);
+    } else {
+        render_generation_guidance(&mut out);
     }
     // The serving box can carry a tool surface of its own (a "system
     // reminder" listing MCP functions: `mcp__gpt-image__gpt_image`,
@@ -380,7 +406,9 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
         out.push('\n');
     }
     out.push('\n');
-    out.push_str(capabilities);
+    if !doctrine_first {
+        out.push_str(capabilities);
+    }
     out
 }
 
