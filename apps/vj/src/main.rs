@@ -184,7 +184,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::columns::{Column, ColumnLayout};
-use crate::console::Console;
+use crate::console::{ClipLatch, Console};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
@@ -6937,6 +6937,9 @@ pub struct App {
     /// the number actually moves.
     #[rust]
     console_points: Option<(f64, f64)>,
+    /// The master clipped and has not been cleared.
+    #[rust]
+    console_clip: ClipLatch,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
     #[rust(TabStage::None)]
@@ -13793,6 +13796,20 @@ p2 {}
                 ),
             }
             self.audio_render_max_seen = health.render_max_nanos;
+        }
+        // The strip's one line, every pump: this is the only place these
+        // numbers reach the operator. Everything above them goes to the log,
+        // which nobody in a booth is reading.
+        let meters = self.mixer.meters();
+        let master = meters[crate::mixer::METER_MASTER];
+        self.console_clip.saw(master);
+        let line = crate::console::summary_line(&health, master, self.console_clip.lit());
+        self.set_status_label(cx, ids!(console_line), &line);
+        // The opened pane is the same numbers with the room to lay them out.
+        if self.console.panes().0 {
+            let decks = self.mixer.deck_levels();
+            let detail = crate::console::detail_text(&health, &meters, decks);
+            self.set_status_label(cx, ids!(console_numbers), &detail);
         }
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
