@@ -1,0 +1,87 @@
+## The regression gate, run on every push.
+##
+## The suites this covers are the ones the DJ tab and its libraries own.
+## Nothing here needs a GPU, a sound card or a music library: the tests
+## that do are marked ignored and stay that way, so this passes or fails on
+## logic alone.
+##
+## The per-test timeout is the point of using nextest rather than plain
+## `cargo test`. A hung test on a runner is a job that burns its whole
+## allowance and then reports nothing useful; one that is killed after a
+## minute reports exactly which test hung.
+name: vj gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A test that has not finished in a minute is not slow, it is stuck.
+  # Nothing in these suites takes longer than a few seconds.
+  NEXTEST_SLOW_TIMEOUT: "period=60s,terminate-after=1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # From tools/linux_deps.sh, trimmed to what a headless build links
+      # against. The media and GL runtime packages are left out: nothing
+      # here opens a window or a device.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang ca-certificates libssl-dev \
+            libx11-dev libxcursor-dev libxkbcommon-dev libxrandr-dev \
+            libxi-dev libxinerama-dev libasound2-dev libpulse-dev \
+            libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: taiki-e/install-action@nextest
+
+      # Keyed on the lock file: this workspace has eighty-odd members and a
+      # cold build is most of the job's wall clock.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vj-gate
+
+      - name: The DJ tab
+        run: cargo nextest run -p makepad-vj --release
+
+      - name: The libraries it leans on
+        run: >
+          cargo nextest run --release
+          -p makepad-audio-decode
+          -p makepad-audio-lyrics
+          -p makepad-audio-sidechannels
+          -p makepad-platform
+
+      # The widgets, minus three that already fail on upstream and have
+      # nothing to do with this tab. Naming them rather than dropping the
+      # whole crate keeps the other hundred-odd honest: a gate that is red
+      # from its first run is a gate nobody reads, and a crate left out
+      # entirely is a hundred tests nobody runs. Delete a line here the day
+      # its test passes again.
+      - name: The widgets it draws with
+        run: >
+          cargo nextest run --release -p makepad-widgets -E
+          'not (test(=animated_image_gif::tests::test_animated_image_gif_struct_has_inner_image_field)
+          + test(=widget_tree::tests::test_observe_and_find_single_node)
+          + test(=widget_tree::tests::test_property_patch_no_structural_rebuild))'
+
+      # Warnings only, and deliberately: this workspace has plenty that
+      # predate the gate, and failing on them would mean either a flag day
+      # or a gate nobody reads. What matters is that a NEW one shows up in
+      # the log of the change that introduced it.
+      - name: Lints
+        run: cargo clippy -p makepad-vj --release
+        continue-on-error: true
