@@ -76,6 +76,54 @@ fn publish_manifest(
     core.publish_batch(&[item], now).unwrap()[0].revision
 }
 
+fn publish_manifest_without_alias(
+    core: &AssetServerCore,
+    namespace: &str,
+    manifest: &AssetManifest,
+    now: u64,
+) -> AssetRevisionId {
+    let item = PublishBatchItem {
+        namespace: namespace.into(),
+        manifest_bytes: manifest.to_canonical_bytes().unwrap(),
+        annotation: annotation(manifest.kind, "unaliased fixture"),
+        alias: None,
+    };
+    core.publish_batch(&[item], now).unwrap()[0].revision
+}
+
+fn audio_manifest(id: AssetId, audio: &[u8], lyrics: Option<&[u8]>) -> AssetManifest {
+    let mut manifest = prop_manifest(id, b"unused", b"unused");
+    manifest.kind = AssetKind::Audio;
+    manifest.thumbnail = None;
+    manifest.files = vec![AssetFile {
+        role: FileRole::Audio,
+        tier: DeviceTier::Any,
+        lod: 0,
+        media: MediaType::Mp3,
+        blob: BlobId::hash_of(audio),
+        byte_len: audio.len() as u64,
+        dims: None,
+    }];
+    if let Some(lyrics) = lyrics {
+        manifest.files.push(AssetFile {
+            role: FileRole::Lyrics,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media: MediaType::Json,
+            blob: BlobId::hash_of(lyrics),
+            byte_len: lyrics.len() as u64,
+            dims: None,
+        });
+    }
+    manifest.metrics = Metrics {
+        total_bytes: manifest.files.iter().map(|file| file.byte_len).sum(),
+        media_millis: 1_000,
+        ..Default::default()
+    };
+    manifest.canonicalize();
+    manifest
+}
+
 fn list_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -217,7 +265,7 @@ fn deterministic_golden_rewrites_graph_and_indexes_every_route() {
     assert_eq!(report_a.revisions, 2);
     assert_eq!(report_a.aliases, 2);
     assert_eq!(report_a.snapshot_id.len(), 32);
-    assert_eq!(report_a.snapshot_id, "829331efd52b70bb45cfc9fb43479b4b");
+    assert_eq!(report_a.snapshot_id, "78d089faf3fa7a7405a73da60b4a8f10");
     assert!(report_a.snapshot_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     let alias = parse_file(&out_a.join("v1/aliases/pub/fixture/parent"));
@@ -409,6 +457,114 @@ fn public_page_is_bounded_sorted_and_redacted_by_type() {
         .unwrap();
     assert_eq!(second.assets[0].asset_id, asset_id_n(7));
     assert!(second.next.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn namespace_kind_and_limit_include_unaliased_assets_and_side_channels_read_only() {
+    let (root, core) = open_core("static_export_filters");
+    let song_a = b"MP3-A";
+    let song_b = b"MP3-B";
+    let lyrics = br#"{"lines":[]}"#;
+    let prop = b"PROP-GLB";
+    let thumb = b"PROP-PNG";
+    for bytes in [
+        song_a.as_slice(),
+        song_b.as_slice(),
+        lyrics.as_slice(),
+        prop.as_slice(),
+        thumb.as_slice(),
+    ] {
+        core.put_blob(bytes, NOW).unwrap();
+    }
+
+    let audio_a = audio_manifest(asset_id_n(10), song_a, Some(lyrics));
+    let audio_b = audio_manifest(asset_id_n(11), song_b, None);
+    publish_manifest_without_alias(&core, "music", &audio_a, NOW);
+    publish_manifest_without_alias(&core, "music", &audio_b, NOW + 1);
+    let prop_manifest = prop_manifest(asset_id_n(12), prop, thumb);
+    publish_manifest(&core, "other", "other/fixture/prop", &prop_manifest, NOW + 2);
+
+    // The exporter opens a separate read-only WAL reader while the writer is
+    // still alive; it neither needs nor takes the host's server.lock.
+    let reader = AssetServerCore::open_read_only(&root, Budgets::default_v1()).unwrap();
+
+    let out_all = root.join("export-all");
+    let all = export_static(&reader, &out_all, &StaticExportOptions::default()).unwrap();
+    assert_eq!((all.assets, all.revisions, all.aliases), (3, 3, 1));
+
+    let out_ns = root.join("export-ns");
+    let by_ns = export_static(
+        &reader,
+        &out_ns,
+        &StaticExportOptions {
+            namespace: Some("music".into()),
+            ..StaticExportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((by_ns.assets, by_ns.revisions, by_ns.aliases), (2, 2, 0));
+    assert!(out_ns.join(format!("v1/blobs/{}", BlobId::hash_of(lyrics))).is_file());
+
+    let out_kind = root.join("export-kind");
+    let by_kind = export_static(
+        &reader,
+        &out_kind,
+        &StaticExportOptions {
+            kind: Some(AssetKind::Audio),
+            ..StaticExportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((by_kind.assets, by_kind.revisions), (2, 2));
+
+    let out_zero = root.join("export-zero");
+    let zero = export_static(
+        &reader,
+        &out_zero,
+        &StaticExportOptions {
+            namespace: Some("music".into()),
+            kind: Some(AssetKind::Prop),
+            ..StaticExportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(zero.assets, 0);
+    assert_eq!(zero.live_assets_considered, 3);
+    assert_eq!(zero.excluded_namespace_mismatch, 1);
+    assert_eq!(zero.excluded_kind_mismatch, 2);
+
+    let out_limit = root.join("export-limit");
+    let limited = export_static(
+        &reader,
+        &out_limit,
+        &StaticExportOptions {
+            namespace: Some("music".into()),
+            limit: Some(1),
+            ..StaticExportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((limited.assets, limited.revisions), (1, 1));
+    assert_eq!(limited.excluded_limit, 1);
+
+    drop(reader);
+    drop(core);
+    raw::exec(&root.join("catalog.sqlite3"), "PRAGMA user_version=9");
+    let schema_v9_reader = AssetServerCore::open_read_only(&root, Budgets::default_v1()).unwrap();
+    assert_eq!(
+        schema_v9_reader
+            .public_export_page(PublicExportFilter {
+                namespace: Some("music"),
+                limit: 10,
+                ..PublicExportFilter::default()
+            })
+            .unwrap()
+            .assets
+            .len(),
+        2
+    );
+    drop(schema_v9_reader);
     let _ = std::fs::remove_dir_all(root);
 }
 

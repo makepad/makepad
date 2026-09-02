@@ -128,6 +128,21 @@ impl FsCas {
         })
     }
 
+    /// Open an existing CAS without creating directories or syncing metadata.
+    /// Static exports use this beside the live server and must be pure readers.
+    pub fn open_read_only(root: &Path, budgets: &Budgets) -> ServerResult<FsCas> {
+        let objects = root.join("objects");
+        if !objects.is_dir() {
+            return Err(ServerError::NotFound { what: "cas objects directory" });
+        }
+        Ok(FsCas {
+            objects,
+            tmp: root.join("tmp"),
+            max_blob_bytes: budgets.max_blob_bytes,
+            chunk: budgets.io_chunk_bytes,
+        })
+    }
+
     /// Crash recovery: every file under tmp/ is an abandoned in-flight write
     /// (commit renames out of tmp atomically). Delete them all; returns count.
     pub fn recover(&self) -> ServerResult<u64> {

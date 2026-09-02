@@ -202,18 +202,25 @@ fn run_export() {
             other => fail(&format!("unknown export-static flag {other}")),
         }
     }
-    let core = AssetServerCore::open(&root, Budgets::default_v1())
+    let core = AssetServerCore::open_read_only(&root, Budgets::default_v1())
         .unwrap_or_else(|error| fail(&format!("cannot open store: {error}")));
     let report = export_static(&core, &out, &options)
         .unwrap_or_else(|error| fail(&format!("static export failed: {error}")));
     println!(
-        "exported {} assets, {} revisions, {} aliases, {} blobs ({} omitted) as snapshot {}",
+        "exported {} assets, {} revisions, {} aliases, {} blobs ({} omitted) as snapshot {}; considered-live={}; excluded: namespace={}, no-published-revisions={}, kind={}, rights={}, budget={}, limit={}",
         report.assets,
         report.revisions,
         report.aliases,
         report.blobs_present,
         report.blobs_omitted,
         report.snapshot_id,
+        report.live_assets_considered,
+        report.excluded_namespace_mismatch,
+        report.excluded_no_published_revisions,
+        report.excluded_kind_mismatch,
+        report.excluded_rights,
+        report.excluded_budget,
+        report.excluded_limit,
     );
 }
 

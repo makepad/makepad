@@ -27,6 +27,8 @@ use makepad_asset_data::{
 };
 use std::path::Path;
 
+const STATIC_EXPORT_MIN_SCHEMA_VERSION: i64 = 9;
+
 /// The catalog schema version this build reads and writes, stored in
 /// SQLite's `user_version`.
 ///
@@ -321,6 +323,23 @@ impl AssetServerCore {
         db.exec("set foreign keys", "PRAGMA foreign_keys=ON")?;
 
         migrate(&db, &cas, &budgets)?;
+        Ok(Self { core: CatalogCore::from_parts(db, budgets), cas })
+    }
+
+    /// Open an existing store for static export without taking the server
+    /// lock, migrating the catalog, changing pragmas, or touching the CAS.
+    /// The read-only pager follows the live server's committed WAL snapshot.
+    pub fn open_read_only(root: &Path, budgets: Budgets) -> ServerResult<Self> {
+        budgets.validate()?;
+        if !root.is_dir() {
+            return Err(ServerError::NotFound { what: "server root" });
+        }
+        let cas = FsCas::open_read_only(&root.join("cas"), &budgets)?;
+        let db = Db::open_read_only(&root.join("catalog.sqlite3"))?;
+        let version = db.user_version()?;
+        if !(STATIC_EXPORT_MIN_SCHEMA_VERSION..=SERVER_SCHEMA_VERSION).contains(&version) {
+            return Err(ServerError::UnsupportedSchema { found: version });
+        }
         Ok(Self { core: CatalogCore::from_parts(db, budgets), cas })
     }
 

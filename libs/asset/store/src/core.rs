@@ -9,7 +9,7 @@ use crate::catalog::{CandidateRow, CandidateState, Catalog, CATALOG_SCHEMA};
 use crate::error::{ServerError, ServerResult};
 use crate::gc::{Gc, GC_SCHEMA};
 use crate::imports::{Imports, IMPORT_SCHEMA};
-use crate::search::{kind_name, kind_parse, AssetAnnotation, Search, SEARCH_SCHEMA};
+use crate::search::{kind_parse, AssetAnnotation, Search, SEARCH_SCHEMA};
 use crate::sqlite::Db;
 use crate::variants::{Variants, VARIANT_SCHEMA};
 use makepad_asset_data::{
@@ -151,7 +151,8 @@ impl CatalogCore {
     }
 
     /// Enumerate a bounded, public-only page for a sink-independent export
-    /// planner. No filesystem path or transport value crosses this boundary.
+    /// planner. Asset identity and published revision state are catalog truth;
+    /// aliases and public/live search text are optional projections.
     pub fn public_export_page(
         &self,
         filter: PublicExportFilter<'_>,
@@ -166,87 +167,133 @@ impl CatalogCore {
         if let Some(namespace) = filter.namespace {
             crate::catalog::validate_namespace(namespace)?;
         }
-        let mut stmt = self.db.prepare(
-            "public export page",
-            "SELECT a.asset_id, a.namespace, a.created_ms,
-                    sa.title, sa.description, sa.kind, sa.creator,
-                    sa.generator, sa.backend, sa.model, sa.updated_ms
-             FROM assets a
-             JOIN search_annotations sa ON sa.asset_id = a.asset_id
-             WHERE a.retired_ms IS NULL
-               AND sa.visibility = 'public' AND sa.live = 1
-               AND (?1 IS NULL OR a.namespace = ?1)
-               AND (?2 IS NULL OR sa.kind = ?2)
-               AND (?3 IS NULL OR a.asset_id > ?3)
-               AND EXISTS(
-                    SELECT 1 FROM asset_aliases aa
-                    JOIN candidates c ON c.kind='asset'
-                       AND c.owner_id=aa.asset_id AND c.revision=aa.head_revision
-                    WHERE aa.asset_id=a.asset_id AND c.state='published'
-                      AND c.retired_ms IS NULL)
-             ORDER BY a.asset_id LIMIT ?4",
-        )?;
-        match filter.namespace {
-            Some(namespace) => stmt.bind_text(1, namespace)?,
-            None => stmt.bind_null(1)?,
-        }
-        match filter.kind {
-            Some(kind) => stmt.bind_text(2, kind_name(kind))?,
-            None => stmt.bind_null(2)?,
-        }
-        match filter.after {
-            Some(asset_id) => stmt.bind_blob(3, asset_id.as_bytes())?,
-            None => stmt.bind_null(3)?,
-        }
-        stmt.bind_u64(4, filter.limit as u64 + 1)?;
+        let wanted = filter.limit as usize + 1;
+        let scan_limit = self.budgets.max_search_results as u64;
+        let mut scan_after = filter.after;
+        let mut assets = Vec::with_capacity(wanted);
+        while assets.len() < wanted {
+            let mut stmt = self.db.prepare(
+                "public export page",
+                "SELECT a.asset_id, a.namespace, a.created_ms, sa.asset_id,
+                        sa.title, sa.description, sa.kind, sa.creator,
+                        sa.generator, sa.backend, sa.model, sa.updated_ms
+                 FROM assets a
+                 LEFT JOIN search_annotations sa ON sa.asset_id=a.asset_id
+                    AND sa.visibility='public' AND sa.live=1
+                 WHERE a.retired_ms IS NULL
+                   AND (?1 IS NULL OR a.namespace=?1)
+                   AND (?2 IS NULL OR a.asset_id>?2)
+                 ORDER BY a.asset_id LIMIT ?3",
+            )?;
+            match filter.namespace {
+                Some(namespace) => stmt.bind_text(1, namespace)?,
+                None => stmt.bind_null(1)?,
+            }
+            match scan_after {
+                Some(asset_id) => stmt.bind_blob(2, asset_id.as_bytes())?,
+                None => stmt.bind_null(2)?,
+            }
+            stmt.bind_u64(3, scan_limit)?;
 
-        let mut base = Vec::new();
-        while stmt.step()? {
-            base.push((
-                AssetId::from_bytes(crate::catalog::fixed16(
-                    &stmt.column_blob(0),
-                    "public export asset id",
-                )?),
-                stmt.column_text(1),
-                stmt.column_u64(2),
-                stmt.column_text(3),
-                stmt.column_text(4),
-                if stmt.column_is_null(5) {
-                    None
-                } else {
-                    Some(kind_parse(&stmt.column_text(5)).ok_or(
-                        ServerError::InvalidState {
-                            what: "public export annotation kind",
-                            state: "unknown",
-                        },
-                    )?)
-                },
-                stmt.column_text(6),
-                stmt.column_text(7),
-                stmt.column_text(8),
-                stmt.column_text(9),
-                stmt.column_u64(10),
-            ));
-        }
-        drop(stmt);
-        let more = base.len() > filter.limit as usize;
-        base.truncate(filter.limit as usize);
-        let next = if more { base.last().map(|row| row.0) } else { None };
-        let mut assets = Vec::with_capacity(base.len());
-        for (
-            asset_id,
-            namespace,
-            created_ms,
-            title,
-            description,
-            kind,
-            creator,
-            generator,
-            backend,
-            model,
-            updated_ms,
-        ) in base
-        {
+            let mut base = Vec::new();
+            while stmt.step()? {
+                base.push((
+                    AssetId::from_bytes(crate::catalog::fixed16(
+                        &stmt.column_blob(0),
+                        "public export asset id",
+                    )?),
+                    stmt.column_text(1),
+                    stmt.column_u64(2),
+                    !stmt.column_is_null(3),
+                    stmt.column_text(4),
+                    stmt.column_text(5),
+                    if stmt.column_is_null(6) {
+                        None
+                    } else {
+                        Some(kind_parse(&stmt.column_text(6)).ok_or(
+                            ServerError::InvalidState {
+                                what: "public export annotation kind",
+                                state: "unknown",
+                            },
+                        )?)
+                    },
+                    stmt.column_text(7),
+                    stmt.column_text(8),
+                    stmt.column_text(9),
+                    stmt.column_text(10),
+                    stmt.column_u64(11),
+                ));
+            }
+            drop(stmt);
+            if base.is_empty() {
+                break;
+            }
+            let scanned = base.len();
+            scan_after = base.last().map(|row| row.0);
+
+            for (
+                asset_id,
+                namespace,
+                created_ms,
+                has_public_search,
+                title,
+                description,
+                kind,
+                creator,
+                generator,
+                backend,
+                model,
+                updated_ms,
+            ) in base
+            {
+                let mut revisions = Vec::new();
+                let mut revision_stmt = self.db.prepare(
+                    "public export revisions",
+                    "SELECT c.revision, c.staged_ms, c.published_ms, r.manifest
+                     FROM candidates c
+                     JOIN asset_revisions r ON r.revision=c.revision
+                        AND r.asset_id=c.owner_id
+                     WHERE c.kind='asset' AND c.owner_id=?1
+                       AND c.state='published' AND c.retired_ms IS NULL
+                     ORDER BY c.published_ms, c.revision LIMIT ?2",
+                )?;
+                revision_stmt.bind_blob(1, asset_id.as_bytes())?;
+                revision_stmt.bind_u64(2, self.budgets.max_search_index_terms as u64 + 1)?;
+                while revision_stmt.step()? {
+                    let revision = AssetRevisionId::from_bytes(crate::catalog::fixed32(
+                        &revision_stmt.column_blob(0),
+                        "public export revision",
+                    )?);
+                    let manifest = AssetManifest::from_canonical_bytes(
+                        &revision_stmt.column_blob(3),
+                    )?;
+                    if manifest.asset_id != asset_id {
+                        return Err(ServerError::Conflict {
+                            what: "public export revision asset",
+                        });
+                    }
+                    revisions.push(PublicAssetRevision {
+                        target: AssetRevisionRef { asset_id, revision },
+                        kind: manifest.kind,
+                        staged_ms: revision_stmt.column_u64(1),
+                        published_ms: revision_stmt.column_u64(2),
+                    });
+                }
+                drop(revision_stmt);
+                if revisions.len() > self.budgets.max_search_index_terms as usize {
+                    return Err(ServerError::OverBudget {
+                        what: "public export revisions per asset",
+                        limit: self.budgets.max_search_index_terms as u64,
+                        found: revisions.len() as u64,
+                    });
+                }
+                if filter
+                    .kind
+                    .is_some_and(|wanted| !revisions.iter().any(|row| row.kind == wanted))
+                {
+                    continue;
+                }
+
             let mut aliases = Vec::new();
             let mut alias_stmt = self.db.prepare(
                 "public export aliases",
@@ -282,61 +329,75 @@ impl CatalogCore {
                 });
             }
 
-            let mut categories = Vec::new();
-            let mut tags = Vec::new();
-            let mut labels = self.db.prepare(
-                "public export labels",
-                "SELECT kind, label FROM search_labels
-                 WHERE asset_id=?1 ORDER BY kind, label",
-            )?;
-            labels.bind_blob(1, asset_id.as_bytes())?;
-            while labels.step()? {
-                if labels.column_text(0) == "category" {
-                    categories.push(labels.column_text(1));
-                } else {
-                    tags.push(labels.column_text(1));
+                let mut categories = Vec::new();
+                let mut tags = Vec::new();
+                let mut terms = Vec::new();
+                if has_public_search {
+                    let mut labels = self.db.prepare(
+                        "public export labels",
+                        "SELECT kind, label FROM search_labels
+                         WHERE asset_id=?1 ORDER BY kind, label",
+                    )?;
+                    labels.bind_blob(1, asset_id.as_bytes())?;
+                    while labels.step()? {
+                        if labels.column_text(0) == "category" {
+                            categories.push(labels.column_text(1));
+                        } else {
+                            tags.push(labels.column_text(1));
+                        }
+                    }
+                    drop(labels);
+
+                    let mut postings = self.db.prepare(
+                        "public export postings",
+                        "SELECT term, SUM(weight) FROM (
+                             SELECT term, weight_public AS weight FROM search_postings
+                             WHERE asset_id=?1 AND weight_public>0
+                             UNION ALL
+                             SELECT term, weight FROM search_alias_postings
+                             WHERE asset_id=?1 AND weight>0
+                         ) GROUP BY term ORDER BY term",
+                    )?;
+                    postings.bind_blob(1, asset_id.as_bytes())?;
+                    while postings.step()? {
+                        terms.push(PublicSearchTerm {
+                            term: postings.column_text(0),
+                            weight: postings.column_u64(1),
+                        });
+                    }
+                }
+
+                assets.push(PublicExportAsset {
+                    asset_id,
+                    namespace,
+                    created_ms,
+                    revisions,
+                    aliases,
+                    search: PublicSearchProjection {
+                        title,
+                        description,
+                        kind,
+                        categories,
+                        tags,
+                        creator,
+                        generator,
+                        backend,
+                        model,
+                        updated_ms,
+                        terms,
+                    },
+                });
+                if assets.len() == wanted {
+                    break;
                 }
             }
-            drop(labels);
-
-            let mut terms = Vec::new();
-            let mut postings = self.db.prepare(
-                "public export postings",
-                "SELECT term, SUM(weight) FROM (
-                     SELECT term, weight_public AS weight FROM search_postings
-                     WHERE asset_id=?1 AND weight_public>0
-                     UNION ALL
-                     SELECT term, weight FROM search_alias_postings
-                     WHERE asset_id=?1 AND weight>0
-                 ) GROUP BY term ORDER BY term",
-            )?;
-            postings.bind_blob(1, asset_id.as_bytes())?;
-            while postings.step()? {
-                terms.push(PublicSearchTerm {
-                    term: postings.column_text(0),
-                    weight: postings.column_u64(1),
-                });
+            if assets.len() == wanted || scanned < scan_limit as usize {
+                break;
             }
-            assets.push(PublicExportAsset {
-                asset_id,
-                namespace,
-                created_ms,
-                aliases,
-                search: PublicSearchProjection {
-                    title,
-                    description,
-                    kind,
-                    categories,
-                    tags,
-                    creator,
-                    generator,
-                    backend,
-                    model,
-                    updated_ms,
-                    terms,
-                },
-            });
         }
+        let more = assets.len() > filter.limit as usize;
+        assets.truncate(filter.limit as usize);
+        let next = if more { assets.last().map(|row| row.asset_id) } else { None };
         Ok(PublicExportPage { assets, next })
     }
 
@@ -486,6 +547,14 @@ pub struct PublicAliasHead {
     pub published_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicAssetRevision {
+    pub target: AssetRevisionRef,
+    pub kind: AssetKind,
+    pub staged_ms: u64,
+    pub published_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicSearchTerm {
     pub term: String,
@@ -512,6 +581,7 @@ pub struct PublicExportAsset {
     pub asset_id: AssetId,
     pub namespace: String,
     pub created_ms: u64,
+    pub revisions: Vec<PublicAssetRevision>,
     pub aliases: Vec<PublicAliasHead>,
     pub search: PublicSearchProjection,
 }
