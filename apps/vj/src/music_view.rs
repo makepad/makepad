@@ -1746,8 +1746,8 @@ script_mod! {
                 deck_a_key := KeyReadout{text: "—"}
                 deck_a_time := MusicLabel{width: 78 text: "0:00 / 0:00"}
             }
-            // QUANT, not SNAP: an immediate, phase-preserving jump —
-            // Traktor's word for exactly this. SNAP stays reserved for
+            // QUANT, not SNAP: an immediate, phase-preserving jump, which
+            // is what the word means here. SNAP stays reserved for
             // placement rounding, which this deliberately is not. It sits
             // at the console's center line, between the two decks it
             // gates equally.
@@ -2231,7 +2231,7 @@ script_mod! {
                         deck_a_loop_halve := MusicButton{width: 22 height: 24 text: "-"}
                         deck_a_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
                         deck_a_loop_double := MusicButton{width: 22 height: 24 text: "+"}
-                        // The CDJ's loop pair, in glyphs that read as the marks
+                        // The loop pair, in glyphs that read as the marks
                         // they set: `[` in, `]` out. The loop icon left of the
                         // stepper is RELOOP/EXIT; the sparkle past them opens the
                         // scanner, which is also where marks go to be forgotten.
@@ -2748,7 +2748,7 @@ script_mod! {
                         }
                         // NOT mirrored like the rest of the row: IN then OUT is the
                         // temporal order of the gesture, and hands read it
-                        // left-to-right on every CDJ regardless of deck side.
+                        // left-to-right on any deck regardless of its side.
                         deck_b_loop_in := MusicButton{width: 22 height: 24 text: "["}
                         deck_b_loop_out := MusicButton{width: 22 height: 24 text: "]"}
                         // − and +, matching deck A: these size a loop, and the

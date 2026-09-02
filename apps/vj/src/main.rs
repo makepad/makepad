@@ -21866,7 +21866,7 @@ p2 {}
             let words_have = self.deck_lyrics[index].is_some();
             let kar_mode = self.deck_karaoke_mode[index];
             self.paint_kar_title(cx, ids.kar_title, index, kar_mode, words_have);
-            // CDJ law: the button that is FLASHING is the one you press
+            // The button that is FLASHING is the one you press
             // next. `[` has placed an IN point and `]` is holding a
             // half-finished loop — a state worth telling apart from
             // "looping" at a glance, which is why it is not just lit.

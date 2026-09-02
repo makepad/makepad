@@ -288,8 +288,8 @@ impl ApcModel {
 
     /// Note number for VJ pad `index` (0 = top-left of the 5×8 surface).
     ///
-    /// BOTH devices number their clip-grid rows BOTTOM-up (Ableton session
-    /// convention): the mkII's 5×8 grid has note 0 at bottom-left and 32 at
+    /// BOTH devices number their clip-grid rows BOTTOM-up, the clip-launcher
+    /// convention: the mkII's 5×8 grid has note 0 at bottom-left and 32 at
     /// top-left; the mini mk2's 8×8 grid has note 0 bottom-left and 56
     /// top-left (the VJ's five rows sit on its top five, bottom three stay
     /// dark). Mapping the mkII top-down mirrored the whole surface — a
