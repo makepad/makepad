@@ -976,6 +976,9 @@ impl Cx {
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::StartDragging(items) => {
+                    self.drag_drop.start_internal_drag(items);
+                }
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Web");
                     self.call_event_handler(&Event::DragEnd);

@@ -858,7 +858,7 @@ impl WaylandCx {
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::StartDragging(items) => {
-                    state.start_internal_drag(items);
+                    cx.drag_drop.start_internal_drag(items);
                 }
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Wayland");

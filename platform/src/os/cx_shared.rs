@@ -1147,6 +1147,22 @@ impl Cx {
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
+        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        if let Some(event) = self.drag_drop.internal_drag_event(event) {
+            match event {
+                crate::event::InternalDragEvent::Drag(event) => {
+                    self.call_event_handler(&Event::Drag(event));
+                    self.drag_drop.cycle_drag();
+                }
+                crate::event::InternalDragEvent::Drop(event) => {
+                    self.call_event_handler(&Event::Drop(event));
+                    self.drag_drop.cycle_drag();
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+            }
+            return;
+        }
         if !matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
         }
