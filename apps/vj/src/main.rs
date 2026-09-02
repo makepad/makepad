@@ -109,6 +109,7 @@ mod notes_map;
 mod music_dsp;
 mod music_import_ui;
 mod music_view;
+mod advisor;
 mod arc;
 mod mix_facts;
 mod pick;

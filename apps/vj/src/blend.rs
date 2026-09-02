@@ -119,6 +119,10 @@ pub enum Route {
     Short,
 }
 
+impl Route {
+    pub const ALL: [Route; 3] = [Route::Handover, Route::Pickup, Route::Short];
+}
+
 /// The route, and why.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutePick {
