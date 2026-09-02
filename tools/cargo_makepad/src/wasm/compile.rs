@@ -265,6 +265,55 @@ fn print_brotli_size_report(
     }
 }
 
+/// FNV-1a over the bytes, 16 hex chars: enough to make a changed build a new URL.
+fn content_hash_hex(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// A package artifact of a previous build of `build_bin`: the primary wasm, the secondary
+/// (function-split) wasm and the split data blob, with or without a content hash and with or
+/// without the `.br` sibling. The analysis-only `<bin>.names.wasm` is not one.
+fn is_package_artifact(build_bin: &str, file_name: &str) -> bool {
+    let name = file_name.strip_suffix(".br").unwrap_or(file_name);
+    let Some(rest) = name.strip_prefix(build_bin) else {
+        return false;
+    };
+    let mid = if let Some(mid) = rest.strip_suffix(".wasm") {
+        mid.strip_prefix(".secondary").unwrap_or(mid)
+    } else if let Some(mid) = rest.strip_suffix(".bin") {
+        match mid.strip_prefix(".data") {
+            Some(mid) => mid,
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    match mid.strip_prefix('.') {
+        None => mid.is_empty(),
+        Some(hash) => hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+    }
+}
+
+fn remove_package_artifacts(app_dir: &Path, build_bin: &str) {
+    let Ok(entries) = fs::read_dir(app_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if is_package_artifact(build_bin, file_name) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub fn generate_html(
     wasm: &str,
     split_data_path: Option<&str>,
@@ -935,7 +984,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         build_dir.join(format!("{}.wasm", build_bin))
     };
 
-    let wasm_dest = app_dir.join(format!("{}.wasm", build_bin));
     let named_wasm_dest = app_dir.join(format!("{}.names.wasm", build_bin));
     let data = fs::read(&wasm_source)
         .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
@@ -964,12 +1012,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     if config.wasm_opt {
         output = try_wasm_opt(&output, &cwd);
     }
+    // Package artifacts carry a content hash in their name so a re-upload is a new URL and
+    // `immutable` caching is correct; drop the previous build's set first.
+    remove_package_artifacts(&app_dir, &build_bin);
 
     // `--split` implies function splitting as part of the higher-level split pipeline.
     let split_functions_enabled = config.split || config.split_functions;
 
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
-    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_bin));
     let mut defer_secondary_wasm = false;
     let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
     let secondary_wasm_path = if split_functions_enabled {
@@ -1016,8 +1066,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     config.split_functions_threshold
                 );
             }
-            let _ = fs::remove_file(&secondary_wasm_dest);
-            remove_brotli_artifact(&secondary_wasm_dest);
             None
         } else {
             if config.split_auto && config.split {
@@ -1043,22 +1091,23 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             println!("  primary:   {} bytes", result.primary_wasm.len());
             println!("  secondary: {} bytes", result.secondary_wasm.len());
             output = result.primary_wasm;
+            let secondary_name = format!(
+                "{}.secondary.{}.wasm",
+                build_bin,
+                content_hash_hex(&result.secondary_wasm)
+            );
+            let secondary_wasm_dest = app_dir.join(&secondary_name);
             fs::write(&secondary_wasm_dest, &result.secondary_wasm)
                 .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
             if config.brotli {
                 brotli_compress(&secondary_wasm_dest);
-            } else {
-                remove_brotli_artifact(&secondary_wasm_dest);
             }
-            Some(format!("./{}.secondary.wasm", build_bin))
+            Some(format!("./{secondary_name}"))
         }
     } else {
-        let _ = fs::remove_file(&secondary_wasm_dest);
-        remove_brotli_artifact(&secondary_wasm_dest);
         None
     };
 
-    let split_data_dest = app_dir.join(format!("{}.data.bin", build_bin));
     let mut split_data_bytes = None;
     let mut split_brotli_bytes = None;
     let split_data_path = if config.split {
@@ -1074,26 +1123,28 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         );
         output = split.primary_wasm;
         if split.split_data.is_empty() {
-            let _ = fs::remove_file(&split_data_dest);
-            remove_brotli_artifact(&split_data_dest);
             None
         } else {
             split_data_bytes = Some(split.split_data.len());
+            let split_data_name = format!(
+                "{}.data.{}.bin",
+                build_bin,
+                content_hash_hex(&split.split_data)
+            );
+            let split_data_dest = app_dir.join(&split_data_name);
             fs::write(&split_data_dest, &split.split_data)
                 .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
             if config.brotli {
                 split_brotli_bytes = Some(brotli_compress(&split_data_dest));
-            } else {
-                remove_brotli_artifact(&split_data_dest);
             }
-            Some(format!("./{}.data.bin", build_bin))
+            Some(format!("./{split_data_name}"))
         }
     } else {
-        let _ = fs::remove_file(&split_data_dest);
-        remove_brotli_artifact(&split_data_dest);
         None
     };
 
+    let wasm_name = format!("{}.{}", build_bin, content_hash_hex(&output));
+    let wasm_dest = app_dir.join(format!("{wasm_name}.wasm"));
     fs::write(&wasm_dest, output)
         .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
     let wasm_bytes = fs::metadata(&wasm_dest)
@@ -1108,7 +1159,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     // generate html file
     let index_path = app_dir.join("index.html");
     let html = generate_html(
-        &build_bin,
+        &wasm_name,
         split_data_path.as_deref(),
         secondary_wasm_path.as_deref(),
         defer_secondary_wasm,
@@ -2298,5 +2349,41 @@ mod tests {
             Some(123)
         );
         assert_eq!(parse_binaryen_version("unexpected output"), None);
+    }
+
+    #[test]
+    fn package_artifacts_are_the_hashed_or_legacy_outputs_only() {
+        for name in [
+            "app.wasm",
+            "app.wasm.br",
+            "app.0123456789abcdef.wasm",
+            "app.0123456789abcdef.wasm.br",
+            "app.secondary.wasm",
+            "app.secondary.fedcba9876543210.wasm.br",
+            "app.data.bin",
+            "app.data.0123456789abcdef.bin.br",
+        ] {
+            assert!(is_package_artifact("app", name), "{name}");
+        }
+        for name in [
+            "app.names.wasm",
+            "application.wasm",
+            "app.0123.wasm",
+            "app.0123456789abcdeg.wasm",
+            "app.data.wasm",
+            "app.secondary.bin",
+            "index.html",
+            "app.wasm.br.old",
+        ] {
+            assert!(!is_package_artifact("app", name), "{name}");
+        }
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_content_sensitive() {
+        assert_eq!(content_hash_hex(b""), "cbf29ce484222325");
+        assert_eq!(content_hash_hex(b"a"), "af63dc4c8601ec8c");
+        assert_ne!(content_hash_hex(b"ab"), content_hash_hex(b"ba"));
+        assert_eq!(content_hash_hex(b"makepad").len(), 16);
     }
 }
