@@ -42,6 +42,10 @@ pub struct App {
     /// the window's own F10 overlay when standalone.
     #[rust]
     ai_port: Option<AiServicePort>,
+    /// Answers the wall sends later (an `add` finishing on its bake thread),
+    /// drained to the port on every event.
+    #[rust]
+    late_replies: Option<std::sync::mpsc::Receiver<makepad_ai_services::wire::ToolResult>>,
 }
 
 impl App {
@@ -56,12 +60,14 @@ impl App {
                     log!("photos: AI service registered as {}", endpoint.as_str());
                 }
                 PortEvent::Call(call) => {
-                    let result = match self.ui.widget(cx, ids!(photos)).borrow_mut::<PhotosView>() {
+                    let answered = match self.ui.widget(cx, ids!(photos)).borrow_mut::<PhotosView>() {
                         Some(mut view) => ai::answer(cx, &mut view, &call),
-                        None => makepad_ai_services::wire::ToolResult::unavailable(&call.call_id, "the wall is gone"),
+                        None => ai::Answered::Now(makepad_ai_services::wire::ToolResult::unavailable(&call.call_id, "the wall is gone")),
                     };
-                    if let Some(port) = self.ai_port.as_ref() {
-                        port.reply(result);
+                    if let ai::Answered::Now(result) = answered {
+                        if let Some(port) = self.ai_port.as_ref() {
+                            port.reply(result);
+                        }
                     }
                 }
                 // Nothing here runs long enough to cancel, and the wall has
@@ -76,6 +82,15 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         makepad_wm_api::set_title(cx, "Photos");
+        // The wall answers an `add` when its bake thread reports: route
+        // those answers to the port through a channel this App drains.
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(mut view) = self.ui.widget(cx, ids!(photos)).borrow_mut::<PhotosView>() {
+            view.set_reply(Box::new(move |result| {
+                let _ = tx.send(result);
+            }));
+        }
+        self.late_replies = Some(rx);
     }
 
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
@@ -106,5 +121,11 @@ impl AppMain for App {
         self.drain_ai_port(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // An add that finished during this event answers now.
+        if let (Some(rx), Some(port)) = (self.late_replies.as_ref(), self.ai_port.as_ref()) {
+            while let Ok(result) = rx.try_recv() {
+                port.reply(result);
+            }
+        }
     }
 }
