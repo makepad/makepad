@@ -82,7 +82,7 @@ pub fn cache_dir() -> PathBuf {
     if let Some(dir) = crate::preprocess::cache_subdir(crate::preprocess::STEMS_SUBDIR) {
         return dir;
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/stem-cache")
+    crate::service::data_root().join("stem-cache")
 }
 
 /// How much disk the span cache may hold. `VJ_STEMS_CACHE_BUDGET` (bytes)

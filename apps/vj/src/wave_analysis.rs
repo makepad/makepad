@@ -1996,8 +1996,7 @@ pub fn cache_dir() -> PathBuf {
     if let Some(dir) = crate::preprocess::cache_subdir(crate::preprocess::WAVE_SUBDIR) {
         return dir;
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/vj/wave-cache")
+    crate::service::data_root().join("wave-cache")
 }
 
 fn cache_path(dir: &Path, key: &AnalysisKey) -> PathBuf {

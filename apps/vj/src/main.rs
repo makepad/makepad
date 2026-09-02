@@ -10888,7 +10888,7 @@ p2 {}
     /// Where the last-active surface sleeps between sessions: one word in
     /// a file, so closing on the DJ tab reopens on the DJ tab.
     fn ui_surface_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/ui-surface")
+        crate::service::data_root().join("ui-surface")
     }
 
     fn save_ui_surface(surface: ApcSurface) {
@@ -10919,9 +10919,7 @@ p2 {}
         for byte in item.asset.as_bytes() {
             name.push_str(&format!("{byte:02x}"));
         }
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/vj/loop-marks")
-            .join(name)
+        crate::service::data_root().join("loop-marks").join(name)
     }
 
     /// The SAVE button: write the deck's marks beside the library.
@@ -10991,9 +10989,7 @@ p2 {}
         for byte in item.asset.as_bytes() {
             name.push_str(&format!("{byte:02x}"));
         }
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/vj/found-loops")
-            .join(name)
+        crate::service::data_root().join("found-loops").join(name)
     }
 
     fn save_found_loops(&self, deck: DeckId) {

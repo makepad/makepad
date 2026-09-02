@@ -12,7 +12,10 @@
 //! - `VJ_ASSET_TOKEN=mpat_…` — bearer token; then
 //!   `VJ_ASSET_ADMIN_TOKEN_FILE`, then that same root's `admin-token`,
 //!   then the legacy `~/.makepad-vj/asset-server.token`,
-//! - `VJ_ASSET_CACHE=<dir>` — cache parent, default `~/.makepad-vj`.
+//! - `VJ_ASSET_CACHE=<dir>` — the root for EVERYTHING the VJ owns, not
+//!   only the caches: marks, found loops, settings, the last-open surface
+//!   and the token all sit under it. Default is the checkout's
+//!   `local/vj`. See `data_root`.
 
 use crate::lanes;
 use makepad_asset_client::{ApiEndpoints, SessionConfig};
@@ -92,18 +95,38 @@ fn attach_local_asset_db(home: &Path) -> Option<LocalAssetDb> {
     None
 }
 
+/// Where the VJ keeps everything it owns: caches, marks, settings, tokens.
+///
+/// ONE answer, for every one of them. Some paths used to read
+/// `$VJ_ASSET_CACHE` and some went straight to the checkout, so pointing
+/// that variable somewhere else moved half the store and left the other
+/// half where it was — the marks, the found loops and the last-open
+/// surface stayed behind while their caches moved.
+pub fn data_root() -> PathBuf {
+    data_root_from(std::env::var("VJ_ASSET_CACHE").ok().as_deref())
+}
+
+/// The choice on its own, so it can be tested without touching the
+/// environment every test in the process shares.
+pub fn data_root_from(chosen: Option<&str>) -> PathBuf {
+    match chosen {
+        // An empty variable is not a choice. It used to become an empty
+        // path, which quietly writes the whole store into the working
+        // directory.
+        Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj"),
+    }
+}
+
 /// The VJ's session config from environment conventions.
 pub fn session_config_from_env() -> SessionConfig {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    let vj_home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj");
-    let cache_parent = std::env::var("VJ_ASSET_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| vj_home.clone());
+    let cache_parent = data_root();
     let local = attach_local_asset_db(&home);
 
-    let mut config = SessionConfig::new(cache_parent);
+    let mut config = SessionConfig::new(cache_parent.clone());
     // The catalog runtime carries EVERY small request the grids make:
     // listings, a detail and a manifest per tile, and every thumbnail blob.
     // The shared default of four workers is sized for an app that browses;
@@ -140,6 +163,27 @@ pub fn session_config_from_env() -> SessionConfig {
             read_trimmed(Path::new(&path))
         })
         .or_else(|| local.as_ref().and_then(|db| db.token.clone()))
-        .or_else(|| read_trimmed(&vj_home.join("asset-server.token")));
+        .or_else(|| read_trimmed(&cache_parent.join("asset-server.token")));
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chosen_root_is_where_everything_goes() {
+        assert_eq!(data_root_from(Some("F:/somewhere/else")), PathBuf::from("F:/somewhere/else"));
+        assert_eq!(data_root_from(Some("  F:/padded  ")), PathBuf::from("F:/padded"));
+    }
+
+    #[test]
+    fn no_choice_and_an_empty_choice_both_mean_the_checkout() {
+        let fallback = data_root_from(None);
+        assert!(fallback.ends_with("local/vj"), "{fallback:?}");
+        // An empty variable used to become an empty path, which writes the
+        // whole store into whatever directory the app happened to start in.
+        assert_eq!(data_root_from(Some("")), fallback);
+        assert_eq!(data_root_from(Some("   ")), fallback);
+    }
 }
