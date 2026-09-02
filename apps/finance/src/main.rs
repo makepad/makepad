@@ -14,6 +14,7 @@ use makepad_widgets::*;
 mod chart;
 mod csv;
 mod date;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
 mod db;
 mod import;
 mod model;
