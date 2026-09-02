@@ -653,6 +653,25 @@ impl MpSheets {
         out
     }
 
+    /// Run one assistant tool against this live workbook. Writes use the
+    /// workbook's normal transaction funnel, then the same post-model refresh
+    /// as paste, undo and direct edits so chrome, copy state and the grid all
+    /// observe the recalculated values.
+    pub fn ai_answer(
+        &mut self,
+        cx: &mut Cx,
+        call: &makepad_ai_services::wire::ServiceCall,
+    ) -> makepad_ai_services::wire::ToolResult {
+        let summary = self.ai_summary(cx);
+        let writes = matches!(call.tool.as_str(), "write_cell" | "set_range");
+        let result = crate::ai::answer(call, || summary, &mut self.wb);
+        if writes && result.outcome.is_ok() {
+            self.status = result.note.clone();
+            self.after_model_change(cx);
+        }
+        result
+    }
+
     fn selection_rect(&self, cx: &Cx) -> (Pos, Pos) {
         match self.grid(cx).selection() {
             Some(sel) => {

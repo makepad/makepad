@@ -3,9 +3,9 @@
 //!
 //! `register` puts this crate's theme tokens (`mod.sheets`) and widget
 //! family into the isolate the host prepared; `create` mints one
-//! `MpSheets{}` root there and hands the host its tools: the same
-//! `sheets.summary` the standalone binary answers over its port, read
-//! from the root at call time. The module never touches a file, a socket
+//! `MpSheets{}` root there and hands the host its tools: the same tools the
+//! standalone binary answers over its port, read or written on the root at
+//! call time. The module never touches a file, a socket
 //! or a thread — a workbook arrives, when it does, as a handle the host
 //! issued (the `file` argument of the open schema, unused until the host
 //! has a picker to issue one).
@@ -61,7 +61,7 @@ impl AppModule for SheetsModule {
     }
 }
 
-/// The instance's tools: `summary`, read from the root at call time.
+/// The instance's tools, read from or written to the root at call time.
 struct SheetsExecutor {
     root: WidgetRef,
 }
@@ -72,12 +72,12 @@ impl ServiceExecutor for SheetsExecutor {
     }
 
     fn execute(&mut self, cx: &mut Cx, call: &ServiceCall) -> ExecOutcome {
-        let summary = self
+        let result = self
             .root
-            .borrow::<MpSheets>()
-            .map(|sheets| sheets.ai_summary(cx))
-            .unwrap_or_else(|| "no sheet is open".to_string());
-        ExecOutcome::Done(crate::ai::answer(call, || summary))
+            .borrow_mut::<MpSheets>()
+            .map(|mut sheets| sheets.ai_answer(cx, call))
+            .unwrap_or_else(|| makepad_ai_services::wire::ToolResult::failed(&call.call_id, "no sheet is open"));
+        ExecOutcome::Done(result)
     }
 }
 

@@ -31,8 +31,8 @@ standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
-# The assistant: the F10 overlay in this window, and the one read tool the
-# sheet exposes to it (src/ai.rs).
+# The assistant: the F10 overlay in this window, and the bounded sheet tools
+# exposed to it (src/ai.rs).
 makepad-aichat = { path = "../aichat", optional = true }
 # The window manager's vocabulary for the standalone window: the bar's
 # title and the polite close (the module has no window of its own).
