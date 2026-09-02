@@ -275,6 +275,8 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldList
             | ContentToolCall::WorldGetSource
+            | ContentToolCall::WorldGetPlan
+            | ContentToolCall::WorldSetPlan { .. }
             | ContentToolCall::WorldSetSource { .. }
             | ContentToolCall::WorldNewLevel { .. }
             | ContentToolCall::WorldSetPlayerModel { .. }
