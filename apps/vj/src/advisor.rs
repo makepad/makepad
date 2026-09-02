@@ -139,17 +139,40 @@ pub struct Question {
 }
 
 impl Question {
-    /// The prompt, in the plainest form that can be answered wrongly and
-    /// still be safe. Every id it may name is in front of it, every shape
-    /// it may pick is listed, and it is told what "no opinion" looks like.
+    /// The prompt: a chat turn the model will recognise, and a question it
+    /// can only answer safely.
+    ///
+    /// Wrapped in the chat markers and given an EMPTY thinking block, which
+    /// is not decoration. These models reason out loud by default, and with
+    /// a budget of a sentence the whole answer is spent on the reasoning
+    /// and the reply never arrives — the first version of this asked
+    /// plainly, got a page of deliberation, and parsed to nothing.
+    ///
+    /// Every id it may name is in front of it, every shape it may pick is
+    /// listed, and it is told what having no opinion looks like.
     pub fn prompt(&self) -> String {
-        let mut out = String::from(
-            "You are helping choose the next record in a DJ set.\n\n",
+        let mut out = String::with_capacity(1024);
+        out.push_str("<|im_start|>system\n");
+        out.push_str(
+            "You help a DJ choose which record to play next. You are given \
+             the records that are already known to fit, each with what was \
+             measured about it, and the transition shapes the engine can \
+             perform. Choose among them. Do not invent a record, a time or \
+             a shape, and do not explain your working.\n\
+             \n\
+             Answer with these lines and nothing else:\n\
+             pick: <one id from the list>\n\
+             route: <one shape from the list>\n\
+             reason: <one short sentence>\n\
+             \n\
+             Leave out any line you have no opinion about. Answering with \
+             nothing at all is allowed and is better than a guess.",
         );
+        out.push_str("<|im_end|>\n<|im_start|>user\n");
         if !self.mood.is_empty() {
             out.push_str("The operator asks for: ");
             out.push_str(&self.mood);
-            out.push_str("\n\n");
+            out.push('\n');
         }
         out.push_str("Records on offer:\n");
         for (key, described) in self.offered.iter().zip(&self.described) {
@@ -159,7 +182,7 @@ impl Question {
             out.push_str(described);
             out.push('\n');
         }
-        out.push_str("\nTransition shapes available: ");
+        out.push_str("Transition shapes available: ");
         for (index, route) in self.eligible.iter().enumerate() {
             if index > 0 {
                 out.push_str(", ");
@@ -170,13 +193,10 @@ impl Question {
                 Route::Short => "short",
             });
         }
-        out.push_str(
-            "\n\nAnswer with these lines and nothing else:\n\
-             pick: <one id from the list above>\n\
-             route: <one shape from the list above>\n\
-             reason: <one short sentence>\n\
-             Leave out any line you have no opinion about.\n",
-        );
+        // The empty thinking block is the prefill: it tells the model its
+        // deliberation is already done, so the sentence budget goes to the
+        // answer.
+        out.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
         out
     }
 }
@@ -194,6 +214,44 @@ mod runner {
     /// A sentence, not an essay.
     const ANSWER_TOKENS: usize = 96;
 
+    /// The prefill attention kernel comes in a wide form that needs the
+    /// tensor cores of an Ampere card or newer. On anything older it
+    /// refuses at the point of use — the kernel prints that it has no
+    /// device code and the answer never arrives, which from the outside
+    /// looks exactly like a model that had nothing to say.
+    ///
+    /// One environment flag picks the narrower path that those cards can
+    /// run. It is set here rather than asked of the operator, and only when
+    /// the card actually needs it, so a newer machine keeps the fast route.
+    /// If the flag is already set, whoever set it meant it.
+    fn spare_older_cards_the_wide_attention_path() {
+        const NARROW: &str = "MKLLM_DISABLE_FATTN_MMA";
+        if std::env::var_os(NARROW).is_some() {
+            return;
+        }
+        let Ok(probe) = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+            .output()
+        else {
+            return;
+        };
+        let capability: f32 = String::from_utf8_lossy(&probe.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0.0);
+        // Ampere is 8.0. Zero means we could not tell, and guessing wrong
+        // towards the narrow path costs speed rather than answers.
+        if capability > 0.0 && capability < 8.0 {
+            log!("auto dj advisor: narrow attention path for a {capability} card");
+            // SAFETY: called once, before any model is loaded, from the
+            // thread that starts the advisor and before it spawns.
+            unsafe { std::env::set_var(NARROW, "1") };
+        }
+    }
+
     /// The advisor on its own thread.
     ///
     /// The model is `!Send`, so it is built on the worker and never leaves
@@ -210,6 +268,7 @@ mod runner {
         /// Start the worker. Cheap: nothing is loaded until the first
         /// question, so an advisor that is never asked costs a thread.
         pub fn start(model: std::path::PathBuf) -> Advisor {
+            spare_older_cards_the_wide_attention_path();
             let (ask, questions) = std::sync::mpsc::channel::<(u64, String)>();
             let (replies, answered) = std::sync::mpsc::channel();
             std::thread::Builder::new()
@@ -281,6 +340,78 @@ mod runner {
 
 #[cfg(feature = "advisor")]
 pub use runner::Advisor;
+
+/// Ask the real model one real question, end to end.
+///
+/// Ignored by default because it needs the model on disk and a card to run
+/// it on, which a test run cannot assume. It is the only thing that proves
+/// the whole chain — load, prompt, generate, parse, gate — so it is worth
+/// keeping runnable:
+///
+/// ```text
+/// cargo test --release -p makepad-vj --features advisor -- --ignored --nocapture live_advisor
+/// ```
+#[cfg(all(test, feature = "advisor"))]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs the model on disk and a card to run it on"]
+    fn live_advisor_answers_a_real_question() {
+        let Some(model) = std::env::var_os("VJ_ADVISOR_MODEL")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let home = std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))?;
+                let path = std::path::Path::new(&home)
+                    .join(".makepad/weights/llm/Qwen3.5-4B-Q5_K_M.gguf");
+                path.is_file().then_some(path)
+            })
+        else {
+            panic!("no model: set VJ_ADVISOR_MODEL or install the hub entry");
+        };
+
+        let question = Question {
+            offered: vec!["ast_one".to_string(), "ast_two".to_string()],
+            described: vec![
+                "128 BPM, key 8A, same pulse, in key, lifts".to_string(),
+                "141 BPM, key 3B, a tempo away, keys pull apart".to_string(),
+            ],
+            eligible: vec![Route::Handover, Route::Short],
+            mood: "keep the floor moving".to_string(),
+        };
+
+        let advisor = Advisor::start(model);
+        advisor.ask(1, &question);
+
+        let started = std::time::Instant::now();
+        let mut answer = None;
+        while started.elapsed() < std::time::Duration::from_secs(180) {
+            if let Some((_gen, proposal)) = advisor.poll().into_iter().next() {
+                answer = Some(proposal);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let proposal = answer.expect("the advisor never answered");
+        println!("proposal: {proposal:?}");
+
+        let accepted = validate(&proposal, &question.offered, &question.eligible);
+        println!("accepted: {accepted:?}");
+        println!("took: {:?}", started.elapsed());
+
+        // What it decides is its own business — the room is the judge of
+        // that. What is being proven here is that a real answer survives
+        // the gate, which is the contract the rest of the tab relies on.
+        let accepted = accepted.expect("nothing survived the gate");
+        if let Some(pick) = &accepted.pick {
+            assert!(question.offered.contains(pick), "it named {pick}");
+        }
+        if let Some(route) = accepted.route {
+            assert!(question.eligible.contains(&route), "it chose {route:?}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
