@@ -6206,6 +6206,10 @@ pub struct App {
     /// mirrored from the render bank so the tile paints the failure.
     #[rust]
     fx_thumb_failed: HashSet<AssetRevisionId>,
+    /// Rendered/cache-decoded effect sheets. Web sheets intentionally carry
+    /// one representative frame, so frame-count cannot be their ready bit.
+    #[rust]
+    fx_thumb_ready: HashSet<AssetRevisionId>,
     /// Sheet decodes handed to the thumb lane for rendered/cached effect
     /// thumbnails, by submit time — a decode the epoch guard dropped is
     /// simply asked again a few seconds later (the storage value is idempotent).
@@ -16729,6 +16733,9 @@ p2 {}
                         self.thumb_used.insert(revision, self.thumb_clock);
                         self.thumb_inflight.remove(&revision);
                         let fx_sheet = self.fx_decode_pending.remove(&revision).is_some();
+                        if fx_sheet {
+                            self.fx_thumb_ready.insert(revision);
+                        }
                         if frames.len() > 1 {
                             self.thumb_anims
                                 .insert(revision, (frames.clone(), thumb.fps));
@@ -17140,6 +17147,18 @@ p2 {}
                 continue;
             }
             let Some(revision) = tile.revision else { continue };
+            #[cfg(target_arch = "wasm32")]
+            if tile
+                .alias
+                .as_ref()
+                .is_some_and(|alias| self.fx_heads.contains_key(alias))
+            {
+                // Bundled web documents use the compiled source-digest feed
+                // above. The static catalog's asset revision is a second
+                // identity for the same immutable source; rendering it too
+                // would duplicate every browser-local cache entry.
+                continue;
+            }
             // A revision whose picture already declares cells has a REAL
             // animated thumbnail (store-side or ours) — nothing to do.
             if tile.thumb.as_ref().is_some_and(|t| t.anim.is_some()) {
@@ -19280,7 +19299,10 @@ p2 {}
                 // layout, so the tile draws one of its cells whole. True for
                 // a single-cell sprite strip too, which has no second frame
                 // to reveal it — see `GridEntry::cells`.
-                let cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some());
+                let cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some())
+                    || tile
+                        .revision
+                        .is_some_and(|revision| self.fx_thumb_ready.contains(&revision));
                 // Loading feedback, straight off the engines that know: the
                 // cue being prepared for the program grid, the pad loader
                 // for the SFX bank. An ARMED cue is ready — it is only
@@ -19407,6 +19429,10 @@ p2 {}
             // catalog-resolve pace.
             if entry.frames.is_empty() {
                 if let Some((_, revision, _)) = self.fx_heads.get(&alias) {
+                    if let Some(texture) = self.thumbs.get(revision) {
+                        entry.texture = Some(texture.clone());
+                    }
+                    entry.cells |= self.fx_thumb_ready.contains(revision);
                     if let Some((frames, fps)) = self.thumb_anims.get(revision) {
                         entry.frames = frames.clone();
                         entry.fps = *fps;
@@ -24976,6 +25002,16 @@ impl MatchEvent for App {
         // compiled in, so its art is generated here — ahead of any store,
         // any socket, any listing.
         self.build_fx_prefab_art(cx);
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Native gets this feed from the writable store seeder. The
+            // static web session cannot seed a server, so hand the same
+            // compiled sources to the browser-local render/cache pipeline.
+            let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
+            let _ = bundle_tx.send(crate::effects::seed::browser_bundle_heads());
+            drop(bundle_tx);
+            self.fx_bundle_rx = Some(bundle_rx);
+        }
         #[cfg(target_arch = "wasm32")]
         log!(
             "startup: workers and effect art ready +{:.0}ms",

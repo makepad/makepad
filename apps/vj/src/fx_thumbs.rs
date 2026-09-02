@@ -435,6 +435,9 @@ struct ActiveJob {
     job: FxThumbJob,
     phase: Phase,
     encoder: Option<TaskHandle<Result<FxThumbSheet, String>>>,
+    /// A readback may be deferred by the frame deadline, so remember that
+    /// this transition-only diagnostic was already emitted.
+    render_logged: bool,
     /// LIVECODING: the log position this document's load started at, so a
     /// draw-shader failure raised while the lane rendered can be attributed
     /// to it (see `crate::livecode`).
@@ -659,7 +662,9 @@ impl VjFxThumbs {
         let key = cache_key(&asset, &revision, transition);
         self.begin_batch();
         self.cache_keys.insert(revision, key.clone());
+        log!("fx thumb: requested {revision}");
         let request = self.storage(cx).get(cx, &key);
+        log!("fx thumb: cache read {revision}");
         self.cache_reads.insert(
             request,
             CacheLookup { revision, key, job: None },
@@ -764,6 +769,9 @@ impl VjFxThumbs {
         }
         self.pending.retain(|j| j.asset != job.asset);
         self.begin_batch();
+        if !self.cache_keys.contains_key(&job.revision) {
+            log!("fx thumb: requested {}", job.revision);
+        }
         if self.cache_misses.contains(&job.revision) {
             self.pending.push(job);
         } else if let Some(read) = self
@@ -776,6 +784,7 @@ impl VjFxThumbs {
             let key = cache_key(&job.asset, &job.revision, job.transition);
             self.cache_keys.insert(job.revision, key.clone());
             let request = self.storage(cx).get(cx, &key);
+            log!("fx thumb: cache read {}", job.revision);
             self.cache_reads.insert(
                 request,
                 CacheLookup { revision: job.revision, key, job: Some(job) },
@@ -804,12 +813,14 @@ impl VjFxThumbs {
                         });
                     }
                     Ok(StorageResult::Value(_)) => {
+                        log!("fx thumb: cache miss {}", read.revision);
                         self.cache_misses.insert(read.revision);
                         if let Some(job) = read.job {
                             self.pending.push(job);
                         }
                     }
                     Ok(_) => {
+                        log!("fx thumb: cache miss {}", read.revision);
                         self.cache_misses.insert(read.revision);
                         if let Some(job) = read.job {
                             self.pending.push(job);
@@ -899,6 +910,7 @@ impl VjFxThumbs {
             }
             let Some(job) = self.take_next() else { return };
             loads += 1;
+            log!("fx thumb: render scheduled {} lane {index}", job.revision);
             let prepared = self.lanes[index].prepared;
             let t0 = Instant::now();
             let view = self.view(index);
@@ -921,6 +933,7 @@ impl VjFxThumbs {
                         job,
                         phase: Phase::Warmup(0),
                         encoder: None,
+                        render_logged: false,
                         mark,
                         pending_chain: Vec::new(),
                         seq_pending: None,
@@ -978,6 +991,7 @@ impl VjFxThumbs {
                     self.lanes[index].job = Some(active);
                 }
                 Some(Ok(Ok(sheet))) => {
+                    log!("fx thumb: encode done {}", active.job.revision);
                     self.done_count += 1;
                     self.done_ms += total_ms;
                     log!(
@@ -1005,6 +1019,7 @@ impl VjFxThumbs {
                     );
                     self.cache_keys.insert(active.job.revision, key.clone());
                     let request = self.storage(cx).set(cx, &key, sheet.jpeg.clone());
+                    log!("fx thumb: cache write {}", active.job.revision);
                     self.cache_writes
                         .insert(request, (active.job.revision, key));
                     self.results.push(sheet);
@@ -1396,6 +1411,9 @@ impl VjFxThumbs {
             return;
         };
         if cx.request_render_texture_capture(&texture) {
+            if let Some(active) = self.lanes[index].job.as_ref() {
+                log!("fx thumb: readback issued {}", active.job.revision);
+            }
             // Repaint the sheet pass so the producing queue's next command
             // buffer carries the blit (its retained draw lists re-execute
             // — same cells, same pixels); the bytes arrive through
@@ -1411,6 +1429,9 @@ impl VjFxThumbs {
             return;
         }
         let t0 = Instant::now();
+        if let Some(active) = self.lanes[index].job.as_ref() {
+            log!("fx thumb: readback issued {}", active.job.revision);
+        }
         let Some((w, h, bytes)) = cx.debug_read_render_texture(&texture) else {
             self.readback_failures += 1;
             if self.readback_failures >= 3 {
@@ -1424,6 +1445,9 @@ impl VjFxThumbs {
         };
         self.readback_failures = 0;
         let read_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        if let Some(active) = self.lanes[index].job.as_ref() {
+            log!("fx thumb: readback complete {}", active.job.revision);
+        }
         self.spawn_encode(cx, index, w, h, bytes, read_ms);
     }
 
@@ -1446,7 +1470,10 @@ impl VjFxThumbs {
             .thread_spawner()
             .spawn(move || encode_jpeg(bytes, w, h, revision))
         {
-            Ok(handle) => active.encoder = Some(handle),
+            Ok(handle) => {
+                active.encoder = Some(handle);
+                log!("fx thumb: encode sent {revision}");
+            }
             Err(error) => {
                 self.fail_lane(cx, index, format!("jpeg worker unavailable: {error}"));
                 return;
@@ -1486,6 +1513,9 @@ impl VjFxThumbs {
                 .as_ref()
                 .map(|a| a.await_started.elapsed().as_secs_f32() * 1000.0)
                 .unwrap_or(0.0);
+            if let Some(active) = self.lanes[index].job.as_ref() {
+                log!("fx thumb: readback complete {}", active.job.revision);
+            }
             self.spawn_encode(cx, index, w, h, bytes, read_ms);
         }
         for index in 0..self.lanes.len() {
@@ -1784,6 +1814,12 @@ impl Widget for VjFxThumbs {
                 &mut budget,
                 deadline,
             ) {
+                if let Some(active) = self.lanes[index].job.as_mut() {
+                    if !active.render_logged {
+                        active.render_logged = true;
+                        log!("fx thumb: rendered {}", active.job.revision);
+                    }
+                }
                 ready.push(index);
             }
             if let Some(sheet) = self.lanes[index].sheet.as_ref() {
