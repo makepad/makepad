@@ -9,10 +9,12 @@
 
 use super::geometry::{lon_lat_to_normalized, tile_world_size, TileKey, TILE_SIZE};
 use super::style::probe_compiled_theme;
-use super::tile::{load_local_tile_batch, TileBuffers};
+use super::tile::{
+    load_local_tile_batch, TileBuffers, SHADOW_DISC_INSTANCE_FLOATS,
+};
 use crate::makepad_draw::vector::{
-    FILL_PACKED_FLOATS_PER_VERTEX, ROAD_PACKED_FLOATS_PER_VERTEX, VECTOR_FLOATS_PER_VERTEX,
-    VECTOR_PACKED_FLOATS_PER_VERTEX,
+    FILL_PACKED_FLOATS_PER_VERTEX, ROAD_PACKED_FLOATS_PER_VERTEX, ROOF_PACKED_FLOATS_PER_VERTEX,
+    VECTOR_FLOATS_PER_VERTEX, VECTOR_PACKED_FLOATS_PER_VERTEX,
 };
 use makepad_mbtile_reader::TileArchiveReader;
 use std::path::{Path, PathBuf};
@@ -78,9 +80,9 @@ fn streams(b: &TileBuffers) -> [(&'static str, usize, usize, usize); 13] {
         ("fringe", b.fringe_vertices.len(), b.fringe_indices.len(), ROAD_PACKED_FLOATS_PER_VERTEX),
         ("icon", b.icon_vertices.len(), b.icon_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("icon_high", b.icon_high_vertices.len(), b.icon_high_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
-        ("shadow_disc", b.shadow_disc_vertices.len(), b.shadow_disc_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("road_icon", b.road_icon_vertices.len(), b.road_icon_indices.len(), VECTOR_FLOATS_PER_VERTEX),
-        ("fill_3d", b.fill_3d_vertices.len(), b.fill_3d_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
+        ("fill_3d", b.fill_3d_vertices.len(), b.fill_3d_indices.len(), ROOF_PACKED_FLOATS_PER_VERTEX),
+        ("fill_3d_misc", b.fill_3d_misc_vertices.len(), b.fill_3d_misc_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("wall", b.wall_vertices.len(), b.wall_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("tree", b.tree_vertices.len(), b.tree_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
         ("tree_cross", b.tree_cross_vertices.len(), b.tree_cross_indices.len(), VECTOR_PACKED_FLOATS_PER_VERTEX),
@@ -161,7 +163,7 @@ fn amsterdam_start_view_bake_report() {
         RENDER_ZOOM
     );
     println!(
-        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc casing stroke fringe icon icon_hi shadow_disc road_ic fill3d wall tree treeX) + icon instances (count / KiB)",
+        "{:>14} {:>8} {:>8} {:>7} {:>9} {:>8} {:>7} {:>8} {:>8} | per-stream MiB (fill fill_misc casing stroke fringe icon icon_hi road_ic fill3d fill3d_misc wall tree treeX) + instances (icons count/KiB, shadow discs count/KiB)",
         "tile", "raw KiB", "mvt KiB", "feats", "bake MiB", "verts", "labels", "icons", "ms"
     );
     let mut total_raw = 0usize;
@@ -170,6 +172,8 @@ fn amsterdam_start_view_bake_report() {
     let mut total_ms = 0.0f64;
     let mut stream_totals = [0usize; 13];
     let mut total_icon_instance_bytes = 0usize;
+    let mut total_shadow_disc_instance_bytes = 0usize;
+    let mut total_shadow_disc_instances = 0usize;
     let mut total_wall_instance_bytes = 0usize;
     let mut total_tree_instance_bytes = 0usize;
     let mut icon_kinds = std::collections::BTreeMap::new();
@@ -242,6 +246,9 @@ fn amsterdam_start_view_bake_report() {
             .map(|group| group.count())
             .sum();
         total_icon_instance_bytes += b.icon_instance_floats() * 4;
+        total_shadow_disc_instance_bytes += b.shadow_disc_instances.len() * 4;
+        total_shadow_disc_instances +=
+            b.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS;
         total_wall_instance_bytes += b.wall_instances.len() * 4;
         total_tree_instance_bytes += (b.tree_instances.len()
             + b.tree_template_indices.len()
@@ -253,7 +260,7 @@ fn amsterdam_start_view_bake_report() {
         classify_fill_packed(&b.fill_vertices, &mut fill_kinds);
         classify_road_packed(&b.casing_vertices, &mut casing_kinds);
         println!(
-            "{:>14} {:>8} {:>8} {:>7} {:>9.1} {:>8} {:>7} {:>8} {:>8.0} | {} + {} / {:.0}",
+            "{:>14} {:>8} {:>8} {:>7} {:>9.1} {:>8} {:>7} {:>8} {:>8.0} | {} + {} / {:.0}, {} / {:.0}",
             format!("{}/{}/{}", key.z, key.x, key.y),
             raw.len() / 1024,
             mvt / 1024,
@@ -265,7 +272,9 @@ fn amsterdam_start_view_bake_report() {
             ms,
             cols.join(" "),
             icon_count,
-            b.icon_instance_floats() as f64 * 4.0 / 1024.0
+            b.icon_instance_floats() as f64 * 4.0 / 1024.0,
+            b.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS,
+            b.shadow_disc_instances.len() as f64 * 4.0 / 1024.0,
         );
         if !b.stage_summary.is_empty() {
             println!("{:>14} stages: {}", "", b.stage_summary);
@@ -282,8 +291,8 @@ fn amsterdam_start_view_bake_report() {
         total_ms / baked.max(1) as f64
     );
     let names = [
-        "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "shadow_disc", "road_icon",
-        "fill_3d", "wall", "tree", "tree_cross",
+        "fill", "fill_misc", "casing", "stroke", "fringe", "icon", "icon_high", "road_icon",
+        "fill_3d", "fill_3d_misc", "wall", "tree", "tree_cross",
     ];
     for (name, bytes) in names.iter().zip(stream_totals.iter()) {
         println!(
@@ -298,6 +307,13 @@ fn amsterdam_start_view_bake_report() {
         "icon_inst",
         mib(total_icon_instance_bytes),
         total_icon_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
+    );
+    println!(
+        "  {:<16} {:>8.1} MiB {:>5.1}%  ({} instances)",
+        "shadow_disc_inst",
+        mib(total_shadow_disc_instance_bytes),
+        total_shadow_disc_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64,
+        total_shadow_disc_instances,
     );
     println!(
         "  {:<10} {:>8.1} MiB {:>5.1}%",

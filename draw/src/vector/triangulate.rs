@@ -6,6 +6,8 @@ pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
 pub const VECTOR_PACKED_FLOATS_PER_VERTEX: usize = 12;
 /// Packed map-fill layout: xy, unorm8 colour, f16(code/coverage), depths.
 pub const FILL_PACKED_FLOATS_PER_VERTEX: usize = 5;
+/// Packed map-roof layout: xy, unorm8 colour, exact height, material/depth.
+pub const ROOF_PACKED_FLOATS_PER_VERTEX: usize = 5;
 const FILL_PARAM5_STEP: f32 = 0.00001;
 pub const ROAD_PACKED_FLOATS_PER_VERTEX: usize = 8;
 
@@ -277,6 +279,65 @@ pub fn pack_road_vertices(vertices: &[f32]) -> Vec<f32> {
     }
     out
 }
+/// Whether a logical vector record can use the compact roof shader without
+/// dropping any channel that its vertex/fragment paths observe. Parapet AO
+/// records carry a distinct tilted depth and therefore stay on the generic
+/// layout alongside any future gradient or patterned roofs.
+#[inline]
+pub fn is_compact_roof_record(record: &[f32]) -> bool {
+    if record.len() < VECTOR_FLOATS_PER_VERTEX {
+        return false;
+    }
+    let surface_depth = if record[15] > 0.0 {
+        0.5 + 0.30 * (record[15] / 2.0).min(1.0)
+    } else {
+        0.5
+    };
+    record[2] == 0.5
+        && record[3] == 1.0
+        && record[8] > 1e5
+        && record[8] < 1.5e6
+        && record[9] == 0.0
+        && record[10] == 0.0
+        && record[11] == 0.0
+        && record[12] == 0.0
+        && record[13] == 0.0
+        && record[14] == crate::scene_sun::MAT_ROOF
+        && record[15].is_finite()
+        && record[15] >= 0.0
+        && record[16] == surface_depth
+        && record[18].is_finite()
+        && record[18] >= 0.0
+        && record[18] / VECTOR_ZBIAS_STEP <= 65504.0
+}
+
+/// One logical lifted shape-0 roof record -> five GPU slots (20 bytes).
+#[inline]
+pub fn pack_roof_record(record: &[f32]) -> Option<[f32; ROOF_PACKED_FLOATS_PER_VERTEX]> {
+    if !is_compact_roof_record(record) {
+        return None;
+    }
+    Some([
+        record[0],
+        record[1],
+        pack_unorm8x4(record[4], record[5], record[6], record[7]),
+        record[15],
+        pack_pair_f16(record[14], (record[18] / VECTOR_ZBIAS_STEP).round()),
+    ])
+}
+
+/// Pack a buffer already classified as compact map roofs.
+pub fn pack_roof_vertices(vertices: &[f32]) -> Vec<f32> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * ROOF_PACKED_FLOATS_PER_VERTEX);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        out.extend_from_slice(
+            &pack_roof_record(record).expect("non-roof record in compact map roof stream"),
+        );
+    }
+    out
+}
+
 /// IEEE 754 binary16 decode — inverse of `f16_bits` above.
 #[inline]
 fn f16_bits_to_f32(h: u32) -> f32 {
