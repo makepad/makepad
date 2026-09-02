@@ -242,6 +242,17 @@ impl AiServicePort {
         self.send(ServiceUp::Unregister);
     }
 
+    /// Test seam: drain the in-process channel the way `handle_event`
+    /// does, without a `Cx`.
+    #[cfg(test)]
+    pub(crate) fn test_drain(&mut self) -> Vec<PortEvent> {
+        let frames: Vec<HostedDown> = match &mut self.transport {
+            Transport::InProcess { down, .. } => down.try_iter().collect(),
+            Transport::Hosted => Vec::new(),
+        };
+        frames.into_iter().filter_map(|f| self.accept(f)).collect()
+    }
+
     fn send(&self, msg: ServiceUp) {
         // Never a claim of identity on the way up: `from` is the host's.
         let frame = HostedUp { from: None, msg };

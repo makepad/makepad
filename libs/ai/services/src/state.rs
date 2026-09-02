@@ -181,6 +181,13 @@ impl EngineState {
         self.generation += 1;
     }
 
+    pub fn tool(&self, call_id: &str) -> Option<&ToolEntry> {
+        self.entries.iter().rev().find_map(|e| match e {
+            Entry::Tool(t) if t.call_id == call_id => Some(t),
+            _ => None,
+        })
+    }
+
     pub fn tool_mut(&mut self, call_id: &str) -> Option<&mut ToolEntry> {
         self.entries.iter_mut().rev().find_map(|e| match e {
             Entry::Tool(t) if t.call_id == call_id => Some(t),
