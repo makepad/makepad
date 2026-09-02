@@ -1,6 +1,7 @@
 use makepad_micro_serde::*;
 use std::fmt::Write;
 use std::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub fn trace_topics() -> String {
 /// An enabled trace span. Dropping it logs elapsed wall-clock time.
 pub struct TraceSpan {
     topic: String,
+    #[cfg(not(target_arch = "wasm32"))]
     started: Instant,
 }
 
@@ -134,7 +136,7 @@ impl Drop for TraceSpan {
         log!(
             "[{}] elapsed {:.3} ms",
             self.topic,
-            self.started.elapsed().as_secs_f64() * 1000.0
+            self.elapsed_ms()
         );
     }
 }
@@ -148,8 +150,21 @@ pub fn trace_span(topic: &str) -> Option<TraceSpan> {
     }
     trace_enabled(topic).then(|| TraceSpan {
         topic: topic.to_string(),
+        #[cfg(not(target_arch = "wasm32"))]
         started: Instant::now(),
     })
+}
+
+impl TraceSpan {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn elapsed_ms(&self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn elapsed_ms(&self) -> f64 {
+        0.0
+    }
 }
 
 #[macro_export]

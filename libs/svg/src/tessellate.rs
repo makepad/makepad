@@ -14,6 +14,37 @@ pub struct VVertex {
     pub clip_radius: f32,
 }
 
+
+/// Accumulates wall time between laps into the profiler's slots; the web has
+/// no clock, so the laps are simply skipped there.
+struct LapTimer {
+    #[cfg(not(target_arch = "wasm32"))]
+    last: Option<std::time::Instant>,
+}
+
+impl LapTimer {
+    fn new(enabled: bool) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = enabled;
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            last: enabled.then(std::time::Instant::now),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lap(&mut self, slot: &mut u64) {
+        if let Some(t) = self.last {
+            let now = std::time::Instant::now();
+            *slot += (now - t).as_nanos() as u64;
+            self.last = Some(now);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn lap(&mut self, _slot: &mut u64) {}
+}
+
 impl VVertex {
     fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
         Self {
@@ -902,14 +933,9 @@ impl Tessellator {
         #[cfg(not(target_arch = "wasm32"))]
         fixture_dump::dump_fill(self, aa, line_join, miter_limit, gpu_expand_fill);
 
-        let timing = stats.is_some();
-        let mut t_last = timing.then(std::time::Instant::now);
+        let mut lap_timer = LapTimer::new(stats.is_some());
         let mut lap = move |slot: &mut u64| {
-            if let Some(t) = t_last {
-                let now = std::time::Instant::now();
-                *slot += (now - t).as_nanos() as u64;
-                t_last = Some(now);
-            }
+            lap_timer.lap(slot);
         };
 
         let woff = aa * 0.5;
