@@ -134,7 +134,17 @@ fn amsterdam_start_view_bake_report() {
             println!("{:>14} (no tile)", format!("{}/{}/{}", key.z, key.x, key.y));
             continue;
         };
-        let mvt = reader.decode_tile(&raw).map(|d| d.len()).unwrap_or(0);
+        let decoded = reader.decode_tile(&raw).unwrap_or_default();
+        let mvt = decoded.len();
+        // MAP_BAKE_REPORT_DUMP=<dir>: keep the raw (archive) and decoded tile
+        // bytes so a data-side survey can read them without the archive.
+        if let Some(dir) = std::env::var_os("MAP_BAKE_REPORT_DUMP") {
+            let dir = Path::new(&dir);
+            let _ = std::fs::create_dir_all(dir);
+            let stem = format!("z{}-x{}-y{}", key.z, key.x, key.y);
+            let _ = std::fs::write(dir.join(format!("{stem}.raw")), &raw);
+            let _ = std::fs::write(dir.join(format!("{stem}.decoded")), &decoded);
+        }
         let start = Instant::now();
         let (loaded, unavailable) = load_local_tile_batch(
             &archive,
