@@ -6,28 +6,33 @@
 //! No DXVA/hardware surface path — output is read back to system memory
 //! NV12 via `IMFMediaBuffer::Lock`, same as the file-based decoder.
 //!
-//! Lifecycle that the live decoder needs, in order:
-//! 1. `MF_LOW_LATENCY` on the transform attributes — otherwise the decoder
-//!    holds a reorder window and a 2–3 frame live pipeline never sees a
-//!    single output frame.
-//! 2. Input type = bare H.264 (no frame-size hint; the SPS decides).
-//! 3. An output type committed BEFORE the first `ProcessOutput` — the
+//! Lifecycle, as measured on a real box (2026-09-02, RTX 4090 node):
+//! 1. Input type = bare H.264 (no frame-size hint; the SPS decides).
+//! 2. An output type committed BEFORE the first `ProcessOutput` — the
 //!    decoder offers NV12 (at a placeholder size) as soon as the input type
 //!    is set, and `ProcessOutput` without one is `MF_E_TRANSFORM_TYPE_NOT_
 //!    SET`, not a stream change.
-//! 4. `ProcessOutput` reports `MF_E_TRANSFORM_STREAM_CHANGE` once the real
+//! 3. `ProcessOutput` reports `MF_E_TRANSFORM_STREAM_CHANGE` once the real
 //!    picture size is known; re-negotiate and retry.
+//! 4. The decoder delays output by the DPB size it derives from the SPS
+//!    `level_idc` — neither `MF_LOW_LATENCY` nor `CODECAPI_AVLowLatencyMode`
+//!    shortens that (both accepted, both without effect: six access units
+//!    in, nothing out until DRAIN). Rewriting `level_idc` to 1.0 in every
+//!    SPS gives a one-picture DPB and every picture comes out as the next
+//!    access unit arrives. Both switches are still set for decoders that
+//!    do honour them.
 //!
 //! `MAKEPAD_H264_DEBUG=<file>` traces every step (see [`crate::stream_debug`]).
 
+use crate::annex_b;
 use crate::stream_debug::{self as dbg, hex_hr};
 use crate::stream_decoder::DecodedFrame;
 use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft::{
-    self, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    CODECAPI_AV_LOW_LATENCY_MODE, MF_E_BUFFERTOOSMALL, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY,
+    self, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, CODECAPI_AV_LOW_LATENCY_MODE, MF_E_BUFFERTOOSMALL, MF_E_NOTACCEPTING,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY,
 };
 use crate::VideoFileError;
 use std::collections::VecDeque;
@@ -44,6 +49,14 @@ use windows::{
 /// Well-known Microsoft H.264 decoder MFT CLSID (msmpeg2vdec.dll) — stable
 /// and documented since Windows 7; not in the vendored bindings.
 const CLSID_CMS_H264_DECODER_MFT: GUID = GUID::from_u128(0x62ce7e72_4c71_4d20_b15d_452831a87d9d);
+
+/// The `level_idc` every SPS is rewritten to (level 1.0, MaxDpbMbs 396):
+/// one decoded picture of DPB for anything 352x288 or larger, which is
+/// what turns the decoder into a one-access-unit-latency pipeline. Live
+/// streams here are IPPP with one reference picture, which such a DPB
+/// holds; the decoder does not validate the level against the picture
+/// size (a 512x512 stream at "level 1.0" decodes cleanly).
+const LOW_DELAY_LEVEL_IDC: u8 = 10;
 
 /// Output allocation floor while the decoder still reports a placeholder
 /// size (1080p NV12): the first real picture must fit before the stream
@@ -117,7 +130,7 @@ impl WindowsStreamDecoder {
                     let set = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
                     dbg::log(|| format!("h264dec: MF_LOW_LATENCY set -> {set:?}"));
                 }
-                Err(e) => dbg::log(|| format!("h264dec: GetAttributes failed {e:?} (no low-latency mode)")),
+                Err(e) => dbg::log(|| format!("h264dec: GetAttributes failed {e:?} (no low-latency attribute)")),
             }
             let codec_api = windows_mft::set_codec_api_u32(&transform, &CODECAPI_AV_LOW_LATENCY_MODE, 1);
             dbg::log(|| format!("h264dec: CODECAPI_AVLowLatencyMode set -> {codec_api:?}"));
@@ -202,8 +215,8 @@ impl WindowsStreamDecoder {
         self.output_buffer_size = stream_info.cbSize.max(needed).max(OUTPUT_BUFFER_FLOOR);
         dbg::log(|| {
             format!(
-                "h264dec: output committed {}x{} stride {} provides_samples {} cbSize {} -> alloc {}",
-                self.width, self.height, self.output_stride, self.provides_samples, stream_info.cbSize, self.output_buffer_size
+                "h264dec: output committed {}x{} stride {} flags 0x{:x} cbSize {} -> alloc {}",
+                self.width, self.height, self.output_stride, stream_info.dwFlags, stream_info.cbSize, self.output_buffer_size
             )
         });
         Ok(())
@@ -216,6 +229,8 @@ impl WindowsStreamDecoder {
         ensure_media_foundation()?;
         dbg::dump_packet(self.packets_in, annex_b_data);
         self.packets_in += 1;
+        let low_delay = annex_b::with_sps_level_idc(annex_b_data, LOW_DELAY_LEVEL_IDC);
+        let annex_b_data = low_delay.as_deref().unwrap_or(annex_b_data);
         let sample = make_input_sample(annex_b_data, pts_100ns)?;
         let mut hr = unsafe { windows_mft::process_input(&self.transform, &sample) };
         let mut frames = Vec::new();
@@ -225,11 +240,12 @@ impl WindowsStreamDecoder {
         }
         dbg::log(|| {
             format!(
-                "h264dec: packet #{} {} bytes head [{}] pts {} ProcessInput {}",
+                "h264dec: packet #{} {} bytes head [{}] pts {}{} ProcessInput {}",
                 self.packets_in,
                 annex_b_data.len(),
                 dbg::head(annex_b_data),
                 pts_100ns,
+                if low_delay.is_some() { " (SPS level rewritten)" } else { "" },
                 hex_hr(hr.0)
             )
         });
@@ -318,7 +334,12 @@ impl WindowsStreamDecoder {
         Ok(frames)
     }
 
+    /// Asks the decoder for everything it still holds (`COMMAND_DRAIN`);
+    /// reference pictures survive, so streaming can continue afterwards.
     pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
+        ensure_media_foundation()?;
+        unsafe { windows_mft::process_message(&self.transform, MFT_MESSAGE_COMMAND_DRAIN, 0) }
+            .map_err(|e| hr_err("ProcessMessage(COMMAND_DRAIN)", e))?;
         self.drain_available()
     }
 }

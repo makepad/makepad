@@ -33,6 +33,9 @@ use windows::Win32::System::Variant::{VARENUM, VARIANT};
 // that ARE used since they're one small, complete, documented set.
 #[allow(dead_code)]
 pub(crate) const MFT_MESSAGE_COMMAND_FLUSH: i32 = 0x0000_0000;
+/// `MFT_MESSAGE_COMMAND_DRAIN` — "emit everything you hold, then ask for
+/// input again"; reference pictures survive it (only FLUSH discards them).
+pub(crate) const MFT_MESSAGE_COMMAND_DRAIN: i32 = 0x0000_0001;
 #[allow(dead_code)]
 pub(crate) const MFT_MESSAGE_NOTIFY_END_OF_STREAM: i32 = 0x1000_0002;
 pub(crate) const MFT_MESSAGE_NOTIFY_START_OF_STREAM: i32 = 0x1000_0003;
