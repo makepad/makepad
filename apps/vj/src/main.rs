@@ -119,6 +119,8 @@ mod columns;
 // is opened.
 mod console;
 mod dsp_math;
+#[macro_use]
+mod verify;
 // What may be worked out about a track before anyone asks to play it, and
 // where the results of that work are kept.
 mod preprocess;

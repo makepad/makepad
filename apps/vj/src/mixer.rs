@@ -19,6 +19,7 @@
 
 use crate::cue::SlotId;
 use crate::dsp_math::{lerp, lerp_frame};
+use crate::verify_or;
 use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
@@ -2393,7 +2394,14 @@ impl Mixer {
                 !scheduled.started && output_frame >= scheduled.target_frame
             });
             if starts_now {
-                let mut scheduled = s.scheduled_video.expect("checked above");
+                // The two ways this callback could ever unwind were these
+                // `expect`s. Both are right today, but a panic here takes
+                // the audio device down mid-set with nothing to show for
+                // it; a missed video start is a scratch nobody hears.
+                verify_or!(s.scheduled_video.is_some(), { continue });
+                // The binding the line above just guaranteed; its own `else`
+                // never runs.
+                let Some(mut scheduled) = s.scheduled_video else { continue };
                 scheduled.started = true;
                 s.scheduled_video = Some(scheduled);
                 let fade_secs = if scheduled.fade_frames == 0 {
@@ -2811,7 +2819,8 @@ impl Mixer {
                         >= scheduled.target_frame.saturating_add(scheduled.fade_frames.max(1))
             });
             if completes_now {
-                let scheduled = s.scheduled_video.take().expect("checked above");
+                verify_or!(s.scheduled_video.is_some(), { continue });
+                let Some(scheduled) = s.scheduled_video.take() else { continue };
                 if let Some(from) = scheduled.from {
                     s.video[from.index()].gain = Ramp::at(0.0);
                 }
