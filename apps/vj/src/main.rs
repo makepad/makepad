@@ -93,6 +93,8 @@ mod mesh_view;
 mod midi_learn;
 mod mix;
 mod mixer;
+// The lock-free hand-off across the audio thread's boundary, in either direction.
+mod spsc;
 // The audio path pinned against what it rendered the day the reference was
 // recorded, and the click rule every transition has to keep.
 #[cfg(test)]
