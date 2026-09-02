@@ -20,7 +20,13 @@ use std::time::{Duration, Instant};
 /// listen backlog fills, and new SYNs get dropped: the service looks dead
 /// from outside while established flows stay fine. Bound every socket wait.
 const API_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
-const STATIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// File responses may use this entire write window only if they sustain at
+/// least 32 KiB/s. Small files get 60 seconds; even huge files get at most an
+/// hour, so slow readers remain bounded without truncating ordinary shards.
+const MIN_STATIC_WRITE_RATE: u64 = 32 * 1024;
+const MIN_STATIC_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_STATIC_WRITE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Concurrent connection threads (process-wide). Over the cap, new
 /// connections are shed with an inline 503 — cheap and honest — instead of
 /// growing the thread pile.
@@ -146,6 +152,10 @@ pub struct HttpServer {
     /// after the header is read, the ordinary cap is charged to the resolved
     /// client instead.
     pub trusted_proxy: Option<fn(IpAddr) -> bool>,
+    /// Returns the comma-separated methods accepted for a request path. When
+    /// present, unsupported methods are rejected before application dispatch
+    /// (and, for POST, before the declared body is allocated or read).
+    pub allowed_methods: Option<fn(&str) -> &'static str>,
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
@@ -361,20 +371,7 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                         peer_guard
                     };
 
-                    let deadline = started
-                        + if headers.verb == "POST" || headers.path.starts_with("/api/") {
-                            API_CONNECTION_TIMEOUT
-                        } else {
-                            STATIC_CONNECTION_TIMEOUT
-                        };
-                    if !matches!(headers.verb.as_str(), "GET" | "HEAD" | "POST" | "OPTIONS") {
-                        return http_error_out_until(
-                            tcp_stream,
-                            405,
-                            Some("GET, HEAD, POST, OPTIONS"),
-                            deadline,
-                        );
-                    }
+                    let deadline = started + API_CONNECTION_TIMEOUT;
                     if headers.sec_websocket_key.is_some() {
                         if headers.verb != "GET" {
                             return http_error_out_until(
@@ -390,6 +387,22 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                             headers,
                             body_prefix,
                             connection_counter,
+                            deadline,
+                        );
+                    }
+                    if let Some(allowed_methods) = http_server.allowed_methods {
+                        let allow = allowed_methods(&headers.path);
+                        if !allow.split(',').any(|method| method.trim() == headers.verb) {
+                            return http_method_not_allowed_out(tcp_stream, allow);
+                        }
+                    } else if !matches!(
+                        headers.verb.as_str(),
+                        "GET" | "HEAD" | "POST" | "OPTIONS"
+                    ) {
+                        return http_error_out_until(
+                            tcp_stream,
+                            405,
+                            Some("GET, HEAD, POST, OPTIONS"),
                             deadline,
                         );
                     }
@@ -425,6 +438,7 @@ fn handle_post(
     body_ip_connections: Arc<Mutex<HashMap<IpAddr, usize>>>,
     client_ip: IpAddr,
 ) {
+    let is_static = !headers.path.starts_with("/api/");
     // we have to have a content-length or bust
     let Some(content_length) = headers.content_length else {
         return http_error_out_until(tcp_stream, 411, None, deadline);
@@ -489,7 +503,7 @@ fn handle_post(
         match admission_receiver.recv_timeout(remaining) {
             Ok(PostAdmission::Read) => pending_body_sender = Some(body_sender),
             Ok(PostAdmission::Respond(response)) => {
-                write_response(&mut tcp_stream, response, false, deadline);
+                write_response(&mut tcp_stream, response, false, deadline, is_static);
                 let _ = tcp_stream.shutdown(Shutdown::Both);
                 return;
             }
@@ -563,7 +577,7 @@ fn handle_post(
         return http_error_out_until(tcp_stream, 504, None, deadline);
     };
     match rx_socket.recv_timeout(wait) {
-        Ok(response) => write_response(&mut tcp_stream, response, false, deadline),
+        Ok(response) => write_response(&mut tcp_stream, response, false, deadline, is_static),
         Err(_) => return http_error_out_until(tcp_stream, 504, None, deadline),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -726,6 +740,7 @@ fn handle_get(
     deadline: Instant,
 ) {
     // send our channel the post
+    let is_static = !headers.path.starts_with("/api/");
     let suppress_body = headers.verb == "HEAD";
     let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse>();
     if http_server
@@ -743,7 +758,9 @@ fn handle_get(
         return http_error_out_until(tcp_stream, 504, None, deadline);
     };
     match rx_socket.recv_timeout(wait) {
-        Ok(response) => write_response(&mut tcp_stream, response, suppress_body, deadline),
+        Ok(response) => {
+            write_response(&mut tcp_stream, response, suppress_body, deadline, is_static)
+        }
         Err(_) => return http_error_out_until(tcp_stream, 504, None, deadline),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -754,7 +771,26 @@ fn write_response(
     response: HttpServerResponse,
     suppress_body: bool,
     deadline: Instant,
+    is_static: bool,
 ) {
+    let file_len = if is_static {
+        match &response.payload {
+            HttpServerResponsePayload::File(file_response) => Some(
+                file_response
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len,
+            ),
+            HttpServerResponsePayload::Bytes => None,
+        }
+    } else {
+        None
+    };
+    let deadline = response_write_deadline(
+        Instant::now(),
+        deadline,
+        file_len,
+    );
     if !write_bytes_until(tcp_stream, response.header.as_bytes(), deadline) {
         return;
     }
@@ -782,6 +818,22 @@ fn write_response(
     } else {
         let _ = write_bytes_until(tcp_stream, &response.body, deadline);
     }
+}
+
+fn response_write_deadline(
+    now: Instant,
+    request_deadline: Instant,
+    file_len: Option<u64>,
+) -> Instant {
+    let Some(file_len) = file_len else { return request_deadline };
+    now + static_write_timeout(file_len)
+}
+
+fn static_write_timeout(file_len: u64) -> Duration {
+    let seconds = file_len
+        .saturating_add(MIN_STATIC_WRITE_RATE - 1)
+        / MIN_STATIC_WRITE_RATE;
+    Duration::from_secs(seconds).clamp(MIN_STATIC_WRITE_TIMEOUT, MAX_STATIC_WRITE_TIMEOUT)
 }
 
 fn remaining(deadline: Instant) -> Option<Duration> {
@@ -870,5 +922,18 @@ mod tests {
         .reject(response);
         assert!(owned.upgrade().is_none());
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_write_deadline_scales_with_size_but_api_deadline_stays_short() {
+        let now = Instant::now();
+        let api_deadline = now + API_CONNECTION_TIMEOUT;
+        assert_eq!(response_write_deadline(now, api_deadline, None), api_deadline);
+        assert_eq!(static_write_timeout(1), MIN_STATIC_WRITE_TIMEOUT);
+        assert_eq!(
+            static_write_timeout(64 * 1024 * 1024),
+            Duration::from_secs(2_048)
+        );
+        assert_eq!(static_write_timeout(u64::MAX), MAX_STATIC_WRITE_TIMEOUT);
     }
 }

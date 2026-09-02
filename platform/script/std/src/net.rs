@@ -806,6 +806,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 pre_admit_posts: false,
                 client_ip_resolver: None,
                 trusted_proxy: None,
+                allowed_methods: None,
                 request: server_tx,
             };
 

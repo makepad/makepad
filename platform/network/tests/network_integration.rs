@@ -259,6 +259,7 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
             pre_admit_posts: false,
             client_ip_resolver: None,
             trusted_proxy: None,
+            allowed_methods: None,
         })
         .expect("start HTTP server");
     let handler = std::thread::spawn(move || {
@@ -310,6 +311,14 @@ fn test_forwarded_client(headers: &makepad_network::HttpServerHeaders) -> IpAddr
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn fixture_allowed_methods(path: &str) -> &'static str {
+    match path {
+        "/write-only" => "POST, OPTIONS",
+        _ => "GET, HEAD, OPTIONS",
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn trusted_proxy_connections_are_capped_by_verified_forwarded_client() {
     let _guard = test_guard();
@@ -326,6 +335,7 @@ fn trusted_proxy_connections_are_capped_by_verified_forwarded_client() {
             pre_admit_posts: false,
             client_ip_resolver: Some(test_forwarded_client),
             trusted_proxy: Some(test_proxy_peer),
+            allowed_methods: None,
         })
         .unwrap();
 
@@ -382,6 +392,44 @@ fn trusted_proxy_connections_are_capped_by_verified_forwarded_client() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn http_server_rejects_disallowed_methods_before_dispatch() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: Some(fixture_allowed_methods),
+        })
+        .unwrap();
+
+    let response = raw_server_request(
+        listen_address,
+        b"POST /read-only HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+    assert!(response.contains("Allow: GET, HEAD, OPTIONS\r\n"), "{response:?}");
+    assert!(request_receiver.recv_timeout(Duration::from_millis(100)).is_err());
+
+    let response = raw_server_request(
+        listen_address,
+        b"GET /write-only HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+    assert!(response.contains("Allow: POST, OPTIONS\r\n"), "{response:?}");
+    assert!(request_receiver.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn http_server_rejects_ambiguous_framing_and_unsupported_methods_before_get_consumer() {
     let _guard = test_guard();
     let port = find_free_port().expect("allocate local test port");
@@ -397,6 +445,7 @@ fn http_server_rejects_ambiguous_framing_and_unsupported_methods_before_get_cons
             pre_admit_posts: false,
             client_ip_resolver: None,
             trusted_proxy: None,
+            allowed_methods: None,
         })
         .unwrap();
 
@@ -470,6 +519,7 @@ fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
             pre_admit_posts: true,
             client_ip_resolver: None,
             trusted_proxy: None,
+            allowed_methods: None,
         })
         .unwrap();
     let handler = std::thread::spawn(move || {
@@ -510,6 +560,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         pre_admit_posts: false,
         client_ip_resolver: None,
         trusted_proxy: None,
+        allowed_methods: None,
     }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;
