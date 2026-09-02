@@ -1,6 +1,156 @@
 use makepad_micro_serde::*;
 use std::fmt::Write;
 use std::sync::RwLock;
+use std::time::Instant;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TraceTopic {
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Debug)]
+struct TopicSet {
+    topics: Vec<TraceTopic>,
+    spec: String,
+}
+
+impl TopicSet {
+    const fn empty() -> Self {
+        Self {
+            topics: Vec::new(),
+            spec: String::new(),
+        }
+    }
+
+    fn parse(spec: &str) -> Self {
+        let mut topics: Vec<TraceTopic> = Vec::new();
+        for raw in spec.split(',') {
+            let raw = raw.trim();
+            let (enabled, name) = match raw.strip_prefix('-') {
+                Some(name) => (false, name),
+                None => (true, raw),
+            };
+            if !valid_topic(name) {
+                continue;
+            }
+            if let Some(existing) = topics.iter_mut().find(|topic| topic.name == name) {
+                existing.enabled = enabled;
+            } else {
+                topics.push(TraceTopic {
+                    name: name.to_string(),
+                    enabled,
+                });
+            }
+        }
+        let spec = topics
+            .iter()
+            .map(|topic| {
+                if topic.enabled {
+                    topic.name.clone()
+                } else {
+                    format!("-{}", topic.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        Self { topics, spec }
+    }
+
+    fn enabled(&self, topic: &str) -> bool {
+        if !valid_topic(topic) {
+            return false;
+        }
+        if self
+            .topics
+            .iter()
+            .any(|entry| !entry.enabled && topic_matches(&entry.name, topic))
+        {
+            return false;
+        }
+        self.topics
+            .iter()
+            .any(|entry| entry.enabled && topic_matches(&entry.name, topic))
+    }
+}
+
+fn valid_topic(topic: &str) -> bool {
+    !topic.is_empty()
+        && topic
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'.')
+}
+
+fn topic_matches(configured: &str, topic: &str) -> bool {
+    configured == "all"
+        || configured == topic
+        || topic
+            .strip_prefix(configured)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+static TRACE_TOPICS: RwLock<TopicSet> = RwLock::new(TopicSet::empty());
+/// True while at least one topic is enabled: the per-frame fast path never
+/// takes the lock in the common case of no tracing at all.
+static TRACE_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Returns whether `topic` is enabled by the process-wide trace topic set.
+#[inline]
+pub fn trace_enabled(topic: &str) -> bool {
+    if !TRACE_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    TRACE_TOPICS
+        .read()
+        .expect("Trace topic lock poisoned")
+        .enabled(topic)
+}
+
+/// Replaces the process-wide trace topic set with a comma-separated spec.
+pub fn set_trace_topics(spec: &str) {
+    let set = TopicSet::parse(spec);
+    let any = set.topics.iter().any(|topic| topic.enabled);
+    *TRACE_TOPICS.write().expect("Trace topic lock poisoned") = set;
+    TRACE_ANY.store(any, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns the normalized process-wide trace topic spec.
+pub fn trace_topics() -> String {
+    TRACE_TOPICS
+        .read()
+        .expect("Trace topic lock poisoned")
+        .spec
+        .clone()
+}
+
+/// An enabled trace span. Dropping it logs elapsed wall-clock time.
+pub struct TraceSpan {
+    topic: String,
+    started: Instant,
+}
+
+impl Drop for TraceSpan {
+    fn drop(&mut self) {
+        log!(
+            "[{}] elapsed {:.3} ms",
+            self.topic,
+            self.started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
+/// Starts an elapsed-time span when `topic` is enabled. Never on the web:
+/// `Instant` is unimplemented on wasm32 and panics, so a span there is
+/// simply absent rather than fatal.
+pub fn trace_span(topic: &str) -> Option<TraceSpan> {
+    if cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    trace_enabled(topic).then(|| TraceSpan {
+        topic: topic.to_string(),
+        started: Instant::now(),
+    })
+}
 
 #[macro_export]
 macro_rules!log {
@@ -94,17 +244,25 @@ macro_rules!debug {
 
 #[macro_export]
 macro_rules!trace {
-    ( $ ( $ t: tt) *) => {
+    ($topic:expr, $fmt:literal $($arg:tt)*) => {{
+        let topic_value = $topic;
+        let topic: &str = ::std::convert::AsRef::<str>::as_ref(&topic_value);
+        if $crate::trace_enabled(topic) {
+            $crate::log!("[{}] {}", topic, format_args!($fmt $($arg)*));
+        }
+    }};
+    // Compatibility for crates using the former unconditional trace logger.
+    ($($t:tt)*) => {
         $crate::log_with_level(
             file!(),
             line!()-1,
             column!()-1,
             line!()-1,
             column!() + 3,
-            format!( $ ( $ t) *),
-            $ crate::LogLevel::Log
+            format!($($t)*),
+            $crate::LogLevel::Log
         )
-    }
+    };
 }
 
 fn log_with_level_rustc(
@@ -254,5 +412,33 @@ impl LogLevel {
         let _ = write!(out, "}}");
         let _ = write!(out, "}}");
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_matcher_hierarchy_all_and_negation() {
+        let topics = TopicSet::parse("gpu,all,-gpu.profile");
+        assert!(topics.enabled("gpu"));
+        assert!(topics.enabled("gpu.pass"));
+        assert!(topics.enabled("frame"));
+        assert!(!topics.enabled("gpu.profile"));
+        assert!(!topics.enabled("gpu.profile.detail"));
+        assert!(!TopicSet::parse("gpu").enabled("gpuish"));
+    }
+
+    #[test]
+    fn set_clear_and_get_topics() {
+        set_trace_topics(" gpu.pass, invalid!, -gpu.profile ");
+        assert_eq!(trace_topics(), "gpu.pass,-gpu.profile");
+        assert!(trace_enabled("gpu.pass.detail"));
+        assert!(!trace_enabled("gpu.profile"));
+
+        set_trace_topics("");
+        assert_eq!(trace_topics(), "");
+        assert!(!trace_enabled("gpu.pass"));
     }
 }

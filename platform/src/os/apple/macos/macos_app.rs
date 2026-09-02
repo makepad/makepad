@@ -68,8 +68,7 @@ static METAL_LINK_TRACE_LAST_US: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 fn metal_link_frame_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some())
+    crate::makepad_error_log::trace_enabled("frame")
 }
 
 pub(super) fn metal_link_trace_drawable_consumed() {
@@ -116,8 +115,9 @@ fn metal_link_trace_report() {
     let updates = METAL_LINK_TRACE_UPDATES.swap(0, std::sync::atomic::Ordering::AcqRel);
     let drawables = METAL_LINK_TRACE_DRAWABLES.swap(0, std::sync::atomic::Ordering::AcqRel);
     let presented = METAL_LINK_TRACE_PRESENTED.swap(0, std::sync::atomic::Ordering::AcqRel);
-    eprintln!(
-        "[frame-trace] metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
+    crate::trace!(
+        "frame",
+        "metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
         now_us.saturating_sub(last_us) as f64 / 1000.0,
         updates,
         drawables,
@@ -1375,8 +1375,9 @@ impl MacosApp {
                             let () = msg_send![link, setPreferredFrameRateRange: requested_range];
                             let () = msg_send![link, setPreferredFrameLatency: 2isize];
                             if metal_link_frame_trace_enabled() {
-                                eprintln!(
-                                    "[frame-trace] metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
+                                crate::trace!(
+                                    "frame",
+                                    "metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
                                     default_range.minimum,
                                     default_range.maximum,
                                     default_range.preferred,

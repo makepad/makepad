@@ -138,7 +138,7 @@ use crate::os::apple::apple_sys::{
 
 impl Cx {
     fn total_drawcall_log_enabled() -> bool {
-        std::env::var_os("MAKEPAD_TOTAL_DRAWCALLS_DEBUG").is_some()
+        crate::makepad_error_log::trace_enabled("gpu.drawcalls")
     }
 
     fn render_view(
@@ -242,8 +242,9 @@ impl Cx {
                     let instance_bytes = (draw_item.instances.as_ref().unwrap().len()
                         * std::mem::size_of::<f32>())
                         as u64;
-                    if instance_bytes > 524_288 && std::env::var_os("MAKEPAD_PRESENT").is_some() {
-                        crate::log!(
+                    if instance_bytes > 524_288 && crate::makepad_error_log::trace_enabled("present") {
+                        crate::trace!(
+                            "present",
                             "MPUPLOAD list {:?} item {} — {:.1}MB re-uploaded",
                             draw_list_id,
                             draw_item_id,
@@ -976,7 +977,8 @@ impl Cx {
         if Self::total_drawcall_log_enabled() {
             static LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
             if LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 200 {
-                crate::log!(
+                crate::trace!(
+                    "gpu.drawcalls",
                     "total_drawcalls repaint={} pass={:?} draw_list={:?} draw_calls_done={}",
                     self.repaint_id,
                     draw_pass_id,
@@ -1002,9 +1004,9 @@ impl Cx {
             (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
         });
 
-        // MAKEPAD_GPU_PASS_TRACE=1: log each pass's GPU time to stderr —
+        // Log each pass's GPU time —
         // per-pass breakdown for chasing frame-budget overruns.
-        if std::env::var_os("MAKEPAD_GPU_PASS_TRACE").is_some() {
+        if crate::makepad_error_log::trace_enabled("gpu.pass") {
             let name = if self.passes[draw_pass_id].debug_name.is_empty() {
                 "main".to_string()
             } else {
@@ -1016,7 +1018,7 @@ impl Cx {
                     addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
                         let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                         let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
-                        eprintln!("[gpu-pass] {} {:.3}ms", name, (end - start) * 1000.0);
+                        crate::trace!("gpu.pass", "{} {:.3}ms", name, (end - start) * 1000.0);
                     })
                 ]
             };
@@ -1273,8 +1275,7 @@ impl Cx {
     }
 
     fn gpu_profile_enabled() -> bool {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var_os("MAKEPAD_GPU_PROFILE").is_some())
+        crate::makepad_error_log::trace_enabled("gpu.profile")
     }
 
     fn commit_command_buffer(
@@ -1627,7 +1628,7 @@ pub struct MetalCx {
     /// encoders here instead of committing one buffer each — a 12-pass
     /// blur pyramid was paying ~1ms commit/schedule latency PER PASS. The
     /// final window pass presents and commits it. Retained (see retain in
-    /// draw_pass); None outside a frame or when MAKEPAD_GPU_PROFILE=1
+    /// draw_pass); None outside a frame or when `gpu.profile` is enabled
     /// (profiling keeps per-pass buffers for per-pass GPU spans).
     pub frame_command_buffer: Option<ObjcId>,
     /// `cb_seq` of `frame_command_buffer`, restored into `current_cb_seq`
@@ -1647,7 +1648,7 @@ pub struct MetalCx {
     staging_pool: Arc<Mutex<Vec<StagingBuffer>>>,
     /// Shaders drawn by the pass being encoded (`render_view` collects
     /// them, `draw_pass` hands them to the in-flight registry) — what the
-    /// hang diagnostic and `MAKEPAD_GPU_TRACE` name.
+    /// hang diagnostic and `gpu.trace` name.
     pass_shaders: RefCell<Vec<LiveId>>,
     /// The last command-buffer seq of each recent repaint, oldest first —
     /// the unit of the frame-level GPU backpressure (`frames_in_flight`).
@@ -1667,7 +1668,7 @@ pub struct MetalCx {
 /// completion of N implies completion of everything numbered below it.
 static METAL_CB_COMPLETED: AtomicU64 = AtomicU64::new(0);
 
-/// One in-flight command buffer as the hang watchdog and `MAKEPAD_GPU_TRACE`
+/// One in-flight command buffer as the hang watchdog and `gpu.trace`
 /// see it. Entries are born in `new_command_buffer`, filled by `draw_pass`,
 /// stamped at commit, and removed by the buffer's completion handler.
 struct InFlightCb {
@@ -1739,19 +1740,11 @@ fn gpu_hang_max_ms() -> u64 {
     })
 }
 
-/// `MAKEPAD_GPU_TRACE=1` logs every command buffer whose GPU time exceeds
-/// 4 ms (`=N` sets the threshold in ms) with its passes and shaders, plus
+/// The `gpu.trace` topic logs every command buffer whose GPU time exceeds
+/// 4 ms with its passes and shaders, plus
 /// once-per-second staging, queue, and backpressure counters.
 pub(crate) fn gpu_trace_threshold_ms() -> Option<f64> {
-    static T: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
-    *T.get_or_init(|| {
-        let v = std::env::var("MAKEPAD_GPU_TRACE").ok()?;
-        let v = v.trim();
-        match v.parse::<f64>() {
-            Ok(ms) if ms > 1.0 => Some(ms),
-            _ => Some(4.0),
-        }
-    })
+    crate::makepad_error_log::trace_enabled("gpu.trace").then_some(4.0)
 }
 
 /// GPU-HANG SELF-TERMINATION. A runaway shader keeps its command buffer
@@ -1759,8 +1752,9 @@ pub(crate) fn gpu_trace_threshold_ms() -> Option<f64> {
 /// user's whole desktop, tonight: two freezes and a reboot). This thread
 /// watches the oldest committed-but-uncompleted command buffer and, once it
 /// is older than `MAKEPAD_GPU_MAX_CB_MS`, writes a diagnostic naming the
-/// passes and shaders in that buffer (stderr, and the file named by
-/// `MAKEPAD_GPU_HANG_DUMP` if set) and aborts THIS process — the kernel
+/// passes and shaders in that buffer (stderr, and under
+/// `~/.makepad/logs/gpu.hang/` when that topic is enabled) and aborts THIS
+/// process — the kernel
 /// tears down our GPU context long before the driver-level watchdog fires.
 /// A thread, not a per-frame check: a hung GPU also stalls the display
 /// link, so the main loop may never get another beat.
@@ -1802,12 +1796,14 @@ fn metal_hang_watchdog_start() {
                     )
                 };
                 eprintln!("{}", diagnostic);
-                if let Some(path) = std::env::var_os("MAKEPAD_GPU_HANG_DUMP") {
+                if crate::makepad_error_log::trace_enabled("gpu.hang") {
                     use std::io::Write as _;
+                    let dir = crate::log::trace_log_dir("gpu.hang");
+                    let _ = std::fs::create_dir_all(&dir);
                     if let Ok(mut file) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(&path)
+                        .open(dir.join("hang.log"))
                     {
                         let _ = writeln!(
                             file,
@@ -2071,8 +2067,9 @@ impl MetalCx {
                         let end: f64 = unsafe { msg_send![cb, GPUEndTime] };
                         let ms = (end - start) * 1000.0;
                         if ms.is_finite() && ms > threshold {
-                            eprintln!(
-                                "[gpu-trace] command buffer #{} gpu {:.2} ms: {}",
+                            crate::trace!(
+                                "gpu.trace",
+                                "command buffer #{} gpu {:.2} ms: {}",
                                 seq,
                                 ms,
                                 describe_passes(&entry.passes)
@@ -2111,7 +2108,7 @@ impl MetalCx {
             .count()
     }
 
-    /// `MAKEPAD_GPU_TRACE=1`: report the allocations whose lifetime follows
+    /// With `gpu.trace`, report allocations whose lifetime follows
     /// command-buffer completion. The pool is bounded, while `used` identifies
     /// work waiting on the GPU; growth there is queue growth, not pool growth.
     #[allow(dead_code)] // called by the macos present gate
@@ -2134,8 +2131,9 @@ impl MetalCx {
         let used_bytes = STAGING_USED_BYTES.load(Ordering::Relaxed);
         let encoding_count = live_count.saturating_sub(pool_count.saturating_add(used_count));
         let command_buffers = metal_in_flight().len();
-        eprintln!(
-            "[gpu-memory] staging_live={} staging_used={} staging_pool={} staging_encoding={} total_bytes={} used_bytes={} pool_bytes={} command_buffers={} frames={} backpressure_skips={}",
+        crate::trace!(
+            "gpu.trace",
+            "staging_live={} staging_used={} staging_pool={} staging_encoding={} total_bytes={} used_bytes={} pool_bytes={} command_buffers={} frames={} backpressure_skips={}",
             live_count,
             used_count,
             pool_count,
@@ -2544,11 +2542,12 @@ impl CxOsDrawShader {
     ) -> Option<Self> {
         // Generated shader source is what an author — increasingly an AI —
         // actually has to debug, and it is otherwise invisible. Dumping it is
-        // opt-in and costs nothing when the var is unset.
-        if let Ok(dir) = std::env::var("MAKEPAD_SHADER_DUMP") {
+        // opt-in and costs nothing when the topic is disabled.
+        if crate::makepad_error_log::trace_enabled("shader.dump") {
+            let dir = crate::log::trace_log_dir("shader.dump");
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&mtlsl, &mut hasher);
-            let name = format!("{}/shader_{:016x}.metal", dir, std::hash::Hasher::finish(&hasher));
+            let name = dir.join(format!("shader_{:016x}.metal", std::hash::Hasher::finish(&hasher)));
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&name, mtlsl.as_bytes());
         }
@@ -2661,8 +2660,8 @@ impl CxOsDrawShader {
 
         // Opt-in: shader compile timing is only interesting when someone is
         // measuring it, and every boot compiles dozens of shaders.
-        if std::env::var("MAKEPAD_SHADER_BENCH").is_ok() {
-            crate::log!("MPSHADERBENCH src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
+        if crate::makepad_error_log::trace_enabled("shader.bench") {
+            crate::trace!("shader.bench", "src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
                 _mp_src_len, _mp_lib_ms, _mp_t1.elapsed().as_secs_f64()*1000.0,
                 _mp_t0.elapsed().as_secs_f64()*1000.0);
         }
@@ -4163,7 +4162,7 @@ impl EaglRenderBridge {
     }
 }
 
-/// MAKEPAD_GPU_PROFILE=1: per-pass GPU-time + geometry table, printed once
+/// The `gpu.profile` topic prints a per-pass GPU-time + geometry table once
 /// a second from the command-buffer completion threads. Names are the
 /// passes' debug names; ms are summed GPU intervals over the window.
 fn gpu_profile_accumulate(
@@ -4214,7 +4213,7 @@ fn gpu_profile_accumulate(
                 s.instance_bytes as f64 / 1e6,
             ));
         }
-        crate::log!("{}", out);
+        crate::trace!("gpu.profile", "{}", out);
         *guard = None;
     }
 }
@@ -4330,7 +4329,7 @@ mod vec_upload_tests {
 }
 
 
-/// `MAKEPAD_PRESENT=1`: once a second, how many drawables were actually presented
+/// The `present` topic reports once a second how many drawables were presented
 /// and the worst gap between two of them — the number the eye sees, below
 /// every app-side clock. Costs one env check when off.
 /// CPU encode seconds and uploaded bytes per pass, summed on the main
@@ -4355,12 +4354,12 @@ fn present_gpu_time(seconds: f64) {
     GPU_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// MAKEPAD_PRESENT=1: stamp when an input event arrived; the next present logs
+/// Stamp when an input event arrived; the next present logs
 /// the input→glass latency. THE number behind "the first letter hangs".
 static INPUT_AT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn note_input_event() {
-    if std::env::var_os("MAKEPAD_PRESENT").is_none() {
+    if !crate::makepad_error_log::trace_enabled("present") {
         return;
     }
     let now = std::time::SystemTime::now()
@@ -4378,13 +4377,12 @@ pub(crate) fn note_input_event() {
 fn present_pulse() {
     use std::cell::Cell;
     thread_local! {
-        static ON: bool = std::env::var("MAKEPAD_PRESENT").is_ok();
         static LAST: Cell<f64> = const { Cell::new(0.0) };
         static SINCE: Cell<f64> = const { Cell::new(0.0) };
         static COUNT: Cell<u32> = const { Cell::new(0) };
         static WORST: Cell<f64> = const { Cell::new(0.0) };
     }
-    if !ON.with(|v| *v) {
+    if !crate::makepad_error_log::trace_enabled("present") {
         return;
     }
     let input_at = INPUT_AT_US.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -4393,7 +4391,7 @@ fn present_pulse() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        crate::log!("MPINPUT input→present {:.1}ms", (now_us.saturating_sub(input_at)) as f64 / 1000.0);
+        crate::trace!("present", "MPINPUT input→present {:.1}ms", (now_us.saturating_sub(input_at)) as f64 / 1000.0);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4419,8 +4417,9 @@ fn present_pulse() {
                 let cpu_ms = CPU_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
                 let up_mb = UP_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
                 let tex_mb = TEX_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
-                crate::log!(
-                    "MAKEPAD_PRESENT {count} presents/s · worst gap {:.1}ms · cpu encode {:.1}ms/s · instances {:.2}MB/s · textures {tex_mb:.2}MB/s · gpu {:.1}ms/frame max {:.1}ms",
+                crate::trace!(
+                    "present",
+                    "{count} presents/s · worst gap {:.1}ms · cpu encode {:.1}ms/s · instances {:.2}MB/s · textures {tex_mb:.2}MB/s · gpu {:.1}ms/frame max {:.1}ms",
                     worst * 1000.0,
                     cpu_ms,
                     up_mb,

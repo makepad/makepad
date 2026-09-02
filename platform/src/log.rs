@@ -43,9 +43,20 @@ fn android_logcat_write(
 
 impl Cx {
     pub fn init_log() {
+        static TRACE_TOPICS_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        TRACE_TOPICS_INIT.get_or_init(|| {
+            set_trace_topics(&std::env::var("MAKEPAD_TRACE").unwrap_or_default());
+        });
         let mut logger = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
         *logger = log_with_level_makepad_platform;
     }
+}
+
+/// Default directory for trace artifacts that are too large for the log.
+pub fn trace_log_dir(topic: &str) -> std::path::PathBuf {
+    #[allow(deprecated)]
+    let base = std::env::home_dir().unwrap_or_else(std::env::temp_dir);
+    base.join(".makepad").join("logs").join(topic)
 }
 
 pub(crate) fn log_with_level_makepad_platform(
