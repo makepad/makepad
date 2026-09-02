@@ -64,7 +64,12 @@ pub(crate) const MF_LOW_LATENCY: GUID = GUID::from_u128(0x9c27891a_ed7a_40e1_88e
 /// Bit in `MFT_OUTPUT_STREAM_INFO::dwFlags` meaning the MFT allocates its
 /// own output samples (caller must pass `None` to `process_output`,
 /// otherwise the caller must pre-allocate one of `cbSize` bytes).
-pub(crate) const MFT_OUTPUT_STREAM_PROVIDES_SAMPLES: u32 = 0x0000_0001;
+/// mftransform.h: WHOLE_SAMPLES 0x1, SINGLE_SAMPLE_PER_BUFFER 0x2,
+/// FIXED_SAMPLE_SIZE 0x4, DISCARDABLE 0x8, OPTIONAL 0x10, PROVIDES_SAMPLES
+/// 0x100, CAN_PROVIDE_SAMPLES 0x200 — the Microsoft H.264 decoder reports
+/// 0x107, so reading bit 0 as "provides samples" hands it no buffer and
+/// every `ProcessOutput` is `E_INVALIDARG`.
+pub(crate) const MFT_OUTPUT_STREAM_PROVIDES_SAMPLES: u32 = 0x0000_0100;
 
 pub(crate) unsafe fn process_message(transform: &IMFTransform, message: i32, param: usize) -> windows::core::Result<()> {
     let vtbl = Interface::vtable(transform);
