@@ -260,10 +260,10 @@ script_mod! {
             let p = self.pos * self.rect_size
             let w = self.rect_size.x
             let h = self.rect_size.y
-            let x0 = clamp(self.part_x0 * w, 0.0, w)
-            let x1 = clamp(self.part_x1 * w, x0, w)
-            let y0 = clamp(self.part_y0 * h, 0.0, h)
-            let y1 = clamp(self.part_y1 * h, y0, h)
+            let x0 = clamp(self.part.x * w, 0.0, w)
+            let x1 = clamp(self.part.y * w, x0, w)
+            let y0 = clamp(self.part.z * h, 0.0, h)
+            let y1 = clamp(self.part.w * h, y0, h)
             let inside_y = step(y0 + 2.0, p.y) * step(p.y, y1 - 2.0)
             let play_x = x0 + 2.0
                 + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
@@ -283,10 +283,10 @@ script_mod! {
             let p = self.pos * self.rect_size
             let w = self.rect_size.x
             let h = self.rect_size.y
-            let x0 = clamp(self.part_x0 * w, 0.0, w)
-            let x1 = clamp(self.part_x1 * w, x0, w)
-            let y0 = clamp(self.part_y0 * h, 0.0, h)
-            let y1 = clamp(self.part_y1 * h, y0, h)
+            let x0 = clamp(self.part.x * w, 0.0, w)
+            let x1 = clamp(self.part.y * w, x0, w)
+            let y0 = clamp(self.part.z * h, 0.0, h)
+            let y1 = clamp(self.part.w * h, y0, h)
             let fill_x = x0 + 3.0
                 + clamp(self.bar_phase, 0.0, 1.0) * max(x1 - x0 - 6.0, 0.0)
             let strip = step(y0 + 3.0, p.y) * step(p.y, min(y0 + 6.0, y1 - 2.0))
@@ -302,10 +302,10 @@ script_mod! {
             let p = self.pos * self.rect_size
             let sdf = Sdf2d.viewport(p)
             let rgb = self.color.xyz
-            let part_x0 = clamp(self.part_x0 * w, 0.0, w)
-            let part_x1 = clamp(self.part_x1 * w, part_x0, w)
-            let part_y0 = clamp(self.part_y0 * h, 0.0, h)
-            let part_y1 = clamp(self.part_y1 * h, part_y0, h)
+            let part_x0 = clamp(self.part.x * w, 0.0, w)
+            let part_x1 = clamp(self.part.y * w, part_x0, w)
+            let part_y0 = clamp(self.part.z * h, 0.0, h)
+            let part_y1 = clamp(self.part.w * h, part_y0, h)
             sdf.box(1.0, 1.0, w - 2.0, h - 2.0, 3.0)
             if self.state < 0.5 {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.10), 1.0)
@@ -390,8 +390,8 @@ script_mod! {
             // Symmetric envelope with a one-pixel feather and a four-pixel
             // inset, so the wave never spills through the rounded corners.
             let active = step(2.5, self.state)
-            let part_h = max(self.part_y1 - self.part_y0, 0.001)
-            let part_y = clamp((self.pos.y - self.part_y0) / part_h, 0.0, 1.0)
+            let part_h = max(self.part.w - self.part.z, 0.001)
+            let part_y = clamp((self.pos.y - self.part.z) / part_h, 0.0, 1.0)
             let display_y = mix(self.pos.y, part_y, active)
             let display_h = mix(h, part_y1 - part_y0, active)
             let inner_scale = max(display_h - 8.0, 1.0) / max(display_h, 1.0)
@@ -409,8 +409,8 @@ script_mod! {
             let cover = envelope * in_x * mix(1.0, part_mask, active)
 
             let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-            let part_w = max(self.part_x1 - self.part_x0, 0.001)
-            let part_x = clamp((self.pos.x - self.part_x0) / part_w, 0.0, 1.0)
+            let part_w = max(self.part.y - self.part.x, 0.001)
+            let part_x = clamp((self.pos.x - self.part.x) / part_w, 0.0, 1.0)
             let played = step(part_x, clamp(self.phase, 0.0, 1.0))
             let silent = 1.0 - step(1.5, self.state)
             let ready = step(1.5, self.state) - step(2.5, self.state)

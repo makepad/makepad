@@ -163,14 +163,11 @@ pub struct DrawSplatCell {
     pub state: f32,
     #[live]
     pub hover: f32,
+    /// The part's rectangle as fractions of the cell: x0, x1, y0, y1 in one
+    /// register. The cell shader is at the vertex-input ceiling of the
+    /// narrowest GPU backend; four scalars here put it over.
     #[live]
-    pub part_x0: f32,
-    #[live(1.0)]
-    pub part_x1: f32,
-    #[live]
-    pub part_y0: f32,
-    #[live(1.0)]
-    pub part_y1: f32,
+    pub part: Vec4f,
     /// Source span in finest-level pyramid columns.
     #[live]
     pub span_start: f32,
@@ -588,10 +585,12 @@ impl VjLoopSplat {
         let part_rect = slot_rect(rect, part);
         let width = rect.size.x.max(1.0);
         let height = rect.size.y.max(1.0);
-        self.draw_cell.part_x0 = ((part_rect.pos.x - rect.pos.x) / width) as f32;
-        self.draw_cell.part_x1 = ((part_rect.pos.x + part_rect.size.x - rect.pos.x) / width) as f32;
-        self.draw_cell.part_y0 = ((part_rect.pos.y - rect.pos.y) / height) as f32;
-        self.draw_cell.part_y1 = ((part_rect.pos.y + part_rect.size.y - rect.pos.y) / height) as f32;
+        self.draw_cell.part = vec4(
+            ((part_rect.pos.x - rect.pos.x) / width) as f32,
+            ((part_rect.pos.x + part_rect.size.x - rect.pos.x) / width) as f32,
+            ((part_rect.pos.y - rect.pos.y) / height) as f32,
+            ((part_rect.pos.y + part_rect.size.y - rect.pos.y) / height) as f32,
+        );
         self.draw_cell.has_blocks = if has_blocks { 1.0 } else { 0.0 };
         self.draw_cell.channel = match row {
             SplatRowView::Vocals => 0.0,
