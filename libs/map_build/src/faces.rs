@@ -716,6 +716,7 @@ mod tests {
                 16,
                 true,
                 true,
+                false,
             )
             .unwrap()
         };
@@ -737,6 +738,11 @@ mod tests {
                 );
             })+};
         }
+        macro_rules! same_bytes {
+            ($($field:ident),+ $(,)?) => {$({
+                assert_eq!(trimmed.$field, full.$field, stringify!($field));
+            })+};
+        }
         same_indices!(
             fill_indices,
             fill_misc_indices,
@@ -755,15 +761,10 @@ mod tests {
             road_icon_indices,
         );
         same_floats!(
-            fill_vertices,
             fill_misc_vertices,
-            casing_vertices,
-            stroke_vertices,
             icon_vertices,
             icon_high_vertices,
             shadow_disc_instances,
-            fringe_vertices,
-            fill_3d_vertices,
             fill_3d_misc_vertices,
             wall_vertices,
             wall_instances,
@@ -773,6 +774,13 @@ mod tests {
             tree_cross_template_vertices,
             tree_instances,
             road_icon_vertices,
+        );
+        same_bytes!(
+            fill_vertices,
+            casing_vertices,
+            stroke_vertices,
+            fringe_vertices,
+            fill_3d_vertices,
         );
         let same_instances = |left: &[makepad_widgets::map::tile::IconInstances],
                               right: &[makepad_widgets::map::tile::IconInstances]| {

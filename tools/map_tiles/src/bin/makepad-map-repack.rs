@@ -1,10 +1,12 @@
-use makepad_map_build::repack::{repack_archive, RepackOptions, TileSelection};
+use makepad_map_build::repack::{
+    repack_archive, repack_status, RepackOptions, ShardRange, TileSelection,
+};
 use makepad_mbtile_reader::mkmap_tile_id;
 use std::collections::BTreeSet;
 use std::env;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: makepad-map-repack <in.mkmap dir> <out dir> [--tiles <hilbert range | z/x/y list>] [--dry-run] [--verify] [--resume]";
+const USAGE: &str = "Usage: makepad-map-repack <in.mkmap dir> <out dir> [--tiles <hilbert range | z/x/y list>] [--jobs N] [--brotli-quality Q] [--resume] [--verify [--shards A..B]] [--status] [--log FILE] [--dry-run]\nDefaults: all available cores, Brotli q11, progress log <out>/repack.log; A..B is half-open.";
 
 fn parse_selection(value: &str) -> Result<TileSelection, String> {
     if value.contains('/') {
@@ -55,6 +57,31 @@ fn parse_selection(value: &str) -> Result<TileSelection, String> {
     Ok(TileSelection::HilbertRange { start, end })
 }
 
+fn parse_shard_range(value: &str) -> Result<ShardRange, String> {
+    let (start, end, inclusive) = if let Some((start, end)) = value.split_once("..=") {
+        (start, end, true)
+    } else if let Some((start, end)) = value.split_once("..") {
+        (start, end, false)
+    } else {
+        return Err("shard range must be START..END or START..=END".to_string());
+    };
+    let start = start
+        .parse::<usize>()
+        .map_err(|err| format!("invalid shard range start '{start}': {err}"))?;
+    let mut end = end
+        .parse::<usize>()
+        .map_err(|err| format!("invalid shard range end '{end}': {err}"))?;
+    if inclusive {
+        end = end
+            .checked_add(1)
+            .ok_or_else(|| "inclusive shard range end overflows".to_string())?;
+    }
+    if start >= end {
+        return Err("shard range must not be empty".to_string());
+    }
+    Ok(ShardRange { start, end })
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
@@ -71,7 +98,15 @@ fn run() -> Result<(), String> {
         dry_run: false,
         verify: false,
         resume: false,
+        jobs: std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1),
+        brotli_quality: 11,
+        verify_shards: None,
+        log: None,
     };
+    let mut status = false;
+    let mut explicit_log = false;
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
@@ -92,8 +127,66 @@ fn run() -> Result<(), String> {
                 options.resume = true;
                 index += 1;
             }
+            "--jobs" => {
+                let value = args.get(index + 1).ok_or("--jobs requires a value")?;
+                options.jobs = value
+                    .parse::<usize>()
+                    .map_err(|err| format!("invalid --jobs value '{value}': {err}"))?;
+                if options.jobs == 0 {
+                    return Err("--jobs must be at least 1".to_string());
+                }
+                index += 2;
+            }
+            "--brotli-quality" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--brotli-quality requires a value")?;
+                options.brotli_quality = value.parse::<u32>().map_err(|err| {
+                    format!("invalid --brotli-quality value '{value}': {err}")
+                })?;
+                if options.brotli_quality > 11 {
+                    return Err("--brotli-quality must be in 0..=11".to_string());
+                }
+                index += 2;
+            }
+            "--shards" => {
+                let value = args.get(index + 1).ok_or("--shards requires a value")?;
+                options.verify_shards = Some(parse_shard_range(value)?);
+                index += 2;
+            }
+            "--status" => {
+                status = true;
+                index += 1;
+            }
+            "--log" => {
+                let value = args.get(index + 1).ok_or("--log requires a value")?;
+                options.log = Some(PathBuf::from(value));
+                explicit_log = true;
+                index += 2;
+            }
             other => return Err(format!("unknown argument '{other}'\n{USAGE}")),
         }
+    }
+    if options.verify_shards.is_some() && !options.verify {
+        return Err("--shards requires --verify".to_string());
+    }
+    if status {
+        if options.dry_run || options.verify || options.resume || explicit_log {
+            return Err("--status cannot be combined with --dry-run, --verify, --resume, or --log"
+                .to_string());
+        }
+        let status = repack_status(&options)?;
+        println!(
+            "{}/{} done, {} bytes in, {} bytes out",
+            status.completed_shards,
+            status.total_shards,
+            status.compressed_before,
+            status.compressed_after
+        );
+        return Ok(());
+    }
+    if !options.dry_run && options.log.is_none() {
+        options.log = Some(options.output.join("repack.log"));
     }
     repack_archive(&options).map(|_| ())
 }
@@ -120,5 +213,17 @@ mod tests {
             panic!("explicit selection expected")
         };
         assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn parses_half_open_and_inclusive_shard_ranges() {
+        assert_eq!(
+            parse_shard_range("2..5").unwrap(),
+            ShardRange { start: 2, end: 5 }
+        );
+        assert_eq!(
+            parse_shard_range("2..=5").unwrap(),
+            ShardRange { start: 2, end: 6 }
+        );
     }
 }
