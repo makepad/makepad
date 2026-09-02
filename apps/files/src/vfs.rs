@@ -97,6 +97,14 @@ pub trait Vfs: Send + Sync {
             .unwrap_or(false)
     }
 
+    /// Create a directory path. Callers validate collisions before this
+    /// reaches the backend; recursive creation also lets Trash bootstrap its
+    /// platform-specific parent folders.
+    fn mkdir(&self, path: &Path) -> Result<(), String>;
+
+    /// Move or rename one path without replacing an existing target.
+    fn rename(&self, source: &Path, target: &Path) -> Result<(), String>;
+
     /// The real file on disk behind a path, for native integrations that
     /// cannot consume bytes. A virtual filesystem returns typed Unavailable.
     fn native_path(&self, _path: &Path) -> Result<PathBuf, VfsError> {
@@ -229,6 +237,19 @@ impl Vfs for RealVfs {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn mkdir(&self, path: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(path)
+            .map_err(|error| format!("Could not create {}: {error}", path.display()))
+    }
+
+    fn rename(&self, source: &Path, target: &Path) -> Result<(), String> {
+        if target.exists() {
+            return Err(format!("{} already exists", target.display()));
+        }
+        crate::ops::move_path(source, target, &AtomicBool::new(false), &|_| {})
+            .map_err(|error| format!("Could not move {}: {error}", source.display()))
     }
 
     fn native_path(&self, path: &Path) -> Result<PathBuf, VfsError> {

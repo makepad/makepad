@@ -1004,6 +1004,69 @@ impl Vfs for DemoVfs {
         resolve(&tree, path).is_some_and(|n| n.is_dir)
     }
 
+    fn mkdir(&self, path: &Path) -> Result<(), String> {
+        let home = Path::new(VIRTUAL_HOME);
+        let rel = path
+            .strip_prefix(home)
+            .map_err(|_| format!("{} is outside the demo home", path.display()))?;
+        let mut tree = self.root.lock().unwrap();
+        let mut node = &mut *tree;
+        for component in rel.components() {
+            let std::path::Component::Normal(part) = component else {
+                return Err(format!("Invalid folder path: {}", path.display()));
+            };
+            let name = part.to_string_lossy().into_owned();
+            let index = match node.children.iter().position(|child| child.name == name) {
+                Some(index) => index,
+                None => {
+                    node.children.push(folder_at(
+                        name,
+                        DEMO_NOW_SECS,
+                        DEMO_NOW_SECS,
+                        Vec::new(),
+                    ));
+                    node.children.len() - 1
+                }
+            };
+            node = &mut node.children[index];
+            if !node.is_dir {
+                return Err(format!("{} is not a folder", path.display()));
+            }
+        }
+        Ok(())
+    }
+
+    fn rename(&self, source: &Path, target: &Path) -> Result<(), String> {
+        if source == reserved_trash_path() {
+            return Err("Can't move the reserved demo Trash folder".to_string());
+        }
+        let (source_parent, source_name) =
+            split_path(source).ok_or_else(|| format!("Can't move {}", source.display()))?;
+        let (target_parent, target_name) =
+            split_path(target).ok_or_else(|| format!("Can't move to {}", target.display()))?;
+        let mut tree = self.root.lock().unwrap();
+        let destination = resolve(&tree, &target_parent)
+            .ok_or_else(|| format!("No such folder: {}", target_parent.display()))?;
+        if !destination.is_dir {
+            return Err(format!("{} is not a folder", target_parent.display()));
+        }
+        if destination.children.iter().any(|child| child.name == target_name) {
+            return Err(format!("{} already exists", target.display()));
+        }
+        let mut moved = {
+            let parent = resolve_mut(&mut tree, &source_parent)
+                .ok_or_else(|| format!("No such folder: {}", source_parent.display()))?;
+            take_child(parent, &source_name)
+                .ok_or_else(|| format!("No such file: {}", source.display()))?
+        };
+        moved.name = target_name;
+        resolve_mut(&mut tree, &target_parent)
+            .expect("destination was validated under the same lock")
+            .children
+            .push(moved);
+        Ok(())
+    }
+
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, VfsError> {
         let tree = self.root.lock().unwrap();
         resolve(&tree, path)
@@ -1513,6 +1576,14 @@ mod tests {
 
         fn is_dir(&self, path: &Path) -> bool {
             self.0.is_dir(path)
+        }
+
+        fn mkdir(&self, path: &Path) -> Result<(), String> {
+            self.0.mkdir(path)
+        }
+
+        fn rename(&self, source: &Path, target: &Path) -> Result<(), String> {
+            self.0.rename(source, target)
         }
 
         fn native_path(&self, _path: &Path) -> Result<PathBuf, VfsError> {

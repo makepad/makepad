@@ -36,15 +36,18 @@ makepad-strict-json = { path = "../../libs/strict_json" }
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-sheets = { path = "../sheets", default-features = false, optional = true }
+makepad-photos = { path = "../photos", default-features = false, optional = true }
 # The assistant as a module, seated in the pane in-process: the web build's
 # only chat, a desktop option. Without the engine feature: no model runtime,
 # NoModel and the tool console (the child process keeps the real models).
 makepad-aichat = { path = "../aichat", default-features = false, optional = true }
 
 [features]
-default = ["app-sheets", "app-aichat"]
+default = ["app-sheets", "app-photos", "app-aichat"]
 # Sheets linked in as a module (hosting is still Process unless switched).
 app-sheets = ["dep:makepad-sheets"]
+# Photos (the picture wall) linked in as a module, the same way.
+app-photos = ["dep:makepad-photos"]
 # The aichat module linked in (the pane seats it in-process where there are
 # no processes, or when `aichat` is switched to module hosting).
 app-aichat = ["dep:makepad-aichat"]

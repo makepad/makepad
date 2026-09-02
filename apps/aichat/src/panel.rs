@@ -194,7 +194,14 @@ script_mod! {
             input := TextInput{
                 width: Fill
                 height: Fit
-                empty_text: "Ask, or /tool {json}"
+                empty_text: "Ask AI"
+                // The prompt is a hint, not text: a dark grey in every state,
+                // never the typed colour (the composer is always focused).
+                draw_text +: {
+                    color_empty: #666666
+                    color_empty_hover: #777777
+                    color_empty_focus: #666666
+                }
             }
             send_button := Button{ text: "Send" }
         }

@@ -40,44 +40,123 @@ const MIN_REMAINING_CONTEXT: usize = 256;
 /// The Anthropic model the cloud adapter asks for.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
 
-/// Where the local weights are, or `None` when this machine has none:
-/// the env override, then the checkout-relative path from the working
-/// directory, then up from the executable.
+/// Where the local weights are, or `None` when this machine has none.
+/// Independent of the working directory — an app launched from a copied
+/// binary in some scratch folder must find the same weights as one run
+/// from the checkout: the env override, then the makepad home's weights
+/// directory (where the hub's registry installs models), then the
+/// checkout the executable lives in, then the working directory last.
 pub fn local_model_path() -> Option<PathBuf> {
-    if let Some(from_env) = std::env::var_os(LOCAL_MODEL_ENV) {
-        let path = PathBuf::from(from_env);
+    local_model_path_in(
+        std::env::var_os(LOCAL_MODEL_ENV).map(PathBuf::from),
+        &makepad_ai_hub::home::weights_dir(),
+        std::env::current_exe().ok().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+/// [`local_model_path`] over explicit inputs, so the order is testable.
+pub fn local_model_path_in(
+    from_env: Option<PathBuf>,
+    weights_dir: &Path,
+    exe: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(path) = from_env {
         return path.is_file().then_some(path);
     }
-    let relative = Path::new(DEFAULT_LOCAL_MODEL);
-    if relative.is_file() {
-        return Some(relative.to_path_buf());
+    if let Some(found) = chat_gguf_under(weights_dir, 0) {
+        return Some(found);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        for base in exe.ancestors() {
-            let candidate = base.join(relative);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    let relative = Path::new(DEFAULT_LOCAL_MODEL);
+    if let Some(root) = exe.and_then(repo_root_of) {
+        let candidate = root.join(relative);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Some(cwd) = cwd {
+        let candidate = cwd.join(relative);
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     None
 }
 
+/// The checkout an executable runs out of (`target/<profile>/<bin>` under
+/// a root with a `Cargo.toml` and a `local/` beside it), if any — the
+/// same rule the window manager uses to decide it runs from a checkout.
+fn repo_root_of(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(6)
+        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join("local").is_dir())
+        .map(Path::to_path_buf)
+}
+
+/// How deep the weights directory is searched: the registry installs a
+/// model as `<repo>/<file>`, so two levels reach every installed GGUF.
+const WEIGHTS_SEARCH_DEPTH: usize = 2;
+
+/// The best chat GGUF under `dir`: a Qwen chat model over any other, the
+/// larger file over the smaller. Projector and OCR files are not chat
+/// models and are never picked.
+fn chat_gguf_under(dir: &Path, depth: usize) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(bool, u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth < WEIGHTS_SEARCH_DEPTH {
+                if let Some(found) = chat_gguf_under(&path, depth + 1) {
+                    let size = std::fs::metadata(&found).map(|m| m.len()).unwrap_or(0);
+                    consider(&mut best, found, size);
+                }
+            }
+            continue;
+        }
+        if !is_chat_gguf(&path) {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        consider(&mut best, path, size);
+    }
+    best.map(|(_, _, path)| path)
+}
+
+fn consider(best: &mut Option<(bool, u64, PathBuf)>, path: PathBuf, size: u64) {
+    let qwen = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_ascii_lowercase().contains("qwen"))
+        .unwrap_or(false);
+    let better = match best {
+        None => true,
+        Some((best_qwen, best_size, _)) => (qwen, size) > (*best_qwen, *best_size),
+    };
+    if better {
+        *best = Some((qwen, size, path));
+    }
+}
+
+fn is_chat_gguf(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".gguf") && !lower.contains("mmproj") && !lower.contains("ocr")
+}
+
 /// The rows the provider chip offers, with honest availability.
 pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     let mut rows = Vec::new();
-    match local_model_path() {
-        Some(p) => rows.push(ProviderRow {
-            choice: ProviderChoice::Local,
-            label: format!("Local · {}", model_short_name(&p)),
-            unavailable: None,
-        }),
-        None => rows.push(ProviderRow {
-            choice: ProviderChoice::Local,
-            label: "Local".into(),
-            unavailable: Some("no local model found".into()),
-        }),
-    }
+    // Local is always a choice: the hub's election finds the model where
+    // it is resident — a node on this machine, the fleet's chat box, or the
+    // weights here — and says honestly when none of those answers.
+    rows.push(ProviderRow {
+        choice: ProviderChoice::Local,
+        label: local_label(local_model_path().as_deref()),
+        unavailable: None,
+    });
     let claude_unavailable = if local_only {
         Some("Local AI only is on".into())
     } else if claude_key().is_none() {
@@ -88,6 +167,14 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     rows.push(ProviderRow { choice: ProviderChoice::Cloud("claude-api".into()), label: "Claude (API)".into(), unavailable: claude_unavailable });
     rows.push(ProviderRow { choice: ProviderChoice::Cloud("none".into()), label: "No model (tools only)".into(), unavailable: None });
     rows
+}
+
+/// The provider chip's base label: the local weights when there are any.
+fn local_label(path: Option<&Path>) -> String {
+    match path {
+        Some(p) => format!("Local · {}", model_short_name(p)),
+        None => "Local".to_string(),
+    }
 }
 
 fn model_short_name(path: &Path) -> String {
@@ -109,10 +196,9 @@ fn claude_key() -> Option<String> {
 /// Build the model for a choice, honestly: `Err` names why it cannot be.
 pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn Model>, String> {
     match choice {
-        ProviderChoice::Local => {
-            let path = local_model_path().ok_or_else(|| "no local model found".to_string())?;
-            Ok(Box::new(LocalModel::new(path)))
-        }
+        // With or without weights on this machine: the election decides
+        // where the model runs, and the first line says so if nowhere.
+        ProviderChoice::Local => Ok(Box::new(LocalModel::new(local_model_path()))),
         ProviderChoice::Cloud(slug) if slug == "none" => Ok(Box::new(NoModel)),
         ProviderChoice::Cloud(_) if local_only => Err("Local AI only is on".into()),
         ProviderChoice::Cloud(slug) if slug == "claude-api" || slug == "claude-cli" => {
@@ -131,7 +217,9 @@ pub use super::no_model::{NoModel, NoModelWithReason};
 
 /// The machine's own model through the hub chat session.
 pub struct LocalModel {
-    model_path: PathBuf,
+    /// The weights on this machine, when it has any. `None` is fine: the
+    /// election still reaches a node here or on the fleet.
+    model_path: Option<PathBuf>,
     session: Option<HubChatSession>,
     system: String,
     tools: Vec<ToolDefinition>,
@@ -147,8 +235,8 @@ pub struct LocalModel {
 }
 
 impl LocalModel {
-    pub fn new(model_path: PathBuf) -> Self {
-        let label = format!("Local · {}", model_short_name(&model_path));
+    pub fn new(model_path: Option<PathBuf>) -> Self {
+        let label = local_label(model_path.as_deref());
         LocalModel {
             model_path,
             session: None,
@@ -164,7 +252,7 @@ impl LocalModel {
     }
 
     fn start_session(&mut self) {
-        let mut llm = LocalLlmConfig::new(self.model_path.clone());
+        let mut llm = LocalLlmConfig::new(self.model_path.clone().unwrap_or_default());
         llm.max_context = MAX_CONTEXT;
         llm.max_new_tokens = MAX_NEW_TOKENS;
         llm.min_remaining_context = MIN_REMAINING_CONTEXT;
@@ -205,8 +293,14 @@ impl LocalModel {
 }
 
 impl Model for LocalModel {
+    /// `Local · Qwen3.5 9B`, and once the election settled where the model
+    /// runs: `Local · qwen3.8-27b on 10.0.0.165`, `Local · Qwen3.5 9B ·
+    /// in-process`.
     fn label(&self) -> String {
-        self.label.clone()
+        match self.session.as_ref().and_then(|s| s.route()) {
+            Some(route) => format!("{} · {}", self.label, route.label()),
+            None => self.label.clone(),
+        }
     }
 
     fn configure(&mut self, system: &str, tools: &[ToolDefinition]) -> Result<(), String> {
@@ -487,5 +581,75 @@ mod tests {
     #[test]
     fn model_names_read_well() {
         assert_eq!(model_short_name(Path::new("/x/Qwen3.5-9B-UD-Q4_K_XL.gguf")), "Qwen3.5 9B");
+        assert_eq!(local_label(Some(Path::new("/x/Qwen3.5-9B-UD-Q4_K_XL.gguf"))), "Local · Qwen3.5 9B");
+        assert_eq!(local_label(None), "Local");
+    }
+
+    /// A scratch tree: a fake makepad home with weights, a fake checkout
+    /// with `local/models`, and a working directory that is neither.
+    struct Tree {
+        root: PathBuf,
+    }
+
+    impl Tree {
+        fn new(name: &str) -> Tree {
+            let root = std::env::temp_dir().join(format!("aichat-models-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Tree { root }
+        }
+        fn file(&self, rel: &str, bytes: usize) -> PathBuf {
+            let path = self.root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; bytes]).unwrap();
+            path
+        }
+        fn dir(&self, rel: &str) -> PathBuf {
+            let path = self.root.join(rel);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn the_weights_are_found_without_the_working_directory() {
+        let t = Tree::new("lookup");
+        let weights = t.dir("home/weights");
+        let elsewhere = t.dir("elsewhere");
+        // Nothing anywhere: none, whatever the cwd.
+        assert_eq!(local_model_path_in(None, &weights, None, Some(&elsewhere)), None);
+        // The registry's layout under the home: found from any cwd; the
+        // projector beside it is never the answer, a Qwen beats a larger
+        // other model, the larger Qwen beats the smaller.
+        t.file("home/weights/some/Other-13B.gguf", 3000);
+        t.file("home/weights/unsloth/Qwen3.5-9B-mmproj-F16.gguf", 4000);
+        let small = t.file("home/weights/unsloth/Qwen3.5-4B-Q5.gguf", 1000);
+        assert_eq!(local_model_path_in(None, &weights, None, Some(&elsewhere)), Some(small.clone()));
+        let big = t.file("home/weights/unsloth/Qwen3.5-9B-UD-Q4_K_XL.gguf", 2000);
+        assert_eq!(local_model_path_in(None, &weights, None, Some(&elsewhere)), Some(big));
+        // A checkout found from the executable's place, no home weights.
+        let t2 = Tree::new("checkout");
+        let empty_weights = t2.dir("home/weights");
+        t2.file("repo/Cargo.toml", 1);
+        t2.dir("repo/local");
+        let checkout_model = t2.file(&format!("repo/{DEFAULT_LOCAL_MODEL}"), 10);
+        let exe = t2.file("repo/target/release/aichat", 1);
+        assert_eq!(local_model_path_in(None, &empty_weights, Some(&exe), Some(&elsewhere)), Some(checkout_model.clone()));
+        // A copied binary outside any checkout: the cwd is the last resort.
+        let copied = t2.file("bin/aichat", 1);
+        assert_eq!(local_model_path_in(None, &empty_weights, Some(&copied), Some(&elsewhere)), None);
+        let repo = t2.root.join("repo");
+        assert_eq!(local_model_path_in(None, &empty_weights, Some(&copied), Some(&repo)), Some(checkout_model));
+        // The override wins when it points at a file, and answers none
+        // (never a fallback) when it does not.
+        let pinned = t2.file("pinned/m.gguf", 5);
+        assert_eq!(local_model_path_in(Some(pinned.clone()), &weights, None, Some(&repo)), Some(pinned));
+        assert_eq!(local_model_path_in(Some(t2.root.join("missing.gguf")), &weights, None, Some(&repo)), None);
     }
 }

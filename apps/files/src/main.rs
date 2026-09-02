@@ -2643,7 +2643,7 @@ impl App {
     }
 
     /// The worker's answers and progress go back over the port.
-    fn drain_ai_replies(&mut self, _cx: &mut Cx) {
+    fn drain_ai_replies(&mut self, cx: &mut Cx) {
         let Some(runner) = self.ai_runner.as_mut() else {
             return;
         };
@@ -2651,15 +2651,22 @@ impl App {
         let Some(port) = self.ai_port.as_ref() else {
             return;
         };
+        let mut refresh = false;
         for reply in replies {
             match reply {
-                ServiceReply::Result(result) => port.reply(result),
+                ServiceReply::Result { result, mutated } => {
+                    port.reply(result);
+                    refresh |= mutated;
+                }
                 ServiceReply::Progress {
                     call_id,
                     note,
                     permille,
                 } => port.progress(&call_id, &note, permille),
             }
+        }
+        if refresh {
+            self.request_directory(cx);
         }
     }
 
@@ -4455,7 +4462,9 @@ impl App {
             Some(runner) => runner.drain(),
             None => Vec::new(),
         };
+        let mut refresh = false;
         for reply in replies {
+            refresh |= reply.mutated;
             self.chat.push(
                 ChatVoice::Tool,
                 if reply.is_error {
@@ -4481,6 +4490,9 @@ impl App {
                 self.set_chat_status(cx, "reading…");
             }
             self.redraw_chat(cx);
+        }
+        if refresh {
+            self.request_directory(cx);
         }
     }
 

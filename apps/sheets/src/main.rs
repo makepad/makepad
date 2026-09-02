@@ -9,7 +9,7 @@
 //!
 //! sheets runs standalone, and unmodified inside makepad-wm / Studio tiles
 //! via the shared --stdin-loop client runtime every Makepad app has. Either
-//! way it exposes one read tool to the assistant (src/ai.rs): under the WM
+//! way it exposes bounded read and write tools to the assistant (src/ai.rs): under the WM
 //! over the bus, standalone to the F10 overlay in its own window.
 
 pub use makepad_widgets;
@@ -55,16 +55,41 @@ pub struct App {
     /// the window's own F10 overlay when standalone.
     #[rust]
     ai_port: Option<AiServicePort>,
+    /// Last summary sent as volatile context, so unchanged events stay quiet.
+    #[rust]
+    ai_context: String,
 }
 
 impl App {
-    /// The one tool: the sheet on screen, read at call time.
+    /// The sheet facts used by both `summary` and the volatile context line.
     fn ai_summary(&self, cx: &mut Cx) -> String {
         self.ui
             .widget(cx, ids!(sheets))
             .borrow::<view::MpSheets>()
             .map(|sheets| sheets.ai_summary(cx))
             .unwrap_or_else(|| "no sheet is open".to_string())
+    }
+
+    fn ai_answer(&self, cx: &mut Cx, call: &makepad_ai_services::wire::ServiceCall) -> makepad_ai_services::wire::ToolResult {
+        self.ui
+            .widget(cx, ids!(sheets))
+            .borrow_mut::<view::MpSheets>()
+            .map(|mut sheets| sheets.ai_answer(cx, call))
+            .unwrap_or_else(|| makepad_ai_services::wire::ToolResult::failed(&call.call_id, "no sheet is open"))
+    }
+
+    fn refresh_ai_context(&mut self, cx: &mut Cx) {
+        if self.ai_port.is_none() {
+            return;
+        }
+        let text = self.ai_summary(cx);
+        if text == self.ai_context {
+            return;
+        }
+        self.ai_context = text.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&text);
+        }
     }
 
     fn drain_ai_port(&mut self, cx: &mut Cx, event: &Event) {
@@ -76,11 +101,13 @@ impl App {
             match ev {
                 PortEvent::Registered(endpoint) => {
                     log!("sheets: AI service registered as {}", endpoint.as_str());
+                    self.ai_context.clear();
+                    self.refresh_ai_context(cx);
                 }
                 PortEvent::Call(call) => {
-                    let summary = self.ai_summary(cx);
+                    let result = self.ai_answer(cx, &call);
                     if let Some(port) = self.ai_port.as_ref() {
-                        port.reply(ai::answer(&call, || summary));
+                        port.reply(result);
                     }
                 }
                 // Nothing here runs long enough to cancel, and the sheet has
@@ -125,5 +152,8 @@ impl AppMain for App {
         self.drain_ai_port(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // Selection and active-sheet changes are observed inside MpSheets;
+        // comparing after dispatch publishes only genuinely changed facts.
+        self.refresh_ai_context(cx);
     }
 }

@@ -116,6 +116,10 @@ fn curated() -> Vec<AppDef> {
         AppDef::app("mixer", "Mixer", "makepad-mixer", "apps/mixer", "makepad-mixer", OrFocus),
         AppDef::app("task", "Task Manager", "makepad-task", "apps/task", "task", OrFocus),
         AppDef::app("sheets", "Sheets", "makepad-sheets", "apps/sheets", "sheets", OrFocus),
+        // The picture wall over a baked library (the SMBC archive by default).
+        AppDef::app("photos", "Photos", "makepad-photos", "apps/photos", "photos", OrFocus),
+        // Sewing patterns from a body measurement: camera, body model, PDF/SVG.
+        AppDef::app("fabric", "Fabric", "makepad-fabric", "apps/fabric", "makepad-fabric", OrFocus),
         AppDef::app(
             "score",
             "Score",
@@ -1006,6 +1010,8 @@ mod tests {
                 "Mixer",
                 "Task Manager",
                 "Sheets",
+                "Photos",
+                "Fabric",
                 "Score",
                 "Video Player",
                 "Route",
