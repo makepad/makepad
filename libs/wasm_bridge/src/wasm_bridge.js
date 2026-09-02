@@ -290,18 +290,58 @@ export class WasmBridge {
         return Date.now() / 1000.0;
     }
 
-    static create_shared_memory() {
+    static create_shared_memory(limits) {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
         }, 1000)
         // wasm32 allows up to 65536 pages (4 GiB); older engines cap shared memory lower, so step down.
+        // The imported Memory must be at least as large as the module's declared initial (e.g. 112 pages).
+        const initial = Math.max(64, (limits && typeof limits.min === "number") ? limits.min : 64);
+        const declared_max = (limits && typeof limits.max === "number") ? limits.max : null;
         let mem = null;
-        for (const maximum of [65536, 32768, 16384]) {
-            try { mem = new WebAssembly.Memory({ initial: 64, maximum, shared: true }); break; } catch (_e) {}
+        let used_maximum = null;
+        for (const candidate of [65536, 32768, 16384]) {
+            const maximum = declared_max != null ? Math.min(declared_max, candidate) : candidate;
+            if (maximum < initial) {
+                continue;
+            }
+            if (used_maximum === maximum) {
+                continue;
+            }
+            used_maximum = maximum;
+            try {
+                mem = new WebAssembly.Memory({ initial, maximum, shared: true });
+                break;
+            } catch (_e) {
+                mem = null;
+            }
         }
-        if (mem === null) throw new Error("cannot allocate shared wasm memory");
+        if (mem === null) {
+            clearTimeout(timeout);
+            throw new Error("cannot allocate shared wasm memory");
+        }
         clearTimeout(timeout);
+        mem._makepad_pages = { initial, maximum: used_maximum };
         return mem;
+    }
+
+    static report_memory_link_error(error, limits, pages) {
+        try {
+            const reporter = globalThis.makepad_crash_reporter;
+            if (!reporter || typeof reporter.report !== "function") {
+                return;
+            }
+            reporter.report("wasm.link_error", {
+                message: error && error.message ? String(error.message) : String(error),
+                name: error && error.name ? String(error.name) : "",
+                declared_min: limits && limits.min != null ? limits.min : null,
+                declared_max: limits && limits.max != null ? limits.max : null,
+                initial: pages && pages.initial != null ? pages.initial : null,
+                maximum: pages && pages.maximum != null ? pages.maximum : null,
+                stack: error && error.stack ? String(error.stack) : ""
+            });
+        } catch (_error) {
+        }
     }
 
     static async supports_simd() {
@@ -366,6 +406,189 @@ export class WasmBridge {
             shift += 7;
         }
         throw new Error("truncated var_u32");
+    }
+
+    static _concat_u8(chunks, total) {
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+            out.set(chunk, offset);
+            offset += chunk.length;
+        }
+        return out;
+    }
+
+    static _wasm_need(cur, n) {
+        if (cur.offset + n > cur.bytes.length) {
+            const error = new Error("truncated wasm");
+            error._wasm_truncated = true;
+            throw error;
+        }
+    }
+
+    static _wasm_u8(cur) {
+        this._wasm_need(cur, 1);
+        return cur.bytes[cur.offset++];
+    }
+
+    static _wasm_varu32(cur) {
+        let result = 0;
+        let shift = 0;
+        for (;;) {
+            const byte = this._wasm_u8(cur);
+            result |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) === 0) {
+                return result >>> 0;
+            }
+            shift += 7;
+            if (shift >= 35) {
+                throw new Error("invalid var_u32");
+            }
+        }
+    }
+
+    static _wasm_skip(cur, n) {
+        this._wasm_need(cur, n);
+        cur.offset += n;
+    }
+
+    // Memory limits: flags byte, min LEB128, optional max LEB128 if flags & 0x01.
+    // Shared memory is flags bit 0x02.
+    static _wasm_limits(cur) {
+        const flags = this._wasm_u8(cur);
+        const min = this._wasm_varu32(cur);
+        let max = null;
+        if (flags & 0x01) {
+            max = this._wasm_varu32(cur);
+        }
+        return { min, max, shared: !!(flags & 0x02) };
+    }
+
+    static _wasm_parse_import_memory(cur) {
+        const count = this._wasm_varu32(cur);
+        let found = null;
+        for (let i = 0; i < count; i++) {
+            const module_len = this._wasm_varu32(cur);
+            this._wasm_skip(cur, module_len);
+            const field_len = this._wasm_varu32(cur);
+            this._wasm_skip(cur, field_len);
+            const kind = this._wasm_u8(cur);
+            if (kind === 0x00) {
+                this._wasm_varu32(cur);
+            } else if (kind === 0x01) {
+                this._wasm_u8(cur);
+                this._wasm_limits(cur);
+            } else if (kind === 0x02) {
+                const limits = this._wasm_limits(cur);
+                if (found === null) {
+                    found = limits;
+                }
+            } else if (kind === 0x03) {
+                this._wasm_skip(cur, 2);
+            } else if (kind === 0x04) {
+                this._wasm_u8(cur);
+                this._wasm_varu32(cur);
+            } else {
+                throw new Error("unknown wasm import kind");
+            }
+        }
+        return found;
+    }
+
+    static _wasm_parse_defined_memory(cur) {
+        const count = this._wasm_varu32(cur);
+        if (count === 0) {
+            return null;
+        }
+        return this._wasm_limits(cur);
+    }
+
+    static try_parse_wasm_memory_limits(bytes) {
+        if (bytes instanceof ArrayBuffer) {
+            bytes = new Uint8Array(bytes);
+        } else if (!(bytes instanceof Uint8Array) && ArrayBuffer.isView(bytes)) {
+            bytes = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        }
+        if (!(bytes instanceof Uint8Array)) {
+            return { complete: true, limits: null };
+        }
+        try {
+            if (bytes.length < 8) {
+                const error = new Error("truncated wasm");
+                error._wasm_truncated = true;
+                throw error;
+            }
+            if (bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
+                return { complete: true, limits: null };
+            }
+            const cur = { bytes, offset: 8 };
+            let imported = null;
+            let defined = null;
+            while (cur.offset < bytes.length) {
+                const id = this._wasm_u8(cur);
+                const payload_len = this._wasm_varu32(cur);
+                this._wasm_need(cur, payload_len);
+                const payload_end = cur.offset + payload_len;
+                const payload_cur = { bytes, offset: cur.offset };
+                if (id === 2) {
+                    imported = this._wasm_parse_import_memory(payload_cur);
+                } else if (id === 5) {
+                    defined = this._wasm_parse_defined_memory(payload_cur);
+                }
+                cur.offset = payload_end;
+                if (imported) {
+                    return { complete: true, limits: imported };
+                }
+                if (defined) {
+                    return { complete: true, limits: defined };
+                }
+                if (id !== 0 && id > 5) {
+                    return { complete: true, limits: null };
+                }
+            }
+            return { complete: true, limits: imported || defined };
+        } catch (error) {
+            if (error && error._wasm_truncated) {
+                return { complete: false, limits: null };
+            }
+            return { complete: true, limits: null };
+        }
+    }
+
+    static parse_wasm_memory_limits(bytes) {
+        return this.try_parse_wasm_memory_limits(bytes).limits;
+    }
+
+    static async read_wasm_memory_limits_from_response(response) {
+        try {
+            if (response && response.body && typeof response.body.getReader === "function") {
+                const reader = response.body.getReader();
+                const chunks = [];
+                let total = 0;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (value && value.length) {
+                        chunks.push(value);
+                        total += value.length;
+                        const result = this.try_parse_wasm_memory_limits(this._concat_u8(chunks, total));
+                        if (result.complete) {
+                            try { await reader.cancel(); } catch (_e) {}
+                            return result.limits;
+                        }
+                    }
+                    if (done) {
+                        return this.parse_wasm_memory_limits(this._concat_u8(chunks, total));
+                    }
+                }
+            }
+        } catch (_error) {
+        }
+        try {
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            return this.parse_wasm_memory_limits(bytes);
+        } catch (_error) {
+            return null;
+        }
     }
 
     static encode_var_u32(value) {
@@ -504,7 +727,7 @@ export class WasmBridge {
         }
     }
 
-    static instantiate_wasm(module, memory, env) {
+    static instantiate_wasm(module, memory, env, limits) {
         let set_wasm = init_env(env);
 
         if (memory !== undefined) {
@@ -520,7 +743,18 @@ export class WasmBridge {
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
-                env.memory = this.create_shared_memory();
+                let pages = null;
+                try {
+                    env.memory = this.create_shared_memory(limits);
+                    pages = env.memory._makepad_pages || null;
+                } catch (alloc_error) {
+                    this.report_memory_link_error(alloc_error, limits, {
+                        initial: Math.max(64, (limits && typeof limits.min === "number") ? limits.min : 64),
+                        maximum: limits && typeof limits.max === "number" ? limits.max : null
+                    });
+                    console.error(alloc_error);
+                    return error
+                }
                 return WebAssembly.instantiate(module, { env }).then(async wasm => {
                     set_wasm(wasm);
                     wasm._has_thread_support = true;
@@ -529,6 +763,7 @@ export class WasmBridge {
                     wasm._env = env;
                     return wasm
                 }, error => {
+                    this.report_memory_link_error(error, limits, pages);
                     console.error(error);
                     return error
                 })
@@ -561,21 +796,34 @@ export class WasmBridge {
                 }
 
                 const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
+                const limits = this.parse_wasm_memory_limits(wasm_bytes);
                 const module = await this.compile_primary_module(wasm_bytes, split_response_promise);
-                const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } });
+                const wasm = await this.instantiate_wasm(module, memory, { _post_signal: _ => { } }, limits);
                 await this.attach_secondary_wasm(wasm, secondary_response_promise, defer_secondary);
                 return wasm;
             })().catch(error => {
                 console.error(error);
             });
         }
-        return WebAssembly.compileStreaming(fetch(wasm_url))
-            .then(
-                (module) => this.instantiate_wasm(module, memory, { _post_signal: _ => { } }),
-                error => {
-                    console.error(error)
-                }
-            )
+        return (async () => {
+            const wasm_response = await fetch(wasm_url);
+            if (!wasm_response.ok) {
+                throw new Error(`failed to fetch wasm: ${wasm_response.status}`);
+            }
+            const env = { _post_signal: _ => { } };
+            if (typeof WebAssembly.compileStreaming === "function") {
+                const limits_promise = this.read_wasm_memory_limits_from_response(wasm_response.clone());
+                const module = await WebAssembly.compileStreaming(wasm_response);
+                const limits = await limits_promise;
+                return this.instantiate_wasm(module, memory, env, limits);
+            }
+            const wasm_bytes = new Uint8Array(await wasm_response.arrayBuffer());
+            const limits = this.parse_wasm_memory_limits(wasm_bytes);
+            const module = await WebAssembly.compile(wasm_bytes);
+            return this.instantiate_wasm(module, memory, env, limits);
+        })().catch(error => {
+            console.error(error);
+        });
     }
 
     static async _instantiate_secondary(secondary_response, primary_wasm) {
