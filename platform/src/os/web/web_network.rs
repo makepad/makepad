@@ -296,14 +296,13 @@ impl NetworkBackend for WasmNetworkShimBackend {
 
     fn http_cancel(&self, request_id: LiveId) -> Result<(), NetworkError> {
         let internal_id = {
-            let mut state = self
+            let state = self
                 .http
                 .lock()
                 .map_err(|_| NetworkError::backend("wasm shim http lock poisoned"))?;
-            let Some(internal_id) = state.by_public.remove(&request_id) else {
+            let Some(internal_id) = state.by_public.get(&request_id).copied() else {
                 return Ok(());
             };
-            state.by_internal.remove(&internal_id);
             internal_id
         };
         unsafe {

@@ -13,8 +13,9 @@ const MAX_ARCHIVE_WAITERS: usize = 64;
 const MAX_ARCHIVE_IN_FLIGHT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RANGE_BYTES: u64 = 64 * 1024 * 1024;
+const HTTP_RANGE_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
 const DEFAULT_COALESCE_MAX_GAP: u64 = 64 * 1024;
-const DEFAULT_COALESCE_MAX_LEN: u64 = 2 * 1024 * 1024;
+const DEFAULT_COALESCE_MAX_LEN: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
@@ -93,7 +94,11 @@ pub trait ByteSource {
         offset: u64,
         len: u64,
         token: ReadToken,
+        priority: u64,
+        tile_key: Option<TileKey>,
     );
+    fn reprioritize(&mut self, _token: ReadToken, _priority: u64, _tile_key: TileKey) {}
+    fn flush(&mut self, _cx: &mut Cx) {}
     fn cancel(&mut self, cx: &mut Cx, token: ReadToken);
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion>;
 }
@@ -237,6 +242,8 @@ impl ByteSource for FileByteSource {
         offset: u64,
         len: u64,
         token: ReadToken,
+        _priority: u64,
+        _tile_key: Option<TileKey>,
     ) {
         if len == 0 || len > MAX_RANGE_BYTES || offset.checked_add(len).is_none() {
             let _ = self.completions.sender().send(ReadCompletion {
@@ -347,7 +354,7 @@ fn read_file_range(
     Ok(Arc::from(bytes))
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum HttpReadKind {
     Root,
     Range {
@@ -357,18 +364,76 @@ enum HttpReadKind {
     },
 }
 
+impl HttpReadKind {
+    fn range_key(self) -> Option<HttpRangeKey> {
+        match self {
+            Self::Root => None,
+            Self::Range { shard, offset, len } => Some(HttpRangeKey { shard, offset, len }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct HttpRangeKey {
+    shard: u32,
+    offset: u64,
+    len: u64,
+}
+
+impl HttpRangeKey {
+    fn end(self) -> u64 {
+        self.offset.saturating_add(self.len)
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.shard == other.shard && self.offset <= other.offset && self.end() >= other.end()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingHttpRead {
     token: ReadToken,
     kind: HttpReadKind,
+    priority: u64,
+    tile_keys: Vec<TileKey>,
+}
+
+#[derive(Clone, Debug)]
+struct HttpNetworkRead {
+    kind: HttpReadKind,
+    waiters: Vec<PendingHttpRead>,
     retry_count: u8,
+    dispatched: bool,
+    reschedule: bool,
+}
+
+impl HttpNetworkRead {
+    fn priority(&self) -> u64 {
+        self.waiters
+            .iter()
+            .map(|waiter| waiter.priority)
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedHttpRange {
+    bytes: Arc<[u8]>,
+    used: u64,
 }
 
 /// HTTP `.mkmap` source using one whole-root GET and strict shard ranges.
 pub struct HttpRangeByteSource {
     root_url: String,
-    requests: HashMap<LiveId, PendingHttpRead>,
+    requests: HashMap<LiveId, HttpNetworkRead>,
+    queued: Vec<PendingHttpRead>,
     ready: VecDeque<ReadCompletion>,
+    root_cache: Option<Arc<[u8]>>,
+    range_cache: HashMap<HttpRangeKey, CachedHttpRange>,
+    range_cache_bytes: usize,
+    cache_clock: u64,
+    priority_dirty: bool,
 }
 
 impl HttpRangeByteSource {
@@ -376,15 +441,50 @@ impl HttpRangeByteSource {
         Self {
             root_url: root_url.into().trim_end_matches('/').to_string(),
             requests: HashMap::new(),
+            queued: Vec::new(),
             ready: VecDeque::new(),
+            root_cache: None,
+            range_cache: HashMap::new(),
+            range_cache_bytes: 0,
+            cache_clock: 0,
+            priority_dirty: false,
         }
     }
 
-    fn issue(&mut self, cx: &mut Cx, pending: PendingHttpRead) {
-        static NEXT_HTTP_ARCHIVE_ID: AtomicU64 = AtomicU64::new(0x4d4b_0000_0000_0001);
-        let request_id = LiveId(NEXT_HTTP_ARCHIVE_ID.fetch_add(1, Ordering::Relaxed));
-        let (url, range) = match pending.kind {
-            HttpReadKind::Root => (format!("{}/root.mkidx", self.root_url), None),
+    fn issue(&mut self, cx: &mut Cx, mut pending: HttpNetworkRead) {
+        let token = pending.waiters.first().unwrap().token.0;
+        let request_id = LiveId(
+            0x4d4b_0000_0000_0000
+                | (token.wrapping_shl(1) & 0x0000_ffff_ffff_fffe)
+                | pending.retry_count as u64,
+        );
+        let priority = pending.priority();
+        let mut tile_keys = pending
+            .waiters
+            .iter()
+            .flat_map(|waiter| waiter.tile_keys.iter().copied())
+            .collect::<Vec<_>>();
+        tile_keys.sort_unstable();
+        tile_keys.dedup();
+        let tile_label = if tile_keys.is_empty() {
+            if pending.kind == HttpReadKind::Root {
+                "root".to_string()
+            } else {
+                "index".to_string()
+            }
+        } else {
+            tile_keys
+                .iter()
+                .map(|key| format!("{}/{}/{}", key.z, key.x, key.y))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let (url, range, max_body) = match pending.kind {
+            HttpReadKind::Root => (
+                format!("{}/root.mkidx", self.root_url),
+                None,
+                MAX_ROOT_BYTES as u64,
+            ),
             HttpReadKind::Range {
                 shard,
                 offset,
@@ -392,7 +492,7 @@ impl HttpRangeByteSource {
             } => {
                 if len > MAX_RANGE_BYTES {
                     self.ready.push_back(ReadCompletion {
-                        token: pending.token,
+                        token: pending.waiters[0].token,
                         result: Err("mkmap HTTP range exceeds byte limit".to_string()),
                     });
                     cx.redraw_all();
@@ -404,47 +504,214 @@ impl HttpRangeByteSource {
                     .and_then(|end| end.checked_sub(1))
                 else {
                     self.ready.push_back(ReadCompletion {
-                        token: pending.token,
+                        token: pending.waiters[0].token,
                         result: Err("invalid mkmap HTTP range".to_string()),
                     });
                     cx.redraw_all();
                     return;
                 };
-                (
-                    format!("{}/tiles-{shard:03}.mkshard", self.root_url),
-                    Some(format!("bytes={offset}-{end}")),
-                )
+                let url = format!("{}/tiles-{shard:03}.mkshard", self.root_url);
+                (url, Some(format!("bytes={offset}-{end}")), len)
             }
         };
+        #[cfg(target_arch = "wasm32")]
+        let url = format!(
+            "{url}#makepad-http=archive&tiles={tile_label}&priority={priority}&bytes={max_body}"
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (&tile_label, priority);
+        let is_range = range.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let url = format!("{url}&range={}", is_range as u8);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = is_range;
         let mut request = HttpRequest::new(url, HttpMethod::GET);
         request.set_header("Accept".to_string(), "application/octet-stream".to_string());
+        request.max_response_body_bytes = max_body;
         if let Some(range) = range {
             request.set_header("Range".to_string(), range);
         }
+        pending.dispatched = false;
+        pending.reschedule = false;
         self.requests.insert(request_id, pending);
         cx.http_request(request_id, request);
     }
 
-    fn retry_or_complete(
-        &mut self,
-        cx: &mut Cx,
-        mut pending: PendingHttpRead,
-        result: Result<Arc<[u8]>, String>,
-    ) -> Option<ReadCompletion> {
-        match result {
-            Ok(bytes) => Some(ReadCompletion {
-                token: pending.token,
-                result: Ok(bytes),
-            }),
-            Err(_error) if pending.retry_count == 0 => {
-                pending.retry_count = 1;
-                self.issue(cx, pending);
-                None
+    fn cached_range(&mut self, requested: HttpRangeKey) -> Option<Arc<[u8]>> {
+        let cached_key = self
+            .range_cache
+            .keys()
+            .copied()
+            .filter(|cached| cached.contains(requested))
+            .min_by_key(|cached| cached.len)?;
+        self.cache_clock = self.cache_clock.wrapping_add(1);
+        let cached = self.range_cache.get_mut(&cached_key).unwrap();
+        cached.used = self.cache_clock;
+        let start = (requested.offset - cached_key.offset) as usize;
+        let end = start + requested.len as usize;
+        if start == 0 && end == cached.bytes.len() {
+            Some(cached.bytes.clone())
+        } else {
+            Some(Arc::from(&cached.bytes[start..end]))
+        }
+    }
+
+    fn cache_range(&mut self, key: HttpRangeKey, bytes: Arc<[u8]>) {
+        if bytes.len() > HTTP_RANGE_CACHE_BYTE_CAPACITY {
+            return;
+        }
+        self.cache_clock = self.cache_clock.wrapping_add(1);
+        if let Some(old) = self.range_cache.insert(
+            key,
+            CachedHttpRange {
+                bytes: bytes.clone(),
+                used: self.cache_clock,
+            },
+        ) {
+            self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
+        }
+        self.range_cache_bytes = self.range_cache_bytes.saturating_add(bytes.len());
+        while self.range_cache_bytes > HTTP_RANGE_CACHE_BYTE_CAPACITY {
+            let Some(oldest) = self
+                .range_cache
+                .iter()
+                .min_by_key(|(_, cached)| cached.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(old) = self.range_cache.remove(&oldest) {
+                self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
             }
-            Err(error) => Some(ReadCompletion {
-                token: pending.token,
-                result: Err(error),
-            }),
+        }
+    }
+
+    fn complete_network_read(
+        &mut self,
+        pending: HttpNetworkRead,
+        bytes: Arc<[u8]>,
+    ) -> Vec<ReadCompletion> {
+        match pending.kind {
+            HttpReadKind::Root => {
+                self.root_cache = Some(bytes.clone());
+                pending
+                    .waiters
+                    .into_iter()
+                    .map(|waiter| ReadCompletion {
+                        token: waiter.token,
+                        result: Ok(bytes.clone()),
+                    })
+                    .collect()
+            }
+            HttpReadKind::Range { shard, offset, len } => {
+                let fetched = HttpRangeKey { shard, offset, len };
+                self.cache_range(fetched, bytes.clone());
+                pending
+                    .waiters
+                    .into_iter()
+                    .map(|waiter| {
+                        let result = waiter
+                            .kind
+                            .range_key()
+                            .filter(|requested| fetched.contains(*requested))
+                            .map(|requested| {
+                                let start = (requested.offset - fetched.offset) as usize;
+                                let end = start + requested.len as usize;
+                                if start == 0 && end == bytes.len() {
+                                    bytes.clone()
+                                } else {
+                                    Arc::from(&bytes[start..end])
+                                }
+                            })
+                            .ok_or_else(|| "coalesced mkmap response did not cover child range".to_string());
+                        ReadCompletion {
+                            token: waiter.token,
+                            result,
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn requeue_undispatched(&mut self, cx: &mut Cx) {
+        if !self.priority_dirty {
+            return;
+        }
+        self.priority_dirty = false;
+        let request_ids = self
+            .requests
+            .iter()
+            .filter(|(_, request)| {
+                !request.dispatched
+                    && !request.reschedule
+                    && request.kind.range_key().is_some()
+            })
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.requests.get_mut(&request_id).unwrap().reschedule = true;
+            cx.cancel_http_request(request_id);
+        }
+    }
+
+    fn issue_queued(&mut self, cx: &mut Cx) {
+        self.requeue_undispatched(cx);
+        if self.queued.is_empty() {
+            return;
+        }
+        let mut queued = std::mem::take(&mut self.queued);
+        queued.sort_unstable_by_key(|pending| {
+            let key = pending.kind.range_key().unwrap();
+            (key.shard, key.offset, key.len)
+        });
+        let mut requests = Vec::<HttpNetworkRead>::new();
+        for pending in queued {
+            let key = pending.kind.range_key().unwrap();
+            if let Some(last) = requests.last_mut() {
+                let last_key = last.kind.range_key().unwrap();
+                let merged_end = last_key.end().max(key.end());
+                let merged_len = merged_end.saturating_sub(last_key.offset);
+                if last_key.shard == key.shard
+                    && key.offset <= last_key.end().saturating_add(DEFAULT_COALESCE_MAX_GAP)
+                    && merged_len <= DEFAULT_COALESCE_MAX_LEN
+                {
+                    last.kind = HttpReadKind::Range {
+                        shard: last_key.shard,
+                        offset: last_key.offset,
+                        len: merged_len,
+                    };
+                    last.waiters.push(pending);
+                    continue;
+                }
+            }
+            requests.push(HttpNetworkRead {
+                kind: pending.kind,
+                waiters: vec![pending],
+                retry_count: 0,
+                dispatched: false,
+                reschedule: false,
+            });
+        }
+        requests.sort_by(|left, right| {
+            left.priority()
+                .cmp(&right.priority())
+                .then_with(|| {
+                    right
+                        .kind
+                        .range_key()
+                        .unwrap()
+                        .len
+                        .cmp(&left.kind.range_key().unwrap().len)
+                })
+                .then_with(|| {
+                    let left = left.kind.range_key().unwrap();
+                    let right = right.kind.range_key().unwrap();
+                    (left.shard, left.offset).cmp(&(right.shard, right.offset))
+                })
+        });
+        for request in requests {
+            self.issue(cx, request);
         }
     }
 
@@ -460,12 +727,40 @@ impl HttpRangeByteSource {
 
 impl ByteSource for HttpRangeByteSource {
     fn request_root(&mut self, cx: &mut Cx, token: ReadToken) {
-        self.issue(
-            cx,
-            PendingHttpRead {
+        if let Some(bytes) = self.root_cache.as_ref() {
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Ok(bytes.clone()),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if let Some(request) = self
+            .requests
+            .values_mut()
+            .find(|request| request.kind == HttpReadKind::Root)
+        {
+            request.waiters.push(PendingHttpRead {
                 token,
                 kind: HttpReadKind::Root,
+                priority: 0,
+                tile_keys: Vec::new(),
+            });
+            return;
+        }
+        self.issue(
+            cx,
+            HttpNetworkRead {
+                kind: HttpReadKind::Root,
+                waiters: vec![PendingHttpRead {
+                    token,
+                    kind: HttpReadKind::Root,
+                    priority: 0,
+                    tile_keys: Vec::new(),
+                }],
                 retry_count: 0,
+                dispatched: false,
+                reschedule: false,
             },
         );
     }
@@ -477,19 +772,66 @@ impl ByteSource for HttpRangeByteSource {
         offset: u64,
         len: u64,
         token: ReadToken,
+        priority: u64,
+        tile_key: Option<TileKey>,
     ) {
-        self.issue(
-            cx,
-            PendingHttpRead {
+        let requested = HttpRangeKey { shard, offset, len };
+        if let Some(bytes) = self.cached_range(requested) {
+            self.ready.push_back(ReadCompletion {
                 token,
-                kind: HttpReadKind::Range {
-                    shard,
-                    offset,
-                    len,
-                },
-                retry_count: 0,
-            },
-        );
+                result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
+        let pending = PendingHttpRead {
+            token,
+            kind: HttpReadKind::Range { shard, offset, len },
+            priority,
+            tile_keys: tile_key.into_iter().collect(),
+        };
+        if let Some(request) = self.requests.values_mut().find(|request| {
+            request
+                .kind
+                .range_key()
+                .is_some_and(|fetched| fetched.contains(requested))
+        }) {
+            request.waiters.push(pending);
+        } else {
+            self.queued.push(pending);
+        }
+    }
+
+    fn reprioritize(&mut self, token: ReadToken, priority: u64, tile_key: TileKey) {
+        for pending in &mut self.queued {
+            if pending.token == token {
+                if pending.priority != priority {
+                    pending.priority = priority;
+                }
+                if !pending.tile_keys.contains(&tile_key) {
+                    pending.tile_keys.push(tile_key);
+                }
+            }
+        }
+        for request in self.requests.values_mut() {
+            for pending in &mut request.waiters {
+                if pending.token == token {
+                    if pending.priority != priority {
+                        pending.priority = priority;
+                        if !request.dispatched {
+                            self.priority_dirty = true;
+                        }
+                    }
+                    if !pending.tile_keys.contains(&tile_key) {
+                        pending.tile_keys.push(tile_key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self, cx: &mut Cx) {
+        self.issue_queued(cx);
     }
 
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion> {
@@ -503,45 +845,66 @@ impl ByteSource for HttpRangeByteSource {
                     request_id,
                     response,
                 } => {
-                    let Some(pending) = self.requests.remove(request_id) else {
+                    let Some(mut pending) = self.requests.remove(request_id) else {
                         continue;
                     };
-                    if let Some(completion) = self.retry_or_complete(
-                        cx,
-                        pending.clone(),
-                        validate_http_response(&pending.kind, response),
-                    ) {
-                        out.push(completion);
+                    match validate_http_response(&pending.kind, response) {
+                        Ok(bytes) => out.extend(self.complete_network_read(pending, bytes)),
+                        Err(_error) if pending.retry_count == 0 && !pending.waiters.is_empty() => {
+                            pending.retry_count = 1;
+                            self.issue(cx, pending);
+                        }
+                        Err(error) => out.extend(pending.waiters.into_iter().map(|waiter| {
+                            ReadCompletion {
+                                token: waiter.token,
+                                result: Err(error.clone()),
+                            }
+                        })),
                     }
                 }
                 NetworkResponse::HttpError { request_id, error } => {
-                    let Some(pending) = self.requests.remove(request_id) else {
+                    let Some(mut pending) = self.requests.remove(request_id) else {
                         continue;
                     };
-                    if let Some(completion) = self.retry_or_complete(
-                        cx,
-                        pending,
-                        Err(format!("mkmap HTTP transport: {}", error.message)),
-                    ) {
-                        out.push(completion);
+                    if pending.reschedule {
+                        self.queued.extend(pending.waiters);
+                    } else if pending.retry_count == 0 && !pending.waiters.is_empty() {
+                        pending.retry_count = 1;
+                        self.issue(cx, pending);
+                    } else {
+                        let message = format!("mkmap HTTP transport: {}", error.message);
+                        out.extend(pending.waiters.into_iter().map(|waiter| ReadCompletion {
+                            token: waiter.token,
+                            result: Err(message.clone()),
+                        }));
+                    }
+                }
+                NetworkResponse::HttpProgress { request_id, .. } => {
+                    if let Some(pending) = self.requests.get_mut(request_id) {
+                        pending.dispatched = true;
                     }
                 }
                 _ => {}
             }
         }
+        self.issue_queued(cx);
         out
     }
 
     fn cancel(&mut self, cx: &mut Cx, token: ReadToken) {
+        self.queued.retain(|pending| pending.token != token);
         let request_ids: Vec<LiveId> = self
             .requests
             .iter()
-            .filter(|(_, pending)| pending.token == token)
+            .filter(|(_, pending)| pending.waiters.iter().any(|waiter| waiter.token == token))
             .map(|(request_id, _)| *request_id)
             .collect();
         for request_id in request_ids {
-            self.requests.remove(&request_id);
-            cx.cancel_http_request(request_id);
+            let pending = self.requests.get_mut(&request_id).unwrap();
+            pending.waiters.retain(|waiter| waiter.token != token);
+            if pending.waiters.is_empty() && !pending.dispatched {
+                cx.cancel_http_request(request_id);
+            }
         }
         self.ready.retain(|completion| completion.token != token);
     }
@@ -641,6 +1004,7 @@ enum WaitStage {
 struct TileWaiter {
     generation: u64,
     stage: WaitStage,
+    priority: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -750,13 +1114,25 @@ impl<S: ByteSource> TileArchive<S> {
     }
 
     pub fn request_tile(&mut self, cx: &mut Cx, key: TileKey, generation: u64) {
+        self.request_tile_prioritized(cx, key, generation, 0);
+    }
+
+    pub fn request_tile_prioritized(
+        &mut self,
+        cx: &mut Cx,
+        key: TileKey,
+        generation: u64,
+        priority: u64,
+    ) {
         if self.generation.is_some_and(|current| generation < current) {
             return;
         }
         if self.generation != Some(generation) {
             self.reset_generation(cx, generation);
         }
-        if self.waiters.contains_key(&key) {
+        if let Some(waiter) = self.waiters.get_mut(&key) {
+            waiter.priority = priority;
+            self.reprioritize_waiter(key);
             return;
         }
         if self.root_error.is_some() {
@@ -776,6 +1152,7 @@ impl<S: ByteSource> TileArchive<S> {
             TileWaiter {
                 generation,
                 stage: WaitStage::Root,
+                priority,
             },
         );
         if self.root.is_none() {
@@ -787,6 +1164,61 @@ impl<S: ByteSource> TileArchive<S> {
                 cx.redraw_all();
             }
         }
+    }
+
+    pub fn reprioritize_tiles(&mut self, priorities: &HashMap<TileKey, u64>) {
+        let keys = self.waiters.keys().copied().collect::<Vec<_>>();
+        for key in keys {
+            let Some(priority) = priorities.get(&key).copied() else {
+                continue;
+            };
+            if let Some(waiter) = self.waiters.get_mut(&key) {
+                waiter.priority = priority;
+            }
+            self.reprioritize_waiter(key);
+        }
+    }
+
+    fn reprioritize_waiter(&mut self, key: TileKey) {
+        let Some(waiter) = self.waiters.get(&key).copied() else {
+            return;
+        };
+        let (token, priority) = match waiter.stage {
+            WaitStage::Root => (
+                self.root_in_flight,
+                self.waiters
+                    .values()
+                    .filter(|candidate| candidate.stage == WaitStage::Root)
+                    .map(|candidate| candidate.priority)
+                    .min()
+                    .unwrap_or(waiter.priority),
+            ),
+            WaitStage::Leaf(index) => (
+                self.leaf_in_flight.get(&index).copied(),
+                self.waiters
+                    .values()
+                    .filter(|candidate| candidate.stage == WaitStage::Leaf(index))
+                    .map(|candidate| candidate.priority)
+                    .min()
+                    .unwrap_or(waiter.priority),
+            ),
+            WaitStage::Blob(blob) => (
+                self.blob_in_flight.get(&blob).map(|read| read.token),
+                self.waiters
+                    .values()
+                    .filter(|candidate| candidate.stage == WaitStage::Blob(blob))
+                    .map(|candidate| candidate.priority)
+                    .min()
+                    .unwrap_or(waiter.priority),
+            ),
+        };
+        if let Some(token) = token {
+            self.source.reprioritize(token, priority, key);
+        }
+    }
+
+    pub fn flush(&mut self, cx: &mut Cx) {
+        self.source.flush(cx);
     }
 
     pub fn drain(&mut self, cx: &mut Cx, event: &Event) -> Vec<TileBytes> {
@@ -884,6 +1316,7 @@ impl<S: ByteSource> TileArchive<S> {
             self.advance_waiters(cx);
             self.enforce_leaf_cache_bounds();
         }
+        self.source.flush(cx);
         self.ready.drain(..).collect()
     }
 
@@ -945,7 +1378,11 @@ impl<S: ByteSource> TileArchive<S> {
         if self.root.is_none() {
             return;
         }
-        let keys: Vec<TileKey> = self.waiters.keys().copied().collect();
+        let mut keys: Vec<TileKey> = self.waiters.keys().copied().collect();
+        keys.sort_unstable_by_key(|key| {
+            let waiter = self.waiters.get(key).unwrap();
+            (waiter.priority, key.z, key.y, key.x)
+        });
         for key in keys {
             let Some(waiter) = self.waiters.get(&key).copied() else {
                 continue;
@@ -977,6 +1414,7 @@ impl<S: ByteSource> TileArchive<S> {
                     if let Some(in_flight) = self.blob_in_flight.get_mut(&blob) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
                         in_flight.waiters.insert(key);
+                        self.reprioritize_waiter(key);
                     } else if self.can_start_range(blob.len) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
                         let token = next_archive_task_token();
@@ -1002,6 +1440,8 @@ impl<S: ByteSource> TileArchive<S> {
                             blob.offset,
                             blob.len,
                             token,
+                            waiter.priority,
+                            Some(key),
                         );
                     }
                 }
@@ -1009,6 +1449,7 @@ impl<S: ByteSource> TileArchive<S> {
                 None => {
                     if self.leaf_in_flight.contains_key(&record.index) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
+                        self.reprioritize_waiter(key);
                     } else if self.can_start_range(record.dir_len) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
                         let token = next_archive_task_token();
@@ -1031,6 +1472,8 @@ impl<S: ByteSource> TileArchive<S> {
                             record.dir_offset,
                             record.dir_len,
                             token,
+                            waiter.priority,
+                            Some(key),
                         );
                     }
                 }
@@ -1268,10 +1711,30 @@ impl MapTileArchive {
         ))
     }
 
-    pub fn request_tile(&mut self, cx: &mut Cx, key: TileKey, generation: u64) {
+    pub fn request_tile(
+        &mut self,
+        cx: &mut Cx,
+        key: TileKey,
+        generation: u64,
+        priority: u64,
+    ) {
         match self {
-            Self::File(archive) => archive.request_tile(cx, key, generation),
-            Self::Http(archive) => archive.request_tile(cx, key, generation),
+            Self::File(archive) => archive.request_tile_prioritized(cx, key, generation, priority),
+            Self::Http(archive) => archive.request_tile_prioritized(cx, key, generation, priority),
+        }
+    }
+
+    pub fn reprioritize_tiles(&mut self, priorities: &HashMap<TileKey, u64>) {
+        match self {
+            Self::File(archive) => archive.reprioritize_tiles(priorities),
+            Self::Http(archive) => archive.reprioritize_tiles(priorities),
+        }
+    }
+
+    pub fn flush(&mut self, cx: &mut Cx) {
+        match self {
+            Self::File(archive) => archive.flush(cx),
+            Self::Http(archive) => archive.flush(cx),
         }
     }
 
@@ -1355,6 +1818,8 @@ mod tests {
             offset: u64,
             len: u64,
             token: ReadToken,
+            _priority: u64,
+            _tile_key: Option<TileKey>,
         ) {
             self.requests.push(MockRequest::Range {
                 shard,
@@ -1493,7 +1958,8 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
         let token = next_archive_task_token();
-        source.request_range(&mut cx, 0, 10, 4, token);
+        source.request_range(&mut cx, 0, 10, 4, token, 0, None);
+        source.flush(&mut cx);
         let first_id = *source.requests.keys().next().unwrap();
         assert!(source
             .poll(
@@ -1539,12 +2005,14 @@ mod tests {
         let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
         let first = next_archive_task_token();
         let second = next_archive_task_token();
-        source.request_range(&mut cx, 0, 10, 4, first);
-        source.request_range(&mut cx, 0, 20, 4, second);
+        source.request_range(&mut cx, 0, 10, 4, first, 0, None);
+        source.flush(&mut cx);
+        source.request_range(&mut cx, 0, 20, 4, second, 0, None);
+        source.flush(&mut cx);
         let request_id = source
             .requests
             .iter()
-            .find(|(_, pending)| pending.token == second)
+            .find(|(_, pending)| pending.waiters.iter().any(|waiter| waiter.token == second))
             .map(|(id, _)| *id)
             .unwrap();
         let done = source.poll(
@@ -1555,12 +2023,15 @@ mod tests {
             }]),
         );
         assert_eq!(done[0].token, second);
-        assert!(source.requests.values().any(|pending| pending.token == first));
+        assert!(source
+            .requests
+            .values()
+            .any(|pending| pending.waiters.iter().any(|waiter| waiter.token == first)));
 
         let request_id = source
             .requests
             .iter()
-            .find(|(_, pending)| pending.token == first)
+            .find(|(_, pending)| pending.waiters.iter().any(|waiter| waiter.token == first))
             .map(|(id, _)| *id)
             .unwrap();
         assert!(source
@@ -1578,7 +2049,7 @@ mod tests {
         let retry_id = source
             .requests
             .iter()
-            .find(|(_, pending)| pending.token == first)
+            .find(|(_, pending)| pending.waiters.iter().any(|waiter| waiter.token == first))
             .map(|(id, _)| *id)
             .unwrap();
         let done = source.poll(
@@ -1642,6 +2113,86 @@ mod tests {
         ];
         assert_eq!(coalesce_refs_bounded(&refs, 2, 32).len(), 2);
         assert_eq!(coalesce_refs_bounded(&refs, 1, 32).len(), 3);
+    }
+
+    #[test]
+    fn http_range_cache_serves_second_settle_pass_without_fetching_again() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let key = TileKey { z: 3, x: 2, y: 1 };
+        let first = next_archive_task_token();
+        source.request_range(&mut cx, 7, 100, 4, first, 0, Some(key));
+        source.flush(&mut cx);
+        assert_eq!(source.requests.len(), 1);
+        let request_id = *source.requests.keys().next().unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id,
+                response: response(206, Some("bytes 100-103/1000"), b"tile"),
+            }]),
+        );
+        assert_eq!(done[0].result.as_ref().unwrap().as_ref(), b"tile");
+
+        let second = next_archive_task_token();
+        source.request_range(&mut cx, 7, 100, 4, second, 0, Some(key));
+        source.flush(&mut cx);
+        assert!(source.requests.is_empty(), "cached pass must not issue HTTP");
+        let done = source.poll(&mut cx, &Event::Startup);
+        assert_eq!(done[0].token, second);
+        assert_eq!(done[0].result.as_ref().unwrap().as_ref(), b"tile");
+    }
+
+    #[test]
+    fn http_queue_drops_obsolete_range_but_keeps_dispatched_download() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let active = next_archive_task_token();
+        let obsolete = next_archive_task_token();
+        source.request_range(&mut cx, 0, 0, 4, active, 0, None);
+        source.request_range(&mut cx, 1, 0, 4, obsolete, 1, None);
+        source.flush(&mut cx);
+        let active_id = source
+            .requests
+            .iter()
+            .find(|(_, request)| request.waiters.iter().any(|waiter| waiter.token == active))
+            .map(|(id, _)| *id)
+            .unwrap();
+        let obsolete_id = source
+            .requests
+            .iter()
+            .find(|(_, request)| {
+                request
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.token == obsolete)
+            })
+            .map(|(id, _)| *id)
+            .unwrap();
+        source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpProgress {
+                request_id: active_id,
+                progress: HttpProgress { loaded: 0, total: 0 },
+            }]),
+        );
+
+        source.cancel(&mut cx, active);
+        source.cancel(&mut cx, obsolete);
+        source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpError {
+                request_id: obsolete_id,
+                error: HttpError {
+                    message: "HTTP request cancelled before dispatch".to_string(),
+                    metadata_id: LiveId::empty(),
+                },
+            }]),
+        );
+        assert_eq!(source.requests.len(), 1);
+        let request = source.requests.get(&active_id).unwrap();
+        assert!(request.dispatched);
+        assert!(request.waiters.is_empty());
     }
 
     #[test]
@@ -1872,7 +2423,15 @@ mod tests {
         assert!(first.workers.ptr_eq(&second.workers));
         first.request_root(&mut cx, token);
         for shard in 0..10_u32 {
-            first.request_range(&mut cx, shard, 0, 1, next_archive_task_token());
+            first.request_range(
+                &mut cx,
+                shard,
+                0,
+                1,
+                next_archive_task_token(),
+                0,
+                None,
+            );
         }
         let mut completions = Vec::new();
         for _ in 0..2_000 {
@@ -1900,7 +2459,7 @@ mod tests {
         let release = Arc::new(std::sync::Barrier::new(2));
         let mut source = FileByteSource::new(&dir, workers);
         source.completion_barriers = Some((reached.clone(), release.clone()));
-        source.request_range(&mut cx, 0, 0, 4, token);
+        source.request_range(&mut cx, 0, 0, 4, token, 0, None);
         reached.wait();
         source.cancel(&mut cx, token);
         assert_eq!(
@@ -1931,7 +2490,7 @@ mod tests {
         archive.request_tile(&mut cx, key, 1);
         let stale_id = *archive.source.requests.keys().next().unwrap();
         archive.reset_generation(&mut cx, 2);
-        assert!(archive.source.requests.is_empty());
+        assert!(archive.source.requests[&stale_id].waiters.is_empty());
         let done = archive.drain(
             &mut cx,
             &Event::NetworkResponses(vec![NetworkResponse::HttpError {
