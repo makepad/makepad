@@ -2734,4 +2734,28 @@ mod tests {
         assert_eq!(l.client_at(500.0, 300.0, AREA, 0.0), Some(3));
         assert_eq!(l.client_at(10.0, 10.0, AREA, 0.0), Some(1));
     }
+
+    /// The AI pane reserves a strip on the desk's LEFT (decision 17): the
+    /// layout is handed an area that starts past it, and every tile lands
+    /// inside that area — beside the pane, never under it.
+    #[test]
+    fn a_reserved_left_strip_keeps_every_tile_beside_it() {
+        let strip = 450.0;
+        let full = LRect::new(10.0, 36.0, 1380.0, 854.0);
+        let area = LRect::new(full.x + strip, full.y, full.w - strip, full.h);
+        let mut l = WmLayout::new();
+        l.insert(1, area, 10.0);
+        l.insert(2, area, 10.0);
+        let rects = l.rects(area, 10.0);
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert!(r.x >= area.x, "tile at {} starts under the strip ({})", r.x, area.x);
+            assert!(r.x + r.w <= area.x + area.w + 0.5);
+        }
+        // Side by side, in what is left: the first tile starts exactly at
+        // the strip's end.
+        let first = rects.iter().find(|(c, _)| *c == 1).unwrap().1;
+        assert_eq!(first.x, full.x + strip);
+    }
+
 }

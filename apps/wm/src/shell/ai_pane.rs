@@ -1,4 +1,5 @@
-//! The AI pane: a right-side slide-in that hosts the assistant.
+//! The AI pane: a left-side column that hosts the assistant and PUSHES
+//! the desk in — never over it.
 //!
 //! The chat is NOT the window manager's — it is an app of its own
 //! (`apps/aichat`), seated here instead of in a tile, in one of two
@@ -10,14 +11,20 @@
 //! exactly as a Window's F10 slot does; the WM's services reach it as
 //! in-process links (`pane_links.rs`), never as frames.
 //!
-//! This widget owns nothing but the slot: the pane rect under the bar,
-//! the slide (easeOutQuint, 260 ms in, 200 ms out), an opaque card with a
-//! 2 px edge on its left, and the body. Open, the pane takes the pointer
-//! inside its rect and the keyboard; closed, it draws its body just off
-//! the desk's right edge and keeps it ticking (the child's 8 ms tick, the
-//! module's engine), so the assistant — started with the desktop, never
-//! on the first F10 — is configured, presenting and answering before the
-//! pane ever slides in, and a turn in flight finishes behind a hidden one.
+//! This widget owns nothing but the slot. It is the first child of the
+//! desk row, LEFT of the desk, and it reserves a STRIP: its own walk width
+//! (decision 17). The slide (easeOutQuint, 260 ms in, 200 ms out) animates
+//! that strip from nothing to the card's width plus one outer gap, and
+//! the desk — a Fill sibling in the same row — narrows by exactly that
+//! every frame, so the tiles reflow beside the pane instead of vanishing
+//! under it; the card itself sits right-aligned in the strip, an opaque
+//! ground with a 2 px edge on its RIGHT. Open, the pane takes the pointer
+//! inside its card and the keyboard; closed, the strip is zero and the
+//! card sits just off the desk's left edge, still drawn and ticking (the
+//! child's 8 ms tick, the module's engine), so the assistant — started
+//! with the desktop, never on the first F10 — is configured, presenting
+//! and answering before the pane ever slides in, and a turn in flight
+//! finishes behind a hidden one.
 
 use crate::desk::ease_out_quint;
 use crate::hub::ClientId;
@@ -33,7 +40,9 @@ script_mod! {
     mod.widgets.ShellAiPaneBase = #(ShellAiPane::register_widget(vm))
 
     mod.widgets.ShellAiPane = set_type_default() do mod.widgets.ShellAiPaneBase {
-        width: Fill
+        // The strip: zero while closed, the card plus a gap when open. The
+        // widget rewrites this width itself as it slides.
+        width: 0
         height: Fill
         draw_card +: { color: mod.wm_theme.background }
         draw_edge +: { color: mod.wm_theme.accent }
@@ -49,8 +58,40 @@ const SLIDE_OUT: f64 = 0.20;
 const PANE_WIDTH: f64 = 440.0;
 /// The most of the desk the pane may take.
 const PANE_MAX_FRACTION: f64 = 0.4;
-/// The edge on the pane's left.
+/// The edge on the pane's right.
 const EDGE: f64 = 2.0;
+/// The narrowest the card ever gets.
+const PANE_MIN_WIDTH: f64 = 240.0;
+
+/// The pane's geometry as plain numbers, testable without a `Cx`: the card
+/// width for a row that wide, the strip the row reserves at slide position
+/// `t`, and the card's rect inside a strip.
+pub struct PaneStrip;
+
+impl PaneStrip {
+    /// The card's width: 440 px, at most 40 % of the row, never under 240.
+    pub fn card_width(row_width: f64) -> f64 {
+        PANE_WIDTH.min(row_width * PANE_MAX_FRACTION).max(PANE_MIN_WIDTH)
+    }
+
+    /// What the row reserves at slide position `t` (0 hidden, 1 shown):
+    /// the card plus one outer gap, eased — the desk beside it narrows by
+    /// exactly this.
+    pub fn strip(t: f64, card_width: f64, gap: f64) -> f64 {
+        (ease_out_quint(t) * (card_width + gap)).max(0.0)
+    }
+
+    /// The card, right-aligned in a strip of `strip` px starting at
+    /// `row.pos.x`: at rest one gap in from the row's left edge, and at
+    /// strip zero fully off the row's left edge. Full desk height minus
+    /// the gaps.
+    pub fn card_rect(row: Rect, strip: f64, card_width: f64, gap: f64) -> Rect {
+        let x = row.pos.x + strip - card_width;
+        let y = row.pos.y + gap;
+        let h = (row.size.y - gap * 2.0).max(100.0);
+        Rect { pos: dvec2(x, y), size: dvec2(card_width, h) }
+    }
+}
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellAiPane {
@@ -71,12 +112,16 @@ pub struct ShellAiPane {
     anim_started: Option<(f64, f64, bool)>,
     #[rust]
     client: Option<ClientId>,
-    /// The desk's rect (under the bar) and the outer gap, as the WM
-    /// last told us; the pane rect derives from them.
+    /// The desk ROW's rect (under the bar, pane and desk together) and the
+    /// outer gap, as the WM last told us; the card width and the strip
+    /// derive from them.
     #[rust]
-    desk_rect: Rect,
+    row_rect: Rect,
     #[rust]
     gap: f64,
+    /// The strip this widget currently reserves (its own walk width).
+    #[rust]
+    strip: f64,
     #[rust]
     next_frame: NextFrame,
     /// The keyboard was asked for while the body had no live area;
@@ -139,26 +184,38 @@ impl ShellAiPane {
         self.client = client;
     }
 
-    /// Where the desk is and how far from its edges the pane sits.
-    pub fn set_geometry(&mut self, desk_rect: Rect, gap: f64) {
-        self.desk_rect = desk_rect;
+    /// Where the desk row is and how far from its edges the card sits.
+    pub fn set_geometry(&mut self, row_rect: Rect, gap: f64) {
+        self.row_rect = row_rect;
         self.gap = gap;
+        self.apply_strip();
     }
 
-    /// The pane's resting rect: right side, under the bar, `gap` in.
-    pub fn pane_rect(&self) -> Rect {
-        let w = PANE_WIDTH.min(self.desk_rect.size.x * PANE_MAX_FRACTION).max(240.0);
-        let x = self.desk_rect.pos.x + self.desk_rect.size.x - self.gap - w;
-        let y = self.desk_rect.pos.y + self.gap;
-        let h = (self.desk_rect.size.y - self.gap * 2.0).max(100.0);
-        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
+    /// The card's width for the current row.
+    fn card_width(&self) -> f64 {
+        PaneStrip::card_width(self.row_rect.size.x)
     }
 
-    /// The rect as drawn right now, slid by `t`.
-    fn slid_rect(&self) -> Rect {
-        let rest = self.pane_rect();
-        let off = (1.0 - ease_out_quint(self.t)) * (rest.size.x + self.gap);
-        Rect { pos: dvec2(rest.pos.x + off, rest.pos.y), size: rest.size }
+    /// The strip the row reserves right now, and the walk that claims it.
+    fn apply_strip(&mut self) {
+        self.strip = PaneStrip::strip(self.t, self.card_width(), self.gap);
+        self.view.walk.width = Size::Fixed(self.strip);
+    }
+
+    /// The reserved strip in px: what the desk beside the pane has lost.
+    pub fn strip(&self) -> f64 {
+        self.strip
+    }
+
+    /// The card is on the move: the desk snaps its tiles to the layout
+    /// every frame instead of tweening after the strip.
+    pub fn is_sliding(&self) -> bool {
+        self.anim_started.is_some()
+    }
+
+    /// The card as drawn right now: right-aligned in the strip.
+    fn card_rect(&self) -> Rect {
+        PaneStrip::card_rect(self.row_rect, self.strip, self.card_width(), self.gap)
     }
 
     /// True while the pane is on screen at all (open, or sliding out).
@@ -167,7 +224,7 @@ impl ShellAiPane {
     }
 
     pub fn contains(&self, p: DVec2) -> bool {
-        self.open && self.slid_rect().contains(p)
+        self.open && self.card_rect().contains(p)
     }
 
     pub fn set_open(&mut self, cx: &mut Cx, open: bool) {
@@ -207,8 +264,10 @@ impl ShellAiPane {
         if p >= 1.0 {
             self.t = to;
             self.anim_started = None;
+            self.apply_strip();
             return false;
         }
+        self.apply_strip();
         true
     }
 
@@ -248,7 +307,9 @@ impl Widget for ShellAiPane {
             if self.animate(now) {
                 self.next_frame = cx.new_next_frame();
             }
-            self.redraw(cx);
+            // The strip changed: the desk beside us must lay out again,
+            // not just this widget.
+            cx.redraw_all();
         }
         // The body is ticked whether or not the pane shows (the child's
         // 8 ms tick timer is what makes it run at all; the module's engine
@@ -268,27 +329,68 @@ impl Widget for ShellAiPane {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        // Drawn even while hidden: at slide position zero the body sits
-        // just off the desk's right edge, where a child process keeps a
-        // real rect (so it is configured, gets a swapchain and presents
-        // its frames) and a module root keeps a live picture — the pane's
-        // first slide-in shows the assistant already running, not a
-        // "starting…" wash. One off-screen quad is what that costs.
-        let r = self.slid_rect();
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // The strip is this widget's walk: `walk` arrives with its width,
+        // the desk row lays the desk out after it. The card is drawn
+        // right-aligned in the strip — off the row's left edge while
+        // hidden, where a child process still keeps a real rect (so it is
+        // configured, gets a swapchain and presents its frames) and a
+        // module root keeps a live picture: the first slide-in shows the
+        // assistant already running, not a "starting…" wash.
+        cx.begin_turtle(walk, Layout::default());
+        let r = self.card_rect();
         self.draw_card.draw_abs(cx, r);
-        self.draw_edge.draw_abs(cx, Rect { pos: r.pos, size: dvec2(EDGE, r.size.y) });
-        let inner = Rect { pos: dvec2(r.pos.x + EDGE, r.pos.y), size: dvec2(r.size.x - EDGE, r.size.y) };
+        self.draw_edge.draw_abs(
+            cx,
+            Rect { pos: dvec2(r.pos.x + r.size.x - EDGE, r.pos.y), size: dvec2(EDGE, r.size.y) },
+        );
+        let inner = Rect { pos: r.pos, size: dvec2(r.size.x - EDGE, r.size.y) };
         match self.overlay.clone() {
             Some(overlay) => overlay.draw_walk_all(cx, scope, Walk::abs_rect(inner)),
             None => {
                 while self.view.draw_walk(cx, scope, Walk::abs_rect(inner)).is_step() {}
             }
         }
+        cx.end_turtle();
         if self.focus_pending && self.open {
             // The body just drew: its area is live, the claim can land.
             self.focus_keyboard(cx);
         }
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_card_width_follows_the_row_within_its_bounds() {
+        assert_eq!(PaneStrip::card_width(1400.0), 440.0);
+        assert_eq!(PaneStrip::card_width(800.0), 320.0, "40 % of a narrow row");
+        assert_eq!(PaneStrip::card_width(300.0), 240.0, "never under the minimum");
+    }
+
+    #[test]
+    fn the_strip_grows_from_nothing_to_the_card_plus_a_gap() {
+        assert_eq!(PaneStrip::strip(0.0, 440.0, 10.0), 0.0);
+        assert_eq!(PaneStrip::strip(1.0, 440.0, 10.0), 450.0);
+        let mid = PaneStrip::strip(0.5, 440.0, 10.0);
+        assert!(mid > 0.0 && mid < 450.0, "{mid}");
+    }
+
+    #[test]
+    fn the_card_rests_one_gap_in_and_hides_off_the_left_edge() {
+        let row = Rect { pos: dvec2(0.0, 26.0), size: dvec2(1400.0, 874.0) };
+        let w = PaneStrip::card_width(row.size.x);
+        let rest = PaneStrip::card_rect(row, PaneStrip::strip(1.0, w, 10.0), w, 10.0);
+        assert_eq!(rest.pos, dvec2(10.0, 36.0));
+        assert_eq!(rest.size, dvec2(440.0, 854.0));
+        // The desk starts where the strip ends: a tile one gap past the
+        // card's right edge, never under it.
+        let strip = PaneStrip::strip(1.0, w, 10.0);
+        assert_eq!(row.pos.x + strip + 10.0, rest.pos.x + rest.size.x + 10.0);
+        let hidden = PaneStrip::card_rect(row, 0.0, w, 10.0);
+        assert_eq!(hidden.pos.x + hidden.size.x, row.pos.x, "fully off the left edge");
     }
 }

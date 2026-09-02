@@ -362,6 +362,10 @@ pub struct WmState {
     /// the accent: dropping here makes the dragged window a TAB of this
     /// tile instead of swapping the two.
     pub drop_hint: Option<ClientId>,
+    /// The AI pane is mid-slide: the desk's rect narrows or widens every
+    /// frame, and every tile snaps to the layout like a dragged one — a
+    /// tween on top of the slide would lag it (see `dragging`).
+    pub pane_sliding: bool,
 }
 
 impl WmState {
@@ -1260,6 +1264,7 @@ impl Widget for WmDesk {
         self.hint = state.drop_hint;
         let borders = state.borders;
         let dragging = state.dragging.clone();
+        let pane_sliding = state.pane_sliding;
         // A preview float dims everything behind it (Quick Look).
         let previews: Vec<ClientId> = targets
             .iter()
@@ -1319,7 +1324,7 @@ impl Widget for WmDesk {
             match self.anims.get_mut(client) {
                 Some(anim) => {
                     anim.close_t = None;
-                    if dragging.contains(client) {
+                    if dragging.contains(client) || pane_sliding {
                         anim.snap_to(*target);
                     } else {
                         anim.retarget(*target);
