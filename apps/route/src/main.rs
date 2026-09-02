@@ -873,8 +873,15 @@ fn parse_utc_offset(text: &str) -> i64 {
 }
 
 /// The current local hour-of-day (0..24), wall clock + system UTC offset.
+/// `--hour=N` on the command line pins it: a render gate compares grabs
+/// taken at different times of day against one daylight baseline.
 #[cfg(feature = "native")]
 fn local_hour_now() -> u32 {
+    if let Some(hour) = std::env::args()
+        .find_map(|arg| arg.strip_prefix("--hour=").and_then(|v| v.parse::<u32>().ok()))
+    {
+        return hour % 24;
+    }
     let epoch_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
