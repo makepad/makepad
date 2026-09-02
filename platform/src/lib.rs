@@ -3,6 +3,18 @@ pub mod gl_render_bridge;
 pub mod home;
 pub mod os;
 
+#[cfg(any(
+    test,
+    all(target_arch = "wasm32", target_feature = "atomics")
+))]
+#[path = "os/web/alloc.rs"]
+mod web_alloc;
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+#[global_allocator]
+static WEB_GLOBAL_ALLOCATOR: web_alloc::ThreadCachingAllocator =
+    web_alloc::ThreadCachingAllocator::new();
+
 #[macro_use]
 pub mod log;
 

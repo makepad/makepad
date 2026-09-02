@@ -178,6 +178,8 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
+                    #[cfg(target_feature = "atomics")]
+                    crate::web_alloc::prefill_main_thread_cache();
                     self.cpu_cores = (tw.cpu_cores as usize).max(1);
                     // A browser may accept a 4 GiB wasm maximum, but elastic
                     // caches must still target the 1 GiB deployment class.

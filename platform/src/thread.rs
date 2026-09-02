@@ -598,13 +598,6 @@ pub fn worker_count(reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
 
 fn worker_count_from(parallelism: NonZeroUsize, reserve_for_ui: usize, cap: usize) -> NonZeroUsize {
     let available = parallelism.get().saturating_sub(reserve_for_ui).max(1);
-    // Stop-gap for the threaded wasm build: std's wasm allocator is one
-    // global spin lock, so workers that allocate serialise on it and per-job
-    // throughput collapses with the worker count (measured on the map bake:
-    // a tile takes 15-20 s with 8 workers, 0.1-0.5 s with 2) while the main
-    // thread starves behind them. Two workers until the thread-caching
-    // allocator (ALLOC2) lands; then this cap goes.
-    let cap = if cfg!(target_arch = "wasm32") { cap.min(2) } else { cap };
     NonZeroUsize::new(available.min(cap.max(1))).unwrap()
 }
 
@@ -1391,6 +1384,7 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(_request_id: u32, closure_ptr: u
     // JavaScript posts `finished` after this returns and that UI callback
     // removes the request. Duplicating cleanup here only creates a
     // worker/UI mutex race when the UI starts the next task.
+    crate::web_alloc::thread_exit();
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
