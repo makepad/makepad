@@ -87,9 +87,65 @@ fn site_index(lx: i32, ly: i32, lz: i32) -> usize {
 /// what schedules remeshing, collider swaps and wire resends.
 #[derive(Clone, Debug)]
 pub struct VoxelChunk {
+    /// The COMPOSED density every mesher and probe reads: the history layer
+    /// with the plan patch clipped over it.
     pub density: Vec<i8>,
+    /// The HISTORY layer alone — the player's digs, fills and tunnels. This
+    /// is what persists, replicates as chunk bytes and survives a plan
+    /// change; a plan press never writes here, so retracting a railway
+    /// cannot leave its berm behind and a snapshot cannot bake it.
+    pub history: Vec<i8>,
     pub material: Vec<u8>,
     pub rev: u64,
+}
+
+/// One PLAN-layer press: open air above the plane `y` inside the x/z box.
+/// `owner` is the plan feature that asked for it (0 = arrived over the
+/// wire without provenance), the key a retraction uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanPress {
+    pub owner: u64,
+    pub min: Vec3f,
+    pub max: Vec3f,
+    pub y: f32,
+}
+
+/// The plan's terrain patch over the voxel layer (worldgen DESIGN.md,
+/// amendment B): derived from plan features, rebuilt by every solve,
+/// retracted by owner, composed over the history at READ time and never
+/// written into chunk bytes. Presses today; lot pads and channel carves
+/// take the same shape.
+#[derive(Clone, Debug, Default)]
+pub struct PlanTerrainPatch {
+    pub presses: Vec<PlanPress>,
+}
+
+impl PlanTerrainPatch {
+    pub fn is_empty(&self) -> bool {
+        self.presses.is_empty()
+    }
+
+    /// The plan's clip at a world point: the strongest "air above the pad
+    /// plane" any press asks for there, `None` when no press covers the
+    /// column.
+    pub fn clip(&self, w: Vec3f, cell: f32) -> Option<i8> {
+        let mut best: Option<i8> = None;
+        for p in &self.presses {
+            if w.x >= p.min.x && w.x <= p.max.x && w.z >= p.min.z && w.z <= p.max.z {
+                let q = VoxelField::quantize((w.y - p.y) / cell);
+                best = Some(best.map_or(q, |b| b.max(q)));
+            }
+        }
+        best
+    }
+
+    /// History composed with the plan: air wins wherever a press clips.
+    pub fn compose(history: i8, clip: Option<i8>) -> i8 {
+        match clip {
+            Some(q) => history.max(q),
+            None => history,
+        }
+    }
 }
 
 /// Which mesher a volume uses (D5: two meshers, one field).
@@ -299,6 +355,10 @@ pub struct VoxelField {
     pub persist_overflow: bool,
     /// Terrain revision the heightfield hole-punch was last applied against.
     pub punch_rev: Option<u64>,
+    /// The plan layer over this field — see [`PlanTerrainPatch`]. Cleared on
+    /// every reset_content (the eval re-registers every press it still
+    /// wants), never persisted, never part of a chunk blob.
+    pub plan: PlanTerrainPatch,
     /// Monotonic mesh revision source.
     mesh_rev: u64,
     /// One-shot "chunk cap hit" log latch.
@@ -323,6 +383,7 @@ impl VoxelField {
             persist_ops: Vec::new(),
             persist_overflow: false,
             punch_rev: None,
+            plan: PlanTerrainPatch::default(),
             mesh_rev: 0,
             cap_logged: false,
         }
@@ -568,6 +629,20 @@ impl VoxelField {
     /// crossing in materialized data. `None` also when the column was carved
     /// clean through everything materialized (the caller falls back to the
     /// heightfield, which is what the base layer below would say).
+    /// Does a materialized column own the surface at (x, z)? The sites just
+    /// above and below the base surface are both in chunks — the punch rule.
+    /// Ownership without a floor below means a HOLE, not "ask the
+    /// heightfield" (see `GameWorld::surface_sample_at`).
+    pub fn owns_surface(&self, x: f32, z: f32, base_h: f32) -> bool {
+        if self.chunks.is_empty() {
+            return false;
+        }
+        let air = self.world_site(vec3f(x, base_h, z));
+        let solid = [air[0], air[1] - 1, air[2]];
+        self.chunks.contains_key(&ChunkKey::of_site(air))
+            && self.chunks.contains_key(&ChunkKey::of_site(solid))
+    }
+
     pub fn surface_at(&self, x: f32, z: f32, base_h: f32) -> Option<f32> {
         if self.chunks.is_empty() {
             return None;
@@ -710,10 +785,15 @@ impl VoxelField {
                 }
             }
         }
+        // The base layer IS history at birth (nothing has been dug yet);
+        // the plan clips over it at read time.
+        let history = density;
+        let density = self.compose_history(key, &history);
         self.chunks.insert(
             key,
             VoxelChunk {
                 density,
+                history,
                 material,
                 rev: 1,
             },
@@ -745,6 +825,16 @@ impl VoxelField {
         record: bool,
         log: &mut Vec<String>,
     ) {
+        // A press is PLAN, not history: it registers in the patch (owner 0 —
+        // the wire carries no provenance) and composes at read time. The
+        // op still records so replicas compose the same patch.
+        if let VoxelOp::Press { min, max, y } = op {
+            self.plan_press(0, min, max, y);
+            if record {
+                self.record_op(op);
+            }
+            return;
+        }
         let (lo, hi) = self.op_site_bounds(&op);
         // Materialize every chunk the op's bounds touch — the WHOLE world is
         // implicitly editable; lazy materialization is what keeps that free
@@ -796,6 +886,7 @@ impl VoxelField {
             })
             .copied()
             .collect();
+        let plan = self.plan.clone();
         for key in keys {
             let b = key.base();
             let (x0, x1) = (lo[0].max(b[0]), hi[0].min(b[0] + CHUNK - 1));
@@ -810,7 +901,9 @@ impl VoxelField {
                     let s = [sx, sy, sz];
                     let w = vec3f(s[0] as f32 * cell, s[1] as f32 * cell, s[2] as f32 * cell);
                     let at = site_index(sx - b[0], sy - b[1], sz - b[2]);
-                    let old_d = chunk.density[at];
+                    // History ops read and write the HISTORY layer; the
+                    // composed byte is re-derived from it below.
+                    let old_d = chunk.history[at];
                     let old_m = chunk.material[at];
                     let (new_d, new_m) = match op {
                         VoxelOp::Dig { pos, r, mode, material } => {
@@ -867,23 +960,15 @@ impl VoxelField {
                             let nd = old_d.max(q);
                             (nd, if nd >= 0 { 0 } else { old_m })
                         }
-                        VoxelOp::Press { min, max, y } => {
-                            // Open air above the pad plane inside the box —
-                            // the voxel twin of the heightfield press.
-                            if w.x >= min.x && w.x <= max.x && w.z >= min.z && w.z <= max.z {
-                                let q = Self::quantize((w.y - y) / cell);
-                                let nd = old_d.max(q);
-                                (nd, if nd >= 0 { 0 } else { old_m })
-                            } else {
-                                (old_d, old_m)
-                            }
-                        }
+                        // Routed into the plan patch above; never a site op.
+                        VoxelOp::Press { .. } => (old_d, old_m),
                         // World-level appliers own it (crate::landform);
                         // reaching here is a routing bug, kept harmless.
                         VoxelOp::Landform { .. } => (old_d, old_m),
                     };
                     if new_d != old_d || new_m != old_m {
-                        chunk.density[at] = new_d;
+                        chunk.history[at] = new_d;
+                        chunk.density[at] = PlanTerrainPatch::compose(new_d, plan.clip(w, cell));
                         chunk.material[at] = new_m;
                         changed_any = true;
                         chunk.rev += 1;
@@ -910,17 +995,154 @@ impl VoxelField {
             }
         }
         if record {
-            // Leak guard for hosts that never pump a session (raw sim tests):
-            // the session drains this every tick in every role.
-            if self.pending_ops.len() < 65536 {
-                self.pending_ops.push(op);
+            self.record_op(op);
+        }
+    }
+
+    fn record_op(&mut self, op: VoxelOp) {
+        // Leak guard for hosts that never pump a session (raw sim tests):
+        // the session drains this every tick in every role.
+        if self.pending_ops.len() < 65536 {
+            self.pending_ops.push(op);
+        }
+        // The persistence tail (drained by the app's debounced saver).
+        if self.persist_ops.len() < 8192 {
+            self.persist_ops.push(op);
+        } else {
+            self.persist_overflow = true;
+            self.persist_ops.clear();
+        }
+    }
+
+    // ── the plan layer ──────────────────────────────────────────────────
+
+    /// Register a plan press (a foundation pad, a corridor bed) keyed by its
+    /// owning feature. Composed over the history at read time; the chunk
+    /// bytes never change, so a retraction is exact and a snapshot never
+    /// bakes it.
+    pub fn plan_press(&mut self, owner: u64, min: Vec3f, max: Vec3f, y: f32) {
+        let press = PlanPress {
+            owner,
+            min: vec3f(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z)),
+            max: vec3f(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z)),
+            y,
+        };
+        if self.plan.presses.contains(&press) {
+            return;
+        }
+        self.plan.presses.push(press);
+        self.recompose_region(press.min, press.max);
+    }
+
+    /// Drop every plan press `owner` registered and give the ground back to
+    /// its history — the berm leaves with the railway.
+    pub fn retract_plan(&mut self, owner: u64) {
+        let gone: Vec<PlanPress> =
+            self.plan.presses.iter().filter(|p| p.owner == owner).copied().collect();
+        if gone.is_empty() {
+            return;
+        }
+        self.plan.presses.retain(|p| p.owner != owner);
+        for p in gone {
+            self.recompose_region(p.min, p.max);
+        }
+    }
+
+    /// Drop the whole plan layer (a solve starts from nothing and re-registers
+    /// every press it still wants).
+    pub fn clear_plan(&mut self) {
+        let all = std::mem::take(&mut self.plan.presses);
+        for p in all {
+            self.recompose_region(p.min, p.max);
+        }
+    }
+
+    /// The history bytes of a chunk — what persistence and the wire carry.
+    pub fn chunk_history(&self, key: ChunkKey) -> Option<&[i8]> {
+        self.chunks.get(&key).map(|c| c.history.as_slice())
+    }
+
+    /// `history ⊕ plan` for one chunk's worth of sites.
+    fn compose_history(&self, key: ChunkKey, history: &[i8]) -> Vec<i8> {
+        if self.plan.is_empty() {
+            return history.to_vec();
+        }
+        let b = key.base();
+        let cell = self.cell;
+        let mut out = history.to_vec();
+        for lz in 0..CHUNK {
+            for lx in 0..CHUNK {
+                for ly in 0..CHUNK {
+                    let w = vec3f(
+                        (b[0] + lx) as f32 * cell,
+                        (b[1] + ly) as f32 * cell,
+                        (b[2] + lz) as f32 * cell,
+                    );
+                    let at = site_index(lx, ly, lz);
+                    out[at] = PlanTerrainPatch::compose(history[at], self.plan.clip(w, cell));
+                }
             }
-            // The persistence tail (drained by the app's debounced saver).
-            if self.persist_ops.len() < 8192 {
-                self.persist_ops.push(op);
-            } else {
-                self.persist_overflow = true;
-                self.persist_ops.clear();
+        }
+        out
+    }
+
+    /// Recompose every materialized chunk under the x/z box after the plan
+    /// changed there; a chunk whose composed bytes moved is dirtied with its
+    /// neighbours (their meshes sampled its apron).
+    fn recompose_region(&mut self, min: Vec3f, max: Vec3f) {
+        let cell = self.cell;
+        let span = CHUNK as f32 * cell;
+        let keys: Vec<ChunkKey> = self
+            .chunks
+            .keys()
+            .filter(|k| {
+                let x0 = k.x as f32 * span;
+                let z0 = k.z as f32 * span;
+                x0 <= max.x && x0 + span >= min.x && z0 <= max.z && z0 + span >= min.z
+            })
+            .copied()
+            .collect();
+        let plan = self.plan.clone();
+        let mut changed_keys = Vec::new();
+        for key in keys {
+            let b = key.base();
+            let Some(chunk) = self.chunks.get_mut(&key) else {
+                continue;
+            };
+            let mut changed = false;
+            for lz in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    let x = (b[0] + lx) as f32 * cell;
+                    let z = (b[2] + lz) as f32 * cell;
+                    for ly in 0..CHUNK {
+                        let y = (b[1] + ly) as f32 * cell;
+                        let at = site_index(lx, ly, lz);
+                        let d = PlanTerrainPatch::compose(
+                            chunk.history[at],
+                            plan.clip(vec3f(x, y, z), cell),
+                        );
+                        if d != chunk.density[at] {
+                            chunk.density[at] = d;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                chunk.rev += 1;
+                changed_keys.push(key);
+            }
+        }
+        for key in changed_keys {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let k = ChunkKey { x: key.x + dx, y: key.y + dy, z: key.z + dz };
+                        if self.chunks.contains_key(&k) {
+                            self.mark_dirty(k);
+                        }
+                    }
+                }
             }
         }
     }
@@ -949,6 +1171,7 @@ impl VoxelField {
             return;
         }
         let cell = self.cell;
+        let plan = self.plan.clone();
         let span = CHUNK as f32 * cell;
         let cols: std::collections::BTreeSet<(i32, i32)> = self
             .chunks
@@ -997,7 +1220,7 @@ impl VoxelField {
                     for ly in 0..CHUNK {
                         let y = (b[1] + ly) as f32 * cell;
                         let at = site_index(lx, ly, lz);
-                        let old_d = chunk.density[at];
+                        let old_d = chunk.history[at];
                         let old_m = chunk.material[at];
                         let mut nd = old_d;
                         let mut nm = old_m;
@@ -1020,7 +1243,9 @@ impl VoxelField {
                             }
                         }
                         if nd != old_d || nm != old_m {
-                            chunk.density[at] = nd;
+                            chunk.history[at] = nd;
+                            chunk.density[at] =
+                                PlanTerrainPatch::compose(nd, plan.clip(vec3f(x, y, z), cell));
                             chunk.material[at] = nm;
                             changed = true;
                         }
@@ -1098,7 +1323,10 @@ impl VoxelField {
             return;
         }
         let rev = self.chunks.get(&key).map_or(1, |c| c.rev + 1);
-        self.chunks.insert(key, VoxelChunk { density, material, rev });
+        // A blob carries HISTORY bytes; the plan composes over them here.
+        let history = density;
+        let density = self.compose_history(key, &history);
+        self.chunks.insert(key, VoxelChunk { density, history, material, rev });
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
@@ -1164,6 +1392,9 @@ impl VoxelField {
     /// data they were built from is still here, and a re-declared volume
     /// re-marks what its mode change affects.
     pub fn on_reset_content(&mut self) {
+        // The plan layer is script content: the eval re-registers every
+        // press it still wants, and a feature that vanished leaves nothing.
+        self.clear_plan();
         self.volumes.clear();
         self.structure_rev += 1;
         self.punch_rev = None;

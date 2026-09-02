@@ -14,6 +14,31 @@ use crate::entity::*;
 use crate::terrain::*;
 use crate::CallbackSlot;
 
+/// One answer from the world-surface seam — see
+/// [`GameWorld::surface_sample_at`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SurfaceSample {
+    /// Ground at this height.
+    Surface(f32),
+    /// The column is open: carved through, or a punched heightfield cell.
+    Hole,
+    /// Beyond the heightfield (and no voxel ownership).
+    Outside,
+}
+
+impl SurfaceSample {
+    /// The height where there is ground; `None` for a hole or the outside.
+    pub fn height(self) -> Option<f32> {
+        match self {
+            SurfaceSample::Surface(h) => Some(h),
+            _ => None,
+        }
+    }
+    pub fn is_ground(self) -> bool {
+        matches!(self, SurfaceSample::Surface(_))
+    }
+}
+
 /// Everything the script API reads/writes. Shared (Rc<RefCell>) between the
 /// widget and the native `game` handle registered into the isolate, so script
 /// calls mutate it synchronously — no async widget trampoline, deterministic
@@ -158,6 +183,19 @@ pub struct GameWorld {
     /// worlds that never do carry a null pointer and every pre-voxel code
     /// path byte-identically.
     pub voxel: Option<Box<crate::voxel::VoxelField>>,
+    /// True while the host evaluates the level source (a PLAN solve). Ops
+    /// issued inside it are plan products — re-derived by the next eval,
+    /// retracted when their line is gone, never history; ops issued outside
+    /// it (a brush, an excavator, a hand controller) are history. Set and
+    /// cleared by the script host around eval.
+    pub in_plan_eval: bool,
+    /// Solve epochs (worldgen DESIGN.md, amendment E): `plan_revision`
+    /// advances once per level eval, `history_revision` once per HISTORY
+    /// terrain op (dig, tunnel, brush landform). A solve records the history
+    /// epoch it read and can refuse to commit products derived from older
+    /// ground once solves run off the play thread.
+    pub plan_revision: u64,
+    pub history_revision: u64,
     /// Water volumes with an analytic wave surface (mix.md D7/W1). None
     /// until `game.water` declares one — same null-pointer contract as
     /// `voxel`: worlds without it run every pre-water path byte-identically.
@@ -235,16 +273,41 @@ impl GameWorld {
     /// at once. `None` outside the heightfield (and outside any voxel
     /// ownership): flat/streamed worlds keep their own floor rules.
     pub fn surface_height_at(&self, x: f32, z: f32) -> Option<f32> {
+        self.surface_sample_at(x, z).height()
+    }
+
+    /// The seam with its edges spelled out (worldgen DESIGN.md, amendment
+    /// B): `Surface(h)` where ground exists, `Hole` where the column has
+    /// been carved through or the heightfield cell is punched out, `Outside`
+    /// beyond the heightfield. A hole is never the heightfield underneath
+    /// it (placement used to see ground over a pit) and the border is
+    /// never height 0.
+    pub fn surface_sample_at(&self, x: f32, z: f32) -> SurfaceSample {
         let base = self.terrain.as_ref().and_then(|t| t.height_at(x, z));
         if let Some(v) = self.voxel.as_deref() {
-            if v.chunk_count() > 0 {
-                // No terrain = the voxel base layer's y=0 ground plane.
-                if let Some(h) = v.surface_at(x, z, base.unwrap_or(0.0)) {
-                    return Some(h);
+            // No terrain = the voxel base layer's y=0 ground plane.
+            let base_h = base.unwrap_or(0.0);
+            if v.chunk_count() > 0 && v.owns_surface(x, z, base_h) {
+                return match v.surface_at(x, z, base_h) {
+                    Some(h) => SurfaceSample::Surface(h),
+                    None => SurfaceSample::Hole,
+                };
+            }
+        }
+        match base {
+            None => SurfaceSample::Outside,
+            Some(h) => {
+                let punched = match (&self.terrain, &self.terrain_materials) {
+                    (Some(t), Some(m)) => m.is_hole_at(t, x, z),
+                    _ => false,
+                };
+                if punched {
+                    SurfaceSample::Hole
+                } else {
+                    SurfaceSample::Surface(h)
                 }
             }
         }
-        base
     }
 
     /// A world with the canonical starting camera (the values the gamemaker
@@ -576,6 +639,11 @@ impl GameWorld {
         let field = voxel
             .get_or_insert_with(|| Box::new(crate::voxel::VoxelField::new(0.5)));
         field.apply_op(op, terrain.as_ref(), true, true, log_pending);
+        // A press is plan (routed into the patch inside apply_op); every
+        // other op is HISTORY and moves the epoch a solve commits against.
+        if !matches!(op, crate::voxel::VoxelOp::Press { .. }) {
+            self.history_revision = self.history_revision.wrapping_add(1);
+        }
     }
 }
 
