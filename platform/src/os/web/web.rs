@@ -124,13 +124,14 @@ impl Cx {
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
-                    {
+                    self.os.native_window_geom = new_geom.clone();
+                    if self.windows.is_valid(id_zero) {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
+                        window.window_geom = new_geom.clone();
                     }
-                    self.os.window_geom = new_geom.clone();
-                    self.windows[id_zero].window_geom = new_geom;
+                    self.os.window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.set_physical_keyboard_state(true);
@@ -144,20 +145,25 @@ impl Cx {
                     let old_geom = self.os.window_geom.clone();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     let id_zero = CxWindowPool::id_zero();
-                    {
+                    self.os.native_window_geom = new_geom.clone();
+                    if self.windows.is_valid(id_zero) {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
-                    }
-                    if old_geom != new_geom {
-                        self.os.window_geom = new_geom.clone();
-                        self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: id_zero,
-                            old_geom: old_geom,
-                            new_geom: new_geom,
-                        }));
-                        self.redraw_all();
+                        if old_geom != new_geom {
+                            self.os.window_geom = new_geom.clone();
+                            window.window_geom = new_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(
+                                WindowGeomChangeEvent {
+                                    window_id: id_zero,
+                                    old_geom: old_geom,
+                                    new_geom: new_geom,
+                                },
+                            ));
+                            self.redraw_all();
+                        }
+                    } else {
+                        self.os.window_geom = new_geom;
                     }
                 }
 
@@ -294,12 +300,16 @@ impl Cx {
 
                 live_id!(ToWasmWindowGotFocus) => {
                     let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowGotFocus(window_id));
+                    if self.windows.is_valid(window_id) {
+                        self.call_event_handler(&Event::WindowGotFocus(window_id));
+                    }
                 }
 
                 live_id!(ToWasmWindowLostFocus) => {
                     let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowLostFocus(window_id));
+                    if self.windows.is_valid(window_id) {
+                        self.call_event_handler(&Event::WindowLostFocus(window_id));
+                    }
                 }
 
                 live_id!(ToWasmRedrawAll) => {
@@ -307,8 +317,12 @@ impl Cx {
                 }
 
                 live_id!(ToWasmPaintDirty) => {
-                    let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
-                    self.passes[main_pass_id].paint_dirty = true;
+                    let window_id = CxWindowPool::id_zero();
+                    if self.windows.is_valid(window_id) {
+                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                            self.passes[main_pass_id].paint_dirty = true;
+                        }
+                    }
                 }
 
                 live_id!(ToWasmLiveFileChange) => {
@@ -634,21 +648,22 @@ impl Cx {
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
-                    // Inherit the OS-reported scale factor recorded by
-                    // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
-                    // freshly-created window's `dpi_override` machinery has
-                    // a baseline.
-                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
+                    let native_geom = self.os.native_window_geom.clone();
+                    let new_geom = {
+                        let window = &mut self.windows[window_id];
+                        window.os_dpi_factor = Some(native_geom.dpi_factor);
+                        window.native_window_geom_to_layout(native_geom)
+                    };
+                    self.os.window_geom = new_geom.clone();
                     {
                         let window = &mut self.windows[window_id];
-                        window.os_dpi_factor = id_zero_os_dpi;
-                        window.window_geom = self.os.window_geom.clone();
+                        window.window_geom = new_geom.clone();
                     }
 
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
                         window_id,
-                        old_geom: self.os.window_geom.clone(),
-                        new_geom: self.os.window_geom.clone(),
+                        old_geom: new_geom.clone(),
+                        new_geom,
                     }));
 
                     self.windows[window_id].is_created = true;
@@ -697,7 +712,14 @@ impl Cx {
                     // Bottom of the caret line (matches the pre-rect point); the
                     // hidden-textarea IME anchor only takes a point.
                     let pos = area.clipped_rect(self).pos + cursor_rect.pos + cursor_rect.size;
-                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let id_zero = CxWindowPool::id_zero();
+                    let Some(window_id) = self
+                        .get_window_id_of(&area)
+                        .filter(|window_id| self.windows.is_valid(*window_id))
+                        .or_else(|| self.windows.is_valid(id_zero).then_some(id_zero))
+                    else {
+                        continue;
+                    };
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     self.os
                         .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });
@@ -1186,6 +1208,7 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 // storage buffers for graphics API related platform
 pub struct CxOs {
     pub(crate) window_geom: WindowGeom,
+    pub(crate) native_window_geom: WindowGeom,
 
     pub from_wasm: Option<FromWasmMsg>,
 
@@ -1203,6 +1226,7 @@ impl Default for CxOs {
     fn default() -> Self {
         Self {
             window_geom: WindowGeom::default(),
+            native_window_geom: WindowGeom::default(),
 
             from_wasm: Some(FromWasmMsg::new()),
 
