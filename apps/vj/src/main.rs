@@ -184,6 +184,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::columns::{Column, ColumnLayout};
+use crate::console::Console;
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
@@ -6928,6 +6929,14 @@ pub struct App {
     /// is room) is the landing; the loops page is one tap away.
     #[rust(0usize)]
     lists_shown: usize,
+    /// The strip under the lists: one line of numbers, and the log when it
+    /// is opened.
+    #[rust]
+    console: Console,
+    /// What the lists were last given, so the strip only re-sizes them when
+    /// the number actually moves.
+    #[rust]
+    console_points: Option<(f64, f64)>,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
     #[rust(TabStage::None)]
@@ -17214,6 +17223,79 @@ p2 {}
         }
     }
 
+    /// Show the console the way its state says. Every set is guarded, so a
+    /// settled console does no work at all.
+    fn paint_console(&mut self, cx: &mut Cx) {
+        let (numbers, log) = self.console.panes();
+        let open = self.console.open;
+        // The explorer and the strip divide the pane between them, and both
+        // are given a size: a `Fill` explorer takes the whole pane as the
+        // turtle reaches it and leaves the strip nothing at all, whatever
+        // size the strip itself was given. Both are set on EVERY pump, the
+        // way the folds and the tabs are — these are DSL-declared sizes, and
+        // anything that re-applies the panel puts the declared ones straight
+        // back.
+        //
+        // The pane is measured from POSITIONS, not from a size: a `Fill` view
+        // reports the room it asked for rather than the room it got, so the
+        // page body reads 32 points taller than it draws — the models row
+        // underneath takes that back — and the lists inherit the over-ask.
+        // The floor is therefore read off the row that stands on it, and the
+        // pane is the distance from the lists up to there. Until that row has
+        // drawn, the pane's own size will do.
+        let top = self.ui.widget(cx, ids!(lists_pair)).area().rect(cx);
+        let floor = self.ui.widget(cx, ids!(models_row)).area().rect(cx).pos.y;
+        let room = if floor > top.pos.y {
+            floor - crate::console::GAP_POINTS - top.pos.y
+        } else {
+            top.size.y
+        };
+        let strip = self.console.extent(room);
+        let explorer =
+            (room - crate::console::GAP_POINTS - strip).max(crate::console::OPEN_MIN_POINTS);
+        // Through `widget`, not `view`: the explorer is a `RoundedView`, and
+        // the view lookup answers with nothing for it.
+        for (path, points) in [(ids!(library_drop), explorer), (ids!(console_strip), strip)] {
+            if let Some(mut view) = self.ui.widget(cx, path).borrow_mut::<View>() {
+                view.walk.height = Size::Fixed(points);
+            }
+        }
+        // What is left of the strip once the one line has had its own.
+        let body = (strip - crate::console::CLOSED_POINTS).max(0.0);
+        if let Some(mut view) = self.ui.widget(cx, ids!(console_body)).borrow_mut::<View>() {
+            view.walk.height = Size::Fixed(body);
+        }
+        // Redraw on EITHER size moving, not on the strip's alone. The strip
+        // stays 24 while it is shut, so a guard that watches only it lets the
+        // very first measurement — taken before the page has settled — stand
+        // for good: the sizes are set again every pump, but nothing ever
+        // draws them, so the stale room measures itself back.
+        if room > 1.0 && self.console_points != Some((explorer, strip)) {
+            self.console_points = Some((explorer, strip));
+            self.ui.redraw(cx);
+        }
+        for (path, want) in [
+            (ids!(console_body), open),
+            (ids!(console_grip), open),
+            (ids!(console_chevron_up), open),
+            (ids!(console_chevron_down), !open),
+            (ids!(console_numbers), numbers),
+            (ids!(console_log), log),
+        ] {
+            let view = self.ui.widget(cx, path);
+            if view.visible() != want {
+                view.set_visible(cx, want);
+            }
+        }
+        for (index, chip) in
+            [ids!(console_view_0), ids!(console_view_1), ids!(console_view_2)]
+                .into_iter()
+                .enumerate()
+        {
+            self.paint_lit(cx, chip, index == self.console.view.index());
+        }
+    }
+
     /// A list tab was pressed. Wide, the explorer and queue tabs both mean
     /// the pair; the loops tab is a page at every width.
     fn handle_lists_tabs(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -21949,6 +22031,7 @@ p2 {}
         self.paint_deck_sections(cx);
         self.paint_deck_tabs(cx);
         self.paint_lists_tabs(cx);
+        self.paint_console(cx);
         self.refresh_music_rows(cx);
     }
 

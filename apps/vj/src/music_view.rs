@@ -2892,6 +2892,8 @@ script_mod! {
                         a: View{
                             width: Fill
                             height: Fill
+                            flow: Down
+                            spacing: 6
                             library_drop := RoundedView{
                             width: Fill
                             height: Fill
@@ -3130,6 +3132,67 @@ script_mod! {
                             }
                             music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                         }
+                            // The console strip: always one line of live numbers, and the
+                            // app's own log when it is opened. It sits under the
+                            // explorer, where the list it reports on is.
+                            console_strip := View{
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                console_grip := RoundedView{
+                                    visible: false
+                                    width: Fill
+                                    height: 7
+                                    cursor: MouseCursor.RowResize
+                                    show_bg: true
+                                    draw_bg +: {
+                                        color: #xffffff1f
+                                        color_hover: #xffffff5c
+                                        border_radius: 3.0
+                                        hover: instance(0.0)
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: 24
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
+                                    console_chevron_up := ChevronIcon{
+                                        visible: false
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
+                                    }
+                                    console_chevron_down := ChevronIcon{
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                    }
+                                    console_line := MusicLabel{width: Fill text: ""}
+                                    console_view_0 := MusicChipButton{height: 20 text: "numbers"}
+                                    console_view_1 := MusicChipButton{height: 20 text: "log"}
+                                    console_view_2 := MusicChipButton{height: 20 text: "both"}
+                                }
+                                console_body := View{
+                                    visible: false
+                                    width: Fill
+                                    height: 160
+                                    flow: Down
+                                    spacing: 4
+                                    console_numbers := MusicLabel{width: Fill text: ""}
+                                    View{
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 6
+                                        align: Align{x: 0.0, y: 0.5}
+                                        console_filter := TextInput{
+                                            width: Fill{min: 96. max: 320.}
+                                            flow: Flow.Right{wrap: false}
+                                            empty_text: "filter…"
+                                        }
+                                        console_clear := MusicChipButton{height: 20 text: "clear"}
+                                    }
+                                    console_log := MusicLabel{width: Fill text: ""}
+                                }
+                            }
                         }
                         b: View{
                             width: Fill

@@ -6,6 +6,11 @@ use crate::mixer::AudioHealth;
 
 /// The strip closed: one line, the numbers.
 pub const CLOSED_POINTS: f64 = 24.0;
+
+/// The seam between the explorer and the strip, mirroring the `spacing` the
+/// pane is declared with. The explorer's size is worked out here, so the gap
+/// has to be counted here too.
+pub const GAP_POINTS: f64 = 6.0;
 /// Open, it is never so short that the log is a single line.
 pub const OPEN_MIN_POINTS: f64 = 72.0;
 pub const OPEN_DEFAULT_POINTS: f64 = 190.0;
