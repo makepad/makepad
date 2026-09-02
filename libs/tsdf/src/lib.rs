@@ -366,13 +366,17 @@ struct XrTsdfCooperativeStepSlot {
     callback: Option<XrTsdfCooperativeStepCallback>,
     stats: XrTsdfCooperativeStepStats,
     current_cycle_compute_micros: u64,
+    #[cfg(not(target_arch = "wasm32"))]
     current_cycle_started_at: Option<Instant>,
 }
 
 impl XrTsdfCooperativeStepSlot {
     fn reset_cycle(&mut self) {
         self.current_cycle_compute_micros = 0;
-        self.current_cycle_started_at = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.current_cycle_started_at = None;
+        }
         self.stats.current_cycle_steps = 0;
         self.stats.has_more_work = false;
     }
@@ -528,14 +532,19 @@ impl XrTsdfStore {
     pub fn run_cooperative_step(&self) -> Option<XrTsdfCooperativeStepResult> {
         let mut slot = self.cooperative_step.lock().ok()?;
         let callback = slot.callback.as_mut()?;
+        #[cfg(not(target_arch = "wasm32"))]
         let started = Instant::now();
         let result = callback();
+        #[cfg(not(target_arch = "wasm32"))]
         let elapsed_micros = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        #[cfg(target_arch = "wasm32")]
+        let elapsed_micros = 0u64;
         slot.stats.callback_registered = true;
         slot.stats.last_step_micros = elapsed_micros;
         slot.stats.average_step_micros =
             ema_u64(slot.stats.average_step_micros, elapsed_micros, 1, 4);
         if result.did_work {
+            #[cfg(not(target_arch = "wasm32"))]
             slot.current_cycle_started_at.get_or_insert(started);
             slot.current_cycle_compute_micros = slot
                 .current_cycle_compute_micros
@@ -546,12 +555,16 @@ impl XrTsdfStore {
         }
         slot.stats.has_more_work = result.has_more_work;
         if result.completed_cycle {
+            #[cfg(not(target_arch = "wasm32"))]
             let cycle_wall_micros = slot
                 .current_cycle_started_at
                 .map(|cycle_started| {
                     cycle_started.elapsed().as_micros().min(u64::MAX as u128) as u64
                 })
                 .unwrap_or(slot.current_cycle_compute_micros);
+            // No wall clock on the web: compute time stands in for the cycle's wall time.
+            #[cfg(target_arch = "wasm32")]
+            let cycle_wall_micros = slot.current_cycle_compute_micros;
             slot.stats.last_cycle_compute_micros = slot.current_cycle_compute_micros;
             slot.stats.average_cycle_compute_micros = ema_u64(
                 slot.stats.average_cycle_compute_micros,
