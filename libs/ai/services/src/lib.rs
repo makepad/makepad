@@ -10,13 +10,12 @@
 //!
 //! Design of record: `local/agent_state/aichat/DESIGN.md`.
 
+pub mod engine;
 pub mod port;
 pub mod state;
 pub mod wire;
 
-#[cfg(feature = "engine")]
-pub mod engine;
-
+pub use engine::{EngineCore, EngineEvent, Model, ModelEvent, ServiceRegistry, ToolDefinition};
 pub use port::{AiServicePort, PortEvent, ServiceLink, ServiceLinkHost};
 pub use state::{
     EngineState, Entry, ProviderChoice, ProviderRow, ServiceInfo, Status, ToolEntry, ToolStatus,
