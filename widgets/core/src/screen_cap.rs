@@ -568,12 +568,9 @@ impl Session {
                 queue.dropped += excess as u64;
             }
         });
-        // Upstream's tap allocator hands back an id unconditionally. The fork
-        // carried a version that answered `None` when every slot was taken, so
-        // a recording could say it was going out silent; that is a platform
-        // change and does not belong in a widget PR, so the id is wrapped here
-        // instead and the widget keeps its shape.
-        let tap_id = Some(tap_id);
+        if tap_id.is_none() {
+            log!("ScreenCap: every audio tap is taken; recording without sound");
+        }
 
                     let attachments = CaptureAttachments { capture_id, tap_id };
                     let mut info = RecordingInfo::default();

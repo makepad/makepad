@@ -1790,7 +1790,7 @@ mod imp {
                     let audio = config
                         .audio
                         .then(|| Arc::new(Mutex::new(capture::AudioQueue::new(virtual_clock))));
-                    let tap = audio.clone().map(|queue| {
+                    let tap = audio.clone().and_then(|queue| {
                         let counters = counters.clone();
                         crate::audio_output_tap::add_audio_output_tap(move |info, buffer| {
                             capture::tap_audio(&queue, &counters, info.sample_rate, buffer)
