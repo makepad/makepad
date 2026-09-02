@@ -140,7 +140,7 @@ impl LocalLlmSession {
         let worker_cancel = cancel.clone();
         thread::Builder::new()
             .name("ai-hub-local-llm".into())
-            .spawn(move || worker_main(config, prefix, msg_rx, event_tx, worker_cancel, wake, None))
+            .spawn(move || worker_main(config, prefix, None, msg_rx, event_tx, worker_cancel, wake, None))
             .expect("spawn local llm worker");
         Self {
             to_worker,
@@ -177,6 +177,18 @@ impl LocalLlmSession {
 pub fn build_prefix(system_prompt: &str, tools: &[ToolSpec]) -> String {
     let mut out = String::with_capacity(4096);
     out.push_str("<|im_start|>system\n");
+    out.push_str(&system_text(system_prompt, tools));
+    out.push_str("<|im_end|>\n");
+    out
+}
+
+/// The system turn's TEXT — the tools block and the instructions, without
+/// the template's own `<|im_start|>`/`<|im_end|>` wrapping. A node that
+/// renders the template itself (the fleet chat box) takes this as its
+/// `chat_system`; the in-process prefix wraps it. One rendering of the tool
+/// protocol, wherever the model runs.
+pub fn system_text(system_prompt: &str, tools: &[ToolSpec]) -> String {
+    let mut out = String::with_capacity(4096);
     if !tools.is_empty() {
         out.push_str("# Tools\n\nYou have access to the following functions:\n\n<tools>\n");
         for tool in tools {
@@ -202,7 +214,6 @@ pub fn build_prefix(system_prompt: &str, tools: &[ToolSpec]) -> String {
         );
     }
     out.push_str(system_prompt);
-    out.push_str("<|im_end|>\n");
     out
 }
 
@@ -246,6 +257,10 @@ fn tool_response_turn(results: &[(String, bool)]) -> String {
 pub(crate) fn worker_main(
     config: LocalLlmConfig,
     prefix: String,
+    // A turn that arrived before this worker existed — the election handed
+    // the conversation over after a fleet node died mid-conversation, and
+    // the person's next line is what re-elected. Served first.
+    first: Option<WorkerMsg>,
     msg_rx: Receiver<WorkerMsg>,
     event_tx: Sender<ChatEvent>,
     cancel: Arc<AtomicBool>,
@@ -324,7 +339,15 @@ pub(crate) fn worker_main(
     let think_open = session.vocab().token_id("<think>");
     let think_close = session.vocab().token_id("</think>");
 
-    while let Ok(msg) = msg_rx.recv() {
+    let mut first = first;
+    loop {
+        let msg = match first.take() {
+            Some(msg) => msg,
+            None => match msg_rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
         let turn_text = match msg {
             WorkerMsg::UserTurn(text) => user_turn(&text),
             WorkerMsg::ToolResults(results) => tool_response_turn(&results),
@@ -425,7 +448,7 @@ pub(crate) fn worker_main(
 /// The body between `<tool_call>` and `</tool_call>`: `<function=NAME>` and a
 /// run of `<parameter=key>\nvalue\n</parameter>`, into a name and its
 /// arguments. Values stay strings.
-fn parse_tool_call(body: &str) -> Result<(String, Vec<(String, String)>), String> {
+pub(crate) fn parse_tool_call(body: &str) -> Result<(String, Vec<(String, String)>), String> {
     let function_at = body.find("<function=").ok_or("missing <function=")?;
     let rest = &body[function_at + "<function=".len()..];
     let name_end = rest.find(['>', '\n']).ok_or("unterminated function name")?;
