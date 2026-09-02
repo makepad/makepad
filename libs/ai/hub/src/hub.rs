@@ -45,6 +45,14 @@ impl AiHub {
         Self { _private: () }
     }
 
+    /// Open the shared local registry/downloader/backend manager. Like the
+    /// hub itself this binds no listener; workers start only for installs or
+    /// runs.
+    #[cfg(feature = "local")]
+    pub fn local_models(&self) -> Result<crate::local::LocalModels, crate::AssetAiError> {
+        crate::local::LocalModels::open()
+    }
+
     /// Start a chat on this machine. The session's worker runs the machine
     /// residency election first (aicore §3): route to a serving co-located
     /// holder, wait on a loading one, else claim and load in-process.
