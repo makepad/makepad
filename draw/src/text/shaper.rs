@@ -9,13 +9,24 @@ use {
     rustybuzz,
     rustybuzz::UnicodeBuffer,
     std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
+        sync::Mutex,
     },
     unicode_segmentation::UnicodeSegmentation,
 };
+
+static WARNED_MISSING_GLYPHS: Mutex<Option<HashSet<char>>> = Mutex::new(None);
+
+fn mark_missing_glyph_for_warning(warned: &Mutex<Option<HashSet<char>>>, ch: char) -> bool {
+    warned
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashSet::new)
+        .insert(ch)
+}
 
 /// Returns `true` if `text` is guaranteed to contain no right-to-left
 /// characters, so that the Unicode Bidirectional Algorithm can be skipped
@@ -266,14 +277,10 @@ impl Shaper {
         cluster: usize,
         diagnostics: &FontDiagnostics,
     ) {
-        use std::collections::HashSet;
-        use std::sync::Mutex;
-        static WARNED: Mutex<Option<HashSet<char>>> = Mutex::new(None);
         let Some(ch) = text.get(cluster..).and_then(|s| s.chars().next()) else {
             return;
         };
-        let mut warned = WARNED.lock().unwrap();
-        if warned.get_or_insert_with(HashSet::new).insert(ch) {
+        if mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
             crate::makepad_platform::log!("{}", missing_glyph_message(ch, diagnostics));
         }
     }
@@ -524,5 +531,14 @@ mod tests {
             missing_glyph_message('中', &diagnostics),
             "font miss U+4E2D role=regular set=Latin tried=[ibm_plex_text]"
         );
+    }
+
+    #[test]
+    fn missing_glyph_warning_is_emitted_once_per_codepoint() {
+        let warned = Mutex::new(None);
+        assert!(mark_missing_glyph_for_warning(&warned, '⌘'));
+        assert!(!mark_missing_glyph_for_warning(&warned, '⌘'));
+        assert!(mark_missing_glyph_for_warning(&warned, '⇧'));
+        assert_eq!(warned.lock().unwrap().as_ref().unwrap().len(), 2);
     }
 }

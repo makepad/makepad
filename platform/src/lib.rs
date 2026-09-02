@@ -85,7 +85,9 @@ pub mod pixel_probe;
 pub mod screen_capture;
 pub mod audio_output_tap;
 pub mod shader_error;
-pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
+pub use crate::app_main::{
+    new_cx_with_font_set, resolve_studio_http, should_run_stdin_loop_from_env,
+};
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
@@ -127,9 +129,9 @@ pub use {
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
-            FontAsset, FontChain, FontPolicy, FontRole, FontSet,
-            FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_MANIFEST, UI_SYMBOL_FALLBACK,
+            extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
+            FontRole, FontSet, FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,

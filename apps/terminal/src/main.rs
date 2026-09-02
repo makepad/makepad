@@ -14,7 +14,13 @@ use makepad_widgets::*;
 use makepad_terminal::widget::{MpTerm, MpTermAction};
 use std::path::{Path, PathBuf};
 
-app_main!(App);
+app_main!(
+    App,
+    font_assets: [
+        "makepad_widgets/resources/jetbrains_mono_variable.ttf",
+        "makepad_widgets/resources/fa-solid-900.ttf",
+    ]
+);
 
 script_mod! {
     use mod.prelude.widgets.*

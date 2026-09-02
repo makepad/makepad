@@ -25,7 +25,7 @@ mod seed;
 mod theme;
 mod view;
 
-app_main!(App);
+app_main!(App, font_set: International);
 
 script_mod! {
     use mod.prelude.widgets.*
