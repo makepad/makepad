@@ -590,13 +590,34 @@ mod platform {
                     | NetworkResponse::HttpStreamComplete { request_id, response } => {
                         let id = transport_id(request_id);
                         let Some((method, response_limit)) = self.active.remove(&id) else { continue };
-                        let headers = response.headers.into_iter().flat_map(|(name, values)| {
-                            values.into_iter().map(move |value| (name.clone(), value))
-                        });
+                        let body = response.body.unwrap_or_default().to_vec();
+                        let headers: Vec<_> = response
+                            .headers
+                            .into_iter()
+                            .flat_map(|(name, values)| {
+                                values.into_iter().map(move |value| (name.clone(), value))
+                            })
+                            .collect();
+                        // Fetch resolves only after the complete response body
+                        // has been read, but HTTP/2 responses do not have to
+                        // expose a Content-Length header. Preserve the owned
+                        // transport's framing invariant from the observed body.
+                        #[cfg(target_arch = "wasm32")]
+                        let headers = {
+                            let mut headers = headers;
+                            if !matches!(method, TransportMethod::Head)
+                                && !headers.iter().any(|(name, _)| {
+                                    name.eq_ignore_ascii_case("content-length")
+                                })
+                            {
+                                headers.push(("content-length".into(), body.len().to_string()));
+                            }
+                            headers
+                        };
                         let result = normalize_response(
                             response.status_code,
                             headers,
-                            response.body.unwrap_or_default().to_vec(),
+                            body,
                             response_limit,
                             matches!(method, TransportMethod::Head),
                         );

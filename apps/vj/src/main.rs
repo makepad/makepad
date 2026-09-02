@@ -5941,6 +5941,9 @@ pub struct App {
     session_loss_since: Option<Instant>,
     #[rust]
     up: Option<SessionHandles>,
+    /// Last catalog-pump session state printed by the web startup trace.
+    #[rust]
+    catalog_pump_up_seen: Option<bool>,
     /// One-shot per process: the bundled vjeffect preset library has been
     /// handed to the seeding worker (publish-if-absent into the local
     /// store — see effects/seed.rs). A fresh/empty store gets the full
@@ -13948,6 +13951,7 @@ p2 {}
         for msg in connector.poll() {
             match msg {
                 SessionMsg::Status(status) => {
+                    log!("session poll: Status({status:?})");
                     self.status_text = match status {
                         SessionStatus::Discovering => "discovering asset server…".to_string(),
                         SessionStatus::Connecting { server } => {
@@ -13960,8 +13964,10 @@ p2 {}
                     };
                 }
                 SessionMsg::Up(up) => {
+                    log!("session poll: Up");
                     self.status_text = format!("connected {}", up.server_label);
                     self.up = Some(*up);
+                    log!("session: self.up = Some");
                     self.apply_store_capabilities(cx);
                     // The pipeline transport rides the same verified session
                     // on its own thread. Re-pointed on every reconnect: a run
@@ -14277,6 +14283,11 @@ p2 {}
     }
 
     fn pump_catalog_runtime(&mut self, cx: &mut Cx) {
+        let has_up = self.up.is_some();
+        if self.catalog_pump_up_seen != Some(has_up) {
+            log!("catalog runtime pump: up={}", if has_up { "Some" } else { "None" });
+            self.catalog_pump_up_seen = Some(has_up);
+        }
         let (mut events, static_ready) = match self.up.as_mut() {
             Some(up) => {
                 let events = up.catalog.poll();
@@ -14289,6 +14300,7 @@ p2 {}
             None => return,
         };
         if static_ready {
+            log!("catalog runtime: take_ready_event=true");
             log!("static catalog: ready — refreshing browse models");
             for surface in SURFACES {
                 let cmds = self.model(surface).refresh();
