@@ -273,6 +273,72 @@ pub struct SyncPlan {
 /// ratio inside a musical range when the two tracks are an octave apart.
 /// The seek moves the follower to the nearest grid boundary whose phase
 /// matches the leader's, so it is never more than half a unit of jump.
+/// How far a transition may stretch a record before the room hears it.
+///
+/// Ours to tune, and deliberately tighter than the engine's sync envelope:
+/// that one has to survive whatever the operator lands on, while this one
+/// is a choice about which records to put together at all. Recorded mixes
+/// sit under a few percent the overwhelming majority of the time.
+pub const TEMPO_GATE: f64 = 0.08;
+
+/// How much cheaper it is to push a record up than to drag it down.
+///
+/// Slowing a record is heard first — the transients smear and it sags —
+/// so the two directions are not worth the same and the meeting point
+/// between two tempos is not their midpoint. Ours to measure.
+const SPEEDING_UP_COSTS: f64 = 0.8;
+
+/// The tempo ratio between two records, folded onto the same pulse.
+///
+/// Always at or above 1.0: it is the size of the gap, not its direction.
+/// A record at twice the tempo of another is on the same pulse counted
+/// twice, so it folds to 1.0 rather than reading as a doubling — without
+/// this every drum record looks unmixable against every house record.
+pub fn tempo_ratio(a_bpm: f64, b_bpm: f64) -> f64 {
+    if !(a_bpm > 0.0) || !(b_bpm > 0.0) {
+        return f64::INFINITY;
+    }
+    let mut ratio = b_bpm / a_bpm;
+    while ratio > SYNC_RATE_MAX {
+        ratio *= 0.5;
+    }
+    while ratio < SYNC_RATE_MIN {
+        ratio *= 2.0;
+    }
+    if ratio < 1.0 {
+        1.0 / ratio
+    } else {
+        ratio
+    }
+}
+
+/// How well two tempos sit together: 1.0 on the same pulse, falling to
+/// zero at the gate, and staying there beyond it.
+pub fn tempo_fit(a_bpm: f64, b_bpm: f64) -> f32 {
+    let stretch = tempo_ratio(a_bpm, b_bpm) - 1.0;
+    if !stretch.is_finite() {
+        return 0.0;
+    }
+    (1.0 - stretch / TEMPO_GATE).clamp(0.0, 1.0) as f32
+}
+
+/// The tempo two records should meet at, so neither carries the whole gap.
+///
+/// Splitting the difference in log tempo would be the even-handed answer if
+/// both directions cost the same. They do not: the record being dragged
+/// down gives up more than the one being pushed up, so the meeting point
+/// leans towards the faster record and the slower one travels further.
+pub fn meeting_tempo(a_bpm: f64, b_bpm: f64) -> f64 {
+    if !(a_bpm > 0.0) || !(b_bpm > 0.0) {
+        return a_bpm.max(b_bpm).max(0.0);
+    }
+    let (slow, fast) = if a_bpm <= b_bpm { (a_bpm, b_bpm) } else { (b_bpm, a_bpm) };
+    // Equal cost either side: the slower record pays SPEEDING_UP_COSTS per
+    // unit of log tempo, the faster one pays a full unit.
+    let weight = SPEEDING_UP_COSTS + 1.0;
+    ((slow.ln() * SPEEDING_UP_COSTS + fast.ln()) / weight).exp()
+}
+
 pub fn sync_plan(
     leader: &SyncView,
     follower: &SyncView,
@@ -2640,6 +2706,48 @@ mod tests {
         for (name, a, b) in [("dipped/linear", dipped, linear), ("linear/equal", linear, equal)] {
             assert!((b - a) > 0.05, "{name} differ by only {}", b - a);
         }
+    }
+
+    #[test]
+    fn a_double_time_record_folds_onto_its_partner() {
+        // 150 under 75 is not a record played at half speed, it is the same
+        // pulse counted twice. The fold has to see that before anything
+        // measures a gap, or every drum record reads as unmixable.
+        assert!((tempo_ratio(75.0, 150.0) - 1.0).abs() < 1e-9);
+        assert!((tempo_ratio(150.0, 75.0) - 1.0).abs() < 1e-9);
+        assert!((tempo_fit(75.0, 150.0) - 1.0).abs() < 1e-6);
+        // And a genuine gap still reads as one.
+        assert!(tempo_ratio(120.0, 126.0) > 1.0);
+        assert!(tempo_fit(120.0, 126.0) < 1.0);
+    }
+
+    #[test]
+    fn tempo_fit_falls_away_as_the_gap_widens_and_bottoms_out_past_the_gate() {
+        let close = tempo_fit(128.0, 129.0);
+        let near = tempo_fit(128.0, 132.0);
+        let far = tempo_fit(128.0, 140.0);
+        assert!(close > near && near > far, "{close} {near} {far}");
+        assert!(close <= 1.0 && far >= 0.0);
+        // Beyond the gate there is nothing left to grade.
+        assert!((tempo_fit(128.0, 200.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_meeting_tempo_leans_on_the_record_that_speeds_up() {
+        // Both records give way, so neither is stretched by the whole gap.
+        // Dragging a record down is heard sooner than pushing one up, so the
+        // meeting point sits above the halfway house, and the slower record
+        // does more of the travelling.
+        let (slow, fast) = (123.0, 143.0);
+        let meet = meeting_tempo(slow, fast);
+        assert!(meet > slow && meet < fast, "between the two: {meet}");
+        let halfway = (slow * fast).sqrt();
+        assert!(meet > halfway, "leaning the right way: {meet} over {halfway}");
+        let up = meet / slow - 1.0;
+        let down = 1.0 - meet / fast;
+        assert!(up > down, "the slower record travels further: {up} vs {down}");
+        // Two records already together have nowhere to meet but where they are.
+        assert!((meeting_tempo(128.0, 128.0) - 128.0).abs() < 1e-9);
     }
 
     #[test]

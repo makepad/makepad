@@ -132,6 +132,76 @@ impl KeyEstimate {
 }
 
 // ---------------------------------------------------------------------------
+// how two keys sit together
+// ---------------------------------------------------------------------------
+
+/// A diatonic scale has seven notes, and one step around the circle of
+/// fifths trades exactly one of them. That is the whole of the arithmetic
+/// below: the fit between two keys is how many notes they still share.
+const SCALE_NOTES: f32 = 7.0;
+
+/// How far apart two keys sit on the wheel, 0..=6 steps.
+///
+/// The wheel is the circle of fifths, so a step is a fifth, and the far
+/// side is the tritone six steps away in either direction.
+fn wheel_distance(a: KeyEstimate, b: KeyEstimate) -> u8 {
+    let position = |key: KeyEstimate| {
+        let tonic = (key.tonic % 12) as u32;
+        // A minor key sits with the major a minor third above it: that is
+        // what puts a key and its relative on the same spot.
+        let root = if key.minor { (tonic + 3) % 12 } else { tonic };
+        (root * 7) % 12
+    };
+    let raw = (position(a) as i32 - position(b) as i32).rem_euclid(12);
+    raw.min(12 - raw) as u8
+}
+
+/// How well two keys sit together: 1.0 for the same key, falling away as
+/// they share fewer notes, never below zero.
+///
+/// Graded rather than allowed-or-not on purpose. A picker that only ever
+/// took perfect matches would refuse most of a library, and a DJ trades a
+/// step around the wheel for a better record all night. The caller weighs
+/// this against tempo and energy, and against how sure the detector was.
+pub fn key_fit(a: KeyEstimate, b: KeyEstimate) -> f32 {
+    let shared = SCALE_NOTES - wheel_distance(a, b) as f32;
+    let fit = (shared / SCALE_NOTES).max(0.0);
+    if a.minor == b.minor {
+        return fit;
+    }
+    // Same notes, different home. A relative pair shares all seven and is
+    // the classic move, but the tonal centre does shift under the mix, so
+    // it does not score as an exact match; a mode change further round the
+    // wheel is a little harder still.
+    fit * MODE_CHANGE
+}
+
+/// What a change of mode costs, as a share of the note-count fit.
+const MODE_CHANGE: f32 = 0.94;
+
+/// The semitone shift that makes `b` sit best against `a`, and the fit it
+/// buys. Zero when the pair is already at its best.
+///
+/// One semitone is seven steps around the wheel, so a record that clashes
+/// is often a semitone from agreeing. Kept to a semitone either way: real
+/// mixes almost never move a record further, and a stretcher asked for more
+/// starts to be heard doing it.
+pub fn key_shift_to_fit(a: KeyEstimate, b: KeyEstimate) -> (i8, f32) {
+    let mut best = (0i8, key_fit(a, b));
+    for shift in [-1i8, 1] {
+        let moved = KeyEstimate {
+            tonic: ((b.tonic as i32 + shift as i32).rem_euclid(12)) as u8,
+            ..b
+        };
+        let fit = key_fit(a, moved);
+        if fit > best.1 {
+            best = (shift, fit);
+        }
+    }
+    best
+}
+
+// ---------------------------------------------------------------------------
 // the analysis pass
 // ---------------------------------------------------------------------------
 
@@ -926,6 +996,75 @@ fn pearson(left: &[f64; 12], right: &[f64; 12]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(tonic: u8, minor: bool) -> KeyEstimate {
+        KeyEstimate { tonic, minor, confidence: 1.0 }
+    }
+
+    #[test]
+    fn a_key_fits_itself_best_and_a_tritone_away_worst() {
+        // The wheel IS the circle of fifths, and one step around it changes
+        // exactly one note of the seven. So the fit is a count of shared
+        // notes, and it has to fall away in order as the keys separate.
+        let c_major = key(0, false);
+        let g_major = key(7, false); // one step
+        let d_major = key(2, false); // two steps
+        let fs_major = key(6, false); // six steps, the far side
+
+        let same = key_fit(c_major, c_major);
+        let one = key_fit(c_major, g_major);
+        let two = key_fit(c_major, d_major);
+        let far = key_fit(c_major, fs_major);
+
+        assert!((same - 1.0).abs() < 1e-6, "a key fits itself: {same}");
+        assert!(one < same && two < one && far < two, "{same} {one} {two} {far}");
+        assert!(far >= 0.0, "a clash is still a number, not a negative: {far}");
+        // Around the wheel is symmetric: a step down is a step.
+        let f_major = key(5, false);
+        assert!((key_fit(c_major, f_major) - one).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_relative_minor_shares_every_note_and_nearly_every_point() {
+        // A minor and C major sit on the same wheel position and share all
+        // seven notes, so they must score close behind an exact match and
+        // clearly ahead of a neighbouring key that has given one up.
+        let c_major = key(0, false);
+        let a_minor = key(9, true);
+        let g_major = key(7, false);
+
+        let relative = key_fit(c_major, a_minor);
+        assert!(relative < 1.0, "a different tonal centre is not a free ride");
+        assert!(
+            relative > key_fit(c_major, g_major),
+            "sharing all seven notes beats sharing six: {relative}"
+        );
+    }
+
+    #[test]
+    fn the_fit_does_not_care_which_record_is_asked_about_first() {
+        for (a, b) in [((0, false), (7, false)), ((9, true), (2, false))] {
+            let (a, b) = (key(a.0, a.1), key(b.0, b.1));
+            assert!((key_fit(a, b) - key_fit(b, a)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_semitone_shift_is_offered_when_it_buys_a_better_fit() {
+        // Seven steps around the wheel is one semitone, so a pair that sits
+        // badly can often be rescued by moving one. The shift is reported
+        // signed, and it has to actually improve the fit it claims.
+        let a = key(0, false);
+        let b = key(1, false); // five steps away: a poor pair
+        let (shift, fitted) = key_shift_to_fit(a, b);
+        assert!(shift != 0, "this pair needs help");
+        assert!(shift.abs() <= 2, "a DJ moves a record a semitone, not a fifth");
+        assert!(fitted > key_fit(a, b), "the shift has to earn its keep");
+
+        // A pair that already fits is left alone.
+        let (none, _) = key_shift_to_fit(a, a);
+        assert_eq!(none, 0);
+    }
 
     // ---------------------------------------------------------------------------
     // signals
