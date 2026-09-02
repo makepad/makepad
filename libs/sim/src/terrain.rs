@@ -53,6 +53,25 @@ pub struct TerrainMaterials {
     pub surfaces: Vec<TerrainSurface>,
 }
 
+impl TerrainMaterials {
+    /// Is the heightfield cell under (x, z) punched out (box3d's `0xFF`
+    /// hole value)? Row-major `(cells-1)²` like the indices themselves;
+    /// a missing entry is material 0, never a hole.
+    pub fn is_hole_at(&self, terrain: &Terrain, x: f32, z: f32) -> bool {
+        let fx = (x - terrain.origin) / terrain.cell_size;
+        let fz = (z - terrain.origin) / terrain.cell_size;
+        if fx < 0.0 || fz < 0.0 || terrain.cells < 2 {
+            return false;
+        }
+        let side = terrain.cells - 1;
+        let (ix, iz) = (fx.floor() as usize, fz.floor() as usize);
+        if ix >= side || iz >= side {
+            return false;
+        }
+        self.indices.get(iz * side + ix).is_some_and(|m| *m == 0xFF)
+    }
+}
+
 impl Terrain {
     /// Piecewise-planar ground height at (x, z): the two triangles per cell,
     /// same split the mesh uses, so collision and pixels agree. None outside.

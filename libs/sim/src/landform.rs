@@ -407,6 +407,23 @@ fn same_landform(a: &VoxelOp, b: &VoxelOp) -> bool {
 /// own landform line) applies heightfield-only — the chunks already carry
 /// its voxel effect plus everything dug since.
 pub fn host_apply_landform(world: &mut GameWorld, op: VoxelOp) {
+    // A landform issued by the level source is a PLAN product (worldgen
+    // DESIGN.md, amendment B): the next eval re-derives it on the rebuilt
+    // heightfield, a removed line removes the mountain, and it is never
+    // recorded or persisted as history. Heightfield-only — composing it
+    // into materialized chunks would bake plan into history bytes (the
+    // voxel-side plan overlay for landforms is the next step). It still
+    // replicates so replicas raise the same ground.
+    if world.in_plan_eval {
+        if let Some(field) = world.voxel.as_deref_mut() {
+            if field.pending_ops.len() < 65536 {
+                field.pending_ops.push(op);
+            }
+        }
+        apply_landform_op(world, op, false);
+        return;
+    }
+    world.history_revision = world.history_revision.wrapping_add(1);
     let mut overflow = false;
     let field = world
         .voxel
