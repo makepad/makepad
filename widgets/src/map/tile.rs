@@ -93,6 +93,8 @@ pub enum TileLoadState {
         /// slot on the view), same band split as the vertex streams.
         icon_instances: Vec<IconInstances>,
         icon_high_instances: Vec<IconInstances>,
+        /// Tree/signal contact-shadow discs, drawn into the shadow mask.
+        shadow_disc_geometry: Option<Geometry>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
         fringe_geometry: Option<Geometry>,
@@ -367,6 +369,10 @@ pub struct TileBuffers {
     /// the vertex streams (floor <= ICON_HIGH_BAND_FLOOR here).
     pub icon_instances: Vec<IconInstances>,
     pub icon_high_instances: Vec<IconInstances>,
+    /// Tree/signal contact-shadow discs (material 6), drawn into the
+    /// shadow mask pass as coverage rather than as ground decals.
+    pub shadow_disc_indices: Vec<u32>,
+    pub shadow_disc_vertices: Vec<f32>,
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
     pub fringe_indices: Vec<u32>,
     pub fringe_vertices: Vec<f32>,
@@ -435,6 +441,8 @@ impl TileBuffers {
             + self.tree_vertices.len()
             + self.tree_cross_indices.len()
             + self.tree_cross_vertices.len()
+            + self.shadow_disc_indices.len()
+            + self.shadow_disc_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len()
@@ -3050,9 +3058,9 @@ fn push_wall_instance(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-/// T3 contact-shadow decal: a radial-gradient dark disc on the ground
-/// (alpha `strength` at center, 0 at the rim), material 6 so its darkness
-/// rides the live shadow uniform. A triangle fan — no tessellator involved.
+/// T3 contact-shadow decal: a radial-gradient disc on the ground
+/// (alpha `strength` at center, 0 at the rim). Split into the shadow-disc
+/// stream and drawn only into MapView's screen-space shadow mask.
 fn append_ground_shadow_disc(
     center: (f32, f32),
     radius_units: f32,
@@ -3509,55 +3517,6 @@ impl TileProfiler {
             self.start.elapsed_seconds() * 1000.0
         );
     }
-}
-
-/// Deck (overpass) ground-shadow shapes: chunked dissolve of the swept
-/// slab quads, minus grounded building footprints. Deterministic per
-/// (tile, bucket) — baked into the shadow section at capture time; the
-/// runtime only runs this on a shadow-bake MISS.
-fn dissolve_deck_shadows(
-    deck_shadow_paths: Vec<Vec<[f64; 2]>>,
-    building_shadow_footprints: &[Vec<[f64; 2]>],
-) -> Vec<Vec<Vec<[f64; 2]>>> {
-    use i_overlay::core::fill_rule::FillRule as IoFillRule;
-    use i_overlay::core::overlay_rule::OverlayRule;
-    use i_overlay::float::simplify::SimplifyShape;
-    use i_overlay::float::single::SingleFloatOverlay;
-    const DECK_SHADOW_CHUNK: usize = 3000;
-    let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
-        deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
-    } else {
-        let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-        for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
-            let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-            if acc.is_empty() {
-                acc = part;
-            } else {
-                let part_paths: Vec<Vec<[f64; 2]>> = part
-                    .iter()
-                    .flat_map(|shape| shape.iter().cloned())
-                    .collect();
-                acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-            }
-        }
-        acc
-    };
-    if !building_shadow_footprints.is_empty() {
-        let mut acc = shapes;
-        for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
-            let subject: Vec<Vec<[f64; 2]>> = acc
-                .iter()
-                .flat_map(|shape| shape.iter().cloned())
-                .collect();
-            acc = subject.overlay(
-                &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                OverlayRule::Difference,
-                IoFillRule::NonZero,
-            );
-        }
-        shapes = acc;
-    }
-    shapes
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4429,26 +4388,13 @@ fn build_tile_buffers_from_features_profiled(
     // as fill_3d so distant tiles under tilt can skip/fade it.
     let fill_3d_vert_start = fill_vertices.len();
     let fill_3d_index_start = fill_indices.len();
-    let mut tree_cross_vertices: Vec<f32> = Vec::new();
-    let mut tree_cross_indices: Vec<u32> = Vec::new();
+    let tree_cross_vertices: Vec<f32> = Vec::new();
+    let tree_cross_indices: Vec<u32> = Vec::new();
 
-    // Cast-shadow union outlines, kept for the tree/signal contact discs:
-    // a tree already standing in a building's shadow must not stack its
-    // own disc on top (double-darkening + equal-depth z-fight).
-    let mut building_shadow_shapes: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-    // Shadow input signature captured when the runtime pipeline runs, so
-    // the faces-bake sink stores it with the shapes.
-    let mut captured_shadow_sig = 0u64;
-    // Baked shadows consumed: gates the runtime deck-shadow dissolve off
-    // (the baked shapes already contain the deck set).
-    let mut shadow_baked_hit = false;
     // v4 building-dissolve capture: filled in the buildings block (jobs
     // are local there), consumed by the bake sink.
     let mut captured_building_sig = 0u64;
     let mut captured_building_groups: Vec<BakedBuildingGroup> = Vec::new();
-    // Grounded building footprints (positive winding), kept so deck
-    // shadows can subtract them exactly like the building shadows did.
-    let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
     // 2.5D building extrusion: per-edge flat-shaded walls (exterior rings
     // AND courtyard holes), then the roof with holes preserved, lifted by
     // height (the tilt shader does the lifting per frame, so tilt animates
@@ -4601,289 +4547,7 @@ fn build_tile_buffers_from_features_profiled(
         };
         // The one SceneSun also drives the legacy baked-shadow projection.
         let sun_2d = theme.shiny.sun.dir_2d();
-        // T3 building shadows: no shadow map, no second scene pass —
-        // project each exterior roof ring along the sun's ground direction
-        // by height * shadow_len, dissolve footprint + projection +
-        // silhouette quads for the whole tile into ONE union (overlapping
-        // shadows must not double-darken), and emit it as an ordinary
-        // ground fill, material 6, whose alpha rides the live shadow
-        // uniform. Drawn before the walls/roofs so buildings paint over
-        // their own footprint's shadow.
-        if theme.shiny.bake_shadows && buildings_3d && render_zoom >= 14 {
-            use i_overlay::core::fill_rule::FillRule as IoFillRule;
-            use i_overlay::core::overlay_rule::OverlayRule;
-            use i_overlay::float::simplify::SimplifyShape;
-            use i_overlay::float::single::SingleFloatOverlay;
-            let len_per_m = theme.shiny.sun.shadow_len_per_m();
-            let (sx, sy) = (-sun_2d.x, -sun_2d.y);
-            // Floor the silhouette simplification: shadows never need
-            // footprint micro-detail, and sub-meter edges spawn needle
-            // slivers out of the boolean at high overzoom.
-            let shadow_min_edge = (1.2 / render_scale).max(0.35);
-            // Signature over everything the sweep+dissolve consumes: job
-            // rings and heights, sun, scale, simplification floor. On a
-            // baked match the entire boolean pipeline below is skipped and
-            // the baked shapes/footprints substitute — the 0.2-2.6s tail
-            // the in-app slow-tile log kept catching on building-dense
-            // tiles.
-            let shadow_sig = {
-                use std::hash::Hasher;
-                let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
-                h.write(&sun_2d.x.to_bits().to_le_bytes());
-                h.write(&sun_2d.y.to_bits().to_le_bytes());
-                h.write(&len_per_m.to_bits().to_le_bytes());
-                h.write(&shadow_min_edge.to_bits().to_le_bytes());
-                h.write(&building_units_per_m.to_bits().to_le_bytes());
-                h.write(&render_scale.to_bits().to_le_bytes());
-                h.write(&(building_jobs.len() as u32).to_le_bytes());
-                // Hash job content UNCONDITIONALLY: the bake sink runs with
-                // faces_bake_sink_armed() true, and a sink-gated filter here
-                // made the baker store a jobs-less signature no runtime could
-                // ever match — the shadow bake was dead weight in the stream.
-                for job in building_jobs.iter() {
-                    h.write(&job.height_m.to_bits().to_le_bytes());
-                    h.write(&job.base_m.to_bits().to_le_bytes());
-                    h.write(&(job.polygon.len() as u32).to_le_bytes());
-                    for ring in &job.polygon {
-                        h.write(&(ring.len() as u32).to_le_bytes());
-                        for &(x, y) in ring {
-                            h.write(&x.to_bits().to_le_bytes());
-                            h.write(&y.to_bits().to_le_bytes());
-                        }
-                    }
-                }
-                h.0
-            };
-            let baked_shadow = (!faces_bake_sink_armed())
-                .then(|| baked_faces.as_ref())
-                .flatten()
-                .filter(|bake| {
-                    bake.bucket == render_zoom && bake.shadow_signature == shadow_sig
-                });
-            if let Some(bake) = baked_shadow {
-                shadow_baked_hit = true;
-                building_shadow_footprints = bake.shadow_footprints.clone();
-                building_shadow_shapes = bake.shadow_shapes.clone();
-                profiler.lap("b-sh-baked", &format!("shapes={}", building_shadow_shapes.len()));
-                let fill_clip_bounds =
-                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
-                emit_shadow_shapes(
-                    bake.shadow_shapes.clone(),
-                    fill_clip_bounds,
-                    shadow_aa,
-                    tolerance,
-                    &mut path,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
-                feature_count += 1;
-            } else {
-            captured_shadow_sig = shadow_sig;
-            let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
-            let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
-                // NonZero dissolve: every contributing path must wind
-                // positive or it would subtract instead of add.
-                let mut area = 0.0f64;
-                for i in 0..ring.len() {
-                    let a = ring[i];
-                    let b = ring[(i + 1) % ring.len()];
-                    area += a[0] * b[1] - b[0] * a[1];
-                }
-                if area < 0.0 {
-                    ring.reverse();
-                }
-                paths.push(std::mem::take(ring));
-            };
-            // No sink gate here: the WHOLE POINT of the bake is to run this
-            // sweep offline. Gated, the baker captured deck-only shadow sets
-            // (invisible while the sig bug masked it with permanent misses).
-            for job in building_jobs.iter() {
-                let height = job.height_m;
-                if height <= 0.5 {
-                    continue;
-                }
-                let d = len_per_m * height * building_units_per_m;
-                // LOD: shadows that could not show at this magnification
-                // don't earn their union cost.
-                if d * render_scale < 2.0 {
-                    continue;
-                }
-                for ring in &job.polygon {
-                    // Courtyard holes: skip — at casting sun angles the
-                    // court is mostly self-shadowed anyway.
-                    if polygon_signed_area(ring) <= 0.0 {
-                        continue;
-                    }
-                    let ring = simplify_wall_ring(ring, shadow_min_edge);
-                    let n = ring.len();
-                    if n < 3 {
-                        continue;
-                    }
-                    // The swept hull needs all three parts: footprint,
-                    // TRANSLATED footprint, and the connecting edge quads.
-                    // (A single Minkowski-sweep path was tried and REVERTED:
-                    // epsilon-concave rings hand i_overlay self-crossing
-                    // near-degenerate polygons and the dissolve explodes to
-                    // 10-15s. The real fix for shadow cost is baking the
-                    // dissolved shadow shapes per bucket, not a cleverer
-                    // runtime construction.)
-                    let mut scratch: Vec<[f64; 2]> = ring
-                        .iter()
-                        .map(|p| [p.0 as f64, p.1 as f64])
-                        .collect();
-                    push_positive(&mut scratch);
-                    let mut roof: Vec<[f64; 2]> = ring
-                        .iter()
-                        .map(|p| [(p.0 + sx * d) as f64, (p.1 + sy * d) as f64])
-                        .collect();
-                    push_positive(&mut roof);
-                    for i in 0..n {
-                        let a = ring[i];
-                        let b = ring[(i + 1) % n];
-                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                        let len = (dx * dx + dy * dy).sqrt();
-                        if len < 1e-4 {
-                            continue;
-                        }
-                        if (dy / len) * sx + (-dx / len) * sy <= 0.02 {
-                            continue;
-                        }
-                        let mut quad = vec![
-                            [a.0 as f64, a.1 as f64],
-                            [b.0 as f64, b.1 as f64],
-                            [(b.0 + sx * d) as f64, (b.1 + sy * d) as f64],
-                            [(a.0 + sx * d) as f64, (a.1 + sy * d) as f64],
-                        ];
-                        push_positive(&mut quad);
-                    }
-                }
-            }
-            profiler.lap("b-sh-sweep", &format!("paths={}", paths.len()));
-            if !paths.is_empty() {
-                // Chunked dissolve (union-mesh lesson: the solver
-                // degenerates on ring soups past a few thousand rings).
-                const SHADOW_DISSOLVE_CHUNK: usize = 3000;
-                let mut shapes = if paths.len() <= SHADOW_DISSOLVE_CHUNK {
-                    paths.simplify_shape(IoFillRule::NonZero)
-                } else {
-                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-                    for chunk in paths.chunks(SHADOW_DISSOLVE_CHUNK) {
-                        let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-                        if acc.is_empty() {
-                            acc = part;
-                        } else {
-                            let part_paths: Vec<Vec<[f64; 2]>> = part
-                                .iter()
-                                .flat_map(|shape| shape.iter().cloned())
-                                .collect();
-                            acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-                        }
-                    }
-                    acc
-                };
-                // Subtract every grounded building footprint: a shadow
-                // must never cover a building's own ground. Roofs sit at
-                // param5 0.05 + a LIFT-scaled depth term that vanishes
-                // overhead (tilt -> 0), so a decal left under a neighbor
-                // building would depth-win and blotch its roof.
-                let mut footprints: Vec<Vec<[f64; 2]>> = Vec::new();
-                for job in &building_jobs {
-                    if job.height_m <= 0.05 || job.base_m > 0.5 {
-                        continue;
-                    }
-                    for ring in &job.polygon {
-                        if polygon_signed_area(ring) <= 0.0 {
-                            continue;
-                        }
-                        let ring = simplify_wall_ring(ring, shadow_min_edge);
-                        if ring.len() < 3 {
-                            continue;
-                        }
-                        // Dilate ~0.5 m: sub-meter slits between abutting
-                        // sections must not collect shadow (they render as
-                        // dark vertical spikes between the walls). The
-                        // matching pull-back at real wall bases is ~2 px.
-                        let ring = dilate_ring(&ring, 0.5 * building_units_per_m);
-                        let mut fp: Vec<[f64; 2]> = ring
-                            .iter()
-                            .map(|p| [p.0 as f64, p.1 as f64])
-                            .collect();
-                        let mut area = 0.0f64;
-                        for i in 0..fp.len() {
-                            let a = fp[i];
-                            let b = fp[(i + 1) % fp.len()];
-                            area += a[0] * b[1] - b[0] * a[1];
-                        }
-                        if area < 0.0 {
-                            fp.reverse();
-                        }
-                        footprints.push(fp);
-                    }
-                }
-                profiler.lap("b-sh-dissolve", "");
-                if !footprints.is_empty() {
-                    let mut acc = shapes;
-                    for chunk in footprints.chunks(SHADOW_DISSOLVE_CHUNK) {
-                        let subject: Vec<Vec<[f64; 2]>> = acc
-                            .iter()
-                            .flat_map(|shape| shape.iter().cloned())
-                            .collect();
-                        acc = subject.overlay(
-                            &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                            OverlayRule::Difference,
-                            IoFillRule::NonZero,
-                        );
-                    }
-                    shapes = acc;
-                }
-                building_shadow_footprints = footprints;
-                profiler.lap("b-sh-diff", "");
-                let fill_clip_bounds =
-                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-                // ~1.2 m analytic AA fringe softens the shadow edge.
-                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
-                // Morphological opening (~0.35 m erode + dilate): the
-                // boolean leaves hair-thin shadow tendrils ATTACHED to the
-                // main body wherever walls run nearly parallel across a
-                // narrow passage — per-ring sliver filters can't touch
-                // welded appendages, an opening removes anything under
-                // ~0.7 m wide wherever it hides.
-                {
-                    use i_overlay::mesh::outline::offset::OutlineOffset;
-                    use i_overlay::mesh::style::OutlineStyle;
-                    let open_r = (0.5 * building_units_per_m) as f64;
-                    let eroded = shapes.outline(&OutlineStyle::new(-open_r));
-                    if !eroded.is_empty() {
-                        shapes = eroded.outline(&OutlineStyle::new(open_r));
-                    } else {
-                        shapes = Vec::new();
-                    }
-                }
-                building_shadow_shapes = shapes.clone();
-                profiler.lap("b-sh-open", "");
-                emit_shadow_shapes(
-                    shapes,
-                    fill_clip_bounds,
-                    shadow_aa,
-                    tolerance,
-                    &mut path,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
-                feature_count += 1;
-            }
-            }
-        }
-        profiler.lap("b-shadow", "");
+        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // v4 block dissolve: same-height touching buildings union at BAKE
         // time so shared interior walls never reach the extruder. Runtime
         // pays ZERO booleans — a signature HIT swaps the eligible jobs for
@@ -5239,9 +4903,6 @@ fn build_tile_buffers_from_features_profiled(
                     *x - sun_2d.x * 2.2 * units_per_m,
                     *y - sun_2d.y * 2.2 * units_per_m,
                 );
-                if point_in_shadow_shapes(center, &building_shadow_shapes) {
-                    continue;
-                }
                 // Full-strength center (the live shadow uniform is the
                 // brightness knob), canopy-sized, offset like a canopy
                 // hanging 7.5-11 m up would cast. The per-disc depth step
@@ -5556,9 +5217,6 @@ fn build_tile_buffers_from_features_profiled(
                     *x - sun_2d.x * 0.9 * units_per_m,
                     *y - sun_2d.y * 0.9 * units_per_m,
                 );
-                if point_in_shadow_shapes(center, &building_shadow_shapes) {
-                    continue;
-                }
                 append_ground_shadow_disc(
                     center,
                     1.3 * units_per_m,
@@ -6181,27 +5839,6 @@ fn build_tile_buffers_from_features_profiled(
         dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
     profiler.lap("rf-fields", "");
-    // T3 deck shadows: elevated road segments project along the sun by
-    // their per-vertex height, so overpasses ground themselves the way
-    // buildings do. Collected as slab quads per lifted segment (grounded
-    // stretches skip, so approaches don't shade their own surface).
-    let mut deck_shadow_paths: Vec<Vec<[f64; 2]>> = Vec::new();
-    let deck_shadow_ctx = if theme.shiny.bake_shadows && buildings_3d && render_zoom >= 14 {
-        let n = (1u32 << tile_key.z) as f64;
-        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
-            .sinh()
-            .atan();
-        let units_per_m =
-            (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
-        let sun_2d = theme.shiny.sun.dir_2d();
-        Some((
-            -sun_2d.x,
-            -sun_2d.y,
-            theme.shiny.sun.shadow_len_per_m() * units_per_m,
-        ))
-    } else {
-        None
-    };
     for pass in 0..2u8 {
         for (tier_index, (tier_key, style, ways)) in smoothed_tiers.iter().enumerate() {
             let (color, width, depth_micro) = if pass == 0 {
@@ -6240,52 +5877,6 @@ fn build_tile_buffers_from_features_profiled(
             } else {
                 road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip)
             };
-            if pass == 1 {
-                if let Some((sx, sy, len_per_m_units)) = deck_shadow_ctx {
-                    let hw = (width * 0.5).max(0.05);
-                    for (points, dz) in ways.iter() {
-                        let Some(dz) = dz.as_ref() else { continue };
-                        for i in 0..points.len().saturating_sub(1) {
-                            // Cap the projected height: solver outliers
-                            // (20 m+ dz spikes exist in the archive) turned
-                            // one segment into a canal-spanning slab.
-                            let (da, db) = (dz[i].min(6.0), dz[i + 1].min(6.0));
-                            if da < 0.5 && db < 0.5 {
-                                continue;
-                            }
-                            if dz[i] > 12.0 || dz[i + 1] > 12.0 {
-                                continue;
-                            }
-                            let a = points[i];
-                            let b = points[i + 1];
-                            let (ex, ey) = (b.0 - a.0, b.1 - a.1);
-                            let l = (ex * ex + ey * ey).sqrt();
-                            if l < 1e-4 {
-                                continue;
-                            }
-                            let (px, py) = (-ey / l * hw, ex / l * hw);
-                            let (oax, oay) = (sx * da * len_per_m_units, sy * da * len_per_m_units);
-                            let (obx, oby) = (sx * db * len_per_m_units, sy * db * len_per_m_units);
-                            let mut quad = vec![
-                                [(a.0 + px + oax) as f64, (a.1 + py + oay) as f64],
-                                [(b.0 + px + obx) as f64, (b.1 + py + oby) as f64],
-                                [(b.0 - px + obx) as f64, (b.1 - py + oby) as f64],
-                                [(a.0 - px + oax) as f64, (a.1 - py + oay) as f64],
-                            ];
-                            let mut area = 0.0f64;
-                            for j in 0..quad.len() {
-                                let p0 = quad[j];
-                                let p1 = quad[(j + 1) % quad.len()];
-                                area += p0[0] * p1[1] - p1[0] * p0[1];
-                            }
-                            if area < 0.0 {
-                                quad.reverse();
-                            }
-                            deck_shadow_paths.push(quad);
-                        }
-                    }
-                }
-            }
             let skirt_joints: Vec<RoadSkirtJoint> = ways
                 .iter()
                 .enumerate()
@@ -6381,23 +5972,13 @@ fn build_tile_buffers_from_features_profiled(
         } else {
             compute_visible_regions(&groups)
         };
-        // The baked shadow set = building shadows ++ dissolved deck
-        // shadows (concat matches the runtime's two separate emits
-        // exactly, overlap behavior included).
-        let mut shadow_shapes = building_shadow_shapes.clone();
-        if !deck_shadow_paths.is_empty() {
-            shadow_shapes.extend(dissolve_deck_shadows(
-                std::mem::take(&mut deck_shadow_paths),
-                &building_shadow_footprints,
-            ));
-        }
         let bucket = BakedFacesBucket {
             bucket: render_zoom,
             signature: input_sig,
             regions,
-            shadow_signature: captured_shadow_sig,
-            shadow_shapes,
-            shadow_footprints: building_shadow_footprints.clone(),
+            shadow_signature: 0,
+            shadow_shapes: Vec::new(),
+            shadow_footprints: Vec::new(),
             building_signature: captured_building_sig,
             buildings: std::mem::take(&mut captured_building_groups),
         };
@@ -6416,6 +5997,8 @@ fn build_tile_buffers_from_features_profiled(
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            shadow_disc_indices: Vec::new(),
+            shadow_disc_vertices: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
@@ -6627,31 +6210,6 @@ fn build_tile_buffers_from_features_profiled(
         }
     }
     events.sort_by_key(|(key, _)| *key);
-
-    // Dissolve + emit the collected deck shadows (minus building
-    // footprints, same rule as building shadows: never on a roof).
-    // On a shadow-bake HIT the baked shapes already contain the deck
-    // shadows (concatenated at capture) — the dissolve is bake/MISS-only.
-    if !shadow_baked_hit && !deck_shadow_paths.is_empty() {
-        let shapes = dissolve_deck_shadows(
-            std::mem::take(&mut deck_shadow_paths),
-            &building_shadow_footprints,
-        );
-        let fill_clip_bounds = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-        emit_shadow_shapes(
-            shapes,
-            fill_clip_bounds,
-            aa_units,
-            tolerance,
-            &mut path,
-            &mut tess,
-            &mut tess_verts,
-            &mut tess_indices,
-            &mut icon_vertices,
-            &mut icon_indices,
-            &mut icon_zbias,
-        );
-    }
 
     // Corridor bbox prefilter: deck matching is O(verts x corridors) per
     // stroke, and most strokes are nowhere near a bridge. One cheap bbox
@@ -7384,6 +6942,11 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
         split_icon_band(&mut icon_vertices, &mut icon_indices);
+    let (shadow_disc_vertices, shadow_disc_indices) = split_band_by(
+        &mut icon_vertices,
+        &mut icon_indices,
+        |record| record[14] > 5.5 && record[14] < 6.5,
+    );
     let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
@@ -7424,6 +6987,7 @@ fn build_tile_buffers_from_features_profiled(
     let stroke_vertices = pack_vector_vertices(&stroke_vertices);
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
+    let shadow_disc_vertices = pack_vector_vertices(&shadow_disc_vertices);
     let fringe_vertices = pack_vector_vertices(&fringe_vertices);
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
@@ -7442,6 +7006,8 @@ fn build_tile_buffers_from_features_profiled(
         icon_vertices,
         icon_high_indices,
         icon_high_vertices,
+        shadow_disc_indices,
+        shadow_disc_vertices,
         icon_instances,
         icon_high_instances,
         fringe_indices,
@@ -10638,6 +10204,8 @@ mod bridge_probe_tests {
             icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            shadow_disc_indices: Vec::new(),
+            shadow_disc_vertices: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
@@ -12917,15 +12485,11 @@ mod bridge_probe_tests {
             true,
         )
         .unwrap();
-        let shadow_verts = buffers
-            .icon_vertices
-            .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
-            .filter(|v| v[14] > 5.5 && v[14] < 6.5)
-            .count();
+        let shadow_verts = buffers.shadow_disc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX;
         println!(
-            "fill verts {} icon verts {} shadow verts {}",
-            buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-            buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            "fill verts {} icon verts {} shadow_disc verts {}",
+            buffers.fill_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
+            buffers.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             shadow_verts
         );
     }
