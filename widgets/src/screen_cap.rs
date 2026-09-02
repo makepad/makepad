@@ -1,5 +1,9 @@
 //! ScreenCap — SHIFT+F12 records the window to an mp4, picture and sound.
 //!
+//! The hotkey needs the dev overlays switched on
+//! (`makepad_platform::devtools`: `--devtools`, `MAKEPAD_DEVTOOLS=1`, or
+//! `--remote`); an app that wants its own recording key calls [`ScreenCap::toggle`].
+//!
 //! One widget, hardcoded into [`crate::window::Window`] the way the tweaker
 //! and the nav control are, so every Makepad app can record itself without
 //! wiring anything up. Shift+F12 starts, Shift+F12 stops. While it records,
@@ -43,6 +47,7 @@ use crate::makepad_draw::audio::AudioBuffer;
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use makepad_platform::audio_output_tap::{add_audio_output_tap, remove_audio_output_tap};
+use makepad_platform::devtools;
 use makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,
 };
@@ -321,7 +326,12 @@ impl ScreenCap {
 impl Widget for ScreenCap {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
-            if ke.key_code == self.hotkey
+            // The hotkey only exists once the dev overlays are switched on
+            // (`--devtools` / `MAKEPAD_DEVTOOLS=1` / `--remote`). A shipped app
+            // should not have a key that starts writing mp4s to disk; one that
+            // wants a recorder can call `toggle` from its own binding.
+            if devtools::enabled()
+                && ke.key_code == self.hotkey
                 && ke.modifiers.shift == self.hotkey_shift
                 && !ke.is_repeat
             {
