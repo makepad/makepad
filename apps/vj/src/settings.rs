@@ -176,6 +176,56 @@ pub mod legacy {
         next("queue.shuffle", 0);
         store
     }
+
+    /// `headphones.txt` at version 0: the device NAME on the first line —
+    /// which is why this one could never have been key-and-value by
+    /// accident, since a device name holds spaces and may be empty — then
+    /// volume, placement and cue mode.
+    pub fn phones(text: &str) -> Settings {
+        let mut store = Settings::new();
+        let mut lines = text.lines();
+        store.set_text("phones.device", lines.next().unwrap_or("").trim());
+        if let Some(volume) = lines.next().and_then(|line| line.trim().parse::<f64>().ok()) {
+            store.set_f64("phones.volume", volume);
+        }
+        for key in ["phones.placement", "phones.cue_mode"] {
+            if let Some(index) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
+                store.set_usize(key, index);
+            }
+        }
+        store
+    }
+
+    /// `gen-panel.txt` at version 0: ten bare lines, one of which is the
+    /// PROMPT — free text that may be empty, sitting in the middle, which
+    /// is exactly the arrangement a positional format handles worst.
+    ///
+    /// The last line stays optional on purpose: only a remembered pick
+    /// counts as the operator having chosen an image model, so an absent
+    /// line must not pin one.
+    pub fn gen_panel(text: &str) -> Settings {
+        fn number(store: &mut Settings, lines: &mut std::str::Lines, key: &str) {
+            if let Some(value) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
+                store.set_usize(key, value);
+            }
+        }
+        let mut store = Settings::new();
+        let mut lines = text.lines();
+        number(&mut store, &mut lines, "gen.profile");
+        number(&mut store, &mut lines, "gen.video_length");
+        number(&mut store, &mut lines, "gen.continuous");
+        // Not trimmed and not parsed: it is whatever the operator typed.
+        if let Some(prompt) = lines.next() {
+            store.set_text("gen.prompt", prompt);
+        }
+        number(&mut store, &mut lines, "gen.panel_open");
+        number(&mut store, &mut lines, "ui.lower_tab");
+        number(&mut store, &mut lines, "ui.monitor_audio");
+        number(&mut store, &mut lines, "import.convert_video");
+        number(&mut store, &mut lines, "gen.video_size");
+        number(&mut store, &mut lines, "gen.image_model");
+        store
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +243,55 @@ mod tests {
         assert_eq!(store.usize("auto.phrase_snap", 0), 1);
         assert_eq!(store.usize("queue.repeat", 9), 0);
         assert_eq!(store.usize("queue.shuffle", 9), 0);
+    }
+
+    #[test]
+    fn the_headphones_file_on_disk_today_reads_into_the_right_keys() {
+        // Verbatim from local/vj/headphones.txt. The device name holds
+        // spaces AND brackets, which is why that line was never a key.
+        let store = legacy::phones(
+            "Mindframe Headset (2- OMEN Mindframe Prime)\n0.85\n0\n0\n",
+        );
+        assert_eq!(
+            store.text("phones.device", ""),
+            "Mindframe Headset (2- OMEN Mindframe Prime)"
+        );
+        assert_eq!(store.f64("phones.volume", 0.0), 0.85);
+        assert_eq!(store.usize("phones.placement", 9), 0);
+        assert_eq!(store.usize("phones.cue_mode", 9), 0);
+    }
+
+    #[test]
+    fn a_headphones_file_with_no_device_chosen_still_says_so() {
+        let store = legacy::phones("\n0.5\n1\n2\n");
+        assert!(store.has("phones.device"));
+        assert_eq!(store.text("phones.device", "unused"), "");
+        assert_eq!(store.usize("phones.placement", 9), 1);
+        assert_eq!(store.usize("phones.cue_mode", 9), 2);
+    }
+
+    #[test]
+    fn the_gen_panel_file_on_disk_today_reads_into_the_right_keys() {
+        // Verbatim from local/vj/gen-panel.txt, empty prompt line and all.
+        let store = legacy::gen_panel("2\n3\n0\n\n0\n0\n0\n0\n1\n");
+        assert_eq!(store.usize("gen.profile", 9), 2);
+        assert_eq!(store.usize("gen.video_length", 9), 3);
+        assert!(!store.bool("gen.continuous", true));
+        assert_eq!(store.text("gen.prompt", "unused"), "", "an empty prompt is a prompt");
+        assert!(!store.bool("gen.panel_open", true));
+        assert_eq!(store.usize("ui.lower_tab", 9), 0);
+        assert_eq!(store.usize("gen.video_size", 9), 1);
+        assert!(
+            !store.has("gen.image_model"),
+            "nine lines, so nobody picked a model, and none may be pinned"
+        );
+    }
+
+    #[test]
+    fn a_gen_panel_prompt_keeps_the_spaces_the_operator_typed() {
+        let store = legacy::gen_panel("0\n0\n0\na slow  drifting  city at night\n1\n");
+        assert_eq!(store.text("gen.prompt", ""), "a slow  drifting  city at night");
+        assert!(store.bool("gen.panel_open", false), "and the line after it still lines up");
     }
 
     #[test]

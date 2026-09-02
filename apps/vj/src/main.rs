@@ -18451,40 +18451,37 @@ p2 {}
     /// are live monitoring state and deliberately absent.
     fn save_phones_settings(&self) {
         let path = Self::phones_settings_path();
-        let body = format!(
-            "{}\n{}\n{}\n{}\n",
-            self.phones_device_name.as_deref().unwrap_or(""),
-            self.phones_volume,
-            self.phones_placement.index(),
-            self.phones_cue_mode.index(),
-        );
-        let _ = crate::durable::write_file(&path, body);
+        let mut store = crate::settings::Settings::new();
+        store.set_text("phones.device", self.phones_device_name.as_deref().unwrap_or(""));
+        store.set_f64("phones.volume", self.phones_volume as f64);
+        store.set_usize("phones.placement", self.phones_placement.index());
+        store.set_usize("phones.cue_mode", self.phones_cue_mode.index());
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_phones_settings(&mut self) {
         let Ok(body) = std::fs::read_to_string(Self::phones_settings_path()) else {
             return;
         };
-        // Line-per-field; missing lines read as the defaults, so the file
-        // can grow.
-        let mut lines = body.lines();
-        let name = lines.next().unwrap_or("").trim();
-        self.phones_device_name = (!name.is_empty()).then(|| name.to_string());
-        // `"NaN"` and `"inf"` both parse, so a hand-edited or half-written
-        // file could otherwise hand the monitor a level it can never leave.
-        if let Some(volume) = lines
-            .next()
-            .and_then(|line| line.trim().parse::<f32>().ok())
-            .filter(|volume| volume.is_finite())
-        {
-            self.phones_volume = volume.clamp(0.0, 1.0);
-        }
-        if let Some(place) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
-            self.phones_placement = PhonesPlacement::from_index(place);
-        }
-        if let Some(mode) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
-            self.phones_cue_mode = CueMode::from_index(mode);
-        }
+        // Four bare lines before the store existed, the device NAME first;
+        // keys since. A missing key is the default, so the file can grow.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::phones(&body)
+        } else {
+            store
+        };
+        let name = store.text("phones.device", "");
+        self.phones_device_name = (!name.is_empty()).then_some(name);
+        // The store refuses a number that is not finite, so a hand-edited or
+        // half-written file can no longer hand the monitor a level it could
+        // never leave.
+        self.phones_volume =
+            (store.f64("phones.volume", self.phones_volume as f64) as f32).clamp(0.0, 1.0);
+        self.phones_placement =
+            PhonesPlacement::from_index(store.usize("phones.placement", self.phones_placement.index()));
+        self.phones_cue_mode =
+            CueMode::from_index(store.usize("phones.cue_mode", self.phones_cue_mode.index()));
         self.mixer.set_phones_volume(self.phones_volume);
         self.mixer.set_cue_mode(self.phones_cue_mode);
     }
@@ -19255,59 +19252,60 @@ p2 {}
     /// prompt re-apply at launch, so an endless stream stays endless
     /// through every reboot instead of dying with the window.
     fn save_gen_panel(&self) {
-        let prompt = self.gen.prompt.replace('\n', " ");
-        let body = format!(
-            "{}\n{}\n{}\n{}\n{}\n",
-            self.gen.selected,
-            self.gen.video_length(),
-            u8::from(self.gen.continuous()),
-            prompt,
-            u8::from(self.gen_panel_open),
-        ) + &format!(
-            "{}\n{}\n{}\n{}\n",
-            self.lower_tab as u8,
-            u8::from(self.monitor_audio),
-            u8::from(self.import.convert_video),
-            // Appended last: a file written before the canvas picker
-            // existed simply has no line here and reads as the default.
-            self.gen.size_index(),
-        ) + &format!("{}\n", self.gen.image_model_index());
+        let mut store = crate::settings::Settings::new();
+        store.set_usize("gen.profile", self.gen.selected);
+        store.set_usize("gen.video_length", self.gen.video_length());
+        store.set_bool("gen.continuous", self.gen.continuous());
+        store.set_text("gen.prompt", &self.gen.prompt);
+        store.set_bool("gen.panel_open", self.gen_panel_open);
+        store.set_usize("ui.lower_tab", self.lower_tab as usize);
+        store.set_bool("ui.monitor_audio", self.monitor_audio);
+        store.set_bool("import.convert_video", self.import.convert_video);
+        store.set_usize("gen.video_size", self.gen.size_index());
+        store.set_usize("gen.image_model", self.gen.image_model_index());
         let path = Self::gen_panel_path();
-        let _ = crate::durable::write_file(&path, body);
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_gen_panel(&mut self, cx: &mut Cx) {
         let Ok(body) = std::fs::read_to_string(Self::gen_panel_path()) else { return };
-        let mut lines = body.lines();
-        let selected: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
-        let length: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
-        let cont = lines.next().map(|l| l == "1").unwrap_or(false);
-        let prompt = lines.next().unwrap_or("").to_string();
-        let open = lines.next().map(|l| l == "1").unwrap_or(false);
+        // Ten bare lines before the store existed, the PROMPT sitting in the
+        // middle of them; keys since.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::gen_panel(&body)
+        } else {
+            store
+        };
+        let selected = store.usize("gen.profile", 0);
+        let length = store.usize("gen.video_length", 0);
+        let cont = store.bool("gen.continuous", false);
+        let prompt = store.text("gen.prompt", "");
+        let open = store.bool("gen.panel_open", false);
         if open != self.gen_panel_open {
             self.set_gen_panel_open(cx, open);
         }
-        let tab = LowerTab::from_u8(lines.next().and_then(|l| l.parse().ok()).unwrap_or(0));
+        let tab = LowerTab::from_u8(store.usize("ui.lower_tab", 0) as u8);
         if tab != self.lower_tab {
             self.set_lower_tab(cx, tab);
         }
         // MONITOR AUDIO comes back on for the operator who left it on
         // (the TCC prompt was answered on the deliberate first flip).
-        if lines.next().map(|l| l == "1").unwrap_or(false) {
+        if store.bool("ui.monitor_audio", false) {
             self.set_monitor_audio(cx, true);
         }
         // The import's FLOW tick — absent in files written before it
         // existed, which reads as off, which is the old behaviour exactly.
-        if lines.next().map(|l| l == "1").unwrap_or(false) {
+        if store.bool("import.convert_video", false) {
             self.import.convert_video = true;
             self.ui.check_box(cx, ids!(import_flow)).set_active(cx, true, Animate::No);
         }
-        let size: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        let size = store.usize("gen.video_size", 0);
         // Only a REMEMBERED pick counts as the operator having chosen: an
-        // absent line must still take the flux default when the profiles
+        // absent key must still take the flux default when the profiles
         // land, rather than pinning `auto` forever.
-        if let Some(model) = lines.next().and_then(|l| l.parse::<usize>().ok()) {
-            self.gen.set_image_model(model);
+        if store.has("gen.image_model") {
+            self.gen.set_image_model(store.usize("gen.image_model", 0));
         }
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
