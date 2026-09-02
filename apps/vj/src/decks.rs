@@ -176,6 +176,32 @@ fn xorshift64star(mut x: u64) -> u64 {
     x.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
+/// What a fresh load puts back to nothing.
+///
+/// Every switch is off by default, which is exactly what the tab did
+/// before this existed: the channel strip an operator has set stands
+/// across a load, because on most decks that is the point -- the EQ and
+/// the trim describe the ROOM, not the record.
+///
+/// The groups are separable because they answer to different hands. Speed
+/// and key are tempo and pitch intent; the EQ, the filter and the gain are
+/// the console; the stems are the lane knobs. Note what is NOT here: a
+/// tempo the LOCK worked out is dropped unconditionally, because a match
+/// to a departed track is never a preference somebody chose.
+///
+/// Deliberately untouched by any of these, and staying that way: the pitch
+/// RANGE, keylock, the armed loop count and the stem mode. Those describe
+/// how the operator likes to work, not what was on the last record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadReset {
+    pub speed: bool,
+    pub key: bool,
+    pub eq: bool,
+    pub filter: bool,
+    pub gain: bool,
+    pub stems: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum DeckLoad {
     #[default]
@@ -834,6 +860,9 @@ pub struct DeckEngine {
     last_loaded: Option<DeckId>,
     /// Hold the non-leading deck to the leader's grid without being asked.
     pub auto_sync: bool,
+    /// What a fresh load puts back to nothing. Off by default; see
+    /// `LoadReset`.
+    pub load_reset: LoadReset,
     /// QUANT's unit in beats, 0 = off. One global value: snapping is a
     /// property of how the operator is working, not of a deck.
     pub snap_beats: u32,
@@ -879,6 +908,7 @@ impl Default for DeckEngine {
             curve: FadeCurve::EqualPower,
             last_loaded: None,
             auto_sync: true,
+            load_reset: LoadReset::default(),
             snap_beats: 0,
             queue: Vec::new(),
             auto_load_queue: true,
@@ -1096,6 +1126,35 @@ impl DeckEngine {
             state.rate = 1.0;
             state.pitch = 0.0;
             state.rate_from_lock = false;
+        }
+        // Then whatever the operator asked a load to clear. Done here, in
+        // front of the command list below, so every SetX carries the reset
+        // value and there is no second source of truth.
+        let policy = self.load_reset;
+        let state = self.deck_mut(deck);
+        if policy.speed {
+            state.rate = 1.0;
+            state.pitch = 0.0;
+            state.rate_from_lock = false;
+        }
+        if policy.key {
+            state.key_shift = 0.0;
+        }
+        if policy.eq {
+            state.eq = [1.0; 3];
+            state.eq_kill = [false; 3];
+            state.eq_solo = [false; 3];
+        }
+        if policy.filter {
+            state.filter = 0.0;
+        }
+        if policy.gain {
+            state.gain = 1.0;
+        }
+        if policy.stems {
+            state.stem_gain = [1.0; STEM_COUNT];
+            state.stem_kill = [false; STEM_COUNT];
+            state.stem_solo = [false; STEM_COUNT];
         }
         // Fresh installs inherit the whole standing channel-strip intent:
         // transport, tone, stems and the rate the pitch slider is sitting at.
@@ -2177,6 +2236,12 @@ impl DeckEngine {
 
     /// No commands: unlike auto sync, a new unit changes nothing until
     /// the next seek, so there is nothing to emit.
+    /// Choose what a fresh load puts back to nothing. Emits nothing: the
+    /// policy only bites on the next load, so there is nothing to send now.
+    pub fn set_load_reset(&mut self, policy: LoadReset) {
+        self.load_reset = policy;
+    }
+
     pub fn set_snap_beats(&mut self, beats: u32) {
         self.snap_beats = beats;
     }
@@ -3831,6 +3896,76 @@ mod tests {
         assert_ne!(e.deck(DeckId::A).bend, 0.0);
         e.click(item(9), DeckTarget::A);
         assert_eq!(e.deck(DeckId::A).bend, 0.0, "the lean was on the record that just left");
+    }
+
+    #[test]
+    fn a_load_leaves_the_console_alone_unless_it_is_asked_not_to() {
+        // The default IS today's behaviour, and a later flip of one of
+        // these bools should fail here rather than move eight other tests.
+        assert_eq!(LoadReset::default(), LoadReset {
+            speed: false, key: false, eq: false, filter: false, gain: false, stems: false,
+        });
+        assert_eq!(DeckEngine::new().load_reset, LoadReset::default());
+
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).eq = [0.3, 0.4, 0.5];
+        e.deck_mut(DeckId::A).filter = -0.7;
+        e.deck_mut(DeckId::A).gain = 0.6;
+        e.deck_mut(DeckId::A).key_shift = 2.0;
+        e.deck_mut(DeckId::A).stem_gain = [0.1, 0.2, 0.3, 0.4];
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        let s = e.deck(DeckId::A);
+        assert_eq!(s.eq, [0.3, 0.4, 0.5], "the EQ describes the room, not the record");
+        assert_eq!(s.filter, -0.7);
+        assert_eq!(s.gain, 0.6);
+        assert_eq!(s.key_shift, 2.0);
+        assert_eq!(s.stem_gain, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn each_switch_clears_its_own_group_and_no_other() {
+        for (name, policy) in [
+            ("eq", LoadReset { eq: true, ..LoadReset::default() }),
+            ("filter", LoadReset { filter: true, ..LoadReset::default() }),
+            ("gain", LoadReset { gain: true, ..LoadReset::default() }),
+            ("key", LoadReset { key: true, ..LoadReset::default() }),
+            ("stems", LoadReset { stems: true, ..LoadReset::default() }),
+        ] {
+            let mut e = DeckEngine::new();
+            e.set_load_reset(policy);
+            load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+            let d = e.deck_mut(DeckId::A);
+            d.eq = [0.3, 0.4, 0.5];
+            d.eq_kill = [true; 3];
+            d.filter = -0.7;
+            d.gain = 0.6;
+            d.key_shift = 2.0;
+            d.stem_gain = [0.1, 0.2, 0.3, 0.4];
+            d.stem_solo = [true; STEM_COUNT];
+            load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+            let s = e.deck(DeckId::A);
+            assert_eq!(s.eq == [1.0; 3], policy.eq, "{name}: eq");
+            assert_eq!(s.eq_kill == [false; 3], policy.eq, "{name}: eq kills");
+            assert_eq!(s.filter == 0.0, policy.filter, "{name}: filter");
+            assert_eq!(s.gain == 1.0, policy.gain, "{name}: gain");
+            assert_eq!(s.key_shift == 0.0, policy.key, "{name}: key");
+            assert_eq!(s.stem_gain == [1.0; STEM_COUNT], policy.stems, "{name}: stem gains");
+            assert_eq!(s.stem_solo == [false; STEM_COUNT], policy.stems, "{name}: stem solos");
+        }
+    }
+
+    #[test]
+    fn the_speed_switch_clears_a_tempo_the_hand_set() {
+        let mut e = DeckEngine::new();
+        e.set_load_reset(LoadReset { speed: true, ..LoadReset::default() });
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 0.5);
+        assert_ne!(e.deck(DeckId::A).rate, 1.0);
+        e.auto_sync = false;
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::A).rate, 1.0, "asked for, so even the hand's tempo goes");
+        assert_eq!(e.deck(DeckId::A).pitch, 0.0);
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
