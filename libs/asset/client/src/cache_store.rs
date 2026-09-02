@@ -25,9 +25,9 @@ impl BlobContent {
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
     pub fn as_path(&self) -> Option<&std::path::Path> {
         match self {
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
             Self::VerifiedPath(path) => Some(path),
             Self::Bytes(_) => None,
         }

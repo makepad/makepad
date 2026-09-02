@@ -3352,7 +3352,7 @@ fn md3_to_glb(
             "_default".into()
         };
         surfaces.push((s, num_verts, num_tris, ofs_tris, ofs_st, ofs_xyz, tex_key, surf_name));
-        if ofs_end <= 0 {
+        if ofs_end == 0 {
             break;
         }
         s += ofs_end as usize;
@@ -4019,7 +4019,7 @@ fn emit_md3_posed(
             out.indices
                 .extend_from_slice(&[c0 as u32, c0 as u32 + 1, c0 as u32 + 2]);
         }
-        if ofs_end <= 0 {
+        if ofs_end == 0 {
             break;
         }
         s += ofs_end as usize;

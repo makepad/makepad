@@ -8,16 +8,26 @@
 //! one exists. `VJ_ASSET_EMBED` / `VJ_ASSET_ROOT` / `VJ_ASSET_PORT` steer
 //! it; an explicit `VJ_ASSET_SERVER` pin always means attach.
 
-use makepad_app_asset_server::embed;
 use makepad_asset_client::SessionConfig;
 
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_app_asset_server::embed;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub use makepad_app_asset_server::embed::{LocalStore, StoreMode};
+
+/// The web build has no native host to own. Its catalog comes from the
+/// static-site session; browser-local publication is handled by the embedded
+/// store service rather than pretending a socket server exists.
+#[cfg(target_arch = "wasm32")]
+pub struct LocalStore;
 
 /// What `resolve` decided, and why — the `note` is written straight into the
 /// VJ's status line, because "which store am I on" is the first thing that
 /// matters when content does not show up.
 pub struct Resolved {
     pub config: SessionConfig,
+    #[cfg(not(target_arch = "wasm32"))]
     pub mode: StoreMode,
     pub local: Option<LocalStore>,
     pub note: String,
@@ -30,6 +40,7 @@ pub struct Resolved {
 /// [`crate::service::session_config_from_env`]) — everything about cache
 /// roots, lanes and token conventions is already resolved there, and this
 /// only overrides the three fields that say WHICH server.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve(base: SessionConfig) -> Resolved {
     let pinned = std::env::var("VJ_ASSET_SERVER")
         .ok()
@@ -46,5 +57,16 @@ pub fn resolve(base: SessionConfig) -> Resolved {
         mode: resolved.mode,
         local: resolved.local,
         note: resolved.note,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn resolve(_base: SessionConfig) -> Resolved {
+    let base = makepad_asset_client::BaseUrl::parse("https://makepad.nl/vj/store/")
+        .expect("valid built-in VJ static-store URL");
+    Resolved {
+        config: SessionConfig::static_site(base),
+        local: None,
+        note: "web catalog at https://makepad.nl/vj/store/".to_string(),
     }
 }

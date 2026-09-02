@@ -237,9 +237,13 @@ fn pass1(
     let mut t_psy = 0f64;
     let mut t_quant = 0f64;
     let mut t_gather = 0f64;
+    #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("OGGENC_PHASES").is_ok();
+    #[cfg(target_arch = "wasm32")]
+    let timing = false;
     for (bi, b) in range.enumerate() {
         for c in 0..ch {
+            #[cfg(not(target_arch = "wasm32"))]
             let t0 = if timing { Some(std::time::Instant::now()) } else { None };
             // Windowed block: block `b` covers input frames
             // [b*HOP - HOP, b*HOP + HOP), zero-padded outside the input.
@@ -253,15 +257,21 @@ fn pass1(
                 time[i] = pcm[(start + i - lo) * ch + c] * win[i];
             }
 
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(t) = t0 { t_gather += t.elapsed().as_secs_f64(); }
+            #[cfg(not(target_arch = "wasm32"))]
             let t0 = if timing { Some(std::time::Instant::now()) } else { None };
             mdct.mdct(&time, &mut spec);
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(t) = t0 { t_mdct += t.elapsed().as_secs_f64(); }
+            #[cfg(not(target_arch = "wasm32"))]
             let t0 = if timing { Some(std::time::Instant::now()) } else { None };
             psy.desired_floor(&spec, &tables, &mut desired);
             fitter.encode(&desired, &mut vals_i32);
             fitter.synthesize(&vals_i32, &mut curve);
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(t) = t0 { t_psy += t.elapsed().as_secs_f64(); }
+            #[cfg(not(target_arch = "wasm32"))]
             let t0 = if timing { Some(std::time::Instant::now()) } else { None };
 
             let at = bi * ch + c;
@@ -307,6 +317,7 @@ fn pass1(
                     slab.hist.res[c - 1][BookSet::res_symbol(c, chunk)] += 1;
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(t) = t0 { t_quant += t.elapsed().as_secs_f64(); }
         }
     }

@@ -26,6 +26,7 @@ use makepad_widgets::makepad_platform::file_dialogs::{
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
+use crate::browser_store::BrowserStore;
 
 mod apc40;
 mod archive_stream;
@@ -99,6 +100,13 @@ mod notes_map;
 mod music_dsp;
 mod music_import_ui;
 mod music_view;
+#[cfg(target_arch = "wasm32")]
+mod browser_store;
+#[cfg(not(target_arch = "wasm32"))]
+mod browser_store {
+    #[derive(Default)]
+    pub struct BrowserStore;
+}
 mod score_preview;
 mod stems;
 mod wave_analysis;
@@ -142,7 +150,8 @@ use crate::deck_sections::{DeckSection, DeckSections, Fold};
 
 use crate::deck_tabs::{DeckTabs, TabFollow};
 use crate::side_channels::{
-    FetchedJob, SideChannelMsg, SideChannelPool, WriteBackJob, WriteBackMsg, WriteBackPool,
+    FetchedJob, FetchedSource, SideChannelMsg, SideChannelPool, WriteBackJob, WriteBackMsg,
+    WriteBackPool,
 };
 use crate::music_view::{
     format_bpm, format_duration, format_pitch, track_list_hits, OverviewEvent,
@@ -166,7 +175,7 @@ use makepad_asset_widgets::{VideoAction, VideoView};
 use crate::pipelines::{PipeDone, PipeReq, Pipelines};
 use crate::gen::{GenCmd, GenModel, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
-use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
+use crate::media::{DecodeDone, DecodeJob, DecodePool, DecodeSource, SlotPlayer};
 use crate::mixer::{
     TrackStems,
     CueMode, CueReadState, MixCmd, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
@@ -4340,11 +4349,11 @@ enum MediaPurpose {
 struct PendingSideChannels {
     gen: u64,
     /// In `FileRole::STEMS` order.
-    stems: [Option<PathBuf>; 4],
+    stems: [Option<FetchedSource>; 4],
     /// False once the lyrics landed, or once their fetch failed — a missing
     /// transcript is not a reason to hold the stems back.
     want_lyrics: bool,
-    lyrics: Option<PathBuf>,
+    lyrics: Option<FetchedSource>,
 }
 
 impl PendingSideChannels {
@@ -7026,6 +7035,8 @@ pub struct App {
     /// handles, the decode pool, the import worker — is torn down before the
     /// server it was talking to. `None` when attached to somebody else's
     /// store, which is the same code path either way.
+    #[rust]
+    browser_store: BrowserStore,
     #[rust]
     local_store: Option<LocalStore>,
 }
@@ -13275,6 +13286,16 @@ p2 {}
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
                     self.deck_side_channels[deck.index()] = None;
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(track) = self.browser_store.track(&item.asset).cloned() {
+                        self.decode.submit(DecodeJob::Deck {
+                            deck,
+                            gen,
+                            source: DecodeSource::Bytes(track.bytes),
+                            media: track.media,
+                        });
+                        continue;
+                    }
                     // A local file never goes near the store: it decodes
                     // straight off disk on the same worker pool.
                     if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
@@ -13289,7 +13310,12 @@ p2 {}
                             Some("mp3") => MediaType::Mp3,
                             _ => MediaType::Mp4,
                         };
-                        self.decode.submit(DecodeJob::Deck { deck, gen, path, media });
+                        self.decode.submit(DecodeJob::Deck {
+                            deck,
+                            gen,
+                            source: path.into(),
+                            media,
+                        });
                         continue;
                     }
                     let Some(up) = self.up.as_mut() else { continue };
@@ -13875,7 +13901,7 @@ p2 {}
             for deck in [DeckId::A, DeckId::B] {
                 let index = deck.index();
                 self.decks
-                    .set_stems_mode(deck, crate::decks::ProcessMode::Off);
+                    .set_stems_mode(deck, crate::decks::ProcessMode::Cached);
                 self.mixer.clear_deck_stems(deck);
                 self.deck_stems[index] = None;
                 self.deck_stem_coverage[index] = None;
@@ -13925,6 +13951,7 @@ p2 {}
                     // store, publish-if-absent (idempotent; a user-edited
                     // revision under a seeded alias is never touched). Runs
                     // detached — the UI never waits on it.
+                    #[cfg(not(target_arch = "wasm32"))]
                     if !self.fx_presets_seeded
                         && self.up.as_ref().unwrap().endpoints.is_some()
                     {
@@ -14603,13 +14630,9 @@ p2 {}
                 // tiles the operator has already scrolled past is dropped
                 // unstarted rather than holding up the ones under their
                 // thumb (the thumb lane serves newest-first).
-                let Some(path) = content.as_path().map(Path::to_path_buf) else {
-                    log!("thumbnail blob was not persisted to the native cache");
-                    return;
-                };
                 self.decode.submit(DecodeJob::Thumb {
                     revision,
-                    path,
+                    source: content.into(),
                     sheet,
                     legacy_may_be_sheet,
                     epoch: self.view_epoch,
@@ -14798,12 +14821,19 @@ p2 {}
                             continue;
                         };
                         let ClientOutput::Blob { content, .. } = output else { continue };
-                        let Some(path) = content.as_path().map(Path::to_path_buf) else {
-                            log!("media blob was not persisted to the native cache");
-                            continue;
-                        };
+                        let source = DecodeSource::from(content);
                         match purpose {
                             MediaPurpose::Cue { gen } => {
+                                let Some(path) = source.into_path() else {
+                                    self.media_request_failed(
+                                        cx,
+                                        lane,
+                                        id,
+                                        MediaPurpose::Cue { gen },
+                                        "hardware video playback is unavailable on web".into(),
+                                    );
+                                    continue;
+                                };
                                 // Only the CURRENT plan entry advances the
                                 // cue; superseded completions are stale.
                                 if self.video_plan.finished(lane, id) {
@@ -14821,6 +14851,16 @@ p2 {}
                                 }
                             }
                             MediaPurpose::CueSource { gen } => {
+                                let Some(path) = source.into_path() else {
+                                    self.media_request_failed(
+                                        cx,
+                                        lane,
+                                        id,
+                                        MediaPurpose::CueSource { gen },
+                                        "hardware video playback is unavailable on web".into(),
+                                    );
+                                    continue;
+                                };
                                 let ready = self
                                     .cue_pair
                                     .as_mut()
@@ -14831,27 +14871,37 @@ p2 {}
                                 }
                             }
                             MediaPurpose::Deck { deck, gen, media } => {
-                                self.decode.submit(DecodeJob::Deck { deck, gen, path, media });
+                                self.decode.submit(DecodeJob::Deck { deck, gen, source, media });
                             }
                             MediaPurpose::Preview { gen, media } => {
-                                self.decode.submit(DecodeJob::Preview { gen, path, media });
+                                self.decode.submit(DecodeJob::Preview { gen, source, media });
                             }
                             MediaPurpose::DeckStem { deck, gen, index } => {
-                                self.side_channel_landed(deck, gen, Some(index), path);
+                                self.side_channel_landed(deck, gen, Some(index), source);
                             }
                             MediaPurpose::DeckLyrics { deck, gen } => {
-                                self.side_channel_landed(deck, gen, None, path);
+                                self.side_channel_landed(deck, gen, None, source);
                             }
                             MediaPurpose::Pad { pad, gen, revision, media } => {
                                 self.decode.submit(DecodeJob::Pad {
                                     pad,
                                     gen,
                                     revision,
-                                    path,
+                                    source,
                                     media,
                                 });
                             }
                             MediaPurpose::Mesh { gen } => {
+                                let Some(path) = source.into_path() else {
+                                    self.media_request_failed(
+                                        cx,
+                                        lane,
+                                        id,
+                                        MediaPurpose::Mesh { gen },
+                                        "filesystem mesh loading is unavailable on web".into(),
+                                    );
+                                    continue;
+                                };
                                 if self.mesh_plan.finished(lane, id) && gen == self.mesh_gen {
                                     self.decode.submit(DecodeJob::MeshPrep { gen, path });
                                 }
@@ -14988,6 +15038,7 @@ p2 {}
         // the client session did. Re-point at the server we are still
         // running rather than re-resolving, which would try to take a lock
         // we already hold and fail every time.
+        #[cfg(not(target_arch = "wasm32"))]
         let config = match &self.local_store {
             Some(local) => {
                 let mut config = service::session_config_from_env();
@@ -15001,6 +15052,12 @@ p2 {}
                 self.local_store = resolved.local;
                 resolved.config
             }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let config = {
+            let resolved = local_store::resolve(service::session_config_from_env());
+            self.status_text = resolved.note;
+            resolved.config
         };
         match SessionConnector::start(config) {
             Ok(connector) => self.connector = Some(connector),
@@ -15057,6 +15114,32 @@ p2 {}
         if self.import_picker != ImportPicker::None {
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.browser_store.is_ready() {
+                let status = self
+                    .browser_store
+                    .error()
+                    .unwrap_or("browser library is still opening")
+                    .to_string();
+                self.set_music_import_status(cx, &status);
+                return;
+            }
+            self.import_picker = ImportPicker::Dj;
+            cx.open_select_file_dialog(
+                FileDialog::new()
+                    .set_title("Choose music to import".into())
+                    .add_filter(
+                        "Audio".into(),
+                        vec!["mp3".into(), "ogg".into(), "oga".into(), "wav".into(), "wave".into()],
+                    )
+                    .set_multiple(true)
+                    .want_bytes(true),
+            );
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         let Some(up) = self.up.as_ref() else {
             self.set_music_import_status(cx, "no asset store session yet");
             return;
@@ -15082,10 +15165,12 @@ p2 {}
                     .want_bytes(true),
             );
         }
+        }
     }
 
     /// Start a music import of exactly these files and folders. Both the
     /// IMPORT button and a drop on the library land here.
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_music_import(&mut self, cx: &mut Cx, paths: Vec<PathBuf>) {
         let Some(up) = self.up.as_ref() else {
             self.set_music_import_status(cx, "no asset server session yet");
@@ -15111,7 +15196,15 @@ p2 {}
         self.paint_lit(cx, ids!(music_import), self.music_import_run.busy());
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn start_music_import(&mut self, cx: &mut Cx, _paths: Vec<PathBuf>) {
+        self.set_music_import_status(cx, "desktop path imports are unavailable on web");
+    }
+
     fn start_music_import_files(&mut self, cx: &mut Cx, files: Vec<VirtualFile>) {
+        #[cfg(target_arch = "wasm32")]
+        let publish = self.browser_store.is_ready();
+        #[cfg(not(target_arch = "wasm32"))]
         let publish = self
             .up
             .as_ref()
@@ -15120,7 +15213,10 @@ p2 {}
             self.set_music_import_status(cx, "this asset store is read-only");
             return;
         }
-        if let Err(error) = self.music_import_run.start_files(files) {
+        if let Err(error) = self
+            .music_import_run
+            .start_files(files, cx.thread_spawner())
+        {
             crate::log!("music import refused: {error}");
         }
         self.sync_music_import_run(cx);
@@ -15132,6 +15228,15 @@ p2 {}
     fn pump_music_import(&mut self, cx: &mut Cx) {
         let changed = self.music_import_run.poll();
         let submitted = if let Some(prepared) = self.music_import_run.take_prepared() {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let name = prepared.name.clone();
+                match self.browser_store.publish(cx, prepared.request) {
+                    Ok(outcome) => self.music_import_run.prepared_settled(outcome),
+                    Err(error) => self.music_import_run.prepared_failed(&name, error),
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             self.submit_prepared_music_import(cx, prepared);
             true
         } else {
@@ -16533,7 +16638,7 @@ p2 {}
             self.fx_decode_pending.insert(sheet.revision, now);
             self.decode.submit(DecodeJob::Thumb {
                 revision: sheet.revision,
-                path: sheet.path,
+                source: sheet.path.into(),
                 sheet: Some((sheet.cells, sheet.fps)),
                 legacy_may_be_sheet: false,
                 epoch: self.view_epoch,
@@ -16702,7 +16807,7 @@ p2 {}
                         self.fx_decode_pending.insert(revision, now);
                         self.decode.submit(DecodeJob::Thumb {
                             revision,
-                            path: cache,
+                            source: cache.into(),
                             sheet: Some((cells, fps)),
                             legacy_may_be_sheet: false,
                             epoch: self.view_epoch,
@@ -16776,7 +16881,7 @@ p2 {}
                         self.fx_decode_pending.insert(revision, now);
                         self.decode.submit(DecodeJob::Thumb {
                             revision,
-                            path: cache,
+                            source: cache.into(),
                             sheet: Some((cells, fps)),
                             legacy_may_be_sheet: false,
                             epoch: self.view_epoch,
@@ -17109,7 +17214,6 @@ p2 {}
     /// chevron the way its block will go.
     fn paint_deck_sections(&mut self, cx: &mut Cx) {
         let folded = self.deck_sections.folded();
-        let ai = self.store_ai_available();
         // The deck region's 330-point floor is there to keep a readable
         // karaoke box under the knobs. Folded, there is no karaoke box under
         // the knobs — so the floor comes down with it, and the height goes
@@ -17130,7 +17234,9 @@ p2 {}
         }
         drop(region_ref);
         for (head, chev, body, section) in Self::deck_blocks() {
-            let available = section != DeckSection::Stems || ai;
+            // Cached stems remain a web capability even though the local AI
+            // producer is unavailable there.
+            let available = true;
             let shows = available && self.deck_sections.shows(section);
             let body_view = self.ui.widget(cx, body);
             if body_view.visible() != shows {
@@ -17211,9 +17317,6 @@ p2 {}
         // both folded a block and flipped stem processing would be one
         // gesture doing two jobs.
         for (_, chev, _, section) in Self::deck_blocks() {
-            if section == DeckSection::Stems && !self.store_ai_available() {
-                continue;
-            }
             let pressed = self.ui.button(cx, chev.0).clicked(actions)
                 || self.ui.button(cx, chev.1).clicked(actions);
             if pressed && self.deck_sections.press(section) {
@@ -17952,20 +18055,43 @@ p2 {}
         }
         // A local file decodes straight off disk; a store track fetches
         // its blob first — the deck-load split, on the preview lane.
-        if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
+        let disk_local = if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
             let media = Self::media_type_for_path(&path);
-            self.decode.submit(DecodeJob::Preview { gen, path, media });
-        } else if let Some(up) = self.up.as_mut() {
-            if let Some(runtime) = up.media.get_mut(AUDIO_LANE) {
-                if let Ok(id) = runtime.submit(ClientRequest::FetchBlob {
-                    blob: item.media_blob,
-                    expected_len: Some(item.media_len),
-                    pin: false,
-                }) {
-                    self.media_reqs.insert(
-                        (AUDIO_LANE, id),
-                        MediaPurpose::Preview { gen, media: item.media },
-                    );
+            self.decode.submit(DecodeJob::Preview { gen, source: path.into(), media });
+            true
+        } else {
+            false
+        };
+        #[cfg(target_arch = "wasm32")]
+        let browser_local = if !disk_local {
+            if let Some(track) = self.browser_store.track(&item.asset).cloned() {
+                self.decode.submit(DecodeJob::Preview {
+                    gen,
+                    source: DecodeSource::Bytes(track.bytes),
+                    media: track.media,
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let browser_local = false;
+        if !disk_local && !browser_local {
+            if let Some(up) = self.up.as_mut() {
+                if let Some(runtime) = up.media.get_mut(AUDIO_LANE) {
+                    if let Ok(id) = runtime.submit(ClientRequest::FetchBlob {
+                        blob: item.media_blob,
+                        expected_len: Some(item.media_len),
+                        pin: false,
+                    }) {
+                        self.media_reqs.insert(
+                            (AUDIO_LANE, id),
+                            MediaPurpose::Preview { gen, media: item.media },
+                        );
+                    }
                 }
             }
         }
@@ -19639,9 +19765,6 @@ p2 {}
     /// deck stays on the local path, because three stems out of four is not
     /// a stem mix. The lyrics document is optional in both directions.
     fn begin_side_channel_fetch(&mut self, deck: DeckId, gen: u64, item: &TrackItem) {
-        if !self.store_ai_available() {
-            return;
-        }
         let index = deck.index();
         let Some(stems) = item.side.stems else { return };
         let lyrics = item.side.lyrics;
@@ -19686,7 +19809,13 @@ p2 {}
     }
 
     /// One downloaded side-channel file landed.
-    fn side_channel_landed(&mut self, deck: DeckId, gen: u64, slot: Option<usize>, path: PathBuf) {
+    fn side_channel_landed(
+        &mut self,
+        deck: DeckId,
+        gen: u64,
+        slot: Option<usize>,
+        source: DecodeSource,
+    ) {
         let index = deck.index();
         {
             let Some(pending) = self.deck_side_channels[index].as_mut() else { return };
@@ -19696,11 +19825,11 @@ p2 {}
             match slot {
                 Some(slot) => {
                     if let Some(entry) = pending.stems.get_mut(slot) {
-                        *entry = Some(path);
+                        *entry = Some(source.into());
                     }
                 }
                 None => {
-                    pending.lyrics = Some(path);
+                    pending.lyrics = Some(source.into());
                     pending.want_lyrics = false;
                 }
             }
@@ -19735,10 +19864,6 @@ p2 {}
     /// use without the other. Called from both sides; whichever completes
     /// last is the one that starts the job.
     fn try_start_side_channels(&mut self, deck: DeckId, gen: u64) {
-        if !self.store_ai_available() {
-            self.deck_side_channels[deck.index()] = None;
-            return;
-        }
         let index = deck.index();
         if !self.deck_side_channels[index]
             .as_ref()
@@ -20152,7 +20277,7 @@ p2 {}
             self.decode.submit(DecodeJob::Deck {
                 deck: DeckId::A,
                 gen: stems::PREFETCH_GEN,
-                path: path.clone(),
+                source: path.clone().into(),
                 media,
             });
             self.prefetch.asset = Some(item.asset);
@@ -20207,11 +20332,6 @@ p2 {}
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
-        if !self.store_ai_available() {
-            let _ = self.stems.poll();
-            let _ = self.sidechan.poll();
-            return;
-        }
         let mut touched = [false; 2];
         for done in self.splat_refine.poll() {
             if self.deck_splat_refining[done.deck.index()] == Some(done.gen) {
@@ -20232,6 +20352,20 @@ p2 {}
         for message in self.sidechan.poll() {
             match message {
                 SideChannelMsg::Stems(message) => messages.push(message),
+                SideChannelMsg::Lyrics { deck, gen, digest, lyrics } => {
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    let index = deck.index();
+                    self.deck_track_digest[index] = Some(digest.clone());
+                    self.lyrics_by_digest.insert(digest, lyrics.clone());
+                    if self.deck_karaoke_mode[index].shows() {
+                        self.deck_lyrics[index] = Some(lyrics.clone());
+                        self.deck_lyrics_status[index] =
+                            format!("lyrics: {} lines (side-channel)", lyrics.lines.len());
+                        self.rebuild_karaoke(cx, deck);
+                    }
+                }
                 SideChannelMsg::Fallback { deck, gen, reason } => {
                     log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
                     self.deck_side_channels[deck.index()] = None;
@@ -20282,7 +20416,7 @@ p2 {}
                     // A track this machine separated end to end is worth
                     // giving back — before the dispatch gate below, which
                     // stops at the SECOND report of the same coverage.
-                    if complete {
+                    if complete && self.store_ai_available() {
                         self.arm_stems_write_back(deck, &digest, model_frames);
                     }
                     if complete {
@@ -20307,6 +20441,9 @@ p2 {}
                                 self.video_pump = cx.new_next_frame();
                             }
                         }
+                        continue;
+                    }
+                    if !self.store_ai_available() {
                         continue;
                     }
                     if !self.deck_karaoke_mode[deck.index()].computes() {
@@ -21605,7 +21742,7 @@ p2 {}
                 .collect::<Vec<_>>();
             return self.filter_sort_rows(rows);
         }
-        let rows = self
+        let mut rows = self
             .music_model
             .tiles()
             .iter()
@@ -21648,6 +21785,24 @@ p2 {}
                 }
             })
             .collect::<Vec<_>>();
+        #[cfg(target_arch = "wasm32")]
+        rows.extend(self.browser_store.tracks().iter().map(|track| {
+            let key = TrackKey::Asset(track.asset);
+            let (badge, live) = self.deck_badge(&key);
+            TrackRowEntry {
+                key,
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                bpm: String::new(),
+                musical_key: String::new(),
+                duration: String::new(),
+                tags: format!("browser local · {}", track.alias),
+                stem: false,
+                krk: false,
+                badge,
+                live,
+            }
+        }));
         self.filter_sort_rows(rows)
     }
 
@@ -22510,7 +22665,6 @@ p2 {}
                         }
                         // RIFE's worker API is native-only until its deadline is migrated.
                         #[cfg(not(target_arch = "wasm32"))]
-                        #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
                         if let (Some(service), Some(start)) =
                             (self.rife_service[i].as_ref(), self.app_start_instant)
                         {
@@ -22520,7 +22674,7 @@ p2 {}
                                     (now + depth as f64 / step.pace).max(0.0),
                                 );
                             let remaining = target.saturating_duration_since(Instant::now());
-                            let deadline = std::time::Instant::now() + remaining;
+                            let deadline = Cx::monotonic_now() + remaining.as_secs_f64();
                             let _ = service.offer_next(flow_tween::RifeJob {
                                 generation,
                                 a: ahead.a,
@@ -24218,6 +24372,18 @@ p2 {}
         let entry = self.music_rows.get(index)?.clone();
         match entry.key {
             TrackKey::Asset(asset) => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(track) = self.browser_store.track(&asset) {
+                    return Some(TrackItem {
+                        asset,
+                        revision: track.revision,
+                        title: track.title.clone(),
+                        media_blob: track.media_blob,
+                        media_len: track.media_len,
+                        media: track.media,
+                        side: TrackSideChannels::default(),
+                    });
+                }
                 let tile = self.music_model.tile(&asset)?;
                 let (revision, media) = (tile.revision?, tile.media.clone()?);
                 Some(TrackItem {
@@ -24242,6 +24408,10 @@ p2 {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.status_text = "starting…".to_string();
+        #[cfg(target_arch = "wasm32")]
+        self.browser_store.start(cx);
+        self.decode.start(cx.thread_spawner());
+        self.sidechan.start(cx.thread_spawner());
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
         // compiled in, so its art is generated here — ahead of any store,
@@ -25747,6 +25917,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_store.handle_event(cx, event) {
+            self.music_rows.clear();
+            self.grids_dirty = true;
+            self.ui.redraw(cx);
+        }
         self.sync_console_scale(cx, event);
         self.sync_deck_tabs(cx, event);
         self.sync_deck_accordion(cx, event);

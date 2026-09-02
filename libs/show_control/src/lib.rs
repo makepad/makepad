@@ -17,15 +17,17 @@ pub use desk::{
 };
 
 use makepad_micro_serde::*;
+use makepad_platform::Cx;
 use std::{
     net::UdpSocket,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::JoinHandle;
 
 pub const DMX_FRAME_HZ: f64 = 44.0;
 pub const DMX_FRAME_DT: f64 = 1.0 / DMX_FRAME_HZ;
@@ -1099,6 +1101,7 @@ impl Default for ArtNetConfig {
 pub struct VideoArtNet {
     shared: Arc<Mutex<PerformanceWorkerState>>,
     stop: Arc<AtomicBool>,
+    #[cfg(not(target_arch = "wasm32"))]
     thread: Option<JoinHandle<()>>,
 }
 
@@ -1109,22 +1112,22 @@ struct PerformanceWorkerState {
     arms: HazardArms,
     deadman: bool,
     blackout_latched: bool,
-    last_hazard_heartbeat: Instant,
-    last_control_update: Instant,
+    last_hazard_heartbeat: f64,
+    last_control_update: f64,
 }
 
 fn safety_snapshot_at(
     state: PerformanceWorkerState,
-    now: Instant,
+    now: f64,
     hazard_timeout: Duration,
     control_timeout: Duration,
 ) -> SafetySnapshot {
     let control_live = control_timeout.is_zero()
-        || now.saturating_duration_since(state.last_control_update) <= control_timeout;
+        || now - state.last_control_update <= control_timeout.as_secs_f64();
     let deadman_live = state.deadman
         && !state.blackout_latched
         && (hazard_timeout.is_zero()
-            || now.saturating_duration_since(state.last_hazard_heartbeat) <= hazard_timeout);
+            || now - state.last_hazard_heartbeat <= hazard_timeout.as_secs_f64());
     SafetySnapshot { control_live, deadman_live, arms: state.arms }
 }
 
@@ -1144,6 +1147,7 @@ impl VideoArtNet {
         Self::start_inner(config, PerformanceState::default())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_inner(
         config: PerformanceConfig,
         initial_performance: PerformanceState,
@@ -1160,7 +1164,7 @@ impl VideoArtNet {
         socket
             .set_broadcast(true)
             .map_err(|e| format!("Art-Net broadcast setup failed: {e}"))?;
-        let now = Instant::now();
+        let now = Cx::monotonic_now();
         let shared = Arc::new(Mutex::new(PerformanceWorkerState {
             sample: SpatialLightSample::default(),
             performance: initial_performance,
@@ -1187,7 +1191,7 @@ impl VideoArtNet {
                 let mut sequence = 1u8;
                 let frame = Duration::from_secs_f64(DMX_FRAME_DT);
                 while !worker_stop.load(Ordering::Acquire) {
-                    let started = Instant::now();
+                    let started = Cx::monotonic_now();
                     let snapshot = *worker_shared.lock().unwrap();
                     let safety =
                         safety_snapshot_at(snapshot, started, hazard_timeout, control_timeout);
@@ -1205,8 +1209,9 @@ impl VideoArtNet {
                     packet.set_sequence(sequence);
                     let _ = socket.send_to(packet.as_bytes(), &target);
                     sequence = if sequence == u8::MAX { 1 } else { sequence + 1 };
-                    if let Some(left) = frame.checked_sub(started.elapsed()) {
-                        std::thread::sleep(left);
+                    let spent = Cx::monotonic_now() - started;
+                    if spent < DMX_FRAME_DT {
+                        std::thread::sleep(Duration::from_secs_f64(DMX_FRAME_DT - spent));
                     }
                 }
                 // Art-Net receivers commonly hold the last universe. Always
@@ -1221,6 +1226,14 @@ impl VideoArtNet {
         Ok(Self { shared, stop, thread: Some(thread) })
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn start_inner(
+        _config: PerformanceConfig,
+        _initial_performance: PerformanceState,
+    ) -> Result<Self, String> {
+        Err("Art-Net output is unavailable on web".to_string())
+    }
+
     pub fn set_sample(&self, sample: LightSample) {
         self.set_spatial_sample(sample.into());
     }
@@ -1228,7 +1241,7 @@ impl VideoArtNet {
     pub fn set_spatial_sample(&self, sample: SpatialLightSample) {
         let mut shared = self.shared.lock().unwrap();
         shared.sample = sample;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     pub fn set_performance_state(&self, mut state: PerformanceState) {
@@ -1240,13 +1253,13 @@ impl VideoArtNet {
         }
         state.blackout |= shared.blackout_latched;
         shared.performance = state;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     pub fn set_master(&self, master: f32) {
         let mut shared = self.shared.lock().unwrap();
         shared.performance.master = master;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     /// Arm selected groups, but do not energize them. Output additionally
@@ -1260,11 +1273,11 @@ impl VideoArtNet {
         if !arms.any() {
             shared.deadman = false;
         }
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     pub fn hazard_heartbeat(&self, deadman_pressed: bool) {
-        let now = Instant::now();
+        let now = Cx::monotonic_now();
         let mut shared = self.shared.lock().unwrap();
         shared.deadman = deadman_pressed && !shared.blackout_latched;
         shared.last_hazard_heartbeat = now;
@@ -1275,7 +1288,7 @@ impl VideoArtNet {
         let mut shared = self.shared.lock().unwrap();
         shared.arms = HazardArms::default();
         shared.deadman = false;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     /// Latch a whole-room blackout and synchronously revoke all hazard arms.
@@ -1285,7 +1298,7 @@ impl VideoArtNet {
         shared.performance.blackout = true;
         shared.arms = HazardArms::default();
         shared.deadman = false;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 
     /// Clear only the blackout latch. Hazard groups remain disarmed and need
@@ -1296,7 +1309,7 @@ impl VideoArtNet {
         shared.performance.blackout = false;
         shared.arms = HazardArms::default();
         shared.deadman = false;
-        shared.last_control_update = Instant::now();
+        shared.last_control_update = Cx::monotonic_now();
     }
 }
 
@@ -1306,6 +1319,7 @@ pub type RoomArtNet = VideoArtNet;
 impl Drop for VideoArtNet {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

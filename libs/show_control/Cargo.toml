@@ -7,3 +7,4 @@ description = "House Art-Net / DMX patch and video-reactive lighting desk"
 
 [dependencies]
 makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
+makepad-platform = { path = "../../platform" }

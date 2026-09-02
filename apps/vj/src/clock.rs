@@ -6,7 +6,7 @@ use std::time::Duration;
 
 /// Monotonic platform-clock seconds with the arithmetic used by the VJ's
 /// media, beat, fade, and profiling paths.
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Instant(f64);
 
 impl Instant {
@@ -33,6 +33,12 @@ impl Instant {
 }
 
 impl Eq for Instant {}
+
+impl PartialOrd for Instant {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for Instant {
     fn cmp(&self, other: &Self) -> Ordering {

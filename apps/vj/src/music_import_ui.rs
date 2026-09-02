@@ -26,6 +26,7 @@ use makepad_asset_importer::music_import::{
     self, MusicProgress, MusicReport, MusicStage, TrackOutcome,
 };
 use makepad_widgets::makepad_platform::file_dialogs::VirtualFile;
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -201,6 +202,7 @@ impl MusicImporter {
     /// Begin an import of exactly these files and folders. The session
     /// details come from the live connection, so the worker publishes into
     /// the same store the explorer is listing — embedded or remote.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(
         &mut self,
         paths: Vec<PathBuf>,
@@ -239,7 +241,11 @@ impl MusicImporter {
     /// app's already connected client runtime. This is the same importer
     /// bake and request builder as the path worker; only the filesystem read
     /// at the front is absent.
-    pub fn start_files(&mut self, files: Vec<VirtualFile>) -> Result<(), String> {
+    pub fn start_files(
+        &mut self,
+        files: Vec<VirtualFile>,
+        spawner: ThreadSpawner,
+    ) -> Result<(), String> {
         if self.busy() {
             return Err("an import is already running".to_string());
         }
@@ -256,7 +262,7 @@ impl MusicImporter {
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
-        launch_file_preparation(files, tx, cancel)
+        launch_file_preparation(files, tx, cancel, spawner)
             .map_err(|error| self.refuse(format!("cannot start the import: {error}")))?;
         Ok(())
     }
@@ -388,14 +394,13 @@ fn push_note(summary: &mut MusicImportSummary, name: &str, error: &str) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn launch_file_preparation(
     files: Vec<VirtualFile>,
     tx: mpsc::Sender<Msg>,
     cancel: Arc<AtomicBool>,
+    spawner: ThreadSpawner,
 ) -> Result<(), String> {
-    thread::Builder::new()
-        .name("vj-music-import-bytes".into())
+    spawner
         .spawn(move || {
             let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
             let _ = tx.send(Msg::Prepared {
@@ -404,26 +409,8 @@ fn launch_file_preparation(
                 cancelled,
             });
         })
-        .map(|_| ())
+        .map(|handle| handle.detach())
         .map_err(|error| error.to_string())
-}
-
-/// Browser builds without workers still have to import selected bytes. The
-/// preparation stays behind this executor seam, outside handler routing; a
-/// worker-backed implementation can replace it without changing publishing.
-#[cfg(target_arch = "wasm32")]
-fn launch_file_preparation(
-    files: Vec<VirtualFile>,
-    tx: mpsc::Sender<Msg>,
-    cancel: Arc<AtomicBool>,
-) -> Result<(), String> {
-    let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
-    tx.send(Msg::Prepared {
-        imports,
-        summary,
-        cancelled,
-    })
-    .map_err(|_| "import result receiver closed".to_string())
 }
 
 fn prepare_files(
@@ -492,6 +479,7 @@ fn prepare_files(
 }
 
 /// The worker body. Everything expensive lives here.
+#[cfg(not(target_arch = "wasm32"))]
 fn run(
     paths: &[PathBuf],
     endpoints: ApiEndpoints,
@@ -558,6 +546,7 @@ fn run(
 /// published rights and nothing else, so "close enough to be honest" is
 /// the whole requirement: a file's own folder, or the deepest folder every
 /// path sits under.
+#[cfg(not(target_arch = "wasm32"))]
 fn common_root(paths: &[PathBuf]) -> PathBuf {
     let mut folders = paths.iter().map(|path| {
         if path.is_dir() {

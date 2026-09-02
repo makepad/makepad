@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
 #[cfg(unix)]
@@ -1427,6 +1428,7 @@ struct DiscoveredFile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
     len: u64,
+    #[cfg(not(target_arch = "wasm32"))]
     modified: Option<SystemTime>,
     is_file: bool,
     #[cfg(unix)]
@@ -1439,6 +1441,7 @@ impl FileIdentity {
     fn from_meta(meta: &fs::Metadata) -> Self {
         Self {
             len: meta.len(),
+            #[cfg(not(target_arch = "wasm32"))]
             modified: meta.modified().ok(),
             is_file: meta.file_type().is_file() && !meta.file_type().is_symlink(),
             #[cfg(unix)]
@@ -1450,7 +1453,16 @@ impl FileIdentity {
 
     fn matches(&self, other: &Self) -> bool {
         self.len == other.len
-            && self.modified == other.modified
+            && {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.modified == other.modified
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    true
+                }
+            }
             && self.is_file
             && other.is_file
             && {

@@ -684,6 +684,7 @@ impl Pager {
         let writable = self.write.is_some();
         #[cfg(not(target_arch = "wasm32"))]
         let deadline = std::time::Instant::now() + self.busy_timeout;
+        #[allow(clippy::never_loop)]
         let guard = loop {
             if let Some(g) = ShmGuard::acquire_with(self.stores.clone(), writable)? {
                 break Some(g);

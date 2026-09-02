@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::util::clock::Instant;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::collections::HashMap;
 
@@ -1173,7 +1174,7 @@ impl XrDepthAlignMatcher {
         if self.is_finished() || max_steps == 0 {
             return 0;
         }
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut steps = 0u32;
         while steps < max_steps as u32 {
             if steps != 0 && !budget.is_zero() && started.elapsed() >= budget {
@@ -1191,12 +1192,12 @@ impl XrDepthAlignMatcher {
         if self.is_finished() {
             return false;
         }
-        let step_started = std::time::Instant::now();
+        let step_started = Instant::now();
         let did_work = loop {
             let state = std::mem::replace(&mut self.state, XrDepthAlignMatcherState::Done);
             match state {
                 XrDepthAlignMatcherState::BuildSignals => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     self.local_signal = selected_descriptor_signal_cells(&self.local);
                     self.remote_signal = selected_descriptor_signal_cells(&self.remote);
                     self.remote_dense_signal = descriptor_dense_signal_cells(&self.remote);
@@ -1265,7 +1266,7 @@ impl XrDepthAlignMatcher {
                     continue;
                 }
                 XrDepthAlignMatcherState::SeedHeightRefine(mut task) => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let Some(local_map) = self.local_map() else {
                         self.state = XrDepthAlignMatcherState::SeedSignalRefine {
                             best_yaw: task.best_yaw,
@@ -1301,7 +1302,7 @@ impl XrDepthAlignMatcher {
                     best_yaw,
                     best_translation,
                 } => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let (signal_refined_yaw, signal_refined_translation) = refine_signal_alignment(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1334,7 +1335,7 @@ impl XrDepthAlignMatcher {
                     best_yaw,
                     best_translation,
                 } => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let best = score_full_alignment_solution(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1356,7 +1357,7 @@ impl XrDepthAlignMatcher {
                     break true;
                 }
                 XrDepthAlignMatcherState::SeedLocalSearch(mut task) => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let completed = task.step(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1393,7 +1394,7 @@ impl XrDepthAlignMatcher {
                         };
                         continue;
                     };
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let completed = task.step(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1411,7 +1412,7 @@ impl XrDepthAlignMatcher {
                     break true;
                 }
                 XrDepthAlignMatcherState::SeedVerticalOffset { candidate } => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let candidate = if let (Some(local_map), Some(remote_map)) =
                         (self.local_map(), self.remote_map())
                     {
@@ -1447,7 +1448,7 @@ impl XrDepthAlignMatcher {
                     continue;
                 }
                 XrDepthAlignMatcherState::BuildYawCandidates => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     self.yaw_candidates = candidate_signal_yaws(
                         &self.local_histogram,
                         &self.remote_histogram,
@@ -1465,7 +1466,7 @@ impl XrDepthAlignMatcher {
                 }
                 XrDepthAlignMatcherState::BuildTranslations { yaw_index } => {
                     let yaw = self.yaw_candidates[yaw_index];
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let translations = candidate_signal_translations(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1531,7 +1532,7 @@ impl XrDepthAlignMatcher {
                     }
 
                     let translation = translations[translation_index];
-                    let signal_refine_started = std::time::Instant::now();
+                    let signal_refine_started = Instant::now();
                     let (refined_yaw, refined_translation) = refine_signal_alignment(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1541,7 +1542,7 @@ impl XrDepthAlignMatcher {
                     );
                     self.signal_refine_time += signal_refine_started.elapsed();
 
-                    let signal_score_started = std::time::Instant::now();
+                    let signal_score_started = Instant::now();
                     let signal_candidate = score_signal_alignment_solution(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1595,7 +1596,7 @@ impl XrDepthAlignMatcher {
                         };
                         continue;
                     };
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let completed = task.step(
                         local_map,
                         self.local_sample_cache.as_ref(),
@@ -1623,7 +1624,7 @@ impl XrDepthAlignMatcher {
                     refined_yaw,
                     refined_translation,
                 } => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let candidate = score_full_alignment_solution(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1675,7 +1676,7 @@ impl XrDepthAlignMatcher {
                         self.state = XrDepthAlignMatcherState::Finish;
                         continue;
                     };
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     let completed = task.step(
                         &self.local_signal,
                         &self.remote_signal,
@@ -1693,7 +1694,7 @@ impl XrDepthAlignMatcher {
                     break true;
                 }
                 XrDepthAlignMatcherState::FinalVerticalOffset { candidate } => {
-                    let started = std::time::Instant::now();
+                    let started = Instant::now();
                     self.best = Some(
                         if let (Some(local_map), Some(remote_map)) =
                             (self.local_map(), self.remote_map())

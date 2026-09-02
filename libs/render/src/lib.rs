@@ -8,6 +8,9 @@
 //! Asset UI / VJ use [`PreviewLook`] + [`Renderer::draw_preview`]. Arcade
 //! still draws a full world through [`Renderer::draw_scene_full`].
 
+// Shader/live literals intentionally use their source-language spelling.
+#![allow(clippy::approx_constant)]
+
 pub mod ao;
 pub mod level;
 pub mod ao_atlas;

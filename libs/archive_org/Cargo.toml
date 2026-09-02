@@ -14,4 +14,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-network = { path = "../../platform/network" }
+makepad-platform = { path = "../../platform" }
 makepad-micro-serde = { path = "../micro_serde" }

@@ -27,6 +27,7 @@ pub struct ByteRangeSeqs<'a> {
 impl<'a> Iterator for ByteRangeSeqs<'a> {
     type Item = ByteRangeSeq;
 
+    #[allow(clippy::never_loop)]
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(mut range) = self.range_stack.pop() {
             'LOOP: loop {

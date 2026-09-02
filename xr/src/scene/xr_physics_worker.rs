@@ -10,6 +10,7 @@ use super::{
 use crate::{
     prelude::*,
     scene::{XrBodyKind, XrRuntimeBodyState},
+    util::clock::Instant,
 };
 use makepad_widgets::makepad_platform::{
     event::{XrController, XrHand},
@@ -20,7 +21,6 @@ use std::{
     mem,
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
-    time::Instant,
 };
 
 const XR_WORKER_SIMULATION_DT_DEFAULT: f32 = 1.0 / 120.0;

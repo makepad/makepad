@@ -10,7 +10,7 @@
 //! // once a real frame lands
 //! tweener.push_frame(cx, view, &rgb, w, h);
 //! // every display frame; true = ask for another
-//! let animating = tweener.tick(cx, view, Instant::now());
+//! let animating = tweener.tick(cx, view, Cx::monotonic_now());
 //! ```
 //!
 //! The clock is the only interesting part. Real frames arrive at whatever
@@ -28,7 +28,7 @@ use crate::frame::rgb8_to_bgra32;
 use crate::mode::{ai_ceiling, AiRateGate, Mode};
 use makepad_widgets::*;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Below this the tween is pointless — a feed this fast has nothing to
 /// interpolate — and above the AI rate law it is forbidden outright.
@@ -51,7 +51,7 @@ pub struct FeedTweener {
     a: Option<Arc<Vec<u32>>>,
     b: Option<Arc<Vec<u32>>>,
     /// When B landed, and how long the pair before it lasted.
-    pair_started: Option<Instant>,
+    pair_started: Option<f64>,
     period: f64,
     /// Bumped per pair so a product that arrives late is never adopted.
     generation: u64,
@@ -171,7 +171,7 @@ impl FeedTweener {
         if w < 8 || h < 8 || bgra.len() < w * h {
             return false;
         }
-        let now = Instant::now();
+        let now = Cx::monotonic_now();
         let resized = self.size != (width, height);
         if resized {
             self.a = None;
@@ -193,7 +193,7 @@ impl FeedTweener {
                     view.set_pair_bgra32(cx, &previous, &next, width, height);
                 }
                 if let Some(started) = self.pair_started {
-                    let measured = now.duration_since(started).as_secs_f64();
+                    let measured = now - started;
                     if (MIN_PERIOD..=MAX_PERIOD).contains(&measured) {
                         self.period += (measured - self.period) * PERIOD_SMOOTHING;
                     }
@@ -216,14 +216,14 @@ impl FeedTweener {
 
     /// One display frame. Advances `t`, harvests whatever the neural worker
     /// finished, and returns whether the host should ask for another frame.
-    pub fn tick(&mut self, cx: &mut Cx, view: &mut FlowTweenView, now: Instant) -> bool {
+    pub fn tick(&mut self, cx: &mut Cx, view: &mut FlowTweenView, now: f64) -> bool {
         if self.b.is_none() {
             return false;
         }
         let t = match self.pair_started {
             None => 1.0,
             Some(started) => {
-                let elapsed = now.saturating_duration_since(started).as_secs_f64();
+                let elapsed = (now - started).max(0.0);
                 (elapsed / self.period.max(MIN_PERIOD)).clamp(0.0, 1.0) as f32
             }
         };
@@ -249,9 +249,9 @@ impl FeedTweener {
 
     /// How long until the next real frame is due, for a host that would
     /// rather wake on a timer than free-run.
-    pub fn until_next_frame(&self, now: Instant) -> Duration {
+    pub fn until_next_frame(&self, now: f64) -> Duration {
         let Some(started) = self.pair_started else { return Duration::from_secs_f64(self.period) };
-        let elapsed = now.saturating_duration_since(started).as_secs_f64();
+        let elapsed = (now - started).max(0.0);
         Duration::from_secs_f64((self.period - elapsed).max(0.0))
     }
 
@@ -292,8 +292,8 @@ impl FeedTweener {
             };
             // The deadline is the end of this pair: a product that misses it
             // belongs to a picture already gone.
-            let deadline = Instant::now()
-                + Duration::from_secs_f64((self.period * (1.0 - t as f64)).max(0.0));
+            let deadline = Cx::monotonic_now()
+                + (self.period * (1.0 - t as f64)).max(0.0);
             self.offered = rife.offer_next(RifeJob {
                 generation: self.generation,
                 a: 0,

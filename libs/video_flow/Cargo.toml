@@ -17,10 +17,11 @@ license = "MIT OR Apache-2.0"
 # Off leaves a std-only crate: the payload format and the estimator, which
 # is all the enhance backend needs from here.
 default = ["convert"]
-convert = ["dep:makepad-video"]
+convert = ["dep:makepad-video", "dep:makepad-platform"]
 
 [dependencies]
 makepad-video = { package = "makepad-platform-video", path = "../../platform/video", optional = true }
+makepad-platform = { path = "../../platform", optional = true }
 
 # The synthetic optical-flow debug clips. It writes mp4s, so it needs the
 # codec seam the `convert` feature pulls in — declared explicitly rather than

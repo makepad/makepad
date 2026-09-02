@@ -1446,8 +1446,8 @@ impl ModelInstance {
     }
 }
 
-fn perf_us(t0: std::time::Instant) -> u64 {
-    t0.elapsed().as_micros() as u64
+fn perf_us(t0: f64) -> u64 {
+    ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64
 }
 
 /// Fold a baked shade multiplier into an instance colour.
@@ -1817,7 +1817,7 @@ fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
 /// platforms, a dragged kinematic) pays ONE refresh once the world has been
 /// still this long — "only re-render the shadows when an object stops
 /// moving" — instead of one per mutation.
-const SHADOW_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+const SHADOW_SETTLE: f64 = 0.2;
 
 /// Coalescing debounce for the settle work. Pure state machine — the caller
 /// supplies the clock — so the burst behaviour is testable without threads
@@ -1830,7 +1830,7 @@ struct ShadowRebuildGate {
     /// The key the current chunks were built for. None = never built.
     built: Option<(u64, u64, u64, u32)>,
     /// Latest key seen since `built`, and when it last CHANGED.
-    pending: Option<((u64, u64, u64, u32), std::time::Instant)>,
+    pending: Option<((u64, u64, u64, u32), f64)>,
 }
 
 impl ShadowRebuildGate {
@@ -1839,8 +1839,8 @@ impl ShadowRebuildGate {
     fn should_rebuild(
         &mut self,
         key: (u64, u64, u64, u32),
-        now: std::time::Instant,
-        settle: std::time::Duration,
+        now: f64,
+        settle: f64,
     ) -> bool {
         if self.built == Some(key) {
             self.pending = None;
@@ -1850,7 +1850,7 @@ impl ShadowRebuildGate {
             return true;
         }
         match self.pending {
-            Some((k, since)) if k == key => now.duration_since(since) >= settle,
+            Some((k, since)) if k == key => now - since >= settle,
             // New key (first change, or changed again mid-wait): the settle
             // clock restarts — the world is still being edited.
             _ => {
@@ -6899,7 +6899,7 @@ impl Renderer {
             && draws.alpha.cube.cube.draw_vars.can_instance();
         let slab_key = static_slab_key(world, self.bake.generation());
         if vars_ready && self.slab_key != Some(slab_key) {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             self.rebuild_static_slabs(draws, world);
             stats.slab_us += perf_us(t0);
             stats.slab_rebuilds += 1;
@@ -6964,7 +6964,7 @@ impl Renderer {
             );
             if self
                 .shadow_gate
-                .should_rebuild(key, std::time::Instant::now(), SHADOW_SETTLE)
+                .should_rebuild(key, Cx::monotonic_now(), SHADOW_SETTLE)
             {
                 self.refresh_shadow_receivers(world);
                 // Same settle cadence: the light bake becomes GPU render
@@ -7223,7 +7223,7 @@ impl Renderer {
             // with no loadable sidecar (or a host with no SDF shader).
             // Realtime draws NONE of this — characters are in the tiles.
             if shadow_mesh_enabled {
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let ground = world
                     .terrain
                     .as_ref()
@@ -7387,7 +7387,7 @@ impl Renderer {
         // plain blob, as does any instance whose model has no sidecar.
         // Realtime draws none of this — the cars are in the tiles.
         if shadow_mesh_enabled {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             let instances = std::mem::take(&mut self.placed_models);
             for inst in &instances {
                 if !inst.dynamic {
@@ -7865,7 +7865,7 @@ impl Renderer {
         // depth write off means overlapping shadows can never fight for the
         // buffer.
         if let Some(shadow) = draws.shadow.as_deref_mut() {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             self.last_dynamic_shadow_tris = self.shadow_mesh.triangle_count();
             if !self.shadow_mesh.is_empty() {
                 let geometry = self.shadow_geometry.get_or_insert_with(|| Geometry::new(cx.cx));
@@ -7890,7 +7890,7 @@ impl Renderer {
         // shares a draw item — the atlas bind is what splits items.
         if let Some(sd) = draws.shadow_sdf.as_deref_mut() {
             if !self.sdf_instances.is_empty() {
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let geometry_id = self.ensure_flare_geometry(cx.cx);
                 sd.draw_vars.geometry_id = Some(geometry_id);
                 sd.depth_clip = 1.0;
@@ -8670,9 +8670,8 @@ mod chunk_tests {
     /// moving keeps the rebuild parked.
     #[test]
     fn shadow_gate_coalesces_an_edit_burst() {
-        use std::time::{Duration, Instant};
-        let settle = Duration::from_millis(200);
-        let t0 = Instant::now();
+        let settle = 0.2;
+        let t0 = 10.0;
         let mut gate = ShadowRebuildGate::default();
         // First sight builds immediately.
         assert!(gate.should_rebuild((1, 0, 0, 0), t0, settle));
@@ -8681,17 +8680,17 @@ mod chunk_tests {
         // Burst: five mutations in quick succession — no rebuild during it,
         // and the settle clock restarts on every change.
         for i in 2..7u64 {
-            let now = t0 + Duration::from_millis(10 * i);
+            let now = t0 + 0.01 * i as f64;
             assert!(!gate.should_rebuild((i, 0, 0, 0), now, settle));
         }
         // Still pending just before the window closes...
-        let last_change = t0 + Duration::from_millis(60);
-        assert!(!gate.should_rebuild((6, 0, 0, 0), last_change + Duration::from_millis(199), settle));
+        let last_change = t0 + 0.06;
+        assert!(!gate.should_rebuild((6, 0, 0, 0), last_change + 0.199, settle));
         // ...and exactly one rebuild once it has.
-        let at_rest = last_change + Duration::from_millis(200);
+        let at_rest = last_change + 0.2;
         assert!(gate.should_rebuild((6, 0, 0, 0), at_rest, settle));
         gate.mark_built((6, 0, 0, 0));
-        assert!(!gate.should_rebuild((6, 0, 0, 0), at_rest + Duration::from_millis(1000), settle));
+        assert!(!gate.should_rebuild((6, 0, 0, 0), at_rest + 1.0, settle));
     }
 
     /// Tiling must regroup the terrain mesh, not change it: the union of

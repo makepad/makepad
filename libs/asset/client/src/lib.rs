@@ -61,7 +61,15 @@ pub mod location;
 pub mod transport;
 pub mod cache_store;
 pub mod static_store;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod side_channels;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[path = "portable/side_channels.rs"]
+pub mod side_channels;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+pub mod publish;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[path = "portable/publish.rs"]
 pub mod publish;
 pub mod resolver;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]

@@ -1359,6 +1359,7 @@ impl LyricsPool {
         let (tx, jobs) = channel::<LyricsJob>();
         let (prefetch_tx, prefetch_jobs) = channel::<LyricsJob>();
         let (out, rx) = channel::<LyricsMsg>();
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::thread::Builder::new()
             .name("vj-lyrics".into())
             .spawn(move || {
@@ -1391,6 +1392,8 @@ impl LyricsPool {
                     }
                 }
             });
+        #[cfg(target_arch = "wasm32")]
+        drop((jobs, prefetch_jobs, out));
         LyricsPool { tx, prefetch_tx, rx }
     }
 

@@ -504,10 +504,7 @@ impl WidgetSet {
     }
 
     pub fn into_first(self) -> WidgetRef {
-        for item in self.0 {
-            return item;
-        }
-        WidgetRef::empty()
+        self.0.into_iter().next().unwrap_or_else(WidgetRef::empty)
     }
 
     pub fn widgets(&self, cx: &Cx, paths: &[&[LiveId]]) -> WidgetSet {

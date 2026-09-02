@@ -14,7 +14,7 @@
 //! request is in flight and the newest camera wins.
 
 use makepad_widgets::makepad_draw::*;
-use std::time::Instant;
+use crate::util::clock::Instant;
 
 /// Keys 0..=CULLED-1 are depth buckets; CULLED marks a splat that is not
 /// drawn for this camera.
