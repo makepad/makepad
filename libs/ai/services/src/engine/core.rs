@@ -96,6 +96,15 @@ impl EngineCore {
         self.model.as_mut()
     }
 
+    /// What the provider chip shows: the choice, the rows it may switch
+    /// to, and whether the lock is on. Presentation only.
+    pub fn set_provider_facts(&mut self, provider: ProviderChoice, rows: Vec<ProviderRow>, local_only: bool) {
+        self.state.provider = provider;
+        self.state.providers = rows;
+        self.state.local_only = local_only;
+        self.state.touch();
+    }
+
     /// Swap the model (a provider change). The conversation restarts.
     pub fn set_model(&mut self, model: Box<dyn Model>) {
         self.model.cancel();
