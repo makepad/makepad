@@ -1,5 +1,4 @@
 use crate::path::*;
-use std::f32::consts::PI;
 
 // Output vertex: position + texcoord for AA + distance along stroke
 #[derive(Clone, Copy, Default, Debug)]
@@ -493,7 +492,13 @@ impl Tessellator {
         self.calculate_joins(hw, line_join, miter_limit);
         verts.clear();
         indices.clear();
-        let (u0, u1) = if aa > 0.0 { (0.0, 1.0) } else { (0.5, 0.5) };
+        let has_round_cap = self.paths.iter().any(|path| !path.closed)
+            && (matches!(start_cap, LineCap::Round) || matches!(end_cap, LineCap::Round));
+        let (u0, u1) = if aa > 0.0 || has_round_cap {
+            (0.0, 1.0)
+        } else {
+            (0.5, 0.5)
+        };
         for pi in 0..self.paths.len() {
             let sp = &self.paths[pi];
             let first = sp.first;
@@ -532,7 +537,7 @@ impl Tessellator {
                 };
                 let p0 = self.points[first];
                 self.emit_cap_start(
-                    verts, indices, p0.x, p0.y, ndx, ndy, hw, aa, u0, u1, start_cap,
+                    verts, indices, p0.x, p0.y, ndx, ndy, hw, u0, u1, start_cap,
                 );
                 // stamp stroke_dist=0 on cap verts
                 let cap_end = verts.len();
@@ -640,7 +645,6 @@ impl Tessellator {
         dx: f32,
         dy: f32,
         w: f32,
-        aa: f32,
         u0: f32,
         u1: f32,
         cap: LineCap,
@@ -649,79 +653,37 @@ impl Tessellator {
         let dly = -dx;
         match cap {
             LineCap::Butt => {
-                verts.push(VVertex::new(
-                    px + dlx * w - dx * aa,
-                    py + dly * w - dy * aa,
-                    u0,
-                    0.0,
-                ));
-                verts.push(VVertex::new(
-                    px - dlx * w - dx * aa,
-                    py - dly * w - dy * aa,
-                    u1,
-                    0.0,
-                ));
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
             }
             LineCap::Square => {
-                verts.push(VVertex::new(
-                    px + dlx * w - dx * (w - aa),
-                    py + dly * w - dy * (w - aa),
-                    u0,
-                    0.0,
-                ));
-                verts.push(VVertex::new(
-                    px - dlx * w - dx * (w - aa),
-                    py - dly * w - dy * (w - aa),
-                    u1,
-                    0.0,
-                ));
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
             }
             LineCap::Round => {
-                // Emit a triangle fan from center to arc points, then
-                // end with the (left, right) pair for the stroke body.
-                let ncap = ((w * PI).ceil() as usize).max(2).min(32);
-                let center_vi = verts.len() as u32;
-                verts.push(VVertex::new(px, py, 0.5, 1.0));
-                // Arc vertices from +left through back to -left
-                for i in 0..ncap {
-                    let a = i as f32 / (ncap - 1) as f32 * PI;
-                    let ax = a.cos() * w;
-                    let ay = a.sin() * w;
-                    verts.push(VVertex::new(
-                        px - dlx * ax - dx * ay,
-                        py - dly * ax - dy * ay,
-                        // u=0.5 -> fully-covered (sd=1) so the round cap is a SOLID disc.
-                        // (was u0=0.0 -> sd=0 -> radial fade that vanished at small sizes,
-                        // making round caps look square — robrix #926.)
-                        0.5,
-                        1.0,
-                    ));
-                }
-                // Fan triangles: center + consecutive arc points
-                let arc_start = center_vi + 1;
-                for i in 0..(ncap as u32 - 1) {
-                    indices.push(center_vi);
-                    indices.push(arc_start + i);
-                    indices.push(arc_start + i + 1);
-                }
-                // Final pair for body stitching: (left_edge, right_edge)
+                let vi = verts.len() as u32;
+                verts.push(VVertex::new(
+                    px + dlx * w - dx * w,
+                    py + dly * w - dy * w,
+                    u0,
+                    2.0,
+                ));
+                verts.push(VVertex::new(
+                    px - dlx * w - dx * w,
+                    py - dly * w - dy * w,
+                    u1,
+                    2.0,
+                ));
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
-                // Connect last arc point to the left edge, and first arc point to the right edge
-                let left_vi = verts.len() as u32 - 2;
-                let right_vi = verts.len() as u32 - 1;
-                // Left edge triangle: center, first arc point (at +left side), left_edge
-                indices.push(center_vi);
-                indices.push(arc_start);
-                indices.push(left_vi);
-                // Right edge triangle: center, last arc point (at -left side), right_edge
-                indices.push(center_vi);
-                indices.push(arc_start + ncap as u32 - 1);
-                indices.push(right_vi);
+                indices.extend_from_slice(&[
+                    vi,
+                    vi + 1,
+                    vi + 2,
+                    vi + 1,
+                    vi + 3,
+                    vi + 2,
+                ]);
             }
         }
     }
@@ -777,8 +739,6 @@ impl Tessellator {
                 ));
             }
             LineCap::Round => {
-                let ncap = ((w * PI).ceil() as usize).max(2).min(32);
-                // Connect body's last pair to the (left, right) pair
                 verts.push(VVertex::new(px + dlx * w, py + dly * w, u0, 1.0));
                 verts.push(VVertex::new(px - dlx * w, py - dly * w, u1, 1.0));
                 if vi >= 2 {
@@ -789,36 +749,26 @@ impl Tessellator {
                     indices.push(vi + 1);
                     indices.push(vi);
                 }
-                // Center vertex for fan
-                let center_vi = verts.len() as u32;
-                verts.push(VVertex::new(px, py, 0.5, 1.0));
-                // Arc vertices from +left through front to -left
-                let arc_start = center_vi + 1;
-                for i in 0..ncap {
-                    let a = i as f32 / (ncap - 1) as f32 * PI;
-                    let ax = a.cos() * w;
-                    let ay = a.sin() * w;
-                    verts.push(VVertex::new(
-                        px - dlx * ax + dx * ay,
-                        py - dly * ax + dy * ay,
-                        // u=0.5 -> solid disc (see emit_cap_start). Was u0 -> square at small sizes.
-                        0.5,
-                        1.0,
-                    ));
-                }
-                // Fan triangles: center + consecutive arc points
-                for i in 0..(ncap as u32 - 1) {
-                    indices.push(center_vi);
-                    indices.push(arc_start + i);
-                    indices.push(arc_start + i + 1);
-                }
-                // Connect left_edge to first arc, right_edge to last arc
-                indices.push(center_vi);
-                indices.push(vi);
-                indices.push(arc_start);
-                indices.push(center_vi);
-                indices.push(arc_start + ncap as u32 - 1);
-                indices.push(vi + 1);
+                verts.push(VVertex::new(
+                    px + dlx * w + dx * w,
+                    py + dly * w + dy * w,
+                    u0,
+                    2.0,
+                ));
+                verts.push(VVertex::new(
+                    px - dlx * w + dx * w,
+                    py - dly * w + dy * w,
+                    u1,
+                    2.0,
+                ));
+                indices.extend_from_slice(&[
+                    vi,
+                    vi + 1,
+                    vi + 2,
+                    vi + 1,
+                    vi + 3,
+                    vi + 2,
+                ]);
                 return;
             }
         }
@@ -2343,6 +2293,55 @@ impl SweepTessellator {
         self.active_edges
             .splice(incident_start..incident_start, new_edges.drain(..));
         self.right_edges_scratch = new_edges;
+    }
+}
+
+#[cfg(test)]
+mod stroke_tests {
+    use super::*;
+
+    fn straight_stroke(cap: LineCap) -> (Vec<VVertex>, Vec<u32>) {
+        let mut path = VectorPath::new();
+        path.move_to(0.0, 0.0);
+        path.line_to(20.0, 0.0);
+        let mut tess = Tessellator::default();
+        tess.flatten(&path, 0.25);
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        tess.stroke(10.0, cap, LineJoin::Miter, 4.0, 1.0, &mut verts, &mut indices);
+        (verts, indices)
+    }
+
+    #[test]
+    fn round_caps_emit_one_carrier_pair_per_end() {
+        let (verts, indices) = straight_stroke(LineCap::Round);
+
+        // Two body pairs plus one two-vertex carrier at each end: no fan.
+        assert_eq!(verts.len(), 2 * 2 + 2 * 2);
+        assert_eq!(indices.len(), 3 * 6);
+        assert_eq!(
+            verts.iter().map(|vertex| vertex.v).collect::<Vec<_>>(),
+            [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0]
+        );
+        assert!(verts
+            .iter()
+            .all(|vertex| !(vertex.x == 0.0 && vertex.y == 0.0)
+                && !(vertex.x == 20.0 && vertex.y == 0.0)));
+        assert!(indices.iter().all(|&index| index < verts.len() as u32));
+    }
+
+    #[test]
+    fn butt_start_emits_no_dead_feather_vertices() {
+        let (verts, indices) = straight_stroke(LineCap::Butt);
+        let mut referenced = vec![false; verts.len()];
+        for &index in &indices {
+            referenced[index as usize] = true;
+        }
+
+        // Start contributes only its structural pair; the indexed end
+        // carrier remains necessary to place the longitudinal AA ramp.
+        assert_eq!(verts.len(), 2 + 4);
+        assert!(referenced.into_iter().all(|is_referenced| is_referenced));
     }
 }
 
