@@ -12,7 +12,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobContent {
     Bytes(Arc<[u8]>),
-    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+    #[cfg(not(target_arch = "wasm32"))]
     VerifiedPath(std::path::PathBuf),
 }
 
@@ -207,12 +207,12 @@ impl CacheStore for MemoryCacheStore {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct FsCacheStore {
     cache: crate::cache::ContentCache,
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl FsCacheStore {
     pub fn open(
         root: &std::path::Path,
@@ -232,7 +232,7 @@ impl FsCacheStore {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl CacheStore for FsCacheStore {
     fn get_verified(&mut self, digest: &[u8; 32]) -> ClientResult<Option<BlobContent>> {
         self.cache
@@ -241,8 +241,12 @@ impl CacheStore for FsCacheStore {
     }
 
     fn put_verified(&mut self, digest: &[u8; 32], bytes: &[u8]) -> ClientResult<()> {
+        let now = crate::util::now_ms();
+        if self.cache.contains(digest) {
+            let _ = self.cache.resolve(digest, now)?;
+        }
         self.cache
-            .put_bytes(bytes, Some(digest), crate::util::now_ms())
+            .put_bytes(bytes, Some(digest), now)
             .map(|_| ())
     }
 
@@ -332,7 +336,7 @@ mod tests {
         assert_eq!(cache.stats().corruption_rejections, 1);
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn filesystem_adapter_preserves_verified_paths_pins_and_stats() {
         let root = std::env::temp_dir().join(format!(
@@ -354,6 +358,63 @@ mod tests {
         assert!(cache.stats().persistent);
         assert!(cache.stats().resumable_across_reload);
         drop(cache);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn filesystem_verified_put_repairs_same_length_corruption() {
+        let root = std::env::temp_dir().join(format!(
+            "mp-fs-cache-repair-{}-{}",
+            std::process::id(),
+            crate::util::now_ms()
+        ));
+        let mut budgets = crate::cache::CacheBudgets::default_v1();
+        budgets.max_total_bytes = 1024;
+        budgets.max_object_bytes = 1024;
+        let bytes = b"verified";
+        let digest = digest(bytes);
+        let mut cache = FsCacheStore::open(&root, budgets).unwrap();
+        cache.put_verified(&digest, bytes).unwrap();
+        let BlobContent::VerifiedPath(path) = cache.get_verified(&digest).unwrap().unwrap()
+        else {
+            panic!("filesystem cache must return a path");
+        };
+        std::fs::write(&path, b"corrupt!").unwrap();
+
+        cache.put_verified(&digest, bytes).unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert_eq!(cache.stats().corruption_rejections, 1);
+        drop(cache);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn filesystem_adapter_reopens_verified_objects() {
+        let root = std::env::temp_dir().join(format!(
+            "mp-fs-cache-reopen-{}-{}",
+            std::process::id(),
+            crate::util::now_ms()
+        ));
+        let mut budgets = crate::cache::CacheBudgets::default_v1();
+        budgets.max_total_bytes = 1024;
+        budgets.max_object_bytes = 1024;
+        let bytes = b"survives reopen";
+        let digest = digest(bytes);
+        {
+            let mut cache = FsCacheStore::open(&root, budgets).unwrap();
+            cache.put_verified(&digest, bytes).unwrap();
+        }
+        let mut reopened = FsCacheStore::open(&root, budgets).unwrap();
+        let BlobContent::VerifiedPath(path) = reopened.get_verified(&digest).unwrap().unwrap()
+        else {
+            panic!("filesystem cache must return a path");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(reopened.stats().resumable_across_reload);
+        drop(reopened);
         let _ = std::fs::remove_dir_all(root);
     }
 }

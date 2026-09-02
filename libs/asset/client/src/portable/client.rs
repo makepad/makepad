@@ -1,7 +1,10 @@
 //! Portable configuration and the deliberately unavailable blocking facade.
 
 use crate::error::{ClientError, ClientResult};
-use crate::location::{ApiEndpoints, BaseUrl, ClientLocation, ClientMode};
+use crate::location::{
+    ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_BLOCKING_API,
+    CAPABILITY_STATIC_SITE_SESSION,
+};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug)]
@@ -143,6 +146,10 @@ impl AssetClient {
             .as_ref()
             .map(ClientLocation::mode)
             .unwrap_or(ClientMode::Native);
-        Err(ClientError::Unavailable { capability: "blocking_api", mode })
+        let capability = match mode {
+            ClientMode::Native => CAPABILITY_BLOCKING_API,
+            ClientMode::StaticWeb => CAPABILITY_STATIC_SITE_SESSION,
+        };
+        Err(ClientError::Unavailable { capability, mode })
     }
 }

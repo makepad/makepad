@@ -126,6 +126,21 @@ pub fn define_url_session_data_delegate() -> *const Class {
         }
     }
 
+    extern "C" fn will_redirect(
+        _this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _task: ObjcId,
+        _response: ObjcId,
+        _request: ObjcId,
+        completion: ObjcId,
+    ) {
+        unsafe {
+            // Passing nil refuses the redirect and surfaces the original 3xx.
+            objc_block_invoke!(completion, invoke((nil): ObjcId));
+        }
+    }
+
     if let Some(existing) = Class::get(URL_SESSION_DATA_DELEGATE_CLASS_NAME) {
         return existing as *const Class;
     }
@@ -151,6 +166,19 @@ pub fn define_url_session_data_delegate() -> *const Class {
             sel!(URLSession:task:didCompleteWithError:),
             did_complete_with_error as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
         );
+        decl.add_method(
+            sel!(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:),
+            will_redirect
+                as extern "C" fn(
+                    &Object,
+                    Sel,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                ),
+        );
     }
 
     decl.add_ivar::<u64>("context_box");
@@ -166,6 +194,9 @@ struct UrlSessionBufferContext {
     last_emit: usize,
     status_code: u16,
     headers: BTreeMap<String, Vec<String>>,
+    max_body_bytes: u64,
+    is_head: bool,
+    failed: bool,
 }
 
 fn emit_http_progress(ctx: &UrlSessionBufferContext) {
@@ -194,8 +225,15 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
             // New response (including after a 302) replaces any redirect body.
             ctx.body.clear();
             ctx.last_emit = 0;
+            ctx.headers.clear();
             if expected > 0 {
                 ctx.expected = expected as u64;
+                if !ctx.is_head && ctx.expected > ctx.max_body_bytes {
+                    ctx.failed = true;
+                    let _ = Box::into_raw(ctx);
+                    objc_block_invoke!(completion, invoke((0): u64));
+                    return;
+                }
                 ctx.body.reserve(expected as usize);
             } else {
                 ctx.expected = 0;
@@ -233,7 +271,12 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
             let mut ctx: Box<UrlSessionBufferContext> = Box::from_raw(context_box as *mut _);
             let bytes: *const u8 = msg_send![data, bytes];
             let length: usize = msg_send![data, length];
-            if !bytes.is_null() && length > 0 {
+            if !ctx.failed
+                && ctx.body.len().saturating_add(length) as u64 > ctx.max_body_bytes
+            {
+                ctx.failed = true;
+                let () = msg_send![_data_task, cancel];
+            } else if !ctx.failed && !bytes.is_null() && length > 0 {
                 ctx.body.extend_from_slice(std::slice::from_raw_parts(bytes, length));
             }
             if ctx.body.len().saturating_sub(ctx.last_emit) >= PROGRESS_EVERY {
@@ -254,6 +297,16 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
         unsafe {
             let context_box: u64 = *this.get_ivar("context_box");
             let ctx: Box<UrlSessionBufferContext> = Box::from_raw(context_box as *mut _);
+            if ctx.failed {
+                let _ = ctx.sender.send(NetworkResponse::HttpError {
+                    request_id: ctx.request_id,
+                    error: HttpError {
+                        metadata_id: ctx.metadata_id,
+                        message: crate::HTTP_BODY_LIMIT_ERROR.to_string(),
+                    },
+                });
+                return;
+            }
             if error != nil {
                 let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                 let _ = ctx.sender.send(NetworkResponse::HttpError {
@@ -284,6 +337,20 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
         }
     }
 
+    extern "C" fn will_redirect(
+        _this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _task: ObjcId,
+        _response: ObjcId,
+        _request: ObjcId,
+        completion: ObjcId,
+    ) {
+        unsafe {
+            objc_block_invoke!(completion, invoke((nil): ObjcId));
+        }
+    }
+
     if let Some(existing) = Class::get(URL_SESSION_BUFFER_DELEGATE_CLASS_NAME) {
         return existing as *const Class;
     }
@@ -308,6 +375,19 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
         decl.add_method(
             sel!(URLSession:task:didCompleteWithError:),
             did_complete_with_error as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:),
+            will_redirect
+                as extern "C" fn(
+                    &Object,
+                    Sel,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                    ObjcId,
+                ),
         );
     }
     decl.add_ivar::<u64>("context_box");
@@ -463,6 +543,9 @@ impl AppleHttpRequests {
                         last_emit: 0,
                         status_code: 0,
                         headers: BTreeMap::new(),
+                        max_body_bytes: request.max_response_body_bytes,
+                        is_head: matches!(request.method, crate::types::HttpMethod::HEAD),
+                        failed: false,
                     })) as u64;
                     let buffer_delegate: ObjcId =
                         msg_send![url_session_buffer_delegate_class(), new];

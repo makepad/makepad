@@ -1,7 +1,9 @@
 //! Portable session configuration; static execution is a later feature lane.
 
 use crate::error::{ClientError, ClientResult};
-use crate::location::{ApiEndpoints, BaseUrl, ClientLocation, ClientMode};
+use crate::location::{
+    ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
+};
 use makepad_asset_data::AssetKind;
 use std::path::PathBuf;
 
@@ -166,7 +168,10 @@ impl SessionConnector {
             .as_ref()
             .map(ClientLocation::mode)
             .unwrap_or(ClientMode::Native);
-        Err(ClientError::Unavailable { capability: "static_site_session", mode })
+        Err(ClientError::Unavailable {
+            capability: CAPABILITY_STATIC_SITE_SESSION,
+            mode,
+        })
     }
 
     pub fn poll(&mut self) -> Vec<SessionMsg> {

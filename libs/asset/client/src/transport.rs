@@ -5,6 +5,7 @@
 //! owned bytes and reports exactly one completion for every accepted id.
 
 use crate::error::ClientError;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
 
 pub const MAX_TRANSPORT_URL_BYTES: usize = 8 * 1024;
@@ -82,7 +83,13 @@ pub enum TransportError {
 
 impl From<ClientError> for TransportError {
     fn from(error: ClientError) -> Self {
-        Self::Client(error)
+        match error {
+            ClientError::Protocol { what } => Self::Protocol { what },
+            ClientError::OverBudget { what, limit, found } => {
+                Self::OverBudget { what, limit, found }
+            }
+            error => Self::Client(error),
+        }
     }
 }
 
@@ -158,7 +165,19 @@ fn validate_request(req: &OwnedRequest, absolute_url: bool) -> Result<(), Transp
         if name.is_empty()
             || name.len() > 128
             || !name.bytes().all(header_name_byte_ok)
-            || matches!(name.to_ascii_lowercase().as_str(), "host" | "connection" | "content-length")
+            || matches!(
+                name.to_ascii_lowercase().as_str(),
+                "host"
+                    | "connection"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "te"
+                    | "trailer"
+                    | "upgrade"
+                    | "expect"
+                    | "keep-alive"
+                    | "proxy-connection"
+            )
         {
             return Err(TransportError::InvalidRequest { what: "request header name" });
         }
@@ -181,6 +200,7 @@ fn normalize_response(
     headers: impl IntoIterator<Item = (String, String)>,
     body: Vec<u8>,
     max_body_bytes: u64,
+    is_head_request: bool,
 ) -> Result<OwnedResponse, TransportError> {
     if body.len() as u64 > max_body_bytes {
         return Err(TransportError::OverBudget {
@@ -189,7 +209,23 @@ fn normalize_response(
             found: body.len() as u64,
         });
     }
+    if is_head_request && !body.is_empty() {
+        return Err(TransportError::Protocol { what: "HEAD response body" });
+    }
+    if status < 200 {
+        return Err(TransportError::Protocol { what: "unexpected informational status" });
+    }
+    if status == 204 || status == 304 {
+        return Err(TransportError::Protocol { what: "unexpected bodyless status" });
+    }
+    if (300..400).contains(&status) {
+        return Err(TransportError::Protocol { what: "redirect refused" });
+    }
+    if status > 599 {
+        return Err(TransportError::Protocol { what: "invalid response status" });
+    }
     let mut normalized = Vec::new();
+    let mut content_length = None;
     let mut total = 0usize;
     for (name, value) in headers {
         if normalized.len() >= MAX_TRANSPORT_HEADERS {
@@ -209,9 +245,36 @@ fn normalize_response(
         if !value.bytes().all(|b| b == b'\t' || (b >= b' ' && b != 0x7f)) {
             return Err(TransportError::Protocol { what: "response header value" });
         }
-        normalized.push((name.to_ascii_lowercase(), value));
+        let name = name.to_ascii_lowercase();
+        if name == "transfer-encoding" {
+            return Err(TransportError::Protocol { what: "transfer-encoding refused" });
+        }
+        if name == "content-length" {
+            if content_length.is_some() {
+                return Err(TransportError::Protocol { what: "duplicate content-length" });
+            }
+            content_length = Some(parse_content_length(&value)?);
+        }
+        normalized.push((name, value));
+    }
+    let declared = content_length
+        .ok_or(TransportError::Protocol { what: "content-length required" })?;
+    if !is_head_request && declared != body.len() as u64 {
+        return Err(TransportError::Protocol { what: "content-length mismatch" });
     }
     Ok(OwnedResponse { status, headers: normalized, body })
+}
+
+fn parse_content_length(value: &str) -> Result<u64, TransportError> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(TransportError::Protocol { what: "malformed content-length" });
+    }
+    value
+        .parse()
+        .map_err(|_| TransportError::Protocol { what: "malformed content-length" })
 }
 
 fn header_name_byte_ok(b: u8) -> bool {
@@ -221,7 +284,7 @@ fn header_name_byte_ok(b: u8) -> bool {
         | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod tcp {
     use super::*;
     use crate::http::{self, HttpLimits, Method, Request};
@@ -380,11 +443,17 @@ mod tcp {
                 body.extend_from_slice(&chunk[..read]);
             }
         }
-        normalize_response(status, headers, body, max)
+        normalize_response(
+            status,
+            headers,
+            body,
+            max,
+            matches!(owned.method, TransportMethod::Head),
+        )
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub use tcp::TcpHttpTransport;
 
 #[cfg(any(target_arch = "wasm32", feature = "web"))]
@@ -393,13 +462,14 @@ mod platform {
     use makepad_live_id::LiveId;
     use makepad_network::{
         HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime,
+        HTTP_BODY_LIMIT_ERROR,
     };
 
     pub struct PlatformHttpTransport {
         runtime: NetworkRuntime,
         max_response_body_bytes: u64,
         next_id: u64,
-        active: HashSet<TransportId>,
+        active: std::collections::HashMap<TransportId, TransportMethod>,
         ready: Vec<TransportCompletion>,
     }
 
@@ -426,7 +496,7 @@ mod platform {
                 runtime,
                 max_response_body_bytes,
                 next_id: 1,
-                active: HashSet::new(),
+                active: std::collections::HashMap::new(),
                 ready: Vec::new(),
             }
         }
@@ -441,7 +511,7 @@ mod platform {
     impl Transport for PlatformHttpTransport {
         fn start(&mut self, req: OwnedRequest) -> TransportId {
             let id = self.allocate();
-            self.active.insert(id);
+            self.active.insert(id, req.method);
             if let Err(error) = validate_request(&req, true) {
                 self.ready.push(TransportCompletion { id, result: Err(error) });
                 return id;
@@ -454,6 +524,7 @@ mod platform {
                 TransportMethod::Delete => HttpMethod::DELETE,
             };
             let mut request = HttpRequest::new(req.url_or_target, method);
+            request.set_max_response_body_bytes(self.max_response_body_bytes);
             for (name, value) in req.headers {
                 request.set_header(name, value);
             }
@@ -470,7 +541,7 @@ mod platform {
         }
 
         fn cancel(&mut self, id: TransportId) {
-            if !self.active.remove(&id) {
+            if self.active.remove(&id).is_none() {
                 return;
             }
             let _ = self.runtime.http_cancel(live_id(id));
@@ -479,7 +550,7 @@ mod platform {
 
         fn poll(&mut self, out: &mut Vec<TransportCompletion>) {
             for completion in self.ready.drain(..) {
-                if self.active.remove(&completion.id)
+                if self.active.remove(&completion.id).is_some()
                     || matches!(completion.result, Err(TransportError::Cancelled))
                 {
                     out.push(completion);
@@ -490,9 +561,7 @@ mod platform {
                     NetworkResponse::HttpResponse { request_id, response }
                     | NetworkResponse::HttpStreamComplete { request_id, response } => {
                         let id = transport_id(request_id);
-                        if !self.active.remove(&id) {
-                            continue;
-                        }
+                        let Some(method) = self.active.remove(&id) else { continue };
                         let headers = response.headers.into_iter().flat_map(|(name, values)| {
                             values.into_iter().map(move |value| (name.clone(), value))
                         });
@@ -501,15 +570,25 @@ mod platform {
                             headers,
                             response.body.unwrap_or_default(),
                             self.max_response_body_bytes,
+                            matches!(method, TransportMethod::Head),
                         );
                         out.push(TransportCompletion { id, result });
                     }
                     NetworkResponse::HttpError { request_id, error } => {
                         let id = transport_id(request_id);
-                        if self.active.remove(&id) {
+                        if self.active.remove(&id).is_some() {
+                            let result = if error.message == HTTP_BODY_LIMIT_ERROR {
+                                Err(TransportError::OverBudget {
+                                    what: "response body",
+                                    limit: self.max_response_body_bytes,
+                                    found: self.max_response_body_bytes.saturating_add(1),
+                                })
+                            } else {
+                                Err(TransportError::Network(error.message))
+                            };
                             out.push(TransportCompletion {
                                 id,
-                                result: Err(TransportError::Network(error.message)),
+                                result,
                             });
                         }
                     }
@@ -601,5 +680,54 @@ mod tests {
             validate_request(&request, true),
             Err(TransportError::InvalidRequest { what: "request header value" })
         ));
+    }
+
+    #[test]
+    fn request_bounds_reject_caller_controlled_framing() {
+        for name in ["content-length", "transfer-encoding", "te", "trailer", "upgrade", "expect"] {
+            let request = OwnedRequest::new(TransportMethod::Post, "https://example.test/x")
+                .header(name, "value")
+                .body(b"body".to_vec());
+            assert!(
+                matches!(
+                    validate_request(&request, true),
+                    Err(TransportError::InvalidRequest { what: "request header name" })
+                ),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_response_contract_rejects_bad_status_and_framing() {
+        for status in [0, 199, 204, 302, 304, 600] {
+            assert!(normalize_response(
+                status,
+                [("content-length".to_string(), "0".to_string())],
+                Vec::new(),
+                16,
+                false,
+            )
+            .is_err(), "accepted status {status}");
+        }
+        for headers in [
+            vec![],
+            vec![("transfer-encoding".to_string(), "chunked".to_string())],
+            vec![("content-length".to_string(), "02".to_string())],
+            vec![
+                ("content-length".to_string(), "2".to_string()),
+                ("content-length".to_string(), "2".to_string()),
+            ],
+        ] {
+            assert!(normalize_response(200, headers, b"ok".to_vec(), 16, false).is_err());
+        }
+        assert!(normalize_response(
+            200,
+            [("content-length".to_string(), "3".to_string())],
+            b"ok".to_vec(),
+            16,
+            false,
+        )
+        .is_err());
     }
 }

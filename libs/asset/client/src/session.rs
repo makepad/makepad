@@ -22,7 +22,9 @@ use crate::api::ApiEndpoints;
 use crate::client::{AssetClient, ClientConfig};
 use crate::discovery::{content_client_caps, DiscoveryListener};
 use crate::error::{ClientError, ClientResult};
-use crate::location::{BaseUrl, ClientLocation, ClientMode};
+use crate::location::{
+    BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
+};
 use crate::runtime::{ClientRuntime, RuntimeConfig};
 use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
 use crate::util::now_ms;
@@ -177,10 +179,15 @@ impl SessionConnector {
         config.validate()?;
         if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
             return Err(ClientError::Unavailable {
-                capability: "static_site_session",
+                capability: CAPABILITY_STATIC_SITE_SESSION,
                 mode: ClientMode::StaticWeb,
             });
         }
+        let configured_endpoints = match config.location.as_ref() {
+            Some(ClientLocation::Native(endpoints)) => Some(*endpoints),
+            Some(ClientLocation::StaticSite(_)) => unreachable!(),
+            None => config.endpoints,
+        };
         let (tx, rx) = channel();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_worker = stopping.clone();
@@ -192,13 +199,13 @@ impl SessionConnector {
                 // ephemeral ports and UDP-announce the live pair; if the hint
                 // is stale, fall through to discovery instead of retrying a
                 // dead SocketAddr forever.
-                let mut allow_hint = config.endpoints.is_some();
+                let mut allow_hint = configured_endpoints.is_some();
                 loop {
                     if stop_worker.load(Ordering::Acquire) {
                         return;
                     }
                     let status = |s: SessionStatus| tx.send(SessionMsg::Status(s)).is_ok();
-                    let hinted = allow_hint.then_some(config.endpoints).flatten();
+                    let hinted = allow_hint.then_some(configured_endpoints).flatten();
                     let endpoints = match hinted {
                         Some(endpoints) => Some((endpoints, config.server_id)),
                         None => {
@@ -341,6 +348,7 @@ fn connect_all(
 ) -> Result<SessionHandles, String> {
     let client_config = |leaf: &str| {
         let mut c = ClientConfig::new(config.cache_parent.join(leaf));
+        c.location = Some(ClientLocation::Native(endpoints));
         c.token = config.token.clone();
         c
     };

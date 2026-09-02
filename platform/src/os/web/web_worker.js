@@ -139,7 +139,9 @@ onmessage = async function (e) {
             headers_ptr,
             headers_len,
             body_ptr,
-            body_len
+            body_len,
+            max_body_lo,
+            max_body_hi
         ) {
             let url = u8_to_string(url_ptr, url_len);
             let method = u8_to_string(method_ptr, method_len);
@@ -147,6 +149,7 @@ onmessage = async function (e) {
             let body = body_len > 0 ? u8_to_array(body_ptr, body_len) : undefined;
             let controller = new AbortController();
             let request_key = id_to_key(request_id_lo, request_id_hi);
+            let max_body = max_body_lo + max_body_hi * 4294967296;
             network_http_requests.set(request_key, controller);
 
             let headers = new Headers();
@@ -175,13 +178,41 @@ onmessage = async function (e) {
                 headers,
                 body,
                 signal: controller.signal,
+                redirect: "manual",
             }).then(async response => {
                 console.log("[makepad][http][req]", method, url);
                 let response_headers = "";
                 response.headers.forEach((value, key) => {
                     response_headers += `${key}: ${value}\r\n`;
                 });
-                let response_body = new Uint8Array(await response.arrayBuffer());
+                const declared = response.headers.get("content-length");
+                if (method !== "HEAD" && declared !== null && Number(declared) > max_body) {
+                    controller.abort();
+                    throw "response body exceeds configured limit";
+                }
+                let chunks = [];
+                let response_body_len = 0;
+                if (response.body !== null) {
+                    const reader = response.body.getReader();
+                    for (;;) {
+                        const item = await reader.read();
+                        if (item.done) {
+                            break;
+                        }
+                        response_body_len += item.value.byteLength;
+                        if (response_body_len > max_body) {
+                            controller.abort();
+                            throw "response body exceeds configured limit";
+                        }
+                        chunks.push(item.value);
+                    }
+                }
+                let response_body = new Uint8Array(response_body_len);
+                let body_at = 0;
+                for (const chunk of chunks) {
+                    response_body.set(chunk, body_at);
+                    body_at += chunk.byteLength;
+                }
                 let headers_u8 = string_to_u8(response_headers);
                 let body_u8 = array_to_u8(response_body);
                 console.log("[makepad][http][res]", response.status, url, response_body.length);

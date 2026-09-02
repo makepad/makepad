@@ -55,7 +55,7 @@ impl HttpMethod {
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     #[cfg_attr(feature = "script", live)]
     pub metadata_id: LiveId,
@@ -69,6 +69,10 @@ pub struct HttpRequest {
     pub ignore_ssl_cert: bool,
     #[cfg_attr(feature = "script", live)]
     pub is_streaming: bool,
+    /// Hard allocation cap enforced by the backend while bytes arrive.
+    /// Existing callers default to `u64::MAX`; bounded clients set it lower.
+    #[cfg_attr(feature = "script", live)]
+    pub max_response_body_bytes: u64,
     #[cfg_attr(feature = "script", live)]
     pub body: Option<Vec<u8>>,
     #[cfg_attr(feature = "script", live)]
@@ -84,6 +88,7 @@ impl HttpRequest {
             headers: BTreeMap::new(),
             ignore_ssl_cert: false,
             is_streaming: false,
+            max_response_body_bytes: u64::MAX,
             body: None,
             websocket_transport: WebSocketTransport::Auto,
         }
@@ -124,6 +129,10 @@ impl HttpRequest {
         self.is_streaming = true;
     }
 
+    pub fn set_max_response_body_bytes(&mut self, max_response_body_bytes: u64) {
+        self.max_response_body_bytes = max_response_body_bytes;
+    }
+
     pub fn set_metadata_id(&mut self, id: LiveId) {
         self.metadata_id = id;
     }
@@ -160,6 +169,12 @@ impl HttpRequest {
 
     pub fn set_websocket_transport(&mut self, transport: WebSocketTransport) {
         self.websocket_transport = transport;
+    }
+}
+
+impl Default for HttpRequest {
+    fn default() -> Self {
+        Self::new(String::new(), HttpMethod::GET)
     }
 }
 
