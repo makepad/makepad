@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+makepad-micro-serde = { path = "../../libs/micro_serde" }
 makepad-asset-client = { path = "../../libs/asset/client" }
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-store = { path = "../../libs/asset/store" }

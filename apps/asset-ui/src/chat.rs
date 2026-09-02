@@ -953,6 +953,7 @@ mod tests {
                 capabilities: Some(vec![domain.into()]),
                 vram_reserve_mb: Some(1024),
                 queue_limit: Some(4),
+                max_job_body_bytes: None,
                 fleet: None,
                 lanes: None,
             }),

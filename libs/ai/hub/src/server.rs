@@ -26,6 +26,19 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+const POST_MAX_SIZE: u64 = 128 * 1024 * 1024;
+/// A 20-minute, 44.1 kHz stereo PCM16 WAV is about 269 MiB after base64.
+/// Leave room for the JSON envelope while keeping ordinary POSTs bounded by
+/// `POST_MAX_SIZE`.
+pub const MAX_JOB_BODY_BYTES: u64 = 384 * 1024 * 1024;
+
+fn job_body_size_overrides() -> Vec<(String, u64)> {
+    vec![
+        ("/generate".to_string(), MAX_JOB_BODY_BYTES),
+        ("/jobs".to_string(), MAX_JOB_BODY_BYTES),
+    ]
+}
+
 pub struct ServiceConfig {
     /// Bind host, default "0.0.0.0" (the sandbox reaches boxes over LAN).
     pub host: String,
@@ -339,16 +352,13 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
 
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     // Character chains relay self-contained GLBs between mesh, rig, and
-    // motion nodes. A 2048 PBR atlas can make the base64 JSON request larger
-    // than the old 32 MiB image-oriented ceiling even when the game mesh is
-    // only ~20k triangles. Keep the bound finite, but size it for artifacts
-    // produced by this service rather than only for PNG inputs.
-    const POST_MAX_SIZE: u64 = 128 * 1024 * 1024;
+    // motion nodes. Keep their existing bound; only job submission accepts
+    // the larger stems envelope.
     let http_thread = start_http_server(HttpServer {
         listen_address: addr,
         request: request_tx,
         post_max_size: POST_MAX_SIZE,
-        post_max_size_overrides: Vec::new(),
+        post_max_size_overrides: job_body_size_overrides(),
         pre_admit_posts: false,
         client_ip_resolver: None,
         trusted_proxy: None,
@@ -1045,6 +1055,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         capabilities: Some(capabilities),
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
+        max_job_body_bytes: Some(MAX_JOB_BODY_BYTES),
         fleet: Some(shared.fleet.clone()),
         // What a live session on this build can be told. One entry today:
         // `seed_output`, a feed moving here from another box handing over the
@@ -2562,6 +2573,66 @@ mod lifecycle_tests {
         assert!(String::from_utf8(health.body)
             .unwrap()
             .contains("\"auth_required\":false"));
+    }
+
+    #[test]
+    fn stems_sized_posts_are_admitted_only_on_job_endpoints() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let wav_bytes = 44 + 44_100u64 * 60 * 20 * 4;
+        let stems_body_bytes = wav_bytes.div_ceil(3) * 4 + 4096;
+        assert!(stems_body_bytes > POST_MAX_SIZE);
+        assert!(stems_body_bytes <= MAX_JOB_BODY_BYTES);
+
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let (request_tx, request_rx) = mpsc::channel();
+        let _server = start_http_server(HttpServer {
+            listen_address: addr,
+            request: request_tx,
+            post_max_size: POST_MAX_SIZE,
+            post_max_size_overrides: job_body_size_overrides(),
+            pre_admit_posts: true,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .unwrap();
+
+        let handler = std::thread::spawn(move || {
+            let HttpServerRequest::PostPending { headers, body, .. } = request_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("large job POST was not admitted")
+            else {
+                panic!("job POST bypassed pre-admission");
+            };
+            assert_eq!(headers.path, "/generate");
+            assert_eq!(body.content_length, stems_body_bytes as usize);
+            body.reject(HttpServerResponse::new(
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string(),
+                Vec::new(),
+            ));
+        });
+
+        let request = |path: &str| {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(
+                stream,
+                "POST {path} HTTP/1.1\r\nHost: test\r\nContent-Length: {stems_body_bytes}\r\n\r\n"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        assert!(request("/generate").starts_with("HTTP/1.1 204"));
+        handler.join().unwrap();
+        assert!(request("/other").starts_with("HTTP/1.1 413"));
     }
 
     #[test]

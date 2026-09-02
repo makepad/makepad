@@ -167,7 +167,7 @@ impl ContentProvider for LocalService {
         domain: Domain,
         request: &GenerateRequestJson,
     ) -> Result<String, AssetAiError> {
-        let mut request = request.clone();
+        let mut request_with_model = None;
         if request.model.is_empty() {
             let models = self.list_models()?;
             let chosen = models
@@ -180,8 +180,11 @@ impl ContentProvider for LocalService {
                         self.base_url
                     ))
                 })?;
-            request.model = chosen.id.clone();
+            let mut owned = request.clone();
+            owned.model = chosen.id.clone();
+            request_with_model = Some(owned);
         }
+        let request = request_with_model.as_ref().unwrap_or(request);
         let url = format!("{}/generate", self.base_url);
         let body = request.serialize_json();
         let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
