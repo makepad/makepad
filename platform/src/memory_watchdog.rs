@@ -108,9 +108,9 @@ fn orphaned_stdin_app() -> bool {
 /// The host owns the child's whole reason to run: it draws into the host's
 /// swapchain and its only input is the host's message stream. When the host
 /// dies the child must follow, and its own event loop cannot be trusted to
-/// notice — a busy handler (an mpterm tile parsing a `yes` flood) can sit
+/// notice — a busy handler (an terminal tile parsing a `yes` flood) can sit
 /// between two socket reads for minutes, which is exactly how orphans that
-/// burn a core were surviving their mpwm. This is a separate, tiny thread so
+/// burn a core were surviving their wm. This is a separate, tiny thread so
 /// the check keeps running no matter what the event loop is doing, and it is
 /// independent of the (opt-in) memory watchdog, which almost no app starts.
 pub fn start_stdin_orphan_watchdog() {

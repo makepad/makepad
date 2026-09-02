@@ -1,7 +1,7 @@
 //! The `h3` backend: video domain — MiniMax H3 text-to-video(+audio) through
 //! the in-repo port in libs/diffusion (`h3_pipeline` on the makepad-ggml CUDA
 //! stack), muxed to mp4 by the platform hardware video encoder
-//! (`makepad_video`: Media Foundation/NVENC on Windows, VideoToolbox on
+//! (`makepad_video` from `makepad-platform-video`: Media Foundation/NVENC on Windows, VideoToolbox on
 //! macOS). No python, no ffmpeg, no full UI platform crate.
 //!
 //! Layering (kokoro pattern, one level deeper):

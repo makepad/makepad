@@ -376,7 +376,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
-        mp_theme::apply(vm);
+        makepad_wm_theme::apply(vm);
         Palette::shared().install(vm);
         self::script_mod(vm)
     }

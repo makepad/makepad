@@ -6,7 +6,7 @@
 //!
 //! **UNVERIFIED — cross-compiled only, never run.** There is no Windows
 //! machine in this agent's environment; this file has only ever been
-//! `cargo check -p makepad-video --target x86_64-pc-windows-msvc`-checked
+//! `cargo check -p makepad-platform-video --target x86_64-pc-windows-msvc`-checked
 //! (type/signature validation only — it cannot catch COM/HRESULT semantic
 //! bugs). Treat it as a first draft that needs real Windows testing.
 //!

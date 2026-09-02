@@ -1,7 +1,7 @@
 //! The app side: a port that exposes one service to whichever host is there.
 //!
 //! An app builds its manifest and opens a port. Hosted by the window manager
-//! (`--stdin-loop` under mpwm) the port registers over the studio protocol
+//! (`--stdin-loop` under wm) the port registers over the studio protocol
 //! and calls arrive as `Event::Custom` frames. Embedding the chat panel
 //! itself, the app opens an in-process port and hands the matching
 //! [`ServiceLink`] to its own engine's registry. Either way the app sees the

@@ -2,7 +2,7 @@
 //! (`VideoStreamEncoder` / `VideoStreamDecoder`, VideoToolbox on macOS /
 //! an H.264 MFT on Windows). Only run for real on macOS (the platform this
 //! agent can execute on) — see the `#[cfg]` gate below. The Windows backend
-//! is compile-checked only (`cargo check -p makepad-video --target
+//! is compile-checked only (`cargo check -p makepad-platform-video --target
 //! x86_64-pc-windows-msvc`), never exercised by this test.
 
 use makepad_video::{
