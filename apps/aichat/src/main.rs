@@ -64,8 +64,15 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        // Bus frames reach the panel through its own handle_event; the
-        // WM's own frames are not ours to act on here yet.
+        // Bus frames reach the panel through its own handle_event; of the
+        // WM's own frames only the polite close is ours (the pane hides us
+        // by leaving us running; this is the desktop going down).
+        if let Event::Custom(json) = event {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
+                cx.quit();
+                return;
+            }
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
