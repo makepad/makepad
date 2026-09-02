@@ -61,11 +61,9 @@ pub fn resolve(base: SessionConfig) -> Resolved {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn resolve(_base: SessionConfig) -> Resolved {
-    let base = makepad_asset_client::BaseUrl::parse("https://makepad.nl/vj/store/")
-        .expect("valid built-in VJ static-store URL");
+pub fn resolve(base: SessionConfig) -> Resolved {
     Resolved {
-        config: SessionConfig::static_site(base),
+        config: base,
         local: None,
         note: "web catalog at https://makepad.nl/vj/store/".to_string(),
     }

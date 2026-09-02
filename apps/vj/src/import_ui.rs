@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 /// What the panel is doing right now.
@@ -187,6 +188,7 @@ impl ImportPanel {
     /// Begin an import. `endpoints`/`token`/`server_id` come from the live
     /// session, so the worker talks to exactly the store the UI is showing —
     /// embedded or remote, it makes no difference here.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(
         &mut self,
         endpoints: ApiEndpoints,
@@ -227,6 +229,17 @@ impl ImportPanel {
             })
             .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn start(
+        &mut self,
+        _endpoints: ApiEndpoints,
+        _server_id: [u8; 16],
+        _token: Option<String>,
+        _cache_parent: PathBuf,
+    ) -> Result<(), String> {
+        Err(self.refuse("folder import unavailable on web"))
     }
 
     fn refuse(&mut self, why: impl Into<String>) -> String {
