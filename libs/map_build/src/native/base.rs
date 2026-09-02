@@ -1,6 +1,7 @@
 //! `pbf-base`: build ONE archive holding renderer-compatible base layers at
-//! z0..=14 plus the all-tag detail layers at z14, straight from the existing
-//! pbf-detail store (no PBF re-ingest), with per-archive tile compression.
+//! z0..=14 plus renderer-consumed detail layers at z14, straight from the
+//! existing pbf-detail store (no PBF re-ingest), with per-archive tile
+//! compression. `--full` preserves the former all-tag detail profile.
 //!
 //! Pipeline:
 //! 1. Validate the store's completion marker against the source PBF.
@@ -18,8 +19,8 @@
 
 use super::geom::TILE_BUFFER;
 use super::mvt::{
-    encode_tile, read_protobuf_bytes, read_protobuf_key, skip_protobuf_value, GeometryType,
-    Layer, OsmType, TileFeature, TilePoint,
+    encode_tile, encode_tile_with_profile, read_protobuf_bytes, read_protobuf_key,
+    skip_protobuf_value, GeometryType, Layer, OsmType, TileFeature, TilePoint,
 };
 use super::schema::{
     base_specs, dissolve_polygon_features, downsample_paths, exact_clip_to_tile,
@@ -57,6 +58,9 @@ pub struct BaseOptions {
     pub max_zoom: u8,
     pub sort_memory_mib: usize,
     pub baseline: Option<ProgressBaseline>,
+    /// Preserve all raw detail tags and __makepad_osm_* provenance. The
+    /// default archive contains only fields read by the renderer.
+    pub full: bool,
 }
 
 /// Reference numbers from existing gzip archives covering the same extract,
@@ -108,6 +112,7 @@ pub fn default_base_options(source: PathBuf, output: PathBuf, store: PathBuf) ->
         max_zoom: DETAIL_ZOOM,
         sort_memory_mib: 128,
         baseline: None,
+        full: false,
     }
 }
 
@@ -363,6 +368,7 @@ fn build_tile(
     features: Vec<TileFeature>,
     pyramid_top: u8,
     emit_detail_zoom: bool,
+    full: bool,
 ) -> Result<TileBuild, String> {
     let mut combined: Vec<TileFeature> = Vec::with_capacity(features.len() + 8);
     let mut frags = Vec::new();
@@ -434,7 +440,7 @@ fn build_tile(
         // overlays must be rebaked against archives built with this
         // (stale joins fail closed via the endpoint identity check).
         let combined = merge_features_by_tags(combined, DETAIL_ZOOM);
-        encode_tile(combined)?
+        encode_tile_with_profile(combined, full)?
     } else {
         Vec::new()
     };
@@ -611,6 +617,7 @@ fn sample_tiles(
     emit_detail_zoom: bool,
     tile_bounds: Option<TileBounds>,
     live_spool: bool,
+    full: bool,
 ) -> Result<Vec<Vec<u8>>, String> {
     let block_count = blocks.len().min(DICT_SAMPLE_BLOCKS).max(1);
     let per_block = DICT_SAMPLE_TILES / block_count;
@@ -631,6 +638,7 @@ fn sample_tiles(
                     emit_detail_zoom,
                     tile_bounds,
                     live_spool,
+                    full,
                 )
             }));
         }
@@ -662,6 +670,7 @@ fn sample_block(
     emit_detail_zoom: bool,
     tile_bounds: Option<TileBounds>,
     live_spool: bool,
+    full: bool,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut samples = Vec::new();
     {
@@ -678,7 +687,7 @@ fn sample_block(
                 return Ok(());
             }
             taken += 1;
-            let build = build_tile(x, y, features, pyramid_top, emit_detail_zoom)?;
+            let build = build_tile(x, y, features, pyramid_top, emit_detail_zoom, full)?;
             // Partial pyramid tiles from every 4th sample.
             if taken % 4 == 0 {
                 let mut per_zoom_tile =
@@ -1074,8 +1083,14 @@ fn run_phase1(
                     let Ok(job) = job else {
                         return Ok(());
                     };
-                    let build =
-                        build_tile(job.x, job.y, job.features, pyramid_top, emit_detail_zoom)?;
+                    let build = build_tile(
+                        job.x,
+                        job.y,
+                        job.features,
+                        pyramid_top,
+                        emit_detail_zoom,
+                        options.full,
+                    )?;
                     stats.tiles_done.fetch_add(1, Ordering::Relaxed);
                     if let Some(sample) = sample_out {
                         if !build.mvt14.is_empty()
@@ -1665,6 +1680,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
             emit_detail_zoom,
             tile_bounds,
             live_spool,
+            options.full,
         )?;
         let dictionary = build_dictionary(&samples)?;
         let ab =
@@ -1774,7 +1790,12 @@ fn archive_metadata(
         ("name".to_string(), "Makepad OSM base+detail".to_string()),
         (
             "description".to_string(),
-            "Single-origin OpenStreetMap archive: shortbread-style base layers z0-14 plus all-tag detail layers at z14".to_string(),
+            if options.full {
+                "Single-origin OpenStreetMap archive: shortbread-style base layers z0-14 plus all-tag detail layers at z14"
+            } else {
+                "Single-origin OpenStreetMap archive: shortbread-style base layers z0-14 plus renderer-consumed detail layers at z14"
+            }
+            .to_string(),
         ),
         ("type".to_string(), "baselayer".to_string()),
         ("version".to_string(), "1".to_string()),
@@ -1819,14 +1840,22 @@ fn archive_metadata(
         ),
     ];
     if options.max_zoom == DETAIL_ZOOM {
-        metadata.push(("makepad_all_osm_tags".to_string(), "true".to_string()));
+        metadata.push((
+            "makepad_all_osm_tags".to_string(),
+            options.full.to_string(),
+        ));
         metadata.push((
             "makepad_detail_zoom".to_string(),
             DETAIL_ZOOM.to_string(),
         ));
         metadata.push((
             "makepad_2_5d_tags".to_string(),
-            "building,building:part,height,min_height,building:levels,building:min_level,roof:shape,roof:height,roof:levels,roof:direction,roof:orientation,roof:angle,building:material,building:colour,roof:material,roof:colour".to_string(),
+            if options.full {
+                "building,building:part,height,min_height,building:levels,building:min_level,roof:shape,roof:height,roof:levels,roof:direction,roof:orientation,roof:angle,building:material,building:colour,roof:material,roof:colour"
+            } else {
+                "building,building:part,height,min_height,building:levels,building:min_level"
+            }
+            .to_string(),
         ));
     }
     let mut vector_layers = vec![

@@ -50,7 +50,7 @@ pub fn production_archive_present() -> bool {
 /// What the worker thread sends back.
 enum BakeMsg {
     Progress(Report),
-    Done,
+    Done { skipped: usize },
     Failed(String),
 }
 
@@ -260,11 +260,15 @@ impl TestMapBuild {
                         self.push_log(report.line);
                     }
                 }
-                BakeMsg::Done => {
+                BakeMsg::Done { skipped } => {
                     self.sink = None;
                     self.stage = Stage::Done;
                     self.fraction = 1.0;
-                    self.headline = "Test map ready".to_string();
+                    self.headline = if skipped == 0 {
+                        "Test map ready".to_string()
+                    } else {
+                        format!("Test map built, {skipped} tiles skipped")
+                    };
                 }
                 BakeMsg::Failed(error) => {
                     self.sink = None;
@@ -297,16 +301,17 @@ impl TestMapBuild {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
             //
-            // Caught, not propagated: the face pass reports a corrupt tile
-            // by panicking inside its worker pool, and an uncaught panic
-            // here would take this thread out with the channel still open —
-            // a popup frozen at 63% forever. A failed bake must SAY so.
+            // A pass-level panic must still reach the popup with its actual
+            // payload. Tile-local face failures are caught lower down and
+            // return as successful builds with a skipped count.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 testmap::bake(&options, &mut NoFetch)
             }))
-            .unwrap_or_else(|_| Err("bake panicked — see the log".to_string()));
+            .unwrap_or_else(|payload| {
+                Err(format!("bake panicked: {}", testmap::panic_message(payload)))
+            });
             let _ = done.send(match result {
-                Ok(()) => BakeMsg::Done,
+                Ok(stats) => BakeMsg::Done { skipped: stats.skipped_tiles },
                 Err(error) => BakeMsg::Failed(error),
             });
         });

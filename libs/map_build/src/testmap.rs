@@ -144,6 +144,9 @@ pub struct BakeOptions {
     /// roughly two thirds, and is what makes the tilted view draw cheaply.
     /// Ignored without the `faces` feature.
     pub faces: bool,
+    /// Preserve the complete archival tag payload. The default keeps only
+    /// renderer-consumed detail tags; this is for archival/world builds.
+    pub full: bool,
 }
 
 impl BakeOptions {
@@ -155,7 +158,25 @@ impl BakeOptions {
             brotli_quality: 11,
             keep_store: false,
             faces: true,
+            full: false,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BakeStats {
+    pub skipped_tiles: usize,
+}
+
+/// Recover the useful text from a caught panic instead of replacing it with
+/// a generic "see the log" message at a host boundary.
+pub fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic with non-string payload".to_string()
     }
 }
 
@@ -196,7 +217,7 @@ impl Fetch for NoFetch {
 /// Re-entrant in the useful sense — every stage skips itself when its
 /// output is already on disk, so a bake interrupted after the download (or
 /// after the archive) resumes rather than repeats.
-pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> {
+pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<BakeStats, String> {
     let started = Instant::now();
     let paths = &options.paths;
     if let Some(dir) = paths.archive.parent() {
@@ -207,7 +228,7 @@ pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> 
     detail_stage(options)?;
     base_stage(options)?;
     nav_stage(options)?;
-    faces_stage(options)?;
+    let skipped_tiles = faces_stage(options)?;
 
     if !options.keep_store && paths.store.exists() {
         // Only now, with every artifact written and verified present: the
@@ -224,7 +245,7 @@ pub fn bake(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> 
         started.elapsed().as_secs_f64(),
         paths.bytes_on_disk() as f64 / (1024.0 * 1024.0 * 1024.0)
     );
-    Ok(())
+    Ok(BakeStats { skipped_tiles })
 }
 
 fn fetch_stage(options: &BakeOptions, fetch: &mut dyn Fetch) -> Result<(), String> {
@@ -285,6 +306,7 @@ fn detail_stage(options: &BakeOptions) -> Result<(), String> {
     );
     detail.zoom = options.zoom;
     detail.no_tiles = true;
+    detail.full = options.full;
     native::convert_detail(detail)
 }
 
@@ -306,6 +328,7 @@ fn base_stage(options: &BakeOptions) -> Result<(), String> {
     );
     base.brotli_quality = options.brotli_quality;
     base.max_zoom = options.zoom;
+    base.full = options.full;
     native::convert_base(base)?;
     fs::rename(&partial, &paths.archive)
         .map_err(|e| format!("rename {}: {e}", partial.display()))
@@ -334,14 +357,14 @@ fn nav_stage(options: &BakeOptions) -> Result<(), String> {
 /// and renamed, so a machine that loses power mid-bake still has the
 /// working archive it had before.
 #[cfg(feature = "faces")]
-fn faces_stage(options: &BakeOptions) -> Result<(), String> {
+fn faces_stage(options: &BakeOptions) -> Result<usize, String> {
     let archive = &options.paths.archive;
     if !options.faces {
-        return Ok(());
+        return Ok(0);
     }
     if crate::faces::archive_has_faces(archive) {
         crate::step!("faces", "archive already carries baked faces");
-        return Ok(());
+        return Ok(0);
     }
     crate::step!(
         "faces",
@@ -349,25 +372,48 @@ fn faces_stage(options: &BakeOptions) -> Result<(), String> {
     );
     let partial = archive.with_extension("faces.partial.mbtiles");
     let _ = fs::remove_file(&partial);
-    let face_options =
+    let mut face_options =
         crate::faces::default_face_bake_options(archive.clone(), partial.clone());
+    face_options.full = options.full;
     let stats = crate::faces::bake_faces(&face_options)?;
-    if stats.total == 0 {
+    if stats.baked == 0 {
         let _ = fs::remove_file(&partial);
-        return Err("face bake produced an empty archive".to_string());
+        return Err(format!(
+            "face bake produced zero baked tiles ({} skipped)",
+            stats.skipped.len()
+        ));
     }
-    fs::rename(&partial, archive).map_err(|e| format!("rename {}: {e}", partial.display()))
+    if !stats.skipped.is_empty() {
+        crate::note!(
+            "faces",
+            "  faces: {} tiles skipped; renderer fallback will handle them",
+            stats.skipped.len()
+        );
+        for (key, reason) in stats.skipped.iter().take(5) {
+            crate::note!(
+                "faces",
+                "  skipped {}/{}/{}: {}",
+                key.z,
+                key.x,
+                key.y,
+                reason
+            );
+        }
+    }
+    fs::rename(&partial, archive)
+        .map_err(|e| format!("rename {}: {e}", partial.display()))?;
+    Ok(stats.skipped.len())
 }
 
 #[cfg(not(feature = "faces"))]
-fn faces_stage(options: &BakeOptions) -> Result<(), String> {
+fn faces_stage(options: &BakeOptions) -> Result<usize, String> {
     if options.faces {
         crate::note!(
             "faces",
             "  faces not baked: this build has no renderer (feature `faces` off)"
         );
     }
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -382,6 +428,12 @@ mod tests {
         assert_eq!(paths.graph(), PathBuf::from("/tmp/maps/amsterdam.graph"));
         assert_eq!(paths.search(), PathBuf::from("/tmp/maps/amsterdam.search"));
         assert!(!paths.is_complete());
+    }
+
+    #[test]
+    fn caught_panic_keeps_its_message() {
+        let panic = std::panic::catch_unwind(|| panic!("bad tile ring"));
+        assert_eq!(panic_message(panic.unwrap_err()), "bad tile ring");
     }
 
     #[test]
