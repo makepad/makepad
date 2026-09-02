@@ -26,6 +26,19 @@ impl DecodedFrame {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MftDecodeLoopAction {
+    ProcessOutput { caller_must_allocate: bool },
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn next_mft_decode_loop_action(output_negotiated: bool, provides_samples: bool) -> MftDecodeLoopAction {
+    MftDecodeLoopAction::ProcessOutput {
+        caller_must_allocate: output_negotiated && !provides_samples,
+    }
+}
+
 #[cfg(target_os = "macos")]
 use crate::apple_stream_decoder::AppleStreamDecoder as OsStreamDecoder;
 #[cfg(target_os = "windows")]
@@ -79,5 +92,20 @@ impl VideoStreamDecoder {
         return self.os.flush();
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         return Ok(Vec::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_mft_decode_loop_action, MftDecodeLoopAction};
+
+    #[test]
+    fn accepted_input_without_output_negotiation_still_pulls_output() {
+        assert_eq!(
+            next_mft_decode_loop_action(false, false),
+            MftDecodeLoopAction::ProcessOutput {
+                caller_must_allocate: false,
+            }
+        );
     }
 }

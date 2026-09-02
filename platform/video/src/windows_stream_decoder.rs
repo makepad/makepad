@@ -19,7 +19,7 @@
 //! output format; `renegotiate_output_type` handles that by walking `Get
 //! OutputAvailableType` for an NV12 entry and calling `SetOutputType`.
 
-use crate::stream_decoder::DecodedFrame;
+use crate::stream_decoder::{next_mft_decode_loop_action, DecodedFrame, MftDecodeLoopAction};
 use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft::{
@@ -32,7 +32,8 @@ use windows::{
     core::GUID,
     Win32::Media::MediaFoundation::{
         IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-        MFVideoFormat_H264, MFVideoFormat_NV12, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+        MFVideoFormat_H264, MFVideoFormat_NV12, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
+        MF_MT_SUBTYPE,
     },
     Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
 };
@@ -78,6 +79,7 @@ pub struct WindowsStreamDecoder {
     output_buffer_size: u32,
     width: u32,
     height: u32,
+    output_stride: usize,
     pending_pts: VecDeque<i64>,
 }
 
@@ -104,6 +106,7 @@ impl WindowsStreamDecoder {
             output_buffer_size: 0,
             width: 0,
             height: 0,
+            output_stride: 0,
             pending_pts: VecDeque::new(),
         })
     }
@@ -115,7 +118,7 @@ impl WindowsStreamDecoder {
     fn renegotiate_output_type(&mut self) -> Result<(), VideoFileError> {
         unsafe {
             let mut chosen = None;
-            for index in 0..16u32 {
+            for index in 0.. {
                 let Ok(candidate) = windows_mft::get_output_available_type(&self.transform, index) else {
                     break;
                 };
@@ -131,10 +134,15 @@ impl WindowsStreamDecoder {
                     "windows stream decoder: no NV12 output type offered by CMSH264DecoderMFT",
                 ));
             };
+            windows_mft::set_output_type(&self.transform, &chosen_type).map_err(|e| hr_err("SetOutputType(NV12)", e))?;
             let packed = chosen_type.GetUINT64(&MF_MT_FRAME_SIZE).map_err(|e| hr_err("GetUINT64(FRAME_SIZE)", e))?;
             self.width = (packed >> 32) as u32;
             self.height = (packed & 0xFFFF_FFFF) as u32;
-            windows_mft::set_output_type(&self.transform, &chosen_type).map_err(|e| hr_err("SetOutputType(NV12)", e))?;
+            self.output_stride = chosen_type
+                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                .map(|stride| (stride as i32).unsigned_abs() as usize)
+                .unwrap_or(self.width as usize)
+                .max(self.width as usize);
             let stream_info =
                 windows_mft::get_output_stream_info(&self.transform).map_err(|e| hr_err("GetOutputStreamInfo", e))?;
             self.provides_samples = stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES != 0;
@@ -158,15 +166,22 @@ impl WindowsStreamDecoder {
         self.drain_available()
     }
 
+    /// Drives the MFT's pull side after input is accepted. Even before an
+    /// output type is known, `ProcessOutput(None)` must run: that is how the
+    /// decoder reports `MF_E_TRANSFORM_STREAM_CHANGE`. A stream change
+    /// selects a supported type and refreshes dimensions, stride, allocation
+    /// mode, and buffer size before retrying. Need-more-input ends the pump;
+    /// every successful output keeps draining until that point.
     fn drain_available(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
         let mut frames = Vec::new();
         loop {
-            if !self.output_negotiated {
-                // Nothing to pull yet — the decoder hasn't told us its
-                // output format (needs SPS/PPS + at least one VCL NAL).
-                break;
-            }
-            let provided = if self.provides_samples { None } else { Some(make_output_sample(self.output_buffer_size)?) };
+            let MftDecodeLoopAction::ProcessOutput { caller_must_allocate } =
+                next_mft_decode_loop_action(self.output_negotiated, self.provides_samples);
+            let provided = if caller_must_allocate {
+                Some(make_output_sample(self.output_buffer_size)?)
+            } else {
+                None
+            };
             let (hr, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
             if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
                 break;
@@ -178,11 +193,31 @@ impl WindowsStreamDecoder {
             if hr.is_err() {
                 return Err(VideoFileError::with_code("IMFTransform::ProcessOutput", hr.0));
             }
+            self.output_negotiated = true;
             let Some(sample) = sample else { break };
             let buffer = unsafe { sample.ConvertToContiguousBuffer() }.map_err(|e| hr_err("ConvertToContiguousBuffer", e))?;
             let (mut ptr, mut len) = (std::ptr::null_mut(), 0u32);
             unsafe { buffer.Lock(&mut ptr, None, Some(&mut len)) }.map_err(|e| hr_err("Lock(out)", e))?;
-            let nv12 = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            let width = self.width as usize;
+            let height = self.height as usize;
+            let uv_height = height.div_ceil(2);
+            let stride = self.output_stride.max(width);
+            let mut nv12 = vec![0u8; width * (height + uv_height)];
+            if stride * (height + uv_height) <= bytes.len() {
+                for row in 0..height {
+                    nv12[row * width..(row + 1) * width]
+                        .copy_from_slice(&bytes[row * stride..row * stride + width]);
+                }
+                for row in 0..uv_height {
+                    let src = (height + row) * stride;
+                    let dst = (height + row) * width;
+                    nv12[dst..dst + width].copy_from_slice(&bytes[src..src + width]);
+                }
+            } else {
+                let copy_len = nv12.len().min(bytes.len());
+                nv12[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            }
             unsafe { buffer.Unlock() }.map_err(|e| hr_err("Unlock(out)", e))?;
             let pts_100ns = self.pending_pts.pop_front().unwrap_or(0);
             frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns });
