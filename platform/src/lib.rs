@@ -1,5 +1,6 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod gl_render_bridge;
+pub mod home;
 pub mod os;
 
 #[macro_use]
@@ -18,6 +19,7 @@ pub mod audio;
 pub mod midi;
 pub mod script;
 pub mod thread;
+pub mod storage;
 pub mod video;
 pub mod gpu_texture;
 
@@ -174,6 +176,7 @@ pub use {
             MouseMoveEvent,
             MouseUpEvent,
             NetworkResponsesEvent,
+            StorageResponsesEvent,
             NextFrame,
             NextFrameEvent,
             QuitReason,
@@ -234,6 +237,11 @@ pub use {
         script::vm::*,
         screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
+        storage::{
+            StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
+            StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
+            MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
+        },
         texture::{
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,

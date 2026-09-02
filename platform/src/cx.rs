@@ -22,6 +22,7 @@ use {
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         sploded::SplodedView,
+        storage::StorageState,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
@@ -100,6 +101,7 @@ pub struct Cx {
     pub(crate) timer_id: u64,
     pub(crate) next_frame_id: u64,
     pub(crate) permissions_request_id: i32,
+    pub(crate) storage_state: StorageState,
 
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
@@ -509,6 +511,7 @@ impl Cx {
             timer_id: 1,
             next_frame_id: 1,
             permissions_request_id: 0,
+            storage_state: StorageState::default(),
 
             keyboard: Default::default(),
             fingers: Default::default(),

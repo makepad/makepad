@@ -223,6 +223,7 @@ impl Cx {
     }
 
     pub(crate) fn dispatch_network_runtime_events(&mut self) {
+        self.dispatch_storage_responses();
         use crate::makepad_math::dvec2;
         use crate::window::CxWindowPool;
 

@@ -16,6 +16,7 @@ pub use game_input::*;
 pub use keyboard::*;
 pub use location::*;
 pub use network::*;
+pub use crate::storage::StorageResponsesEvent;
 pub use video_playback::*;
 pub use window::*;
 pub use xr::*;

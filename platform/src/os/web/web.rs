@@ -13,6 +13,10 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
+        storage::{
+            StorageError, StorageList, StorageOp, StorageRequestId, StorageRequestKind,
+            StorageResult, StorageStat,
+        },
         thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
@@ -106,6 +110,7 @@ impl Cx {
         self.reset_event_dispatch_state();
         let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         let mut network_responses = Vec::new();
+        let mut storage_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
         let mut is_animation_frame = None;
@@ -233,6 +238,48 @@ impl Cx {
                     let response = response.borrow_mut().take();
                     if let Some(response) = response {
                         self.os.from_wasm(FromWasmTextCopyResponse { response });
+                    }
+                }
+
+                live_id!(ToWasmStorageResult) => {
+                    let tw = ToWasmStorageResult::read_to_wasm(&mut to_wasm);
+                    let request_id = StorageRequestId(
+                        tw.request_id_lo as u64 | ((tw.request_id_hi as u64) << 32),
+                    );
+                    let Some(op) = StorageOp::from_u32(tw.op) else {
+                        if let Some(response) = self.finish_web_storage_protocol_error(
+                            request_id,
+                            format!("storage response had unknown operation {}", tw.op),
+                        ) {
+                            storage_responses.push(response);
+                        }
+                        to_wasm.block_skip(skip);
+                        continue;
+                    };
+                    let result = if !tw.error.is_empty() {
+                        Err(StorageError::Backend(tw.error))
+                    } else {
+                        Ok(match op {
+                            StorageOp::Get | StorageOp::GetRange => StorageResult::Value(
+                                tw.found.then(|| tw.value.into_vec_u8()),
+                            ),
+                            StorageOp::Set | StorageOp::Delete => StorageResult::Unit,
+                            StorageOp::List => StorageResult::List(StorageList {
+                                keys: tw.keys,
+                                next_cursor: tw.has_next.then_some(tw.next),
+                            }),
+                            StorageOp::Stat => StorageResult::Stat(tw.found.then_some(
+                                StorageStat {
+                                    len: tw.length_lo as u64
+                                        | ((tw.length_hi as u64) << 32),
+                                },
+                            )),
+                        })
+                    };
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, result)
+                    {
+                        storage_responses.push(response);
                     }
                 }
 
@@ -567,6 +614,10 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
+        if !storage_responses.is_empty() {
+            self.call_event_handler(&Event::Storage(storage_responses));
+        }
+
         self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
@@ -751,6 +802,88 @@ impl Cx {
                         request_id_lo: request_id.lo(),
                         request_id_hi: request_id.hi(),
                     });
+                }
+                CxOsOp::StorageRequest(request) => {
+                    let request_id_lo = request.request_id.0 as u32;
+                    let request_id_hi = (request.request_id.0 >> 32) as u32;
+                    let namespace = request.namespace;
+                    match request.kind {
+                        StorageRequestKind::Get { key } => {
+                            self.os.from_wasm(FromWasmStorageGet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::Set { key, value } => {
+                            self.os.from_wasm(FromWasmStorageSet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                value: WasmDataU8::from_vec_u8(value),
+                            });
+                        }
+                        StorageRequestKind::Delete { key } => {
+                            self.os.from_wasm(FromWasmStorageDelete {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::List {
+                            prefix,
+                            after,
+                            limit,
+                        } => {
+                            let has_after = after.is_some();
+                            self.os.from_wasm(FromWasmStorageList {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                prefix,
+                                after: after.unwrap_or_default(),
+                                has_after,
+                                limit,
+                            });
+                        }
+                        StorageRequestKind::GetRange {
+                            key,
+                            offset,
+                            len,
+                        } => {
+                            self.os.from_wasm(FromWasmStorageGetRange {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                offset_lo: offset as u32,
+                                offset_hi: (offset >> 32) as u32,
+                                len,
+                            });
+                        }
+                        StorageRequestKind::Stat { key } => {
+                            self.os.from_wasm(FromWasmStorageStat {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                    }
+                }
+                CxOsOp::StorageRequestError {
+                    request_id,
+                    op,
+                    error,
+                } => {
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, Err(error))
+                    {
+                        self.call_event_handler(&Event::Storage(vec![response]));
+                    }
                 }
                 CxOsOp::CheckPermission {
                     permission,
@@ -956,6 +1089,7 @@ impl CxOsApi for Cx {
             ToWasmKeyUp::to_js_code(),
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
+            ToWasmStorageResult::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
@@ -995,6 +1129,12 @@ impl CxOsApi for Cx {
             FromWasmSetDocumentTitle::to_js_code(),
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
+            FromWasmStorageGet::to_js_code(),
+            FromWasmStorageSet::to_js_code(),
+            FromWasmStorageDelete::to_js_code(),
+            FromWasmStorageList::to_js_code(),
+            FromWasmStorageGetRange::to_js_code(),
+            FromWasmStorageStat::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
