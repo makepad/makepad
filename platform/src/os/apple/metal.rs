@@ -242,7 +242,7 @@ impl Cx {
                     let instance_bytes = (draw_item.instances.as_ref().unwrap().len()
                         * std::mem::size_of::<f32>())
                         as u64;
-                    if instance_bytes > 524_288 && std::env::var_os("MPPRESENT").is_some() {
+                    if instance_bytes > 524_288 && std::env::var_os("MAKEPAD_PRESENT").is_some() {
                         crate::log!(
                             "MPUPLOAD list {:?} item {} — {:.1}MB re-uploaded",
                             draw_list_id,
@@ -4330,7 +4330,7 @@ mod vec_upload_tests {
 }
 
 
-/// `MPPRESENT=1`: once a second, how many drawables were actually presented
+/// `MAKEPAD_PRESENT=1`: once a second, how many drawables were actually presented
 /// and the worst gap between two of them — the number the eye sees, below
 /// every app-side clock. Costs one env check when off.
 /// CPU encode seconds and uploaded bytes per pass, summed on the main
@@ -4355,12 +4355,12 @@ fn present_gpu_time(seconds: f64) {
     GPU_MAX_US.fetch_max(us, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// MPPRESENT=1: stamp when an input event arrived; the next present logs
+/// MAKEPAD_PRESENT=1: stamp when an input event arrived; the next present logs
 /// the input→glass latency. THE number behind "the first letter hangs".
 static INPUT_AT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn note_input_event() {
-    if std::env::var_os("MPPRESENT").is_none() {
+    if std::env::var_os("MAKEPAD_PRESENT").is_none() {
         return;
     }
     let now = std::time::SystemTime::now()
@@ -4378,7 +4378,7 @@ pub(crate) fn note_input_event() {
 fn present_pulse() {
     use std::cell::Cell;
     thread_local! {
-        static ON: bool = std::env::var("MPPRESENT").is_ok();
+        static ON: bool = std::env::var("MAKEPAD_PRESENT").is_ok();
         static LAST: Cell<f64> = const { Cell::new(0.0) };
         static SINCE: Cell<f64> = const { Cell::new(0.0) };
         static COUNT: Cell<u32> = const { Cell::new(0) };
@@ -4420,7 +4420,7 @@ fn present_pulse() {
                 let up_mb = UP_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
                 let tex_mb = TEX_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1048576.0;
                 crate::log!(
-                    "MPPRESENT {count} presents/s · worst gap {:.1}ms · cpu encode {:.1}ms/s · instances {:.2}MB/s · textures {tex_mb:.2}MB/s · gpu {:.1}ms/frame max {:.1}ms",
+                    "MAKEPAD_PRESENT {count} presents/s · worst gap {:.1}ms · cpu encode {:.1}ms/s · instances {:.2}MB/s · textures {tex_mb:.2}MB/s · gpu {:.1}ms/frame max {:.1}ms",
                     worst * 1000.0,
                     cpu_ms,
                     up_mb,

@@ -5,8 +5,8 @@
 //! [`ServiceManifest`]; from then on the engine sends [`ServiceDown`] messages
 //! (calls, cancels) and the service answers with [`ServiceUp`] messages
 //! (results, progress, context). The transport is not this module's
-//! business: in-process it is a channel, hosted by mpwm it rides the
-//! studio protocol's `Custom` frames under the `"mpwm_ai"` envelope key.
+//! business: in-process it is a channel, hosted by wm it rides the
+//! studio protocol's `Custom` frames under the `"wm_ai"` envelope key.
 //!
 //! Names. A tool is known to the model by its canonical dotted name,
 //! `<service>.<tool>` (`route.plan`, `files.list_dir`); native function
@@ -44,8 +44,8 @@ pub const MAX_SERVICE_ID: usize = 24;
 pub const MAX_TOOL_NAME: usize = 32;
 
 /// The envelope key hosted transports use inside a studio `Custom` frame,
-/// distinct from the window manager's own `"mpwm"` key.
-pub const HOSTED_KEY: &str = "mpwm_ai";
+/// distinct from the window manager's own `"wm"` key.
+pub const HOSTED_KEY: &str = "wm_ai";
 
 /// How much a tool can break.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, SerJson, DeJson)]
@@ -363,40 +363,40 @@ pub enum ServiceDown {
 
 #[derive(SerJson, DeJson)]
 struct UpEnvelope {
-    mpwm_ai: ServiceUp,
+    wm_ai: ServiceUp,
 }
 
 #[derive(SerJson, DeJson)]
 struct DownEnvelope {
-    mpwm_ai: ServiceDown,
+    wm_ai: ServiceDown,
 }
 
 impl ServiceUp {
-    /// The hosted frame: `{"mpwm_ai": …}`.
+    /// The hosted frame: `{"wm_ai": …}`.
     pub fn to_hosted_json(&self) -> String {
-        UpEnvelope { mpwm_ai: self.clone() }.serialize_json()
+        UpEnvelope { wm_ai: self.clone() }.serialize_json()
     }
 
     /// `None` for frames that are not ours (the window manager's own
-    /// `"mpwm"` envelope, anything else).
+    /// `"wm"` envelope, anything else).
     pub fn parse_hosted(json: &str) -> Option<ServiceUp> {
-        if !json.contains("\"mpwm_ai\"") {
+        if !json.contains("\"wm_ai\"") {
             return None;
         }
-        UpEnvelope::deserialize_json(json).ok().map(|e| e.mpwm_ai)
+        UpEnvelope::deserialize_json(json).ok().map(|e| e.wm_ai)
     }
 }
 
 impl ServiceDown {
     pub fn to_hosted_json(&self) -> String {
-        DownEnvelope { mpwm_ai: self.clone() }.serialize_json()
+        DownEnvelope { wm_ai: self.clone() }.serialize_json()
     }
 
     pub fn parse_hosted(json: &str) -> Option<ServiceDown> {
-        if !json.contains("\"mpwm_ai\"") {
+        if !json.contains("\"wm_ai\"") {
             return None;
         }
-        DownEnvelope::deserialize_json(json).ok().map(|e| e.mpwm_ai)
+        DownEnvelope::deserialize_json(json).ok().map(|e| e.wm_ai)
     }
 }
 
@@ -434,7 +434,7 @@ mod tests {
     fn a_manifest_round_trips_through_the_hosted_envelope() {
         let up = ServiceUp::Register(route());
         let json = up.to_hosted_json();
-        assert!(json.contains("\"mpwm_ai\""));
+        assert!(json.contains("\"wm_ai\""));
         assert_eq!(ServiceUp::parse_hosted(&json), Some(up));
     }
 
@@ -468,8 +468,8 @@ mod tests {
 
     #[test]
     fn the_window_managers_own_frames_are_not_ours() {
-        assert_eq!(ServiceUp::parse_hosted(r#"{"mpwm":{"Close":{}}}"#), None);
-        assert_eq!(ServiceDown::parse_hosted(r#"{"mpwm":{"Adopted":{}}}"#), None);
+        assert_eq!(ServiceUp::parse_hosted(r#"{"wm":{"Close":{}}}"#), None);
+        assert_eq!(ServiceDown::parse_hosted(r#"{"wm":{"Adopted":{}}}"#), None);
         assert_eq!(ServiceUp::parse_hosted("not json"), None);
     }
 

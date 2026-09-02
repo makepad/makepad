@@ -16,5 +16,5 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-mp-theme = { path = "../../libs/mp_theme" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-sqlite = { path = "../../libs/sqlite_query" }

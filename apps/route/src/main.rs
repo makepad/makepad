@@ -935,7 +935,7 @@ pub struct App {
 /// The machine's UTC offset in seconds, read once. The platform has no
 /// timezone database, so we ask the system's own `date` — which knows about
 /// DST — instead of guessing. Same house pattern as
-/// `apps/mpfiles/src/model.rs::local_utc_offset_secs`.
+/// `apps/files/src/model.rs::local_utc_offset_secs`.
 fn local_utc_offset_secs() -> i64 {
     static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFFSET.get_or_init(|| {
@@ -2327,7 +2327,7 @@ impl AppMain for App {
         // voice Metal library has no quantized matmul kernels, so q5_0/q8_0
         // models fail every GPU op. Port the kernels before re-quantizing.
         crate::makepad_widgets::script_mod(vm);
-        mp_theme::apply(vm);
+        makepad_wm_theme::apply(vm);
         self::script_mod(vm)
     }
 
