@@ -46,7 +46,7 @@ pub trait CxMediaApi {
             index,
             Box::new(move |info, buffer| {
                 f(info, buffer);
-                crate::audio_output_tap::feed_audio_output_tap(info, buffer);
+                crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
             }),
         )
     }

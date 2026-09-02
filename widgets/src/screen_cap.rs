@@ -384,7 +384,9 @@ struct AudioQueue {
 struct Session {
     slot: Arc<(Mutex<FrameSlot>, Condvar)>,
     capture_id: u64,
-    tap_id: u64,
+    /// `None` when every output tap was taken at start: the recording then
+    /// has picture and no sound, and said so in the log.
+    tap_id: Option<u64>,
     /// Cleared by the encoder thread on exit, so the UI can poll for the
     /// finalize without blocking on a join.
     running: Arc<AtomicBool>,
@@ -445,6 +447,9 @@ impl Session {
                 queue.dropped += excess as u64;
             }
         });
+        if tap_id.is_none() {
+            log!("ScreenCap: every audio tap is taken; recording without sound");
+        }
 
         let thread_slot = slot.clone();
         let thread_audio = audio.clone();
@@ -479,7 +484,9 @@ impl Session {
         }
         self.stopping = true;
         remove_screen_capture(self.capture_id);
-        remove_audio_output_tap(self.tap_id);
+        if let Some(tap_id) = self.tap_id {
+            remove_audio_output_tap(tap_id);
+        }
         let (lock, cvar) = &*self.slot;
         if let Ok(mut slot) = lock.lock() {
             slot.stop = true;
