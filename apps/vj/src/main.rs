@@ -6213,8 +6213,8 @@ pub struct App {
     #[rust]
     fx_thumb_ready: HashSet<AssetRevisionId>,
     /// Sheet decodes handed to the thumb lane for rendered/cached effect
-    /// thumbnails, by submit time — a decode the epoch guard dropped is
-    /// simply asked again a few seconds later (the storage value is idempotent).
+    /// thumbnails, by submit time. These are durable local results and the
+    /// decode queue keeps them across viewport epochs and backlog pruning.
     #[rust]
     fx_decode_pending: HashMap<AssetRevisionId, f64>,
     /// EFFECT SLOTS (fx_slot.rs): assignment/arm/knob state for the three
@@ -15059,6 +15059,7 @@ p2 {}
                     sheet,
                     legacy_may_be_sheet,
                     epoch: self.view_epoch,
+                    keep_pending: false,
                 });
                 self.thumb_decodes_out += 1;
             }
@@ -16413,6 +16414,24 @@ p2 {}
                     self.thumb_stats.dec_at.remove(&revision);
                     self.grids_dirty = true;
                 }
+                DecodeDone::ThumbTimedOut { revision } => {
+                    self.thumb_decodes_out = self.thumb_decodes_out.saturating_sub(1);
+                    self.thumb_inflight.remove(&revision);
+                    self.thumb_stats.dec_at.remove(&revision);
+                    if self.fx_decode_pending.remove(&revision).is_some() {
+                        let widget = self.ui.widget(cx, ids!(fx_thumbs));
+                        if let Some(mut thumbs) =
+                            widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
+                        {
+                            // Logs once through the render bank's terminal
+                            // per-revision failure gate.
+                            thumbs.mark_decode_timed_out(cx, revision);
+                        };
+                    } else {
+                        log!("thumbnail {revision}: decode timed out");
+                    }
+                    self.grids_dirty = true;
+                }
                 DecodeDone::Thumb { .. } => {
                     self.thumb_decodes_out = self.thumb_decodes_out.saturating_sub(1);
                     self.decode_backlog.push_back(done);
@@ -16801,6 +16820,14 @@ p2 {}
                             self.grids_dirty = true;
                         }
                         self.apply_thumb(cx, revision, texture, frames, thumb.fps);
+                        if fx_sheet {
+                            let widget = self.ui.widget(cx, ids!(fx_thumbs));
+                            if let Some(mut thumbs) =
+                                widget.borrow_mut::<fx_thumbs::VjFxThumbs>()
+                            {
+                                thumbs.mark_cache_visible(cx, revision);
+                            };
+                        }
                         self.evict_thumbs();
                     } else if let Err(e) = result {
                         // A failed decode must NOT be remembered as "no
@@ -16827,7 +16854,7 @@ p2 {}
                 }
                 // Sorted into neither queue above: a dropped job carries no
                 // work for this thread.
-                DecodeDone::ThumbDropped { .. } => {}
+                DecodeDone::ThumbDropped { .. } | DecodeDone::ThumbTimedOut { .. } => {}
             }
         }
         if !self.decode_backlog.is_empty() {
@@ -17048,21 +17075,27 @@ p2 {}
             self.fx_thumb_failed.extend(failures);
             self.grids_dirty = true;
         }
+        let mut decode_batch = Vec::with_capacity(results.len());
         for sheet in results {
             if sheet.encode_ms == 0.0 {
                 self.thumb_stats.fx_cache_submitted += 1;
             }
             self.fx_decode_pending.insert(sheet.revision, now);
-            self.decode.submit(DecodeJob::Thumb {
+            decode_batch.push(DecodeJob::Thumb {
                 revision: sheet.revision,
                 source: media::DecodeSource::Bytes(Arc::from(sheet.jpeg)),
                 sheet: Some((sheet.cells, sheet.fps)),
                 legacy_may_be_sheet: false,
                 epoch: self.view_epoch,
+                // This JPEG is already local and immutable. Unlike a blob
+                // prefetched for a scroll position, it must survive the
+                // thumbnail queue's epoch and pending-cap pruning.
+                keep_pending: true,
             });
             self.thumb_decodes_out += 1;
             self.grids_dirty = true;
         }
+        self.decode.submit_batch(decode_batch);
         // THE BUNDLED FEED: seeding streams every bundled head whose
         // source IS the compiled-in bytes — the already-present library
         // as one batch (a warm store's whole feed, one round trip), then
@@ -17147,7 +17180,6 @@ p2 {}
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
         let mut seen: HashSet<AssetId> = HashSet::new();
-        let mut cache_probes = 0usize;
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -17199,10 +17231,6 @@ p2 {}
                     thumbs.probe_cache(cx, asset, revision, transition)
                 });
             if !cache_missed {
-                cache_probes += 1;
-                if cache_probes >= 16 {
-                    break;
-                }
                 continue;
             }
             // Cache miss: fetch the source and enqueue on arrival. The
