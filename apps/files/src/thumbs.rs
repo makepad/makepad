@@ -227,18 +227,20 @@ struct NativeThumbSource<'a>(&'a dyn crate::vfs::Vfs);
 
 impl ThumbSource for NativeThumbSource<'_> {
     fn decode(&self, path: &Path) -> Option<ThumbPixels> {
-        let real = self.0.real_path(path);
         if crate::model::is_playable_video(path) {
             #[cfg(not(target_arch = "wasm32"))]
-            return decode_video_thumb(&real);
+            return decode_video_thumb(&self.0.native_path(path).ok()?);
             #[cfg(target_arch = "wasm32")]
             return None;
         }
-        let meta = std::fs::metadata(&real).ok()?;
-        if meta.len() > THUMB_MAX_FILE_BYTES {
+        let entry = self.0.stat(path).ok()?;
+        if entry.is_dir || entry.size > THUMB_MAX_FILE_BYTES {
             return None;
         }
-        let data = std::fs::read(&real).ok()?;
+        let data = self.0.read_bytes(path, THUMB_MAX_FILE_BYTES as usize + 1).ok()?;
+        if data.len() as u64 > THUMB_MAX_FILE_BYTES {
+            return None;
+        }
         decode_image_bytes(&data)
     }
 }

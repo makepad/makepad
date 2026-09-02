@@ -4097,24 +4097,7 @@ struct MapJob {
 
 /// The mode as `755`, next to the `rwx` letters the listing already shows.
 fn octal_mode(path: &Path) -> String {
-    // A virtual file has no inode to ask, and inventing one would be a number
-    // that means nothing.
-    if vfs::is_demo() {
-        return "—".to_string();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match std::fs::metadata(path) {
-            Ok(meta) => format!("{:o}", meta.permissions().mode() & 0o7777),
-            Err(_) => "—".to_string(),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        "—".to_string()
-    }
+    vfs().unix_mode(path).map(|mode| format!("{mode:o}")).unwrap_or_else(|_| "—".to_string())
 }
 
 impl App {

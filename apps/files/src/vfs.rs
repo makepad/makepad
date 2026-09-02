@@ -12,9 +12,10 @@
 //! Threading a handle through every signature would buy nothing: no part of
 //! this app ever wants a *different* filesystem than the rest of it.
 //!
-//! Virtual files are also statted and read through this seam. `real_path` is
-//! reserved for native integrations backed by [`RealVfs`]; the closed demo
-//! never maps a virtual name onto the host disk.
+//! Virtual files are also statted and read through this seam. `native_path`
+//! is reserved for native integrations backed by [`RealVfs`]; the closed
+//! demo returns typed [`VfsError::Unavailable`] instead of mapping a virtual
+//! name onto the host disk.
 
 use std::{
     path::{Path, PathBuf},
@@ -24,8 +25,32 @@ use std::{
 use crate::{
     model::{self, FileEntry},
     ops::{OpKind, OpRequest, Undo},
+    sizecache::Cached,
     treemap::{self, Node, ScanProgress, ScanRules, ScanStep},
 };
+
+/// A capability the active filesystem deliberately does not provide.
+///
+/// Virtual paths have no honest host path or native cache file. Keeping that
+/// answer typed makes an accidentally reached native integration fail closed
+/// instead of turning the virtual path into a host path and reaching the
+/// platform's unsupported-filesystem trap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VfsError {
+    Unavailable(&'static str),
+    Io(String),
+}
+
+impl std::fmt::Display for VfsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VfsError::Unavailable(capability) => write!(f, "{capability} is unavailable"),
+            VfsError::Io(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for VfsError {}
 
 /// What an operation did, once it is done: the sentence for the status bar,
 /// how to reverse it, and the paths worth selecting afterwards.
@@ -72,10 +97,41 @@ pub trait Vfs: Send + Sync {
             .unwrap_or(false)
     }
 
-    /// The real file on disk behind a path: what a decoder opens and what a
-    /// viewer process is handed. The identity function for a real filesystem.
-    fn real_path(&self, path: &Path) -> PathBuf {
-        path.to_path_buf()
+    /// The real file on disk behind a path, for native integrations that
+    /// cannot consume bytes. A virtual filesystem returns typed Unavailable.
+    fn native_path(&self, _path: &Path) -> Result<PathBuf, VfsError> {
+        Err(VfsError::Unavailable("native filesystem path"))
+    }
+
+    /// Unix permission bits for the properties panel. Other backends have no
+    /// inode mode to report.
+    fn unix_mode(&self, _path: &Path) -> Result<u32, VfsError> {
+        Err(VfsError::Unavailable("Unix file mode"))
+    }
+
+    /// Resolve links and `..` components for callers that enforce a path
+    /// boundary. Virtual filesystems may return the already-normalized path.
+    fn canonicalize(&self, _path: &Path) -> Result<PathBuf, VfsError> {
+        Err(VfsError::Unavailable("path canonicalization"))
+    }
+
+    /// Whether a path is a link without following it.
+    fn is_symlink(&self, _path: &Path) -> Result<bool, VfsError> {
+        Err(VfsError::Unavailable("symbolic-link metadata"))
+    }
+
+    /// The native size-map cache. Virtual filesystems have no cache file;
+    /// their scans are already instant.
+    fn load_scan_cache(&self, _root: &Path) -> Result<Option<Cached>, VfsError> {
+        Err(VfsError::Unavailable("native size-map cache"))
+    }
+
+    fn store_scan_cache(&self, _root: &Path, _bytes: &[u8]) -> Result<(), VfsError> {
+        Err(VfsError::Unavailable("native size-map cache"))
+    }
+
+    fn forget_scan_cache(&self, _root: &Path) -> Result<(), VfsError> {
+        Err(VfsError::Unavailable("native size-map cache"))
     }
 
     /// Recursive byte total, for the properties panel. Stops when cancelled.
@@ -175,8 +231,95 @@ impl Vfs for RealVfs {
         path.exists()
     }
 
-    fn real_path(&self, path: &Path) -> PathBuf {
-        path.to_path_buf()
+    fn native_path(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(path.to_path_buf())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            Err(VfsError::Unavailable("native filesystem path"))
+        }
+    }
+
+    fn unix_mode(&self, path: &Path) -> Result<u32, VfsError> {
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path)
+                .map(|meta| meta.permissions().mode() & 0o7777)
+                .map_err(|error| VfsError::Io(error.to_string()))
+        }
+        #[cfg(any(not(unix), target_arch = "wasm32"))]
+        {
+            let _ = path;
+            Err(VfsError::Unavailable("Unix file mode"))
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::fs::canonicalize(path).map_err(|error| VfsError::Io(error.to_string()))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            Err(VfsError::Unavailable("path canonicalization"))
+        }
+    }
+
+    fn is_symlink(&self, path: &Path) -> Result<bool, VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .map_err(|error| VfsError::Io(error.to_string()))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            Err(VfsError::Unavailable("symbolic-link metadata"))
+        }
+    }
+
+    fn load_scan_cache(&self, root: &Path) -> Result<Option<Cached>, VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(crate::sizecache::load(root))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = root;
+            Err(VfsError::Unavailable("native size-map cache"))
+        }
+    }
+
+    fn store_scan_cache(&self, root: &Path, bytes: &[u8]) -> Result<(), VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::sizecache::store(root, bytes);
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (root, bytes);
+            Err(VfsError::Unavailable("native size-map cache"))
+        }
+    }
+
+    fn forget_scan_cache(&self, root: &Path) -> Result<(), VfsError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::sizecache::forget(root);
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = root;
+            Err(VfsError::Unavailable("native size-map cache"))
+        }
     }
 
     fn total_bytes(&self, path: &Path, cancel: &AtomicBool) -> u64 {
@@ -235,7 +378,16 @@ pub fn install(vfs: Arc<dyn Vfs>) {
 
 /// The filesystem this process is browsing.
 pub fn vfs() -> &'static Arc<dyn Vfs> {
-    VFS.get_or_init(|| Arc::new(RealVfs))
+    VFS.get_or_init(|| {
+        #[cfg(all(target_arch = "wasm32", feature = "demo"))]
+        {
+            Arc::new(crate::demo::DemoVfs::new())
+        }
+        #[cfg(not(all(target_arch = "wasm32", feature = "demo")))]
+        {
+            Arc::new(RealVfs)
+        }
+    })
 }
 
 /// True when the browser is showing the demo home rather than a real disk.
@@ -279,9 +431,23 @@ mod tests {
     fn the_real_filesystem_is_the_identity_on_paths() {
         let real = RealVfs;
         let path = Path::new("/a/b/c.png");
-        assert_eq!(real.real_path(path), path);
+        assert_eq!(real.native_path(path).unwrap(), path);
         assert!(!real.is_instant());
         assert!(!real.is_demo());
+    }
+
+    #[test]
+    fn virtual_native_entry_points_are_typed_unavailable() {
+        let virtual_fs = crate::demo::DemoVfs::new();
+
+        assert_eq!(
+            virtual_fs.native_path(Path::new("/Demo/file")),
+            Err(VfsError::Unavailable("native filesystem path"))
+        );
+        assert!(matches!(
+            virtual_fs.forget_scan_cache(Path::new("/Demo")),
+            Err(VfsError::Unavailable("native size-map cache"))
+        ));
     }
 
     #[test]

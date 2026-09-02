@@ -22,7 +22,7 @@ use crate::{
     model::{self, FileEntry, SortSpec},
     ops::{OpKind, OpRequest, Undo},
     treemap::{Node, ScanProgress},
-    vfs::{outcome_message, OpOutcome, Vfs},
+    vfs::{outcome_message, OpOutcome, Vfs, VfsError},
 };
 
 /// The demo's home. Rooted somewhere that cannot be mistaken for a real
@@ -1004,6 +1004,20 @@ impl Vfs for DemoVfs {
         resolve(&tree, path).is_some_and(|n| n.is_dir)
     }
 
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        let tree = self.root.lock().unwrap();
+        resolve(&tree, path)
+            .map(|_| path.to_path_buf())
+            .ok_or_else(|| VfsError::Io(format!("No such file: {}", path.display())))
+    }
+
+    fn is_symlink(&self, path: &Path) -> Result<bool, VfsError> {
+        let tree = self.root.lock().unwrap();
+        resolve(&tree, path)
+            .map(|_| false)
+            .ok_or_else(|| VfsError::Io(format!("No such file: {}", path.display())))
+    }
+
     fn stat(&self, path: &Path) -> Result<FileEntry, String> {
         let tree = self.root.lock().unwrap();
         let node = resolve(&tree, path).ok_or_else(|| format!("No such file: {}", path.display()))?;
@@ -1316,6 +1330,20 @@ mod tests {
     }
 
     #[test]
+    fn rescan_stream_matches_the_initial_demo_scan_totals() {
+        let vfs = DemoVfs::new();
+        let initial = vfs
+            .scan(&vfs.home(), &AtomicBool::new(false), &|_| {})
+            .expect("initial demo scan should complete");
+        let rescanned = Mutex::new(Node::dir(initial.name.clone(), initial.kind));
+        assert!(vfs.scan_stream(&vfs.home(), &AtomicBool::new(false), &|step| {
+            assert!(rescanned.lock().unwrap().apply(step));
+        }));
+        let rescanned = rescanned.into_inner().unwrap();
+        assert_eq!((rescanned.size, rescanned.files), (initial.size, initial.files));
+    }
+
+    #[test]
     fn scan_scope_excludes_library_and_trash_beneath_the_demo_home() {
         let vfs = DemoVfs::new();
         let full = full_scan(&vfs);
@@ -1487,8 +1515,8 @@ mod tests {
             self.0.is_dir(path)
         }
 
-        fn real_path(&self, _path: &Path) -> PathBuf {
-            panic!("a demo path was resolved onto the host")
+        fn native_path(&self, _path: &Path) -> Result<PathBuf, VfsError> {
+            Err(VfsError::Unavailable("native filesystem path"))
         }
 
         fn total_bytes(&self, path: &Path, cancel: &AtomicBool) -> u64 {
