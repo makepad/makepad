@@ -1996,6 +1996,12 @@ fn entry_animates(entry: &GridEntry) -> bool {
     entry.frames.len() > 1 || entry.loading
 }
 
+/// Effect sheets declare cells even when wasm deliberately captures one
+/// representative frame. Frame count therefore cannot double as bake state.
+fn entry_is_baking(entry: &GridEntry) -> bool {
+    entry.state == "FX" && !entry.cells
+}
+
 /// Spinner phase (radians) at `time`, ~0.45 turns a second.
 fn busy_spin(time: f64) -> f32 {
     const TAU: f64 = std::f64::consts::TAU;
@@ -2164,6 +2170,15 @@ mod tile_fit_tests {
         entry.loading = false;
         entry.failed = true;
         assert!(!entry_animates(&entry), "a failed ring is still");
+        entry.failed = false;
+        entry.fx = true;
+        entry.state = "FX".to_string();
+        assert!(entry_is_baking(&entry), "an effect placeholder spins");
+        entry.cells = true;
+        assert!(
+            !entry_is_baking(&entry),
+            "a declared one-cell web bake is complete"
+        );
     }
 
     #[test]
@@ -3538,7 +3553,7 @@ impl Widget for VjTileGrid {
                     // The click's own feedback: spinner while the cue loads,
                     // a still red ring if it failed — and an effect tile
                     // still on placeholder art spins too: bake in progress.
-                    let baking = entry.state == "FX" && entry.frames.len() <= 1;
+                    let baking = entry_is_baking(entry);
                     let mut busy = cell.view(cx, ids!(grid_busy));
                     busy.set_visible(cx, entry.loading || entry.failed || baking);
                     if entry.loading || entry.failed || baking {
@@ -3862,7 +3877,7 @@ impl VjPadMatrix {
                     // still on its placeholder art gets the same spinner —
                     // the bake is in progress, and a tile that visibly moves
                     // says so (a static placeholder reads as done-and-boring).
-                    let baking = entry.state == "FX" && entry.frames.len() <= 1;
+                    let baking = entry_is_baking(entry);
                     let mut busy = cell.view(cx, ids!(grid_busy));
                     busy.set_visible(cx, entry.loading || entry.failed || baking);
                     if entry.loading || entry.failed || baking {

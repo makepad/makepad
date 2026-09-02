@@ -610,6 +610,45 @@ pub struct BundleHead {
     pub revision: makepad_asset_data::AssetRevisionId,
 }
 
+/// The static web demo has no writable asset server and therefore never
+/// runs [`seed_presets`]. Give its compiled-in documents stable, local-only
+/// identities so the thumbnail cache can use the same immutable-key contract
+/// without publishing anything. The source digest is the revision: editing a
+/// bundled document automatically asks browser storage for a new key.
+#[cfg(target_arch = "wasm32")]
+pub fn browser_bundle_heads() -> Vec<BundleHead> {
+    bundled_presets()
+        .iter()
+        .copied()
+        .map(|(name, source)| {
+            let (asset, revision) = browser_bundle_identity(name, source);
+            BundleHead {
+                name,
+                source,
+                asset,
+                revision,
+            }
+        })
+        .collect()
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn browser_bundle_identity(
+    name: &str,
+    source: &str,
+) -> (
+    makepad_asset_data::AssetId,
+    makepad_asset_data::AssetRevisionId,
+) {
+    let alias_digest = makepad_asset_data::BlobId::hash_of(preset_alias(name).as_bytes());
+    let mut asset = [0u8; 16];
+    asset.copy_from_slice(&alias_digest.as_bytes()[..16]);
+    (
+        makepad_asset_data::AssetId::from_bytes(asset),
+        makepad_asset_data::AssetRevisionId::hash_of(source.as_bytes()),
+    )
+}
+
 /// Post-seed acceptance count: how many vjeffect rows the store actually
 /// lists, against how many the binary bundles. The caller logs a shortfall
 /// LOUDLY — a store showing a subset of the shipped library is a bug, and
@@ -841,6 +880,14 @@ mod tests {
         assert!(a.len() > 500, "suspiciously small jpeg");
         assert!(a.starts_with(&[0xff, 0xd8]), "not a jpeg");
         assert_ne!(a, b, "two presets must not share a placeholder");
+    }
+
+    #[test]
+    fn browser_thumbnail_identity_is_stable_and_source_versioned() {
+        let a = browser_bundle_identity("01_fireworks", "source a");
+        assert_eq!(a, browser_bundle_identity("01_fireworks", "source a"));
+        assert_ne!(a.0, browser_bundle_identity("02_other", "source a").0);
+        assert_ne!(a.1, browser_bundle_identity("01_fireworks", "source b").1);
     }
 }
 
