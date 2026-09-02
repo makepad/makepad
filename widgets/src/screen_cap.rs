@@ -1,14 +1,14 @@
-//! ScreenCap — SHIFT+F12 records the window to an mp4, picture and sound.
+//! ScreenCap — CTRL+F10 records the window to an mp4, picture and sound.
 //!
 //! One widget, hardcoded into [`crate::window::Window`] the way the tweaker
 //! and the nav control are, so every Makepad app can record itself without
-//! wiring anything up. Shift+F12 starts, Shift+F12 stops. While it records,
+//! wiring anything up. Ctrl+F10 starts, Ctrl+F10 stops. While it records,
 //! a red dot sits in the top-right corner of the window (and therefore in
 //! the file — the indicator is drawn into the same pass the recorder reads
 //! back).
 //!
-//! The key sits next to the tweaker's plain F12 on purpose: one design-surface
-//! key, one recorder key. `widgets/src/tweaker.rs` explicitly lets the shifted
+//! The key sits beside the AI's plain F10 and the debugger's Shift+F10 on
+//! purpose: one assistant key, one debugger key, one recorder key. `widgets/src/tweaker.rs` explicitly lets the shifted
 //! chord through so the two never fire together.
 //!
 //! Both halves come off platform seams added for this:
@@ -36,7 +36,7 @@
 //! draw lists and no widget redraw.
 //!
 //! Key events are not scoped to a window in Makepad, so in a multi-window app
-//! Shift+F12 starts one recording per window, each into its own file. That is
+//! Ctrl+F10 starts one recording per window, each into its own file. That is
 //! the honest reading of "record the window" when there is more than one.
 
 use crate::makepad_draw::audio::AudioBuffer;
@@ -89,8 +89,9 @@ script_mod! {
     mod.widgets.ScreenCap = set_type_default() do mod.widgets.ScreenCapBase{
         width: Fill
         height: Fill
-        hotkey: KeyCode.F12
-        hotkey_shift: true
+        hotkey: KeyCode.F10
+        hotkey_shift: false
+        hotkey_ctrl: true
         dot_size: 13.0
         dot_margin: 12.0
         max_fps: 60.0
@@ -154,12 +155,16 @@ pub struct ScreenCap {
     draw_dot: DrawRecDot,
     /// The key that starts and stops recording. Seen before key focus, so it
     /// works while a text input has the caret.
-    #[live(KeyCode::F12)]
+    #[live(KeyCode::F10)]
     hotkey: KeyCode,
-    /// Whether the hotkey needs Shift held. Shift+F12 by default, so the
-    /// recorder sits beside the tweaker's bare F12 without stealing it.
-    #[live(true)]
+    /// Whether the hotkey needs Shift held (false by default: Shift+F10 is
+    /// the exploded-view debugger).
+    #[live(false)]
     hotkey_shift: bool,
+    /// Whether the hotkey needs Ctrl held. Ctrl+F10 by default, so the
+    /// recorder sits beside the AI's bare F10 without stealing it.
+    #[live(true)]
+    hotkey_ctrl: bool,
     #[live(13.0)]
     dot_size: f64,
     #[live(12.0)]
@@ -323,6 +328,7 @@ impl Widget for ScreenCap {
         if let Event::KeyDown(ke) = event {
             if ke.key_code == self.hotkey
                 && ke.modifiers.shift == self.hotkey_shift
+                && ke.modifiers.control == self.hotkey_ctrl
                 && !ke.is_repeat
             {
                 self.toggle(cx);
