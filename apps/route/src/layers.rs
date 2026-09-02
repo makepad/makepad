@@ -6,12 +6,13 @@
 //! the MapView after each tool run and feeds worker results as they arrive.
 
 use makepad_widgets::*;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 /// Always-on ocean sidecars (sea from coastline-derived polygons; low serves
 /// open ocean via ancestor overzoom, high carries exact coastal tiles).
-pub const OCEAN_LOW_MBTILES: &str = "local/maps/ocean-low.mbtiles";
-pub const OCEAN_HIGH_MBTILES: &str = "local/maps/ocean-high.mbtiles";
+pub const OCEAN_LOW_MBTILES: &str = "ocean-low.mbtiles";
+pub const OCEAN_HIGH_MBTILES: &str = "ocean-high.mbtiles";
 
 /// name → overlay mbtiles path (order = fixed toggle slots).
 pub const OVERLAY_LAYERS: [(&str, &str); 6] = [
@@ -46,6 +47,7 @@ pub struct TerrainUpdate {
 }
 
 pub struct LayerState {
+    pub maps_root: PathBuf,
     pub overlay_on: [bool; OVERLAY_LAYERS.len()],
     pub rain: bool,
     pub wind: bool,
@@ -66,6 +68,7 @@ pub struct LayerState {
 impl Default for LayerState {
     fn default() -> Self {
         Self {
+            maps_root: PathBuf::new(),
             overlay_on: [false; OVERLAY_LAYERS.len()],
             rain: false,
             wind: false,
@@ -82,6 +85,10 @@ impl Default for LayerState {
 }
 
 impl LayerState {
+    pub fn set_maps_root(&mut self, maps_root: PathBuf) {
+        self.maps_root = maps_root;
+    }
+
     /// Toggle a layer by user-facing name. Returns the canonical name.
     pub fn set_layer(&mut self, name: &str, on: bool) -> Result<&'static str, String> {
         let key = name.trim().to_ascii_lowercase();
@@ -137,13 +144,16 @@ impl LayerState {
     pub fn overlay_paths(&self) -> String {
         // Ocean sidecars are always on: sea polygons are base data (the
         // pbf-base schema has no coastline stage), not a toggleable layer.
-        let mut paths = vec![OCEAN_LOW_MBTILES, OCEAN_HIGH_MBTILES];
+        let mut paths = vec![
+            self.maps_root.join(OCEAN_LOW_MBTILES).to_string_lossy().into_owned(),
+            self.maps_root.join(OCEAN_HIGH_MBTILES).to_string_lossy().into_owned(),
+        ];
         paths.extend(
             OVERLAY_LAYERS
                 .iter()
                 .zip(self.overlay_on.iter())
                 .filter(|(_, on)| **on)
-                .map(|((_, path), _)| *path),
+                .map(|((_, path), _)| (*path).to_string()),
         );
         paths.join(";")
     }
@@ -199,7 +209,10 @@ pub fn start_wind_worker(sender: ToUISender<WindUpdate>) {
 
 /// Terrain worker: hillshade renders for requested view bboxes from the
 /// local terrarium mbtiles, with landcover drape (shared with examples/map).
-pub fn start_terrain_worker(sender: ToUISender<TerrainUpdate>) -> mpsc::Sender<TerrainRequest> {
+pub fn start_terrain_worker(
+    sender: ToUISender<TerrainUpdate>,
+    maps_root: PathBuf,
+) -> mpsc::Sender<TerrainRequest> {
     let (tx, rx) = mpsc::channel::<TerrainRequest>();
     std::thread::spawn(move || {
         use makepad_geodata::terrain_shade::TerrainShader;
@@ -208,9 +221,9 @@ pub fn start_terrain_worker(sender: ToUISender<TerrainUpdate>) -> mpsc::Sender<T
         else {
             return;
         };
-        let mut land_reader = makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(
-            "local/maps/europe-shortbread.mbtiles",
-        ))
+        let mut land_reader = makepad_mbtile_reader::MbtilesReader::open(
+            &maps_root.join("europe-shortbread.mbtiles"),
+        )
         .ok();
         while let Ok(mut request) = rx.recv() {
             // Only the newest pending request matters.

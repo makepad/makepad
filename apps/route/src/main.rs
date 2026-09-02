@@ -399,6 +399,23 @@ script_mod! {
                                 }
                                 theme_night := LayerCheck{text: "Night theme"}
                                 theme_circuit := LayerCheck{text: "Circuit City"}
+                                Hr{
+                                    height: 16
+                                }
+                                Label{
+                                    text: "Maps folder (next launch)"
+                                    draw_text +: {
+                                        color: #x223038
+                                        text_style: theme.font_regular{font_size: 9}
+                                    }
+                                }
+                                maps_root_input := TextInput{
+                                    width: 270
+                                    empty_text: "Automatic"
+                                }
+                                maps_root_save := AppButton{
+                                    text: "Save maps folder"
+                                }
                             }
                             layers_button := AppButton{
                                 margin: Inset{left: 14, bottom: 16}
@@ -929,11 +946,17 @@ impl App {
         // user can still flip it manually afterwards.
         let _ = self.layers.set_theme_name(theme_name_for_hour(local_hour_now()));
         self.layers.dirty = false;
+        let maps_root = testmap::resolve_maps_root();
+        log!("maps root: {}", maps_root.display());
+        self.ui
+            .text_input(cx, ids!(maps_root_input))
+            .set_text(cx, &maps_root.to_string_lossy());
+        self.layers.set_maps_root(maps_root.clone());
         // Applies the theme above (chrome + map + checkboxes) and reflects
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
         // layers popover.
         self.apply_layers(cx);
-        self.adopt_map_source(cx);
+        self.adopt_map_source(cx, &maps_root);
         nav_data::start_radar_worker(self.radar_rx.sender());
         cx.start_location_updates();
         // Kokoro af_heart when weights are in reach (this process, the machine
@@ -1014,13 +1037,13 @@ impl App {
     /// Point the map and the nav plane at whatever this machine has:
     /// the production archives, else a baked test map, else nothing — in
     /// which case the first-run popup offers to build one.
-    fn adopt_map_source(&mut self, cx: &mut Cx) {
-        let nav_basename = nav_data::nav_basename();
+    fn adopt_map_source(&mut self, cx: &mut Cx, maps_root: &std::path::Path) {
+        let nav_basename = nav_data::nav_basename(maps_root);
         if let Some(basename) = nav_basename.clone() {
             nav_data::start_nav_load(self.nav_rx.sender(), basename);
         }
         let map = self.ui.map_view(cx, ids!(map));
-        if let Some(basename) = self.testmap.ensure_source(cx, &map) {
+        if let Some(basename) = self.testmap.ensure_source(cx, &map, maps_root) {
             if nav_basename.is_none() {
                 nav_data::start_nav_load(self.nav_rx.sender(), basename);
             }
@@ -2037,7 +2060,10 @@ impl App {
 
         if self.layers.terrain {
             if self.layers.terrain_tx.is_none() {
-                self.layers.terrain_tx = Some(layers::start_terrain_worker(self.terrain_rx.sender()));
+                self.layers.terrain_tx = Some(layers::start_terrain_worker(
+                    self.terrain_rx.sender(),
+                    self.layers.maps_root.clone(),
+                ));
             }
             self.layers.last_terrain_key = None;
             layers::request_terrain(cx, &map, &mut self.layers);
@@ -2155,6 +2181,13 @@ impl MatchEvent for App {
             self.ui
                 .widget(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_panel_open);
+        }
+        if self.ui.button(cx, ids!(maps_root_save)).clicked(actions) {
+            let value = self.ui.text_input(cx, ids!(maps_root_input)).text();
+            match testmap::save_maps_root_setting(&value) {
+                Ok(()) => self.set_status(cx, "maps folder saved; it will apply next launch"),
+                Err(error) => self.set_status(cx, &format!("maps folder: {error}")),
+            }
         }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;

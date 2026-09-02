@@ -25,6 +25,7 @@ use makepad_map_build::progress::{Report, SinkGuard};
 use makepad_map_build::testmap::{self, BakeOptions, NoFetch, TestMapPaths};
 use makepad_widgets::*;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Lines kept in the popup's log pane. Enough to show the current pass and
@@ -35,16 +36,91 @@ const LOG_LINES: usize = 7;
 /// declared with). Any one of them present means this is not a first run
 /// and nothing should be offered.
 const PRODUCTION_ARCHIVES: [&str; 3] = [
-    "local/maps/world.mkmap",
-    "local/maps/europe-base-br-faces.mbtiles",
-    "local/maps/europe-shortbread.mbtiles",
+    "world.mkmap",
+    "europe-base-br-faces.mbtiles",
+    "europe-shortbread.mbtiles",
 ];
+const MAPS_ROOT_PREF: &str = "route/maps-root";
 
-/// True when this machine already has a real map to draw.
-pub fn production_archive_present() -> bool {
+/// The first production archive under this app's one resolved maps root.
+pub fn production_archive(maps_root: &Path) -> Option<PathBuf> {
     PRODUCTION_ARCHIVES
         .iter()
-        .any(|path| std::path::Path::new(path).exists())
+        .map(|name| maps_root.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Resolve once at startup: a checked-out executable uses that checkout's
+/// `local/maps`; an installed/copied executable uses Makepad's per-user home.
+/// The saved setting wins over both. The process cwd is deliberately absent.
+pub fn resolve_maps_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let home = makepad_widgets::makepad_platform::home::makepad_home();
+        let explicit = fs::read_to_string(home.join(MAPS_ROOT_PREF))
+            .ok()
+            .map(|value| PathBuf::from(value.trim()))
+            .filter(|path| !path.as_os_str().is_empty());
+        let executable = std::env::current_exe().unwrap_or_default();
+        resolve_maps_root_from(&executable, &home, explicit.as_deref())
+    })
+    .clone()
+}
+
+fn resolve_maps_root_from(executable: &Path, home: &Path, explicit: Option<&Path>) -> PathBuf {
+    resolve_maps_root_with(executable, home, explicit, |manifest| {
+        fs::read_to_string(manifest).is_ok_and(|text| {
+            text.lines().any(|line| {
+                let line = line.trim();
+                line == "[workspace]" || line.starts_with("workspace.members")
+            })
+        })
+    })
+}
+
+fn resolve_maps_root_with(
+    executable: &Path,
+    home: &Path,
+    explicit: Option<&Path>,
+    mut is_workspace_manifest: impl FnMut(&Path) -> bool,
+) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return explicit.to_path_buf();
+    }
+    let mut directory = executable.parent();
+    while let Some(candidate) = directory {
+        if is_workspace_manifest(&candidate.join("Cargo.toml")) {
+            return candidate.join("local/maps");
+        }
+        directory = candidate.parent();
+    }
+    home.join("maps")
+}
+
+/// Persist the settings-panel override. Empty restores automatic resolution;
+/// a non-empty setting must be absolute so it can never regain cwd semantics.
+pub fn save_maps_root_setting(value: &str) -> Result<(), String> {
+    let home = makepad_widgets::makepad_platform::home::makepad_home();
+    let path = home.join(MAPS_ROOT_PREF);
+    let value = value.trim();
+    if value.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("remove {}: {error}", path.display())),
+        }
+    }
+    let root = Path::new(value);
+    if !root.is_absolute() {
+        return Err("maps root must be an absolute path".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let partial = path.with_extension("part");
+    fs::write(&partial, value).map_err(|error| format!("write {}: {error}", partial.display()))?;
+    fs::rename(&partial, &path).map_err(|error| format!("publish {}: {error}", path.display()))
 }
 
 /// What the worker thread sends back.
@@ -84,7 +160,7 @@ pub struct TestMapBuild {
 impl Default for TestMapBuild {
     fn default() -> Self {
         Self {
-            paths: TestMapPaths::amsterdam(),
+            paths: TestMapPaths::in_dir(resolve_maps_root(), "amsterdam"),
             stage: Stage::Idle,
             headline: String::new(),
             log: Vec::new(),
@@ -97,6 +173,10 @@ impl Default for TestMapBuild {
 }
 
 impl TestMapBuild {
+    pub fn set_maps_root(&mut self, maps_root: &Path) {
+        self.paths = TestMapPaths::in_dir(maps_root, "amsterdam");
+    }
+
     /// True while the popup should be on screen.
     pub fn is_active(&self) -> bool {
         self.stage != Stage::Idle
@@ -130,7 +210,14 @@ impl TestMapBuild {
         self.log = vec![
             "Building an Amsterdam test map: ~143 MB download, then a couple".to_string(),
             "of minutes of baking. Tiles with baked road faces, a routing".to_string(),
-            "graph and a search index land under local/maps.".to_string(),
+            format!(
+                "graph and a search index land under {}.",
+                self.paths
+                    .archive
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
+            ),
         ];
     }
 
@@ -340,10 +427,51 @@ impl TestMapBuild {
             ),
             Stage::Baking => format!("{:.0}%", self.fraction * 100.0),
             Stage::Done => format!(
-                "{:.1} GB under local/maps",
-                self.paths.bytes_on_disk() as f64 / 1.0e9
+                "{:.1} GB under {}",
+                self.paths.bytes_on_disk() as f64 / 1.0e9,
+                self.paths
+                    .archive
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
             ),
             _ => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_root_uses_checkout_found_from_executable() {
+        let executable = Path::new("/checkout/target/release/route");
+        let root = resolve_maps_root_with(executable, Path::new("/home/.makepad"), None, |path| {
+            path == Path::new("/checkout/Cargo.toml")
+        });
+        assert_eq!(root, PathBuf::from("/checkout/local/maps"));
+    }
+
+    #[test]
+    fn maps_root_for_a_binary_copy_uses_makepad_home() {
+        let root = resolve_maps_root_with(
+            Path::new("/Applications/Makepad/route"),
+            Path::new("/home/.makepad"),
+            None,
+            |_| false,
+        );
+        assert_eq!(root, PathBuf::from("/home/.makepad/maps"));
+    }
+
+    #[test]
+    fn explicit_maps_root_wins_over_checkout() {
+        let root = resolve_maps_root_with(
+            Path::new("/checkout/target/release/route"),
+            Path::new("/home/.makepad"),
+            Some(Path::new("/data/maps")),
+            |_| true,
+        );
+        assert_eq!(root, PathBuf::from("/data/maps"));
     }
 }

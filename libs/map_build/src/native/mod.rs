@@ -22,6 +22,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use store::{
@@ -310,16 +311,29 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
             options.source.display()
         ));
     }
-    if options.store.exists() {
-        return finish_existing_detail(&options, &header);
-    }
-
     if let Some(parent) = options.store.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
-    fs::create_dir(&options.store)
-        .map_err(|err| format!("create native store {}: {err}", options.store.display()))?;
+    if options.store.exists() {
+        let paths = NativePaths::new(&options.store);
+        if paths.complete.exists() {
+            return finish_existing_detail(&options, &header);
+        }
+        if !store_has_only_bake_lock(&options.store)? {
+            match open_partial_detail(&options, &paths) {
+                Ok(resume) => return resume_partial_detail(&options, &header, &paths, resume),
+                Err(error) => {
+                    crate::step!("detail", "resuming unfinished bake at stage detail pass 1");
+                    crate::note!("detail", "  scratch cannot resume ({error}); starting clean");
+                    reset_store_contents(&options.store)?;
+                }
+            }
+        }
+    } else {
+        fs::create_dir(&options.store)
+            .map_err(|err| format!("create native store {}: {err}", options.store.display()))?;
+    }
     let paths = NativePaths::new(&options.store);
     let started = Instant::now();
     let mut stats = ConversionStats::default();
@@ -428,6 +442,7 @@ fn write_pass_stamp(
     stats: &ConversionStats,
 ) -> Result<(), String> {
     let (records, bytes, blocks) = spool.snapshot()?;
+    sync_tree(&options.store)?;
     let source_bytes = options
         .source
         .metadata()
@@ -451,10 +466,7 @@ fn write_pass_stamp(
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|err| format!("serialize {}: {err}", path.display()))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).map_err(|err| format!("write {}: {err}", tmp.display()))?;
-    fs::rename(&tmp, &path)
-        .map_err(|err| format!("publish {}: {err}", path.display()))?;
-    Ok(())
+    write_durable_marker(&tmp, &path, &bytes)
 }
 
 fn write_complete_marker(
@@ -478,15 +490,58 @@ fn write_complete_marker(
     });
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|err| format!("serialize {}: {err}", paths.complete.display()))?;
+    // The marker is the commit record for the scratch store. Everything it
+    // describes must be on stable storage before that record can appear.
+    sync_tree(&options.store)?;
     let partial = options.store.join("spool.complete.partial");
-    fs::write(&partial, bytes).map_err(|err| format!("write {}: {err}", partial.display()))?;
-    fs::rename(&partial, &paths.complete).map_err(|err| {
-        format!(
-            "rename {} to {}: {err}",
-            partial.display(),
-            paths.complete.display()
-        )
-    })
+    write_durable_marker(&partial, &paths.complete, &bytes)
+}
+
+fn write_durable_marker(partial: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(partial)
+        .map_err(|err| format!("create {}: {err}", partial.display()))?;
+    file.write_all(bytes)
+        .map_err(|err| format!("write {}: {err}", partial.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("fsync {}: {err}", partial.display()))?;
+    fs::rename(partial, path)
+        .map_err(|err| format!("publish {}: {err}", path.display()))?;
+    sync_dir(path.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+fn sync_tree(path: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(path).map_err(|err| format!("read {}: {err}", path.display()))? {
+        let entry = entry.map_err(|err| format!("read {}: {err}", path.display()))?;
+        let entry_path = entry.path();
+        if entry
+            .file_type()
+            .map_err(|err| format!("stat {}: {err}", entry_path.display()))?
+            .is_dir()
+        {
+            sync_tree(&entry_path)?;
+        } else {
+            fs::File::open(&entry_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|err| format!("fsync {}: {err}", entry_path.display()))?;
+        }
+    }
+    sync_dir(path)
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|err| format!("fsync {}: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn finish_existing_detail(
@@ -501,7 +556,8 @@ fn finish_existing_detail(
     }
     let paths = NativePaths::new(&options.store);
     if !paths.complete.exists() {
-        return resume_partial_detail(options, header, &paths);
+        let resume = open_partial_detail(options, &paths)?;
+        return resume_partial_detail(options, header, &paths, resume);
     }
     let marker_bytes = fs::read(&paths.complete).map_err(|err| {
         format!(
@@ -557,6 +613,10 @@ fn finish_existing_detail(
     crate::note!("detail", "  store:  {}", options.store.display());
     crate::note!("detail", "  zoom:   {}", options.zoom);
     crate::note!("detail", "  blocks: {}", spool.blocks.len());
+    if options.no_tiles {
+        crate::step!("detail", "scratch store already complete");
+        return Ok(());
+    }
     let output_stats = finish_tiles(options, &spool, header.bounds)?;
     if let Ok(report) = fs::read_to_string(&paths.audit) {
         print!("{report}");
@@ -572,65 +632,136 @@ fn finish_existing_detail(
     Ok(())
 }
 
-/// Resume an interrupted conversion from its newest pass stamp: verify the
-/// stamp matches the source, roll the spool back to the stamped block
-/// lengths, then run the remaining passes.
-fn resume_partial_detail(
+struct PartialDetail {
+    pass: u8,
+    block_count: usize,
+    records: u64,
+    stats: ConversionStats,
+    spool: BlockSpoolWriter,
+}
+
+/// Validate the newest durable pass and roll the spool back to precisely
+/// that boundary. Failure here means there is no trustworthy state to
+/// resume, so the caller may discard the scratch directory and start clean.
+fn open_partial_detail(
     options: &DetailOptions,
-    header: &PbfHeaderInfo,
     paths: &NativePaths,
-) -> Result<(), String> {
-    let started = Instant::now();
-    let mut stamp = None;
+) -> Result<PartialDetail, String> {
+    let mut last_error = None;
     for pass in [3u8, 2u8] {
         let path = options.store.join(format!("spool.pass{pass}.json"));
         if !path.exists() {
             continue;
         }
-        let bytes =
-            fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|err| format!("parse {}: {err}", path.display()))?;
-        if value.get("format").and_then(|v| v.as_str())
-            != Some("makepad-native-detail-pass-stamp-v1")
-        {
-            return Err(format!("{} has an unsupported pass stamp", path.display()));
+        let opened = (|| -> Result<PartialDetail, String> {
+            let bytes = fs::read(&path)
+                .map_err(|err| format!("read {}: {err}", path.display()))?;
+            let stamp: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|err| format!("parse {}: {err}", path.display()))?;
+            if stamp.get("format").and_then(|v| v.as_str())
+                != Some("makepad-native-detail-pass-stamp-v1")
+            {
+                return Err(format!("{} has an unsupported pass stamp", path.display()));
+            }
+            let stamp_zoom = stamp
+                .get("zoom")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| format!("{} has no zoom", path.display()))?;
+            if stamp_zoom != u64::from(options.zoom) {
+                return Err(format!(
+                    "scratch zoom {stamp_zoom} does not match requested zoom {}",
+                    options.zoom
+                ));
+            }
+            let source_bytes = options
+                .source
+                .metadata()
+                .map_err(|err| format!("stat {}: {err}", options.source.display()))?
+                .len();
+            let stamp_source_bytes = stamp
+                .get("source_bytes")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| format!("{} has no source_bytes", path.display()))?;
+            if stamp_source_bytes != source_bytes {
+                return Err(format!(
+                    "scratch source size {stamp_source_bytes} does not match {} bytes for {}",
+                    source_bytes,
+                    options.source.display()
+                ));
+            }
+            let records = stamp
+                .get("records")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| format!("{} has no records", path.display()))?;
+            let spool_bytes = stamp
+                .get("bytes")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| format!("{} has no bytes", path.display()))?;
+            let blocks = stamp
+                .get("blocks")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| format!("{} has no blocks", path.display()))?;
+            let mut stamped = Vec::with_capacity(blocks.len());
+            for (name, len) in blocks {
+                let len = len
+                    .as_u64()
+                    .ok_or_else(|| format!("{} block {name} has no length", path.display()))?;
+                stamped.push((name.clone(), len));
+            }
+            let stats = ConversionStats::from_json(
+                stamp
+                    .get("stats")
+                    .ok_or_else(|| format!("{} has no stats", path.display()))?,
+            )?;
+            if pass == 2 {
+                // Pass 3 creates these with create_new. They are not part of
+                // the pass-2 commit and must not survive its rollback.
+                for stale in [&paths.way_data, &paths.way_index] {
+                    if stale.exists() {
+                        fs::remove_file(stale)
+                            .map_err(|err| format!("remove {}: {err}", stale.display()))?;
+                    }
+                }
+            }
+            let spool = BlockSpoolWriter::resume(
+                &paths.spool,
+                &stamped,
+                records,
+                spool_bytes,
+            )?;
+            Ok(PartialDetail {
+                pass,
+                block_count: stamped.len(),
+                records,
+                stats,
+                spool,
+            })
+        })();
+        match opened {
+            Ok(resume) => return Ok(resume),
+            Err(error) => last_error = Some(error),
         }
-        stamp = Some((pass, path, value));
-        break;
     }
-    let Some((stamp_pass, stamp_path, stamp)) = stamp else {
-        return Err(format!(
-            "{} is incomplete and has no pass stamp; delete it and restart",
-            options.store.display()
-        ));
-    };
-    let stamp_zoom = stamp
-        .get("zoom")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("{} has no zoom", stamp_path.display()))?;
-    if stamp_zoom != u64::from(options.zoom) {
-        return Err(format!(
-            "scratch zoom {stamp_zoom} does not match requested zoom {}",
-            options.zoom
-        ));
-    }
-    let source_bytes = options
-        .source
-        .metadata()
-        .map_err(|err| format!("stat {}: {err}", options.source.display()))?
-        .len();
-    let stamp_source_bytes = stamp
-        .get("source_bytes")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("{} has no source_bytes", stamp_path.display()))?;
-    if stamp_source_bytes != source_bytes {
-        return Err(format!(
-            "scratch source size {stamp_source_bytes} does not match {} bytes for {}",
-            source_bytes,
-            options.source.display()
-        ));
-    }
+    Err(last_error.unwrap_or_else(|| {
+        format!("{} has no durable pass stamp", options.store.display())
+    }))
+}
+
+/// Resume an interrupted conversion from its newest usable pass stamp.
+fn resume_partial_detail(
+    options: &DetailOptions,
+    header: &PbfHeaderInfo,
+    paths: &NativePaths,
+    resume: PartialDetail,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let PartialDetail {
+        pass: stamp_pass,
+        block_count,
+        records,
+        mut stats,
+        mut spool,
+    } = resume;
     // A stale pass-4 frontier describes records the rollback below removes
     // from disk — drop it before touching the blocks so nothing gates on it.
     let frontier_path = options.store.join("spool-frontier.txt");
@@ -638,38 +769,12 @@ fn resume_partial_detail(
         fs::remove_file(&frontier_path)
             .map_err(|err| format!("remove {}: {err}", frontier_path.display()))?;
     }
-    let records = stamp
-        .get("records")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("{} has no records", stamp_path.display()))?;
-    let bytes = stamp
-        .get("bytes")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("{} has no bytes", stamp_path.display()))?;
-    let blocks = stamp
-        .get("blocks")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| format!("{} has no blocks", stamp_path.display()))?;
-    let mut stamped = Vec::with_capacity(blocks.len());
-    for (name, len) in blocks {
-        let len = len
-            .as_u64()
-            .ok_or_else(|| format!("{} block {name} has no length", stamp_path.display()))?;
-        stamped.push((name.clone(), len));
-    }
-    let mut stats = ConversionStats::from_json(
-        stamp
-            .get("stats")
-            .ok_or_else(|| format!("{} has no stats", stamp_path.display()))?,
-    )?;
-    let mut spool = BlockSpoolWriter::resume(&paths.spool, &stamped, records, bytes)?;
-
-    crate::step!("detail", "Native OSM detail conversion (resumed after pass {stamp_pass})");
+    crate::step!("detail", "resuming unfinished bake at stage detail pass {}", stamp_pass + 1);
     crate::note!("detail", "  source: {}", options.source.display());
     crate::note!("detail", "  output: {}", options.output.display());
     crate::note!("detail", "  store:  {}", options.store.display());
     crate::note!("detail", "  zoom:   {}", options.zoom);
-    crate::note!("detail", "  spool rolled back to {} blocks, {} records", stamped.len(), records);
+    crate::note!("detail", "  spool rolled back to {} blocks, {} records", block_count, records);
 
     if stamp_pass == 2 {
         crate::step!("detail", "Pass 3/5: resolving ways and writing tagged way features");
@@ -687,17 +792,49 @@ fn resume_partial_detail(
     run_relations_and_finish(options, header.clone(), paths, spool, stats, started)
 }
 
+fn store_has_only_bake_lock(store: &Path) -> Result<bool, String> {
+    for entry in fs::read_dir(store).map_err(|err| format!("read {}: {err}", store.display()))? {
+        let entry = entry.map_err(|err| format!("read {}: {err}", store.display()))?;
+        if entry.file_name() != ".bake.lock" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn reset_store_contents(store: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(store).map_err(|err| format!("read {}: {err}", store.display()))? {
+        let entry = entry.map_err(|err| format!("read {}: {err}", store.display()))?;
+        if entry.file_name() == ".bake.lock" {
+            continue;
+        }
+        let path = entry.path();
+        if entry
+            .file_type()
+            .map_err(|err| format!("stat {}: {err}", path.display()))?
+            .is_dir()
+        {
+            fs::remove_dir_all(&path)
+                .map_err(|err| format!("remove {}: {err}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|err| format!("remove {}: {err}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_detail_options(options: &DetailOptions) -> Result<(), String> {
     if !options.source.is_file() {
         return Err(format!("{} is not a file", options.source.display()));
     }
-    if options.output.exists() {
+    if !options.no_tiles && options.output.exists() {
         return Err(format!(
             "{} already exists; refusing to overwrite it",
             options.output.display()
         ));
     }
-    if options.output.is_dir() {
+    if !options.no_tiles && options.output.is_dir() {
         return Err(format!("{} is a directory", options.output.display()));
     }
     if !(1..=22).contains(&options.zoom) {
@@ -709,7 +846,10 @@ fn validate_detail_options(options: &DetailOptions) -> Result<(), String> {
     if options.source == options.output {
         return Err("source and output paths must differ".to_string());
     }
-    if let Some(parent) = options.output.parent() {
+    if !options.no_tiles {
+        let Some(parent) = options.output.parent() else {
+            return Ok(());
+        };
         fs::create_dir_all(parent)
             .map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
@@ -1728,6 +1868,19 @@ pub fn inspect_mvt_tile(input: &[u8]) -> Result<mvt::TileInspection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn recovery_fixture() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = PathBuf::from("target/map-build-test-fixtures").join(format!(
+            "native-resume-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn all_source_tags_and_2_5d_fields_are_recognized() {
@@ -1768,5 +1921,44 @@ mod tests {
         assert!(flags.building_colour);
         assert!(flags.roof_material);
         assert!(flags.roof_colour);
+    }
+
+    #[test]
+    fn pass_two_resume_discards_partial_way_store() {
+        let root = recovery_fixture();
+        let source = root.join("source.pbf");
+        fs::write(&source, b"fixture source").unwrap();
+        let store = root.join("scratch.store");
+        let paths = NativePaths::new(&store);
+        let mut spool = BlockSpoolWriter::create(&paths.spool).unwrap();
+        let (records, bytes, blocks) = spool.snapshot().unwrap();
+        drop(spool);
+        fs::write(&paths.way_data, b"unfinished pass 3").unwrap();
+        fs::write(&paths.way_index, b"unfinished pass 3").unwrap();
+        let marker = serde_json::json!({
+            "format": "makepad-native-detail-pass-stamp-v1",
+            "pass": 2,
+            "source_bytes": fs::metadata(&source).unwrap().len(),
+            "zoom": DEFAULT_ZOOM,
+            "records": records,
+            "bytes": bytes,
+            "stats": ConversionStats::default().to_json(),
+            "blocks": blocks
+                .into_iter()
+                .map(|(name, len)| (name, len.into()))
+                .collect::<serde_json::Map<_, _>>(),
+        });
+        fs::write(
+            store.join("spool.pass2.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let options = default_detail_options(source, root.join("unused.mbtiles"), store);
+        let resume = open_partial_detail(&options, &paths).unwrap();
+        assert_eq!(resume.pass, 2);
+        assert!(!paths.way_data.exists());
+        assert!(!paths.way_index.exists());
+        drop(resume);
+        fs::remove_dir_all(root).unwrap();
     }
 }

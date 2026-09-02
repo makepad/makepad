@@ -140,11 +140,6 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     options.paths = TestMapPaths::in_dir(&dir, &name);
-    if options.paths.is_complete() {
-        println!("test map already built:");
-        report(&options.paths);
-        return Ok(());
-    }
     let stats = bake(&options, &mut SidecarFetch)?;
     if stats.skipped_tiles != 0 {
         println!("built, {} tiles skipped", stats.skipped_tiles);

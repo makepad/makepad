@@ -1,6 +1,7 @@
 use crate::testmap::TestMapBuild;
 use makepad_widgets::{Cx, MapViewRef};
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 
 pub const PROFILE: super::ProvisioningProfile = super::ProvisioningProfile::Native;
 
@@ -27,19 +28,57 @@ pub struct ProvisionerUpdate {
 impl MapProvisioner {
     /// Select production data, an already-baked test map, or start the
     /// established first-run flow. Filesystem policy stays inside this seam.
-    pub fn ensure_source(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
-        if crate::testmap::production_archive_present() {
+    pub fn ensure_source(
+        &mut self,
+        cx: &mut Cx,
+        map: &MapViewRef,
+        maps_root: &Path,
+    ) -> Option<String> {
+        self.build.set_maps_root(maps_root);
+        if let Some(archive) = crate::testmap::production_archive(maps_root) {
+            self.adopt_production_map(cx, map, maps_root, &archive);
             return None;
         }
         if self.build.paths.archive.is_file() {
             self.adopt_existing_test_map(cx, map);
             return None;
         }
+        // The DSL has checkout-relative placeholders so it can be previewed,
+        // but runtime filesystem policy must never fall back to the cwd.
+        map.set_source_paths(cx, "", "", "");
         self.build.offer_if_no_map(false);
         if self.build.is_offered() {
             self.build.start(cx);
         }
         None
+    }
+
+    fn adopt_production_map(
+        &mut self,
+        cx: &mut Cx,
+        map: &MapViewRef,
+        maps_root: &Path,
+        archive: &Path,
+    ) {
+        if self.adopted {
+            return;
+        }
+        self.adopted = true;
+        let archive = archive.to_string_lossy();
+        let bridge = maps_root.join("nl-bridge-dz.mbtiles");
+        let bridge = bridge
+            .is_file()
+            .then(|| bridge.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        map.set_source_paths(cx, &archive, &archive, &bridge);
+        let overlays = ["ocean-low.mbtiles", "ocean-high.mbtiles"]
+            .into_iter()
+            .map(|name| maps_root.join(name))
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(";");
+        map.set_overlay_paths(cx, &overlays);
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, map: &MapViewRef) -> ProvisionerUpdate {
