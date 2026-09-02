@@ -11,7 +11,8 @@ use makepad_asset_store::{
 use makepad_widgets::makepad_platform::{
     Cx, Event, StorageError, StorageEstimate, StorageHandle, StorageRequestId, StorageResult,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
 const STORE_ID: &str = "makepad-vj-browser-library-v1";
@@ -34,6 +35,31 @@ pub struct BrowserTrack {
 struct Values {
     map: BTreeMap<String, Vec<u8>>,
     changes: Vec<StorageCommand>,
+}
+
+enum WorkerCommand {
+    Publish { name: String, request: ClientPublishRequest },
+}
+
+enum WorkerEvent {
+    Ready {
+        tracks: Vec<BrowserTrack>,
+        changes: Vec<StorageCommand>,
+        elapsed_ms: f64,
+    },
+    Published {
+        name: String,
+        result: Result<TrackOutcome, String>,
+        tracks: Vec<BrowserTrack>,
+        changes: Vec<StorageCommand>,
+    },
+    Failed(String),
+}
+
+struct WorkerStore {
+    values: Values,
+    store: EmbeddedStore,
+    tracks: Vec<BrowserTrack>,
 }
 
 impl Values {
@@ -81,7 +107,10 @@ pub struct BrowserStore {
     gets: HashMap<StorageRequestId, String>,
     writes: HashMap<StorageRequestId, String>,
     values: Values,
-    store: Option<EmbeddedStore>,
+    worker_tx: Option<Sender<WorkerCommand>>,
+    worker_rx: Option<Receiver<WorkerEvent>>,
+    publish_results: VecDeque<(String, Result<TrackOutcome, String>)>,
+    ready: bool,
     tracks: Vec<BrowserTrack>,
     error: Option<String>,
 }
@@ -104,7 +133,7 @@ impl BrowserStore {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.store.is_some()
+        self.ready
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -120,10 +149,10 @@ impl BrowserStore {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
-        let Event::Storage(responses) = event else { return false };
-        let Some(handle) = self.handle.clone() else { return false };
+        let mut changed = self.poll_worker(cx);
+        let Event::Storage(responses) = event else { return changed };
+        let Some(handle) = self.handle.clone() else { return changed };
         let namespace = handle.namespace().to_string();
-        let mut changed = false;
         for response in responses.iter().filter(|response| response.namespace == namespace) {
             if let Some(key) = self.writes.remove(&response.request_id) {
                 if let Err(error) = &response.result {
@@ -140,7 +169,7 @@ impl BrowserStore {
                         if let Some(cursor) = page.next_cursor.clone() {
                             self.list_request = Some(handle.list(cx, "", Some(cursor), LIST_LIMIT));
                         } else if self.list_keys.is_empty() {
-                            changed |= self.finish_restore(cx);
+                            changed |= self.start_restore(cx);
                         } else {
                             for key in std::mem::take(&mut self.list_keys) {
                                 let id = handle.get(cx, &key);
@@ -163,7 +192,7 @@ impl BrowserStore {
                 Err(error) => self.error = Some(format!("browser store get: {error}")),
             }
             if self.gets.is_empty() {
-                changed |= self.finish_restore(cx);
+                changed |= self.start_restore(cx);
             }
         }
         changed
@@ -171,12 +200,156 @@ impl BrowserStore {
 
     pub fn publish(
         &mut self,
-        cx: &mut Cx,
+        name: String,
         request: ClientPublishRequest,
-    ) -> Result<TrackOutcome, String> {
-        let store = self.store.as_mut().ok_or("browser library is still opening")?;
+    ) -> Result<(), String> {
+        if !self.ready {
+            return Err("browser library is still opening".into());
+        }
+        self.worker_tx
+            .as_ref()
+            .ok_or("browser library worker is unavailable")?
+            .send(WorkerCommand::Publish { name, request })
+            .map_err(|_| "browser library worker stopped".to_string())
+    }
+
+    pub fn take_publish_result(&mut self) -> Option<(String, Result<TrackOutcome, String>)> {
+        self.publish_results.pop_front()
+    }
+
+    fn start_restore(&mut self, cx: &mut Cx) -> bool {
+        if self.ready || self.worker_tx.is_some() || self.error.is_some() {
+            return false;
+        }
+        let values = Arc::new(std::sync::Mutex::new(Some(std::mem::take(&mut self.values))));
+        let worker_values = values.clone();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        match cx.thread_spawner().spawn(move || {
+            let started = Cx::monotonic_now();
+            let mut values = worker_values.lock().unwrap().take().unwrap();
+            let store = match EmbeddedStore::open_durable(
+                &mut values,
+                Budgets::default_v1(),
+                QuotaPolicy::default(),
+            ) {
+                Ok(store) => store,
+                Err(error) => {
+                    let _ = event_tx.send(WorkerEvent::Failed(format!(
+                        "open browser library: {error:?}"
+                    )));
+                    return;
+                }
+            };
+            let tracks = match WorkerStore::restored_tracks(&store, &values) {
+                Ok(tracks) => tracks,
+                Err(error) => {
+                    let _ = event_tx.send(WorkerEvent::Failed(error));
+                    return;
+                }
+            };
+            let mut worker = WorkerStore { values, store, tracks };
+            let ready = WorkerEvent::Ready {
+                tracks: worker.tracks.clone(),
+                changes: worker.values.take_changes(),
+                elapsed_ms: (Cx::monotonic_now() - started) * 1e3,
+            };
+            if event_tx.send(ready).is_err() {
+                return;
+            }
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    WorkerCommand::Publish { name, request } => {
+                        let result = worker.publish(request);
+                        let event = WorkerEvent::Published {
+                            name,
+                            result,
+                            tracks: worker.tracks.clone(),
+                            changes: worker.values.take_changes(),
+                        };
+                        if event_tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }) {
+            Ok(handle) => {
+                handle.detach();
+                self.worker_tx = Some(command_tx);
+                self.worker_rx = Some(event_rx);
+                false
+            }
+            Err(error) => {
+                self.values = values.lock().unwrap().take().unwrap_or_default();
+                self.error = Some(format!("start browser library worker: {error}"));
+                true
+            }
+        }
+    }
+
+    fn poll_worker(&mut self, cx: &mut Cx) -> bool {
+        let mut changed = false;
+        loop {
+            let event = match self.worker_rx.as_ref().map(Receiver::try_recv) {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Empty)) | None => break,
+                Some(Err(TryRecvError::Disconnected)) => {
+                    self.worker_rx = None;
+                    self.worker_tx = None;
+                    self.ready = false;
+                    self.error = Some("browser library worker stopped without an answer".into());
+                    changed = true;
+                    break;
+                }
+            };
+            changed = true;
+            match event {
+                WorkerEvent::Ready { tracks, changes, elapsed_ms } => {
+                    self.ready = true;
+                    self.tracks = tracks;
+                    self.flush_changes(cx, changes);
+                    makepad_widgets::log!(
+                        "browser library: ready in {elapsed_ms:.0}ms off UI thread"
+                    );
+                }
+                WorkerEvent::Published { name, result, tracks, changes } => {
+                    self.tracks = tracks;
+                    self.flush_changes(cx, changes);
+                    self.publish_results.push_back((name, result));
+                }
+                WorkerEvent::Failed(error) => {
+                    self.error = Some(error);
+                    self.ready = false;
+                    self.worker_rx = None;
+                    self.worker_tx = None;
+                    break;
+                }
+            }
+        }
+        changed
+    }
+
+    fn flush_changes(&mut self, cx: &mut Cx, changes: Vec<StorageCommand>) {
+        let Some(handle) = self.handle.as_ref() else { return };
+        for command in changes {
+            let (id, key) = match command {
+                StorageCommand::Set { key, value } => (handle.set(cx, &key, value), key),
+                StorageCommand::Delete { key } => (handle.delete(cx, &key), key),
+                StorageCommand::Get { key } => {
+                    self.error = Some(format!("unexpected embedded-store get command for {key}"));
+                    continue;
+                }
+            };
+            self.writes.insert(id, key);
+        }
+    }
+}
+
+impl WorkerStore {
+    fn publish(&mut self, request: ClientPublishRequest) -> Result<TrackOutcome, String> {
         let alias = request.alias.clone().ok_or("prepared track has no alias")?;
-        let existing = store
+        let existing = self.store
             .resolve_alias(&alias)
             .map_err(|error| format!("resolve local alias: {error:?}"))?;
         let asset = request.asset_id.or(existing.map(|target| target.asset_id)).unwrap_or_else(|| {
@@ -220,7 +393,7 @@ impl BrowserStore {
             now_ms: (Cx::time_now().max(0.0) * 1000.0) as u64,
         };
         let usage = self.values.usage();
-        let outcomes = store
+        let outcomes = self.store
             .publish_durable(
                 &mut self.values,
                 StorageEstimate { usage, quota: usage.saturating_add(2 * 1024 * 1024 * 1024) },
@@ -228,7 +401,6 @@ impl BrowserStore {
             )
             .map_err(|error| format!("publish local track: {error:?}"))?;
         let already = outcomes.first().is_some_and(|outcome| outcome.already_published);
-        self.flush_changes(cx);
         self.tracks.retain(|track| track.asset != asset);
         self.tracks.push(BrowserTrack {
             asset,
@@ -251,47 +423,10 @@ impl BrowserStore {
         })
     }
 
-    fn finish_restore(&mut self, cx: &mut Cx) -> bool {
-        if self.store.is_some() || self.error.is_some() {
-            return false;
-        }
-        match EmbeddedStore::open_durable(
-            &mut self.values,
-            Budgets::default_v1(),
-            QuotaPolicy::default(),
-        ) {
-            Ok(store) => {
-                self.store = Some(store);
-                self.flush_changes(cx);
-                if let Err(error) = self.refresh_tracks() {
-                    self.error = Some(error);
-                }
-                true
-            }
-            Err(error) => {
-                self.error = Some(format!("open browser library: {error:?}"));
-                true
-            }
-        }
-    }
-
-    fn flush_changes(&mut self, cx: &mut Cx) {
-        let Some(handle) = self.handle.as_ref() else { return };
-        for command in self.values.take_changes() {
-            let (id, key) = match command {
-                StorageCommand::Set { key, value } => (handle.set(cx, &key, value), key),
-                StorageCommand::Delete { key } => (handle.delete(cx, &key), key),
-                StorageCommand::Get { key } => {
-                    self.error = Some(format!("unexpected embedded-store get command for {key}"));
-                    continue;
-                }
-            };
-            self.writes.insert(id, key);
-        }
-    }
-
-    fn refresh_tracks(&mut self) -> Result<(), String> {
-        let store = self.store.as_ref().ok_or("browser store is not open")?;
+    fn restored_tracks(
+        store: &EmbeddedStore,
+        values: &Values,
+    ) -> Result<Vec<BrowserTrack>, String> {
         let viewer = SearchViewer { principal: None, scope: ViewerScope::All };
         let mut cursor = None;
         let mut tracks = Vec::new();
@@ -318,7 +453,7 @@ impl BrowserStore {
                 let file = manifest.files.iter().find(|file| file.role == FileRole::Audio)
                     .ok_or("browser track has no audio file")?;
                 let bytes = store
-                    .read_blob_durable(&self.values, &file.blob)
+                    .read_blob_durable(values, &file.blob)
                     .map_err(|error| format!("read browser audio: {error:?}"))?;
                 tracks.push(BrowserTrack {
                     asset: hit.asset_id,
@@ -335,7 +470,6 @@ impl BrowserStore {
             let Some(next) = page.cursor else { break };
             cursor = Some(next);
         }
-        self.tracks = tracks;
-        Ok(())
+        Ok(tracks)
     }
 }

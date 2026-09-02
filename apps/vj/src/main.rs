@@ -6910,6 +6910,9 @@ pub struct App {
     /// Frame-loop hang detector: the previous pump's instant.
     #[rust]
     frame_watch: Option<crate::clock::Instant>,
+    /// One wasm-only duration sample around the first widget-tree draw.
+    #[rust]
+    first_draw_timed: bool,
     /// Display-cadence pump for the deck surface. The wave view's own
     /// `NextFrame` never comes back (measured: zero ticks a second), so the
     /// app drives it the same way it drives video frames.
@@ -14097,6 +14100,11 @@ p2 {}
                     // this the model's everything-default listed the whole
                     // store under a lit chip that didn't match it.
                     self.set_lane(cx, self.grid_lane);
+                    // Native sessions are ready before their handles arrive.
+                    // A static web session preserves its StaticStore Ready
+                    // edge on the catalog runtime; pump_catalog_runtime owns
+                    // that edge so every later static refresh re-lists too.
+                    #[cfg(not(target_arch = "wasm32"))]
                     for surface in SURFACES {
                         let cmds = self.model(surface).refresh();
                         self.run_cat_cmds(surface, cmds);
@@ -14269,10 +14277,29 @@ p2 {}
     }
 
     fn pump_catalog_runtime(&mut self, cx: &mut Cx) {
-        let events = match self.up.as_mut() {
-            Some(up) => up.catalog.poll(),
+        let (mut events, static_ready) = match self.up.as_mut() {
+            Some(up) => {
+                let events = up.catalog.poll();
+                #[cfg(target_arch = "wasm32")]
+                let ready = up.catalog.take_ready_event();
+                #[cfg(not(target_arch = "wasm32"))]
+                let ready = false;
+                (events, ready)
+            }
             None => return,
         };
+        if static_ready {
+            log!("static catalog: ready — refreshing browse models");
+            for surface in SURFACES {
+                let cmds = self.model(surface).refresh();
+                self.run_cat_cmds(surface, cmds);
+            }
+            // Static catalog searches are local index projections. Complete
+            // the newly submitted first pages in this same readiness tick.
+            if let Some(up) = self.up.as_mut() {
+                events.extend(up.catalog.poll());
+            }
+        }
         for event in events {
             let id = event.id();
             match event {
@@ -15288,8 +15315,8 @@ p2 {}
             #[cfg(target_arch = "wasm32")]
             {
                 let name = prepared.name.clone();
-                match self.browser_store.publish(cx, prepared.request) {
-                    Ok(outcome) => self.music_import_run.prepared_settled(outcome),
+                match self.browser_store.publish(name.clone(), prepared.request) {
+                    Ok(()) => {}
                     Err(error) => self.music_import_run.prepared_failed(&name, error),
                 }
             }
@@ -24529,6 +24556,10 @@ p2 {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        #[cfg(target_arch = "wasm32")]
+        let startup_started = Cx::monotonic_now();
+        #[cfg(target_arch = "wasm32")]
+        log!("startup: app setup begin");
         self.status_text = "starting…".to_string();
         let output_available = output_window_available().is_ok();
         self.ui
@@ -24538,7 +24569,13 @@ impl MatchEvent for App {
             .widget(cx, ids!(open_output))
             .set_disabled(cx, !output_available);
         #[cfg(target_arch = "wasm32")]
-        self.browser_store.start(cx);
+        {
+            self.browser_store.start(cx);
+            log!(
+                "startup: browser storage requested +{:.0}ms",
+                (Cx::monotonic_now() - startup_started) * 1e3
+            );
+        }
         self.decode.start(cx.thread_spawner());
         self.sidechan.start(cx.thread_spawner());
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
@@ -24546,6 +24583,11 @@ impl MatchEvent for App {
         // compiled in, so its art is generated here — ahead of any store,
         // any socket, any listing.
         self.build_fx_prefab_art(cx);
+        #[cfg(target_arch = "wasm32")]
+        log!(
+            "startup: workers and effect art ready +{:.0}ms",
+            (Cx::monotonic_now() - startup_started) * 1e3
+        );
         self.midi_status = "APC40: scanning…".to_string();
         self.midi_input = cx.midi_input();
         self.midi_output = cx.midi_output();
@@ -24571,6 +24613,11 @@ impl MatchEvent for App {
             Ok(connector) => self.connector = Some(connector),
             Err(error) => self.status_text = format!("session config invalid: {error}"),
         }
+        #[cfg(target_arch = "wasm32")]
+        log!(
+            "startup: catalog connector started +{:.0}ms",
+            (Cx::monotonic_now() - startup_started) * 1e3
+        );
         self.thumb_stats.start();
         // The shuffle draw is deterministic from its seed; the host is the
         // only party with a clock, so it seeds once here.
@@ -24731,6 +24778,11 @@ impl MatchEvent for App {
             self.loop_tx = Some(tx);
             self.loop_results = Some(results);
         }
+        #[cfg(target_arch = "wasm32")]
+        log!(
+            "startup: app setup complete +{:.0}ms",
+            (Cx::monotonic_now() - startup_started) * 1e3
+        );
     }
 
     fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
@@ -26082,10 +26134,31 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         #[cfg(target_arch = "wasm32")]
-        if self.browser_store.handle_event(cx, event) {
-            self.music_rows.clear();
-            self.grids_dirty = true;
-            self.ui.redraw(cx);
+        let first_draw_started = if !self.first_draw_timed && matches!(event, Event::Draw(_)) {
+            self.first_draw_timed = true;
+            Some(Cx::monotonic_now())
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        {
+            let store_changed = self.browser_store.handle_event(cx, event);
+            let mut import_changed = false;
+            while let Some((name, result)) = self.browser_store.take_publish_result() {
+                match result {
+                    Ok(outcome) => self.music_import_run.prepared_settled(outcome),
+                    Err(error) => self.music_import_run.prepared_failed(&name, error),
+                }
+                import_changed = true;
+            }
+            if import_changed {
+                self.sync_music_import_run(cx);
+            }
+            if store_changed {
+                self.music_rows.clear();
+                self.grids_dirty = true;
+                self.ui.redraw(cx);
+            }
         }
         self.sync_console_scale(cx, event);
         self.sync_deck_tabs(cx, event);
@@ -26442,6 +26515,13 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        #[cfg(target_arch = "wasm32")]
+        if let Some(started) = first_draw_started {
+            log!(
+                "startup: first draw complete in {:.0}ms",
+                (Cx::monotonic_now() - started) * 1e3
+            );
+        }
         self.pump_hub_model_install(cx);
         self.pump_drum_bank(cx);
         self.sync_video_pad_window(cx);
