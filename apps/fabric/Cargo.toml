@@ -1,0 +1,16 @@
+[package]
+name = "makepad-fabric"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Fabric: a photo in, a fitted sewing pattern out — body model, measurements, draft, cut sheet"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-fabric-measure = { path = "../../libs/fabric/measure" }
+makepad-fabric-draft = { path = "../../libs/fabric/draft" }
+# The body model runs in-process (Metal on the Mac, CUDA on a box); the
+# hub does install, licence acknowledgement and weight location.
+makepad-ai-body = { path = "../../libs/ai/models/body" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["local", "body-native"] }
+makepad-ai-hub-ui = { path = "../../libs/ai/hub_ui" }
