@@ -11,6 +11,7 @@ pub use makepad_widgets;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 
+mod ai_bus;
 mod binds;
 mod clients;
 mod demo_home;
@@ -35,12 +36,23 @@ use layout::{Axis, Dir, DividerHit, FullscreenMode, LRect};
 use makepad_studio_protocol::{AppToStudio, StudioToApp};
 use makepad_wm_api::{WmEvent, WmRequest};
 use preview::PreviewCache;
-use run_view::MpRunViewAction;
+use run_view::{MpRunView, MpRunViewAction};
+use makepad_widgets::makepad_micro_serde::*;
 use shell::bar::{BarData, BarModule, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
 use shell::panels::ShellPanelAction;
+use ai_bus::{AiBus, Route};
+use makepad_ai_services::wire::{ServiceCall, ToolResult};
+use shell::ai_pane::ShellAiPane;
 
-app_main!(App);
+app_main!(
+    App,
+    font_set: International,
+    font_assets: [
+        "makepad_widgets/resources/jetbrains_mono_variable.ttf",
+        "makepad_widgets/resources/NotoColorEmoji.ttf",
+    ]
+);
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -132,6 +144,9 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Overlay
+                        // The AI pane: over the tiles, under every other
+                        // shell surface (shell/ai_pane.rs).
+                        shell_ai_pane := ShellAiPane{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
                         shell_notes := ShellNotifications{}
@@ -295,6 +310,10 @@ pub struct App {
     /// so the glyph atlas and shaders it warms up are the right ones.
     #[rust]
     dpi_factor: f64,
+    /// The AI services bus: which client is the pane, every client's last
+    /// registration, the routing (see ai_bus.rs).
+    #[rust]
+    ai_bus: AiBus,
 }
 
 /// A warm instance's own swapchain: the host end of the frames a DORMANT
@@ -459,8 +478,9 @@ impl App {
                 .filter(|(_, slot)| {
                     // A warm instance is NOT a window: matching one here
                     // would "focus" something invisible and the app would
-                    // never open at all.
+                    // never open at all. Nor is the AI pane's child.
                     !slot.warm
+                        && !slot.pane
                         && (clients::word_match(&slot.app, pattern)
                             || clients::word_match(&slot.title, pattern))
                 })
@@ -878,8 +898,10 @@ impl App {
                 continue;
             }
             let mut warm = false;
+            let mut pane = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                 warm = slot.warm;
+                pane = slot.pane;
                 slot.status = text.clone();
                 // cargo's last word before the app takes over. macOS then
                 // scans a freshly linked binary on its FIRST exec, which
@@ -896,6 +918,11 @@ impl App {
             // draws, with an 8ms child-tick timer behind it. The pool's
             // invariant is literal: no tile until adoption.
             if warm {
+                continue;
+            }
+            // The pane's child has its own run view, never a desk tile.
+            if pane {
+                self.with_pane_run_view(cx, |cx, v| v.set_status_line(cx, &text));
                 continue;
             }
             self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
@@ -1278,6 +1305,16 @@ impl App {
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         log!("wm: removing client {}", client);
+        // The bus: the pane's own death empties the slot (the next F10
+        // launches afresh); anyone else's death is an `Unregister` the
+        // pane hears on their behalf, so its tool table shrinks at once.
+        if self.ai_bus.is_pane(client) {
+            log!("wm: the AI pane's child died");
+            self.with_ai_pane(cx, |cx, p| p.reset(cx));
+        }
+        if let Some(bye) = self.ai_bus.client_died(client) {
+            self.send_to_pane(bye);
+        }
         // A dying warm instance clears its pool slot, so the next launch
         // of that app falls back to a cold spawn instead of talking to a
         // dead socket, and the pool heals itself. A death nobody asked for
@@ -1315,6 +1352,11 @@ impl App {
     }
 
     fn focus_client(&mut self, cx: &mut Cx, client: ClientId) {
+        // The pane's child is not in the layout: it has its own focus path.
+        if self.ai_bus.is_pane(client) {
+            self.focus_pane(cx);
+            return;
+        }
         // FOCUS RULE: a Quick Look preview never takes key focus.
         let takes_focus = self
             .state_mut()
@@ -1381,12 +1423,19 @@ impl App {
             .collect();
         for client in waiting {
             let text = "macOS is verifying the new binary…".to_string();
+            let mut pane = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                 if slot.status == text {
                     continue;
                 }
                 slot.status = text.clone();
                 slot.linked = false;
+                pane = slot.pane;
+            }
+            // Asking the desk for the pane child's tile would BUILD one.
+            if pane {
+                self.with_pane_run_view(cx, |cx, v| v.set_status_line(cx, &text));
+                continue;
             }
             self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                 d.with_run_view(cx, client, |cx, v| v.set_status_line(cx, &text))
@@ -1426,6 +1475,412 @@ impl App {
     }
 
     // --------------------------------------------------------------
+    // The AI pane and its bus
+    //
+    // The chat is a CHILD (apps/aichat), seated in the pane slot instead
+    // of a tile. The WM gives it three things and nothing more: the slot
+    // (shell/ai_pane.rs), the bus — every other client's service frames,
+    // stamped and routed (ai_bus.rs) — and its own `os` service on that
+    // bus. The child is never in the layout, so nothing the desk
+    // enumerates (alt-tab, the bar, workspace counts) can see it.
+    // --------------------------------------------------------------
+
+    fn with_ai_pane<R>(
+        &mut self,
+        cx: &mut Cx,
+        f: impl FnOnce(&mut Cx, &mut ShellAiPane) -> R,
+    ) -> Option<R> {
+        let pane = self.ui.widget(cx, ids!(shell_ai_pane));
+        let mut borrowed = pane.borrow_mut::<ShellAiPane>()?;
+        Some(f(cx, &mut borrowed))
+    }
+
+    fn with_pane_run_view<R>(
+        &mut self,
+        cx: &mut Cx,
+        f: impl FnOnce(&mut Cx, &mut MpRunView) -> R,
+    ) -> Option<R> {
+        self.with_ai_pane(cx, |cx, p| p.with_run_view(cx, f)).flatten()
+    }
+
+    fn ai_pane_is_open(&mut self, cx: &mut Cx) -> bool {
+        self.with_ai_pane(cx, |_, p| p.is_open()).unwrap_or(false)
+    }
+
+    /// The desk rect the pane hangs off: the desk's last drawn rect, or
+    /// the window's startup proportions before the first draw.
+    fn sync_ai_pane_geometry(&mut self, cx: &mut Cx) {
+        let rect = self
+            .desk(cx)
+            .borrow_mut::<WmDesk>()
+            .map(|d| d.desk_rect)
+            .unwrap_or_default();
+        let rect = if rect.size.x > 1.0 {
+            rect
+        } else {
+            Rect {
+                pos: dvec2(0.0, BAR_HEIGHT_FALLBACK),
+                size: dvec2(1400.0, 860.0),
+            }
+        };
+        let gap = self.state_mut().gaps_out;
+        self.with_ai_pane(cx, |_, p| p.set_geometry(rect, gap));
+    }
+
+    /// F10 / `--test-action ai`.
+    fn toggle_ai_pane(&mut self, cx: &mut Cx) {
+        if self.ai_pane_is_open(cx) {
+            self.close_ai_pane(cx);
+        } else {
+            self.open_ai_pane(cx);
+        }
+    }
+
+    /// Slide the pane in, launching the aichat child the first time (or
+    /// again after it died). The keyboard goes to the child as soon as it
+    /// has a frame to receive it in; every registered app hears
+    /// `ChatOpen`.
+    fn open_ai_pane(&mut self, cx: &mut Cx) {
+        if self.ai_bus.pane_client.is_none() && !self.launch_ai_pane(cx) {
+            return;
+        }
+        self.sync_ai_pane_geometry(cx);
+        self.with_ai_pane(cx, |cx, p| p.set_open(cx, true));
+        self.focus_pane(cx);
+        self.broadcast_chat_open(true);
+        self.redraw_all(cx);
+    }
+
+    /// Slide the pane out; the child keeps running behind it. The
+    /// keyboard returns to the layout's focused tile.
+    fn close_ai_pane(&mut self, cx: &mut Cx) {
+        if !self.ai_pane_is_open(cx) {
+            return;
+        }
+        self.with_ai_pane(cx, |cx, p| p.set_open(cx, false));
+        self.focus_after_layout(cx);
+        self.broadcast_chat_open(false);
+        self.update_bar(cx);
+        self.redraw_all(cx);
+    }
+
+    /// Spawn the aichat child as the pane's client: the ordinary launch
+    /// path (cargo, env, per-client log) minus the layout — `launch_app`
+    /// is never used for it, since launch-or-focus would "focus" a pane.
+    fn launch_ai_pane(&mut self, cx: &mut Cx) -> bool {
+        let Some(app) = clients::find_app("aichat") else {
+            log!("wm: no aichat entry in the registry");
+            return false;
+        };
+        let hub_port = self.state_mut().hub_port;
+        if hub_port == 0 {
+            log!("wm: no hub; the AI pane cannot host a child");
+            return false;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let lines = self.line_sender();
+        match spawn_client(&app, id, hub_port, None, None, &[], false, lines) {
+            Ok(mut slot) => {
+                slot.pane = true;
+                self.state_mut().clients.insert(id, slot);
+                self.ai_bus.pane_client = Some(id);
+                self.with_ai_pane(cx, |cx, p| {
+                    p.set_client(Some(id));
+                    p.with_run_view(cx, |cx, v| v.set_run_target(cx, id, 0, hub_port));
+                });
+                log!("wm: launched aichat as client {} (the AI pane)", id);
+                true
+            }
+            Err(err) => {
+                log!("wm: launching the AI pane failed: {}", err);
+                false
+            }
+        }
+    }
+
+    /// The pane's keyboard goes to the child's run view; the pane itself
+    /// keeps the request pending until its run view has drawn (see
+    /// `ShellAiPane::focus_keyboard`).
+    fn focus_pane(&mut self, cx: &mut Cx) {
+        if self.ai_bus.pane_client.is_none() {
+            return;
+        }
+        self.with_ai_pane(cx, |cx, p| p.focus_keyboard(cx));
+    }
+
+    /// A pointer event inside the OPEN pane is the pane's alone — routed
+    /// to it directly, the way an open menu or flyout takes the pointer,
+    /// so the tile underneath and the WM's own gestures never see it. A
+    /// drag already in flight keeps its events: a window carried across
+    /// the pane must still land.
+    fn ai_pane_pointer(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let abs = match event {
+            Event::MouseMove(e) => e.abs,
+            Event::MouseDown(e) => e.abs,
+            Event::MouseUp(e) => e.abs,
+            Event::Scroll(e) => e.abs,
+            _ => return false,
+        };
+        if self.drag.is_some() || self.div_drag.is_some() {
+            return false;
+        }
+        let inside = self
+            .with_ai_pane(cx, |_, p| p.contains(abs))
+            .unwrap_or(false);
+        if !inside {
+            return false;
+        }
+        let pane = self.ui.widget(cx, ids!(shell_ai_pane));
+        pane.handle_event(cx, event, &mut Scope::empty());
+        true
+    }
+
+    /// One `Custom` frame to a connected client; false when it has no
+    /// socket yet (or is gone).
+    fn send_custom(&mut self, client: ClientId, json: String) -> bool {
+        if let Some(slot) = self.state_mut().clients.get(&client) {
+            if let Some(sender) = &slot.sender {
+                send_to_app(sender, vec![StudioToApp::Custom(json)]);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A frame for the pane child. Dropped when the pane is not up: the
+    /// bus already holds every registration for the replay, and a
+    /// result nobody is waiting for has no one to go to.
+    fn send_to_pane(&mut self, json: String) -> bool {
+        match self.ai_bus.pane_client {
+            Some(client) => self.send_custom(client, json),
+            None => false,
+        }
+    }
+
+    fn broadcast_chat_open(&mut self, open: bool) {
+        for (client, json) in self.ai_bus.chat_open_frames(open) {
+            self.send_custom(client, json);
+        }
+    }
+
+    /// The registry as the `os` brief names it: (id, label).
+    fn registry_apps() -> Vec<(String, String)> {
+        clients::registry()
+            .iter()
+            .map(|a| (a.id.clone(), a.label.clone()))
+            .collect()
+    }
+
+    /// The pane connected: the WM's own registration, then every client's
+    /// last one, in one batch.
+    fn replay_bus_to_pane(&mut self) {
+        let Some(client) = self.ai_bus.pane_client else {
+            return;
+        };
+        let frames = self
+            .ai_bus
+            .replay(AiBus::os_manifest(&Self::registry_apps()));
+        let sender = self
+            .state_mut()
+            .clients
+            .get(&client)
+            .and_then(|s| s.sender.clone());
+        if let Some(sender) = sender {
+            log!("wm: replaying {} registrations to the AI pane", frames.len());
+            send_to_app(
+                &sender,
+                frames.into_iter().map(StudioToApp::Custom).collect(),
+            );
+        }
+    }
+
+    /// The pane child's own window requests. Its `Close` (Esc on an idle,
+    /// empty composer) means HIDE — the process stays for the next F10;
+    /// the rest of the window vocabulary has no window to apply to.
+    fn on_pane_request(&mut self, cx: &mut Cx, req: WmRequest) {
+        match req {
+            WmRequest::Close => self.close_ai_pane(cx),
+            WmRequest::Title { .. } | WmRequest::Cwd { .. } => {}
+            other => log!(
+                "wm: the AI pane asked for {:?}; a pane has no window for that",
+                other
+            ),
+        }
+    }
+
+    fn on_bus_route(&mut self, cx: &mut Cx, route: Route) {
+        match route {
+            Route::ToPane(json) => {
+                self.send_to_pane(json);
+            }
+            Route::ToClient(client, json) => {
+                self.send_custom(client, json);
+            }
+            Route::Os(call) => {
+                let result = self.answer_os_call(cx, &call);
+                self.send_to_pane(AiBus::os_reply(result));
+            }
+            Route::Drop => {}
+        }
+    }
+
+    /// The WM is going down: the pane's child has no window of its own
+    /// and no tile, so nothing else would reap it.
+    fn kill_pane_child(&mut self) {
+        let Some(client) = self.ai_bus.pane_client else {
+            return;
+        };
+        if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+            if let Some(child) = slot.child.as_mut() {
+                log!("wm: shutdown kills the AI pane's child {}", client);
+                clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+            }
+        }
+    }
+
+    // ---- the `os` service ----
+
+    /// Every app the desktop knows, with its window state: the registry
+    /// rows first, then any window of an app outside the menu (a viewer
+    /// opened on a file).
+    fn app_rows(&mut self) -> Vec<OsAppRow> {
+        let state = self.state_mut();
+        let focused = state.layout.focused_client();
+        let mut rows: Vec<OsAppRow> = clients::registry()
+            .iter()
+            .map(|a| OsAppRow {
+                id: a.id.clone(),
+                label: a.label.clone(),
+                running: false,
+                focused: false,
+            })
+            .collect();
+        let mut windows: Vec<(ClientId, String)> = state
+            .clients
+            .iter()
+            .filter(|(id, s)| {
+                !s.warm && !s.pane && s.closing.is_none() && state.layout.workspace_of(**id).is_some()
+            })
+            .map(|(id, s)| (*id, s.app.clone()))
+            .collect();
+        windows.sort_unstable();
+        for (id, app) in windows {
+            if !rows.iter().any(|r| r.id == app) {
+                rows.push(OsAppRow {
+                    id: app.clone(),
+                    label: clients::find_app(&app)
+                        .map(|a| a.label)
+                        .unwrap_or_else(|| app.clone()),
+                    running: false,
+                    focused: false,
+                });
+            }
+            let row = rows.iter_mut().find(|r| r.id == app).unwrap();
+            row.running = true;
+            if focused == Some(id) {
+                row.focused = true;
+            }
+        }
+        rows
+    }
+
+    /// The oldest window of `app` (launch-or-focus's `head -n1` rule).
+    fn client_for_app(&mut self, app: &str) -> Option<ClientId> {
+        let state = self.state_mut();
+        let mut ids: Vec<ClientId> = state
+            .clients
+            .iter()
+            .filter(|(id, s)| {
+                s.app == app
+                    && !s.warm
+                    && !s.pane
+                    && s.closing.is_none()
+                    && state.layout.workspace_of(**id).is_some()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids.first().copied()
+    }
+
+    /// The WM as a service. Every branch answers; every answer is bounded.
+    fn answer_os_call(&mut self, cx: &mut Cx, call: &ServiceCall) -> ToolResult {
+        let id = call.call_id.as_str();
+        let mut result = match call.tool.as_str() {
+            "list" => os_list_result(id, &self.app_rows()),
+            "launch" => match AiBus::app_arg(call) {
+                None => ToolResult::refused(id, "launch needs an `app` id from os.list"),
+                Some(app) if app == "aichat" => {
+                    ToolResult::ok(id, "the assistant is already open", "already open")
+                }
+                Some(app) => match clients::find_app(&app) {
+                    None => ToolResult::refused(
+                        id,
+                        format!("no app `{app}`; known: {}", known_app_ids()),
+                    ),
+                    Some(def) => {
+                        self.launch_app(cx, &def.id);
+                        // The person is talking to the chat: the new
+                        // window takes the layout's focus, not their keys
+                        // — including the focus a tile that has not drawn
+                        // yet would otherwise claim on its first frame.
+                        self.pending_focus = None;
+                        self.focus_pane(cx);
+                        ToolResult::ok(
+                            id,
+                            format!(
+                                "{} is opening (or coming to the front); its tools appear on the next turn",
+                                def.label
+                            ),
+                            "tools appear on the next turn",
+                        )
+                    }
+                },
+            },
+            "focus" | "close" => match AiBus::app_arg(call) {
+                None => ToolResult::refused(id, format!("{} needs an `app` id", call.tool)),
+                Some(app) => match self.client_for_app(&app) {
+                    None => ToolResult::failed(id, format!("{app} is not running")),
+                    Some(client) if call.tool == "focus" => {
+                        self.focus_client(cx, client);
+                        self.pending_focus = None;
+                        self.focus_pane(cx);
+                        ToolResult::ok(id, format!("{app} is in front"), "focused")
+                    }
+                    Some(client) => {
+                        self.request_close(cx, client);
+                        ToolResult::ok(id, format!("{app} is closing"), "closing")
+                    }
+                },
+            },
+            "open" => match AiBus::str_arg(call, "path") {
+                None => ToolResult::refused(id, "open needs a `path`"),
+                Some(path) => {
+                    let req = WmRequest::Open {
+                        app: AiBus::app_arg(call),
+                        path: path.clone(),
+                    };
+                    match preview::OpenRequest::from_request(&req) {
+                        Some(open) if clients::find_app(&open.app).is_some() => {
+                            let app = open.app.clone();
+                            self.open_request(cx, open);
+                            ToolResult::ok(id, format!("opening {path} in {app}"), "opening")
+                        }
+                        _ => ToolResult::refused(id, format!("no app can open {path}")),
+                    }
+                }
+            },
+            other => ToolResult::refused(
+                id,
+                format!("os has no tool `{other}`; it has list, launch, focus, close, open"),
+            ),
+        };
+        result.bound();
+        result
+    }
+
+    // --------------------------------------------------------------
     // Hub routing
     // --------------------------------------------------------------
 
@@ -1458,6 +1913,11 @@ impl App {
                                 )],
                             );
                         }
+                    }
+                    // The pane just connected (or reconnected): it learns
+                    // every current registration, the WM's own first.
+                    if self.ai_bus.is_pane(client) {
+                        self.replay_bus_to_pane();
                     }
                     // A Quick-Look retarget that arrived while this viewer
                     // was still starting: it has a socket now, so land it.
@@ -1511,9 +1971,12 @@ impl App {
                 if first {
                     // A warm instance has no tile to be ready IN: it gets
                     // a framebuffer of its own instead, and draws into it
-                    // until someone adopts it.
+                    // until someone adopts it. The pane's child is ready
+                    // in the pane's own run view.
                     if self.is_warm(client) {
                         self.warm_bootstrap(cx, client, window_id);
+                    } else if self.ai_bus.is_pane(client) {
+                        self.with_pane_run_view(cx, |cx, v| v.app_ready(cx, client, window_id));
                     } else {
                         self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                             d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
@@ -1548,6 +2011,11 @@ impl App {
                     }
                     return;
                 }
+                if self.ai_bus.is_pane(client) {
+                    self.with_pane_run_view(cx, |cx, v| v.set_presentable_draw(cx, pd));
+                    self.note_first_frame(client);
+                    return;
+                }
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
@@ -1559,6 +2027,10 @@ impl App {
                 }
             }
             AppToStudio::SetCursor(cursor) => {
+                if self.ai_bus.is_pane(client) {
+                    self.with_pane_run_view(cx, |cx, v| v.set_remote_cursor(cx, cursor.into()));
+                    return;
+                }
                 self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
                     d.with_run_view(cx, client, |cx, v| v.set_remote_cursor(cx, cursor.into()))
                 });
@@ -1567,10 +2039,18 @@ impl App {
                 cx.copy_to_clipboard(&text);
             }
             AppToStudio::Custom(json) => {
-                // The typed app<->WM vocabulary (libs/wm_api).
+                // The typed app<->WM vocabulary (libs/wm_api) first; what
+                // is not the WM's own envelope is the AI bus's (or noise).
                 if let Some(req) = WmRequest::parse(&json) {
-                    self.on_wm_request(cx, client, req);
+                    if self.ai_bus.is_pane(client) {
+                        self.on_pane_request(cx, req);
+                    } else {
+                        self.on_wm_request(cx, client, req);
+                    }
+                    return;
                 }
+                let route = self.ai_bus.on_custom(client, &json);
+                self.on_bus_route(cx, route);
             }
             AppToStudio::LogItem(item) => {
                 // Hosted children log over the studio socket, not stdout —
@@ -2213,6 +2693,7 @@ impl App {
                 log!("wm: SUPER+ALT layer armed for the next key");
                 return;
             }
+            WmAction::ToggleAi => self.toggle_ai_pane(cx),
         }
         self.update_bar(cx);
         self.redraw_all(cx);
@@ -2639,6 +3120,7 @@ fn test_action(name: &str) -> Option<WmAction> {
         "keys" => Some(WmAction::Keybindings),
         "theme" => Some(WmAction::ThemeMenu),
         "background" => Some(WmAction::BackgroundNext),
+        "ai" => Some(WmAction::ToggleAi),
         "bar" => Some(WmAction::ToggleBar),
         "layout" => Some(WmAction::ToggleWorkspaceLayout),
         _ => None,
@@ -2663,6 +3145,81 @@ fn test_action(name: &str) -> Option<WmAction> {
 
 /// The SUPER chord for mouse binds — Ctrl+Alt nested, the Logo key on a
 /// Linux session (binds.rs carries the same law for keys).
+/// No modifier at all: the bare function keys the WM owns (F10).
+fn bare_key(m: &KeyModifiers) -> bool {
+    !m.shift && !m.control && !m.alt && !m.logo
+}
+
+/// The registry's ids, for a refusal that names what exists.
+fn known_app_ids() -> String {
+    clients::registry()
+        .iter()
+        .map(|a| a.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One row of `os.list`: what the model reads as text and as data.
+#[derive(Clone, Debug, PartialEq, SerJson)]
+struct OsAppRow {
+    id: String,
+    label: String,
+    running: bool,
+    focused: bool,
+}
+
+/// `os.list`'s answer: one line per app, and the same rows as JSON.
+fn os_list_result(call_id: &str, rows: &[OsAppRow]) -> ToolResult {
+    let text = rows
+        .iter()
+        .map(|r| {
+            let state = if r.focused {
+                "focused"
+            } else if r.running {
+                "running"
+            } else {
+                "not running"
+            };
+            format!("{} (`{}`) — {}", r.label, r.id, state)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let running = rows.iter().filter(|r| r.running).count();
+    ToolResult::ok(
+        call_id,
+        text,
+        format!("{} apps, {} running", rows.len(), running),
+    )
+    .with_data(rows.to_vec().serialize_json())
+}
+
+#[cfg(test)]
+mod os_service_tests {
+    use super::*;
+
+    #[test]
+    fn os_list_reads_as_text_and_as_data() {
+        let rows = vec![
+            OsAppRow { id: "files".into(), label: "Files".into(), running: true, focused: true },
+            OsAppRow { id: "route".into(), label: "Route".into(), running: false, focused: false },
+        ];
+        let result = os_list_result("c1", &rows);
+        assert_eq!(result.outcome, makepad_ai_services::wire::ToolOutcome::Ok);
+        assert_eq!(result.text, "Files (`files`) — focused\nRoute (`route`) — not running");
+        assert_eq!(result.note, "2 apps, 1 running");
+        assert!(result.data.contains(r#""id":"files""#) && result.data.contains(r#""running":true"#));
+        assert!(result.data.starts_with('[') && result.data.ends_with(']'));
+    }
+
+    #[test]
+    fn bare_keys_have_no_modifier() {
+        let none = KeyModifiers { shift: false, control: false, alt: false, logo: false };
+        assert!(bare_key(&none));
+        assert!(!bare_key(&KeyModifiers { shift: true, ..none }));
+        assert!(!bare_key(&KeyModifiers { logo: true, ..none }));
+    }
+}
+
 fn super_chord(m: &KeyModifiers) -> bool {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -3049,6 +3606,19 @@ impl AppMain for App {
         {
             return;
         }
+        // The AI pane owns the pointer inside its rect while it is open:
+        // the event goes to the pane alone, so neither the WM's own drag
+        // gestures nor the tile underneath ever see it.
+        if self.state.is_some() && self.ai_pane_pointer(cx, event) {
+            return;
+        }
+        // The pane rect follows the desk: refreshed from the desk's last
+        // drawn rect right before every draw, one borrow's worth.
+        if let Event::Draw(_) = event {
+            if self.state.is_some() {
+                self.sync_ai_pane_geometry(cx);
+            }
+        }
         // SUPER + mouse:272 / mouse:273 — move and resize (tiling.lua).
         // Taken before the tiles see it, so the drag never reaches a child.
         if self.state.is_some() {
@@ -3107,6 +3677,14 @@ impl AppMain for App {
                     self.alt_armed = false;
                     return;
                 }
+                // F10 is the assistant, everywhere (aicontrol decision 8):
+                // under the WM the bare key opens the pane for whatever is
+                // focused, before the keymap and before any tile.
+                if e.key_code == KeyCode::F10 && bare_key(&e.modifiers) {
+                    self.alt_armed = false;
+                    self.do_action(cx, WmAction::ToggleAi);
+                    return;
+                }
                 let armed = self.alt_armed;
                 if let Some(action) = match_bind_armed(e.key_code, &e.modifiers, armed) {
                     // Any key but the prefix itself disarms it.
@@ -3120,8 +3698,10 @@ impl AppMain for App {
                     self.alt_armed = false;
                 }
                 // A Quick-Look preview closes on Escape or Space, before
-                // the key reaches the viewer.
+                // the key reaches the viewer — unless the pane is up and
+                // holds the keyboard: Escape and Space are the chat's then.
                 if matches!(e.key_code, KeyCode::Escape | KeyCode::Space)
+                    && !self.ai_pane_is_open(cx)
                     && self.close_focused_preview(cx)
                 {
                     return;
@@ -3131,6 +3711,7 @@ impl AppMain for App {
         if let Event::Shutdown = event {
             if self.state.is_some() {
                 self.kill_warm_previews();
+                self.kill_pane_child();
             }
         }
         if let Event::Timer(te) = event {
