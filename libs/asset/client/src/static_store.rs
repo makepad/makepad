@@ -897,11 +897,47 @@ fn parse_search(values: &[crate::json::Value]) -> ClientResult<Vec<SearchDoc>> {
             need_array(value, "aliases", "static search aliases")?,
             "static search alias", AssetAlias::from_str,
         )?;
-        let categories = parse_strings(need_array(value, "categories", "static categories")?, "static category")?;
-        let tags = parse_strings(need_array(value, "tags", "static tags")?, "static tag")?;
-        checked_text(value, "generator", MAX_STATIC_STRING_BYTES, "static search generator")?;
-        checked_text(value, "backend", MAX_STATIC_STRING_BYTES, "static search backend")?;
-        checked_text(value, "model", MAX_STATIC_STRING_BYTES, "static search model")?;
+        let (title, title_changed) = tolerant_text(
+            value, "title", crate::wire::MAX_TITLE_BYTES, "static search title",
+        )?;
+        let (description, description_changed) = tolerant_text(
+            value, "description", crate::wire::MAX_SNIPPET_BYTES, "static search description",
+        )?;
+        let (categories, categories_changed) = tolerant_strings(
+            need_array(value, "categories", "static categories")?,
+            crate::wire::MAX_FILTER_VALUE_BYTES,
+            "static category",
+        )?;
+        let (tags, tags_changed) = tolerant_strings(
+            need_array(value, "tags", "static tags")?,
+            crate::wire::MAX_FILTER_VALUE_BYTES,
+            "static tag",
+        )?;
+        let (creator, creator_changed) = tolerant_text(
+            value, "creator", crate::wire::MAX_FILTER_VALUE_BYTES, "static search creator",
+        )?;
+        let (_, generator_changed) = tolerant_text(
+            value, "generator", crate::wire::MAX_FILTER_VALUE_BYTES, "static search generator",
+        )?;
+        let (_, backend_changed) = tolerant_text(
+            value, "backend", crate::wire::MAX_FILTER_VALUE_BYTES, "static search backend",
+        )?;
+        let (_, model_changed) = tolerant_text(
+            value, "model", crate::wire::MAX_FILTER_VALUE_BYTES, "static search model",
+        )?;
+        if title_changed
+            || description_changed
+            || categories_changed
+            || tags_changed
+            || creator_changed
+            || generator_changed
+            || backend_changed
+            || model_changed
+        {
+            makepad_platform::warning!(
+                "static store normalized search text for asset {asset_id}"
+            );
+        }
         let terms_values = need_array(value, "terms", "static terms")?;
         bounded_items(terms_values, "static terms")?;
         let mut terms = Vec::new();
@@ -918,11 +954,11 @@ fn parse_search(values: &[crate::json::Value]) -> ClientResult<Vec<SearchDoc>> {
             asset_id,
             namespace: checked_text(value, "namespace", crate::wire::MAX_NAMESPACE_BYTES, "static search namespace")?,
             kind,
-            title: checked_text(value, "title", crate::wire::MAX_TITLE_BYTES, "static search title")?,
-            description: checked_text(value, "description", MAX_STATIC_STRING_BYTES, "static search description")?,
+            title,
+            description,
             categories,
             tags,
-            creator: checked_text(value, "creator", MAX_STATIC_STRING_BYTES, "static search creator")?,
+            creator,
             live: need_bool(value, "live", "static search live")?,
             updated_ms: need_u64(value, "updated_ms", "static search updated")?,
             aliases,
@@ -1218,10 +1254,7 @@ fn tokenize(text: &str) -> Vec<String> {
 
 fn snippet(title: &str, description: &str) -> String {
     let source = if description.is_empty() { title } else { description };
-    if source.len() <= 512 { return source.to_string(); }
-    let mut end = 512;
-    while !source.is_char_boundary(end) { end -= 1; }
-    source[..end].to_string()
+    normalize_text(source, crate::wire::MAX_SNIPPET_BYTES)
 }
 
 fn query_fingerprint(query: &CatalogQuery) -> [u8; 32] {
@@ -1286,6 +1319,63 @@ fn parse_strings(values: &[crate::json::Value], what: &'static str) -> ClientRes
         out.push(previous.clone());
     }
     Ok(out)
+}
+
+fn tolerant_strings(
+    values: &[crate::json::Value], max: usize, what: &'static str,
+) -> ClientResult<(Vec<String>, bool)> {
+    bounded_items(values, what)?;
+    let mut out = Vec::with_capacity(values.len());
+    let mut changed = false;
+    for value in values {
+        let text = value.as_str().ok_or(ClientError::Protocol { what })?;
+        let normalized = normalize_text(text, max);
+        changed |= normalized != text;
+        if normalized.is_empty() {
+            changed = true;
+        } else {
+            out.push(normalized);
+        }
+    }
+    let before = out.clone();
+    out.sort();
+    out.dedup();
+    changed |= out != before;
+    Ok((out, changed))
+}
+
+fn tolerant_text(
+    value: &crate::json::Value, key: &str, max: usize, what: &'static str,
+) -> ClientResult<(String, bool)> {
+    let text = need(value, key, what)?.as_str().ok_or(ClientError::Protocol { what })?;
+    let normalized = normalize_text(text, max);
+    let changed = normalized != text;
+    Ok((normalized, changed))
+}
+
+fn normalize_text(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() || character.is_control() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(character);
+        }
+    }
+    if out.len() > max {
+        const ELLIPSIS: &str = "…";
+        let mut end = max.saturating_sub(ELLIPSIS.len()).min(out.len());
+        while !out.is_char_boundary(end) { end -= 1; }
+        out.truncate(end);
+        while out.ends_with(' ') { out.pop(); }
+        if max >= ELLIPSIS.len() { out.push_str(ELLIPSIS); }
+    }
+    out
 }
 
 fn validate_path(path: &str) -> ClientResult<()> {
