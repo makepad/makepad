@@ -53,12 +53,28 @@ struct Parked {
     from_console: bool,
 }
 
+/// Seconds an `os.launch` answer is held for the app it started to
+/// register, so the model can use that app's tools in the same turn.
+pub const LAUNCH_PATIENCE_SECS: f64 = 8.0;
+
+/// An `os.launch` that answered ok, held until the launched app is on
+/// the bus (or the patience runs out) — see `pump_awaiting`.
+struct AwaitingApp {
+    call_id: String,
+    app: String,
+    result: ToolResult,
+    from_console: bool,
+    seen_generation: u64,
+    deadline: f64,
+}
+
 pub struct EngineCore {
     registry: ServiceRegistry,
     model: Box<dyn Model>,
     state: EngineState,
     pending: HashMap<String, Pending>,
     parked: HashMap<String, Parked>,
+    awaiting: Option<AwaitingApp>,
     seen_generation: Option<u64>,
     tool_rounds: u32,
     next_call: u64,
@@ -76,6 +92,7 @@ impl EngineCore {
             state,
             pending: HashMap::new(),
             parked: HashMap::new(),
+            awaiting: None,
             seen_generation: None,
             tool_rounds: 0,
             next_call: 0,
@@ -174,6 +191,9 @@ impl EngineCore {
         for call_id in parked {
             self.mark_done(&call_id, &ToolResult::denied(&call_id, "cancelled"));
         }
+        if let Some(a) = self.awaiting.take() {
+            self.mark_done(&a.call_id, &ToolResult::cancelled(&a.call_id));
+        }
         self.end_turn();
     }
 
@@ -219,7 +239,7 @@ impl EngineCore {
         let mut events = Vec::new();
         for up in self.registry.pump() {
             match up {
-                RegistryUp::Result(endpoint, result) => self.on_result(&endpoint, result),
+                RegistryUp::Result(endpoint, result) => self.on_result(&endpoint, result, now),
                 RegistryUp::Progress { endpoint, call_id, note, permille } => {
                     if let Some(p) = self.pending.get_mut(&call_id) {
                         if p.endpoint == endpoint {
@@ -233,6 +253,7 @@ impl EngineCore {
                 }
             }
         }
+        self.pump_awaiting(now);
         if !self.turn_active {
             self.reconfigure_if_needed();
         }
@@ -306,7 +327,11 @@ impl EngineCore {
                 self.state.status = Status::Streaming;
                 match self.state.streaming_mut() {
                     Some(s) => s.push_str(&text),
-                    None => self.state.push(Entry::Assistant { text, streaming: true }),
+                    // Leading whitespace opens no row: a model that breathes
+                    // a newline before its first tool call must not leave a
+                    // blank block above the card.
+                    None if text.trim().is_empty() => {}
+                    None => self.state.push(Entry::Assistant { text: text.trim_start().to_string(), streaming: true }),
                 }
             }
             ModelEvent::Thinking(text) => {
@@ -329,6 +354,8 @@ impl EngineCore {
                     self.model.cancel();
                     self.end_turn();
                 } else {
+                    // A row that never got text sits above the card as a gap.
+                    self.drop_empty_assistant();
                     self.state.status = Status::WaitingForTool;
                     return self.dispatch(call_id, &name, &args, false, now);
                 }
@@ -353,6 +380,7 @@ impl EngineCore {
         if let Some(Entry::Assistant { streaming, .. }) = self.state.entries.last_mut() {
             *streaming = false;
         }
+        self.drop_empty_assistant();
         self.turn_active = false;
         self.state.status = Status::Idle;
         self.state.thinking.clear();
@@ -470,7 +498,7 @@ impl EngineCore {
         self.state.touch();
     }
 
-    fn on_result(&mut self, endpoint: &EndpointId, mut result: ToolResult) {
+    fn on_result(&mut self, endpoint: &EndpointId, mut result: ToolResult, now: f64) {
         let Some(p) = self.pending.get(&result.call_id) else { return };
         if &p.endpoint != endpoint {
             return;
@@ -479,7 +507,100 @@ impl EngineCore {
         self.pending.remove(&result.call_id);
         result.bound();
         let call_id = result.call_id.clone();
+        // An `os.launch` that worked is held until the app it started is on
+        // the bus, so the model gets its tools with the result and goes on
+        // in the same turn instead of stopping at "it is opening".
+        if !from_console && result.outcome.is_ok() && self.awaiting.is_none() {
+            if let Some(app) = self.launched_app(&call_id) {
+                if self.registry.instances_of(&app).is_empty() {
+                    if let Some(t) = self.state.tool_mut(&call_id) {
+                        t.status = ToolStatus::Running { note: format!("waiting for {app} to connect…"), permille: 500 };
+                    }
+                    self.awaiting = Some(AwaitingApp {
+                        call_id,
+                        app,
+                        result,
+                        from_console,
+                        seen_generation: self.registry.generation(),
+                        deadline: now + LAUNCH_PATIENCE_SECS,
+                    });
+                    self.state.touch();
+                    return;
+                }
+            }
+        }
         self.finish_call(&call_id, result, from_console);
+    }
+
+    /// The app an `os.launch` card asked for, when `call_id` is one.
+    fn launched_app(&self, call_id: &str) -> Option<String> {
+        let t = self.state.tool(call_id)?;
+        if t.service != "os" || t.tool != "launch" {
+            return None;
+        }
+        match makepad_strict_json::parse(t.args.as_bytes()) {
+            Ok(Value::Obj(fields)) => fields
+                .into_iter()
+                .find(|(k, _)| k == "app")
+                .and_then(|(_, v)| v.as_str().map(|s| s.trim().to_lowercase())),
+            _ => None,
+        }
+    }
+
+    /// The held `os.launch` answer: delivered as soon as the launched app
+    /// registers — with the app's tools named in the result, and the
+    /// model's tool table rebound when it can rebind mid-turn — or, when
+    /// the patience runs out, as it is with a note that the app has not
+    /// connected yet.
+    fn pump_awaiting(&mut self, now: f64) {
+        let Some(a) = self.awaiting.as_ref() else { return };
+        let registered = self.registry.generation() != a.seen_generation && !self.registry.instances_of(&a.app).is_empty();
+        if !registered && now < a.deadline {
+            return;
+        }
+        let a = self.awaiting.take().unwrap();
+        let mut result = a.result;
+        if registered {
+            let label = self
+                .registry
+                .instances_of(&a.app)
+                .first()
+                .and_then(|e| self.registry.meta(e))
+                .map(|m| m.display_name)
+                .unwrap_or_else(|| a.app.clone());
+            let prefix = format!("{}.", a.app);
+            let tools: Vec<String> = self
+                .registry
+                .tool_definitions()
+                .into_iter()
+                .map(|t| t.name)
+                .filter(|n| n.starts_with(&prefix))
+                .collect();
+            result.text = format!("{label} is running now. Its tools: {}. Call them directly.", tools.join(", "));
+            result.note = "running".into();
+            if self.model.can_rebind_mid_turn() {
+                self.reconfigure_if_needed();
+            }
+        } else {
+            result.text = format!("{} ({} has not connected yet; its tools are not available in this turn)", result.text, a.app);
+            result.note = "not connected yet".into();
+        }
+        result.bound();
+        self.finish_call(&a.call_id, result, a.from_console);
+    }
+
+    /// Assistant rows that never got visible text are not rows: they sit
+    /// in the transcript as blank blocks. Left alone while a confirm card
+    /// waits, so the panel's row indices stay what it drew.
+    fn drop_empty_assistant(&mut self) {
+        if !self.parked.is_empty() {
+            return;
+        }
+        let before = self.state.entries.len();
+        self.state.entries.retain(|e| !matches!(e, Entry::Assistant { text, .. } if text.trim().is_empty()));
+        if self.state.entries.len() != before {
+            self.state.touch();
+        }
     }
 
     fn mark_done(&mut self, call_id: &str, result: &ToolResult) {
@@ -849,5 +970,116 @@ mod tests {
         core.clear(0.3);
         assert!(core.state().entries.is_empty());
         assert_eq!(model.lock().unwrap().resets, 1);
+    }
+
+    fn os() -> ServiceManifest {
+        ServiceManifest::new("os", "Desktop", "The desktop.")
+            .with_tool(ToolDef::new("launch", "Start an app.", r#"{"type":"object","properties":{"app":{"type":"string"}},"required":["app"]}"#, Risk::Act))
+    }
+
+    fn photos() -> ServiceManifest {
+        ServiceManifest::new("photos", "Photos", "The picture wall.")
+            .with_tool(ToolDef::new("search", "Find pictures.", r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#, Risk::Read))
+    }
+
+    #[test]
+    fn a_turn_of_only_a_tool_call_leaves_no_empty_assistant_row() {
+        let (mut core, _model, mut port, _e) = setup(vec![
+            vec![ModelEvent::Delta("\n\n".into()), call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            done("Three folders."),
+        ]);
+        core.send("list", 0.0);
+        core.pump(0.1);
+        assert!(!core.state().entries.iter().any(|e| matches!(e, Entry::Assistant { .. })), "a whitespace delta opens no row: {:?}", core.state().entries);
+        let ev = port.test_drain();
+        let PortEvent::Call(c) = &ev[0] else { panic!() };
+        port.reply(ToolResult::ok(&c.call_id, "a b c", ""));
+        core.pump(0.2);
+        let assistant: Vec<&Entry> = core.state().entries.iter().filter(|e| matches!(e, Entry::Assistant { .. })).collect();
+        assert_eq!(assistant.len(), 1, "exactly one row, the text: {:?}", core.state().entries);
+        assert!(matches!(assistant[0], Entry::Assistant { text, streaming: false } if text == "Three folders."));
+    }
+
+    #[test]
+    fn a_launch_waits_for_the_app_and_the_turn_goes_on_with_its_tools() {
+        let reg = ServiceRegistry::new();
+        let (mut os_port, os_link) = AiServicePort::in_process(os()).unwrap();
+        reg.register(os_link, "the desktop", None).unwrap();
+        reg.mark_launchable("photos", "Photos");
+        reg.pump();
+        os_port.test_drain();
+        let (model, shared) = scripted(vec![
+            vec![call("os.launch", r#"{"app":"photos"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![ModelEvent::ToolCall { call_id: "m2".into(), name: "photos.search".into(), args: r#"{"query":"dogs"}"#.into() }, ModelEvent::TurnDone { tool_calls: 1 }],
+            done("Two dog comics."),
+        ]);
+        let mut core = EngineCore::new(reg.clone(), model, None);
+        core.send("find the pictures about dogs", 0.0);
+        core.pump(0.1);
+        let ev = os_port.test_drain();
+        let PortEvent::Call(c) = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(c.tool, "launch");
+        os_port.reply(ToolResult::ok(&c.call_id, "Photos is starting", "starting"));
+        core.pump(0.5);
+        assert!(shared.lock().unwrap().tool_results.is_empty(), "the launch result is held until photos registers");
+        assert!(matches!(core.state().tool("m1").map(|t| t.status.clone()), Some(ToolStatus::Running { .. })));
+        // Photos comes up two seconds later.
+        let (mut photos_port, photos_link) = AiServicePort::in_process(photos()).unwrap();
+        reg.register(photos_link, "a tile", None).unwrap();
+        core.pump(2.0);
+        {
+            let m = shared.lock().unwrap();
+            assert_eq!(m.tool_results.len(), 1);
+            let (id, text, is_error) = &m.tool_results[0];
+            assert_eq!(id, "m1");
+            assert!(!is_error);
+            assert!(text.contains("Photos is running now") && text.contains("photos.search"), "{text}");
+        }
+        // ...and the same turn calls photos.search.
+        let ev = photos_port.test_drain();
+        let Some(PortEvent::Call(c)) = ev.iter().find(|e| matches!(e, PortEvent::Call(_))) else { panic!("{ev:?}") };
+        assert_eq!(c.tool, "search");
+        photos_port.reply(ToolResult::ok(&c.call_id, "2 matches", ""));
+        core.pump(2.5);
+        assert_eq!(core.state().status, Status::Idle);
+        assert!(matches!(core.state().entries.last(), Some(Entry::Assistant { text, .. }) if text == "Two dog comics."));
+    }
+
+    #[test]
+    fn a_launch_nobody_answers_goes_to_the_model_after_the_patience() {
+        let reg = ServiceRegistry::new();
+        let (mut os_port, os_link) = AiServicePort::in_process(os()).unwrap();
+        reg.register(os_link, "the desktop", None).unwrap();
+        reg.mark_launchable("photos", "Photos");
+        reg.pump();
+        os_port.test_drain();
+        let (model, shared) = scripted(vec![
+            vec![call("os.launch", r#"{"app":"photos"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            done("Photos did not come up."),
+        ]);
+        let mut core = EngineCore::new(reg, model, None);
+        core.send("open photos", 0.0);
+        core.pump(0.1);
+        let ev = os_port.test_drain();
+        let PortEvent::Call(c) = &ev[0] else { panic!() };
+        os_port.reply(ToolResult::ok(&c.call_id, "Photos is starting", "starting"));
+        core.pump(1.0);
+        assert!(shared.lock().unwrap().tool_results.is_empty());
+        core.pump(LAUNCH_PATIENCE_SECS + 1.5);
+        {
+            let m = shared.lock().unwrap();
+            assert_eq!(m.tool_results.len(), 1);
+            assert!(m.tool_results[0].1.contains("has not connected yet"), "{}", m.tool_results[0].1);
+        }
+        assert!(matches!(core.state().tool("m1").map(|t| t.status.clone()), Some(ToolStatus::Done { note, .. }) if note == "not connected yet"));
+    }
+
+    #[test]
+    fn the_dynamic_context_names_what_runs_and_what_needs_a_launch() {
+        let (core, _model, _port, _e) = setup(vec![]);
+        core.registry().mark_launchable("photos", "Photos");
+        let ctx = core.registry().dynamic_context();
+        assert!(ctx.contains("Running now — call their tools directly: Files (files.list_dir, files.trash, files.open)"), "{ctx}");
+        assert!(ctx.contains("Not running — os.launch starts them: Photos (`photos`)"), "{ctx}");
     }
 }

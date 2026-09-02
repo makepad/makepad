@@ -88,4 +88,12 @@ pub trait Model {
     fn reset(&mut self);
 
     fn poll(&mut self) -> Vec<ModelEvent>;
+
+    /// Whether `configure` may be called while a turn is in flight without
+    /// losing it — a template-prompted model folds a new tool table into
+    /// its next message; a native-tool API rebuilds its session. The
+    /// engine only rebinds mid-turn when this is true.
+    fn can_rebind_mid_turn(&self) -> bool {
+        false
+    }
 }

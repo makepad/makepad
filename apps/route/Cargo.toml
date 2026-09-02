@@ -22,6 +22,7 @@ demo = []
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-map-build = { path = "../../libs/map_build", features = ["faces"], optional = true } # first run: download + bake a test map

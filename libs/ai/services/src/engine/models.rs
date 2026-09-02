@@ -292,6 +292,15 @@ impl LocalModel {
     }
 }
 
+/// A tool result with the pending tool-table update in front of it, so
+/// the model reads the new table before the result it applies to.
+fn with_update(update: Option<String>, text: &str) -> String {
+    match update {
+        Some(u) => format!("{}\n{}", u.trim_end(), text),
+        None => text.to_string(),
+    }
+}
+
 impl Model for LocalModel {
     /// `Local · Qwen3.5 9B`, and once the election settled where the model
     /// runs: `Local · qwen3.8-27b on 10.0.0.165`, `Local · Qwen3.5 9B ·
@@ -344,11 +353,20 @@ impl Model for LocalModel {
         session.send_user_turn(turn);
     }
 
+    fn can_rebind_mid_turn(&self) -> bool {
+        // The tool table travels as an update block in the next message,
+        // so a rebind between a call and its result costs nothing.
+        true
+    }
+
     fn send_tool_result(&mut self, _call_id: &str, text: &str, is_error: bool) {
         if self.awaiting == 0 {
             return;
         }
-        self.results.push((text.to_string(), is_error));
+        // A table that changed while the call ran rides in with its result
+        // (the same block a user turn would carry).
+        let text = with_update(self.pending_update.take(), text);
+        self.results.push((text, is_error));
         if self.results.len() >= self.awaiting {
             self.awaiting = 0;
             if let Some(session) = &self.session {

@@ -383,6 +383,32 @@ impl ServiceRegistry {
     pub fn dynamic_context(&self) -> String {
         let inner = self.inner.lock().unwrap();
         let mut out = String::new();
+        // What can be called right now, at a glance: each running app with
+        // its tool names, then the apps that need an os.launch first — so
+        // the model never launches what is already up.
+        let mut running: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for e in &inner.order {
+            let entry = &inner.entries[e];
+            if seen.contains(&entry.manifest.id) {
+                continue;
+            }
+            seen.push(entry.manifest.id.clone());
+            let tools: Vec<String> = entry.manifest.tools.iter().map(|t| canonical_name(&entry.manifest.id, &t.name)).collect();
+            running.push(format!("{} ({})", entry.meta.display_name, tools.join(", ")));
+        }
+        if !running.is_empty() {
+            out.push_str(&format!("Running now — call their tools directly: {}\n", running.join("; ")));
+        }
+        let idle: Vec<String> = inner
+            .launchable
+            .iter()
+            .filter(|(id, _)| !seen.contains(id))
+            .map(|(id, label)| format!("{label} (`{id}`)"))
+            .collect();
+        if !idle.is_empty() {
+            out.push_str(&format!("Not running — os.launch starts them: {}\n", idle.join(", ")));
+        }
         for e in &inner.order {
             let entry = &inner.entries[e];
             if !entry.context.trim().is_empty() {
@@ -558,7 +584,7 @@ mod tests {
         assert_eq!(ups.len(), 2);
         assert!(matches!(&ups[0], RegistryUp::Progress { call_id, .. } if call_id == "c1"));
         assert!(matches!(&ups[1], RegistryUp::Result(ep, r) if ep == &e && r.call_id == "c1"));
-        assert_eq!(reg.dynamic_context(), "[Files] cwd=~\n");
+        assert_eq!(reg.dynamic_context(), "Running now — call their tools directly: Files (files.stat)\n[Files] cwd=~\n");
         assert!(!reg.send(&EndpointId("nope".into()), ServiceDown::ChatOpen { open: true }));
     }
 }
