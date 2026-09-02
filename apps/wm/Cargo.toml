@@ -28,3 +28,6 @@ makepad-widgets = { path = "../../widgets" }
 makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
+# The AI services wire only: the WM relays frames between the aichat child and the apps.
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-strict-json = { path = "../../libs/strict_json" }

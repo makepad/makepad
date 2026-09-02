@@ -41,8 +41,6 @@ pub struct App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         makepad_wm_api::set_title(cx, "AI");
-        // The composer takes the keyboard as soon as the pane is up.
-        self.ui.text_input(cx, ids!(panel.input)).set_key_focus(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {

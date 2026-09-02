@@ -227,6 +227,10 @@ pub struct AiChatPanel {
     drawn_generation: u64,
     #[rust]
     next_frame: NextFrame,
+    /// The composer took the keyboard once it existed on screen — a
+    /// focus set before the first draw lands on no area at all.
+    #[rust]
+    composer_focused: bool,
 }
 
 impl AiChatPanel {
@@ -279,7 +283,11 @@ impl AiChatPanel {
     fn send(&mut self, cx: &mut Cx, text: String) {
         let now = Self::now(cx);
         self.ensure_engine().send(&text, now);
-        self.view.text_input(cx, ids!(input)).set_text(cx, "");
+        let input = self.view.text_input(cx, ids!(input));
+        input.set_text(cx, "");
+        // The widget drops the keyboard on submit; a chat composer keeps
+        // it, so the next line can be typed straight away.
+        input.take_key_focus(cx);
         self.view.redraw(cx);
     }
 
@@ -402,7 +410,7 @@ impl Widget for AiChatPanel {
                     Entry::Tool(t) => {
                         let row = list.item(cx, index, id!(ToolRow));
                         let (glyph, note, permille, detail) = match &t.status {
-                            ToolStatus::Running { note, permille } => ("▸", note.clone(), *permille, String::new()),
+                            ToolStatus::Running { note, permille } => ("›", note.clone(), *permille, String::new()),
                             ToolStatus::Done { outcome, note, text } => {
                                 let glyph = if outcome.is_ok() { "✓" } else { "✗" };
                                 let note = if note.is_empty() { outcome.slug().to_string() } else { note.clone() };
@@ -415,9 +423,13 @@ impl Widget for AiChatPanel {
                         let bar_visible = matches!(t.status, ToolStatus::Running { .. });
                         row.view(cx, ids!(tool_bar)).set_visible(cx, bar_visible);
                         if bar_visible {
-                            let w = (permille as f64 / 1000.0).max(0.05);
+                            // The bar is a fraction of the row's inner width
+                            // (the row's rect is last frame's; the first
+                            // frame of a card draws it at a token width).
+                            let inner = (row.area().rect(cx).size.x - 36.0).max(24.0);
+                            let px = inner * (permille as f64 / 1000.0).max(0.05);
                             let mut bar = row.view(cx, ids!(tool_bar));
-                            script_apply_eval!(cx, bar, { width: Size.Fill(#(w)) });
+                            script_apply_eval!(cx, bar, { width: #(px) });
                         }
                         let detail_label = row.label(cx, ids!(tool_detail));
                         detail_label.set_visible(cx, t.expanded && !detail.is_empty());
@@ -435,6 +447,10 @@ impl Widget for AiChatPanel {
                 };
                 row.draw_all(cx, &mut Scope::empty());
             }
+        }
+        if !self.composer_focused {
+            self.composer_focused = true;
+            self.view.text_input(cx, ids!(input)).take_key_focus(cx);
         }
         DrawStep::done()
     }

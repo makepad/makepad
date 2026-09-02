@@ -638,9 +638,10 @@ impl MpRunView {
 
     /// Focus the compositor keyboard on this tile.
     /// Claim the compositor's key focus for this tile. False while the
-    /// tile has never drawn (its Area is still empty — focusing it would
-    /// be a no-op); the WM keeps such a focus PENDING and retries when the
-    /// child's first frame arrives.
+    /// tile has no live Area — never drawn, or not drawn since its draw
+    /// list was rebuilt (the AI pane hides its run view entirely between
+    /// showings) — because focusing a dead area is a no-op; the caller
+    /// keeps such a focus PENDING and retries after the next draw.
     pub fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
         // A Quick-Look panel declines the keyboard outright. True, not
         // false: there is nothing to retry later, the tile simply never
@@ -648,11 +649,19 @@ impl MpRunView {
         if !self.takes_key_focus {
             return true;
         }
-        if self.area == Area::Empty {
+        if !self.area.is_valid(cx) {
             return false;
         }
         cx.set_key_focus(self.area);
         true
+    }
+
+    /// Give the keyboard back if this tile holds it — the AI pane hiding
+    /// must not leave its child as the invisible key target.
+    pub fn release_keyboard(&mut self, cx: &mut Cx) {
+        if self.area != Area::Empty && cx.has_key_focus(self.area) {
+            cx.set_key_focus(Area::Empty);
+        }
     }
 
     /// FOCUS RULE: mark this tile a Quick-Look panel — mouse yes, keyboard

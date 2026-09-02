@@ -244,6 +244,19 @@ pub fn find_app(id: &str) -> Option<AppDef> {
             "makepad-example-counter",
             AlwaysNew,
         )),
+        // The assistant: a special child seated in the pane slot, never a
+        // menu row or a tile (see ai_bus.rs / shell/ai_pane.rs). The WM
+        // launches it through its own pane path, never `launch_app`, so
+        // the policy is moot — AlwaysNew keeps launch-or-focus's window
+        // scan from ever "focusing" a pane.
+        "aichat" => Some(AppDef::app(
+            "aichat",
+            "AI",
+            "makepad-aichat",
+            "apps/aichat",
+            "aichat",
+            AlwaysNew,
+        )),
         _ => None,
     }
 }
@@ -592,6 +605,8 @@ pub struct ClientSlot {
     /// A polite close was sent at this instant (omarchy's
     /// `hl.dsp.window.close()`); the hard kill is only the fallback.
     pub closing: Option<std::time::Instant>,
+    /// The aichat child seated in the AI pane: not in the layout, no tile.
+    pub pane: bool,
 }
 
 /// How long a client gets to honor a close request before it is killed.
@@ -872,6 +887,7 @@ pub fn spawn_client(
         linked: false,
         linked_at: None,
         closing: None,
+        pane: false,
     })
 }
 
