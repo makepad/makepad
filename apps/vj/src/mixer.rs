@@ -719,6 +719,17 @@ struct DeckVoice {
     seek_fade: Option<SeekFade>,
     gain: Ramp,
     mute: Ramp,
+    /// Play and pause as a RAMP rather than a switch. The deck used to stop
+    /// contributing on the instant the flag changed, which on anything but
+    /// silence is a step straight to zero -- half full scale on a
+    /// half-scale signal, and the loudest click in the transport. The flag
+    /// above stays the operator's intent; this is what the room hears, and
+    /// the deck keeps reading and fading for as long as it is above zero.
+    transport: Ramp,
+    /// Where the playhead was when the operator pressed pause. The fade-out
+    /// keeps reading, so without this a pause would eat the few
+    /// milliseconds it sounded and every pause would walk the track on.
+    pause_at: Option<f64>,
     ended: bool,
     /// Tempo multiplier from the tempo slider / sync.
     rate: ParamRamp,
@@ -752,6 +763,8 @@ impl DeckVoice {
             seek_fade: None,
             gain: Ramp::at(1.0),
             mute: Ramp::at(1.0),
+            transport: Ramp::at(0.0),
+            pause_at: None,
             ended: false,
             rate: ParamRamp::at(1.0),
             key_ratio: ParamRamp::at(1.0),
@@ -1769,6 +1782,8 @@ impl Mixer {
         d.stems = None;
         d.splat = None;
         d.playing = false;
+        // A fresh track has nothing to fade out of: cut, do not ramp.
+        d.transport = Ramp::at(0.0);
         d.seek_frames(0.0);
         d.eq.reset();
         d.reset_blend();
@@ -1784,6 +1799,7 @@ impl Mixer {
         d.stems = None;
         d.splat = None;
         d.playing = false;
+        d.transport = Ramp::at(0.0);
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
@@ -1818,7 +1834,9 @@ impl Mixer {
             }
             d.ended = false;
         }
+        d.pause_at = if playing { None } else { Some(d.playhead_frames()) };
         d.playing = playing;
+        d.transport.slew(if playing { 1.0 } else { 0.0 }, SLEW_SECS);
         self.publish_deck(&s, deck.index());
     }
 
@@ -2506,7 +2524,16 @@ impl Mixer {
             let mut deck_out = [(0.0f32, 0.0f32); 2];
             let mut cue = (0.0f32, 0.0f32);
             for (i, d) in s.decks.iter_mut().enumerate() {
-                let gain = d.gain.tick(rate) * d.mute.tick(rate);
+                let transport = d.transport.tick(rate);
+                if transport <= 0.0 {
+                    if let Some(at) = d.pause_at.take() {
+                        // The fade is over and nothing is audible: give back
+                        // the frames it sounded, so pause leaves the
+                        // playhead exactly where it was pressed.
+                        d.seek_frames(at);
+                    }
+                }
+                let gain = d.gain.tick(rate) * d.mute.tick(rate) * transport;
                 let side = if i == 0 { fader.0 } else { fader.1 };
                 let deck_rate = d.rate.tick(rate);
                 let key_ratio = d.key_ratio.tick(rate) as f64;
@@ -2555,8 +2582,11 @@ impl Mixer {
                     continue;
                 }
                 // A hand on the record plays even a paused deck; that is the
-                // whole point of scrubbing.
-                if !scratching && (!d.playing || d.ended) {
+                // whole point of scrubbing. And a deck told to stop keeps
+                // reading until its transport ramp reaches zero, so what the
+                // room hears is a fade over the track's own next few
+                // milliseconds rather than a cut.
+                if !scratching && transport <= 0.0 && (!d.playing || d.ended) {
                     continue;
                 }
                 let source = DeckSource {
@@ -2685,9 +2715,16 @@ impl Mixer {
                         d.seek_frames(start);
                         continue;
                     }
-                    d.playing = false;
-                    d.ended = true;
-                    s.ended_decks.push(if i == 0 { DeckId::A } else { DeckId::B });
+                    // Once, not once a frame: the deck keeps running here
+                    // until its transport ramp reaches zero, so without this
+                    // guard the end would be announced again on every frame
+                    // of the fade.
+                    if !d.ended {
+                        d.playing = false;
+                        d.transport.slew(0.0, SLEW_SECS);
+                        d.ended = true;
+                        s.ended_decks.push(if i == 0 { DeckId::A } else { DeckId::B });
+                    }
                     continue;
                 }
                 // The wrap is a crossfade, not a splice and not a duck:
@@ -3726,6 +3763,34 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn pausing_leaves_the_playhead_where_it_was_pressed() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let at_press = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.set_deck_playing(DeckId::A, false);
+        // Well past the fade: the deck keeps reading while it fades, and
+        // hands those frames back when it reaches silence.
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let after = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            (after - at_press).abs() < 1e-9,
+            "pause moved the playhead from {at_press} to {after}"
+        );
+        // And it stays put, however long it sits there.
+        for _ in 0..20 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let later = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!((later - at_press).abs() < 1e-9, "a paused deck crept to {later}");
     }
 
     #[test]
