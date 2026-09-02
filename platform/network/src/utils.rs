@@ -105,6 +105,16 @@ fn find_head_end(buf: &[u8], search_from: usize) -> Option<usize> {
 }
 
 impl HttpServerHeaders {
+    /// Returns the first request-header value with an ASCII case-insensitive
+    /// name. `lines` remains public for callers that need the untouched head.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.lines.iter().skip(1).find_map(|line| {
+            let line = line.strip_suffix("\r\n").unwrap_or(line);
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
     /// Reads the request head, returning the parsed headers together with every
     /// byte that was read past the head terminator.
     ///
@@ -175,6 +185,12 @@ impl HttpServerHeaders {
         let path;
         if let Some(v) = split_header_line(&lines[0], "GET ") {
             verb = "GET";
+            path = parse_url_path(v, sec_websocket_key.is_none())
+        } else if let Some(v) = split_header_line(&lines[0], "HEAD ") {
+            verb = "HEAD";
+            path = parse_url_path(v, sec_websocket_key.is_none())
+        } else if let Some(v) = split_header_line(&lines[0], "OPTIONS ") {
+            verb = "OPTIONS";
             path = parse_url_path(v, sec_websocket_key.is_none())
         } else if let Some(v) = split_header_line(&lines[0], "POST ") {
             verb = "POST";
@@ -267,6 +283,26 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(lines[0], "GET /ui/ HTTP/1.1\r\n");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn head_preserves_verb_and_raw_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream
+                .write_all(b"HEAD /asset.wasm HTTP/1.1\r\nHost: x\r\nRange: bytes=4-7\r\n\r\n")
+                .unwrap();
+        });
+        let (mut server, _) = listener.accept().unwrap();
+        let (headers, body) = HttpServerHeaders::from_tcp_stream(&mut server).unwrap();
+        client.join().unwrap();
+        assert_eq!(headers.verb, "HEAD");
+        assert_eq!(headers.path, "/asset.wasm");
+        assert_eq!(headers.header("range"), Some("bytes=4-7"));
+        assert!(headers.lines.iter().any(|line| line == "Range: bytes=4-7\r\n"));
         assert!(body.is_empty());
     }
 

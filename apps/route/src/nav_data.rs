@@ -12,6 +12,7 @@ use makepad_map_nav::geo::LonLat;
 use makepad_map_nav::graph::{Route, RouteGraph, TravelMode};
 use makepad_map_nav::search::{SearchIndex, SearchResult};
 use makepad_map_nav::searchdb::SearchDb;
+use makepad_map_nav::search_service::merge_search_results;
 use makepad_widgets::*;
 use std::path::Path;
 
@@ -135,26 +136,7 @@ impl NavData {
         } else if let Some(places) = &self.places {
             results.extend(places.query(text, near, limit));
         }
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut kept: Vec<SearchResult> = Vec::new();
-        for r in results {
-            if kept.iter().any(|k| {
-                k.name.eq_ignore_ascii_case(&r.name)
-                    && crate::trip::haversine_m((k.pos.lon, k.pos.lat), (r.pos.lon, r.pos.lat))
-                        < 2000.0
-            }) {
-                continue;
-            }
-            kept.push(r);
-            if kept.len() >= limit {
-                break;
-            }
-        }
-        kept
+        merge_search_results(results, Vec::new(), limit)
     }
 
     /// Detail graph first; whole-pair fallback to the Europe major-roads

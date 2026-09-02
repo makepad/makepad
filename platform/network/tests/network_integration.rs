@@ -1,10 +1,10 @@
 use makepad_live_id::LiveId;
 use makepad_network::{
-    HttpMethod, HttpRequest, HttpServer, HttpServerRequest, NetworkConfig, NetworkResponse,
-    NetworkRuntime, SocketStream, WebSocketTransport, WsMessage, WsSend,
+    HttpMethod, HttpRequest, HttpServer, HttpServerRequest, HttpServerResponse, NetworkConfig,
+    NetworkResponse, NetworkRuntime, SocketStream, WebSocketTransport, WsMessage, WsSend,
 };
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,46 @@ fn parse_content_length(headers: &str) -> usize {
         }
     }
     0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_routes_head_through_get_and_suppresses_body() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 1024,
+        })
+        .expect("start HTTP server");
+    let handler = std::thread::spawn(move || {
+        let request = request_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+        let HttpServerRequest::Get { headers, response_sender } = request else {
+            panic!("HEAD did not use GET-shaped dispatch");
+        };
+        assert_eq!(headers.verb, "HEAD");
+        assert!(response_sender
+            .send(HttpServerResponse {
+                header: "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n".into(),
+                body: b"hidden!".to_vec(),
+            })
+            .is_ok());
+    });
+    let mut stream = TcpStream::connect(listen_address).unwrap();
+    stream
+        .write_all(b"HEAD /asset HTTP/1.1\r\nHost: test\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = find_header_end(&response).unwrap() + 4;
+    assert!(String::from_utf8_lossy(&response[..split]).contains("Content-Length: 7"));
+    assert!(response[split..].is_empty());
+    handler.join().unwrap();
 }
 
 #[cfg(not(target_arch = "wasm32"))]

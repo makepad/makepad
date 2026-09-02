@@ -6,9 +6,11 @@ pub use crate::web_socket_parser::{
     SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
 use std::io::prelude::*;
+use std::fs::File;
+use std::collections::HashMap;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, mpsc::RecvTimeoutError};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, mpsc::RecvTimeoutError, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Sockets whose peer vanished (a client retry storm timing out and
@@ -62,6 +64,56 @@ pub struct HttpServerResponse {
     pub body: Vec<u8>,
 }
 
+struct HttpServerFileResponse {
+    file: File,
+    offset: u64,
+    len: u64,
+}
+
+const FILE_RESPONSE_MARKER: &[u8] = b"\0makepad-http-file\0";
+static NEXT_FILE_RESPONSE: AtomicU64 = AtomicU64::new(1);
+static FILE_RESPONSES: OnceLock<Mutex<HashMap<u64, HttpServerFileResponse>>> = OnceLock::new();
+
+impl HttpServerResponse {
+    /// Builds a response whose already-open file region is streamed by the
+    /// connection thread. Ordinary struct literals and response channels are
+    /// unchanged, so this is additive for existing HTTP server users.
+    pub fn from_file(header: String, file: File, offset: u64, len: u64) -> Self {
+        let id = NEXT_FILE_RESPONSE.fetch_add(1, Ordering::Relaxed);
+        let mut responses = FILE_RESPONSES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A receiver normally consumes this immediately. Bound abandoned
+        // registrations as well, so a dropped response channel cannot leak
+        // open descriptors indefinitely.
+        if responses.len() >= 1_024 {
+            if let Some(oldest) = responses.keys().copied().min() {
+                responses.remove(&oldest);
+            }
+        }
+        responses.insert(id, HttpServerFileResponse { file, offset, len });
+        drop(responses);
+        let mut body = FILE_RESPONSE_MARKER.to_vec();
+        body.extend_from_slice(&id.to_le_bytes());
+        Self { header, body }
+    }
+}
+
+pub type HttpServerResponseSender = mpsc::Sender<HttpServerResponse>;
+
+fn take_file_response(body: &[u8]) -> Option<HttpServerFileResponse> {
+    if body.len() != FILE_RESPONSE_MARKER.len() + 8 || !body.starts_with(FILE_RESPONSE_MARKER) {
+        return None;
+    }
+    let id = u64::from_le_bytes(body[FILE_RESPONSE_MARKER.len()..].try_into().ok()?);
+    FILE_RESPONSES
+        .get()?
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id)
+}
+
 pub enum HttpServerRequest {
     ConnectWebSocket {
         web_socket_id: u64,
@@ -83,12 +135,12 @@ pub enum HttpServerRequest {
     },
     Get {
         headers: HttpServerHeaders,
-        response_sender: mpsc::Sender<HttpServerResponse>,
+        response_sender: HttpServerResponseSender,
     },
     Post {
         headers: HttpServerHeaders,
         body: Vec<u8>,
-        response: mpsc::Sender<HttpServerResponse>,
+        response: HttpServerResponseSender,
     },
 }
 
@@ -148,7 +200,7 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     if headers.verb == "POST" {
                         return handle_post(http_server, tcp_stream, headers, body_prefix);
                     }
-                    if headers.verb == "GET" {
+                    if matches!(headers.verb.as_str(), "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE") {
                         return handle_get(http_server, tcp_stream, headers);
                     }
                     http_error_out(tcp_stream, 500)
@@ -210,10 +262,7 @@ fn handle_post(
     };
 
     match rx_socket.recv_timeout(RESPONSE_TIMEOUT) {
-        Ok(response) => {
-            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, response.header.as_bytes());
-            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &response.body);
-        }
+        Ok(response) => write_response(&mut tcp_stream, response, false),
         Err(_) => return http_error_out(tcp_stream, 504),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -367,6 +416,7 @@ fn handle_web_socket(
 
 fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {
     // send our channel the post
+    let suppress_body = headers.verb == "HEAD";
     let (tx_socket, rx_socket) = mpsc::channel::<HttpServerResponse>();
     if http_server
         .request
@@ -380,11 +430,28 @@ fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpS
     };
 
     match rx_socket.recv_timeout(RESPONSE_TIMEOUT) {
-        Ok(response) => {
-            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, response.header.as_bytes());
-            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &response.body);
-        }
+        Ok(response) => write_response(&mut tcp_stream, response, suppress_body),
         Err(_) => return http_error_out(tcp_stream, 504),
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
+}
+
+fn write_response(
+    tcp_stream: &mut TcpStream,
+    response: HttpServerResponse,
+    suppress_body: bool,
+) {
+    let file_response = take_file_response(&response.body);
+    write_bytes_to_tcp_stream_no_error(tcp_stream, response.header.as_bytes());
+    if suppress_body {
+        return;
+    }
+    if let Some(HttpServerFileResponse { mut file, offset, len }) = file_response {
+        if file.seek(std::io::SeekFrom::Start(offset)).is_ok() {
+            let mut region = file.take(len);
+            let _ = std::io::copy(&mut region, tcp_stream);
+        }
+    } else {
+        write_bytes_to_tcp_stream_no_error(tcp_stream, &response.body);
+    }
 }
