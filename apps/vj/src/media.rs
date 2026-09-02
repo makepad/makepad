@@ -23,7 +23,8 @@ use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
 use makepad_widgets::makepad_platform::thread::{lock_from_ui, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -2157,7 +2158,7 @@ pub fn waveform_bgra(
 /// Anything the UI thread does for longer than this in one go is a dropped
 /// frame the operator sees as a hitch — half a 60Hz frame, so the rest of
 /// the frame still has room to draw.
-pub const UI_STEP_BUDGET_MS: f32 = 8.0;
+pub const UI_STEP_BUDGET_MS: f32 = 7.5;
 
 /// One UI-thread step of a content load, timed.
 ///
@@ -2241,6 +2242,11 @@ pub enum DecodeJob {
         sheet: Option<(ThumbnailCells, f32)>,
         legacy_may_be_sheet: bool,
         epoch: u64,
+        /// A durable local result (not a viewport prefetch): keep it across
+        /// epoch changes and beyond the bounded disposable backlog. Effect
+        /// cache hits set this so a warm library is decoded in full instead
+        /// of silently throwing away everything beyond 64 entries.
+        keep_pending: bool,
     },
 }
 
@@ -2387,6 +2393,11 @@ pub enum DecodeDone {
     /// asks again next time it is wanted. Without this the drop was silent
     /// and the tile stayed blank for the rest of the session.
     ThumbDropped {
+        revision: AssetRevisionId,
+    },
+    /// A queued or active thumbnail decode exceeded its watchdog. Unlike an
+    /// epoch drop this is terminal for that request and must be shown/logged.
+    ThumbTimedOut {
         revision: AssetRevisionId,
     },
 }
@@ -3336,6 +3347,9 @@ pub const THUMB_WIDTH_PERFORMING: usize = 2;
 /// current view — it was requested longest ago) is dropped to make room.
 /// Keeps a fast scroll from growing the backlog without limit.
 const MAX_PENDING_THUMBS: usize = 64;
+/// JPEG/PNG thumbnails are bounded to 8 MiB and normally take milliseconds.
+/// This catches a lost web worker without mistaking ordinary load for a hang.
+const THUMB_JOB_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct PendingThumb {
     revision: AssetRevisionId,
@@ -3343,21 +3357,25 @@ struct PendingThumb {
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
     epoch: u64,
+    keep_pending: bool,
+    submitted: Instant,
 }
 
 struct ThumbQueueState {
     /// Push at the back, pop from the back: a stack, not a FIFO queue.
     stack: VecDeque<PendingThumb>,
     newest_epoch: u64,
-    closed: bool,
     /// Decodes running right now, and how many may. The threads exist
     /// whatever the width is; narrowing just parks the surplus on the
     /// condvar, so widening again costs nothing.
-    active: usize,
-    width: usize,
+    active: HashMap<u64, (AssetRevisionId, Instant)>,
+    next_ticket: u64,
     /// Jobs thrown away UNSTARTED, waiting to be reported so the caller can
     /// clear their in-flight marks. A silent drop is a blank tile forever.
     dropped: Vec<AssetRevisionId>,
+    /// Watchdog failures, reported separately so the caller logs each once
+    /// and does not retry a poisoned cache item forever.
+    timed_out: Vec<AssetRevisionId>,
 }
 
 /// LIFO job source shared by the thumb lane's workers. See `DecodePool`'s
@@ -3365,6 +3383,8 @@ struct ThumbQueueState {
 struct ThumbQueue {
     state: Mutex<ThumbQueueState>,
     cv: Condvar,
+    width: AtomicUsize,
+    closed: AtomicBool,
 }
 
 impl ThumbQueue {
@@ -3373,96 +3393,176 @@ impl ThumbQueue {
             state: Mutex::new(ThumbQueueState {
                 stack: VecDeque::new(),
                 newest_epoch: 0,
-                closed: false,
-                active: 0,
-                width,
+                active: HashMap::new(),
+                next_ticket: 0,
                 dropped: Vec::new(),
+                timed_out: Vec::new(),
             }),
             cv: Condvar::new(),
+            width: AtomicUsize::new(width.max(1)),
+            closed: AtomicBool::new(false),
         }
     }
 
     /// How many workers may decode at once. Raising it wakes the parked
     /// ones; lowering it lets the ones already decoding finish.
     fn set_width(&self, width: usize) {
-        let mut state = lock_from_ui(&self.state);
         let width = width.max(1);
-        if state.width == width {
+        if self.width.swap(width, Ordering::Release) == width {
             return;
         }
-        state.width = width;
-        drop(state);
         self.cv.notify_all();
     }
 
-    fn take_dropped(&self) -> Vec<AssetRevisionId> {
-        let Ok(mut state) = self.state.try_lock() else {
-            return Vec::new();
+    /// Admit as many UI-staged jobs as one nonblocking lock attempt permits.
+    /// On contention the caller retains the complete batch and retries next
+    /// frame; the browser UI never spins or futex-waits on a worker.
+    fn try_push_batch(&self, jobs: &mut VecDeque<PendingThumb>) -> bool {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
         };
-        std::mem::take(&mut state.dropped)
-    }
-
-    /// One decode finished: free its slot and wake whoever is waiting.
-    fn finished(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.active = state.active.saturating_sub(1);
-        drop(state);
-        self.cv.notify_one();
-    }
-
-    fn push(&self, job: PendingThumb) {
-        let mut state = lock_from_ui(&self.state);
-        if job.epoch > state.newest_epoch {
-            state.newest_epoch = job.epoch;
-            // A new visible range makes every pending job for the old one
-            // dead weight. Dropping them HERE rather than at pop keeps the
-            // backlog honest: a fast scroll leaves no queue behind it.
-            let newest = state.newest_epoch;
-            let stale: Vec<AssetRevisionId> = state
-                .stack
-                .iter()
-                .filter(|j| j.epoch < newest)
-                .map(|j| j.revision)
-                .collect();
-            state.stack.retain(|j| j.epoch >= newest);
-            state.dropped.extend(stale);
+        while let Some(job) = jobs.pop_front() {
+            if job.epoch > state.newest_epoch {
+                state.newest_epoch = job.epoch;
+                // A new visible range makes old disposable work dead
+                // weight. Durable cache/render results are already in hand
+                // and must still become textures.
+                let newest = state.newest_epoch;
+                let stale: Vec<AssetRevisionId> = state
+                    .stack
+                    .iter()
+                    .filter(|j| !j.keep_pending && j.epoch < newest)
+                    .map(|j| j.revision)
+                    .collect();
+                state
+                    .stack
+                    .retain(|j| j.keep_pending || j.epoch >= newest);
+                state.dropped.extend(stale);
+            }
+            state.stack.push_back(job);
         }
-        state.stack.push_back(job);
-        while state.stack.len() > MAX_PENDING_THUMBS {
-            // Drop the oldest pending job — and SAY SO.
-            if let Some(job) = state.stack.pop_front() {
-                state.dropped.push(job.revision);
+        while state.stack.iter().filter(|job| !job.keep_pending).count()
+            > MAX_PENDING_THUMBS
+        {
+            // Drop the oldest DISPOSABLE pending job — and SAY SO. A warm
+            // FX cache may legitimately contain the whole bundled library.
+            let Some(index) = state.stack.iter().position(|job| !job.keep_pending) else {
+                break;
+            };
+            let job = state.stack.remove(index).expect("pending thumb index");
+            state.dropped.push(job.revision);
+        }
+        drop(state);
+        self.cv.notify_all();
+        true
+    }
+
+    /// Retire queued/active work whose worker or callback vanished. Like
+    /// admission, this is a single nonblocking UI poll; contention simply
+    /// leaves the records in place for the next frame.
+    fn poll_notifications(&self) -> Option<(Vec<AssetRevisionId>, Vec<AssetRevisionId>)> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let queued: Vec<AssetRevisionId> = state
+            .stack
+            .iter()
+            .filter(|job| job.submitted.elapsed() >= THUMB_JOB_TIMEOUT)
+            .map(|job| job.revision)
+            .collect();
+        if !queued.is_empty() {
+            state
+                .stack
+                .retain(|job| job.submitted.elapsed() < THUMB_JOB_TIMEOUT);
+            state.timed_out.extend(queued);
+        }
+        let active: Vec<u64> = state
+            .active
+            .iter()
+            .filter_map(|(ticket, (_, started))| {
+                (started.elapsed() >= THUMB_JOB_TIMEOUT).then_some(*ticket)
+            })
+            .collect();
+        for ticket in active {
+            if let Some((revision, _)) = state.active.remove(&ticket) {
+                state.timed_out.push(revision);
             }
         }
+        let freed = !state.timed_out.is_empty();
+        let out = (
+            std::mem::take(&mut state.dropped),
+            std::mem::take(&mut state.timed_out),
+        );
+        drop(state);
+        if freed {
+            self.cv.notify_all();
+        }
+        Some(out)
+    }
+
+    /// One decode finished: free its slot. False means the UI watchdog
+    /// already retired it, so the late pixels must not be published.
+    fn finished(&self, ticket: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let current = state.active.remove(&ticket).is_some();
+        drop(state);
         self.cv.notify_one();
+        current
     }
 
     /// Blocks until a live job is available or the queue is closed. Stale
     /// jobs (epoch older than the newest one this queue has seen) are
     /// popped and dropped in place, never decoded — they've certainly
     /// scrolled out of view by the time their turn comes.
-    fn pop(&self) -> Option<PendingThumb> {
-        let mut state = self.state.lock().unwrap();
+    fn pop(&self) -> Option<(u64, PendingThumb)> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         loop {
-            while state.active < state.width {
+            while state.active.len() < self.width.load(Ordering::Acquire) {
                 let Some(job) = state.stack.pop_back() else { break };
-                if job.epoch >= state.newest_epoch {
-                    state.active += 1;
-                    return Some(job);
+                if job.submitted.elapsed() >= THUMB_JOB_TIMEOUT {
+                    state.timed_out.push(job.revision);
+                    continue;
+                }
+                if job.keep_pending || job.epoch >= state.newest_epoch {
+                    let ticket = state.next_ticket;
+                    state.next_ticket = state.next_ticket.wrapping_add(1);
+                    state.active.insert(ticket, (job.revision, Instant::now()));
+                    return Some((ticket, job));
                 }
                 state.dropped.push(job.revision);
             }
-            if state.closed {
+            if self.closed.load(Ordering::Acquire) {
                 return None;
             }
-            state = self.cv.wait(state).unwrap();
+            // The timeout also closes the tiny notify/check race during
+            // teardown; workers otherwise sleep without polling.
+            state = self
+                .cv
+                .wait_timeout(state, Duration::from_secs(1))
+                .unwrap_or_else(|error| error.into_inner())
+                .0;
         }
     }
 
     fn close(&self) {
-        let mut state = lock_from_ui(&self.state);
-        state.closed = true;
+        self.closed.store(true, Ordering::Release);
         self.cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn push(&self, job: PendingThumb) {
+        self.push_batch(vec![job]);
+    }
+
+    #[cfg(test)]
+    fn push_batch(&self, jobs: Vec<PendingThumb>) {
+        let mut jobs = jobs.into();
+        assert!(self.try_push_batch(&mut jobs));
+        assert!(jobs.is_empty());
     }
 }
 
@@ -3545,11 +3645,9 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
 ///   decode that is already wanted must never be starved by ordering games.
 /// - the THUMB lane is a small, dedicated pool (also sized by `lane_sizes`)
 ///   that only ever decodes `DecodeJob::Thumb`. Its pending jobs live on a
-///   bounded LIFO stack (`ThumbQueue`), not a queue: the tile under the
-///   operator's eye right now decodes before ones they scrolled past a
-///   moment ago, and a job whose `epoch` has been superseded by a newer one
-///   is skipped — never decoded — instead of wasting a worker on a tile
-///   that has already scrolled away. See `ThumbQueue` and
+///   LIFO stack (`ThumbQueue`), not a queue: disposable catalog prefetches
+///   are epoch-pruned and capped, while durable local FX sheets survive
+///   both policies so a warm cache drains in full. See `ThumbQueue` and
 ///   `MAX_PENDING_THUMBS` for the exact rules.
 ///
 /// Memory: a thumb decodes to at most `MAX_THUMB_DIM² × 4` bytes of BGRA
@@ -3561,6 +3659,9 @@ pub struct DecodePool {
     heavy_tx: Sender<DecodeJob>,
     heavy_rx: Option<Receiver<DecodeJob>>,
     thumb_queue: Arc<ThumbQueue>,
+    /// UI-owned admission buffer. Moving a batch into the worker queue is a
+    /// best-effort `try_lock`; contention keeps it here for the next poll.
+    thumb_staged: RefCell<VecDeque<PendingThumb>>,
     done_tx: Sender<DecodeDone>,
     rx: Receiver<DecodeDone>,
 }
@@ -3579,6 +3680,7 @@ impl DecodePool {
             heavy_tx,
             heavy_rx: Some(job_rx),
             thumb_queue: Arc::new(ThumbQueue::new(1)),
+            thumb_staged: RefCell::new(VecDeque::new()),
             done_tx,
             rx,
         }
@@ -3615,9 +3717,11 @@ impl DecodePool {
             let queue = self.thumb_queue.clone();
             let done = self.done_tx.clone();
             match spawner.spawn(move || loop {
-                    let Some(job) = queue.pop() else { return };
+                    let Some((ticket, job)) = queue.pop() else { return };
                     let result = decode_thumb_source(&job.source, job.sheet, job.legacy_may_be_sheet);
-                    queue.finished();
+                    if !queue.finished(ticket) {
+                        continue;
+                    }
                     let out = DecodeDone::Thumb { revision: job.revision, result };
                     if done.send(out).is_err() {
                         return;
@@ -3630,13 +3734,37 @@ impl DecodePool {
     }
 
     pub fn submit(&self, job: DecodeJob) {
-        match job {
-            DecodeJob::Thumb { revision, source, sheet, legacy_may_be_sheet, epoch } => {
-                self.thumb_queue
-                    .push(PendingThumb { revision, source, sheet, legacy_may_be_sheet, epoch });
-            }
-            other => {
-                let _ = self.heavy_tx.send(other);
+        self.submit_batch(std::iter::once(job));
+    }
+
+    /// Submit related thumbnail work as one queue operation. This matters
+    /// for a warm FX cache: IndexedDB can return hundreds of JPEGs together,
+    /// and the UI thread stages that set without touching a worker-owned lock.
+    /// [`Self::poll`] transfers it with one nonblocking attempt per frame.
+    pub fn submit_batch(&self, jobs: impl IntoIterator<Item = DecodeJob>) {
+        let submitted = Instant::now();
+        let mut thumbs = self.thumb_staged.borrow_mut();
+        for job in jobs {
+            match job {
+                DecodeJob::Thumb {
+                    revision,
+                    source,
+                    sheet,
+                    legacy_may_be_sheet,
+                    epoch,
+                    keep_pending,
+                } => thumbs.push_back(PendingThumb {
+                    revision,
+                    source,
+                    sheet,
+                    legacy_may_be_sheet,
+                    epoch,
+                    keep_pending,
+                    submitted,
+                }),
+                other => {
+                    let _ = self.heavy_tx.send(other);
+                }
             }
         }
     }
@@ -3649,12 +3777,33 @@ impl DecodePool {
     }
 
     pub fn poll(&self) -> Vec<DecodeDone> {
-        let mut out: Vec<DecodeDone> = self
-            .thumb_queue
-            .take_dropped()
-            .into_iter()
-            .map(|revision| DecodeDone::ThumbDropped { revision })
+        let mut staged = self.thumb_staged.borrow_mut();
+        let expired: Vec<AssetRevisionId> = staged
+            .iter()
+            .filter(|job| job.submitted.elapsed() >= THUMB_JOB_TIMEOUT)
+            .map(|job| job.revision)
             .collect();
+        if !expired.is_empty() {
+            staged.retain(|job| job.submitted.elapsed() < THUMB_JOB_TIMEOUT);
+        }
+        self.thumb_queue.try_push_batch(&mut staged);
+        drop(staged);
+        let mut out: Vec<DecodeDone> = expired
+            .into_iter()
+            .map(|revision| DecodeDone::ThumbTimedOut { revision })
+            .collect();
+        if let Some((dropped, timed_out)) = self.thumb_queue.poll_notifications() {
+            out.extend(
+                dropped
+                    .into_iter()
+                    .map(|revision| DecodeDone::ThumbDropped { revision }),
+            );
+            out.extend(
+                timed_out
+                    .into_iter()
+                    .map(|revision| DecodeDone::ThumbTimedOut { revision }),
+            );
+        }
         loop {
             match self.rx.try_recv() {
                 Ok(done) => out.push(done),
@@ -4353,7 +4502,8 @@ mod tests {
                 | DecodeDone::Billboard { .. }
                 | DecodeDone::FlowClip { .. }
                 | DecodeDone::Thumb { .. }
-                | DecodeDone::ThumbDropped { .. } => {
+                | DecodeDone::ThumbDropped { .. }
+                | DecodeDone::ThumbTimedOut { .. } => {
                     panic!("no mesh/flow/thumb job submitted")
                 }
             }
@@ -4384,24 +4534,26 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         // Width 1: one job out, and the next only after it finishes.
-        let first = queue.pop().expect("first job");
+        let (first_ticket, first) = queue.pop().expect("first job");
         {
             let state = queue.state.lock().unwrap();
-            assert_eq!(state.active, 1);
+            assert_eq!(state.active.len(), 1);
             assert_eq!(state.stack.len(), 2);
         }
-        queue.finished();
-        let second = queue.pop().expect("second job");
+        assert!(queue.finished(first_ticket));
+        let (_, second) = queue.pop().expect("second job");
         assert_ne!(first.revision, second.revision);
         // Widening lets a third start while the second is still running.
         queue.set_width(4);
-        let third = queue.pop().expect("third job");
+        let (_, third) = queue.pop().expect("third job");
         assert_ne!(second.revision, third.revision);
         let state = queue.state.lock().unwrap();
-        assert_eq!(state.active, 2, "the second and third; the first reported finished");
+        assert_eq!(state.active.len(), 2, "the second and third; the first reported finished");
         assert!(state.stack.is_empty());
     }
 
@@ -4417,6 +4569,8 @@ mod tests {
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 1,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
         // A newer epoch retires the pending job for the old one.
         queue.push(PendingThumb {
@@ -4425,9 +4579,11 @@ mod tests {
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
-        assert_eq!(queue.take_dropped(), vec![stale]);
-        assert!(queue.take_dropped().is_empty(), "reported once, not forever");
+        assert_eq!(queue.poll_notifications().unwrap().0, vec![stale]);
+        assert!(queue.poll_notifications().unwrap().0.is_empty(), "reported once, not forever");
 
         // Overflow drops the OLDEST pending job — and says which.
         let queue = ThumbQueue::new(4);
@@ -4438,9 +4594,11 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 5,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
-        let dropped = queue.take_dropped();
+        let dropped = queue.poll_notifications().unwrap().0;
         assert_eq!(dropped.len(), 2, "two over the cap, two reported");
         assert_eq!(dropped[0], AssetRevisionId::from_bytes([0u8; 32]));
     }
@@ -4459,10 +4617,12 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         for expect in (0..10u32).rev() {
-            let job = queue.pop().expect("job available");
+            let (_, job) = queue.pop().expect("job available");
             assert_eq!(
                 job.source,
                 DecodeSource::Path(PathBuf::from(format!("t{expect}.png"))),
@@ -4480,6 +4640,8 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 1,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         queue.push(PendingThumb {
@@ -4488,8 +4650,10 @@ mod tests {
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
-        let job = queue.pop().expect("the fresh-epoch job survives");
+        let (_, job) = queue.pop().expect("the fresh-epoch job survives");
         assert_eq!(job.source, DecodeSource::Path(PathBuf::from("fresh.png")));
         assert!(
             queue.state.lock().unwrap().stack.is_empty(),
@@ -4505,6 +4669,8 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         let remaining = queue.state.lock().unwrap();
@@ -4514,6 +4680,96 @@ mod tests {
             DecodeSource::Path(PathBuf::from("p3.png")),
             "the three oldest (p0..p2) must have been dropped to stay at the cap"
         );
+    }
+
+    #[test]
+    fn fx_thumb_cache_batch_survives_pending_cap_and_epoch_changes() {
+        const CACHED: usize = 249;
+        let queue = ThumbQueue::new(CACHED + 1);
+        queue.push_batch(
+            (0..CACHED)
+                .map(|i| PendingThumb {
+                    revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                    source: PathBuf::from(format!("cached{i}.jpg")).into(),
+                    sheet: None,
+                    legacy_may_be_sheet: false,
+                    epoch: 1,
+                    keep_pending: true,
+                    submitted: Instant::now(),
+                })
+                .collect(),
+        );
+        // A scroll still retires an old disposable prefetch, but it must
+        // not retire any already-read local cache value.
+        let stale = AssetRevisionId::from_bytes([250; 32]);
+        queue.push(PendingThumb {
+            revision: stale,
+            source: PathBuf::from("stale-prefetch.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: false,
+            submitted: Instant::now(),
+        });
+        queue.push(PendingThumb {
+            revision: AssetRevisionId::from_bytes([251; 32]),
+            source: PathBuf::from("new-prefetch.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
+        });
+        assert_eq!(queue.poll_notifications().unwrap().0, vec![stale]);
+        let state = queue.state.lock().unwrap();
+        assert_eq!(
+            state.stack.iter().filter(|job| job.keep_pending).count(),
+            CACHED,
+            "the complete warm-cache batch must remain queued"
+        );
+        assert_eq!(state.stack.len(), CACHED + 1);
+    }
+
+    #[test]
+    fn fx_thumb_batch_retries_queue_lock_contention_without_loss() {
+        let queue = ThumbQueue::new(2);
+        let revision = AssetRevisionId::from_bytes([77; 32]);
+        let mut jobs = VecDeque::from([PendingThumb {
+            revision,
+            source: PathBuf::from("cached.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: true,
+            submitted: Instant::now(),
+        }]);
+        let guard = queue.state.lock().unwrap();
+        assert!(!queue.try_push_batch(&mut jobs));
+        assert_eq!(jobs.len(), 1, "contention must leave the UI batch intact");
+        drop(guard);
+        assert!(queue.try_push_batch(&mut jobs));
+        assert!(jobs.is_empty());
+        assert_eq!(queue.state.lock().unwrap().stack.len(), 1);
+    }
+
+    #[test]
+    fn fx_thumb_pending_timeout_is_reported_once_and_releases_the_queue() {
+        let queue = ThumbQueue::new(2);
+        let revision = AssetRevisionId::from_bytes([88; 32]);
+        queue.push(PendingThumb {
+            revision,
+            source: PathBuf::from("stalled.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: true,
+            submitted: Instant::now() - Duration::from_secs(11),
+        });
+        let (dropped, timed_out) = queue.poll_notifications().unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(timed_out, vec![revision]);
+        assert!(queue.state.lock().unwrap().stack.is_empty());
+        assert!(queue.poll_notifications().unwrap().1.is_empty(), "reported once");
     }
 
     #[test]
@@ -4539,6 +4795,7 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,
+                keep_pending: false,
             });
         }
 
@@ -4577,6 +4834,7 @@ mod tests {
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,
+                keep_pending: false,
             });
         }
         pool.submit(DecodeJob::MeshPrep {

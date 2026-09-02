@@ -289,6 +289,12 @@ pub const DECK_RECIPE: u32 = 2;
 
 const CACHE_SWEEP_LIST_LIMIT: u32 = 256;
 const CACHE_SWEEP_DELETE_BATCH: usize = 16;
+/// A browser storage request normally answers in the next event turn. A
+/// missing IndexedDB callback must not keep a revision in `holds()` forever.
+const CACHE_REQUEST_TIMEOUT_S: f32 = 5.0;
+/// Whole render/encode lane watchdog, counted in draws so a backgrounded tab
+/// does not fail simply because its animation clock was parked.
+const LANE_TIMEOUT_POLLS: u32 = 900;
 
 /// Browser and native use the same namespace/key contract. The immutable
 /// revision is the thumbnail version; recipe and dimensions invalidate any
@@ -468,6 +474,9 @@ struct ActiveJob {
     /// wall time, so a stalled clock (occlusion, machine sleep) can never
     /// spuriously fail a lane whose capture is simply parked with the app.
     await_polls: u32,
+    /// Draw polls spent on this job across load, bake, readback and encode.
+    /// This is the outer watchdog; phase-specific failures remain more useful.
+    lane_polls: u32,
 }
 
 /// One lane's own render target: the sheet the GPU packs cell by cell, plus
@@ -514,6 +523,14 @@ struct CacheLookup {
     revision: AssetRevisionId,
     key: String,
     job: Option<FxThumbJob>,
+    started: Instant,
+}
+
+struct CacheWrite {
+    revision: AssetRevisionId,
+    key: String,
+    stores_value: bool,
+    started: Instant,
 }
 
 /// The premix texture pair for pool step `step` (grown on demand). A free
@@ -582,7 +599,7 @@ pub struct VjFxThumbs {
     #[rust]
     cache_reads: HashMap<StorageRequestId, CacheLookup>,
     #[rust]
-    cache_writes: HashMap<StorageRequestId, (AssetRevisionId, String, bool)>,
+    cache_writes: HashMap<StorageRequestId, CacheWrite>,
     #[rust]
     cache_misses: HashSet<AssetRevisionId>,
     #[rust]
@@ -640,6 +657,13 @@ pub struct VjFxThumbs {
     batch_stored: usize,
     #[rust]
     batch_failed: usize,
+    /// Cache-hit JPEGs handed to the decode workers but not yet uploaded
+    /// and bound to the grid. Keeping them in the batch lifetime makes the
+    /// summary measure what the operator sees, not merely IndexedDB reads.
+    #[rust]
+    cache_visible_pending: HashSet<AssetRevisionId>,
+    #[rust]
+    batch_all_visible_s: Option<f32>,
 }
 
 impl VjFxThumbs {
@@ -650,6 +674,20 @@ impl VjFxThumbs {
             self.batch_cached = 0;
             self.batch_stored = 0;
             self.batch_failed = 0;
+            self.cache_visible_pending.clear();
+            self.batch_all_visible_s = None;
+        }
+    }
+
+    fn finish_visible_timing_if_ready(&mut self) {
+        if self.batch_all_visible_s.is_none()
+            && self.batch_cached > 0
+            && self.cache_reads.is_empty()
+            && self.cache_visible_pending.is_empty()
+        {
+            self.batch_all_visible_s = self
+                .batch_started
+                .map(|started| started.elapsed().as_secs_f32());
         }
     }
 
@@ -710,19 +748,27 @@ impl VjFxThumbs {
         }
         let key = cache_key(&asset, &revision, transition);
         self.begin_batch();
+        self.batch_all_visible_s = None;
         self.cache_keys.insert(revision, key.clone());
         let request = self.storage(cx).get(cx, &key);
         self.cache_reads.insert(
             request,
-            CacheLookup { revision, key, job: None },
+            CacheLookup { revision, key, job: None, started: Instant::now() },
         );
         false
     }
 
     pub fn invalidate_cache(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        self.cache_visible_pending.remove(&revision);
+        self.finish_visible_timing_if_ready();
         if let Some(key) = self.cache_keys.get(&revision).cloned() {
             let request = self.storage(cx).delete(cx, &key);
-            self.cache_writes.insert(request, (revision, key, false));
+            self.cache_writes.insert(request, CacheWrite {
+                revision,
+                key,
+                stores_value: false,
+                started: Instant::now(),
+            });
         }
         self.cache_misses.insert(revision);
     }
@@ -732,6 +778,7 @@ impl VjFxThumbs {
         self.pending.is_empty()
             && self.cache_reads.is_empty()
             && self.cache_writes.is_empty()
+            && self.cache_visible_pending.is_empty()
             && self.lanes.iter().all(|l| l.job.is_none())
     }
 
@@ -810,6 +857,27 @@ impl VjFxThumbs {
         std::mem::take(&mut self.results)
     }
 
+    /// The host has decoded, uploaded and rebound this cache-hit sheet, and
+    /// has requested the grid redraw that makes it visible.
+    pub fn mark_cache_visible(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        if !self.cache_visible_pending.remove(&revision) {
+            return;
+        }
+        self.finish_visible_timing_if_ready();
+        self.area.redraw(cx);
+        self.next_frame = cx.new_next_frame();
+    }
+
+    /// A worker that never answered must release the cache batch just like a
+    /// decode error does. `mark_failed` de-duplicates the error line.
+    pub fn mark_decode_timed_out(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        self.cache_visible_pending.remove(&revision);
+        self.finish_visible_timing_if_ready();
+        self.mark_failed(revision, "JPEG decode timed out".to_string());
+        self.area.redraw(cx);
+        self.next_frame = cx.new_next_frame();
+    }
+
     /// Admission NEVER collapses: a job is refused only when the platform
     /// cannot render at all, its revision already failed (terminal), or the
     /// same revision is already pending/rendering. A REVISION CHANGE is an
@@ -832,11 +900,17 @@ impl VjFxThumbs {
             read.job = Some(job);
         } else {
             let key = cache_key(&job.asset, &job.revision, job.transition);
+            self.batch_all_visible_s = None;
             self.cache_keys.insert(job.revision, key.clone());
             let request = self.storage(cx).get(cx, &key);
             self.cache_reads.insert(
                 request,
-                CacheLookup { revision: job.revision, key, job: Some(job) },
+                CacheLookup {
+                    revision: job.revision,
+                    key,
+                    job: Some(job),
+                    started: Instant::now(),
+                },
             );
         }
         self.next_frame = cx.new_next_frame();
@@ -901,6 +975,7 @@ impl VjFxThumbs {
                         if jpeg.starts_with(&[0xff, 0xd8]) =>
                     {
                         self.batch_cached += 1;
+                        self.cache_visible_pending.insert(read.revision);
                         self.results.push(FxThumbSheet {
                             revision: read.revision,
                             jpeg: jpeg.clone(),
@@ -935,18 +1010,75 @@ impl VjFxThumbs {
                 }
                 changed = true;
             }
-            if let Some((revision, key, stores_value)) =
-                self.cache_writes.remove(&response.request_id)
-            {
+            if let Some(write) = self.cache_writes.remove(&response.request_id) {
                 if let Err(error) = &response.result {
-                    log!("fx thumbs: {revision} cache write failed ({key}): {error}");
-                } else if stores_value {
+                    log!(
+                        "fx thumbs: {} cache write failed ({}): {error}",
+                        write.revision,
+                        write.key
+                    );
+                } else if write.stores_value {
                     self.batch_stored += 1;
                 }
                 changed = true;
             }
         }
+        self.finish_visible_timing_if_ready();
         if changed {
+            self.area.redraw(cx);
+            self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Storage completions are event-driven, but a browser callback can be
+    /// lost (transaction abort, worker teardown). Retire each orphan once so
+    /// it cannot keep `holds()`/`is_idle()` true forever; a read falls back to
+    /// rendering, while a write leaves the already-visible result intact.
+    fn poll_cache_timeouts(&mut self, cx: &mut Cx) {
+        let reads: Vec<StorageRequestId> = self
+            .cache_reads
+            .iter()
+            .filter_map(|(request, read)| {
+                (read.started.elapsed().as_secs_f32() >= CACHE_REQUEST_TIMEOUT_S)
+                    .then_some(*request)
+            })
+            .collect();
+        let mut timed_out = !reads.is_empty();
+        for request in reads {
+            let Some(read) = self.cache_reads.remove(&request) else { continue };
+            log!(
+                "fx thumbs: {} cache read timed out ({})",
+                read.revision,
+                read.key
+            );
+            self.cache_misses.insert(read.revision);
+            if let Some(job) = read.job {
+                self.pending.push(job);
+            }
+        }
+
+        let writes: Vec<StorageRequestId> = self
+            .cache_writes
+            .iter()
+            .filter_map(|(request, write)| {
+                (write.started.elapsed().as_secs_f32() >= CACHE_REQUEST_TIMEOUT_S)
+                    .then_some(*request)
+            })
+            .collect();
+        timed_out |= !writes.is_empty();
+        for request in writes {
+            let Some(write) = self.cache_writes.remove(&request) else { continue };
+            log!(
+                "fx thumbs: {} cache write timed out ({})",
+                write.revision,
+                write.key
+            );
+        }
+        if !self.cache_reads.is_empty() || !self.cache_writes.is_empty() {
+            return;
+        }
+        self.finish_visible_timing_if_ready();
+        if !self.pending.is_empty() || timed_out {
             self.area.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
@@ -1033,6 +1165,7 @@ impl VjFxThumbs {
                         seq_pending: None,
                         sheet_cleared: false,
                         await_polls: 0,
+                        lane_polls: 0,
                     });
                 }
                 Err(error) => {
@@ -1069,6 +1202,9 @@ impl VjFxThumbs {
             crate::livecode::report(&active.job.revision.to_string(), active.mark, Ok(()));
             match handle.try_take() {
                 None => {
+                    // `is_finished` publishes before the payload mutex is
+                    // necessarily available. Keep the handle and the frame
+                    // pump alive so lock contention is retried, never lost.
                     active.encoder = Some(handle);
                     self.lanes[index].job = Some(active);
                 }
@@ -1081,8 +1217,12 @@ impl VjFxThumbs {
                     );
                     self.cache_keys.insert(active.job.revision, key.clone());
                     let request = self.storage(cx).set(cx, &key, sheet.jpeg.clone());
-                    self.cache_writes
-                        .insert(request, (active.job.revision, key, true));
+                    self.cache_writes.insert(request, CacheWrite {
+                        revision: active.job.revision,
+                        key,
+                        stores_value: true,
+                        started: Instant::now(),
+                    });
                     self.results.push(sheet);
                 }
                 Some(Ok(Err(error))) => {
@@ -1094,6 +1234,18 @@ impl VjFxThumbs {
                         format!("encode worker failed: {error}"),
                     );
                 }
+            }
+        }
+    }
+
+    fn poll_lane_timeouts(&mut self, cx: &mut Cx) {
+        for index in 0..self.lanes.len() {
+            let timed_out = self.lanes[index].job.as_mut().is_some_and(|active| {
+                active.lane_polls = active.lane_polls.saturating_add(1);
+                active.lane_polls > LANE_TIMEOUT_POLLS
+            });
+            if timed_out {
+                self.fail_lane(cx, index, "thumbnail lane timed out".to_string());
             }
         }
     }
@@ -1765,8 +1917,10 @@ impl Widget for VjFxThumbs {
         let dpi = cx.current_dpi_factor().max(0.5);
         let slot = dvec2(SLOT_W / dpi, SLOT_H / dpi);
         self.ensure_lanes();
+        self.poll_cache_timeouts(cx.cx);
         self.poll_encoders(cx.cx);
         self.poll_captures(cx.cx);
+        self.poll_lane_timeouts(cx.cx);
         self.start_jobs(cx.cx, deadline);
 
         let mut budget = if self.full_speed { STEP_BUDGET } else { 1 };
@@ -1832,12 +1986,14 @@ impl Widget for VjFxThumbs {
                     > 0
                 {
                     log!(
-                        "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s",
+                        "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s, all cached visible {:.1} s",
                         self.batch_rendered,
                         self.batch_cached,
                         self.batch_stored,
                         self.batch_failed,
                         started.elapsed().as_secs_f32(),
+                        self.batch_all_visible_s
+                            .unwrap_or_else(|| started.elapsed().as_secs_f32()),
                     );
                 }
             }

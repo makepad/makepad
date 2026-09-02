@@ -27,8 +27,6 @@ mod clock;
 
 // The lab compiles the flow modules standalone; host-facing API the lab
 // does not exercise (clear/output/seek — main.rs's surface) stays quiet.
-#[path = "../src/clock.rs"]
-mod clock;
 #[path = "../src/flow.rs"]
 #[allow(dead_code)]
 mod flow;
