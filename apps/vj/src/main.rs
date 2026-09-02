@@ -17297,10 +17297,10 @@ p2 {}
         let strip = self.console.extent(room);
         let explorer =
             (room - crate::console::GAP_POINTS - strip).max(crate::console::OPEN_MIN_POINTS);
-        // Through `widget`, not `view`: the explorer is a `RoundedView`, and
-        // the view lookup answers with nothing for it.
         for (path, points) in [(ids!(library_drop), explorer), (ids!(console_strip), strip)] {
-            if let Some(mut view) = self.ui.widget(cx, path).borrow_mut::<View>() {
+            let view = self.ui.view(cx, path);
+            let mut view_ref = view.borrow_mut();
+            if let Some(view) = view_ref.as_mut() {
                 view.walk.height = Size::Fixed(points);
             }
         }
