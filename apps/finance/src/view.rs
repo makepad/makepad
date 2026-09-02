@@ -15,17 +15,31 @@
 
 use crate::chart::{FinanceChartWidgetExt, MeterWidgetRefExt};
 use crate::date::{self, DateRange, Day, MonthKey};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
 use crate::db::Db;
 use crate::model::*;
 use crate::money::{format_compact, format_minor, format_money, Currency};
 use crate::report;
 use crate::theme;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::*;
 
 /// The dialog that picks a statement, so its answer is not confused with
 /// any other file dialog the app might grow.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
 const PICK_STATEMENT: LiveId = live_id!(finance_pick_statement);
+
+fn current_day() -> Day {
+    #[cfg(any(target_arch = "wasm32", feature = "demo"))]
+    {
+        date::from_ymd(2026, 9, 1)
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
+    {
+        date::today()
+    }
+}
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -599,6 +613,10 @@ pub enum Screen {
 }
 
 impl Screen {
+    #[cfg(any(target_arch = "wasm32", feature = "demo"))]
+    const ALL: [Screen; 4] =
+        [Screen::Overview, Screen::Ledger, Screen::Budget, Screen::Reports];
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
     const ALL: [Screen; 5] =
         [Screen::Overview, Screen::Ledger, Screen::Budget, Screen::Reports, Screen::Import];
 
@@ -764,6 +782,7 @@ pub struct Finance {
     #[deref]
     view: View,
 
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
     #[rust]
     db: Option<Db>,
     #[rust]
@@ -810,36 +829,49 @@ impl Finance {
         self.ledger.base_currency
     }
 
-    /// Open the file, generating a demo household if it is empty, and load
-    /// it into memory.
+    /// Load either the generated demo household or the native database.
     fn start(&mut self, cx: &mut Cx) {
         if self.started {
             return;
         }
         self.started = true;
-        let path = std::path::PathBuf::from("local/finance/finance.db");
-        let mut db = match Db::open(&path) {
-            Ok(db) => db,
-            Err(error) => {
-                self.status = format!("cannot open {}: {error}", path.display());
-                error!("finance: {}", self.status);
-                return;
+
+        #[cfg(any(target_arch = "wasm32", feature = "demo"))]
+        {
+            self.ledger = crate::seed::generate(crate::seed::DEFAULT_YEARS, current_day());
+            self.status = "Demo household loaded".to_string();
+            self.widget(cx, ids!(nav_import)).set_visible(cx, false);
+            self.widget(cx, ids!(tab_import)).set_visible(cx, false);
+            self.view(cx, ids!(import)).set_visible(cx, false);
+        }
+
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
+        {
+            let path = std::path::PathBuf::from("local/finance/finance.db");
+            let mut db = match Db::open(&path) {
+                Ok(db) => db,
+                Err(error) => {
+                    self.status = format!("cannot open {}: {error}", path.display());
+                    error!("finance: {}", self.status);
+                    return;
+                }
+            };
+            match db.is_empty() {
+                Ok(true) => match crate::seed::populate(&mut db, crate::seed::DEFAULT_YEARS) {
+                    Ok(summary) => self.status = format!("Demo file created: {summary}"),
+                    Err(error) => self.status = format!("demo data failed: {error}"),
+                },
+                Ok(false) => {}
+                Err(error) => self.status = format!("cannot read {}: {error}", path.display()),
             }
-        };
-        match db.is_empty() {
-            Ok(true) => match crate::seed::populate(&mut db, crate::seed::DEFAULT_YEARS) {
-                Ok(summary) => self.status = format!("Demo file created: {summary}"),
-                Err(error) => self.status = format!("demo data failed: {error}"),
-            },
-            Ok(false) => {}
-            Err(error) => self.status = format!("cannot read {}: {error}", path.display()),
+            match db.load() {
+                Ok(ledger) => self.ledger = ledger,
+                Err(error) => self.status = format!("load failed: {error}"),
+            }
+            self.db = Some(db);
         }
-        match db.load() {
-            Ok(ledger) => self.ledger = ledger,
-            Err(error) => self.status = format!("load failed: {error}"),
-        }
-        self.db = Some(db);
-        self.budget_month = date::month_key(date::today());
+
+        self.budget_month = date::month_key(current_day());
         self.rebuild_rows();
         self.show_only_current_screen(cx);
         self.chrome_synced = false;
@@ -904,7 +936,7 @@ impl Finance {
     }
 
     fn range(&self) -> DateRange {
-        self.range.resolve(date::today(), self.earliest())
+        self.range.resolve(current_day(), self.earliest())
     }
 
     /// Show the screen, and make the chrome agree with it.
@@ -948,7 +980,7 @@ impl Finance {
     /// something changed, rather than tracking what.
     fn sync_chrome(&mut self, cx: &mut Cx) {
         let currency = self.currency();
-        let today = date::today();
+        let today = current_day();
         let range = self.range();
 
         self.label(cx, ids!(screen_title)).set_text(cx, self.screen.title());
@@ -1208,6 +1240,7 @@ impl Finance {
         self.chrome_synced = true;
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
     fn open_statement(&mut self, cx: &mut Cx) {
         let dialog = FileDialog::new()
             .set_id(PICK_STATEMENT)
@@ -1219,6 +1252,7 @@ impl Finance {
     }
 
     /// Read a chosen file and build the plan, without writing anything.
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
     fn prepare_import(&mut self, cx: &mut Cx, path: &std::path::Path) {
         let text = match std::fs::read(path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -1257,6 +1291,7 @@ impl Finance {
     }
 
     /// Write the plan. Everything or nothing.
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
     fn commit_import(&mut self, cx: &mut Cx) {
         let Some(state) = self.import.take() else { return };
         let Some(db) = self.db.as_mut() else { return };
@@ -1576,11 +1611,16 @@ impl WidgetMatchEvent for Finance {
             (Screen::Ledger, ids!(nav_ledger), ids!(tab_ledger)),
             (Screen::Budget, ids!(nav_budget), ids!(tab_budget)),
             (Screen::Reports, ids!(nav_reports), ids!(tab_reports)),
-            (Screen::Import, ids!(nav_import), ids!(tab_import)),
         ] {
             if self.button(cx, nav).clicked(actions) || self.button(cx, tab).clicked(actions) {
                 self.set_screen(cx, screen);
             }
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
+        if self.button(cx, ids!(nav_import)).clicked(actions)
+            || self.button(cx, ids!(tab_import)).clicked(actions)
+        {
+            self.set_screen(cx, Screen::Import);
         }
 
         for (range, id) in [
@@ -1607,16 +1647,19 @@ impl WidgetMatchEvent for Finance {
             self.redraw(cx);
         }
 
-        if self.button(cx, ids!(import_pick)).clicked(actions) {
-            self.open_statement(cx);
-        }
-        if self.button(cx, ids!(import_apply)).clicked(actions) {
-            self.commit_import(cx);
-        }
-        if self.button(cx, ids!(import_cancel)).clicked(actions) {
-            self.import = None;
-            self.chrome_synced = false;
-            self.redraw(cx);
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
+        {
+            if self.button(cx, ids!(import_pick)).clicked(actions) {
+                self.open_statement(cx);
+            }
+            if self.button(cx, ids!(import_apply)).clicked(actions) {
+                self.commit_import(cx);
+            }
+            if self.button(cx, ids!(import_cancel)).clicked(actions) {
+                self.import = None;
+                self.chrome_synced = false;
+                self.redraw(cx);
+            }
         }
 
         // Search filters the register as it is typed: the whole ledger is
@@ -1645,11 +1688,14 @@ impl WidgetMatchEvent for Finance {
             }
         }
 
-        for action in actions {
-            if let Some(picked) = action.downcast_ref::<FileDialogAction>() {
-                if picked.id() == PICK_STATEMENT {
-                    if let Some(path) = picked.path().cloned() {
-                        self.prepare_import(cx, &path);
+        #[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
+        {
+            for action in actions {
+                if let Some(picked) = action.downcast_ref::<FileDialogAction>() {
+                    if picked.id() == PICK_STATEMENT {
+                        if let Some(path) = picked.path().cloned() {
+                            self.prepare_import(cx, &path);
+                        }
                     }
                 }
             }
