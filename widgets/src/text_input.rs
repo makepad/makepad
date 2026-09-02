@@ -2653,12 +2653,8 @@ impl Widget for TextInput {
                 // In multiline mode, other modifier combos (Alt+Enter, or Ctrl+Enter
                 // on macOS) insert a newline below when not read-only.
                 let has_physical_keyboard = cx.keyboard.has_physical_keyboard();
-                // Ctrl+Enter submits on every platform — on macOS `primary`
-                // is Cmd, and a person who reaches for Ctrl+Enter to send
-                // must not get a newline instead.
                 let should_submit = !self.is_multiline
                     || mods.is_primary()
-                    || mods.control
                     || (has_physical_keyboard && self.submit_on_enter && !mods.any());
                 if should_submit {
                     cx.hide_text_ime();
