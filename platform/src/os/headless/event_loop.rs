@@ -2,7 +2,7 @@ use super::raster::encode_png_rgba;
 use crate::{
     cx::Cx,
     cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-    event::{Event, TextClipboardEvent, WindowGeom, WindowGeomChangeEvent},
+    event::{Event, TextClipboardEvent, WindowGeom},
     makepad_live_id::*,
     makepad_math::dvec2,
     makepad_micro_serde::*,
@@ -357,19 +357,15 @@ impl Cx {
 
                     let window_id = CxWindowPool::from_usize(window_id);
                     if self.windows.is_valid(window_id) {
-                        let old_geom = self.windows[window_id].window_geom.clone();
-                        let new_geom = WindowGeom {
-                            position: dvec2(left, top),
-                            dpi_factor,
-                            inner_size: dvec2(width, height),
-                            ..Default::default()
-                        };
-                        self.windows[window_id].window_geom = new_geom.clone();
-                        let re = WindowGeomChangeEvent {
+                        let re = self.windows.stdin_apply_native_geom(
                             window_id,
-                            new_geom,
-                            old_geom,
-                        };
+                            WindowGeom {
+                                position: dvec2(left, top),
+                                dpi_factor,
+                                inner_size: dvec2(width, height),
+                                ..Default::default()
+                            },
+                        );
                         self.call_event_handler(&Event::WindowGeomChange(re));
                     }
                     self.redraw_all();

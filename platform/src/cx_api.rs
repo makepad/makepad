@@ -1987,6 +1987,32 @@ mod stale_window_tests {
     use super::*;
     use crate::window::WindowHandle;
 
+    /// A hosted window (the host reports 930×848 points at dpi 2) whose app
+    /// shrank its own dpi to 1.6: it lays out 1.25× larger, and a host
+    /// pointer at (100, 100) must land at (125, 125) in its points.
+    #[test]
+    fn a_hosted_window_with_a_dpi_override_lays_out_larger_and_remaps_the_host_pointer() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        let window = WindowHandle::new(&mut cx);
+        let window_id = window.window_id();
+        cx.windows[window_id].is_created = true;
+        let native = crate::event::WindowGeom { dpi_factor: 2.0, inner_size: dvec2(930.0, 848.0), ..Default::default() };
+        let first = cx.windows.stdin_apply_native_geom(window_id, native.clone());
+        assert_eq!(first.new_geom.inner_size, dvec2(930.0, 848.0));
+        cx.windows[window_id].dpi_override = Some(1.6);
+        let again = cx.windows.stdin_apply_native_geom(window_id, native);
+        assert!((again.new_geom.inner_size.x - 1162.5).abs() < 1e-9, "{:?}", again.new_geom.inner_size);
+        assert!((again.new_geom.inner_size.y - 1060.0).abs() < 1e-9);
+        assert_eq!(again.new_geom.dpi_factor, 1.6);
+        let mut pos = dvec2(100.0, 100.0);
+        cx.dpi_override_scale(&mut pos, window_id);
+        assert!((pos.x - 125.0).abs() < 1e-9 && (pos.y - 125.0).abs() < 1e-9, "{pos:?}");
+        // The host's point (900, 800) is still inside the window: containment is in host points.
+        let (hit, origin) = cx.windows.window_id_contains(dvec2(900.0, 800.0));
+        assert_eq!(hit, window_id);
+        assert_eq!(origin, dvec2(0.0, 0.0));
+    }
+
     #[test]
     fn dpi_override_ignores_closed_and_out_of_range_windows() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
