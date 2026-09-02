@@ -1149,6 +1149,14 @@ pub fn run_live(
     cancel: &CancelToken,
     mut progress: impl FnMut(&str, u64, u64, f64),
 ) -> Result<(), AssetAiError> {
+    let started = Instant::now();
+    {
+        let codec = session.codec_stats();
+        eprintln!(
+            "realtime {}: live session open — model {}, {} in, {} out",
+            session.job_id, session.model_id, codec.input, codec.output
+        );
+    }
     let mut last_output: Option<RgbImage> = None;
     let mut feedback = FeedbackState::default();
     let mut frame_index: u64 = 0;
@@ -1424,6 +1432,27 @@ pub fn run_live(
     outbound_cv.notify_all();
     result
     });
+    // One line per session in the service log: enough to tell from a
+    // headless box whether the wire decoded and how fast the model ran.
+    let elapsed = started.elapsed().as_secs_f64();
+    let frames_in = session.frames_in.load(Ordering::Relaxed);
+    let frames_out = session.frames_out.load(Ordering::Relaxed);
+    let codec = session.codec_stats();
+    eprintln!(
+        "realtime {}: session closed after {elapsed:.1} s — {} {} frames in, {frames_out} out ({:.1} fps), \
+         {} dropped, {} undecodable, {} unencoded{}",
+        session.job_id,
+        codec.input,
+        frames_in,
+        if elapsed > 0.0 { frames_out as f64 / elapsed } else { 0.0 },
+        session.dropped.load(Ordering::Relaxed),
+        codec.dropped_decode,
+        session.dropped_encode.load(Ordering::Relaxed),
+        match &result {
+            Ok(()) => String::new(),
+            Err(e) => format!(", error: {e}"),
+        }
+    );
     result
 }
 
