@@ -15918,6 +15918,7 @@ mod world_style_tests {
             namespace: namespace.to_string(),
             kind: Some(makepad_asset_data::AssetKind::World),
             title: title.to_string(),
+            creator: String::new(),
             snippet: String::new(),
             score: 0,
             live: true,

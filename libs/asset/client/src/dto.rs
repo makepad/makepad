@@ -294,6 +294,9 @@ pub struct CatalogHit {
     pub namespace: String,
     pub kind: Option<AssetKind>,
     pub title: String,
+    /// Public creator/artist annotation. Optional on the wire so clients
+    /// remain compatible with stores predating this projection.
+    pub creator: String,
     pub snippet: String,
     pub score: u64,
     pub live: bool,
@@ -424,6 +427,11 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
         };
         let title = need_str(h, "title", MAX_TITLE_BYTES, "hit title")?.to_string();
         check_display(&title, "hit title")?;
+        let creator = match h.get("creator") {
+            None | Some(Value::Null) => String::new(),
+            Some(_) => need_str(h, "creator", 128, "hit creator")?.to_string(),
+        };
+        check_display(&creator, "hit creator")?;
         let snippet = need_str(h, "snippet", MAX_SNIPPET_BYTES, "hit snippet")?.to_string();
         check_display(&snippet, "hit snippet")?;
         let score = need_u64(h, "score", "hit score")?;
@@ -450,6 +458,7 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
             namespace,
             kind,
             title,
+            creator,
             snippet,
             score,
             live,

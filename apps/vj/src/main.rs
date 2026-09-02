@@ -5946,6 +5946,10 @@ pub struct App {
     chat: ChatBridge,
     #[rust]
     status_text: String,
+    /// User-actionable web catalog/load failure shown in the top status
+    /// line. Native keeps its existing quiet asset-server status bar.
+    #[rust]
+    web_status_error: String,
     #[rust]
     lighting_status: String,
     #[rust]
@@ -6751,6 +6755,9 @@ pub struct App {
     /// Rows on screen, so a row click maps back to a track.
     #[rust]
     music_rows: Vec<TrackRowEntry>,
+    /// Public creator annotations from the static catalog projection.
+    #[rust]
+    music_artists: HashMap<AssetId, String>,
     #[rust]
     queue_rows: Vec<TrackRowEntry>,
     /// Browsing local audio files instead of the store catalog.
@@ -14268,6 +14275,9 @@ p2 {}
                     let Some(purpose) = self.cat_reqs.remove(&id) else { continue };
                     match purpose {
                         CatPurpose::Page { surface, gen, slot, .. } => {
+                            if surface == Surface::Music {
+                                self.set_web_status_error(format!("music catalog: {error}"));
+                            }
                             let cmds = self.model(surface).page_failed(gen, slot, error.to_string());
                             self.run_cat_cmds(surface, cmds);
                             self.grids_dirty = true;
@@ -14357,19 +14367,31 @@ p2 {}
                 let hits = page
                     .hits
                     .into_iter()
-                    .map(|h| catalog::HitRow {
-                        updated_ms: h.updated_ms,
-                        asset: h.asset_id,
-                        title: if h.title.is_empty() {
-                            h.asset_id.to_string()
-                        } else {
-                            h.title
-                        },
-                        alias: h.alias.map(|a| a.as_str().to_string()),
-                        live: h.live,
-                        kind: h.kind,
+                    .map(|h| {
+                        #[cfg(target_arch = "wasm32")]
+                        if surface == Surface::Music {
+                            self.music_artists.insert(h.asset_id, h.creator.clone());
+                        }
+                        catalog::HitRow {
+                            updated_ms: h.updated_ms,
+                            asset: h.asset_id,
+                            title: if h.title.is_empty() {
+                                h.asset_id.to_string()
+                            } else {
+                                h.title
+                            },
+                            alias: h.alias.map(|a| a.as_str().to_string()),
+                            live: h.live,
+                            kind: h.kind,
+                        }
                     })
                     .collect();
+                #[cfg(target_arch = "wasm32")]
+                if surface == Surface::Music
+                    && self.web_status_error.starts_with("music catalog:")
+                {
+                    self.web_status_error.clear();
+                }
                 self.thumb_stats.pages += 1;
                 let cmds =
                     self.model(surface).page_arrived(gen, slot, first, hits, page.total, page.next);
@@ -14960,6 +14982,7 @@ p2 {}
                 }
             }
             MediaPurpose::Deck { deck, gen, .. } => {
+                self.set_web_status_error(format!("music load: {error}"));
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
             }
@@ -16030,6 +16053,12 @@ p2 {}
                 }
                 DecodeDone::Deck { deck, gen, result } => match result {
                     Ok((pcm, peaks)) => {
+                        #[cfg(target_arch = "wasm32")]
+                        if self.web_status_error.starts_with("music load:")
+                            || self.web_status_error.starts_with("music decode:")
+                        {
+                            self.web_status_error.clear();
+                        }
                         let seconds = pcm.seconds();
                         // Level-match trim, measured while the samples are
                         // in hand: RMS over the whole track against a target
@@ -16088,6 +16117,7 @@ p2 {}
                         self.sync_deck_controls(cx);
                     }
                     Err(error) => {
+                        self.set_web_status_error(format!("music decode: {error}"));
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
                     }
@@ -19389,6 +19419,9 @@ p2 {}
         // "connected 12"); the label is air now. The state lives on in
         // `status_text` for logs and diagnostics.
         let _ = &status_text;
+        #[cfg(target_arch = "wasm32")]
+        self.set_status_label(cx, ids!(status_label), &self.web_status_error.clone());
+        #[cfg(not(target_arch = "wasm32"))]
         self.set_status_label(cx, ids!(status_label), "");
         self.status_text = status_text;
         let show = format!("{} · {}", self.lighting_status, self.midi_status);
@@ -19699,6 +19732,19 @@ p2 {}
         self.set_status_label(cx, ids!(external_loop_state), &loop_text);
     }
 
+    /// The browser has no terminal beside it: failed catalog, blob and
+    /// decode work must leave one readable line in the app itself.
+    fn set_web_status_error(&mut self, message: impl Into<String>) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.web_status_error = message.into();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = message;
+        }
+    }
+
     // ---- music mode: analysis results and the deck surface -----------------
 
     /// Take finished whole-track analyses: publish the grid to the engine,
@@ -19879,6 +19925,7 @@ p2 {}
         if !self.side_channels_armed(deck, gen) {
             return;
         }
+        self.set_web_status_error(format!("music side-channel: {error}"));
         let index = deck.index();
         if !stem {
             if let Some(pending) = self.deck_side_channels[index].as_mut() {
@@ -20403,6 +20450,7 @@ p2 {}
                 }
                 SideChannelMsg::Fallback { deck, gen, reason } => {
                     log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
+                    self.set_web_status_error(format!("music side-channel decode: {reason}"));
                     self.deck_side_channels[deck.index()] = None;
                     self.fall_back_to_separation(deck, gen);
                 }
@@ -21809,7 +21857,11 @@ p2 {}
                 TrackRowEntry {
                     key,
                     title: tile.title.clone(),
-                    artist: String::new(),
+                    artist: self
+                        .music_artists
+                        .get(&tile.asset)
+                        .cloned()
+                        .unwrap_or_default(),
                     bpm,
                     musical_key: String::new(),
                     duration,
@@ -24512,7 +24564,7 @@ impl MatchEvent for App {
         let want_music = !files.is_empty()
             || std::env::var("VJ_SURFACE").is_ok_and(|value| value.eq_ignore_ascii_case("music"));
         #[cfg(target_arch = "wasm32")]
-        let want_music = false;
+        let want_music = true;
         if want_music {
             self.apc.surface = ApcSurface::Music;
             self.ui
@@ -24523,6 +24575,12 @@ impl MatchEvent for App {
             // Files on the command line open the local lane; a bare
             // `VJ_SURFACE=music` opens the store, like clicking the tab.
             self.music_local = !files.is_empty();
+            #[cfg(target_arch = "wasm32")]
+            {
+                // The web card is DJ-first, and its populated library is the
+                // useful default lower pane rather than the empty loop view.
+                self.lists_shown = 0;
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if self.music_local {
                 self.local_tracks = wave_analysis::list_local_audio(&Self::local_music_dir());

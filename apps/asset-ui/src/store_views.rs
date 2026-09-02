@@ -2542,6 +2542,7 @@ mod tests {
             namespace: "gen".into(),
             kind: Some(AssetKind::Prop),
             title: title.into(),
+            creator: String::new(),
             snippet: "a thing".into(),
             score: 10,
             live,
