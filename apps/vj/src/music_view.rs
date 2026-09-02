@@ -1918,6 +1918,12 @@ script_mod! {
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
                         deck_a_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        // SLIP: the track keeps running where you left it
+                        // while the record goes somewhere else. The room
+                        // comes out of SYNC's own Fill, which is the only
+                        // elastic thing in this row and where the headphone
+                        // button's width came from too.
+                        deck_a_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
                         // The analyser's grid can sit on the off pulse: same tempo,
                         // sync exactly half a beat out. This flips it.
                         deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
@@ -2504,6 +2510,9 @@ script_mod! {
                             height: 22
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
+                        // Mirrored, so SLIP sits inboard of SYNC on this
+                        // side the way the rest of the row is mirrored.
+                        deck_b_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
                         deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
                     }
                     View{

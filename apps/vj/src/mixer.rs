@@ -360,6 +360,40 @@ pub struct SplatFrames {
 /// worst is kept beside it, because a stall that happened once still
 /// happened; but it cannot stand in for the live figure, which is what
 /// having only a high-water meant.
+/// The ghost playhead SLIP keeps running while the record is elsewhere.
+///
+/// Latched when slip is armed and advanced once per buffer at its own
+/// rate, whatever the real head is doing -- paused, scratched, jumped,
+/// looping or run off the end. Letting slip go lands the deck on it, so
+/// the track carries on as if the detour never happened.
+#[derive(Clone, Copy, Debug)]
+struct Ghost {
+    /// Where it has got to, in source frames.
+    pos: f64,
+    /// Source frames per device frame, latched at arm time: a buffer is one
+    /// multiply, and the ghost does not chase a tempo the hand is moving.
+    step: f64,
+    /// The span the ghost wraps through, if one was running when slip was
+    /// armed. A loop engaged AFTER arming -- the roll being slipped over --
+    /// deliberately does not catch it.
+    span: Option<(f64, f64)>,
+}
+
+/// Fold a playhead back inside a span, keeping the overshoot.
+///
+/// Modulo rather than a reset to IN: resetting discards up to a step per
+/// lap, so a held loop walks audibly early, and it is also what catches a
+/// playhead stranded past OUT by a live resize -- modulo continues the
+/// subdivision in phase instead of re-triggering the downbeat at IN.
+///
+/// One function because there are three callers now: the render's wrap,
+/// the resize that catches a paused deck, and slip's ghost, which has to
+/// wrap exactly the way the real head does or the two land apart.
+pub(crate) fn wrapped_into_span(pos: f64, start: f64, end: f64) -> f64 {
+    let len = (end - start).max(1.0);
+    start + (pos - start).rem_euclid(len)
+}
+
 /// Where one callback's time went, in nanoseconds.
 ///
 /// Three phases, not five: the render is one frame loop with setup before
@@ -726,6 +760,8 @@ struct DeckVoice {
     /// above stays the operator's intent; this is what the room hears, and
     /// the deck keeps reading and fading for as long as it is above zero.
     transport: Ramp,
+    /// The ghost SLIP is keeping, if it is armed.
+    slip: Option<Ghost>,
     /// Where the playhead was when the operator pressed pause. The fade-out
     /// keeps reading, so without this a pause would eat the few
     /// milliseconds it sounded and every pause would walk the track on.
@@ -764,6 +800,7 @@ impl DeckVoice {
             gain: Ramp::at(1.0),
             mute: Ramp::at(1.0),
             transport: Ramp::at(0.0),
+            slip: None,
             pause_at: None,
             ended: false,
             rate: ParamRamp::at(1.0),
@@ -1950,6 +1987,51 @@ impl Mixer {
         self.publish_deck(&s, deck.index());
     }
 
+    /// Arm or release SLIP.
+    ///
+    /// Arming latches a ghost at the playhead with the rate it is running
+    /// at; releasing lands the deck on wherever the ghost got to, unless
+    /// the operator asked to keep what they scratched. The landing goes
+    /// through the ordinary seek, so it takes the same 5 ms blend every
+    /// commanded jump does and cannot click.
+    pub fn set_deck_slip(&self, deck: DeckId, on: bool, adopt: bool) {
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        if on {
+            if d.slip.is_some() {
+                return;
+            }
+            let Some(pcm) = d.pcm.as_ref() else { return };
+            let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
+            // Before the first callback there is no device rate to latch a
+            // step from, and a ghost that cannot move is worse than none.
+            if !(device > 0.0) {
+                return;
+            }
+            let natural = pcm.sample_rate as f64 / device;
+            d.slip = Some(Ghost {
+                pos: d.playhead_frames(),
+                step: natural * d.rate.current() as f64,
+                span: d.loop_span,
+            });
+            self.publish_deck(&s, deck.index());
+            return;
+        }
+        let Some(ghost) = d.slip.take() else { return };
+        if !adopt {
+            let from = d.playhead_frames();
+            d.seek_frames(ghost.pos);
+            d.pause_at = None;
+            d.arm_seek_fade(from);
+        }
+        self.publish_deck(&s, deck.index());
+    }
+
+    /// Whether SLIP is holding a ghost on this deck.
+    pub fn deck_slipping(&self, deck: DeckId) -> bool {
+        self.state.lock().unwrap().decks[deck.index()].slip.is_some()
+    }
+
     /// Tempo multiplier. With key lock on the pitch is preserved; with it
     /// off the deck simply plays faster or slower.
     pub fn set_deck_rate(&self, deck: DeckId, rate: f64) {
@@ -2039,11 +2121,9 @@ impl Mixer {
         // deck never renders — without this, a resize on a paused deck
         // parks the playhead outside the span until play is pressed.
         if let Some((start, end)) = d.loop_span {
-            let len = (end - start).max(1.0);
             if d.playhead_frames() >= end {
                 let from = d.playhead_frames();
-                let over = (from - start).rem_euclid(len);
-                d.seek_frames(start + over);
+                d.seek_frames(wrapped_into_span(from, start, end));
                 // A live resize yanking a playing playhead is a jump like
                 // any other and gets the same blend.
                 d.arm_seek_fade(from);
@@ -2447,6 +2527,19 @@ impl Mixer {
             // the expensive part and a buffer is well under a millisecond.
             voice.eq.set_sample_rate(rate);
             voice.eq.prepare_block();
+            // The ghost moves here, once per buffer, and not in the frame
+            // loop below: its rate is latched so a buffer is one multiply,
+            // and the read path has four early exits (no pcm, empty pcm,
+            // splat running, paused and faded) that the ghost must not be
+            // caught by. It runs whatever the record is doing.
+            if let Some(ghost) = voice.slip.as_mut() {
+                ghost.pos += ghost.step * frames as f64;
+                if let Some((start, end)) = ghost.span {
+                    if ghost.pos >= end {
+                        ghost.pos = wrapped_into_span(ghost.pos, start, end);
+                    }
+                }
+            }
         }
         s.score_preview.render_block(frames, device_rate);
 
@@ -2649,9 +2742,8 @@ impl Mixer {
                         // stranded past OUT by a live resize: modulo
                         // continues the subdivision in phase instead of
                         // re-triggering the downbeat at IN.
-                        let len = (end - start).max(1.0);
-                        let over = (d.playhead_frames() - start).rem_euclid(len);
-                        d.seek_frames(start + over);
+                        let landed = wrapped_into_span(d.playhead_frames(), start, end);
+                        d.seek_frames(landed);
                     }
                 }
                 // Where THIS frame is read from, for the wrap crossfade
@@ -3768,6 +3860,110 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_span_folds_a_playhead_back_keeping_the_overshoot() {
+        // Modulo, not a reset to IN: resetting discards up to a step a lap
+        // and a held loop walks audibly early.
+        assert_eq!(wrapped_into_span(105.0, 100.0, 110.0), 105.0, "already inside");
+        assert_eq!(wrapped_into_span(112.0, 100.0, 110.0), 102.0, "two frames past OUT");
+        assert_eq!(wrapped_into_span(130.0, 100.0, 110.0), 100.0, "three whole laps");
+        assert_eq!(wrapped_into_span(98.0, 100.0, 110.0), 108.0, "and backwards");
+        // A span of nothing is floored at one frame rather than dividing by
+        // zero, so it parks at its own start.
+        assert_eq!(wrapped_into_span(5.0, 3.0, 3.0), 3.0);
+    }
+
+    #[test]
+    fn slip_keeps_a_ghost_running_while_the_record_is_taken_elsewhere() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        mixer.set_deck_slip(DeckId::A, true, false);
+        assert!(mixer.deck_slipping(DeckId::A));
+        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        // The hand takes the record somewhere else entirely.
+        mixer.seek_deck_seconds(DeckId::A, 5.0);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        assert!(
+            mixer.deck_snapshot(DeckId::A).position_secs > 4.9,
+            "the real head went where it was told"
+        );
+
+        mixer.set_deck_slip(DeckId::A, false, false);
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        let elapsed = 8.0 * 512.0 / 48_000.0;
+        assert!(
+            (landed - (armed_at + elapsed)).abs() < 0.01,
+            "the deck lands where the track would have got to: {landed} against {}",
+            armed_at + elapsed
+        );
+        assert!(!mixer.deck_slipping(DeckId::A));
+    }
+
+    #[test]
+    fn keeping_what_was_scratched_leaves_the_record_where_the_hand_left_it() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        mixer.set_deck_slip(DeckId::A, true, false);
+        mixer.seek_deck_seconds(DeckId::A, 5.0);
+        render(&mixer, 48_000.0, 512);
+        mixer.set_deck_slip(DeckId::A, false, true);
+        assert!(
+            (mixer.deck_snapshot(DeckId::A).position_secs - 5.0).abs() < 0.05,
+            "adopting keeps the detour: {}",
+            mixer.deck_snapshot(DeckId::A).position_secs
+        );
+    }
+
+    #[test]
+    fn a_ghost_wraps_through_the_loop_that_was_running_when_slip_was_armed() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 0.1)));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        mixer.set_deck_slip(DeckId::A, true, false);
+        // Far more than the loop is long.
+        for _ in 0..40 {
+            render(&mixer, 48_000.0, 512);
+        }
+        mixer.set_deck_slip(DeckId::A, false, false);
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            (0.0..=0.1).contains(&landed),
+            "the ghost stayed inside the loop the operator can see: {landed}"
+        );
+    }
+
+    #[test]
+    fn a_ghost_runs_on_while_the_deck_is_paused() {
+        // "Regardless of what the real head does" is meant literally: this
+        // is what makes slip useful over a stop, not only over a scratch.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        mixer.set_deck_slip(DeckId::A, true, false);
+        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.set_deck_playing(DeckId::A, false);
+        for _ in 0..16 {
+            render(&mixer, 48_000.0, 512);
+        }
+        mixer.set_deck_slip(DeckId::A, false, false);
+        assert!(
+            mixer.deck_snapshot(DeckId::A).position_secs > armed_at + 0.1,
+            "the ghost kept going while the record stood still"
+        );
     }
 
     #[test]

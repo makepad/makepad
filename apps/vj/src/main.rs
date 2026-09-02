@@ -3350,6 +3350,7 @@ struct DeckRefs {
     phase_flip: ButtonRef,
     mute: ButtonRef,
     sync: ButtonRef,
+    slip: ButtonRef,
     keylock: ButtonRef,
     /// The key-shift readout, which is also its reset.
     key: ButtonRef,
@@ -3401,6 +3402,7 @@ impl DeckRefs {
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             sync: ui.button(cx, ids.sync),
+            slip: ui.button(cx, ids.slip),
             keylock: ui.button(cx, ids.keylock),
             key: ui.button(cx, ids.key),
             key_up: ui.button(cx, ids.key_up),
@@ -3504,6 +3506,7 @@ struct MusicDeckIds {
     phase_flip: &'static [LiveId],
     mute: &'static [LiveId],
     sync: &'static [LiveId],
+    slip: &'static [LiveId],
     keylock: &'static [LiveId],
     key: &'static [LiveId],
     key_up: &'static [LiveId],
@@ -3558,6 +3561,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 sync: ids!(deck_a_sync),
+                slip: ids!(deck_a_slip),
                 keylock: ids!(deck_a_keylock),
                 key: ids!(deck_a_key),
                 key_up: ids!(deck_a_key_up),
@@ -3640,6 +3644,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 sync: ids!(deck_b_sync),
+                slip: ids!(deck_b_slip),
                 keylock: ids!(deck_b_keylock),
                 key: ids!(deck_b_key),
                 key_up: ids!(deck_b_key_up),
@@ -22138,6 +22143,7 @@ p2 {}
                 refs.sync.set_text(cx, &sync_text);
             }
             self.paint_lit(cx, ids.sync, mode != SyncMode::Off || synced);
+            self.paint_lit(cx, ids.slip, self.mixer.deck_slipping(deck));
             // The lock's own word: which key it will hold, shown whether it
             // is engaged or not. `paint_lit` still says whether it is.
             let keylock_text = self.decks.deck(deck).keylock_mode.label();
@@ -24542,6 +24548,13 @@ p2 {}
                 };
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
+            }
+            // SLIP: the track carries on where it was left while the
+            // record is taken elsewhere. Shift on the release KEEPS the
+            // detour instead of landing on the ghost.
+            if let Some(modifiers) = refs.slip.clicked_modifiers(actions) {
+                let slipping = self.mixer.deck_slipping(deck);
+                self.mixer.set_deck_slip(deck, !slipping, modifiers.shift);
             }
             // Alt walks which key the lock holds, the same modifier trick
             // SYNC uses for EXT twenty lines above. The word on the button
