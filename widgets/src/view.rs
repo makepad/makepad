@@ -937,8 +937,9 @@ impl Widget for View {
                 }
                 Hit::FingerUp(e) if e.was_tap() && self.item_tap_live => {
                     self.item_tap_live = false;
+                    // clipped_rect: scrolled and clipped, like the hit test itself.
                     let index = self.children.iter()
-                        .position(|(_, child)| child.area().rect(cx).contains(e.abs));
+                        .position(|(_, child)| child.area().clipped_rect(cx).contains(e.abs));
                     if let Some(index) = index {
                         cx.widget_to_script_call(
                             uid,
