@@ -714,10 +714,14 @@ impl ThumbnailMeta {
             byte_len: r.u64("thumbnail byte_len")?,
             views: Vec::new(),
         };
-        let count = r.count("thumbnail views", MAX_THUMBNAIL_VIEWS)?;
-        out.views.reserve(count);
-        for _ in 0..count {
-            out.views.push(ThumbnailView::decode(r)?);
+        // v4 appended views to the otherwise unchanged thumbnail record.
+        // A v3 thumbnail migrates to the equivalent empty-view value.
+        if r.schema_version() >= 4 {
+            let count = r.count("thumbnail views", MAX_THUMBNAIL_VIEWS)?;
+            out.views.reserve(count);
+            for _ in 0..count {
+                out.views.push(ThumbnailView::decode(r)?);
+            }
         }
         Ok(out)
     }

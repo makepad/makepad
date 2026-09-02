@@ -61,7 +61,7 @@ pub use asset::{
     Provenance, Redistribution, Rights, SpawnParam, SpawnRecipe, ThumbnailCells, ThumbnailLayout,
     ThumbnailMedia, ThumbnailMeta, ThumbnailRect, ThumbnailView, ThumbnailViewKind,
 };
-pub use codec::CONTENT_SCHEMA_VERSION;
+pub use codec::{CONTENT_SCHEMA_VERSION, MIN_READABLE_CONTENT_SCHEMA_VERSION};
 pub use content_set::{AssetSlot, ContentSetManifest};
 pub use derived::{
     derivation_key, resolve_variants, ClientProfile, DerivedInput, DerivedVariantManifest,

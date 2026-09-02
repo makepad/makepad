@@ -5,8 +5,9 @@ use makepad_asset_data::*;
 use makepad_asset_store::json::Value;
 use makepad_asset_store::*;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::collections::VecDeque;
+use std::path::Path;
+use std::process::Command;
 
 struct ExportTransport {
     root: std::path::PathBuf,
@@ -124,6 +125,36 @@ fn audio_manifest(id: AssetId, audio: &[u8], lyrics: Option<&[u8]>) -> AssetMani
     manifest
 }
 
+/// Encode the v3 shape stored by pre-thumbnail-view servers. V4 appended one
+/// empty view count after the five unchanged thumbnail fields.
+fn content_v3_asset_bytes(manifest: &AssetManifest) -> Vec<u8> {
+    let thumbnail = manifest.thumbnail.as_ref().expect("fixture has a thumbnail");
+    assert!(thumbnail.views.is_empty());
+    let mut bytes = manifest.to_canonical_bytes().unwrap();
+    assert_eq!(&bytes[..7], b"MPC1\x01\x00\x04");
+
+    let offsets: Vec<_> = bytes
+        .windows(thumbnail.blob.as_bytes().len())
+        .enumerate()
+        .filter_map(|(offset, value)| (value == thumbnail.blob.as_bytes()).then_some(offset))
+        .collect();
+    assert_eq!(offsets.len(), 1, "thumbnail digest must be unique in fixture bytes");
+    let views_count = offsets[0] + 32 + 1 + 4 + 4 + 8;
+    assert_eq!(&bytes[views_count..views_count + 4], &[0; 4]);
+    bytes.drain(views_count..views_count + 4);
+    bytes[5..7].copy_from_slice(&3u16.to_be_bytes());
+    bytes
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(out, "{byte:02x}").unwrap();
+    }
+    out
+}
+
 fn list_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -215,6 +246,87 @@ fn assert_integrity_and_sanitization(out: &Path) {
             "/v1/static/manifest.json.br".to_string(),
         ])
     );
+}
+
+#[test]
+fn schema_v3_asset_manifest_is_migrated_during_static_export() {
+    let (root, core) = open_core("static_export_content_v3");
+    let glb = b"V3-GLB";
+    let thumb = b"V3-PNG";
+    core.put_blob(glb, NOW).unwrap();
+    core.put_blob(thumb, NOW).unwrap();
+    let manifest = prop_manifest(asset_id_n(31), glb, thumb);
+    let v3_bytes = content_v3_asset_bytes(&manifest);
+    let migrated = AssetManifest::from_canonical_bytes(&v3_bytes).unwrap();
+    assert_eq!(migrated, manifest);
+    assert!(migrated.thumbnail.as_ref().unwrap().views.is_empty());
+
+    let old_revision = AssetRevisionId::hash_of(&v3_bytes);
+    let outcome = core
+        .publish_batch(
+            &[PublishBatchItem {
+                namespace: "music".into(),
+                manifest_bytes: v3_bytes,
+                annotation: annotation(AssetKind::Prop, "v3 fixture"),
+                alias: Some("music/v3-fixture".parse().unwrap()),
+            }],
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(outcome[0].revision, old_revision);
+
+    let reader = AssetServerCore::open_read_only(&root, Budgets::default_v1()).unwrap();
+    let out = root.join("export");
+    let report = export_static(&reader, &out, &StaticExportOptions::default()).unwrap();
+    assert_eq!((report.assets, report.revisions), (1, 1));
+
+    let migrated_bytes = migrated.to_canonical_bytes().unwrap();
+    let migrated_revision = AssetRevisionId::hash_of(&migrated_bytes);
+    assert_ne!(migrated_revision, old_revision);
+    let exported = std::fs::read(out.join(format!("v1/revisions/{migrated_revision}"))).unwrap();
+    assert_eq!(exported, migrated_bytes);
+    assert_eq!(u16::from_be_bytes([exported[5], exported[6]]), CONTENT_SCHEMA_VERSION);
+
+    drop(reader);
+    drop(core);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn runtime_schema_failure_names_table_and_does_not_print_usage() {
+    let (root, core) = open_core("static_export_content_schema_error");
+    let glb = b"FUTURE-GLB";
+    let thumb = b"FUTURE-PNG";
+    core.put_blob(glb, NOW).unwrap();
+    core.put_blob(thumb, NOW).unwrap();
+    let manifest = prop_manifest(asset_id_n(32), glb, thumb);
+    publish_manifest(&core, "music", "music/future-fixture", &manifest, NOW);
+    drop(core);
+
+    let mut future = manifest.to_canonical_bytes().unwrap();
+    let found = CONTENT_SCHEMA_VERSION + 1;
+    future[5..7].copy_from_slice(&found.to_be_bytes());
+    raw::exec(
+        &root.join("catalog.sqlite3"),
+        &format!("UPDATE asset_revisions SET manifest=X'{}'", hex(&future)),
+    );
+
+    let out = root.join("export");
+    let result = Command::new(env!("CARGO_BIN_EXE_makepad-asset-store"))
+        .arg("export-static")
+        .arg(&root)
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(stderr.contains(&format!(
+        "unsupported content schema in catalog.sqlite3 asset_revisions.manifest: expected {}..={}, found {found}",
+        MIN_READABLE_CONTENT_SCHEMA_VERSION, CONTENT_SCHEMA_VERSION,
+    )));
+    assert!(!stderr.contains("makepad-asset-store --root"));
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

@@ -6,7 +6,7 @@
 use crate::auth::Auth;
 use crate::budget::Budgets;
 use crate::catalog::{CandidateRow, CandidateState, Catalog, CATALOG_SCHEMA};
-use crate::error::{ServerError, ServerResult};
+use crate::error::{content_err_at, ServerError, ServerResult};
 use crate::gc::{Gc, GC_SCHEMA};
 use crate::imports::{Imports, IMPORT_SCHEMA};
 use crate::search::{kind_parse, AssetAnnotation, Search, SEARCH_SCHEMA};
@@ -264,8 +264,15 @@ impl CatalogCore {
                         &revision_stmt.column_blob(0),
                         "public export revision",
                     )?);
-                    let manifest = AssetManifest::from_canonical_bytes(
-                        &revision_stmt.column_blob(3),
+                    let manifest_bytes = revision_stmt.column_blob(3);
+                    let manifest = AssetManifest::from_canonical_bytes(&manifest_bytes).map_err(
+                        |error| {
+                            content_err_at(
+                                "catalog.sqlite3 asset_revisions.manifest",
+                                &manifest_bytes,
+                                error,
+                            )
+                        },
                     )?;
                     if manifest.asset_id != asset_id {
                         return Err(ServerError::Conflict {

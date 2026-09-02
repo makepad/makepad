@@ -68,7 +68,10 @@ pub fn fail_resp(f: &Fail) -> Resp {
                 ("error", s("denied")),
                 ("capability", s(*capability)),
             ])),
-            ServerError::Io { .. } | ServerError::Db { .. } | ServerError::UnsupportedSchema { .. } => {
+            ServerError::Io { .. }
+            | ServerError::Db { .. }
+            | ServerError::UnsupportedSchema { .. }
+            | ServerError::UnsupportedContentSchema { .. } => {
                 Resp::error(500, "internal")
             }
         },
