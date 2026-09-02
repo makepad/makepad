@@ -155,6 +155,11 @@ pub enum FileRole {
     /// Word-aligned lyrics for an `Audio` asset (JSON, the karaoke line/
     /// word/confidence shape documented in `makepad-audio-lyrics`).
     Lyrics,
+    /// The VJ's versioned whole-track analysis cache: BPM/beat grid, tempo
+    /// map, phrase changes, zoom waveform and whole-track overview.
+    DjAnalysis,
+    /// The VJ's prebuilt, stem-aware loop-splat section/cell grid.
+    DjLoopSplat,
 }
 
 canon_enum!(FileRole {
@@ -182,6 +187,8 @@ canon_enum!(FileRole {
     StemVocals = 21,
     StemOther = 22,
     Lyrics = 23,
+    DjAnalysis = 24,
+    DjLoopSplat = 25,
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -237,6 +244,7 @@ impl FileRole {
             AoTexture => matches!(media, Png),
             StemDrums | StemBass | StemVocals | StemOther => matches!(media, Ogg),
             Lyrics => matches!(media, Json),
+            DjAnalysis | DjLoopSplat => matches!(media, Bin),
         }
     }
 
@@ -256,6 +264,10 @@ impl FileRole {
             self,
             FileRole::StemDrums | FileRole::StemBass | FileRole::StemVocals | FileRole::StemOther
         )
+    }
+
+    pub fn is_dj_analysis(self) -> bool {
+        matches!(self, FileRole::DjAnalysis | FileRole::DjLoopSplat)
     }
 }
 
@@ -1405,11 +1417,12 @@ impl AssetManifest {
         // Stem and lyric side-channels belong to audio assets only, and the
         // four stems travel together: all or none, so a client never has to
         // mix a partial stem set against the original.
-        let has_stem_or_lyrics =
-            self.files.iter().any(|f| f.role.is_stem() || f.role == FileRole::Lyrics);
-        if has_stem_or_lyrics && self.kind != AssetKind::Audio {
+        let has_audio_side_channel = self.files.iter().any(|f| {
+            f.role.is_stem() || f.role == FileRole::Lyrics || f.role.is_dj_analysis()
+        });
+        if has_audio_side_channel && self.kind != AssetKind::Audio {
             return Err(AssetDataError::Malformed {
-                what: "stem/lyrics side-channel on a non-audio asset",
+                what: "audio side-channel on a non-audio asset",
             });
         }
         let stems_present = FileRole::STEMS

@@ -4358,6 +4358,10 @@ enum MediaPurpose {
     DeckStem { deck: DeckId, gen: u64, index: usize },
     /// The deck track's precomputed lyrics document.
     DeckLyrics { deck: DeckId, gen: u64 },
+    /// The deck track's versioned native `.wave` analysis payload.
+    DeckDjAnalysis { deck: DeckId, gen: u64 },
+    /// The deck track's prebuilt loop-splat grid.
+    DeckDjLoopSplat { deck: DeckId, gen: u64 },
     Pad { pad: AssetId, gen: u64, revision: AssetRevisionId, media: MediaType },
     Mesh { gen: u64 },
 }
@@ -4375,6 +4379,22 @@ struct PendingSideChannels {
     /// transcript is not a reason to hold the stems back.
     want_lyrics: bool,
     lyrics: Option<FetchedSource>,
+}
+
+/// A wasm deck's read-only demo-cache lookup. Missing and failed payloads
+/// settle to `Unavailable`; they are never converted into local analysis
+/// jobs, so a static-site miss cannot leave the deck waiting forever.
+#[derive(Clone, Debug)]
+enum DemoCacheValue<T> {
+    Unavailable { gen: u64 },
+    Fetching { gen: u64 },
+    Ready { gen: u64, value: Arc<T> },
+}
+
+impl<T> Default for DemoCacheValue<T> {
+    fn default() -> Self {
+        Self::Unavailable { gen: 0 }
+    }
 }
 
 impl PendingSideChannels {
@@ -4584,6 +4604,8 @@ fn side_channel_refs_of(files: &[makepad_asset_data::AssetFile]) -> TrackSideCha
             .all(Option::is_some)
             .then(|| stems.map(|slot| slot.expect("checked above"))),
         lyrics: file(FileRole::Lyrics),
+        dj_analysis: file(FileRole::DjAnalysis),
+        dj_loop_splat: file(FileRole::DjLoopSplat),
     }
 }
 
@@ -6635,6 +6657,12 @@ pub struct App {
     deck_found_scores: [Vec<f32>; 2],
     #[rust]
     deck_analysis: [Option<Arc<TrackAnalysis>>; 2],
+    /// Web only in behaviour (kept as ordinary fields so App construction is
+    /// identical on both targets): the static store's typed analysis outcome.
+    #[rust]
+    deck_demo_analysis: [DemoCacheValue<TrackAnalysis>; 2],
+    #[rust]
+    deck_demo_splat: [DemoCacheValue<crate::loop_splat::SplatGrid>; 2],
     /// Which deck the loop-splat grid and controller surface address.
     #[rust(DeckId::A)]
     splat_focus: DeckId,
@@ -13571,6 +13599,10 @@ p2 {}
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
                     self.deck_side_channels[deck.index()] = None;
+                    self.deck_demo_analysis[deck.index()] =
+                        DemoCacheValue::Unavailable { gen };
+                    self.deck_demo_splat[deck.index()] =
+                        DemoCacheValue::Unavailable { gen };
                     #[cfg(target_arch = "wasm32")]
                     if let Some(track) = self.browser_store.track(&item.asset).cloned() {
                         self.decode.submit(DecodeJob::Deck {
@@ -13674,7 +13706,13 @@ p2 {}
                             // digest, this deck matches no cached transcript.
                             self.deck_track_digest[deck.index()] = None;
                             self.mixer.clear_deck_stems(deck);
+                            #[cfg(not(target_arch = "wasm32"))]
                             self.submit_analysis(deck, pcm.clone());
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                self.try_install_demo_analysis(cx, deck, key.1);
+                                self.try_install_demo_splat(cx, deck, key.1);
+                            }
                             // Fetch or compute, decided when the track was
                             // clicked: a deck whose side-channel fetch is
                             // armed for this generation never loads the
@@ -13754,6 +13792,8 @@ p2 {}
                     self.mixer.swap_decks();
                     self.deck_tracks.swap(0, 1);
                     self.deck_analysis.swap(0, 1);
+                    self.deck_demo_analysis.swap(0, 1);
+                    self.deck_demo_splat.swap(0, 1);
                     self.deck_zoom_tex.swap(0, 1);
                     self.deck_stem_tex.swap(0, 1);
                     self.deck_stem_coverage.swap(0, 1);
@@ -15112,7 +15152,11 @@ p2 {}
     /// and the only entries worth keeping are the ones that HAVE something.
     fn remember_side_channels(&mut self, revision: AssetRevisionId, manifest: &AssetManifest) {
         let refs = side_channel_refs(manifest);
-        if refs.stems.is_none() && refs.lyrics.is_none() {
+        if refs.stems.is_none()
+            && refs.lyrics.is_none()
+            && refs.dj_analysis.is_none()
+            && refs.dj_loop_splat.is_none()
+        {
             // A republish can also take side-channels AWAY; a stale entry
             // would send this deck fetching blobs the store no longer has.
             self.track_side_channels.remove(&revision);
@@ -15209,6 +15253,12 @@ p2 {}
                             MediaPurpose::DeckLyrics { deck, gen } => {
                                 self.side_channel_landed(deck, gen, None, source);
                             }
+                            MediaPurpose::DeckDjAnalysis { deck, gen } => {
+                                self.demo_analysis_landed(cx, deck, gen, source);
+                            }
+                            MediaPurpose::DeckDjLoopSplat { deck, gen } => {
+                                self.demo_splat_landed(cx, deck, gen, source);
+                            }
                             MediaPurpose::Pad { pad, gen, revision, media } => {
                                 self.decode.submit(DecodeJob::Pad {
                                     pad,
@@ -15293,6 +15343,12 @@ p2 {}
             }
             MediaPurpose::DeckLyrics { deck, gen } => {
                 self.side_channel_failed(deck, gen, false, &error);
+            }
+            MediaPurpose::DeckDjAnalysis { deck, gen } => {
+                self.demo_analysis_unavailable(deck, gen, &error);
+            }
+            MediaPurpose::DeckDjLoopSplat { deck, gen } => {
+                self.demo_splat_unavailable(deck, gen, &error);
             }
             MediaPurpose::Pad { pad, gen, .. } => {
                 let cmds = self.pads.load_failed(pad, gen, error);
@@ -19919,58 +19975,61 @@ p2 {}
     /// and upload the waveform tiles as textures for the deck surface.
     fn pump_analysis(&mut self, cx: &mut Cx) {
         for done in self.analysis.poll() {
-            let index = done.deck.index();
-            // The grid goes to the engine first: it decides whether this
-            // arrival should engage a sync.
-            let cmds = self.decks.grid_ready(done.deck, done.gen, done.analysis.grid);
-            if self.decks.deck(done.deck).load_gen != done.gen {
-                continue;
-            }
-            self.run_deck_cmds(cx, cmds);
-            if let Some(grid) = build_splat(&done.analysis, None) {
-                let cmds = self.decks.splat_set(done.deck, Arc::new(grid));
+            self.install_track_analysis(cx, done.deck, done.gen, done.analysis, true);
+        }
+    }
+
+    fn install_track_analysis(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        gen: u64,
+        analysis: Arc<TrackAnalysis>,
+        derive_splat: bool,
+    ) {
+        let index = deck.index();
+        // The grid goes to the engine first: it decides whether this arrival
+        // should engage a sync.
+        let cmds = self.decks.grid_ready(deck, gen, analysis.grid);
+        if self.decks.deck(deck).load_gen != gen {
+            return;
+        }
+        self.run_deck_cmds(cx, cmds);
+        if derive_splat {
+            if let Some(grid) = build_splat(&analysis, None) {
+                let cmds = self.decks.splat_set(deck, Arc::new(grid));
                 self.run_deck_cmds(cx, cmds);
             }
-            self.deck_zoom_tex[index] =
-                crate::music_view::zoom_texture(cx, &done.analysis.tiles);
-            // The autopilot's map of this record: computed once per
-            // analysis arrival, keyed by the load generation so a stale or
-            // swapped deck can never wear the wrong shape.
-            let shape = crate::track_shape::track_shape(
-                &done.analysis.tiles.overview,
-                done.analysis.duration_secs,
-                &done.analysis.grid,
-            );
-            self.autopilot.shape_ready(done.gen, shape);
-            self.autopilot.changes_ready(done.gen, done.analysis.changes_secs.clone());
-            self.deck_analysis[index] = Some(done.analysis);
-            if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                self.submit_splat_refinement(done.deck, done.gen);
-            }
-            // A parked scan fires only if it is still parked against THIS
-            // load: a track swap between the ask and the grid landing must
-            // not spend the operator's scan on a track they never asked to
-            // scan. A mismatched (or absent) parked entry just clears busy.
-            match self.scan_pending[index].take() {
-                Some((gen, config)) if gen == done.gen => {
-                    self.start_loop_scan(done.deck, config);
-                }
-                Some(_) => self.scan_busy[index] = false,
-                None => {}
-            }
-            // Separation may have finished before the analysis that defines
-            // the column grid: colour whatever is already separated.
-            if self.rebuild_stem_colour(done.deck) {
-                let tiles = std::mem::take(&mut self.deck_stem_tiles[index]);
-                self.deck_stem_tex[index] = crate::music_view::stem_texture(cx, &tiles);
-                self.deck_stem_tiles[index] = tiles;
-            }
-            self.push_deck_wave(cx, done.deck);
-            // The grid is what quantizes the karaoke display to the music;
-            // a transcript that landed before it must be re-scheduled now.
-            self.rebuild_karaoke(cx, done.deck);
-            self.music_rows.clear();
         }
+        self.deck_zoom_tex[index] = crate::music_view::zoom_texture(cx, &analysis.tiles);
+        let shape = crate::track_shape::track_shape(
+            &analysis.tiles.overview,
+            analysis.duration_secs,
+            &analysis.grid,
+        );
+        self.autopilot.shape_ready(gen, shape);
+        self.autopilot.changes_ready(gen, analysis.changes_secs.clone());
+        self.deck_analysis[index] = Some(analysis);
+        if derive_splat
+            && self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete)
+        {
+            self.submit_splat_refinement(deck, gen);
+        }
+        match self.scan_pending[index].take() {
+            Some((pending_gen, config)) if pending_gen == gen => {
+                self.start_loop_scan(deck, config);
+            }
+            Some(_) => self.scan_busy[index] = false,
+            None => {}
+        }
+        if self.rebuild_stem_colour(deck) {
+            let tiles = std::mem::take(&mut self.deck_stem_tiles[index]);
+            self.deck_stem_tex[index] = crate::music_view::stem_texture(cx, &tiles);
+            self.deck_stem_tiles[index] = tiles;
+        }
+        self.push_deck_wave(cx, deck);
+        self.rebuild_karaoke(cx, deck);
+        self.music_rows.clear();
     }
 
     /// What a deck's one status line reads, given where separation stands.
@@ -20014,6 +20073,8 @@ p2 {}
     /// deck stays on the local path, because three stems out of four is not
     /// a stem mix. The lyrics document is optional in both directions.
     fn begin_side_channel_fetch(&mut self, deck: DeckId, gen: u64, item: &TrackItem) {
+        #[cfg(target_arch = "wasm32")]
+        self.begin_demo_cache_fetch(deck, gen, item);
         let index = deck.index();
         let Some(stems) = item.side.stems else { return };
         let lyrics = item.side.lyrics;
@@ -20047,6 +20108,181 @@ p2 {}
             }
         }
         self.deck_side_channels[index] = Some(pending);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn begin_demo_cache_fetch(&mut self, deck: DeckId, gen: u64, item: &TrackItem) {
+        let index = deck.index();
+        if let Some((blob, len)) = item.side.dj_analysis {
+            let id = self
+                .up
+                .as_mut()
+                .and_then(|up| up.media.get_mut(AUDIO_LANE))
+                .and_then(|runtime| {
+                    runtime
+                        .submit(ClientRequest::FetchBlob {
+                            blob,
+                            expected_len: Some(len),
+                            pin: false,
+                        })
+                        .ok()
+                });
+            if let Some(id) = id {
+                self.media_reqs
+                    .insert((AUDIO_LANE, id), MediaPurpose::DeckDjAnalysis { deck, gen });
+                self.deck_demo_analysis[index] = DemoCacheValue::Fetching { gen };
+            }
+        }
+        if let Some((blob, len)) = item.side.dj_loop_splat {
+            let id = self
+                .up
+                .as_mut()
+                .and_then(|up| up.media.get_mut(AUDIO_LANE))
+                .and_then(|runtime| {
+                    runtime
+                        .submit(ClientRequest::FetchBlob {
+                            blob,
+                            expected_len: Some(len),
+                            pin: false,
+                        })
+                        .ok()
+                });
+            if let Some(id) = id {
+                self.media_reqs
+                    .insert((AUDIO_LANE, id), MediaPurpose::DeckDjLoopSplat { deck, gen });
+                self.deck_demo_splat[index] = DemoCacheValue::Fetching { gen };
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn demo_analysis_landed(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        gen: u64,
+        source: DecodeSource,
+    ) {
+        if !matches!(
+            self.deck_demo_analysis[deck.index()],
+            DemoCacheValue::Fetching { gen: pending } if pending == gen
+        ) {
+            return;
+        }
+        let source = FetchedSource::from(source);
+        match source
+            .read_all()
+            .and_then(|bytes| crate::wave_analysis::decode_analysis(&bytes))
+        {
+            Ok(analysis) => {
+                self.deck_demo_analysis[deck.index()] =
+                    DemoCacheValue::Ready { gen, value: Arc::new(analysis) };
+                self.try_install_demo_analysis(cx, deck, gen);
+            }
+            Err(error) => self.demo_analysis_unavailable(deck, gen, &error),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn demo_analysis_landed(
+        &mut self,
+        _cx: &mut Cx,
+        _deck: DeckId,
+        _gen: u64,
+        _source: DecodeSource,
+    ) {
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn demo_splat_landed(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        gen: u64,
+        source: DecodeSource,
+    ) {
+        if !matches!(
+            self.deck_demo_splat[deck.index()],
+            DemoCacheValue::Fetching { gen: pending } if pending == gen
+        ) {
+            return;
+        }
+        let source = FetchedSource::from(source);
+        match source
+            .read_all()
+            .and_then(|bytes| crate::loop_splat::decode_splat(&bytes))
+        {
+            Ok(splat) => {
+                self.deck_demo_splat[deck.index()] =
+                    DemoCacheValue::Ready { gen, value: Arc::new(splat) };
+                self.try_install_demo_splat(cx, deck, gen);
+            }
+            Err(error) => self.demo_splat_unavailable(deck, gen, &error),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn demo_splat_landed(
+        &mut self,
+        _cx: &mut Cx,
+        _deck: DeckId,
+        _gen: u64,
+        _source: DecodeSource,
+    ) {
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn demo_analysis_unavailable(&mut self, deck: DeckId, gen: u64, error: &str) {
+        if self.decks.deck(deck).load_gen == gen {
+            self.deck_demo_analysis[deck.index()] = DemoCacheValue::Unavailable { gen };
+            log!("deck {deck:?}: demo analysis unavailable ({error})");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn demo_analysis_unavailable(&mut self, _deck: DeckId, _gen: u64, _error: &str) {}
+
+    #[cfg(target_arch = "wasm32")]
+    fn demo_splat_unavailable(&mut self, deck: DeckId, gen: u64, error: &str) {
+        if self.decks.deck(deck).load_gen == gen {
+            self.deck_demo_splat[deck.index()] = DemoCacheValue::Unavailable { gen };
+            log!("deck {deck:?}: demo loop splat unavailable ({error})");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn demo_splat_unavailable(&mut self, _deck: DeckId, _gen: u64, _error: &str) {}
+
+    #[cfg(target_arch = "wasm32")]
+    fn try_install_demo_analysis(&mut self, cx: &mut Cx, deck: DeckId, gen: u64) {
+        if !self.deck_track_is(deck, gen) {
+            return;
+        }
+        let DemoCacheValue::Ready { gen: ready_gen, value } =
+            &self.deck_demo_analysis[deck.index()]
+        else {
+            return;
+        };
+        if *ready_gen == gen {
+            self.install_track_analysis(cx, deck, gen, value.clone(), false);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn try_install_demo_splat(&mut self, cx: &mut Cx, deck: DeckId, gen: u64) {
+        if !self.deck_track_is(deck, gen) {
+            return;
+        }
+        let DemoCacheValue::Ready { gen: ready_gen, value } =
+            &self.deck_demo_splat[deck.index()]
+        else {
+            return;
+        };
+        if *ready_gen == gen {
+            let cmds = self.decks.splat_set(deck, value.clone());
+            self.run_deck_cmds(cx, cmds);
+            self.refresh_splat_surface(cx);
+        }
     }
 
     /// True when this deck's load is being served from the store's own
@@ -20565,6 +20801,7 @@ p2 {}
         self.prefetch.release(finished, Instant::now());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn submit_splat_refinement(&mut self, deck: DeckId, gen: u64) {
         let index = deck.index();
         if self.deck_splat_refining[index] == Some(gen) {
@@ -20579,6 +20816,11 @@ p2 {}
                 self.deck_splat_refining[index] = Some(gen);
             }
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn submit_splat_refinement(&mut self, _deck: DeckId, _gen: u64) {
+        // Static web sessions only consume the prebuilt DjLoopSplat role.
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
@@ -20918,8 +21160,10 @@ p2 {}
         if !self.writeback_lyrics.insert(asset) {
             return;
         }
-        let files =
-            makepad_audio_sidechannels::side_channel_files(None, Some(lyrics.to_json(digest)));
+        let files = makepad_audio_sidechannels::side_channel_files(
+            None,
+            Some(lyrics.to_json(digest)),
+        );
         self.submit_side_channel_publish(asset, files);
     }
 
@@ -20947,6 +21191,7 @@ p2 {}
     /// (stems finishing while the transcript lands) would both build on the
     /// same head and the loser would drop the winner's files. The second
     /// waits for the first to settle and then builds on what it left.
+    #[cfg(not(target_arch = "wasm32"))]
     fn submit_side_channel_publish(
         &mut self,
         asset: AssetId,
@@ -20975,6 +21220,17 @@ p2 {}
             }
             Err(error) => log!("side-channels: publish not submitted: {error}"),
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn submit_side_channel_publish(
+        &mut self,
+        _asset: AssetId,
+        _files: Vec<makepad_asset_client::side_channels::SideChannelFile>,
+    ) {
+        // The web demo's StaticStore session is strictly read-only. Imports
+        // and edits are owned by BrowserStore; no side-channel writeback is
+        // ever offered to the server.
     }
 
     /// A publication finished, one way or the other: let whatever was waiting
@@ -21307,6 +21563,24 @@ p2 {}
             return None;
         }
         if cols == 0 {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let gen = self.decks.deck(deck).load_gen;
+                if matches!(
+                    self.deck_demo_analysis[index],
+                    DemoCacheValue::Unavailable { gen: unavailable } if unavailable == gen
+                ) {
+                    return Some(("beat-grid cache not available for this track".to_string(), Some(0.0)));
+                }
+                if self.deck_analysis[index].is_some()
+                    && matches!(
+                        self.deck_demo_splat[index],
+                        DemoCacheValue::Unavailable { gen: unavailable } if unavailable == gen
+                    )
+                {
+                    return Some(("loop-slice cache not available for this track".to_string(), Some(0.0)));
+                }
+            }
             return Some(match self.deck_analysis[index] {
                 None => ("analysing the beat grid…".to_string(), None),
                 Some(_) => ("no steady beat found — this track cannot be split into loops".to_string(), Some(0.0)),
@@ -27023,6 +27297,8 @@ mod sync_tests {
             .map(|(i, role)| file(*role, 20 + i as u8, MediaType::Ogg))
             .collect();
         files.push(file(FileRole::Lyrics, 40, MediaType::Json));
+        files.push(file(FileRole::DjAnalysis, 41, MediaType::Bin));
+        files.push(file(FileRole::DjLoopSplat, 42, MediaType::Bin));
         files.push(audio);
         let refs = side_channel_refs_of(&files);
         let stems = refs.stems.expect("a complete set");
@@ -27031,6 +27307,8 @@ mod sync_tests {
             assert_eq!(*len, 1000 + 20 + slot as u64);
         }
         assert_eq!(refs.lyrics, Some((BlobId::from_bytes([40; 32]), 1040)));
+        assert_eq!(refs.dj_analysis, Some((BlobId::from_bytes([41; 32]), 1041)));
+        assert_eq!(refs.dj_loop_splat, Some((BlobId::from_bytes([42; 32]), 1042)));
 
         // Lyrics alone are worth having: the words show, the knobs do not.
         let words = side_channel_refs_of(&[file(FileRole::Lyrics, 40, MediaType::Json)]);

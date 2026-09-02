@@ -66,7 +66,8 @@ pub enum DeckTarget {
 
 /// Analysis the STORE already holds for a track, as blob references off its
 /// manifest: four Ogg Vorbis stems in `FileRole::STEMS` order (drums, bass,
-/// vocals, other) and the word-aligned lyrics JSON.
+/// vocals, other), word-aligned lyrics, and the web demo's read-only analysis
+/// cache.
 ///
 /// This is the fetch-or-compute switch. Present means the expensive work was
 /// done once, somewhere, and this deck downloads a few hundred kilobytes
@@ -78,6 +79,8 @@ pub struct TrackSideChannels {
     /// is all-four-or-none, so this is one option over the whole set.
     pub stems: Option<[(BlobId, u64); 4]>,
     pub lyrics: Option<(BlobId, u64)>,
+    pub dj_analysis: Option<(BlobId, u64)>,
+    pub dj_loop_splat: Option<(BlobId, u64)>,
 }
 
 /// What a music tile resolves to.

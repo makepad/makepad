@@ -558,7 +558,8 @@ fn role_priority(role: &str) -> u8 {
         "render_glb", "lod1_glb", "lod2_glb", "collider", "ao_mesh",
         "shadow_sdf", "albedo", "normal", "orm", "texture", "preview_front",
         "preview_side", "audio", "depth", "splat", "ao_texture", "lyrics",
-        "stem_drums", "stem_bass", "stem_vocals", "stem_other", "video",
+        "stem_drums", "stem_bass", "stem_vocals", "stem_other", "dj_analysis",
+        "dj_loop_splat", "video",
         "turntable", "source", "thumbnail",
     ]
     .iter()

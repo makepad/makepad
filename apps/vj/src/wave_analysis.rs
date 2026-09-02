@@ -538,6 +538,27 @@ impl TrackAnalysis {
         }
     }
 
+    /// Apply the same optional Beat This! correction the native analysis
+    /// worker uses. Headless cache bakers call this after routing the model
+    /// request through the AI hub.
+    pub fn refine_with_beats(
+        &mut self,
+        beats_secs: &[f64],
+        downbeats_secs: &[f64],
+    ) -> bool {
+        let Some(grid) = refine_grid_with_beats(
+            &self.grid,
+            self.duration_secs,
+            beats_secs,
+            downbeats_secs,
+        ) else {
+            return false;
+        };
+        self.grid = grid;
+        self.mark_refined_by_beats();
+        true
+    }
+
     /// Column index in the zoomed tiles for a source time.
     pub fn zoom_column(&self, secs: f64) -> f64 {
         secs * ZOOM_COLS_PER_SEC

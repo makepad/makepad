@@ -202,10 +202,12 @@ pub fn role_str(r: FileRole) -> &'static str {
         FileRole::StemVocals => "stem_vocals",
         FileRole::StemOther => "stem_other",
         FileRole::Lyrics => "lyrics",
+        FileRole::DjAnalysis => "dj_analysis",
+        FileRole::DjLoopSplat => "dj_loop_splat",
     }
 }
 
-pub const ALL_ROLES: [FileRole; 24] = [
+pub const ALL_ROLES: [FileRole; 26] = [
     FileRole::RenderGlb,
     FileRole::Lod1Glb,
     FileRole::Lod2Glb,
@@ -230,6 +232,8 @@ pub const ALL_ROLES: [FileRole; 24] = [
     FileRole::StemVocals,
     FileRole::StemOther,
     FileRole::Lyrics,
+    FileRole::DjAnalysis,
+    FileRole::DjLoopSplat,
 ];
 
 pub fn parse_role(name: &str) -> Option<FileRole> {

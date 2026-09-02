@@ -20,3 +20,4 @@ makepad-audio-decode = { path = "../../libs/audio_decode" }
 makepad-audio-encode = { path = "../../libs/audio_encode" }
 makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
 makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }
+makepad-vj-analysis = { path = "../../libs/vj_analysis" }

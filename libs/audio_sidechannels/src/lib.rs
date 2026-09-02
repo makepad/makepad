@@ -84,11 +84,22 @@ pub fn encode_stem_oggs(stems: &StemSet) -> [Vec<u8>; 4] {
     out
 }
 
-/// The typed side-channel files for a bake result: four stem oggs (in
-/// [`FileRole::STEMS`] order) and/or a lyrics JSON document.
+/// The typed side-channel files for the original stem/lyrics bake contract.
 pub fn side_channel_files(
     stem_oggs: Option<[Vec<u8>; 4]>,
     lyrics_json: Option<String>,
+) -> Vec<SideChannelFile> {
+    side_channel_files_with_analysis(stem_oggs, lyrics_json, None, None)
+}
+
+/// The complete DJ cache side-channel set: four stem oggs (in
+/// [`FileRole::STEMS`] order), lyrics, the native whole-track analysis cache,
+/// and the prebuilt loop-splat grid.
+pub fn side_channel_files_with_analysis(
+    stem_oggs: Option<[Vec<u8>; 4]>,
+    lyrics_json: Option<String>,
+    dj_analysis: Option<Vec<u8>>,
+    dj_loop_splat: Option<Vec<u8>>,
 ) -> Vec<SideChannelFile> {
     let mut files = Vec::new();
     if let Some(oggs) = stem_oggs {
@@ -101,6 +112,20 @@ pub fn side_channel_files(
             role: FileRole::Lyrics,
             media: MediaType::Json,
             bytes: json.into_bytes(),
+        });
+    }
+    if let Some(bytes) = dj_analysis {
+        files.push(SideChannelFile {
+            role: FileRole::DjAnalysis,
+            media: MediaType::Bin,
+            bytes,
+        });
+    }
+    if let Some(bytes) = dj_loop_splat {
+        files.push(SideChannelFile {
+            role: FileRole::DjLoopSplat,
+            media: MediaType::Bin,
+            bytes,
         });
     }
     files
@@ -175,7 +200,12 @@ mod tests {
     #[test]
     fn files_carry_the_contract_roles() {
         let set = tone_set();
-        let files = side_channel_files(Some(encode_stem_oggs(&set)), Some("{}".into()));
+        let files = side_channel_files_with_analysis(
+            Some(encode_stem_oggs(&set)),
+            Some("{}".into()),
+            Some(b"wave".to_vec()),
+            Some(b"splat".to_vec()),
+        );
         let roles: Vec<FileRole> = files.iter().map(|f| f.role).collect();
         assert_eq!(
             roles,
@@ -184,10 +214,13 @@ mod tests {
                 FileRole::StemBass,
                 FileRole::StemVocals,
                 FileRole::StemOther,
-                FileRole::Lyrics
+                FileRole::Lyrics,
+                FileRole::DjAnalysis,
+                FileRole::DjLoopSplat,
             ]
         );
         assert!(files[..4].iter().all(|f| f.media == MediaType::Ogg));
         assert_eq!(files[4].media, MediaType::Json);
+        assert!(files[5..].iter().all(|f| f.media == MediaType::Bin));
     }
 }
