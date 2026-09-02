@@ -40,14 +40,7 @@ use shell::bar::{BarData, BarModule, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
 use shell::panels::ShellPanelAction;
 
-app_main!(
-    App,
-    font_set: International,
-    font_assets: [
-        "makepad_widgets/resources/jetbrains_mono_variable.ttf",
-        "makepad_widgets/resources/NotoColorEmoji.ttf",
-    ]
-);
+app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
