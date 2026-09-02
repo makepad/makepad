@@ -159,6 +159,7 @@ use crate::loop_splat_view::{
     SPLAT_ROWS,
 };
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
+use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
     DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, ScratchMotion, SyncMode,
@@ -6567,6 +6568,14 @@ pub struct App {
     /// "keep mirroring it onto the surface until it lands".
     #[rust]
     xfade_target: Option<f32>,
+    /// What the night has played, for the picker's windows. The operator's
+    /// own record, loaded at startup and written as each record retires.
+    #[rust]
+    set_history: SetHistory,
+    /// Let the picker choose what goes on next, instead of the queue order.
+    /// Off is what the tab has always done.
+    #[rust]
+    auto_pick: bool,
     /// The DJ autopilot: pure planner ticked from the 20 Hz pump.
     #[rust(AutoPilot::new())]
     autopilot: AutoPilot,
@@ -14113,6 +14122,7 @@ p2 {}
                         self.gen_panel_loaded = true;
                         self.load_gen_panel(cx);
                         self.load_autopilot_settings();
+        self.load_set_history();
                         self.load_loop_scan_settings();
                         self.sync_autopilot_panel(cx);
                         // Dev/automation hook: VJ_IMPORT_PATH=<dir|file>
@@ -17778,6 +17788,30 @@ p2 {}
         service::session_config_from_env().cache_parent.join("autopilot.txt")
     }
 
+    /// The night's play log. Operator-owned, so it sits with the settings
+    /// and never in the analysis cache, where a version bump would erase it.
+    fn set_history_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("set-history.txt")
+    }
+
+    /// Written through a temporary and renamed into place, so a power cut
+    /// mid-write costs the last record rather than the whole night.
+    fn save_set_history(&self) {
+        let path = Self::set_history_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let temporary = path.with_extension("txt.tmp");
+        if std::fs::write(&temporary, self.set_history.to_text()).is_ok() {
+            let _ = std::fs::rename(&temporary, &path);
+        }
+    }
+
+    fn load_set_history(&mut self) {
+        let text = std::fs::read_to_string(Self::set_history_path()).unwrap_or_default();
+        self.set_history = crate::set_history::SetHistory::from_text(&text);
+    }
+
     fn loop_scan_settings_path() -> std::path::PathBuf {
         service::session_config_from_env().cache_parent.join("loop-scan.txt")
     }
@@ -18950,6 +18984,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -18957,6 +18992,7 @@ p2 {}
             u8::from(self.autopilot.phrase_snap),
             u8::from(self.decks.repeat),
             u8::from(self.decks.shuffle),
+            u8::from(self.auto_pick),
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -18990,6 +19026,9 @@ p2 {}
         self.autopilot.phrase_snap = next(1) == 1;
         self.decks.repeat = next(0) == 1;
         self.decks.shuffle = next(0) == 1;
+        // Appended after the file's first six lines: an older settings file
+        // is missing it and reads as off, which is what the tab did before.
+        self.auto_pick = next(0) == 1;
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -21913,6 +21952,7 @@ p2 {}
         self.paint_lit(cx, ids!(auto_dj), self.autopilot.on());
         self.paint_lit(cx, ids!(auto_vocal), self.autopilot.vocal_guard);
         self.paint_lit(cx, ids!(auto_phrase), self.autopilot.phrase_snap);
+        self.paint_lit(cx, ids!(auto_choose), self.auto_pick);
         self.paint_lit(cx, ids!(queue_repeat), self.decks.repeat);
         self.paint_lit(cx, ids!(queue_shuffle), self.decks.shuffle);
         // The AUTO DJ button IS the status line, the SYNC-button pattern:
@@ -24376,6 +24416,11 @@ p2 {}
             self.autopilot.set_phrase_snap(on);
             self.save_autopilot_settings();
         }
+        if self.ui.button(cx, ids!(auto_choose)).clicked(actions) {
+            // Off, the queue plays in the order the operator wrote it.
+            self.auto_pick = !self.auto_pick;
+            self.save_autopilot_settings();
+        }
         self.handle_wave_input(cx);
     }
 
@@ -24829,6 +24874,84 @@ p2 {}
         }
     }
 
+    /// Wall clock in seconds. The picker and the history are clock-free;
+    /// the host is the only party that owns one.
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Remember a record that has just finished sounding.
+    fn note_played(&mut self, item: &crate::decks::TrackItem) {
+        let key = crate::music_view::TrackKey::Asset(item.asset);
+        let artist = self.row_tags(&key).artist;
+        self.set_history.note(crate::set_history::Played {
+            key: item.asset.to_string(),
+            artist,
+            at_secs: Self::now_secs(),
+        });
+        self.save_set_history();
+    }
+
+    /// Put the record the picker wants at the front of the queue.
+    ///
+    /// The engine's queue keeps every rule it had — this only reorders it,
+    /// so `pump_queue` still takes the head, the just-retired track is still
+    /// spared from a shuffle draw, and switching the setting off leaves the
+    /// play order exactly as the operator wrote it.
+    fn choose_next(&mut self) {
+        if !self.auto_pick || self.decks.queue().len() < 2 {
+            return;
+        }
+        let outgoing = match self.decks.sync_leader() {
+            Some(deck) => crate::pick::Outgoing {
+                bpm: self.decks.deck(deck).grid.map_or(0.0, |grid| grid.bpm),
+                musical_key: self.deck_analysis[deck.index()]
+                    .as_ref()
+                    .and_then(|analysis| analysis.key),
+            },
+            None => crate::pick::Outgoing::default(),
+        };
+        let queued: Vec<crate::decks::TrackItem> = self.decks.queue().to_vec();
+        let mut candidates: Vec<crate::pick::Candidate> = Vec::with_capacity(queued.len());
+        for item in &queued {
+            let key = crate::music_view::TrackKey::Asset(item.asset);
+            let summary = self.row_summary(&key);
+            let artist = self.row_tags(&key).artist;
+            candidates.push(crate::pick::Candidate {
+                key: item.asset.to_string(),
+                artist,
+                bpm: summary.map_or(0.0, |summary| summary.grid.bpm),
+                musical_key: summary.and_then(|summary| summary.key),
+                // Energy waits for the arc that reads it. Unmeasured scores
+                // in the middle, which is what the picker does with it.
+                energy: 0.0,
+            });
+        }
+        let (ranked, relaxed) = crate::pick::rank(
+            &candidates,
+            outgoing,
+            &self.set_history,
+            Self::now_secs(),
+            crate::pick::PickSettings::default(),
+        );
+        let Some(index) = crate::pick::choose(&ranked, Self::now_secs().max(1)) else {
+            return;
+        };
+        if let Some(pick) = ranked.iter().find(|scored| scored.index == index) {
+            let mut reason = pick.reason.clone();
+            if relaxed != crate::pick::Relaxed::Not {
+                reason.push_str(" — nothing else was free");
+            }
+            log!("auto dj: next is {} ({reason})", queued[index].title);
+        }
+        if self.decks.move_queued(index, 0) {
+            self.queue_rows_dirty = true;
+        }
+    }
+
     fn run_auto_cmd(&mut self, cx: &mut Cx, cmd: AutoCmd) {
         match cmd {
             AutoCmd::CueIn { deck, secs } => {
@@ -24864,11 +24987,15 @@ p2 {}
                 let item = self.decks.deck(retire).item().cloned();
                 let cmds = self.decks.eject(retire);
                 self.run_deck_cmds(cx, cmds);
+                if let Some(item) = item.as_ref() {
+                    self.note_played(item);
+                }
                 if requeue && self.decks.repeat {
                     if let Some(item) = item {
                         self.decks.requeue(item);
                     }
                 }
+                self.choose_next();
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
                 self.decks.end_auto_fade();
@@ -24890,6 +25017,7 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
             }
             AutoCmd::PumpQueue => {
+                self.choose_next();
                 let cmds = self.decks.pump_queue();
                 self.run_deck_cmds(cx, cmds);
                 self.queue_rows_dirty = true;

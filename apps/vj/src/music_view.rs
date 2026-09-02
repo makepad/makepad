@@ -3359,6 +3359,15 @@ script_mod! {
                         auto_vocal := MusicButton{width: 110 height: 22 text: "VOCAL GUARD"}
                         auto_phrase := MusicButton{width: 110 height: 22 text: "PHRASE SNAP"}
                     }
+                    // Its own line: three of these do not fit the panel's
+                    // width, and a clipped label is worse than a short row.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        auto_choose := MusicButton{width: 110 height: 22 text: "CHOOSE NEXT"}
+                    }
                     View{
                         width: Fill
                         height: Fit
