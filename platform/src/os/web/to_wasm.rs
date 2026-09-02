@@ -165,6 +165,44 @@ pub struct ToWasmLocationChange {
     pub hash: String,
 }
 
+#[derive(ToWasm)]
+pub struct WVirtualFile {
+    pub name: String,
+    pub mime: String,
+    pub bytes: WasmDataU8,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDrag {
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: u32,
+    pub file_count: u32,
+    pub left: bool,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDrop {
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: u32,
+    pub files: Vec<WVirtualFile>,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDropError {
+    pub error: String,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDialogResult {
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub cancelled: bool,
+    pub error: String,
+    pub files: Vec<WVirtualFile>,
+}
+
 // Touch API
 
 #[derive(ToWasm, Clone, Debug)]

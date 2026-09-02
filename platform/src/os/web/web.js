@@ -42,6 +42,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.loader_quiet_animation_frames = 0;
         this.loader_after_presented_frame_id = 0;
         this.loader_fallback_timer = null;
+        this.virtual_file_max_size = 512 * 1024 * 1024;
+        this.virtual_file_max_total_size = 512 * 1024 * 1024;
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
@@ -162,6 +164,7 @@ export class WasmWebBrowser extends WasmBridge {
         // only bind the event handlers now
         // to stop them firing into wasm early
         this.bind_mouse_and_touch();
+        this.bind_file_drop();
         this.bind_keyboard();
         this.bind_screen_resize();
         this.bind_app_lifecycle();
@@ -1288,6 +1291,127 @@ export class WasmWebBrowser extends WasmBridge {
         // This would require tracking requests, which we don't currently do
     }
 
+    FromWasmSetVirtualFileLimits(args) {
+        this.virtual_file_max_size = args.max_file_size;
+        this.virtual_file_max_total_size = args.max_total_size;
+    }
+
+    read_virtual_files(file_list, max_file_size, max_total_size) {
+        const files = Array.from(file_list);
+        let total = 0;
+        for (const file of files) {
+            if (file.size > max_file_size) {
+                return Promise.reject(new Error(
+                    `file '${file.name}' is ${file.size} bytes, exceeding the per-file limit of ${max_file_size} bytes`
+                ));
+            }
+            total += file.size;
+            if (!Number.isSafeInteger(total) || total > max_total_size) {
+                return Promise.reject(new Error(
+                    `selected files total ${total} bytes, exceeding the per-drop limit of ${max_total_size} bytes`
+                ));
+            }
+        }
+        return Promise.all(files.map(async file => {
+            const bytes = await file.arrayBuffer();
+            if (bytes.byteLength > max_file_size) {
+                throw new Error(
+                    `file '${file.name}' grew to ${bytes.byteLength} bytes, exceeding the per-file limit of ${max_file_size} bytes`
+                );
+            }
+            return {
+                name: file.name + "",
+                mime: file.type + "",
+                bytes,
+            };
+        })).then(loaded => {
+            const loaded_total = loaded.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+            if (!Number.isSafeInteger(loaded_total) || loaded_total > max_total_size) {
+                throw new Error(
+                    `loaded files total ${loaded_total} bytes, exceeding the per-drop limit of ${max_total_size} bytes`
+                );
+            }
+            return loaded;
+        });
+    }
+
+    FromWasmSelectFileDialog(args) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.style.display = 'none';
+        input.multiple = args.multiple;
+        if (args.accept) {
+            input.accept = args.accept;
+        }
+        document.body.appendChild(input);
+
+        let settled = false;
+        let selection_started = false;
+        let picker_blurred_window = false;
+        const cleanup = () => {
+            window.removeEventListener('blur', on_blur);
+            window.removeEventListener('focus', on_focus);
+            if (input.parentNode) {
+                input.parentNode.removeChild(input);
+            }
+        };
+        const finish = (cancelled, files, error) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            this.to_wasm.ToWasmFileDialogResult({
+                id_lo: args.id_lo,
+                id_hi: args.id_hi,
+                cancelled,
+                error,
+                files,
+            });
+            this.do_wasm_pump();
+        };
+        const cancel = () => finish(true, [], "");
+        const on_blur = () => {
+            picker_blurred_window = true;
+        };
+        const on_focus = () => {
+            if (picker_blurred_window) {
+                window.setTimeout(() => {
+                    if (!selection_started) {
+                        cancel();
+                    }
+                }, 0);
+            }
+        };
+
+        input.addEventListener('change', () => {
+            selection_started = true;
+            if (!input.files || input.files.length === 0) {
+                cancel();
+                return;
+            }
+            this.read_virtual_files(input.files, args.max_file_size, args.max_total_size)
+                .then(files => finish(false, files, ""))
+                .catch(error => finish(true, [], "" + error));
+        });
+        // Modern browsers report picker dismissal directly. The blur/focus
+        // pair below is the fallback for older engines; engines that expose
+        // neither signal cannot report cancellation until another result.
+        input.addEventListener('cancel', cancel);
+        window.addEventListener('blur', on_blur);
+        window.addEventListener('focus', on_focus);
+
+        // This method is dispatched synchronously by do_wasm_pump(), so the
+        // click stays in the button/mouse event task whenever the app queued
+        // the dialog from that handler. Browsers reject later, unprompted calls.
+        try {
+            input.click();
+        }
+        catch (error) {
+            finish(true, [], "browser rejected file picker: " + error);
+        }
+    }
+
     async FromWasmCheckPermission(args) {
         try {
             if (args.permission === 'microphone' || args.permission === 'camera' || args.permission === 'geolocation') {
@@ -1832,6 +1956,72 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         };
         canvas.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e))
+    }
+
+    bind_file_drop() {
+        const canvas = this.canvas;
+        const file_count = event => {
+            if (event.dataTransfer.files && event.dataTransfer.files.length) {
+                return event.dataTransfer.files.length;
+            }
+            return Array.from(event.dataTransfer.items || [])
+                .filter(item => item.kind === 'file').length;
+        };
+        const position = event => {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: event.clientX - rect.left,
+                y: event.clientY - rect.top,
+            };
+        };
+        const emit_drag = (event, left) => {
+            const pos = position(event);
+            this.to_wasm.ToWasmFileDrag({
+                x: pos.x,
+                y: pos.y,
+                modifiers: pack_key_modifier(event),
+                file_count: file_count(event),
+                left,
+            });
+            this.do_wasm_pump();
+        };
+
+        canvas.addEventListener('dragenter', event => {
+            event.preventDefault();
+            emit_drag(event, false);
+        });
+        canvas.addEventListener('dragover', event => {
+            event.preventDefault();
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'copy';
+            }
+            emit_drag(event, false);
+        });
+        canvas.addEventListener('dragleave', event => {
+            event.preventDefault();
+            emit_drag(event, true);
+        });
+        canvas.addEventListener('drop', event => {
+            event.preventDefault();
+            const pos = position(event);
+            const modifiers = pack_key_modifier(event);
+            this.read_virtual_files(
+                event.dataTransfer.files,
+                this.virtual_file_max_size,
+                this.virtual_file_max_total_size,
+            ).then(files => {
+                this.to_wasm.ToWasmFileDrop({
+                    x: pos.x,
+                    y: pos.y,
+                    modifiers,
+                    files,
+                });
+                this.do_wasm_pump();
+            }).catch(error => {
+                this.to_wasm.ToWasmFileDropError({error: "" + error});
+                this.do_wasm_pump();
+            });
+        });
     }
 
     bind_keyboard() {
