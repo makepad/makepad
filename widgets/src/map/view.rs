@@ -15,6 +15,38 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapMemoryBudgets {
+    upload: usize,
+    pending: usize,
+    tile_cache: usize,
+    http_tile_cache: usize,
+}
+
+impl MapMemoryBudgets {
+    fn from_cx(cx: &Cx) -> Self {
+        Self::from_total(cx.memory_budget_bytes(), cfg!(target_arch = "wasm32"))
+    }
+
+    fn from_total(total: usize, is_web: bool) -> Self {
+        let fraction = |numerator: u128, denominator: u128| {
+            ((total as u128 * numerator) / denominator).min(usize::MAX as u128) as usize
+        };
+        let mut tile_cache = fraction(25, 32);
+        if is_web && total < 1024 * 1024 * 1024 {
+            // Small WebGL2 heaps need the pending queue plus cache to leave
+            // enough allocator headroom for tile-bake workers.
+            tile_cache = tile_cache.min(fraction(1, 2));
+        }
+        Self {
+            upload: fraction(1, 64),
+            pending: fraction(1, 4),
+            tile_cache,
+            http_tile_cache: fraction(5, 32),
+        }
+    }
+}
+
 /// Tile payload sources only. Navigation data is deliberately outside this
 /// contract; applications layer routing datasets over MapView separately.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2343,7 +2375,6 @@ const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
 const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
-const UPLOAD_BYTE_BUDGET: usize = 24_000_000;
 const UPLOAD_TIME_BUDGET_SECONDS: f64 = 0.006;
 
 #[derive(Default)]
@@ -2355,6 +2386,7 @@ struct ReadyTileDrainStats {
 
 fn drain_pending_ready_tiles<T>(
     pending: &mut Vec<T>,
+    byte_budget: usize,
     byte_size: impl Fn(&T) -> usize,
     mut insert: impl FnMut(T) -> f64,
 ) -> ReadyTileDrainStats {
@@ -2362,7 +2394,7 @@ fn drain_pending_ready_tiles<T>(
     while !pending.is_empty() {
         let size = byte_size(&pending[0]);
         if stats.count > 0
-            && (stats.bytes.saturating_add(size) > UPLOAD_BYTE_BUDGET
+            && (stats.bytes.saturating_add(size) > byte_budget
                 || stats.seconds >= UPLOAD_TIME_BUDGET_SECONDS)
         {
             break;
@@ -6384,14 +6416,14 @@ impl MapView {
     /// A fast pan across 3D building tiles can park gigabytes of baked
     /// buffers here. The queue is centre-out, so discard its least useful
     /// tail beyond the byte budget.
-    fn cap_pending_ready_tiles(&mut self) {
-        const PENDING_BYTE_BUDGET: usize = 384_000_000;
+    fn cap_pending_ready_tiles(&mut self, cx: &Cx) {
+        let byte_budget = MapMemoryBudgets::from_cx(cx).pending;
         let mut total: usize = self
             .pending_ready_tiles
             .iter()
             .map(|(_, buffers)| buffers.byte_size())
             .sum();
-        while total > PENDING_BYTE_BUDGET && self.pending_ready_tiles.len() > 1 {
+        while total > byte_budget && self.pending_ready_tiles.len() > 1 {
             let (_, dropped) = self.pending_ready_tiles.pop().unwrap();
             total -= dropped.byte_size();
         }
@@ -6514,7 +6546,7 @@ impl MapView {
         }
         if !self.pending_ready_tiles.is_empty() {
             self.sort_pending_ready_tiles();
-            self.cap_pending_ready_tiles();
+            self.cap_pending_ready_tiles(cx);
         }
         // Drain until the measured upload time or byte budget is spent. A
         // bucket-17+ tile can carry tens of MB of vertex data, so always
@@ -6526,6 +6558,7 @@ impl MapView {
             let mut pending = std::mem::take(&mut self.pending_ready_tiles);
             let stats = drain_pending_ready_tiles(
                 &mut pending,
+                MapMemoryBudgets::from_cx(cx).upload,
                 |(_, buffers)| buffers.byte_size(),
                 |(tile_key, buffers)| {
                     let started = cx.seconds_since_app_start();
@@ -7496,8 +7529,6 @@ impl MapView {
         // 60-90 MB per tile (CPU floats AND a GPU copy), so even a modest
         // resident set can eat the machine. Evict least-recently-used
         // non-visible tiles until the geometry footprint fits.
-        const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
-        const HTTP_TILE_CACHE_BYTE_BUDGET: usize = 240_000_000;
         let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
         // Anti-thrash: street-zoom tiles now carry the full icon horizon
         // (50-85 MB each), so a fixed budget can sit BELOW visible+ring —
@@ -7512,13 +7543,21 @@ impl MapView {
             .filter(|(key, _)| visible_set.contains(*key))
             .map(|(_, entry)| entry.bytes)
             .sum();
+        let budgets = MapMemoryBudgets::from_cx(cx);
         let byte_budget = if matches!(
             self.tile_source_config,
             Some(TileSourceConfig::HttpArchive { .. })
         ) {
-            HTTP_TILE_CACHE_BYTE_BUDGET.max(visible_bytes)
+            budgets.http_tile_cache.max(visible_bytes)
         } else {
-            TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2))
+            let visible_floor = if cfg!(target_arch = "wasm32")
+                && cx.memory_budget_bytes() < 1024 * 1024 * 1024
+            {
+                visible_bytes
+            } else {
+                visible_bytes.saturating_mul(2)
+            };
+            budgets.tile_cache.max(visible_floor)
         };
         if total_bytes > byte_budget {
             let center = self.center_norm;
@@ -10365,6 +10404,26 @@ mod tests {
     }
 
     #[test]
+    fn map_memory_budgets_match_the_baseline_and_scale() {
+        const MIB: usize = 1024 * 1024;
+
+        let baseline = MapMemoryBudgets::from_total(1536 * MIB, false);
+        assert_eq!(baseline.upload, 24 * MIB);
+        assert_eq!(baseline.pending, 384 * MIB);
+        assert_eq!(baseline.tile_cache, 1200 * MIB);
+        assert_eq!(baseline.http_tile_cache, 240 * MIB);
+
+        let scaled = MapMemoryBudgets::from_total(512 * MIB, false);
+        assert_eq!(scaled.upload, 8 * MIB);
+        assert_eq!(scaled.pending, 128 * MIB);
+        assert_eq!(scaled.tile_cache, 400 * MIB);
+        assert_eq!(scaled.http_tile_cache, 80 * MIB);
+
+        let small_web = MapMemoryBudgets::from_total(512 * MIB, true);
+        assert_eq!(small_web.tile_cache, 256 * MIB);
+    }
+
+    #[test]
     fn ready_tile_drain_inserts_25_results_within_nine_frames() {
         struct FakeResult {
             id: usize,
@@ -10385,6 +10444,7 @@ mod tests {
             frames += 1;
             let stats = drain_pending_ready_tiles(
                 &mut pending,
+                MapMemoryBudgets::from_total(1536 * 1024 * 1024, false).upload,
                 |ready| ready.bytes,
                 |ready| {
                     inserted.push(ready.id);
