@@ -198,10 +198,12 @@ pub struct Renderer {
     /// Per-frame visibility scratch, index-aligned with `static_chunks`;
     /// reused so a steady scene does not reallocate.
     chunk_visible: Vec<bool>,
-    /// `(world.render_rev, bake.generation())` — the slabs carry baked light
-    /// in their colours, so a rebake invalidates them exactly like a world
-    /// edit does.
-    slab_key: Option<(u64, u64)>,
+    /// [`static_slab_key`] — the slabs carry the entities' colours AND the
+    /// baked light in those colours, so a repaint (`paint_rev`) and a
+    /// rebake invalidate them exactly like a world edit does. The light
+    /// bake itself keys on [`lightmap_world_key`], which a repaint never
+    /// moves.
+    slab_key: Option<(u64, u64, u64)>,
     slab_instance_count: u64,
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     terrain_tiles: Vec<TerrainTile>,
@@ -1324,6 +1326,20 @@ fn world_boxes(m: &Mat4f, boxes: &[(Vec3f, Vec3f)]) -> (Vec<(Vec3f, Vec3f)>, Vec
     } else {
         (out, lo, hi)
     }
+}
+
+/// What the packed static slabs are valid for: the static geometry, its
+/// paint, and the light baked into its colours. A repaint (`paint_rev`)
+/// repacks the slabs and nothing else.
+fn static_slab_key(world: &GameWorld, bake_generation: u64) -> (u64, u64, u64) {
+    (world.render_rev, world.paint_rev, bake_generation)
+}
+
+/// What a GPU lightmap job is valid for: the static geometry — never its
+/// paint — the placed models and the daylight quantum. A lamp turning red
+/// must not re-bake a town (Crossroads, 2026-09-02: 68 bakes a minute).
+fn lightmap_world_key(world: &GameWorld, models_rev: u64, day_key: u32) -> (u64, u64, u32) {
+    (world.render_rev, models_rev, day_key)
 }
 
 fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
@@ -6881,7 +6897,7 @@ impl Renderer {
 
         let vars_ready = draws.cube.cube.draw_vars.can_instance()
             && draws.alpha.cube.cube.draw_vars.can_instance();
-        let slab_key = (world.render_rev, self.bake.generation());
+        let slab_key = static_slab_key(world, self.bake.generation());
         if vars_ready && self.slab_key != Some(slab_key) {
             let t0 = std::time::Instant::now();
             self.rebuild_static_slabs(draws, world);
@@ -6957,7 +6973,7 @@ impl Renderer {
                 // only a WORLD change (or a sun change that moves the lamps)
                 // re-schedules the whole job; OnChange re-kicks on every
                 // settle, sun changes included.
-                let world_key = (world.render_rev, self.models_rev, day_key);
+                let world_key = lightmap_world_key(world, self.models_rev, day_key);
                 if self.lm_kick_key != Some(world_key)
                     || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
                 {
@@ -8201,6 +8217,19 @@ mod realm_lifecycle_tests {
     }
 
     #[test]
+    fn a_repaint_repacks_the_slabs_but_never_rekicks_the_bake() {
+        let mut world = GameWorld::new();
+        let slab = static_slab_key(&world, 1);
+        let bake = lightmap_world_key(&world, 3, 6);
+        world.mark_paint_dirty();
+        assert_ne!(static_slab_key(&world, 1), slab, "a repainted lamp must reach the screen");
+        assert_eq!(lightmap_world_key(&world, 3, 6), bake, "a repaint is not a world edit");
+        world.mark_render_dirty();
+        assert_ne!(lightmap_world_key(&world, 3, 6), bake, "geometry still re-kicks the bake");
+        assert_ne!(static_slab_key(&world, 2), static_slab_key(&world, 1), "a rebake still repacks");
+    }
+
+    #[test]
     fn dynamic_motion_does_not_rebake_the_static_scene() {
         let mut renderer = Renderer::default();
         renderer.set_models(vec![model("cars/ambulance", 1.0, true, 0.0)]);
@@ -8302,7 +8331,7 @@ mod realm_lifecycle_tests {
         settings.max_probes = 19;
         renderer.set_bake_settings(settings);
 
-        renderer.slab_key = Some((1, 1));
+        renderer.slab_key = Some((1, 1, 1));
         renderer.slab_instance_count = 23;
         renderer.terrain_revision = 1;
         renderer.water_rev = Some(1);
