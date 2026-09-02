@@ -1,4 +1,50 @@
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const MAKEPAD_WASM_PANIC_PREFIX = "__MAKEPAD_WASM_PANIC__:";
+const makepad_worker_started_at = Date.now();
+let makepad_worker_index = null;
+
+function makepad_worker_console_text(parts) {
+    try {
+        return parts.map(value => {
+            if (typeof value === "string") {
+                return value;
+            }
+            if (value instanceof Error) {
+                return value.stack || `${value.name}: ${value.message}`;
+            }
+            try {
+                return typeof value === "object" ? JSON.stringify(value) : String(value);
+            } catch (_error) {
+                return "[unprintable]";
+            }
+        }).join(" ").replace(/\s*\r?\n\s*/g, " ").slice(0, 300);
+    } catch (_error) {
+        return "[unprintable]";
+    }
+}
+
+for (const level of ["log", "warn", "error"]) {
+    try {
+        const original = console[level];
+        if (typeof original !== "function") {
+            continue;
+        }
+        console[level] = function (...parts) {
+            try {
+                postMessage({
+                    type: "breadcrumb",
+                    level,
+                    text: makepad_worker_console_text(parts),
+                    ms: Date.now() - makepad_worker_started_at,
+                    worker_index: makepad_worker_index
+                });
+            } catch (_error) {
+            }
+            return original.apply(console, parts);
+        };
+    } catch (_error) {
+    }
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -19,6 +65,7 @@ function patch_split_table(primary_exports, secondary_exports) {
 
 onmessage = async function (e) {
     let thread_info = e.data;
+    makepad_worker_index = thread_info.request_id;
 
     async function instantiate_secondary(primary_wasm, env) {
         if (!thread_info.secondary_module) {
@@ -67,7 +114,16 @@ onmessage = async function (e) {
         },
 
         js_console_error: (str_ptr, str_len) => {
-            console.error(u8_to_string(str_ptr, str_len))
+            const raw = u8_to_string(str_ptr, str_len);
+            const is_panic = raw.startsWith(MAKEPAD_WASM_PANIC_PREFIX);
+            const text = is_panic ? raw.slice(MAKEPAD_WASM_PANIC_PREFIX.length) : raw;
+            console.error(text);
+            if (is_panic) {
+                try {
+                    postMessage({ type: 'panic', text });
+                } catch (_error) {
+                }
+            }
         },
 
         js_console_log: (str_ptr, str_len) => {
@@ -400,7 +456,11 @@ onmessage = async function (e) {
         postMessage({
             kind: entry_started ? 'trapped' : 'failed_to_start',
             request_id: thread_info.request_id,
-            error: String(error)
+            error: String(error),
+            message: error && error.message ? String(error.message) : String(error),
+            filename: error && error.fileName ? String(error.fileName) : "",
+            lineno: error && error.lineNumber ? error.lineNumber : 0,
+            stack: error && error.stack ? String(error.stack) : ""
         });
     }
 }

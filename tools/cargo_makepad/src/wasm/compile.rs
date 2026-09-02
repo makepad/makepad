@@ -395,10 +395,24 @@ pub fn generate_html(
         <script type='module'>
             const reportBrowserIssue = async (kind, data) => {{
                 try {{
+                    const reporter = window.makepad_crash_reporter;
+                    if (reporter && typeof reporter.report === 'function') {{
+                        return reporter.report(kind, data);
+                    }}
                     const payload = JSON.stringify({{
+                        v: 1,
                         kind,
+                        app: location.pathname.split('/').filter(Boolean)[0] || '',
                         href: location.href,
                         user_agent: navigator.userAgent,
+                        time: Date.now(),
+                        wasm_memory_bytes: null,
+                        hardware_concurrency: Number.isFinite(navigator.hardwareConcurrency)
+                            ? navigator.hardwareConcurrency
+                            : null,
+                        has_thread_support: typeof SharedArrayBuffer !== 'undefined'
+                            && (typeof crossOriginIsolated === 'undefined' || crossOriginIsolated === true),
+                        breadcrumbs: [],
                         data
                     }});
                     const encoded = encodeURIComponent(payload.slice(0, 8192));
@@ -438,7 +452,9 @@ pub fn generate_html(
             }});
 
             try {{
+                const {{makepad_crash_reporter}} = await import('./makepad_platform/web.js');
                 {init}
+                makepad_crash_reporter.set_wasm(wasm);
                 class MyWasmApp {{
                     constructor(wasm) {{
                         let canvas = document.getElementsByClassName('full_canvas')[0];
@@ -2218,6 +2234,41 @@ fn client_accepts_brotli(header: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_wasm_config() -> WasmConfig {
+        WasmConfig {
+            strip: false,
+            lan: false,
+            port: None,
+            brotli: false,
+            bindgen: false,
+            threads: true,
+            optimize_size: false,
+            wasm_opt: false,
+            production: false,
+            lto: false,
+            no_location_detail: false,
+            size_report: false,
+            keep_names: false,
+            split: false,
+            split_auto: false,
+            split_functions: false,
+            split_functions_threshold: 200,
+            hot_reload: false,
+        }
+    }
+
+    #[test]
+    fn generated_html_keeps_early_hooks_and_delegates_to_crash_reporter() {
+        let html = generate_html("demo", None, None, false, &test_wasm_config());
+        assert!(html.contains("window.addEventListener('error'"));
+        assert!(html.contains("window.addEventListener('unhandledrejection'"));
+        assert!(html.contains("window.makepad_report_browser_issue = reportBrowserIssue"));
+        assert!(html.contains("window.makepad_crash_reporter"));
+        assert!(html.contains("await import('./makepad_platform/web.js')"));
+        assert!(html.contains("makepad_crash_reporter.set_wasm(wasm)"));
+        assert!(html.contains("/$report_error?data="));
+    }
 
     #[test]
     fn script_mod_extraction_ignores_non_code_segments() {

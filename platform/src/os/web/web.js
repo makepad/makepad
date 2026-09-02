@@ -1,18 +1,454 @@
 import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 
+const MAKEPAD_CRASH_MAX_REPORTS = 20;
+const MAKEPAD_CRASH_POST_BYTES = 64 * 1024;
+const MAKEPAD_CRASH_GET_BYTES = 8 * 1024;
+
+function makepad_json_replacer(_key, value) {
+    if (typeof value === "bigint") {
+        return value.toString();
+    }
+    if (value instanceof Error) {
+        return {
+            name: value.name,
+            message: value.message,
+            stack: value.stack || ""
+        };
+    }
+    if (typeof value === "function") {
+        return `[function ${value.name || "anonymous"}]`;
+    }
+    return value;
+}
+
+function makepad_safe_json(value) {
+    const seen = new WeakSet();
+    try {
+        const text = JSON.stringify(value, (key, item) => {
+            item = makepad_json_replacer(key, item);
+            if (item && typeof item === "object") {
+                if (seen.has(item)) {
+                    return "[circular]";
+                }
+                seen.add(item);
+            }
+            return item;
+        });
+        return text === undefined ? "null" : text;
+    } catch (_error) {
+        return JSON.stringify("[unserializable]");
+    }
+}
+
+function makepad_json_bytes(text) {
+    if (typeof TextEncoder !== "undefined") {
+        return new TextEncoder().encode(text).byteLength;
+    }
+    return unescape(encodeURIComponent(text)).length;
+}
+
+function makepad_console_text(parts) {
+    const values = Array.isArray(parts) ? parts : [parts];
+    return values.map(value => {
+        if (typeof value === "string") {
+            return value;
+        }
+        if (value instanceof Error) {
+            return value.stack || `${value.name}: ${value.message}`;
+        }
+        if (value && typeof value === "object") {
+            return makepad_safe_json(value);
+        }
+        try {
+            return String(value);
+        } catch (_error) {
+            return "[unprintable]";
+        }
+    }).join(" ").replace(/\s*\r?\n\s*/g, " ");
+}
+
+export function makepad_create_breadcrumb_ring(limit = 30, max_length = 300, started_at = Date.now()) {
+    const entries = [];
+    return {
+        push(level, parts, now = Date.now(), worker_index) {
+            try {
+                const entry = {
+                    ms: Math.max(0, Math.round(now - started_at)),
+                    level: String(level),
+                    text: makepad_console_text(parts).slice(0, max_length)
+                };
+                if (worker_index !== undefined && worker_index !== null) {
+                    entry.worker = worker_index;
+                }
+                entries.push(entry);
+                if (entries.length > limit) {
+                    entries.splice(0, entries.length - limit);
+                }
+            } catch (_error) {
+            }
+        },
+        snapshot() {
+            return entries.map(entry => ({ ...entry }));
+        }
+    };
+}
+
+function makepad_report_message(data) {
+    if (!data || typeof data !== "object") {
+        return data === undefined ? "" : String(data);
+    }
+    for (const key of ["message", "reason_message", "text", "error"]) {
+        if (data[key] !== undefined && data[key] !== null) {
+            return String(data[key]);
+        }
+    }
+    return "";
+}
+
+function makepad_report_stack(data) {
+    if (!data || typeof data !== "object") {
+        return "";
+    }
+    return String(data.stack || data.reason_stack || data.trap_stack || "");
+}
+
+export function makepad_report_key(kind, data) {
+    const stack_lines = makepad_report_stack(data)
+        .split("\n")
+        .map(line => line.trim())
+        .filter(Boolean);
+    const top_frame = stack_lines.find(line => /^(at\s|.*wasm-function|.*\.wasm(?:\?|:|$))/.test(line))
+        || stack_lines[1]
+        || stack_lines[0]
+        || "";
+    return `${kind}\n${makepad_report_message(data)}\n${top_frame}`;
+}
+
+export function makepad_create_report_gate(max_reports = MAKEPAD_CRASH_MAX_REPORTS) {
+    const seen = new Set();
+    let count = 0;
+    return {
+        accept(kind, data) {
+            const key = makepad_report_key(kind, data);
+            if (count >= max_reports || seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            count += 1;
+            return true;
+        },
+        count() {
+            return count;
+        }
+    };
+}
+
+export function makepad_truncate_report(report, max_bytes = MAKEPAD_CRASH_GET_BYTES) {
+    const fits = value => makepad_json_bytes(value) <= max_bytes;
+    let candidate = { ...report };
+    let text = makepad_safe_json(candidate);
+    if (fits(text)) {
+        return text;
+    }
+
+    delete candidate.breadcrumbs;
+    text = makepad_safe_json(candidate);
+    if (fits(text)) {
+        return text;
+    }
+
+    const original_data = makepad_safe_json(candidate.data);
+    candidate.data = { truncated: true, text: "" };
+    let low = 0;
+    let high = original_data.length;
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        candidate.data.text = original_data.slice(0, middle);
+        if (fits(makepad_safe_json(candidate))) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    candidate.data.text = original_data.slice(0, low);
+    text = makepad_safe_json(candidate);
+    if (fits(text)) {
+        return text;
+    }
+
+    candidate = {
+        v: report.v,
+        kind: String(report.kind || "").slice(0, 200),
+        app: String(report.app || "").slice(0, 200),
+        href: String(report.href || "").slice(0, 512),
+        user_agent: String(report.user_agent || "").slice(0, 512),
+        time: report.time,
+        wasm_memory_bytes: report.wasm_memory_bytes,
+        hardware_concurrency: report.hardware_concurrency,
+        has_thread_support: report.has_thread_support,
+        data: { truncated: true }
+    };
+    text = makepad_safe_json(candidate);
+    if (fits(text)) {
+        return text;
+    }
+    return makepad_safe_json({ v: 1, kind: "report.truncated", data: { truncated: true } });
+}
+
+function makepad_is_wasm_trap(kind, data) {
+    if (kind !== "window.error" && kind !== "window.unhandledrejection" && kind !== "startup.exception") {
+        return false;
+    }
+    const detail = `${makepad_report_message(data)}\n${makepad_report_stack(data)}`;
+    return /WebAssembly(?:\.|\s)|RuntimeError|wasm-function|\.wasm(?:\?|:|\b)|unreachable|memory access out of bounds|table index is out of bounds|null function/i.test(detail);
+}
+
+function makepad_create_crash_reporter() {
+    const breadcrumbs = makepad_create_breadcrumb_ring();
+    const gate = makepad_create_report_gate();
+    let wasm = null;
+    let page_hiding = false;
+    let pending_panic = null;
+    let dead = false;
+    let dead_error = null;
+    let suppressed_followups = 0;
+
+    const app_name = () => {
+        try {
+            return location.pathname.split("/").filter(Boolean)[0] || "";
+        } catch (_error) {
+            return "";
+        }
+    };
+
+    const memory_bytes = () => {
+        try {
+            const memory = wasm && (wasm._memory || (wasm.exports && wasm.exports.memory));
+            return memory && memory.buffer ? memory.buffer.byteLength : null;
+        } catch (_error) {
+            return null;
+        }
+    };
+
+    const thread_support = () => {
+        try {
+            if (wasm && typeof wasm._has_thread_support === "boolean") {
+                return wasm._has_thread_support;
+            }
+            return typeof SharedArrayBuffer !== "undefined"
+                && (typeof crossOriginIsolated === "undefined" || crossOriginIsolated === true);
+        } catch (_error) {
+            return false;
+        }
+    };
+
+    const build_payload = (kind, data) => ({
+        v: 1,
+        kind,
+        app: app_name(),
+        href: typeof location === "undefined" ? "" : String(location.href),
+        user_agent: typeof navigator === "undefined" ? "" : String(navigator.userAgent || ""),
+        time: Date.now(),
+        wasm_memory_bytes: memory_bytes(),
+        hardware_concurrency: typeof navigator !== "undefined" && Number.isFinite(navigator.hardwareConcurrency)
+            ? navigator.hardwareConcurrency
+            : null,
+        has_thread_support: thread_support(),
+        breadcrumbs: breadcrumbs.snapshot(),
+        data
+    });
+
+    const fallback_get = async payload => {
+        try {
+            if (typeof fetch !== "function") {
+                return false;
+            }
+            const text = makepad_truncate_report(payload, MAKEPAD_CRASH_GET_BYTES);
+            await fetch('/$report_error?data=' + encodeURIComponent(text), { cache: 'no-store' });
+            return true;
+        } catch (_error) {
+            return false;
+        }
+    };
+
+    const send = async (kind, data) => {
+        try {
+            // Keep one slot available for the terminal wasm.dead diagnostic.
+            if (kind !== "wasm.dead" && gate.count() >= MAKEPAD_CRASH_MAX_REPORTS - 1) {
+                return false;
+            }
+            if (!gate.accept(kind, data)) {
+                return false;
+            }
+            const payload = build_payload(kind, data);
+            const text = makepad_truncate_report(payload, MAKEPAD_CRASH_POST_BYTES);
+            if (page_hiding && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+                try {
+                    if (navigator.sendBeacon('/api/crash', new Blob([text], { type: 'application/json' }))) {
+                        return true;
+                    }
+                } catch (_error) {
+                }
+            }
+            if (typeof fetch !== "function") {
+                return false;
+            }
+            const response = await fetch('/api/crash', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: text,
+                keepalive: true,
+                cache: 'no-store'
+            });
+            if (response.status === 404 || response.status === 405) {
+                return fallback_get(payload);
+            }
+            return response.ok;
+        } catch (_error) {
+            return false;
+        }
+    };
+
+    const take_pending_panic = () => {
+        if (!pending_panic || Date.now() - pending_panic.time > 1000) {
+            return null;
+        }
+        const panic = pending_panic;
+        pending_panic = null;
+        clearTimeout(panic.timer);
+        return panic;
+    };
+
+    const reporter = {
+        report(kind, data) {
+            try {
+                kind = String(kind || "unknown");
+                if (kind === "wasm.panic") {
+                    if (pending_panic) {
+                        clearTimeout(pending_panic.timer);
+                        void send("wasm.panic", pending_panic.data);
+                    }
+                    const panic = { data, time: Date.now(), timer: null };
+                    panic.timer = setTimeout(() => {
+                        if (pending_panic === panic) {
+                            pending_panic = null;
+                            void send("wasm.panic", data);
+                        }
+                    }, 1000);
+                    pending_panic = panic;
+                    return Promise.resolve(true);
+                }
+                if (makepad_is_wasm_trap(kind, data)) {
+                    reporter.mark_wasm_dead(data);
+                    const panic = take_pending_panic();
+                    if (panic) {
+                        return send("wasm.panic", {
+                            ...panic.data,
+                            trap_message: makepad_report_message(data),
+                            trap_stack: makepad_report_stack(data)
+                        });
+                    }
+                }
+                return send(kind, data);
+            } catch (_error) {
+                return Promise.resolve(false);
+            }
+        },
+        set_wasm(next_wasm) {
+            try {
+                wasm = next_wasm;
+            } catch (_error) {
+            }
+        },
+        add_breadcrumb(level, parts, worker_index) {
+            breadcrumbs.push(level, parts, Date.now(), worker_index);
+        },
+        mark_wasm_dead(error) {
+            try {
+                if (dead) {
+                    return;
+                }
+                dead = true;
+                dead_error = {
+                    message: makepad_report_message(error),
+                    stack: makepad_report_stack(error)
+                };
+                setTimeout(() => {
+                    void send("wasm.dead", {
+                        suppressed_followups,
+                        first_trap: dead_error
+                    });
+                }, 2000);
+            } catch (_error) {
+            }
+        },
+        is_wasm_dead() {
+            return dead;
+        },
+        suppress_followup() {
+            if (dead) {
+                suppressed_followups += 1;
+            }
+        },
+        set_page_hiding(value) {
+            page_hiding = !!value;
+            if (page_hiding && pending_panic) {
+                const panic = pending_panic;
+                pending_panic = null;
+                clearTimeout(panic.timer);
+                void send("wasm.panic", panic.data);
+            }
+        }
+    };
+    return reporter;
+}
+
+export const makepad_crash_reporter = makepad_create_crash_reporter();
+
+if (typeof window !== "undefined") {
+    window.makepad_crash_reporter = makepad_crash_reporter;
+    for (const level of ["log", "warn", "error"]) {
+        try {
+            const original = console[level];
+            if (typeof original !== "function") {
+                continue;
+            }
+            console[level] = function (...parts) {
+                makepad_crash_reporter.add_breadcrumb(level, parts);
+                return original.apply(console, parts);
+            };
+        } catch (_error) {
+        }
+    }
+    window.addEventListener("pagehide", () => makepad_crash_reporter.set_page_hiding(true));
+    window.addEventListener("pageshow", () => makepad_crash_reporter.set_page_hiding(false));
+}
+
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super(wasm, dispatch);
         if (wasm === undefined) {
             return
         }
+        makepad_crash_reporter.set_wasm(wasm);
         this.wasm_app = this.wasm_create_app();
 
         this.create_js_message_bridge(this.wasm_app);
 
         this.dispatch = dispatch;
         this.canvas = canvas;
-        this.handlers = {};
+        this.handlers = new Proxy({}, {
+            set(target, property, value) {
+                target[property] = typeof value === "function" ? (...args) => {
+                    if (makepad_crash_reporter.is_wasm_dead()) {
+                        makepad_crash_reporter.suppress_followup();
+                        return;
+                    }
+                    return value(...args);
+                } : value;
+                return true;
+            }
+        });
         this.timers = [];
         this.text_copy_response = "";
         this.web_sockets = [];
@@ -50,12 +486,20 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_wake_ui() {
+        if (makepad_crash_reporter.is_wasm_dead()) {
+            makepad_crash_reporter.suppress_followup();
+            return;
+        }
         if (this.ui_wake_queued) {
             return;
         }
         this.ui_wake_queued = true;
         queueMicrotask(() => {
             this.ui_wake_queued = false;
+            if (makepad_crash_reporter.is_wasm_dead()) {
+                makepad_crash_reporter.suppress_followup();
+                return;
+            }
             const flags = this.exports.wasm_check_signal();
             if (flags !== 0) {
                 this.to_wasm.ToWasmSignal({ flags });
@@ -1012,29 +1456,66 @@ export class WasmWebBrowser extends WasmBridge {
             };
             worker.onmessage = event => {
                 const message = event.data || {};
-                if (message.kind === 'spawn_request') {
+                const message_kind = message.kind || message.type;
+                if (message_kind === 'breadcrumb') {
+                    makepad_crash_reporter.add_breadcrumb(
+                        `worker.${message.level || "log"}`,
+                        [message.text || ""],
+                        args.request_id
+                    );
+                } else if (message_kind === 'panic') {
+                    record.last_panic = { text: String(message.text || ""), time: Date.now() };
+                } else if (message_kind === 'spawn_request') {
                     this.create_thread(message);
-                } else if (message.kind === 'wake_ui') {
+                } else if (message_kind === 'wake_ui') {
                     this.js_wake_ui();
-                } else if (message.kind === 'started') {
+                } else if (message_kind === 'started') {
                     record.started = true;
                     this.exports.wasm_thread_started(args.request_id);
-                } else if (message.kind === 'finished') {
+                } else if (message_kind === 'finished') {
                     this.exports.wasm_thread_finished(args.request_id);
                     release();
-                } else if (message.kind === 'trapped') {
+                } else if (message_kind === 'trapped') {
+                    report_browser_issue("worker.error", {
+                        worker_index: args.request_id,
+                        message: message.message || message.error || "worker trapped",
+                        filename: message.filename || "",
+                        lineno: message.lineno || 0,
+                        stack: message.stack || "",
+                        panic: record.last_panic && Date.now() - record.last_panic.time <= 1000
+                            ? record.last_panic.text
+                            : ""
+                    });
                     this.exports.wasm_thread_worker_lost(args.request_id);
                     release();
-                } else if (message.kind === 'failed_to_start') {
+                } else if (message_kind === 'failed_to_start') {
+                    report_browser_issue("worker.error", {
+                        worker_index: args.request_id,
+                        message: message.message || message.error || "worker failed to start",
+                        filename: message.filename || "",
+                        lineno: message.lineno || 0,
+                        stack: message.stack || ""
+                    });
                     this.exports.wasm_thread_failed_to_start(args.request_id);
                     release();
                 }
             };
-            worker.onerror = error => {
+            const on_worker_error = error => {
                 if (record.closed) {
                     return;
                 }
                 console.error(error);
+                report_browser_issue("worker.error", {
+                    worker_index: args.request_id,
+                    message: error && error.message ? String(error.message) : String(error),
+                    filename: error && error.filename ? String(error.filename) : "",
+                    lineno: error && error.lineno ? error.lineno : 0,
+                    colno: error && error.colno ? error.colno : 0,
+                    stack: error && error.error && error.error.stack ? String(error.error.stack) : "",
+                    panic: record.last_panic && Date.now() - record.last_panic.time <= 1000
+                        ? record.last_panic.text
+                        : ""
+                });
                 if (record.started) {
                     this.exports.wasm_thread_worker_lost(args.request_id);
                 } else {
@@ -1042,9 +1523,36 @@ export class WasmWebBrowser extends WasmBridge {
                 }
                 release();
             };
+            worker.onerror = on_worker_error;
+            worker.addEventListener("error", on_worker_error);
+            worker.addEventListener("messageerror", error => {
+                if (record.closed) {
+                    return;
+                }
+                report_browser_issue("worker.error", {
+                    worker_index: args.request_id,
+                    message: error && error.message ? String(error.message) : "worker message could not be decoded",
+                    filename: "",
+                    lineno: 0,
+                    stack: ""
+                });
+                if (record.started) {
+                    this.exports.wasm_thread_worker_lost(args.request_id);
+                } else {
+                    this.exports.wasm_thread_failed_to_start(args.request_id);
+                }
+                release();
+            });
             worker.postMessage(thread_info);
         })().catch(err => {
             console.error(err);
+            report_browser_issue("worker.error", {
+                worker_index: args.request_id,
+                message: err && err.message ? String(err.message) : String(err),
+                filename: err && err.fileName ? String(err.fileName) : "",
+                lineno: err && err.lineNumber ? err.lineNumber : 0,
+                stack: err && err.stack ? String(err.stack) : ""
+            });
             const record = this.workers.get(args.request_id);
             if (record) {
                 record.closed = true;
@@ -1063,6 +1571,9 @@ export class WasmWebBrowser extends WasmBridge {
 
     start_signal_poll() {
         this.poll_timer = window.setInterval(e => {
+            if (makepad_crash_reporter.is_wasm_dead()) {
+                return;
+            }
             let flags = this.exports.wasm_check_signal();
             if (flags != 0) {
                 this.to_wasm.ToWasmSignal({ flags });
@@ -1701,14 +2212,27 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     do_wasm_pump() {
+        if (makepad_crash_reporter.is_wasm_dead()) {
+            makepad_crash_reporter.suppress_followup();
+            return;
+        }
         let started = performance.now();
-        this.buffer_upload_serial += 1;
-        let to_wasm = this.to_wasm;
-        this.to_wasm = this.new_to_wasm();
-        let from_wasm = this.wasm_process_msg(to_wasm);
-        from_wasm.dispatch_on_app();
-        from_wasm.free();
-        this.update_startup_loader(performance.now() - started);
+        try {
+            this.buffer_upload_serial += 1;
+            let to_wasm = this.to_wasm;
+            this.to_wasm = this.new_to_wasm();
+            let from_wasm = this.wasm_process_msg(to_wasm);
+            from_wasm.dispatch_on_app();
+            from_wasm.free();
+            this.update_startup_loader(performance.now() - started);
+        } catch (error) {
+            makepad_crash_reporter.mark_wasm_dead(error);
+            void makepad_crash_reporter.report("window.error", {
+                message: error && error.message ? String(error.message) : String(error),
+                stack: error && error.stack ? String(error.stack) : ""
+            });
+            throw error;
+        }
     }
 
 
@@ -2415,14 +2939,7 @@ function report_browser_issue(kind, data) {
             window.makepad_report_browser_issue(kind, data);
             return;
         }
-        const payload = JSON.stringify({
-            kind,
-            href: location.href,
-            user_agent: navigator.userAgent,
-            data
-        });
-        const encoded = encodeURIComponent(payload.slice(0, 8192));
-        fetch('/$report_error?data=' + encoded, { cache: 'no-store' });
+        makepad_crash_reporter.report(kind, data);
     } catch (_error) {
     }
 }
