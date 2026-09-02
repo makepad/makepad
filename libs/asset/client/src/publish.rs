@@ -23,8 +23,10 @@
 //! extra notification path exists or is needed.
 
 use crate::api::AnnotationUpload;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::client::AssetClient;
 use std::path::PathBuf;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::dto::CandidateStateDto;
 use crate::error::{ClientError, ClientResult};
 use crate::wire;
@@ -942,6 +944,7 @@ pub struct PublishedBundle {
     pub thumbnail_blob: BlobId,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl AssetClient {
     /// Rights immutability per asset: a publication that would change the
     /// license/credits/source of an ALREADY PUBLISHED asset refuses with

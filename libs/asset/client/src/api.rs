@@ -146,7 +146,7 @@ impl CatalogQuery {
         Self { text: text.into(), page_size, ..Self::default() }
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    pub(crate) fn validate(&self) -> ClientResult<()> {
         if self.page_size == 0 || self.page_size > MAX_SEARCH_LIMIT {
             return Err(ClientError::InvalidInput { what: "search page_size" });
         }

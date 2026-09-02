@@ -34,66 +34,55 @@
 //! lives in [`wire`] — the single coordination surface with the server
 //! process (`libs/asset/store`).
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod api;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/api.rs"]
 pub mod api;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod cache;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod client;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/client.rs"]
 pub mod client;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod discovery;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/discovery.rs"]
 pub mod discovery;
 pub mod dto;
 pub mod error;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod http;
 // The module moved; this re-export keeps every dependent's `makepad_asset_client::json::Value` path compiling.
 pub mod json { pub use makepad_strict_json::*; }
 pub mod location;
 pub mod transport;
 pub mod cache_store;
-#[cfg(not(target_arch = "wasm32"))]
+pub mod static_store;
 pub mod side_channels;
-#[cfg(target_arch = "wasm32")]
-#[path = "portable/side_channels.rs"]
-pub mod side_channels;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod publish;
-#[cfg(target_arch = "wasm32")]
-#[path = "portable/publish.rs"]
-pub mod publish;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod resolver;
-#[cfg(target_arch = "wasm32")]
-#[path = "portable/resolver.rs"]
-pub mod resolver;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod runtime;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/runtime.rs"]
 pub mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod session;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/session.rs"]
 pub mod session;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod subscriber;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 #[path = "portable/subscriber.rs"]
 pub mod subscriber;
 pub mod util;
 pub mod wire;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use api::{
     AnnotationUpload, Api, BatchFlow, BatchFrame, BatchItem, BlobHead, BlobRefAdmission, BlobRefRow, BlobRefsPage, CatalogQuery,
     ChatAttachment, ChatCreateRequest,
@@ -102,28 +91,29 @@ pub use api::{
     PipelineStageSpec, SourceCollectionRegistered, default_stage_weight, stage_ref,
     DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT, NEUTRAL_STAGE_WEIGHT,
 };
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 pub use api::{
-    default_stage_weight, stage_ref, AnnotationUpload, Api, CatalogQuery, ChatAttachment,
-    PipelineStageSpec, DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,
-    NEUTRAL_STAGE_WEIGHT,
+    default_stage_weight, stage_ref, AnnotationUpload, Api, BlobHead, CatalogQuery,
+    ChatAttachment, GcRequest, PipelineStageSpec, SourceCollectionRegistered,
+    DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT, NEUTRAL_STAGE_WEIGHT,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use client::{
     AssetClient, AssetsPage, CatalogEventCursor, CatalogEventsPage, CatalogPage, ClientConfig,
     PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
 };
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 pub use client::{
-    AssetClient, CacheBudgets, CacheStats, CatalogPage, ClientConfig, HttpLimits, PageCursor,
+    AssetClient, AssetsPage, CacheBudgets, CacheStats, CatalogEventCursor, CatalogPage,
+    ClientConfig, HttpLimits, PageCursor,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener,
 };
@@ -158,55 +148,39 @@ pub use transport::{
     OwnedRequest, OwnedResponse, Transport, TransportCompletion, TransportError, TransportId,
     TransportMethod,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use transport::TcpHttpTransport;
-#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[cfg(any(target_arch = "wasm32", feature = "native", feature = "web"))]
 pub use transport::PlatformHttpTransport;
 pub use cache_store::{BlobContent, CacheStore, CacheStoreStats, MemoryCacheStore};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use cache_store::FsCacheStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use http::HttpLimits;
-#[cfg(not(target_arch = "wasm32"))]
 pub use publish::{
     PublishBundle, PublishBundleFile, PublishFile, PublishProvenance, PublishRequest,
     PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
     PublishedFile,
 };
-#[cfg(target_arch = "wasm32")]
-pub use publish::{
-    PublishBundle, PublishBundleFile, PublishFile, PublishProvenance, PublishRequest,
-    PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
-    PublishedFile,
-};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use session::{
     SessionConfig, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
 pub use session::{
-    CatalogSubscriberConfig, RuntimeConfig, SessionConfig, SessionConnector, SessionHandles,
-    SessionMsg, SessionStatus,
+    SessionConfig, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
-#[cfg(target_arch = "wasm32")]
-pub use resolver::{select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference};
-#[cfg(target_arch = "wasm32")]
-pub use runtime::{
-    ClientEvent, ClientOutput, ClientRequest, ClientRuntime, Lane, RequestId, ResourceSlot,
-    ResourceState, StageEvent, SubmitOptions,
-};
-#[cfg(target_arch = "wasm32")]
-pub use subscriber::{CatalogSubscriber, CatalogSubscriptionEvent};
-#[cfg(not(target_arch = "wasm32"))]
 pub use resolver::{
     select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{
     ClientEvent, ClientOutput, ClientRequest, ClientRuntime, Lane, RequestId, ResourceSlot,
     ResourceState, RuntimeConfig, StageEvent, SubmitOptions,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use subscriber::{
     CatalogSubscriber, CatalogSubscriberConfig, CatalogSubscriptionEvent,
+};
+pub use static_store::{
+    StaticFetch, StaticFetchId, StaticFetchOutput, StaticStore, StaticStoreEvent,
+    StaticStoreState, MAX_STATIC_MANIFEST_BYTES,
 };

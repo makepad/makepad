@@ -642,7 +642,7 @@ impl AssetStore {
                             label: handles.server_label.clone(),
                             server_id: handles.server_id,
                         });
-                        self.endpoints = Some(handles.endpoints);
+                        self.endpoints = handles.endpoints;
                         self.token = handles.token.clone();
                         self.handles = Some(*handles);
                         self.connector = None;

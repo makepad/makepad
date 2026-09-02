@@ -1,93 +1,13 @@
-//! Portable session configuration; static execution is a later feature lane.
+//! Poll-driven static session connector. It performs no discovery and starts
+//! no worker thread.
 
+use crate::client::{CacheBudgets, ClientConfig};
 use crate::error::{ClientError, ClientResult};
-use crate::location::{
-    ApiEndpoints, BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
-};
-use makepad_asset_data::AssetKind;
+use crate::location::{ApiEndpoints, BaseUrl, ClientLocation};
+use crate::runtime::{ClientRuntime, RuntimeConfig};
+use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use crate::runtime::ClientRuntime;
-use crate::subscriber::CatalogSubscriber;
-
-#[derive(Clone, Copy, Debug)]
-pub struct CatalogSubscriberConfig {
-    pub kind: Option<AssetKind>,
-    pub wait_ms: u64,
-    pub batch_limit: u32,
-    pub channel_capacity: usize,
-    pub retry_min_ms: u64,
-    pub retry_max_ms: u64,
-}
-
-impl CatalogSubscriberConfig {
-    pub fn default_v1() -> Self {
-        Self {
-            kind: None,
-            wait_ms: 10_000,
-            batch_limit: 128,
-            channel_capacity: 16,
-            retry_min_ms: 250,
-            retry_max_ms: 10_000,
-        }
-    }
-
-    fn validate(&self) -> ClientResult<()> {
-        if self.wait_ms == 0
-            || self.wait_ms > crate::wire::MAX_EVENT_WAIT_MS
-            || self.batch_limit == 0
-            || self.batch_limit > crate::wire::MAX_EVENT_BATCH
-            || self.channel_capacity == 0
-            || self.channel_capacity > 4096
-            || self.retry_min_ms == 0
-            || self.retry_max_ms < self.retry_min_ms
-            || self.retry_max_ms > 60_000
-        {
-            return Err(ClientError::InvalidInput {
-                what: "subscriber configuration",
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RuntimeConfig {
-    pub fast_workers: usize,
-    pub bulk_workers: usize,
-    pub fast_blob_max_bytes: u64,
-    pub fast_batch_max_items: usize,
-}
-
-impl RuntimeConfig {
-    pub fn default_v1() -> Self {
-        Self {
-            fast_workers: 4,
-            bulk_workers: 2,
-            fast_blob_max_bytes: 512 * 1024,
-            fast_batch_max_items: 16,
-        }
-    }
-
-    fn validate(&self) -> ClientResult<()> {
-        if self.fast_workers == 0
-            || self.bulk_workers == 0
-            || self.fast_workers + self.bulk_workers > 64
-            || self.fast_batch_max_items == 0
-            || self.fast_batch_max_items > crate::wire::MAX_BLOB_BATCH_ITEMS
-        {
-            return Err(ClientError::InvalidInput {
-                what: "runtime configuration",
-            });
-        }
-        Ok(())
-    }
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self::default_v1()
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
@@ -104,24 +24,18 @@ pub struct SessionConfig {
     pub catalog_runtime: RuntimeConfig,
     pub retry_min_ms: u64,
     pub retry_max_ms: u64,
+    pub cache: CacheBudgets,
 }
 
 impl SessionConfig {
     pub fn new(cache_parent: impl Into<PathBuf>) -> Self {
         Self {
-            location: None,
-            endpoints: None,
-            server_id: None,
-            token: None,
-            cache_parent: cache_parent.into(),
-            catalog_cache_leaf: "cache-catalog".to_string(),
-            media_lanes: vec!["cache-media".to_string()],
-            discovery_port: crate::wire::DEFAULT_DISCOVERY_PORT,
-            discovery_wait_ms: 4_000,
-            subscriber: CatalogSubscriberConfig::default_v1(),
-            catalog_runtime: RuntimeConfig::default_v1(),
-            retry_min_ms: 1_000,
-            retry_max_ms: 10_000,
+            location: None, endpoints: None, server_id: None, token: None,
+            cache_parent: cache_parent.into(), catalog_cache_leaf: "cache-catalog".into(),
+            media_lanes: vec!["cache-media".into()], discovery_port: crate::wire::DEFAULT_DISCOVERY_PORT,
+            discovery_wait_ms: 4_000, subscriber: CatalogSubscriberConfig::default_v1(),
+            catalog_runtime: RuntimeConfig::default_v1(), retry_min_ms: 1_000,
+            retry_max_ms: 10_000, cache: CacheBudgets::default_v1(),
         }
     }
 
@@ -134,6 +48,7 @@ impl SessionConfig {
     fn validate(&self) -> ClientResult<()> {
         self.subscriber.validate()?;
         self.catalog_runtime.validate()?;
+        self.cache.validate()?;
         if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
             return Err(ClientError::InvalidInput { what: "static site bearer token" });
         }
@@ -144,7 +59,38 @@ impl SessionConfig {
         {
             return Err(ClientError::InvalidInput { what: "session timing bounds" });
         }
+        if !matches!(self.location, Some(ClientLocation::StaticSite(_))) {
+            return Err(ClientError::Unavailable {
+                capability: "native_session", mode: crate::location::ClientMode::StaticWeb,
+            });
+        }
         Ok(())
+    }
+}
+
+pub struct SessionHandles {
+    pub catalog: ClientRuntime,
+    pub media: Vec<ClientRuntime>,
+    pub subscriber: CatalogSubscriber,
+    pub server_label: String,
+    pub server_id: [u8; 16],
+    pub location: ClientLocation,
+    pub endpoints: Option<ApiEndpoints>,
+    pub token: Option<String>,
+}
+
+impl SessionHandles {
+    pub fn native_endpoints(&self) -> ClientResult<ApiEndpoints> {
+        Err(ClientError::Unavailable {
+            capability: "native_endpoints", mode: crate::location::ClientMode::StaticWeb,
+        })
+    }
+    pub fn shutdown(self) {
+        self.subscriber.shutdown();
+        self.catalog.shutdown();
+        for lane in self.media {
+            lane.shutdown();
+        }
     }
 }
 
@@ -161,45 +107,50 @@ pub enum SessionMsg {
     Up(Box<SessionHandles>),
 }
 
-pub struct SessionHandles {
-    pub catalog: ClientRuntime,
-    pub media: Vec<ClientRuntime>,
-    pub subscriber: CatalogSubscriber,
-    pub server_label: String,
-    pub server_id: [u8; 16],
-    pub endpoints: ApiEndpoints,
-    pub token: Option<String>,
+pub struct SessionConnector {
+    runtime: Option<ClientRuntime>,
+    messages: VecDeque<SessionMsg>,
+    stopped: bool,
 }
-
-impl SessionHandles {
-    pub fn shutdown(self) {
-        self.subscriber.shutdown();
-        self.catalog.shutdown();
-        for lane in self.media {
-            lane.shutdown();
-        }
-    }
-}
-
-pub struct SessionConnector;
 
 impl SessionConnector {
     pub fn start(config: SessionConfig) -> ClientResult<Self> {
         config.validate()?;
-        let mode = config
-            .location
-            .as_ref()
-            .map(ClientLocation::mode)
-            .unwrap_or(ClientMode::Native);
-        Err(ClientError::Unavailable {
-            capability: CAPABILITY_STATIC_SITE_SESSION,
-            mode,
-        })
+        let ClientLocation::StaticSite(base) = config.location.clone().unwrap() else { unreachable!() };
+        let mut client = ClientConfig::static_site(base.clone());
+        client.cache = config.cache;
+        let store = crate::static_store::StaticStore::platform(base.clone(), client.cache.max_ram_bytes)?;
+        let runtime = ClientRuntime::start_static_store(store, config.catalog_runtime)?;
+        let mut messages = VecDeque::new();
+        messages.push_back(SessionMsg::Status(SessionStatus::Connecting { server: base.to_string() }));
+        Ok(Self { runtime: Some(runtime), messages, stopped: false })
     }
 
     pub fn poll(&mut self) -> Vec<SessionMsg> {
-        Vec::new()
+        let mut out: Vec<_> = self.messages.drain(..).collect();
+        if self.stopped { return out; }
+        if let Some(runtime) = &mut self.runtime {
+            let _ = runtime.poll();
+            if let Some(error) = runtime.connect_error().cloned() {
+                out.push(SessionMsg::Status(SessionStatus::Retrying {
+                    error: error.to_string(),
+                    in_secs: 0,
+                }));
+                self.runtime = None;
+            } else if runtime.is_ready() {
+                let runtime = self.runtime.take().unwrap();
+                let location = runtime.location().unwrap();
+                let server_id = runtime.server_id().unwrap();
+                let label = location.to_string();
+                out.push(SessionMsg::Up(Box::new(SessionHandles {
+                    catalog: runtime, media: Vec::new(), subscriber: CatalogSubscriber::null(),
+                    server_label: label.clone(), server_id, location, endpoints: None, token: None,
+                })));
+                out.push(SessionMsg::Status(SessionStatus::Connected { server: label }));
+            }
+        }
+        out
     }
 
-    pub fn stop(&self) {}
+    pub fn stop(&mut self) { self.stopped = true; self.runtime = None; }
 }

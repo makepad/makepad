@@ -7536,14 +7536,14 @@ impl App {
     /// IMPORT: hand the panel the live session and let it fetch + publish.
     fn start_archive_import(&mut self, cx: &mut Cx) {
         let target = match self.up.as_ref() {
-            Some(up) => match up.token.clone() {
-                Some(token) => Some(PublishTarget {
-                    endpoints: up.endpoints,
+            Some(up) => match (up.token.clone(), up.endpoints) {
+                (Some(token), Some(endpoints)) => Some(PublishTarget {
+                    endpoints,
                     server_id: up.server_id,
                     token,
                     cache: service::session_config_from_env().cache_parent,
                 }),
-                None => None,
+                _ => None,
             },
             None => None,
         };
@@ -12618,6 +12618,7 @@ p2 {}
         let mut declare_failed: Vec<u64> = Vec::new();
         {
             let Some(up) = self.up.as_mut() else { return };
+            let Some(endpoints) = up.endpoints else { return };
             for cmd in cmds {
                 match cmd {
                     // ---- plain generations -------------------------
@@ -12627,7 +12628,7 @@ p2 {}
                     // publishes the result itself; the store only stores.
                     GenCmd::FetchProfiles { domain } => {
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            self.pipelines.connect(endpoints, up.token.clone());
                         }
                         self.pipelines.submit(PipeReq::Profiles {
                             domain: domain.to_string(),
@@ -12635,7 +12636,7 @@ p2 {}
                     }
                     GenCmd::Enqueue { tag, namespace, kind, body } => {
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            self.pipelines.connect(endpoints, up.token.clone());
                         }
                         if !self.pipelines.submit(PipeReq::EnqueueJob {
                             tag,
@@ -12665,7 +12666,7 @@ p2 {}
                     // endpoints and token on its own thread.
                     GenCmd::CreatePipeline { tag, namespace, title, prompt, stages } => {
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            self.pipelines.connect(endpoints, up.token.clone());
                         }
                         // The declaration verbatim — the exact document
                         // going on the wire, so a run can be read back
@@ -13857,16 +13858,19 @@ p2 {}
                     // process's.
                     {
                         let up = self.up.as_ref().unwrap();
-                        let (endpoints, token) = (up.endpoints, up.token.clone());
-                        self.pipelines.connect(endpoints, token);
+                        if let Some(endpoints) = up.endpoints {
+                            self.pipelines.connect(endpoints, up.token.clone());
+                        }
                     }
                     // Seed the bundled vjeffect preset library into the local
                     // store, publish-if-absent (idempotent; a user-edited
                     // revision under a seeded alias is never touched). Runs
                     // detached — the UI never waits on it.
-                    if !self.fx_presets_seeded {
+                    if !self.fx_presets_seeded
+                        && self.up.as_ref().unwrap().endpoints.is_some()
+                    {
                         self.fx_presets_seeded = true;
-                        let endpoints = self.up.as_ref().unwrap().endpoints;
+                        let endpoints = self.up.as_ref().unwrap().endpoints.unwrap();
                         let token = self.up.as_ref().unwrap().token.clone();
                         let cache = service::session_config_from_env()
                             .cache_parent
@@ -13998,7 +14002,9 @@ p2 {}
                 let cache = service::session_config_from_env()
                     .cache_parent
                     .join("cache-chat");
-                self.chat.connect(up.endpoints, up.token.clone(), cache);
+                if let Some(endpoints) = up.endpoints {
+                    self.chat.connect(endpoints, up.token.clone(), cache);
+                }
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
                 // dirty once a turn runs — so the line would sit there
@@ -14351,7 +14357,7 @@ p2 {}
                     self.video_tile_clicked(cx, asset, as_content);
                 }
             }
-            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { content, .. }) => {
                 // The splash text is here: hand the render job to the hidden
                 // offscreen effect host. Small file, read in place.
                 self.fx_source_inflight.remove(&revision);
@@ -14362,7 +14368,11 @@ p2 {}
                         (t.title.clone(), Self::alias_is_transition(t.alias.as_deref()))
                     })
                     .unwrap_or_else(|| (revision.to_string(), false));
-                match std::fs::read_to_string(&path) {
+                match content.read_all().and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|_| makepad_asset_client::ClientError::Protocol {
+                        what: "effect source utf-8",
+                    })
+                }) {
                     Ok(source) => {
                         let widget = self.ui.widget(cx, ids!(fx_thumbs));
                         if let Some(mut thumbs) =
@@ -14473,7 +14483,7 @@ p2 {}
             }
             (
                 CatPurpose::FxSlotSource { slot, revision, title },
-                ClientOutput::Blob { path, .. },
+                ClientOutput::Blob { content, .. },
             ) => {
                 // The splash text is here: load it into the slot's offscreen
                 // host. A newer click on the same slot supersedes this one.
@@ -14481,7 +14491,11 @@ p2 {}
                     return;
                 }
                 self.fx_slot_inflight[slot.index()] = None;
-                match std::fs::read_to_string(&path) {
+                match content.read_all().and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|_| makepad_asset_client::ClientError::Protocol {
+                        what: "effect source utf-8",
+                    })
+                }) {
                     Ok(source) => {
                         self.load_fx_slot(cx, slot, &title, Some(revision), &source, true)
                     }
@@ -14492,7 +14506,7 @@ p2 {}
                     }
                 }
             }
-            (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::Thumb { revision }, ClientOutput::Blob { content, .. }) => {
                 self.thumb_stats.fetch_landed += 1;
                 let (mut sum, mut max) =
                     (self.thumb_stats.fetch_wait_ms, self.thumb_stats.fetch_wait_max);
@@ -14512,6 +14526,10 @@ p2 {}
                 // tiles the operator has already scrolled past is dropped
                 // unstarted rather than holding up the ones under their
                 // thumb (the thumb lane serves newest-first).
+                let Some(path) = content.as_path().map(Path::to_path_buf) else {
+                    log!("thumbnail blob was not persisted to the native cache");
+                    return;
+                };
                 self.decode.submit(DecodeJob::Thumb {
                     revision,
                     path,
@@ -14618,7 +14636,11 @@ p2 {}
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
                             continue;
                         };
-                        let ClientOutput::Blob { path, .. } = output else { continue };
+                        let ClientOutput::Blob { content, .. } = output else { continue };
+                        let Some(path) = content.as_path().map(Path::to_path_buf) else {
+                            log!("media blob was not persisted to the native cache");
+                            continue;
+                        };
                         match purpose {
                             MediaPurpose::Cue { gen } => {
                                 // Only the CURRENT plan entry advances the
@@ -14842,7 +14864,11 @@ p2 {}
             self.sync_import_ui(cx);
             return;
         };
-        let endpoints = up.endpoints;
+        let Some(endpoints) = up.endpoints else {
+            self.import.status = "imports are unavailable from a static asset site".to_string();
+            self.sync_import_ui(cx);
+            return;
+        };
         let server_id = up.server_id;
         let token = up.token.clone();
         let cache = service::session_config_from_env().cache_parent;
@@ -14874,7 +14900,11 @@ p2 {}
             self.set_music_import_status(cx, "no asset server session yet");
             return;
         };
-        let (endpoints, server_id, token) = (up.endpoints, up.server_id, up.token.clone());
+        let Some(endpoints) = up.endpoints else {
+            self.set_music_import_status(cx, "imports are unavailable from a static asset site");
+            return;
+        };
+        let (server_id, token) = (up.server_id, up.token.clone());
         let cache = service::session_config_from_env().cache_parent;
         if let Err(error) =
             self.music_import_run.start(paths, endpoints, server_id, token, cache)

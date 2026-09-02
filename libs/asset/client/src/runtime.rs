@@ -34,7 +34,8 @@
 //! typed refusal — see [`ResourceState`]/[`ResourceSlot`]. A dead worker
 //! surfaces as [`ClientError::RuntimeDown`] at submit, never as silence.
 
-use crate::api::{CatalogQuery, SourceCollectionRegistered};
+use crate::api::{BlobHead, CatalogQuery, SourceCollectionRegistered};
+use crate::cache_store::{BlobContent};
 use crate::client::{AssetClient, AssetsPage, CatalogPage, PageCursor};
 use crate::dto::{
     AliasDto, AssetDetailDto, GameAliasDto, ImportReportDto, ImportStatusDto,
@@ -44,13 +45,13 @@ use crate::error::{ClientError, ClientResult};
 use crate::publish::{PublishBundle, PublishRequest, PublishStage, Published, PublishedBundle};
 use crate::resolver::{ResolvedFile, ResolvedThumbnail, TierPreference};
 use crate::side_channels::{SideChannelFile, SideChannelOutcome};
+use crate::static_store::{StaticFetch, StaticFetchId, StaticFetchOutput, StaticStore, StaticStoreEvent, StaticStoreState};
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DerivedVariantManifest, FileRole, GameAlias, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -65,6 +66,7 @@ pub enum ClientRequest {
     AssetsPage { namespace: Option<String>, cursor: Option<PageCursor>, limit: u64 },
     AssetDetail { id: AssetId },
     ResolveAlias { alias: AssetAlias },
+    AliasStatus { entries: Vec<(AssetAlias, Option<BlobId>)>, tags: Vec<String> },
     ResolveGameAlias { alias: GameAlias },
     FetchAssetManifest { rev: AssetRevisionId },
     FetchGameManifest { rev: GameRevisionId },
@@ -72,6 +74,7 @@ pub enum ClientRequest {
     /// object is pinned only after the fetch succeeds. A failed or cancelled
     /// fetch therefore never leaves an absent-object pin behind.
     FetchBlob { blob: BlobId, expected_len: Option<u64>, pin: bool },
+    HeadBlob { blob: BlobId },
     /// Remove this blob's cache pin. Pins are idempotent markers rather than
     /// reference-counted leases; removing an absent pin also succeeds.
     UnpinBlob { blob: BlobId },
@@ -136,7 +139,9 @@ pub enum ClientOutput {
     GameAlias(GameAliasDto),
     AssetManifest(Box<AssetManifest>),
     GameManifest(Box<GameRevisionManifest>),
-    Blob { blob: BlobId, path: PathBuf },
+    Blob { blob: BlobId, content: BlobContent },
+    BlobHead { blob: BlobId, head: BlobHead },
+    AliasStatus(Vec<crate::dto::AliasStatusDto>),
     BlobUnpinned { blob: BlobId },
     File(ResolvedFile),
     Thumbnail(Option<ResolvedThumbnail>),
@@ -463,6 +468,27 @@ pub struct ClientRuntime {
     joins: Vec<std::thread::JoinHandle<()>>,
     /// Set by `shutdown`/`Drop` so both paths are idempotent.
     stopped: bool,
+    static_runtime: Option<StaticRuntime>,
+}
+
+struct StaticRuntime {
+    store: StaticStore,
+    queue: VecDeque<(RequestId, ClientRequest)>,
+    active: HashMap<StaticFetchId, StaticActive>,
+    events: VecDeque<ClientEvent>,
+}
+
+enum StaticActiveKind {
+    Direct,
+    File { role: FileRole, tier: makepad_asset_data::DeviceTier, lod: u8,
+        media: makepad_asset_data::MediaType, blob: BlobId, byte_len: u64 },
+    Thumbnail { blob: BlobId, media: makepad_asset_data::ThumbnailMedia,
+        width: u32, height: u32, byte_len: u64 },
+}
+
+struct StaticActive {
+    request_id: RequestId,
+    kind: StaticActiveKind,
 }
 
 impl ClientRuntime {
@@ -521,7 +547,63 @@ impl ClientRuntime {
             config,
             joins,
             stopped: false,
+            static_runtime: None,
         })
+    }
+
+    /// Start the credential-free static backend. Connection readiness is
+    /// advanced by [`Self::poll`]; requests submitted before it is ready are
+    /// retained in priority order.
+    pub fn start_static(config: crate::client::ClientConfig) -> ClientResult<ClientRuntime> {
+        config.validate()?;
+        let crate::location::ClientLocation::StaticSite(base) = config.location.clone()
+            .ok_or(ClientError::InvalidInput { what: "static client location" })?
+        else {
+            return Err(ClientError::InvalidInput { what: "static client location" });
+        };
+        let store = StaticStore::platform(base, config.cache.max_ram_bytes)?;
+        Self::start_static_store(store, RuntimeConfig::default_v1())
+    }
+
+    /// Inject a static store (principally useful for deterministic transport
+    /// tests) while retaining the public runtime event protocol.
+    pub fn start_static_store(store: StaticStore, config: RuntimeConfig) -> ClientResult<ClientRuntime> {
+        config.validate()?;
+        let (_evt_tx, evt_rx) = channel();
+        let (_stage_tx, stage_rx) = channel();
+        Ok(ClientRuntime {
+            fast: Arc::new(LaneQueue::new()),
+            bulk: Arc::new(LaneQueue::new()),
+            rx: evt_rx,
+            stage_rx,
+            next_id: 1,
+            cancelled: Arc::new(Mutex::new(HashSet::new())),
+            config,
+            joins: Vec::new(),
+            stopped: false,
+            static_runtime: Some(StaticRuntime {
+                store, queue: VecDeque::new(), active: HashMap::new(), events: VecDeque::new(),
+            }),
+        })
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.static_runtime.as_ref().is_none_or(|runtime| runtime.store.is_ready())
+    }
+
+    pub fn connect_error(&self) -> Option<&ClientError> {
+        self.static_runtime.as_ref().and_then(|runtime| match runtime.store.state() {
+            StaticStoreState::Failed(error) => Some(error),
+            _ => None,
+        })
+    }
+
+    pub fn location(&self) -> Option<crate::location::ClientLocation> {
+        self.static_runtime.as_ref().map(|runtime| runtime.store.location())
+    }
+
+    pub fn server_id(&self) -> Option<[u8; 16]> {
+        self.static_runtime.as_ref().and_then(|runtime| runtime.store.server_id())
     }
 
     /// Queue a request; events for it arrive under the returned id. The lane
@@ -537,6 +619,13 @@ impl ClientRuntime {
         request: ClientRequest,
         options: SubmitOptions,
     ) -> ClientResult<RequestId> {
+        if let Some(runtime) = &mut self.static_runtime {
+            let id = self.next_id;
+            self.next_id += 1;
+            if options.lifo { runtime.queue.push_front((id, request)); }
+            else { runtime.queue.push_back((id, request)); }
+            return Ok(id);
+        }
         let lane = options
             .lane
             .unwrap_or_else(|| classify(&request, self.config.fast_blob_max_bytes));
@@ -575,6 +664,9 @@ impl ClientRuntime {
     /// happened since the last poll — it never hides a dead worker, which
     /// shows up as [`ClientError::RuntimeDown`] on the next submit.
     pub fn poll(&mut self) -> Vec<ClientEvent> {
+        if self.static_runtime.is_some() {
+            return self.poll_static();
+        }
         let mut out = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -583,6 +675,70 @@ impl ClientRuntime {
             }
         }
         out
+    }
+
+    fn poll_static(&mut self) -> Vec<ClientEvent> {
+        let runtime = self.static_runtime.as_mut().expect("checked static runtime");
+        for event in runtime.store.poll() {
+            match event {
+                StaticStoreEvent::Ready => {}
+                StaticStoreEvent::Failed(error) => {
+                    for (id, _) in runtime.queue.drain(..) {
+                        runtime.events.push_back(ClientEvent::Failed { id, error: error.clone() });
+                    }
+                }
+                StaticStoreEvent::FetchDone { id, output } => {
+                    if let Some(active) = runtime.active.remove(&id) {
+                        let result = static_output(output, active.kind);
+                        match result {
+                            Ok(output) => {
+                                if let ClientOutput::Blob { content, .. } = &output {
+                                    let bytes = match content {
+                                        BlobContent::Bytes(bytes) => bytes.len() as u64,
+                                        BlobContent::VerifiedPath(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+                                    };
+                                    runtime.events.push_back(ClientEvent::Progress {
+                                        id: active.request_id, bytes, total: bytes,
+                                    });
+                                }
+                                runtime.events.push_back(ClientEvent::Done { id: active.request_id, output });
+                            }
+                            Err(error) => runtime.events.push_back(ClientEvent::Failed {
+                                id: active.request_id, error,
+                            }),
+                        }
+                        self.cancelled.lock().unwrap().remove(&active.request_id);
+                    }
+                }
+                StaticStoreEvent::FetchFailed { id, error } => {
+                    if let Some(active) = runtime.active.remove(&id) {
+                        runtime.events.push_back(ClientEvent::Failed { id: active.request_id, error });
+                        self.cancelled.lock().unwrap().remove(&active.request_id);
+                    }
+                }
+            }
+        }
+        let cancelled: Vec<_> = {
+            let set = self.cancelled.lock().unwrap();
+            runtime.active.iter().filter_map(|(fetch, active)| set.contains(&active.request_id).then_some(*fetch)).collect()
+        };
+        for fetch in cancelled { runtime.store.cancel_fetch(fetch); }
+        if runtime.store.is_ready() {
+            for _ in 0..32 {
+                let Some((id, request)) = runtime.queue.pop_front() else { break };
+                if self.cancelled.lock().unwrap().remove(&id) {
+                    runtime.events.push_back(ClientEvent::Failed { id, error: ClientError::Cancelled });
+                    continue;
+                }
+                runtime.events.push_back(ClientEvent::Started { id });
+                match start_static_request(&mut runtime.store, request) {
+                    Ok(StaticStarted::Done(output)) => runtime.events.push_back(ClientEvent::Done { id, output }),
+                    Ok(StaticStarted::Fetch(fetch, kind)) => { runtime.active.insert(fetch, StaticActive { request_id: id, kind }); }
+                    Err(error) => runtime.events.push_back(ClientEvent::Failed { id, error }),
+                }
+            }
+        }
+        runtime.events.drain(..).collect()
     }
 
     /// Drain pending operation-stage events (publications only) without
@@ -621,6 +777,105 @@ impl ClientRuntime {
 impl Drop for ClientRuntime {
     fn drop(&mut self) {
         self.stop_and_join();
+    }
+}
+
+enum StaticStarted {
+    Done(ClientOutput),
+    Fetch(StaticFetchId, StaticActiveKind),
+}
+
+fn start_static_request(store: &mut StaticStore, request: ClientRequest) -> ClientResult<StaticStarted> {
+    let unavailable = |capability| Err(ClientError::Unavailable {
+        capability, mode: crate::location::ClientMode::StaticWeb,
+    });
+    Ok(match request {
+        ClientRequest::CatalogSearch { query, cursor } => StaticStarted::Done(
+            ClientOutput::CatalogPage(store.catalog_search(&query, cursor.as_ref())?),
+        ),
+        ClientRequest::AssetsPage { namespace, cursor, limit } => StaticStarted::Done(
+            ClientOutput::AssetsPage(store.assets_page(namespace.as_deref(), cursor.as_ref(), limit)?),
+        ),
+        ClientRequest::AssetDetail { id } => StaticStarted::Done(
+            ClientOutput::AssetDetail(store.asset_detail(&id)?),
+        ),
+        ClientRequest::ResolveAlias { alias } => StaticStarted::Done(
+            ClientOutput::Alias(store.resolve_alias(&alias)?),
+        ),
+        ClientRequest::AliasStatus { entries, tags } => StaticStarted::Done(
+            ClientOutput::AliasStatus(store.alias_status(&entries, &tags)?),
+        ),
+        ClientRequest::ResolveGameAlias { alias } => StaticStarted::Done(
+            ClientOutput::GameAlias(store.resolve_game_alias(&alias)?),
+        ),
+        ClientRequest::FetchAssetManifest { rev } => StaticStarted::Fetch(
+            store.start_fetch(StaticFetch::AssetManifest(rev))?, StaticActiveKind::Direct,
+        ),
+        ClientRequest::FetchGameManifest { rev } => StaticStarted::Fetch(
+            store.start_fetch(StaticFetch::GameManifest(rev))?, StaticActiveKind::Direct,
+        ),
+        ClientRequest::FetchBlob { blob, expected_len, pin } => StaticStarted::Fetch(
+            store.start_fetch(StaticFetch::Blob { blob, expected_len, pin })?, StaticActiveKind::Direct,
+        ),
+        ClientRequest::HeadBlob { blob } => StaticStarted::Done(
+            ClientOutput::BlobHead { blob, head: store.blob_head(&blob)? },
+        ),
+        ClientRequest::UnpinBlob { blob } => {
+            store.unpin_blob(&blob)?;
+            StaticStarted::Done(ClientOutput::BlobUnpinned { blob })
+        }
+        ClientRequest::ResolveFile { manifest, role, tier, max_lod } => {
+            let file = crate::resolver::select_file(&manifest, role, tier, max_lod)?.clone();
+            let fetch = store.start_fetch(StaticFetch::Blob {
+                blob: file.blob, expected_len: Some(file.byte_len), pin: false,
+            })?;
+            StaticStarted::Fetch(fetch, StaticActiveKind::File {
+                role: file.role, tier: file.tier, lod: file.lod, media: file.media,
+                blob: file.blob, byte_len: file.byte_len,
+            })
+        }
+        ClientRequest::ResolveThumbnail { manifest } => match &manifest.thumbnail {
+            None => StaticStarted::Done(ClientOutput::Thumbnail(None)),
+            Some(thumbnail) => {
+                let fetch = store.start_fetch(StaticFetch::Blob {
+                    blob: thumbnail.blob, expected_len: Some(thumbnail.byte_len), pin: false,
+                })?;
+                StaticStarted::Fetch(fetch, StaticActiveKind::Thumbnail {
+                    blob: thumbnail.blob, media: thumbnail.media, width: thumbnail.width,
+                    height: thumbnail.height, byte_len: thumbnail.byte_len,
+                })
+            }
+        },
+        ClientRequest::FetchDerivedVariant { id } => StaticStarted::Fetch(
+            store.start_fetch(StaticFetch::DerivedVariant(id))?, StaticActiveKind::Direct,
+        ),
+        ClientRequest::FetchVariantSet { id } => StaticStarted::Fetch(
+            store.start_fetch(StaticFetch::VariantSet(id))?, StaticActiveKind::Direct,
+        ),
+        ClientRequest::RetireAsset { .. } | ClientRequest::RetireRevision { .. } => return unavailable("retire"),
+        ClientRequest::GcBlobs { .. } | ClientRequest::GcStatus | ClientRequest::GcCancel => return unavailable("blob_gc"),
+        ClientRequest::PublishArtifact { .. } | ClientRequest::PublishBundle { .. } => return unavailable("publication"),
+        ClientRequest::PublishSideChannels { .. } => return unavailable("side_channels"),
+        ClientRequest::RegisterSourceCollection { .. } | ClientRequest::ListSourceCollections
+        | ClientRequest::RunImport { .. } | ClientRequest::FetchImport { .. } => return unavailable("imports"),
+        ClientRequest::FreezeVariantSet { .. } | ClientRequest::ResolveVariantSet { .. } => return unavailable("variant_resolution"),
+    })
+}
+
+fn static_output(output: StaticFetchOutput, kind: StaticActiveKind) -> ClientResult<ClientOutput> {
+    match (output, kind) {
+        (StaticFetchOutput::AssetManifest(manifest), StaticActiveKind::Direct) => Ok(ClientOutput::AssetManifest(manifest)),
+        (StaticFetchOutput::GameManifest(manifest), StaticActiveKind::Direct) => Ok(ClientOutput::GameManifest(manifest)),
+        (StaticFetchOutput::DerivedVariant(manifest), StaticActiveKind::Direct) => Ok(ClientOutput::DerivedVariant(manifest)),
+        (StaticFetchOutput::VariantSet(manifest), StaticActiveKind::Direct) => Ok(ClientOutput::VariantSet(manifest)),
+        (StaticFetchOutput::Blob { blob, content }, StaticActiveKind::Direct) => Ok(ClientOutput::Blob { blob, content }),
+        (StaticFetchOutput::Blob { content, .. }, StaticActiveKind::File { role, tier, lod, media, blob, byte_len }) => {
+            Ok(ClientOutput::File(ResolvedFile { role, tier, lod, media, blob, byte_len, content }))
+        }
+        (StaticFetchOutput::Blob { content, .. }, StaticActiveKind::Thumbnail { blob, media, width, height, byte_len }) => {
+            Ok(ClientOutput::Thumbnail(Some(ResolvedThumbnail { blob, media, width, height, byte_len, content })))
+        }
+        _ => Err(ClientError::Protocol { what: "static fetch output mismatch" }),
     }
 }
 
@@ -729,7 +984,10 @@ fn run_batch(
                         }
                         events.push(ClientEvent::Done {
                             id: *id,
-                            output: ClientOutput::Blob { blob, path: path.clone() },
+                            output: ClientOutput::Blob {
+                                blob,
+                                content: BlobContent::VerifiedPath(path.clone()),
+                            },
                         });
                     }
                     Err(ClientError::Cancelled) => {
@@ -855,6 +1113,9 @@ fn run_one(
         ClientRequest::ResolveAlias { alias } => {
             Ok(ClientOutput::Alias(client.resolve_alias(&alias)?))
         }
+        ClientRequest::AliasStatus { entries, tags } => {
+            Ok(ClientOutput::AliasStatus(client.alias_status(&entries, &tags)?))
+        }
         ClientRequest::ResolveGameAlias { alias } => {
             Ok(ClientOutput::GameAlias(client.resolve_game_alias(&alias)?))
         }
@@ -877,7 +1138,10 @@ fn run_one(
             if pin {
                 client.pin_blob(&blob)?;
             }
-            Ok(ClientOutput::Blob { blob, path })
+            Ok(ClientOutput::Blob { blob, content: BlobContent::VerifiedPath(path) })
+        }
+        ClientRequest::HeadBlob { blob } => {
+            Ok(ClientOutput::BlobHead { blob, head: client.blob_head(&blob)? })
         }
         ClientRequest::UnpinBlob { blob } => {
             client.unpin_blob(&blob)?;

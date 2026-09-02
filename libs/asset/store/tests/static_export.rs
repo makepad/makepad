@@ -6,6 +6,40 @@ use makepad_asset_store::json::Value;
 use makepad_asset_store::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::collections::VecDeque;
+
+struct ExportTransport {
+    root: std::path::PathBuf,
+    next: u64,
+    ready: VecDeque<makepad_asset_client::TransportCompletion>,
+}
+
+impl makepad_asset_client::Transport for ExportTransport {
+    fn start(&mut self, request: makepad_asset_client::OwnedRequest) -> makepad_asset_client::TransportId {
+        let id = makepad_asset_client::TransportId(self.next);
+        self.next += 1;
+        let route = request.url_or_target.split_once("/v1/")
+            .map(|(_, suffix)| format!("v1/{suffix}"))
+            .unwrap();
+        let result = std::fs::read(self.root.join(route))
+            .map(|body| makepad_asset_client::OwnedResponse {
+                status: 200,
+                headers: vec![("content-length".into(), body.len().to_string())],
+                body,
+            })
+            .map_err(|error| makepad_asset_client::TransportError::Network(error.to_string()));
+        self.ready.push_back(makepad_asset_client::TransportCompletion { id, result });
+        id
+    }
+
+    fn cancel(&mut self, id: makepad_asset_client::TransportId) {
+        self.ready.retain(|completion| completion.id != id);
+    }
+
+    fn poll(&mut self, out: &mut Vec<makepad_asset_client::TransportCompletion>) {
+        out.extend(self.ready.drain(..));
+    }
+}
 
 fn annotation(kind: AssetKind, title: &str) -> AssetAnnotation {
     AssetAnnotation {
@@ -208,6 +242,18 @@ fn deterministic_golden_rewrites_graph_and_indexes_every_route() {
     assert_eq!(manifest.get("static_version").unwrap().as_u64(), Some(1));
     assert_eq!(manifest.get("protocol_version").unwrap().as_u64(), Some(1));
     assert_integrity_and_sanitization(&out_a);
+
+    // The producer's own public export is accepted by the thin-client
+    // reader before either side evolves independently.
+    let transport = ExportTransport { root: out_a.clone(), next: 1, ready: VecDeque::new() };
+    let mut reader = makepad_asset_client::StaticStore::start(
+        makepad_asset_client::BaseUrl::parse("https://fixture.invalid").unwrap(),
+        Box::new(transport),
+        Box::new(makepad_asset_client::MemoryCacheStore::new(1024 * 1024)),
+    ).unwrap();
+    let events = reader.poll();
+    assert!(events.iter().any(|event| matches!(event, makepad_asset_client::StaticStoreEvent::Ready)));
+    assert_eq!(reader.assets_page(None, None, 10).unwrap().assets.len(), 2);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -451,5 +497,36 @@ fn reachable_variant_documents_are_rewritten_to_digest_paths() {
     assert_eq!(DerivedVariantId::hash_of(&variant_bytes), new_variant);
     assert!(out.join(format!("v1/blobs/{}", BlobId::hash_of(derived_bytes))).is_file());
     assert_integrity_and_sanitization(&out);
+
+    let transport = ExportTransport { root: out.clone(), next: 1, ready: VecDeque::new() };
+    let mut reader = makepad_asset_client::StaticStore::start(
+        makepad_asset_client::BaseUrl::parse("https://fixture.invalid").unwrap(),
+        Box::new(transport),
+        Box::new(makepad_asset_client::MemoryCacheStore::new(1024 * 1024)),
+    ).unwrap();
+    assert!(reader.poll().iter().any(|event| {
+        matches!(event, makepad_asset_client::StaticStoreEvent::Ready)
+    }));
+    let set_fetch = reader
+        .start_fetch(makepad_asset_client::StaticFetch::VariantSet(new_set))
+        .unwrap();
+    let variant_fetch = reader
+        .start_fetch(makepad_asset_client::StaticFetch::DerivedVariant(new_variant))
+        .unwrap();
+    let events = reader.poll();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        makepad_asset_client::StaticStoreEvent::FetchDone {
+            id,
+            output: makepad_asset_client::StaticFetchOutput::VariantSet(_),
+        } if *id == set_fetch
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        makepad_asset_client::StaticStoreEvent::FetchDone {
+            id,
+            output: makepad_asset_client::StaticFetchOutput::DerivedVariant(_),
+        } if *id == variant_fetch
+    )));
     let _ = std::fs::remove_dir_all(root);
 }

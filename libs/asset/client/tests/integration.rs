@@ -260,12 +260,12 @@ fn alias_to_verified_file_end_to_end() {
             None,
         )
         .unwrap();
-    assert_eq!(std::fs::read(&resolved.path).unwrap(), glb_bytes);
+    assert_eq!(std::fs::read(resolved.content.as_path().unwrap()).unwrap(), glb_bytes);
     assert_eq!(resolved.byte_len, glb_bytes.len() as u64);
 
     // thumbnail is typed and materialized
     let thumb = client.resolve_thumbnail(&manifest).unwrap().expect("mesh thumbnail");
-    assert!(thumb.path.exists());
+    assert!(thumb.content.as_path().unwrap().exists());
 
     // HEAD probe reports the exact size and echoes the identity as a strong
     // ETag (the precondition for trusting a later If-Range resume).
@@ -284,7 +284,7 @@ fn alias_to_verified_file_end_to_end() {
             None,
         )
         .unwrap();
-    assert_eq!(again.path, resolved.path);
+    assert_eq!(again.content, resolved.content);
     assert_eq!(fixture.log.count("GET", "/v1/blobs/"), gets_before, "cache miss on hot path");
 
     // Bytes path agrees with file path.
@@ -407,7 +407,7 @@ fn offline_resolution_from_cache_and_honest_miss() {
             None,
         )
         .unwrap();
-    assert_eq!(again.path, resolved.path);
+    assert_eq!(again.content, resolved.content);
     let cached = client.cached_blob(&manifest.files[0].blob).unwrap();
     assert!(cached.is_some());
 
@@ -769,8 +769,8 @@ fn runtime_reports_blob_progress() {
                     progress.push((bytes, total));
                 }
                 ClientEvent::Done { id: eid, output } if eid == id => match output {
-                    makepad_asset_client::ClientOutput::Blob { path, .. } => {
-                        done_path = Some(path);
+                    makepad_asset_client::ClientOutput::Blob { content, .. } => {
+                        done_path = Some(content.as_path().unwrap().to_path_buf());
                     }
                     other => panic!("wrong output: {other:?}"),
                 },
@@ -823,9 +823,9 @@ fn runtime_blob_pin_is_transactional_and_async_unpin_is_idempotent() {
         })
         .unwrap();
     match wait_runtime(&mut runtime, fetched).expect("verified fetch") {
-        ClientOutput::Blob { blob: got, path } => {
+        ClientOutput::Blob { blob: got, content } => {
             assert_eq!(got, blob);
-            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(std::fs::read(content.as_path().unwrap()).unwrap(), bytes);
         }
         other => panic!("wrong fetch output: {other:?}"),
     }

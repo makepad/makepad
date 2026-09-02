@@ -15,7 +15,7 @@ edition = "2021"
 
 [features]
 default = ["native"]
-native = []
+native = ["dep:makepad-network", "dep:makepad-live-id"]
 web = ["dep:makepad-network", "dep:makepad-live-id"]
 
 [dependencies]

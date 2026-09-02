@@ -1,11 +1,14 @@
-//! Portable request vocabulary shared with UI code.
+//! Portable request vocabulary shared with UI code. HTTP execution lives in
+//! the polled static runtime, not in a blocking API facade.
 
 use crate::dto::StageOnFailDto;
 use crate::dto::{AliasDto, AssetDetailDto, AssetsQueryDto, CatalogPageDto};
 use crate::error::{ClientError, ClientResult};
 use crate::json::{self, Value};
 use crate::{ApiEndpoints, HttpLimits};
-use makepad_asset_data::{AssetAlias, AssetId, AssetKind, AssetRevisionId};
+use makepad_asset_data::{
+    AssetAlias, AssetId, AssetKind, AssetRevisionId, SourceCollectionId,
+};
 
 pub const MAX_SEARCH_LIMIT: u32 = 100;
 pub const MAX_LIST_LIMIT: u64 = 500;
@@ -78,6 +81,54 @@ impl CatalogQuery {
     pub fn text(text: impl Into<String>, page_size: u32) -> Self {
         Self { text: text.into(), page_size, ..Self::default() }
     }
+
+    pub(crate) fn validate(&self) -> ClientResult<()> {
+        if self.page_size == 0 || self.page_size > MAX_SEARCH_LIMIT {
+            return Err(ClientError::InvalidInput { what: "search page_size" });
+        }
+        if self.text.len() > crate::wire::MAX_QUERY_TEXT_BYTES
+            || self.text.chars().any(char::is_control)
+        {
+            return Err(ClientError::InvalidInput { what: "search text" });
+        }
+        for value in [
+            &self.namespace,
+            &self.category,
+            &self.tag,
+            &self.exclude_tag,
+            &self.creator,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty()
+                || value.len() > crate::wire::MAX_FILTER_VALUE_BYTES
+                || value.chars().any(char::is_control)
+            {
+                return Err(ClientError::InvalidInput { what: "search filter value" });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobHead {
+    pub size: u64,
+    pub etag_matches: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcRequest {
+    pub dry_run: bool,
+    pub grace_ms: Option<u64>,
+    pub retain_per_asset: Option<u32>,
+    pub max_steps: Option<u32>,
+}
+
+impl GcRequest {
+    pub fn dry_run() -> Self { Self { dry_run: true, ..Self::default() } }
+    pub fn collect() -> Self { Self::default() }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -219,4 +270,10 @@ fn stage_token_ok(token: &str) -> bool {
                 || byte.is_ascii_digit()
                 || matches!(byte, b'.' | b'-' | b'_')
         })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceCollectionRegistered {
+    pub source_id: String,
+    pub digest: SourceCollectionId,
 }
