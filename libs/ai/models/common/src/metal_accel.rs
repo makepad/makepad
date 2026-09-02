@@ -3,7 +3,6 @@
 //!
 //! Same shape as `libs/tts` Kokoro accel: try the existing ggml Metal kernels,
 //! fall back to the pure-Rust loops which stay the reference. No new shaders.
-//! `MAKEPAD_DIFFUSION_CPU=1` forces the CPU path (oracle / sa3-validate).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -19,18 +18,14 @@ pub fn force_cpu(value: bool) {
 }
 
 fn enabled() -> bool {
-    static ENV_CPU: OnceLock<bool> = OnceLock::new();
-    let env_cpu = *ENV_CPU.get_or_init(|| {
-        std::env::var_os("MAKEPAD_DIFFUSION_CPU").is_some_and(|v| v != "0")
-    });
-    !env_cpu && !FORCE_CPU.load(Ordering::Relaxed)
+    !FORCE_CPU.load(Ordering::Relaxed)
 }
 
 fn worth_it(m: usize, k: usize, n: usize) -> bool {
     enabled() && m.saturating_mul(k).saturating_mul(n) >= MIN_MACS
 }
 
-/// Whether Metal GEMM offload is allowed (honors `MAKEPAD_DIFFUSION_CPU`).
+/// Whether Metal GEMM offload is allowed.
 /// For callers that assemble their own compat-backend calls (vocoder tconv).
 pub fn gemm_enabled() -> bool {
     enabled()

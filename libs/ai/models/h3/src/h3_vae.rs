@@ -487,18 +487,11 @@ fn decoder_vit_forward_batch(
         .collect())
 }
 
-/// H3_VAE_PROFILE=1: print per-phase wall times of the decode.
-fn h3_vae_profile_enabled() -> bool {
-    matches!(std::env::var("H3_VAE_PROFILE"), Ok(value) if value == "1")
-}
-
 fn decoder_vit_forward_group(
     weights: &H3ShardedWeights,
     prepared: &H3VaeDecoderPrepared,
     tiles: &[&Vol], // post_quant_conv already applied; c = 24, same (f, h, w)
 ) -> Result<Vec<Vol>> {
-    let profile = h3_vae_profile_enabled();
-    let group_start = std::time::Instant::now();
     let batch = tiles.len();
     let (nf, th, tw) = (tiles[0].f, tiles[0].h, tiles[0].w);
     debug_assert!(tiles
@@ -522,7 +515,6 @@ fn decoder_vit_forward_group(
             }
         }
     }
-    let rows_built = std::time::Instant::now();
     let tokens_in = gpu_upload(&rows, batch * num_patches, H3_VAE_LATENT_CHANNELS)
         .map_err(DiffusionError::model)?;
     drop(rows);
@@ -741,10 +733,8 @@ fn decoder_vit_forward_group(
         &prepared.proj_out_bias,
     )?;
     drop(hidden);
-    let submitted = std::time::Instant::now();
     let host = gpu_download(&projected).map_err(DiffusionError::model)?;
     drop(projected);
-    let downloaded = std::time::Instant::now();
 
     // Unpatchify per clip (register/cls rows dropped): row (f, y, x) holds
     // (c, pt, py, px) c-major -> (3, nf*4, th*16, tw*16).
@@ -772,15 +762,6 @@ fn decoder_vit_forward_group(
             }
         }
         outputs.push(out);
-    }
-    if profile {
-        eprintln!(
-            "[vae-profile] group b={batch}: rows {:.3}s submit {:.3}s device+dl {:.3}s unpatch {:.3}s",
-            (rows_built - group_start).as_secs_f64(),
-            (submitted - rows_built).as_secs_f64(),
-            (downloaded - submitted).as_secs_f64(),
-            downloaded.elapsed().as_secs_f64(),
-        );
     }
     Ok(outputs)
 }
@@ -1024,8 +1005,6 @@ pub fn h3_vae_decode_ctrl(
         }
     }
 
-    let profile = h3_vae_profile_enabled();
-    let decode_start = std::time::Instant::now();
     let (pad_tokens, num_chunks) = h3_vae_chunk_plan(num_latent_frames);
     let z = if pad_tokens > 0 {
         let mut padded = Vol::zeros(c, num_latent_frames + pad_tokens, lh, lw);
@@ -1066,11 +1045,9 @@ pub fn h3_vae_decode_ctrl(
             all_tiles.extend(split_clip_tiles(&clip_latent, &tiling));
         }
     }
-    let prep_done = std::time::Instant::now();
     let mut tile_outputs =
         decoder_vit_forward_batch(weights, prepared, &all_tiles, ctrl)?.into_iter();
     drop(all_tiles);
-    let vit_done = std::time::Instant::now();
 
     let chunk_num_frames = H3_VAE_TOKENS_CHUNK * H3_VAE_PATCH_T; // 20
     let mut decoded: Vec<Vol> = Vec::new();
@@ -1139,16 +1116,6 @@ pub fn h3_vae_decode_ctrl(
     } else {
         raw
     };
-    if profile {
-        eprintln!(
-            "[vae-profile] decode: prep {:.3}s vit {:.3}s stitch+assemble {:.3}s total {:.3}s",
-            (prep_done - decode_start).as_secs_f64(),
-            (vit_done - prep_done).as_secs_f64(),
-            vit_done.elapsed().as_secs_f64(),
-            decode_start.elapsed().as_secs_f64(),
-        );
-    }
-
     Ok(H3VaeDecodeRun { raw })
 }
 

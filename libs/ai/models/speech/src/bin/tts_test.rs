@@ -2,8 +2,8 @@
 //!
 //!     cargo run --release --manifest-path libs/ai/models/speech/Cargo.toml --bin tts_test -- "Hello there" [voice.mkvoice] [out.wav]
 //!
-//! Weights resolve through `MAKEPAD_TTS_MODEL` / the working directory /
-//! next to the executable (`kokoro-v1_0.mktts`, `bm_daniel.mkvoice`).
+//! Weights resolve through the working directory or next to the executable
+//! (`kokoro-v1_0.mktts`, `bm_daniel.mkvoice`).
 
 use makepad_ai_speech::kokoro::{self, KokoroSpeaker};
 use makepad_ai_speech::SpeechAudio;
@@ -14,7 +14,7 @@ fn main() {
     let out = args.get(2).cloned().unwrap_or_else(|| "tts_test.wav".to_string());
 
     let Some(model) = kokoro::model_path_if_present() else {
-        eprintln!("kokoro weights not found (set MAKEPAD_TTS_MODEL or put {} in the cwd)", kokoro::DEFAULT_MODEL_PATH);
+        eprintln!("kokoro weights not found (put {} in the cwd)", kokoro::DEFAULT_MODEL_PATH);
         std::process::exit(1);
     };
     let voice = match args.get(1) {

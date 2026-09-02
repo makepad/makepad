@@ -51,14 +51,6 @@ name = "flux-t5-smoke"
 path = "src/bin/flux_t5_smoke.rs"
 
 [[bin]]
-name = "flux-text-smoke"
-path = "src/bin/flux_text_smoke.rs"
-
-[[bin]]
-name = "flux-transformer-smoke"
-path = "src/bin/flux_transformer_smoke.rs"
-
-[[bin]]
 name = "flux-generate"
 path = "src/bin/flux_generate.rs"
 

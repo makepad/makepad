@@ -311,7 +311,6 @@ impl AcePipeline {
         let mut last_vt_guided = Vec::new();
         let mut apg = AceApgMomentum::new(ACE_APG_MOMENTUM);
         let mut dit_total_s = 0.0f64;
-        let profile_dit = std::env::var("ACE_PROFILE_DIT").ok().as_deref() == Some("1");
         let do_apg = req.guidance > 1.0 && self.cond.null_condition_emb.is_some();
         let uncond = if do_apg {
             let null = self.cond.null_condition_emb.as_ref().unwrap();
@@ -342,23 +341,14 @@ impl AcePipeline {
             )?;
             let t = sigmas[step];
             let t_dit = Instant::now();
-            let batch_cfg = std::env::var("ACE_BATCH_CFG").ok().as_deref() == Some("1")
-                && self.dit_device.is_some();
             let (vt_cond, vt_uncond_step) = if let Some(uncond) = uncond.as_ref() {
-                if batch_cfg {
-                    let device = self.dit_device.as_ref().unwrap();
-                    self.dit.forward_device_cfg(
-                        device, &xt, &context, frames, &cond, uncond, t, t,
-                    )?
-                } else {
-                    let vt_cond = self.dit_forward_kv(
-                        &xt, &context, frames, &cond, t, cond_kv.as_ref(),
-                    )?;
-                    let vt_uncond = self.dit_forward_kv(
-                        &xt, &context, frames, uncond, t, uncond_kv.as_ref(),
-                    )?;
-                    (vt_cond, vt_uncond)
-                }
+                let vt_cond = self.dit_forward_kv(
+                    &xt, &context, frames, &cond, t, cond_kv.as_ref(),
+                )?;
+                let vt_uncond = self.dit_forward_kv(
+                    &xt, &context, frames, uncond, t, uncond_kv.as_ref(),
+                )?;
+                (vt_cond, vt_uncond)
             } else {
                 (
                     self.dit_forward_kv(&xt, &context, frames, &cond, t, cond_kv.as_ref())?,
@@ -367,10 +357,10 @@ impl AcePipeline {
             };
             let step_s = t_dit.elapsed().as_secs_f64();
             dit_total_s += step_s;
-            let forwards = if uncond.is_some() && !batch_cfg { 2 } else { 1 };
-            if step < 2 || profile_dit {
+            let forwards = if uncond.is_some() { 2 } else { 1 };
+            if step < 2 {
                 eprintln!(
-                    "ace dit step={step} batch_cfg={batch_cfg} forwards={forwards} {step_s:.3}s"
+                    "ace dit step={step} batch_cfg=false forwards={forwards} {step_s:.3}s"
                 );
             }
             let (vt, vt_uncond_step) = if uncond.is_some() {
@@ -401,21 +391,9 @@ impl AcePipeline {
         }
 
         let denoise_s = t_after_cond.elapsed().as_secs_f64();
-        if makepad_ai_common::backend::prof::enabled() {
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("ace prof denoise ")
-            );
-        }
-        let forwards_per_step = if uncond.is_some() && std::env::var("ACE_BATCH_CFG").ok().as_deref() != Some("1")
-        {
-            2
-        } else {
-            1
-        };
+        let forwards_per_step = if uncond.is_some() { 2 } else { 1 };
         eprintln!(
-            "ace dit summary steps={steps} batch_cfg={} forwards_per_step={forwards_per_step} official_shape=50x1_batched dit_total={dit_total_s:.3}s mean={:.3}s",
-            std::env::var("ACE_BATCH_CFG").ok().as_deref() == Some("1") && self.dit_device.is_some(),
+            "ace dit summary steps={steps} batch_cfg=false forwards_per_step={forwards_per_step} official_shape=50x1_batched dit_total={dit_total_s:.3}s mean={:.3}s",
             if steps > 0 { dit_total_s / steps as f64 } else { 0.0 }
         );
         emit_progress(progress, "vae-decode", 0.88)?;

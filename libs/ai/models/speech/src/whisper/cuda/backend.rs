@@ -20,8 +20,7 @@
 //! * **A pessimization** — elementwise ops (`add`/`mul`/`gelu`/`layer_norm`).
 //!   One float in, one float out, a handful of FLOPs: the PCIe round trip
 //!   costs more than the CPU spends computing them. They are implemented here
-//!   (so the on-box harness can A/B them) but are **off unless**
-//!   `MAKEPAD_VOICE_CUDA_ELEMENTWISE=1`.
+//!   (so the on-box harness can exercise them) but are not selected.
 //! * **Deliberately `None`** — every fused whole-block op
 //!   (`try_encoder_stack_f32`, `try_encoder_layer_f32`,
 //!   `try_encoder_attn_block_f32`, `try_encoder_ffn_block_f32`,
@@ -48,44 +47,11 @@
 
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
 
-/// `MAKEPAD_VOICE_CUDA=0|false|no|off` forces this backend off entirely.
-fn env_off(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => false,
-    }
-}
-
-fn env_on(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 /// True when the CUDA kernels were compiled into this build *and* the driver
 /// reports at least one device. Probed once; never panics.
 pub(crate) fn is_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        if env_off("MAKEPAD_VOICE_CUDA") {
-            return false;
-        }
-        imp::device_available()
-    })
+    *AVAILABLE.get_or_init(imp::device_available)
 }
 
 /// Set on the first hard CUDA error. Everything after returns `None` so the
@@ -115,29 +81,17 @@ fn ready() -> bool {
     is_available() && !degraded()
 }
 
-/// Elementwise ops are a net loss through a host round trip; opt in explicitly.
-fn elementwise_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_on("MAKEPAD_VOICE_CUDA_ELEMENTWISE"))
-}
-
 /// Minimum query count for the packed (non-resident) attention path. The
 /// encoder runs it at n_q = n_ctx = 1500 and wins big; the decoder would run it
 /// at n_q = 1 against a 1500-row K/V that has to be re-uploaded every token,
 /// which is far slower than the CPU. Cross-attention gets the resident cache
 /// instead (see `try_flash_attn_f32_cross_kv_cache`).
-fn min_attn_q() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_usize("MAKEPAD_VOICE_CUDA_MIN_ATTN_Q", 64))
-}
+const MIN_ATTN_Q: usize = 64;
 
 /// Degenerate-shape guard for the matmul family: below this many weight
 /// elements the launch + round-trip latency dominates. Every Whisper
 /// projection is far above it (the smallest, `tiny`, is 384x384 = 147456).
-fn min_matmul_weight_elems() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_usize("MAKEPAD_VOICE_CUDA_MIN_MATMUL", 65536))
-}
+const MIN_MATMUL_WEIGHT_ELEMS: usize = 65_536;
 
 // ---------------------------------------------------------------------------
 // Pure host helpers (compiled everywhere so they are unit-testable on macOS).
@@ -334,7 +288,7 @@ pub(crate) fn try_matmul_nt_f32(
     k: usize,
     n: usize,
 ) -> Option<Vec<f32>> {
-    if !ready() || k.saturating_mul(n) < min_matmul_weight_elems() {
+    if !ready() || k.saturating_mul(n) < MIN_MATMUL_WEIGHT_ELEMS {
         return None;
     }
     if a.len() != m.checked_mul(k)? || bt.len() != n.checked_mul(k)? {
@@ -405,7 +359,7 @@ fn matmul_nt_bytes(
     n: usize,
     bias: Option<&[f32]>,
 ) -> Option<Vec<f32>> {
-    if !ready() || k.saturating_mul(n) < min_matmul_weight_elems() {
+    if !ready() || k.saturating_mul(n) < MIN_MATMUL_WEIGHT_ELEMS {
         return None;
     }
     if a.len() != m.checked_mul(k)? {
@@ -438,7 +392,7 @@ pub(crate) fn try_flash_attn_f32_packed(
     d: usize,
     scale: f32,
 ) -> Option<Vec<f32>> {
-    if !ready() || n_q < min_attn_q() {
+    if !ready() || n_q < MIN_ATTN_Q {
         return None;
     }
     let hidden = n_head.checked_mul(d)?;
@@ -516,84 +470,41 @@ pub(crate) fn try_flash_attn_f32_cross_kv_cache(
 }
 
 pub(crate) fn try_add_f32(
-    a: &[f32],
-    a_shape: &[usize],
-    b: &[f32],
-    b_shape: &[usize],
+    _a: &[f32],
+    _a_shape: &[usize],
+    _b: &[f32],
+    _b_shape: &[usize],
 ) -> Option<Vec<f32>> {
-    if !ready() || !elementwise_enabled() {
-        return None;
-    }
-    let _ = (a_shape, b_shape);
-    // Broadcast (`b` shorter than `a`) is the bias case; tiling it on the host
-    // would cost as much as the CPU add itself, so leave it to the CPU.
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-    ok("add_f32", imp::binary(a, b, false))
+    None
 }
 
 pub(crate) fn try_mul_f32(
-    a: &[f32],
-    a_shape: &[usize],
-    b: &[f32],
-    b_shape: &[usize],
+    _a: &[f32],
+    _a_shape: &[usize],
+    _b: &[f32],
+    _b_shape: &[usize],
 ) -> Option<Vec<f32>> {
-    if !ready() || !elementwise_enabled() {
-        return None;
-    }
-    let _ = (a_shape, b_shape);
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-    ok("mul_f32", imp::binary(a, b, true))
+    None
 }
 
-pub(crate) fn try_gelu_f32(a: &[f32], shape: &[usize]) -> Option<Vec<f32>> {
-    if !ready() || !elementwise_enabled() || a.is_empty() {
-        return None;
-    }
-    let _ = shape;
-    ok("gelu_f32", imp::gelu(a))
+pub(crate) fn try_gelu_f32(_a: &[f32], _shape: &[usize]) -> Option<Vec<f32>> {
+    None
 }
 
-pub(crate) fn try_layer_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
-    if !ready() || !elementwise_enabled() {
-        return None;
-    }
-    let cols = *shape.last()?;
-    if cols == 0 || x.is_empty() || x.len() % cols != 0 {
-        return None;
-    }
-    let ones = vec![1.0f32; cols];
-    let zeros = vec![0.0f32; cols];
-    ok(
-        "layer_norm_f32",
-        imp::layer_norm(x, x.len() / cols, cols, &ones, &zeros, eps),
-    )
+pub(crate) fn try_layer_norm_f32(_x: &[f32], _shape: &[usize], _eps: f32) -> Option<Vec<f32>> {
+    None
 }
 
 pub(crate) fn try_layer_norm_mul_add_f32(
-    x: &[f32],
-    x_shape: &[usize],
-    mul: &[f32],
-    mul_shape: &[usize],
-    add: &[f32],
-    add_shape: &[usize],
-    eps: f32,
+    _x: &[f32],
+    _x_shape: &[usize],
+    _mul: &[f32],
+    _mul_shape: &[usize],
+    _add: &[f32],
+    _add_shape: &[usize],
+    _eps: f32,
 ) -> Option<Vec<f32>> {
-    if !ready() || !elementwise_enabled() {
-        return None;
-    }
-    let _ = (mul_shape, add_shape);
-    let cols = *x_shape.last()?;
-    if cols == 0 || x.is_empty() || x.len() % cols != 0 || mul.len() != cols || add.len() != cols {
-        return None;
-    }
-    ok(
-        "layer_norm_mul_add_f32",
-        imp::layer_norm(x, x.len() / cols, cols, mul, add, eps),
-    )
+    None
 }
 
 pub(crate) fn try_im2col_1d_f32(
@@ -769,8 +680,8 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
 mod imp {
     use super::{dequant_to_f32, fingerprint, fingerprint_f32, WeightSrc};
     use makepad_ai_cuda::launch::{
-        gpu_add, gpu_attention_packed_cross_f32, gpu_device_available, gpu_download, gpu_gelu,
-        gpu_layer_norm_mul_add, gpu_linear_f32_resident, gpu_mul, gpu_upload, GpuTensor,
+        gpu_attention_packed_cross_f32, gpu_device_available, gpu_download,
+        gpu_linear_f32_resident, gpu_upload, GpuTensor,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -974,35 +885,6 @@ mod imp {
         CROSS_KV.with(|cache| cache.borrow_mut().clear());
     }
 
-    pub(super) fn binary(a: &[f32], b: &[f32], is_mul: bool) -> Result<Vec<f32>, String> {
-        let ad = gpu_upload(a, 1, a.len())?;
-        let bd = gpu_upload(b, 1, b.len())?;
-        let out = if is_mul {
-            gpu_mul(&ad, &bd)?
-        } else {
-            gpu_add(&ad, &bd)?
-        };
-        gpu_download(&out)
-    }
-
-    pub(super) fn gelu(a: &[f32]) -> Result<Vec<f32>, String> {
-        let ad = gpu_upload(a, 1, a.len())?;
-        let out = gpu_gelu(&ad)?;
-        gpu_download(&out)
-    }
-
-    pub(super) fn layer_norm(
-        x: &[f32],
-        rows: usize,
-        cols: usize,
-        mul: &[f32],
-        add: &[f32],
-        eps: f32,
-    ) -> Result<Vec<f32>, String> {
-        let xd = gpu_upload(x, rows, cols)?;
-        let out = gpu_layer_norm_mul_add(&xd, mul, add, eps)?;
-        gpu_download(&out)
-    }
 }
 
 #[cfg(not(all(
@@ -1056,24 +938,6 @@ mod imp {
 
     pub(super) fn clear_cross_kv_cache() {}
 
-    pub(super) fn binary(_a: &[f32], _b: &[f32], _is_mul: bool) -> Result<Vec<f32>, String> {
-        Err("CUDA kernels are not compiled into this build".to_string())
-    }
-
-    pub(super) fn gelu(_a: &[f32]) -> Result<Vec<f32>, String> {
-        Err("CUDA kernels are not compiled into this build".to_string())
-    }
-
-    pub(super) fn layer_norm(
-        _x: &[f32],
-        _rows: usize,
-        _cols: usize,
-        _mul: &[f32],
-        _add: &[f32],
-        _eps: f32,
-    ) -> Result<Vec<f32>, String> {
-        Err("CUDA kernels are not compiled into this build".to_string())
-    }
 }
 
 #[cfg(test)]

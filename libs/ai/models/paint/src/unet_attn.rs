@@ -1,7 +1,7 @@
 //! Transformer2D (linear projection) + BasicTransformerBlock without 2.5D
 //! extras: LayerNorm, self-attn, cross-attn, GEGLU-erf feed-forward.
 
-use crate::unet_first::{paint_fast, UnetFirst, ATTN_GN_EPS, GN_GROUPS, LN_EPS, NS};
+use crate::unet_first::{UnetFirst, ATTN_GN_EPS, GN_GROUPS, LN_EPS, NS};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross, gpu_attention_packed_flash_bf16,
     gpu_download, gpu_gelu_erf, gpu_group_norm_planar, gpu_layer_norm_mul_add_cached, gpu_mul,
@@ -58,18 +58,17 @@ pub(crate) fn ref_attn_wide_like(
     Ok((match_half(o_alb, q)?, match_half(o_mr, q)?))
 }
 
-/// Official `F.sdpa` is FLASH for hd=64, no mask. Tap canaries stay fp32.
+/// Official `F.sdpa` is FLASH for hd=64, no mask.
 fn attn_use_official_sdpa(q: &GpuTensor, heads: usize) -> bool {
-    paint_fast() && heads > 0 && q.cols() / heads == 64 && q.cols() % heads == 0
+    heads > 0 && q.cols() / heads == 64 && q.cols() % heads == 0
 }
 
 /// Flash only when the score matrix is large enough that materializing it
 /// dominates (256² MA is 6k²). Small 128² packed attn stays on composite /
 /// the paint batched kernel. Homemade flash on tiny S is slower than
-/// official `F.sdpa`. Tap canaries stay fp32 (`TAP_PARITY=1`).
+/// official `F.sdpa`.
 fn attn_use_flash(q: &GpuTensor, k: &GpuTensor, heads: usize) -> bool {
-    paint_fast()
-        && heads > 0
+    heads > 0
         && q.cols() / heads == 64
         && q.cols() % heads == 0
         && q.rows().saturating_mul(k.rows()) >= 2_000_000
@@ -149,11 +148,7 @@ pub(crate) fn attn_packed_batched(
     heads: usize,
     scale: f32,
 ) -> Result<GpuTensor, String> {
-    // MAKEPAD_PBR_ATTN_COMPOSITE=1 forces the f32 composite kernel for the
-    // batched self-attention (bisect knob: the homemade flash path is
-    // suspected of mis-striding batches).
-    let force_composite = std::env::var("MAKEPAD_PBR_ATTN_COMPOSITE").as_deref() == Ok("1");
-    if !force_composite && attn_use_official_sdpa(q, heads) && q.rows() % batch == 0 {
+    if attn_use_official_sdpa(q, heads) && q.rows() % batch == 0 {
         return match_half(gpu_sdpa_flash_f16(q, k, v, batch, heads, scale)?, q);
     }
     let q32 = as_f32(q)?;

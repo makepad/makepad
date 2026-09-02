@@ -142,14 +142,6 @@ fn compare(tag: &str, ours: &[f32], reference: &[f32]) {
     }
     let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
     println!("  {tag}: cos {cos:.7} max_abs {max_abs:.3e} (ref absmax {ref_absmax:.3})");
-    if std::env::var("MOSS_CMP_DEBUG").is_ok() {
-        println!(
-            "    ours[0..4] {:?} ref[0..4] {:?} len {}",
-            &ours[..4.min(ours.len())],
-            &reference[..4.min(reference.len())],
-            ours.len()
-        );
-    }
 }
 
 fn main() {
@@ -165,6 +157,7 @@ fn main() {
     let weights = PathBuf::from(arg("--weights", "local/moss_ref/weights"));
     let fixture = arg("--fixture", "sword_clash");
     let stage = arg("--stage", "all");
+    let only_call0 = args.iter().any(|arg| arg == "--only-call0");
     let fdir = dumps.join(&fixture);
     let load = |name: &str| -> Npy {
         load_npy(&fdir.join(format!("{name}.npy"))).unwrap_or_else(|e| panic!("{e}"))
@@ -268,7 +261,7 @@ fn main() {
             })
             .expect("dit_timesteps");
         for call in [0usize, 1, 196, 197] {
-            if std::env::var("MOSS_ONLY_CALL0").is_ok() && call != 0 { continue; }
+            if only_call0 && call != 0 { continue; }
             let x = load(&format!("dit{call:03}_x")).as_f32().unwrap();
             let out_ref = load(&format!("dit{call:03}_out")).as_f32().unwrap();
             let ctx_for_call = if call % 2 == 0 { &pos } else { &neg };

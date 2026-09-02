@@ -1,7 +1,7 @@
 //! Run Silero VAD over a wav file and print speech segments plus timing.
 //!
 //! Usage: vad-test <audio_16k_mono.wav> [--probs]
-//! The model resolves via MAKEPAD_VAD_MODEL or ./silero_vad.onnx.
+//! The model resolves from ./silero_vad.onnx.
 
 use makepad_ai_speech::vad::{SileroVad, VAD_CHUNK_SAMPLES, VAD_SAMPLE_RATE};
 use std::io::{Read, Seek, SeekFrom};

@@ -593,7 +593,6 @@ fn sample_greedy(
         }
     }
 
-    crate::whisper::record_token(best_id as i32);
     TokenData { id: best_id as i32 }
 }
 

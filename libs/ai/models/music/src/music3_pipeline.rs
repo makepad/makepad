@@ -114,7 +114,6 @@ pub fn music3_generate_with_progress(
         0.03,
     );
 
-    let bench = std::env::var_os("MAKEPAD_MUSIC3_BENCH").is_some();
     // Reference encode runs on the host before the 8B LM is resident, so
     // the text-only VRAM numbers stay valid.
     let reference_mask = match &req.reference {
@@ -126,7 +125,6 @@ pub fn music3_generate_with_progress(
                 )));
             }
             let weights = Music3ReferenceWeights::resolve(&reference.weights_dir)?;
-            let t_ref = std::time::Instant::now();
             let encoded = music3_encode_reference(
                 &weights,
                 &reference.audio,
@@ -136,14 +134,6 @@ pub fn music3_generate_with_progress(
                 },
                 should_cancel,
             )?;
-            if bench {
-                eprintln!(
-                    "BENCH reference_wall={:.3} frames={} interval={}",
-                    t_ref.elapsed().as_secs_f64(),
-                    encoded.frames,
-                    reference.interval
-                );
-            }
             progress(
                 &format!(
                     "reference {} frames interval {}",
@@ -160,7 +150,6 @@ pub fn music3_generate_with_progress(
     };
 
     progress("load lm", 0.04);
-    let t_load = std::time::Instant::now();
     let (lm, rvq, pack_tail) = match open_gguf_pack(model_dir)? {
         Some((lm, rvq, tail)) => (lm, rvq, Some(tail)),
         None => (
@@ -171,11 +160,7 @@ pub fn music3_generate_with_progress(
     };
     let lm_prep = Music3LmPrepared::prepare(&lm)?;
     let rvq_prep = Music3RvqPrepared::prepare(&rvq)?;
-    if bench {
-        eprintln!("BENCH lm_load_wall={:.3}", t_load.elapsed().as_secs_f64());
-    }
     progress("prefill", 0.06);
-    let t_ar = std::time::Instant::now();
     let hiddens = music3_ar_sample_with_progress(
         &lm,
         &lm_prep,
@@ -203,12 +188,6 @@ pub fn music3_generate_with_progress(
         },
     )?;
     let frames = hiddens.len() / (MUSIC3_COND_LAYERS * MUSIC3_COND_HIDDEN);
-    if bench {
-        eprintln!(
-            "BENCH ar_wall={:.3} frames={frames}",
-            t_ar.elapsed().as_secs_f64()
-        );
-    }
     if frames == 0 {
         return Err(DiffusionError::workflow("music3 generate: no AR frames"));
     }
@@ -217,7 +196,6 @@ pub fn music3_generate_with_progress(
     // from wherever AR actually stopped.
     let after_ar = (0.06 + 0.82 * (frames as f64 / max_frames.max(1) as f64)).clamp(0.06, 0.88);
     progress("cond", after_ar);
-    let t_render = std::time::Instant::now();
     let enc = match &pack_tail {
         Some(tail) => load_condition_encoder_from(&tail.condition)?,
         None => Music3ConditionEncoder::load(model_dir)?,
@@ -249,13 +227,6 @@ pub fn music3_generate_with_progress(
         progress,
     )?;
     let _ = (MUSIC3_AR_CFG, MUSIC3_FRAME_RATE, MUSIC3_SAMPLE_RATE);
-    if bench {
-        eprintln!(
-            "BENCH render_wall={:.3} samples={}",
-            t_render.elapsed().as_secs_f64(),
-            audio.len() / 2
-        );
-    }
     progress("done", 1.0);
     Ok(audio)
 }

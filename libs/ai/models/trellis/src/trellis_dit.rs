@@ -83,14 +83,6 @@ pub struct T2CrossKv {
     layers: Vec<Option<(GpuTensor, GpuTensor)>>,
 }
 
-/// T2_KV_CACHE=0 disables the per-stage cross KV cache (A/B knob).
-pub fn t2_kv_cache_enabled() -> bool {
-    match std::env::var("T2_KV_CACHE") {
-        Ok(value) => value != "0",
-        Err(_) => true,
-    }
-}
-
 fn host_f32(weights: &TrellisWeights, name: &str, len: usize) -> Result<Vec<f32>> {
     let values = weights.tensor_f32(name)?;
     if values.len() != len {

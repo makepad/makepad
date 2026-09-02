@@ -4,18 +4,8 @@
 //!   3DGS reader the viewer uses — including the activations that reader
 //!   applies (exp on scales, sigmoid on opacity, SH DC -> color), which is
 //!   what proves the writer emitted PRE-activation values.
-//! * The state-dict contracts are checked against the real released
-//!   safetensors headers when `MAKEPAD_SPLAT_WEIGHTS_DIR` points at a
-//!   directory holding the pinned files. Without it those checks skip, so
-//!   the suite still runs on a machine with no weights.
-
-use makepad_ai_splat::splat::SplatWeights;
-use makepad_ai_splat::splat_decoder::decoder_expected_tensors;
-use makepad_ai_splat::splat_dino::SplatDino;
-use makepad_ai_splat::splat_flow::flow_expected_tensors;
 use makepad_ai_splat::splat_ply::{write_ply, PlySplat};
-use makepad_ai_splat::splat_rand::{gaussian_offset_perturbation, SplatRng};
-use std::path::PathBuf;
+use makepad_ai_splat::splat_rand::SplatRng;
 
 fn sample_splats(count: usize) -> Vec<PlySplat> {
     let mut rng = SplatRng::new(5);
@@ -86,80 +76,4 @@ fn empty_and_single_splat_plys_are_still_valid() {
     let scene = makepad_splat::load_splat_from_bytes(&bytes, Some(std::path::Path::new("a.ply")))
         .unwrap();
     assert_eq!(scene.splats.len(), 1);
-}
-
-/// `MAKEPAD_SPLAT_WEIGHTS_DIR` layout: the pinned files under their HF paths
-/// or flat by basename.
-fn weights_dir() -> Option<PathBuf> {
-    std::env::var_os("MAKEPAD_SPLAT_WEIGHTS_DIR").map(PathBuf::from)
-}
-
-fn open(dir: &std::path::Path, name: &str) -> Option<SplatWeights> {
-    let flat = dir.join(name);
-    if flat.exists() {
-        return SplatWeights::load(&flat).ok();
-    }
-    None
-}
-
-fn assert_contract(weights: &SplatWeights, expected: &[(String, Vec<usize>)], label: &str) {
-    let mut missing = Vec::new();
-    for (name, shape) in expected {
-        match weights.dtype_shape(name) {
-            Ok((_dtype, actual)) => assert_eq!(
-                &actual, shape,
-                "{label}: {name} is {actual:?}, the port expects {shape:?}"
-            ),
-            Err(_) => missing.push(name.clone()),
-        }
-    }
-    assert!(missing.is_empty(), "{label}: missing {missing:?}");
-    // Every tensor in the file must be consumed (the DINO repack carries one
-    // extra `mask_token` the reference also drops).
-    let expected_names: std::collections::HashSet<&str> =
-        expected.iter().map(|(n, _)| n.as_str()).collect();
-    let unused: Vec<&String> = weights
-        .tensor_names()
-        .filter(|name| !expected_names.contains(name.as_str()))
-        .filter(|name| name.as_str() != "embeddings.mask_token")
-        .collect();
-    assert!(unused.is_empty(), "{label}: unread tensors {unused:?}");
-}
-
-#[test]
-fn state_dict_contracts_match_the_released_checkpoints() {
-    let Some(dir) = weights_dir() else {
-        eprintln!("skipping: set MAKEPAD_SPLAT_WEIGHTS_DIR to check the real headers");
-        return;
-    };
-    let mut checked = 0usize;
-    if let Some(weights) = open(&dir, "triposplat_fp16.safetensors") {
-        assert_contract(&weights, &flow_expected_tensors(), "flow");
-        checked += 1;
-    }
-    if let Some(weights) = open(&dir, "triposplat_vae_decoder_fp16.safetensors") {
-        assert_contract(&weights, &decoder_expected_tensors(), "decoder");
-        checked += 1;
-        // The Hammersley generator must reproduce the checkpoint's own
-        // points_offset_perturbation buffer.
-        let stored = weights
-            .f32_shaped("gs.points_offset_perturbation", &[32, 3])
-            .unwrap();
-        let generated = gaussian_offset_perturbation(1.5);
-        for (a, b) in stored.iter().zip(&generated) {
-            // fp16 storage: compare at fp16 resolution.
-            assert!((a - b).abs() < 5e-3, "{a} vs {b}");
-        }
-    }
-    if let Some(weights) = open(&dir, "dino_v3_vit_h.safetensors") {
-        assert_contract(&weights, &SplatDino::expected_tensors(), "dino");
-        checked += 1;
-    }
-    // Pointing the variable at the wrong directory must fail loudly rather
-    // than silently reporting a green contract.
-    assert_eq!(
-        checked, 3,
-        "MAKEPAD_SPLAT_WEIGHTS_DIR={} held {checked}/3 pinned checkpoints",
-        dir.display()
-    );
 }

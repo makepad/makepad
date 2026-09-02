@@ -491,7 +491,7 @@ pub fn h3_dit_forward(
     precision: GemmPrecision,
     debug_blocks: &[usize],
 ) -> Result<H3DitForwardOutput> {
-    let act16 = precision.f16_activations;
+    let f16_activations = precision.f16_activations;
     let seq = layout.sequence_length;
     // `video_rows` carries the fl2va conditioning rows FIRST, then the
     // generated rows (the reference's `video_indices` order); t2va has zero
@@ -647,10 +647,10 @@ pub fn h3_dit_forward(
             H3_HIDDEN_SIZE,     // scale_msa = chunk 1
             0,                  // shift_msa = chunk 0
             H3_NORM_EPS,
-            act16,
+            f16_activations,
         )
         .map_err(DiffusionError::model)?;
-        let (q, k, v) = qkv_cached(weights, &normed, &prefix, act16, precision)?;
+        let (q, k, v) = qkv_cached(weights, &normed, &prefix, f16_activations, precision)?;
         drop(normed);
         let q = gpu_rms_norm_mul(
             &q,
@@ -706,7 +706,7 @@ pub fn h3_dit_forward(
             4 * H3_HIDDEN_SIZE, // scale_mlp = chunk 4
             3 * H3_HIDDEN_SIZE, // shift_mlp = chunk 3
             H3_NORM_EPS,
-            act16,
+            f16_activations,
         )
         .map_err(DiffusionError::model)?;
         let gateval = linear_cached(
@@ -715,7 +715,7 @@ pub fn h3_dit_forward(
             &format!("{prefix}.ff.net.0.proj.weight"),
             2 * H3_FFN_DIM,
             &[],
-            act16,
+            f16_activations,
             precision,
         )?;
         drop(normed);

@@ -1,5 +1,5 @@
 //! ACE-Step 1.5 XL stage validation against the sibling Python oracle dumps
-//! (`C:\ai\ace\dumps\<fixture>` or `$ACE_DUMP_DIR`). Compares cond / latent /
+//! (`C:\ai\ace\dumps\<fixture>` or `--dump <dir>`). Compares cond / latent /
 //! step residual / wav when dumps exist; always checks the locked schedule
 //! and prompt-format contracts.
 //!
@@ -170,9 +170,6 @@ fn report(name: &str, cmp: &Cmp) -> bool {
 }
 
 fn default_dump_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ACE_DUMP_DIR") {
-        return PathBuf::from(dir);
-    }
     let root = PathBuf::from(r"C:\ai\ace\dumps");
     if let Ok(rd) = std::fs::read_dir(&root) {
         if let Some(first) = rd.flatten().find(|e| e.path().is_dir()) {
@@ -183,12 +180,6 @@ fn default_dump_dir() -> PathBuf {
 }
 
 fn default_weights_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ACE_WEIGHTS_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(dir) = std::env::var("MAKEPAD_ACE_DIR") {
-        return PathBuf::from(dir);
-    }
     for cand in [
         r"C:\ai\ace\weights\acestep-v15-xl-base-diffusers",
         r"C:\ai\ace\weights\acestep-v15-xl-turbo-diffusers",
@@ -328,6 +319,7 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(default_weights_dir);
     let stage = arg_value(&args, "--stage").unwrap_or_else(|| "all".into());
+    let write_wav = arg_value(&args, "--write-wav");
 
     println!("ace-validate stage={stage}");
     println!("  dump    {}", dump.display());
@@ -494,10 +486,10 @@ fn main() {
             pipe.device_active(),
             taps.left.len()
         );
-        if let Ok(path) = std::env::var("ACE_WRITE_WAV") {
+        if let Some(path) = write_wav.as_deref() {
             if !path.is_empty() {
                 match write_wav_stereo16(
-                    Path::new(&path),
+                    Path::new(path),
                     &taps.left,
                     &taps.right,
                     ACE_SAMPLE_RATE as u32,

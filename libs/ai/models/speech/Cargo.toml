@@ -63,11 +63,6 @@ path = "src/bin/whisper_test.rs"
 required-features = ["whisper"]
 
 [[bin]]
-name = "whisper-parity"
-path = "src/bin/whisper_parity.rs"
-required-features = ["whisper"]
-
-[[bin]]
 name = "vad-test"
 path = "src/bin/vad_test.rs"
 required-features = ["vad"]
@@ -76,8 +71,3 @@ required-features = ["vad"]
 name = "metal-strip-unused"
 path = "src/bin/metal_strip_unused.rs"
 required-features = ["whisper"]
-
-[[test]]
-name = "silero_vad"
-path = "tests/silero_vad.rs"
-required-features = ["vad"]

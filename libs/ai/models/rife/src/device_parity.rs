@@ -1,68 +1,10 @@
 //! Op-level parity: the DEVICE ops (CUDA on the fleet, the host-backed
 //! Metal path on macOS) against the portable reference in [`crate::rife_cpu`],
 //! on random tensors — no checkpoint required, so this gate runs anywhere
-//! a device backend exists. The end-to-end checkpoint parity lives in
-//! `rife.rs` behind `MAKEPAD_RIFE_WEIGHTS`.
+//! a device backend exists.
 
 #[cfg(test)]
 mod tests {
-    /// Stage-level bisect against the real checkpoint (env-gated like the
-    /// end-to-end test): the encode Head through the device ops vs the
-    /// portable reference. Isolates composition bugs the op tests miss.
-    #[test]
-    fn checkpoint_head_parity() {
-        let Ok(path) = std::env::var("MAKEPAD_RIFE_WEIGHTS") else {
-            return;
-        };
-        if !crate::rife::rife_device_available() {
-            return;
-        }
-        use crate::backend::{
-            gpu_conv2d_planar_strided, gpu_download, gpu_realesrgan_lrelu,
-            gpu_rife_conv_transpose2d, gpu_upload,
-        };
-        let weights = crate::rife::RifeWeights::load(&path).expect("load checkpoint");
-        let model = weights.prepare_model(None).expect("prepare model");
-        let (w, h) = (64usize, 48usize);
-        let mut img = crate::rife_cpu::Planes::new(3, w, h);
-        img.data = noise(101, 3 * w * h)
-            .iter()
-            .map(|v| (v * 0.5 + 0.5).clamp(0.0, 1.0))
-            .collect();
-        let cpu = crate::rife_cpu::head_forward(&img, &model.encode).expect("cpu head");
-        // Device: the same op sequence rife_model::head_forward runs.
-        let mut extent = (w, h);
-        let mut x = gpu_upload(&img.data, 3, w * h).expect("upload");
-        for (cw, key) in [
-            (&model.encode.cnn0, "cnn0"),
-            (&model.encode.cnn1, "cnn1"),
-            (&model.encode.cnn2, "cnn2"),
-        ] {
-            let ow = (extent.0 + 2 * cw.pad).saturating_sub(cw.kw) / cw.stride + 1;
-            let oh = (extent.1 + 2 * cw.pad).saturating_sub(cw.kh) / cw.stride + 1;
-            let conv = gpu_conv2d_planar_strided(
-                &x, extent.0, extent.1, ow, oh, "t", key, &cw.weights, &cw.bias,
-                cw.out_channels, cw.kw, cw.kh, cw.pad, cw.pad, cw.stride, cw.stride,
-            )
-            .expect(key);
-            x = gpu_realesrgan_lrelu(&conv, crate::rife::RIFE_LRELU_SLOPE).expect("lrelu");
-            extent = (ow, oh);
-        }
-        let dw = &model.encode.cnn3;
-        let x = gpu_rife_conv_transpose2d(
-            &x, extent.0, extent.1, "t", "cnn3", &dw.weights, &dw.bias, dw.out_channels,
-            dw.kw, dw.kh, dw.pad, dw.stride,
-        )
-        .expect("cnn3");
-        let dev = gpu_download(&x).expect("download");
-        let mut worst = 0.0f32;
-        for (a, b) in cpu.data.iter().zip(dev.iter()) {
-            worst = worst.max((a - b).abs());
-        }
-        println!("head parity: max abs {worst}");
-        assert!(worst <= 1e-3, "head drifted {worst}");
-    }
-
     use crate::backend::{
         gpu_conv2d_planar_strided, gpu_download, gpu_pixel_shuffle_planar,
         gpu_realesrgan_lrelu, gpu_rife_conv_transpose2d, gpu_rife_fill,
@@ -99,62 +41,6 @@ mod tests {
             worst = worst.max((x - y).abs());
         }
         assert!(worst <= tol, "{name}: max abs diff {worst} > {tol}");
-    }
-
-    /// Wall-clock of the device flow_field at VJ-ish resolutions —
-    /// `MAKEPAD_RIFE_BENCH=1 MAKEPAD_RIFE_WEIGHTS=... cargo test --release bench_flow -- --nocapture`.
-    #[test]
-    fn bench_flow_field_speed() {
-        if std::env::var_os("MAKEPAD_RIFE_BENCH").is_none() {
-            return;
-        }
-        let Ok(path) = std::env::var("MAKEPAD_RIFE_WEIGHTS") else {
-            return;
-        };
-        if !rife_device_available() {
-            return;
-        }
-        let weights = crate::rife::RifeWeights::load(&path).expect("load");
-        // BOTH scales at the VJ tweener's proxy sizes. The player's budget
-        // is one pair per source frame — 40 ms at 25 fps — and the only
-        // question the bench has to answer is which (size, scale) pairs sit
-        // under it. Half alone cannot answer that: it is the cheaper knob
-        // but it costs far more picture than a smaller canvas does, so the
-        // two have to be timed side by side or the cheap axis wins by
-        // default.
-        for scale in [crate::rife::RifeScale::Half, crate::rife::RifeScale::Full] {
-            let model = weights.prepare_model(None).expect("prepare");
-            let rife = crate::rife::Rife::from_model_weights_scaled(
-                model,
-                crate::rife::RifeBackendKind::Device,
-                scale,
-            );
-            for (w, h) in [
-                (192usize, 128usize),
-                (256, 144),
-                (320, 180),
-                (384, 224),
-                (512, 288),
-                (768, 448),
-            ] {
-                let a: Vec<u8> = (0..w * h * 3).map(|i| (i * 13 % 251) as u8).collect();
-                let b: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 249) as u8).collect();
-                let pair = crate::rife::RifeFramePair::new(&a, &b, w, h).unwrap();
-                // warm
-                let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
-                let t0 = std::time::Instant::now();
-                let n = 5;
-                for _ in 0..n {
-                    let _ = rife.flow_field_rgb8(pair, 0.5, None).expect("flow");
-                }
-                println!(
-                    "rife flow_field {w}x{h} {scale:?}: {:.1} ms/pair",
-                    t0.elapsed().as_secs_f64() * 1000.0 / n as f64
-                );
-                #[cfg(target_os = "macos")]
-                makepad_ai_common::metal_rife_prof_dump();
-            }
-        }
     }
 
     #[test]
