@@ -553,24 +553,23 @@ impl Cx {
 }
 
 // ---------------------------------------------------------------------------
-// Startup trace — working-tree instrumentation, gated on MAKEPAD_STARTUP_TRACE.
+// Startup trace — working-tree instrumentation, gated on the `startup` topic.
 //
 // Prints `[startup] <phase> +<ms>` where <ms> is measured from process exec
 // when a launcher exported MAKEPAD_STARTUP_T0 (epoch seconds, f64) just
 // before exec — that is the only way to see the pre-`main` dyld / Gatekeeper
 // window. Without it the clock starts at the first call.
 //
-// Costs nothing when the var is unset: one relaxed atomic load per call.
+// MAKEPAD_STARTUP_T0 remains launcher-supplied and is read only when enabled.
 // ---------------------------------------------------------------------------
 
-static STARTUP_TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static STARTUP_T0: std::sync::OnceLock<std::time::SystemTime> = std::sync::OnceLock::new();
 static STARTUP_ACC: std::sync::Mutex<Vec<(&'static str, f64, u32)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[inline]
 pub fn startup_trace_enabled() -> bool {
-    *STARTUP_TRACE_ON.get_or_init(|| std::env::var_os("MAKEPAD_STARTUP_TRACE").is_some())
+    crate::makepad_error_log::trace_enabled("startup")
 }
 
 fn startup_t0() -> std::time::SystemTime {
@@ -587,6 +586,13 @@ fn startup_t0() -> std::time::SystemTime {
 
 /// Milliseconds since exec (or since the first trace call).
 pub fn startup_since_exec_ms() -> f64 {
+    if !startup_trace_enabled() {
+        return 0.0;
+    }
+    startup_since_exec_ms_enabled()
+}
+
+fn startup_since_exec_ms_enabled() -> f64 {
     std::time::SystemTime::now()
         .duration_since(startup_t0())
         .map(|d| d.as_secs_f64() * 1000.0)
@@ -595,10 +601,12 @@ pub fn startup_since_exec_ms() -> f64 {
 
 /// Mark a startup phase.
 pub fn startup_trace(phase: &str) {
-    if !startup_trace_enabled() {
-        return;
-    }
-    eprintln!("[startup] {:<28} +{:9.2} ms", phase, startup_since_exec_ms());
+    crate::trace!(
+        "startup",
+        "{:<28} +{:9.2} ms",
+        phase,
+        startup_since_exec_ms_enabled()
+    );
 }
 
 /// Accumulate a repeated sub-cost (shader compiles, font loads, …) under a
@@ -623,8 +631,9 @@ pub fn startup_trace_flush(phase: &str) {
     }
     let rows = std::mem::take(&mut *STARTUP_ACC.lock().unwrap());
     for (bucket, ms, n) in rows {
-        eprintln!(
-            "[startup] {:<28}  {:8.2} ms total over {} ({})",
+        crate::trace!(
+            "startup",
+            "{:<28}  {:8.2} ms total over {} ({})",
             bucket, ms, n, phase
         );
     }

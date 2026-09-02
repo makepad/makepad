@@ -1183,8 +1183,9 @@ impl WaylandCx {
                             continue;
                         }
                         window.resize_buffers();
-                        if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
-                            crate::log!(
+                        if crate::makepad_error_log::trace_enabled("wayland") {
+                            crate::trace!(
+                                "wayland",
                                 "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
                                 window.window_id,
                                 window.window_geom.inner_size.x,
