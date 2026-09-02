@@ -16,6 +16,7 @@ mod own_db {
     use crate::error::{ServerError, ServerResult};
     use makepad_sqlite::{Connection, Value};
     use std::cell::RefCell;
+    #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
     use std::path::Path;
     use std::time::Duration;
 
@@ -37,8 +38,30 @@ mod own_db {
     }
 
     impl Db {
+        #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
         pub fn open(path: &Path, busy_timeout_ms: u32) -> ServerResult<Db> {
-            let conn = Connection::open(path, Duration::from_millis(busy_timeout_ms as u64))
+            Self::open_with_timeout(makepad_sqlite::FileStoreSet::new(path), busy_timeout_ms)
+        }
+
+        pub fn open_memory(busy_timeout_ms: u32) -> ServerResult<Db> {
+            Self::open_with_timeout(makepad_sqlite::MemoryStoreSet::new(), busy_timeout_ms)
+        }
+
+        pub fn open_with<S: makepad_sqlite::PageStoreSet + 'static>(
+            stores: S,
+            busy_timeout_ms: u32,
+        ) -> ServerResult<Db> {
+            Self::open_with_timeout(stores, busy_timeout_ms)
+        }
+
+        fn open_with_timeout<S: makepad_sqlite::PageStoreSet + 'static>(
+            stores: S,
+            busy_timeout_ms: u32,
+        ) -> ServerResult<Db> {
+            let conn = Connection::open_with_timeout(
+                stores,
+                Duration::from_millis(busy_timeout_ms as u64),
+            )
                 .map_err(|e| map_err("open", e))?;
             Ok(Db {
                 conn: RefCell::new(conn),

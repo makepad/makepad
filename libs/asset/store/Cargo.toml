@@ -7,6 +7,16 @@ name = "makepad-asset-store"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+autotests = false
+
+[features]
+default = ["native"]
+native = [
+    "dep:makepad-asset-client",
+    "dep:makepad-filesystem-watcher",
+    "dep:jpeg-encoder",
+]
+embedded = []
 
 [lib]
 name = "makepad_asset_store"
@@ -15,19 +25,36 @@ path = "src/lib.rs"
 [[bin]]
 name = "makepad-asset-store"
 path = "src/bin/makepad-asset-store.rs"
+required-features = ["native"]
+
+[[example]]
+name = "gc_probe"
+path = "examples/gc_probe.rs"
+required-features = ["native"]
+
+[[example]]
+name = "store_scan"
+path = "examples/store_scan.rs"
+required-features = ["native"]
+
+[[example]]
+name = "thumb_bench"
+path = "examples/thumb_bench.rs"
+required-features = ["native"]
 
 
 [dependencies]
 makepad-sqlite = { path = "../../sqlite_query" }
 makepad-asset-data = { path = "../data" }
-makepad-asset-chat = { path = "../chat" }
-makepad-asset-client = { path = "../client" }
 # OBSERVED ORIGIN DIRECTORIES (src/observe.rs): the per-platform directory
 # watcher (FSEvents / inotify / ReadDirectoryChangesW) and the placeholder
 # thumbnail encoder every publication needs.
-makepad-filesystem-watcher = { path = "../../filesystem_watcher" }
-jpeg-encoder = { path = "../../jpeg-encoder", version = "0.6.1" }
 brotli = "8.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-asset-client = { path = "../client", optional = true }
+makepad-filesystem-watcher = { path = "../../filesystem_watcher", optional = true }
+jpeg-encoder = { path = "../../jpeg-encoder", version = "0.6.1", optional = true }
 
 [dev-dependencies]
 makepad-asset-client = { path = "../client" }
@@ -39,31 +66,134 @@ makepad-asset-client = { path = "../client" }
 [[test]]
 name = "http_blob_refs_http"
 path = "tests/http/blob_refs_http.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_client_e2e"
 path = "tests/http/client_e2e.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_events_http"
 path = "tests/http/events_http.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_import_client_e2e"
 path = "tests/http/import_client_e2e.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_observe_http"
 path = "tests/http/observe_http.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_rooms_http"
 path = "tests/http/rooms_http.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_security"
 path = "tests/http/security.rs"
+required-features = ["native"]
 
 [[test]]
 name = "http_service_http"
 path = "tests/http/service_http.rs"
+required-features = ["native"]
+
+[[test]]
+name = "auth"
+path = "tests/auth.rs"
+required-features = ["native"]
+
+[[test]]
+name = "blob_batch_http"
+path = "tests/blob_batch_http.rs"
+required-features = ["native"]
+
+[[test]]
+name = "blob_refs"
+path = "tests/blob_refs.rs"
+required-features = ["native"]
+
+[[test]]
+name = "budgets"
+path = "tests/budgets.rs"
+required-features = ["native"]
+
+[[test]]
+name = "cas"
+path = "tests/cas.rs"
+required-features = ["native"]
+
+[[test]]
+name = "catalog"
+path = "tests/catalog.rs"
+required-features = ["native"]
+
+[[test]]
+name = "embedded"
+path = "tests/embedded.rs"
+required-features = ["embedded"]
+
+[[test]]
+name = "imports"
+path = "tests/imports.rs"
+required-features = ["native"]
+
+[[test]]
+name = "migration"
+path = "tests/migration.rs"
+required-features = ["native"]
+
+[[test]]
+name = "publish_batch_http"
+path = "tests/publish_batch_http.rs"
+required-features = ["native"]
+
+[[test]]
+name = "retire_gc"
+path = "tests/retire_gc.rs"
+required-features = ["native"]
+
+[[test]]
+name = "retire_gc_http"
+path = "tests/retire_gc_http.rs"
+required-features = ["native"]
+
+[[test]]
+name = "scale_retire_gc"
+path = "tests/scale_retire_gc.rs"
+required-features = ["native"]
+
+[[test]]
+name = "search"
+path = "tests/search.rs"
+required-features = ["native"]
+
+[[test]]
+name = "search_index"
+path = "tests/search_index.rs"
+required-features = ["native"]
+
+[[test]]
+name = "search_synonyms"
+path = "tests/search_synonyms.rs"
+required-features = ["native"]
+
+[[test]]
+name = "seed"
+path = "tests/seed.rs"
+required-features = ["native"]
+
+[[test]]
+name = "static_export"
+path = "tests/static_export.rs"
+required-features = ["native"]
+
+[[test]]
+name = "variants"
+path = "tests/variants.rs"
+required-features = ["native"]

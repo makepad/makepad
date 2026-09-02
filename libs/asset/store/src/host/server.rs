@@ -99,7 +99,7 @@ impl AssetServer {
             server_id,
             events: events.clone(),
             rooms: std::sync::Arc::new(super::rooms::RoomRegistry::new()),
-            cas: std::sync::Arc::new(crate::cas::Cas::open(
+            cas: std::sync::Arc::new(crate::FsCas::open(
                 &cfg.root.join("cas"),
                 &cfg.budgets,
             )?),

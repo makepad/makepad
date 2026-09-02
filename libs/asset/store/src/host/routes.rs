@@ -54,7 +54,7 @@ pub struct RouteCtx {
     /// thread. Catalog rows for those objects still commit on the state
     /// thread, after the bytes are durable — the admission ordering law is
     /// unchanged.
-    pub cas: std::sync::Arc<crate::cas::Cas>,
+    pub cas: std::sync::Arc<crate::FsCas>,
 }
 
 /// Serve one parsed request head to completion.

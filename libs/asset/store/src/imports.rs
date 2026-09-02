@@ -388,7 +388,11 @@ fn validate_source_cursor(cursor: &str) -> ServerResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "native",
+    not(any(target_arch = "wasm32", feature = "embedded"))
+))]
 mod tests {
     use super::*;
     use crate::{AssetServerCore, Budgets};

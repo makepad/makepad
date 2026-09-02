@@ -1,6 +1,8 @@
 //! The standalone Asset Server binary: parse flags into a `ServerConfig`,
 //! start the runtime, and wait for SIGINT/SIGTERM to shut down cleanly.
 
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+mod native {
 use makepad_asset_store::{
     export_static, kind_parse, AssetServer, AssetServerCore, Budgets, DiscoveryConfig,
     ServerConfig, StaticExportOptions,
@@ -215,7 +217,7 @@ fn run_export() {
     );
 }
 
-fn main() {
+pub fn run() {
     if std::env::args().nth(1).as_deref() == Some("export-static") {
         run_export();
         return;
@@ -233,4 +235,15 @@ fn main() {
         std::thread::sleep(Duration::from_millis(200));
     }
     server.shutdown();
+}
+}
+
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+fn main() {
+    native::run();
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "embedded"))]
+fn main() {
+    eprintln!("makepad-asset-store: standalone host unavailable in embedded mode");
 }
