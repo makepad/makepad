@@ -8,7 +8,7 @@ use crate::makepad_draw::vector::{
     is_compact_face_record, is_compact_roof_record, pack_face_vertices, pack_fill_vertices,
     pack_road_vertices, pack_roof_vertices, pack_vector_vertices,
     FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
-    ROOF_TYPED_VERTEX_BYTES,
+    ROOF_TYPED_VERTEX_BYTES, MAP_VERTEX_POSITION_SCALE,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -145,8 +145,8 @@ pub enum TileLoadState {
         /// Lifted records that need the generic vector layout.
         fill_3d_misc_geometry: Option<Geometry>,
         wall_geometry: Option<Geometry>,
-        /// Building walls as instance records (see `WALL_INSTANCE_FLOATS`).
-        wall_instances: Vec<f32>,
+        /// Building walls as compact typed instance records.
+        wall_instances: Vec<MapWallInstance>,
         tree_geometry: Option<Geometry>,
         tree_cross_geometry: Option<Geometry>,
         /// The tile's street-tree templates (near ring / mid ring) and the
@@ -828,12 +828,6 @@ fn split_band_by(
 /// param4 composite (zoom floor + pin lift), zbias, unorm8x4 colour.
 pub const ICON_INSTANCE_FLOATS: usize = 8;
 
-/// Floats per building-wall instance: edge a xy, edge b xy, base m, top m,
-/// outward normal xy, bottom AO, unorm8x4 colour, zbias. The wall quad is
-/// extruded from this record in the vertex shader (`DrawMapWall`) — the
-/// bake no longer writes four 48-byte vertices per footprint edge.
-pub const WALL_INSTANCE_FLOATS: usize = 11;
-
 /// Floats per contact-shadow disc instance: centre xy, tile-local radius,
 /// and centre strength. A shared unit quad supplies the four mesh vertices.
 pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
@@ -843,6 +837,68 @@ pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
 /// at the mid LOD ring), drawn once per record with the anchor added in the
 /// vertex shader.
 pub const TREE_INSTANCE_FLOATS: usize = 3;
+
+/// One building-wall edge. Positions use the map's 1/64-tile-unit fixed
+/// point convention and heights use unsigned centimetres (the source is
+/// clamped to 220 m). Counter-clockwise (courtyard) edges are reversed when
+/// packed, so the shader can recover the original outward normal as the
+/// right-hand perpendicular of `b - a`. Z bias is stored in
+/// `VECTOR_ZBIAS_STEP` ticks, matching compact roof records.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapWallInstance {
+    pub a: I16x2,
+    pub b: I16x2,
+    pub heights: U16x2,
+    pub ao_zbias: F16x2,
+    pub color: UNorm8x4,
+}
+
+pub const MAP_WALL_INSTANCE_BYTES: usize = std::mem::size_of::<MapWallInstance>();
+
+impl MapWallInstance {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        a: (f32, f32),
+        b: (f32, f32),
+        base_m: f32,
+        height_m: f32,
+        color: [f32; 4],
+        ao_bottom: f32,
+        clockwise: bool,
+        zbias: f32,
+    ) -> Self {
+        let pack_position = |(x, y): (f32, f32)| {
+            let x = x * MAP_VERTEX_POSITION_SCALE;
+            let y = y * MAP_VERTEX_POSITION_SCALE;
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&x));
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&y));
+            I16x2::from_f32(x, y)
+        };
+        let (a, b) = if clockwise { (a, b) } else { (b, a) };
+        Self {
+            a: pack_position(a),
+            b: pack_position(b),
+            heights: U16x2::from_f32(base_m * 100.0, height_m * 100.0),
+            ao_zbias: F16x2::from_f32(
+                ao_bottom,
+                (zbias / VECTOR_ZBIAS_STEP).round(),
+            ),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+        }
+    }
+
+    pub fn unpack_position(position: I16x2) -> Vec2f {
+        vec2(
+            position.x as f32 / MAP_VERTEX_POSITION_SCALE,
+            position.y as f32 / MAP_VERTEX_POSITION_SCALE,
+        )
+    }
+
+    pub fn unpack_heights(&self) -> (f32, f32) {
+        (self.heights.x as f32 * 0.01, self.heights.y as f32 * 0.01)
+    }
+}
 
 /// One marker stalk or stoplight placement. `size.x` scales the template's
 /// tile-local xy offsets (the stalk arm; 1 for a stoplight), while `size.y`
@@ -942,9 +998,9 @@ pub struct TileBuffers {
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
     pub wall_indices: Vec<u32>,
     pub wall_vertices: Vec<f32>,
-    /// Building walls as instanced edge records (`WALL_INSTANCE_FLOATS` each);
-    /// drawn with the wall band's LOD gate.
-    pub wall_instances: Vec<f32>,
+    /// Building walls as compact typed edge records; drawn with the wall
+    /// band's LOD gate.
+    pub wall_instances: Vec<MapWallInstance>,
     /// Full canopy balls (MAT_CANOPY) — near ring only.
     pub tree_indices: Vec<u32>,
     pub tree_vertices: Vec<f32>,
@@ -1023,7 +1079,6 @@ impl TileBuffers {
                 + self.tree_cross_template_indices.len()
                 + self.tree_cross_template_vertices.len()
                 + self.tree_instances.len()
-                + self.wall_instances.len()
                 + self.icon_instance_floats())
                 * 4
             + (self.stalk_template_indices.len()
@@ -1033,6 +1088,7 @@ impl TileBuffers {
                 * 4
             + (self.stalk_instances.len() + self.stoplight_instances.len())
                 * MAP_PROP_INSTANCE_BYTES
+            + self.wall_instances.len() * MAP_WALL_INSTANCE_BYTES
     }
 
     /// Instance floats across both icon bands.
@@ -3718,35 +3774,25 @@ fn append_wall_quad(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-/// One building wall edge as an instance record (`WALL_INSTANCE_FLOATS`):
+/// One building wall edge as a compact typed instance record:
 /// the shader builds the quad, lifts the top by the height and shades the
 /// bottom by the AO term — the same vertices `append_wall_quad` used to
 /// write. Takes the same zbias step so sibling geometry keeps its order.
 #[allow(clippy::too_many_arguments)]
 fn push_wall_instance(
-    out: &mut Vec<f32>,
+    out: &mut Vec<MapWallInstance>,
     a: (f32, f32),
     b: (f32, f32),
     base_m: f32,
     height_m: f32,
     color: [f32; 4],
     ao_bottom: f32,
-    normal: (f32, f32),
+    clockwise: bool,
     zbias: &mut f32,
 ) {
-    out.extend_from_slice(&[
-        a.0,
-        a.1,
-        b.0,
-        b.1,
-        base_m,
-        height_m,
-        normal.0,
-        normal.1,
-        ao_bottom,
-        crate::makepad_draw::vector::pack_unorm8x4(color[0], color[1], color[2], color[3]),
-        *zbias,
-    ]);
+    out.push(MapWallInstance::new(
+        a, b, base_m, height_m, color, ao_bottom, clockwise, *zbias,
+    ));
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
@@ -3950,6 +3996,70 @@ fn map_prop_instance_packing_roundtrips() {
     let color_lane = u32::from_le_bytes(packed.color.0);
     assert_eq!(UNorm8x4(f32::from_bits(color_lane).to_bits().to_le_bytes()), packed.color);
     assert_eq!(packed.zbias, 37.0 * VECTOR_ZBIAS_STEP);
+}
+
+#[cfg(test)]
+#[test]
+fn map_wall_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_a = (123.25, -4.5);
+    let logical_b = (124.5, 2.25);
+    let logical_heights = (12.34, 83.125);
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let logical_ao = 0.77;
+    let zbias = 321.0 * VECTOR_ZBIAS_STEP;
+    let packed = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        logical_heights.0,
+        logical_heights.1,
+        logical_color,
+        logical_ao,
+        true,
+        zbias,
+    );
+
+    assert_eq!(size_of::<MapWallInstance>(), 20);
+    assert_eq!(MAP_WALL_INSTANCE_BYTES, 20);
+    assert_eq!(align_of::<MapWallInstance>(), 2);
+    assert_eq!(offset_of!(MapWallInstance, a), 0);
+    assert_eq!(offset_of!(MapWallInstance, b), 4);
+    assert_eq!(offset_of!(MapWallInstance, heights), 8);
+    assert_eq!(offset_of!(MapWallInstance, ao_zbias), 12);
+    assert_eq!(offset_of!(MapWallInstance, color), 16);
+
+    let a = MapWallInstance::unpack_position(packed.a);
+    let b = MapWallInstance::unpack_position(packed.b);
+    for (actual, expected) in [(a.x, logical_a.0), (a.y, logical_a.1), (b.x, logical_b.0), (b.y, logical_b.1)] {
+        assert!((actual - expected).abs() <= 0.5 / MAP_VERTEX_POSITION_SCALE);
+    }
+    let heights = packed.unpack_heights();
+    assert!((heights.0 - logical_heights.0).abs() <= 0.005);
+    assert!((heights.1 - logical_heights.1).abs() <= 0.005);
+    let (ao, zbias_ticks) = packed.ao_zbias.to_f32();
+    assert!((ao - logical_ao).abs() <= 0.0005);
+    assert!((zbias_ticks * VECTOR_ZBIAS_STEP - zbias).abs() <= VECTOR_ZBIAS_STEP * 0.5);
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+
+    let courtyard = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        0.0,
+        8.0,
+        logical_color,
+        1.0,
+        false,
+        0.0,
+    );
+    assert_eq!(courtyard.a, packed.b);
+    assert_eq!(courtyard.b, packed.a);
 }
 
 #[cfg(test)]
@@ -4783,8 +4893,9 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_vertices = Vec::<f32>::with_capacity(capacity_hints.icon_vertices);
     let mut shadow_disc_instances =
         Vec::<f32>::with_capacity(capacity_hints.shadow_instances);
-    // Building walls as instance records; see WALL_INSTANCE_FLOATS.
-    let mut wall_instances = Vec::<f32>::with_capacity(capacity_hints.wall_instances);
+    // Building walls as compact typed instance records.
+    let mut wall_instances =
+        Vec::<MapWallInstance>::with_capacity(capacity_hints.wall_instances);
     // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
     let mut tree_template_vertices =
         Vec::<f32>::with_capacity(capacity_hints.tree_template_vertices);
@@ -5678,7 +5789,7 @@ fn build_tile_buffers_from_features_profiled(
                         job.height_m,
                         wall_color,
                         wall_ao(job.base_m),
-                        (nx, ny),
+                        clockwise,
                         &mut fill_zbias,
                     );
                 }
@@ -11315,6 +11426,9 @@ mod tag_arena_tests {
     fn amsterdam_union_faces_ride_the_face_layout() {
         let theme = probe_compiled_theme();
         let mut face_records = 0usize;
+        let mut tilted_bytes = 0usize;
+        let mut flat_bytes = 0usize;
+        let mut wall_instances = 0usize;
         for x in 8412..=8416 {
             for y in 5382..=5386 {
                 let key = TileKey { z: 14, x, y };
@@ -11347,9 +11461,22 @@ mod tag_arena_tests {
                 assert_eq!(tilted.face_vertices, flat.face_vertices, "{path}");
                 assert_eq!(tilted.face_indices, flat.face_indices, "{path}");
                 face_records += tilted_faces;
+                tilted_bytes += tilted.byte_size();
+                flat_bytes += flat.byte_size();
+                wall_instances += tilted.wall_instances.len();
             }
         }
         println!("face records across the 25 fixtures: {face_records}");
+        let wall_bytes = wall_instances * MAP_WALL_INSTANCE_BYTES;
+        let legacy_wall_bytes = wall_instances * 11 * std::mem::size_of::<f32>();
+        println!(
+            "25-fixture bytes: tilted {:.1} MiB (legacy {:.1}), flat {:.1} MiB, wall_inst {:.1} MiB (legacy {:.1})",
+            tilted_bytes as f64 / (1024.0 * 1024.0),
+            (tilted_bytes + legacy_wall_bytes - wall_bytes) as f64 / (1024.0 * 1024.0),
+            flat_bytes as f64 / (1024.0 * 1024.0),
+            wall_bytes as f64 / (1024.0 * 1024.0),
+            legacy_wall_bytes as f64 / (1024.0 * 1024.0),
+        );
         assert!(face_records > 0);
     }
 
@@ -11534,7 +11661,7 @@ mod tag_arena_tests {
         same_float_vec!(fill_3d_misc_vertices);
         same_vec!(wall_indices);
         same_float_vec!(wall_vertices);
-        same_float_vec!(wall_instances);
+        same_vec!(wall_instances);
         same_vec!(tree_indices);
         same_float_vec!(tree_vertices);
         same_vec!(tree_cross_indices);
@@ -11566,6 +11693,7 @@ mod tag_arena_tests {
         let mut arena_parse_times = Vec::with_capacity(25);
         let mut legacy_merge_times = Vec::with_capacity(25);
         let mut arena_merge_times = Vec::with_capacity(25);
+        let mut max_wall_height_error = 0.0f32;
 
         for x in 8412..=8416 {
             for y in 5382..=5386 {
@@ -11585,6 +11713,20 @@ mod tag_arena_tests {
                 };
                 let (legacy_collector, legacy_parse_elapsed) = collect(legacy_parse_mvt_tile);
                 let (arena_collector, arena_parse_elapsed) = collect(parse_mvt_tile_erased);
+                for way in &arena_collector.ways {
+                    if way.tags.contains_key("building")
+                        || way.tags.contains_key("building:part")
+                    {
+                        for height in [
+                            building_height_m(&way.tags),
+                            building_min_height_m(&way.tags),
+                        ] {
+                            let unpacked = U16x2::from_f32(height * 100.0, 0.0).x as f32 * 0.01;
+                            max_wall_height_error =
+                                max_wall_height_error.max((unpacked - height).abs());
+                        }
+                    }
+                }
                 legacy_parse_times.push(legacy_parse_elapsed);
                 arena_parse_times.push(arena_parse_elapsed);
                 assert_eq!(
@@ -11675,6 +11817,11 @@ mod tag_arena_tests {
         println!(
             "Amsterdam detail-merge (25 tiles): legacy median={legacy_merge_median:.3}ms p95={legacy_merge_p95:.3}ms; arena median={arena_merge_median:.3}ms p95={arena_merge_p95:.3}ms"
         );
+        println!(
+            "Amsterdam wall height centimetre-U16 max error: {:.6} m",
+            max_wall_height_error
+        );
+        assert!(max_wall_height_error <= 0.005);
     }
 }
 
