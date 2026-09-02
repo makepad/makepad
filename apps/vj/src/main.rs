@@ -17435,11 +17435,53 @@ p2 {}
         if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
             thumbs.set_priority(&visible, open_tab);
         }
+        let mut seen: HashSet<AssetId> = HashSet::new();
+        let mut cache_probes = 0usize;
+        // THE PREFABS FIRST: pads on screen whose tile is a bundled head
+        // without a catalog row — the whole library on the web, where the
+        // static catalog lists no effects; a still-resolving boot natively.
+        // They never reach the catalog loop below, and the bundled feed
+        // asks for each sheet exactly ONCE, so a decode the thumb lane
+        // dropped (its 64-deep queue under a 260-sheet cache burst, or a
+        // scroll's epoch change) stayed a spinner for the session. This
+        // pass is the heal: what is on screen asks for its cached sheet
+        // again, through the same head identity the bank and cache use.
+        let mut visible_head_aliases: Vec<String> =
+            self.video_pad_pending.iter().flatten().cloned().collect();
+        visible_head_aliases.extend(self.video_pad_assets.iter().flatten().filter_map(|asset| {
+            self.fx_heads.iter().find_map(|(alias, (head_asset, _, _, _))| {
+                (head_asset == asset).then(|| alias.clone())
+            })
+        }));
+        for alias in visible_head_aliases {
+            let Some((asset, revision, transition, source)) =
+                self.fx_heads.get(&alias).cloned()
+            else {
+                continue;
+            };
+            if !seen.insert(asset) {
+                continue;
+            }
+            if self.request_fx_head(
+                cx,
+                &alias,
+                asset,
+                revision,
+                transition,
+                source,
+                now,
+                render_disabled,
+            ) {
+                cache_probes += 1;
+                if cache_probes >= 16 {
+                    return;
+                }
+            }
+        }
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
-        let mut seen: HashSet<AssetId> = HashSet::new();
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -17448,22 +17490,48 @@ p2 {}
             if tile.kind != Some(AssetKind::VjEffect) {
                 continue;
             }
-            let Some(revision) = tile.revision else { continue };
-            #[cfg(target_arch = "wasm32")]
-            if tile
-                .alias
-                .as_ref()
-                .is_some_and(|alias| self.fx_heads.contains_key(alias))
-            {
-                // Bundled web documents use the compiled source-digest feed
-                // above. The static catalog's asset revision is a second
-                // identity for the same immutable source; rendering it too
-                // would duplicate every browser-local cache entry.
-                continue;
-            }
+            let tile_alias = tile.alias.clone();
+            let tile_revision = tile.revision;
             // A revision whose picture already declares cells has a REAL
             // animated thumbnail (store-side or ours) — nothing to do.
-            if tile.thumb.as_ref().is_some_and(|t| t.anim.is_some()) {
+            let tile_has_cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some());
+            let tile_media = tile.media.clone();
+            // THE IDENTITY the bank and the cache use. A bundled document is
+            // keyed by its HEAD (the bundled feed above): natively that is
+            // the catalog revision; on the web the static catalog carries a
+            // second revision for the same immutable source, and a sheet
+            // rendered under it would duplicate every browser-local entry.
+            // Resolving through the head — instead of skipping bundled
+            // tiles on the web, as this loop used to — keeps the prefab
+            // heal above and the catalog row on one path.
+            let head = tile_alias
+                .as_deref()
+                .and_then(|alias| self.fx_heads.get(alias).cloned());
+            if let Some((asset, revision, transition, source)) = head {
+                if !seen.insert(asset) {
+                    continue;
+                }
+                let alias = tile_alias.clone().unwrap_or_default();
+                if self.request_fx_head(
+                    cx,
+                    &alias,
+                    asset,
+                    revision,
+                    transition,
+                    source,
+                    now,
+                    render_disabled,
+                ) {
+                    cache_probes += 1;
+                    if cache_probes >= 16 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let Some(revision) = tile_revision else { continue };
+            let transition = Self::alias_is_transition(tile_alias.as_deref());
+            if tile_has_cells {
                 continue;
             }
             if self.thumbs.contains_key(&revision) || self.thumb_anims.contains_key(&revision) {
@@ -17484,7 +17552,6 @@ p2 {}
             if held {
                 continue;
             }
-            let transition = Self::alias_is_transition(tile.alias.as_deref());
             let cache_missed = widget
                 .borrow_mut::<fx_thumbs::VjFxThumbs>()
                 .is_some_and(|mut thumbs| {
@@ -17502,8 +17569,7 @@ p2 {}
             if self.fx_source_inflight.contains(&revision) {
                 continue;
             }
-            let Some(media) = tile.media.clone() else { continue };
-            let alias = tile.alias.clone();
+            let Some(media) = tile_media else { continue };
             if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
                 continue;
             }
@@ -17520,10 +17586,73 @@ p2 {}
                     .insert(id, CatPurpose::FxSource { asset, revision });
                 // LIVECODING: which FILE this revision is, so the render
                 // outcome can be written under the stem an agent edits.
-                livecode::remember(&revision.to_string(), alias.as_deref());
+                livecode::remember(&revision.to_string(), tile_alias.as_deref());
                 self.fx_source_inflight.insert(revision);
             }
         }
+    }
+
+    /// One bundled head's thumbnail request — the unit both passes of
+    /// [`Self::pump_fx_thumbs`] spend. A sheet the persistent cache holds
+    /// is read again (it lands in the decode lane through `take_results`
+    /// like any other); a missing one bakes from the compiled-in source,
+    /// no store round trip. Returns true when a cache probe was spent —
+    /// the caller meters those per tick.
+    #[allow(clippy::too_many_arguments)]
+    fn request_fx_head(
+        &mut self,
+        cx: &mut Cx,
+        alias: &str,
+        asset: AssetId,
+        revision: AssetRevisionId,
+        transition: bool,
+        source: &'static str,
+        now: f64,
+        render_disabled: bool,
+    ) -> bool {
+        if self.thumbs.contains_key(&revision) || self.thumb_anims.contains_key(&revision) {
+            return false;
+        }
+        if self
+            .fx_decode_pending
+            .get(&revision)
+            .is_some_and(|at| now - at < 3.0)
+        {
+            return false;
+        }
+        let widget = self.ui.widget(cx, ids!(fx_thumbs));
+        // Failed this session (terminal per revision), or already
+        // pending / on a lane in the bank.
+        let held = widget
+            .borrow::<fx_thumbs::VjFxThumbs>()
+            .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
+        if held {
+            return false;
+        }
+        let cache_missed = widget
+            .borrow_mut::<fx_thumbs::VjFxThumbs>()
+            .is_some_and(|mut thumbs| thumbs.probe_cache(cx, asset, revision, transition));
+        if !cache_missed {
+            return true;
+        }
+        if render_disabled {
+            return false;
+        }
+        // `enqueue` dedupes against the pending set and the lanes.
+        if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+            let name = alias.strip_prefix("vjfx/").unwrap_or(alias);
+            thumbs.enqueue(
+                cx,
+                fx_thumbs::FxThumbJob {
+                    asset,
+                    revision,
+                    title: crate::effects::seed::preset_title(name, source),
+                    source: source.to_string(),
+                    transition,
+                },
+            );
+        }
+        false
     }
 
     // ---- UI sync ------------------------------------------------------------

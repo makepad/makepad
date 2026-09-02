@@ -368,6 +368,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.webgl_shader_batch_failed_count++;
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
     this.schedule_webgl_shader_summary();
   }
 
@@ -460,6 +461,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.assert_no_gl_error(gl, "compile_shader_end");
+    // The wasm side counts queued compiles; this closes one so
+    // Cx::draw_shaders_pending can tell a bake its draws are no longer dropped.
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
     this.schedule_webgl_shader_summary();
     return true;
   }
@@ -769,6 +773,10 @@ export class WasmWebGL extends WasmWebBrowser {
     } else {
       gl.disable(gl.CULL_FACE);
     }
+    // Texture passes render with an inverted projection Y (web_gl.rs
+    // setup_render_pass), which reverses triangle winding: front faces are
+    // clockwise there and counter-clockwise on the canvas, matching Metal.
+    gl.frontFace(this.texture_pass_front_face_cw ? gl.CW : gl.CCW);
 
     gl.bindVertexArray(vao.gl_vao);
 
@@ -1050,6 +1058,7 @@ export class WasmWebGL extends WasmWebBrowser {
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
     }
+    this.texture_pass_front_face_cw = true;
 
     let gl = this.gl;
     var gl_framebuffer =
@@ -1279,6 +1288,7 @@ export class WasmWebGL extends WasmWebBrowser {
   FromWasmBeginRenderCanvas(args) {
     let gl = this.gl;
     let xr = this.xr;
+    this.texture_pass_front_face_cw = false;
 
     if (xr !== undefined) {
       xr.in_xr_pass = true;

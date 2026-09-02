@@ -153,6 +153,15 @@ pub struct ToWasmPaintDirty {}
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
+/// `count` WebGL programs finished compiling (or failed) since the last
+/// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
+/// so `Cx::draw_shaders_pending` can say whether draws are still being
+/// dropped for a program that has not linked yet.
+#[derive(ToWasm)]
+pub struct ToWasmWebGLShadersDone {
+    pub count: usize,
+}
+
 #[derive(ToWasm)]
 pub struct ToWasmLiveFileChange {
     pub file_name: String,
