@@ -1323,7 +1323,7 @@ pub enum MapViewAction {
 /// Animated camera flight (zoom-out-then-in arc when the target is far).
 #[derive(Clone, Copy)]
 struct FlyTo {
-    started: std::time::Instant,
+    started: f64,
     duration: f64,
     from_center: Vec2d,
     to_center: Vec2d,
@@ -1831,7 +1831,7 @@ pub struct MapView {
     #[rust]
     last_zoom_change_frame: u64,
     #[rust]
-    last_zoom_change_time: Option<std::time::Instant>,
+    last_zoom_change_time: Option<f64>,
     #[rust]
     zoom_settle_timer: Timer,
     #[rust]
@@ -1869,7 +1869,7 @@ pub struct MapView {
     #[rust]
     space_warp_t: f64,
     #[rust]
-    space_warp_last_step: Option<std::time::Instant>,
+    space_warp_last_step: Option<f64>,
     /// The effective warp this frame — stamped in draw_walk, read by every
     /// OverlayCamera construction so CPU projections match the GPU tiles.
     #[rust]
@@ -1877,13 +1877,13 @@ pub struct MapView {
     #[rust]
     tiles_generation: u64,
     #[rust]
-    last_full_place_time: Option<std::time::Instant>,
+    last_full_place_time: Option<f64>,
     /// When the camera (rotation/tilt/zoom/warp tween) last CHANGED — the
     /// full label re-place waits for ~a beat of camera quiet, so labels
     /// ride the exact GPU transforms through the whole gesture and settle
     /// once, where the transforms already put them.
     #[rust]
-    camera_motion_last: Option<std::time::Instant>,
+    camera_motion_last: Option<f64>,
     /// Camera signature of the previous draw, for the motion detector.
     #[rust]
     camera_motion_sig: (f64, f64, f64, f64),
@@ -1918,7 +1918,7 @@ pub struct MapView {
     #[rust]
     perf_label_full_places: u32,
     #[rust]
-    perf_last_frame: Option<std::time::Instant>,
+    perf_last_frame: Option<f64>,
     #[rust]
     perf_ms_gap_max: f64,
     #[rust]
@@ -2279,9 +2279,9 @@ impl Widget for MapView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let perf_start = std::time::Instant::now();
+        let perf_start = cx.seconds_since_app_start();
         if let Some(last_frame) = self.perf_last_frame {
-            let gap_ms = last_frame.elapsed().as_secs_f64() * 1000.0;
+            let gap_ms = (perf_start - last_frame).max(0.0) * 1000.0;
             self.perf_ms_gap_max = self.perf_ms_gap_max.max(gap_ms);
             // only count gaps from continuous animation, not idle pauses
             if gap_ms < 100.0 {
@@ -2350,10 +2350,10 @@ impl Widget for MapView {
             0.0
         };
         if (self.space_warp_t - warp_target).abs() > 1e-4 {
-            let now = std::time::Instant::now();
+            let now = perf_start;
             let dt = self
                 .space_warp_last_step
-                .map(|t| (now - t).as_secs_f64().clamp(0.0, 0.1))
+                .map(|t| (now - t).clamp(0.0, 0.1))
                 .unwrap_or(1.0 / 60.0);
             let step = dt / 0.6; // ~600ms full travel
             self.space_warp_t = if warp_target > self.space_warp_t {
@@ -2572,7 +2572,7 @@ impl Widget for MapView {
                 };
                 let mut fade_alpha = 1.0_f32;
                 if let Some(fade) = &entry.fade {
-                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
+                    fade_alpha = (((perf_start - fade.started).max(0.0) / TILE_FADE_SECONDS)
                         as f32)
                         .clamp(0.0, 1.0);
                     let outgoing = match pass {
@@ -2754,16 +2754,16 @@ impl Widget for MapView {
             }
         }
 
-        let geo_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        let geo_ms = (cx.seconds_since_app_start() - perf_start).max(0.0) * 1000.0;
 
         // Labels place and draw BEFORE the icon pass: charger pins must sit
         // OVER street names (EV navigator), while their own in-bubble kW
         // text redraws after the pins in draw_pin_label_phase.
-        let labels_start = std::time::Instant::now();
+        let labels_start = cx.seconds_since_app_start();
         let full_place =
             self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
-        let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
-        let icons_start = std::time::Instant::now();
+        let labels_ms = (cx.seconds_since_app_start() - labels_start).max(0.0) * 1000.0;
+        let icons_start = cx.seconds_since_app_start();
 
         for pass in 3..5 {
             // Pass 4: street-band icons (zoom floor > 16) — whole band
@@ -2823,7 +2823,7 @@ impl Widget for MapView {
                 };
                 let mut fade_alpha = 1.0_f32;
                 if let Some(fade) = &entry.fade {
-                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
+                    fade_alpha = (((perf_start - fade.started).max(0.0) / TILE_FADE_SECONDS)
                         as f32)
                         .clamp(0.0, 1.0);
                     let outgoing = match pass {
@@ -2973,10 +2973,10 @@ impl Widget for MapView {
             self.overlay = overlay;
         }
 
-        let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = (cx.seconds_since_app_start() - perf_start).max(0.0) * 1000.0;
         // icons_ms spans the icon pass through overlays; tail = whatever
         // the section timers do not cover (uniform churn, overhead).
-        let icons_ms = icons_start.elapsed().as_secs_f64() * 1000.0;
+        let icons_ms = (cx.seconds_since_app_start() - icons_start).max(0.0) * 1000.0;
         self.perf_ms_icons += icons_ms;
         self.perf_ms_tail += (total_ms - geo_ms - labels_ms - icons_ms).max(0.0);
         self.perf_frames += 1;
@@ -3528,7 +3528,7 @@ impl MapView {
             || fade_stroke_geometry.is_some()
         {
             Some(TileFade {
-                started: std::time::Instant::now(),
+                started: cx.seconds_since_app_start(),
                 bucket: old_bucket,
                 grow_heights: new_baked_3d && !old_baked_3d && !three_d_established,
                 reuse_road_core,
@@ -3541,7 +3541,7 @@ impl MapView {
             })
         } else {
             Some(TileFade {
-                started: std::time::Instant::now(),
+                started: cx.seconds_since_app_start(),
                 bucket: buffers.render_zoom,
                 grow_heights: new_baked_3d && !three_d_established,
                 reuse_road_core: false,
@@ -3736,7 +3736,7 @@ impl MapView {
             && self.last_tile_upload_frame != self.frame_counter
         {
             self.last_tile_upload_frame = self.frame_counter;
-            let upload_start = std::time::Instant::now();
+            let upload_start = cx.seconds_since_app_start();
             // Budget by BYTES, not just count: two 3D/overzoom tiles can
             // carry 60+ MB of buffers each and stall the frame for hundreds
             // of ms; always ship at least one so progress never stops.
@@ -3761,7 +3761,7 @@ impl MapView {
             for (tile_key, buffers) in batch {
                 self.insert_ready_tile(cx, tile_key, buffers);
             }
-            let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
+            let upload_ms = (cx.seconds_since_app_start() - upload_start).max(0.0) * 1000.0;
             if self.is_local_archive() && upload_ms > 4.0 {
                 use std::io::Write;
                 if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -4180,7 +4180,7 @@ impl MapView {
         // tile-batch by tile-batch under the gesture.
         let zoom_settling = self
             .last_zoom_change_time
-            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS);
+            .is_some_and(|at| cx.seconds_since_app_start() - at < ZOOM_SETTLE_SECONDS);
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
             if self.local_requested_tiles.contains_key(key)
@@ -4452,7 +4452,7 @@ impl MapView {
         );
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
         self.pending_viewport_changed = true;
         // The paint beat idles when input stops; without a timer wake the
         // settle window would never elapse and stale-bucket restyles only
@@ -4471,6 +4471,7 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+        let now_seconds = cx.seconds_since_app_start();
         // This is the sole owner of the 2D/3D tile transition. `set_tilt`
         // only updates the camera and redraws, avoiding duplicate restyles.
         let mode_3d = self.buildings_3d && self.tilt > 0.0;
@@ -4489,7 +4490,7 @@ impl MapView {
             if entry
                 .fade
                 .as_ref()
-                .is_some_and(|fade| fade.started.elapsed().as_secs_f64() > TILE_FADE_SECONDS)
+                .is_some_and(|fade| now_seconds - fade.started > TILE_FADE_SECONDS)
             {
                 entry.fade = None;
             }
@@ -4500,7 +4501,7 @@ impl MapView {
         // bucket restyle actually fires once the gesture settles.
         if self
             .last_zoom_change_time
-            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS + 0.05)
+            .is_some_and(|at| now_seconds - at < ZOOM_SETTLE_SECONDS + 0.05)
         {
             self.redraw(cx);
         }
@@ -4923,6 +4924,7 @@ impl MapView {
         map_offset: Vec2d,
         rect: Rect,
     ) -> bool {
+        let now = cx.seconds_since_app_start();
         // Pan-only frames: redraw the cached placement shifted by the pan
         // delta instead of re-scanning/re-shaping/re-colliding every label.
         let pan_delta = map_offset - self.label_cache_offset;
@@ -4963,11 +4965,11 @@ impl MapView {
         );
         if camera_sig != self.camera_motion_sig {
             self.camera_motion_sig = camera_sig;
-            self.camera_motion_last = Some(std::time::Instant::now());
+            self.camera_motion_last = Some(now);
         }
         let camera_moving = self
             .camera_motion_last
-            .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_SETTLE_SECONDS);
+            .is_some_and(|at| now - at < LABEL_SETTLE_SECONDS);
         let cache_soft = self.label_cache_valid
             && ((rot_delta == 0.0 && !tilt_delta)
                 || self.label_cache_zoom == view_zoom)
@@ -4975,7 +4977,7 @@ impl MapView {
             && (camera_moving
                 || self
                     .last_full_place_time
-                    .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_REPLACE_MIN_SECONDS));
+                    .is_some_and(|at| now - at < LABEL_REPLACE_MIN_SECONDS));
         if cache_strict || cache_soft {
             if camera_moving {
                 // Guarantee the settle re-place: the last gesture frame
@@ -5042,7 +5044,7 @@ impl MapView {
             );
             return false;
         }
-        self.last_full_place_time = Some(std::time::Instant::now());
+        self.last_full_place_time = Some(now);
 
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
@@ -5081,11 +5083,11 @@ impl MapView {
             && (self.label_cache_zoom - view_zoom).abs() < 1e-9
             && self
                 .last_zoom_change_time
-                .is_none_or(|at| at.elapsed().as_secs_f64() > 0.25);
+                .is_none_or(|at| now - at > 0.25);
         let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
-        let place_start = std::time::Instant::now();
+        let place_start = now;
         for candidate_index in 0..self.scratch_candidates.len() {
-            if place_start.elapsed().as_secs_f64() * 1000.0 > place_budget_ms {
+            if (cx.seconds_since_app_start() - place_start).max(0.0) * 1000.0 > place_budget_ms {
                 label_perf.rejected_budget +=
                     label_perf.candidates_kept.saturating_sub(candidate_index);
                 break;
@@ -6909,7 +6911,7 @@ impl MapView {
         self.fly = None;
         self.zoom = zoom.clamp(min_zoom, max_zoom);
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
         cx.stop_timer(self.zoom_settle_timer);
         self.zoom_settle_timer = cx.start_timeout(0.15);
         self.emit_viewport_changed(cx);
@@ -6934,7 +6936,7 @@ impl MapView {
         };
         let duration = (0.55 + 0.22 * arc + (dist_px / 6000.0).min(0.6)).min(2.4);
         self.fly = Some(FlyTo {
-            started: std::time::Instant::now(),
+            started: cx.seconds_since_app_start(),
             duration,
             from_center: self.center_norm,
             to_center,
@@ -6953,7 +6955,8 @@ impl MapView {
         };
         let min_zoom = self.min_zoom.max(0.0);
         let max_zoom = self.max_zoom.max(min_zoom);
-        let t = (fly.started.elapsed().as_secs_f64() / fly.duration).clamp(0.0, 1.0);
+        let now = cx.seconds_since_app_start();
+        let t = ((now - fly.started).max(0.0) / fly.duration).clamp(0.0, 1.0);
         let e = t * t * (3.0 - 2.0 * t);
         self.center_norm = fly.from_center + (fly.to_center - fly.from_center) * e;
         let zoom = fly.from_zoom + (fly.to_zoom - fly.from_zoom) * e
@@ -6961,7 +6964,7 @@ impl MapView {
         self.zoom = zoom.clamp(min_zoom, max_zoom);
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(now);
         if t >= 1.0 {
             self.fly = None;
             self.center_norm = fly.to_center;

@@ -14,7 +14,6 @@ script_mod! {
     }
 
     let ResultButton = Button{
-        visible: false
         width: Fill
         draw_text +: {text_style: theme.font_regular{font_size: 10}}
     }
@@ -25,7 +24,7 @@ script_mod! {
         flow: Down
         padding: Inset{left: 16, right: 16, top: 18, bottom: 18}
         spacing: 8
-        draw_bg: {color: #xf7f9fc}
+        draw_bg +: {color: #xf7f9fc}
 
         Label{
             text: "Plan a trip"
@@ -50,16 +49,21 @@ script_mod! {
             height: Fill
             flow: Down
             spacing: 5
-            result_0 := ResultButton{}
-            result_1 := ResultButton{}
-            result_2 := ResultButton{}
-            result_3 := ResultButton{}
-            result_4 := ResultButton{}
-            result_5 := ResultButton{}
-            result_6 := ResultButton{}
-            result_7 := ResultButton{}
+            result_0_wrap := View{visible: false, width: Fill, height: Fit, result_0 := ResultButton{}}
+            result_1_wrap := View{visible: false, width: Fill, height: Fit, result_1 := ResultButton{}}
+            result_2_wrap := View{visible: false, width: Fill, height: Fit, result_2 := ResultButton{}}
+            result_3_wrap := View{visible: false, width: Fill, height: Fit, result_3 := ResultButton{}}
+            result_4_wrap := View{visible: false, width: Fill, height: Fit, result_4 := ResultButton{}}
+            result_5_wrap := View{visible: false, width: Fill, height: Fit, result_5 := ResultButton{}}
+            result_6_wrap := View{visible: false, width: Fill, height: Fit, result_6 := ResultButton{}}
+            result_7_wrap := View{visible: false, width: Fill, height: Fit, result_7 := ResultButton{}}
         }
-        route_here := Button{visible: false, width: Fill, text: "Route here"}
+        route_here_wrap := View{
+            visible: false
+            width: Fill
+            height: Fit
+            route_here := Button{width: Fill, text: "Route here"}
+        }
         PanelLabel{text: "Along this route"}
         View{
             width: Fill
@@ -70,7 +74,11 @@ script_mod! {
             along_museums := Button{text: "Museums"}
         }
         along_status := PanelLabel{text: "Plan a route to search along it."}
-        weather_now := PanelLabel{text: "Weather now: not requested"}
+        weather_wrap := View{
+            width: Fill
+            height: Fit
+            weather_now := PanelLabel{text: "Weather now: not requested"}
+        }
         Hr{height: 10}
         rain_toggle := CheckBox{text: "Rain radar"}
         wind_toggle := CheckBox{text: "Wind"}
@@ -109,17 +117,18 @@ impl PanelController {
         self.selected = None;
         for index in 0..8 {
             let button = result_button(ui, cx, index);
+            let wrapper = result_wrapper(ui, cx, index);
             if let Some(result) = self.results.get(index) {
-                button.set_visible(cx, true);
+                wrapper.set_visible(cx, true);
                 button.set_text(
                     cx,
                     &format!("{}  ·  {}", result.name, result.category.label()),
                 );
             } else {
-                button.set_visible(cx, false);
+                wrapper.set_visible(cx, false);
             }
         }
-        ui.button(cx, ids!(route_here)).set_visible(cx, false);
+        ui.view(cx, ids!(route_here_wrap)).set_visible(cx, false);
         ui.label(cx, ids!(search_status)).set_text(
             cx,
             if self.results.is_empty() {
@@ -139,7 +148,12 @@ impl PanelController {
     }
 
     pub fn set_weather(&self, cx: &mut Cx, ui: &WidgetRef, text: &str) {
+        ui.view(cx, ids!(weather_wrap)).set_visible(cx, true);
         ui.label(cx, ids!(weather_now)).set_text(cx, text);
+    }
+
+    pub fn hide_weather(&self, cx: &mut Cx, ui: &WidgetRef) {
+        ui.view(cx, ids!(weather_wrap)).set_visible(cx, false);
     }
 
     pub fn actions(&mut self, cx: &mut Cx, ui: &WidgetRef, actions: &Actions) -> Vec<PanelAction> {
@@ -158,7 +172,7 @@ impl PanelController {
         for index in 0..self.results.len().min(8) {
             if result_button(ui, cx, index).clicked(actions) {
                 self.selected = Some(index);
-                ui.button(cx, ids!(route_here)).set_visible(cx, true);
+                ui.view(cx, ids!(route_here_wrap)).set_visible(cx, true);
                 self.set_search_status(cx, ui, &format!("Selected {}", self.results[index].name));
                 out.push(PanelAction::SelectResult(index));
             }
@@ -194,5 +208,18 @@ fn result_button(ui: &WidgetRef, cx: &mut Cx, index: usize) -> ButtonRef {
         5 => ui.button(cx, ids!(result_5)),
         6 => ui.button(cx, ids!(result_6)),
         _ => ui.button(cx, ids!(result_7)),
+    }
+}
+
+fn result_wrapper(ui: &WidgetRef, cx: &mut Cx, index: usize) -> ViewRef {
+    match index {
+        0 => ui.view(cx, ids!(result_0_wrap)),
+        1 => ui.view(cx, ids!(result_1_wrap)),
+        2 => ui.view(cx, ids!(result_2_wrap)),
+        3 => ui.view(cx, ids!(result_3_wrap)),
+        4 => ui.view(cx, ids!(result_4_wrap)),
+        5 => ui.view(cx, ids!(result_5_wrap)),
+        6 => ui.view(cx, ids!(result_6_wrap)),
+        _ => ui.view(cx, ids!(result_7_wrap)),
     }
 }
