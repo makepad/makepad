@@ -17,9 +17,53 @@ use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
 use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(test)]
+struct MapCountingAllocator;
+
+#[cfg(test)]
+static MAP_COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static MAP_ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: every operation is forwarded unchanged to `System` with the exact
+// pointer and `Layout` supplied by the allocator contract; the wrapper only
+// increments an atomic counter before allocation/reallocation calls.
+#[cfg(test)]
+unsafe impl GlobalAlloc for MapCountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if MAP_COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            MAP_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        System.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if MAP_COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            MAP_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static MAP_TEST_ALLOCATOR: MapCountingAllocator = MapCountingAllocator;
 
 pub const OVERPASS_ENDPOINTS: &[&str] = &["https://overpass.kumi.systems/api/interpreter"];
 pub const MAX_PENDING_REQUESTS: usize = 2;
@@ -42,8 +86,6 @@ pub const BUILDING_OUTLINE_MIN_ZOOM: u32 = 15;
 pub const BUILDING_OUTLINE_WIDTH_PX: f32 = 0.9;
 pub const EARCUT_MAX_RINGS: usize = 500;
 
-const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
-const MVT_INTERNAL_RING_INDEX_KEY: &str = "__mp_ring";
 /// Stable tilt-mode road depth bands. Unlike the old per-tile face ladder,
 /// these values depend only on road semantics, so padded copies and adjacent
 /// tiles render a shared surface at exactly the same depth.
@@ -67,8 +109,6 @@ const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
 /// camera rotation puts that decal behind the building on screen.
 const BUILDING_SURFACE_DEPTH: f32 = 0.50;
 const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.0001;
-const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
-const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
 
 // --- Tile state types ---
 
@@ -216,6 +256,415 @@ pub struct LoadedLocalTile {
 }
 
 // --- Internal data types ---
+
+#[derive(Debug)]
+struct TagArena {
+    strings: String,
+    keys: Vec<(u32, u32)>,
+    values: Vec<(u32, u32)>,
+    pairs: Vec<(u16, u32)>,
+}
+
+#[derive(Default)]
+struct TagArenaBuffers {
+    strings: String,
+    keys: Vec<(u32, u32)>,
+    values: Vec<(u32, u32)>,
+    pairs: Vec<(u16, u32)>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct OutputCapacityHints {
+    labels: usize,
+    pin_hits: usize,
+    icon_jobs: usize,
+    tree_points: usize,
+    signal_points: usize,
+    fill_indices: usize,
+    fill_vertices: usize,
+    casing_indices: usize,
+    casing_vertices: usize,
+    stroke_indices: usize,
+    stroke_vertices: usize,
+    icon_indices: usize,
+    icon_vertices: usize,
+    shadow_instances: usize,
+    wall_instances: usize,
+    tree_template_vertices: usize,
+    tree_template_indices: usize,
+    tree_cross_template_vertices: usize,
+    tree_cross_template_indices: usize,
+    tree_instances: usize,
+    road_icon_indices: usize,
+    road_icon_vertices: usize,
+}
+
+impl TagArena {
+    fn string(&self, range: (u32, u32)) -> Option<&str> {
+        self.strings.get(range.0 as usize..range.1 as usize)
+    }
+
+    fn key(&self, id: u16) -> Option<&str> {
+        self.string(*self.keys.get(id as usize)?)
+    }
+
+    fn value(&self, id: u32) -> Option<&str> {
+        self.string(*self.values.get(id as usize)?)
+    }
+}
+
+impl Drop for TagArena {
+    fn drop(&mut self) {
+        let mut buffers = TagArenaBuffers {
+            strings: std::mem::take(&mut self.strings),
+            keys: std::mem::take(&mut self.keys),
+            values: std::mem::take(&mut self.values),
+            pairs: std::mem::take(&mut self.pairs),
+        };
+        buffers.strings.clear();
+        buffers.keys.clear();
+        buffers.values.clear();
+        buffers.pairs.clear();
+        // `try_with` also makes this safe during thread-local destruction.
+        let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().tag_arenas.push(buffers));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SyntheticLayer {
+    MicroPois,
+    BarrierLine,
+    StreetPolygons,
+    AttractionArea,
+    TourismBoundary,
+    Platforms,
+    DetailLand,
+    DetailBuildings,
+}
+
+impl SyntheticLayer {
+    fn from_str(value: &'static str) -> Self {
+        match value {
+            "micro_pois" => Self::MicroPois,
+            "barrier_line" => Self::BarrierLine,
+            "street_polygons" => Self::StreetPolygons,
+            "attraction_area" => Self::AttractionArea,
+            "tourism_boundary" => Self::TourismBoundary,
+            "platforms" => Self::Platforms,
+            "detail_land" => Self::DetailLand,
+            "detail_buildings" => Self::DetailBuildings,
+            _ => unreachable!("unknown synthetic map layer {value}"),
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::MicroPois => "micro_pois",
+            Self::BarrierLine => "barrier_line",
+            Self::StreetPolygons => "street_polygons",
+            Self::AttractionArea => "attraction_area",
+            Self::TourismBoundary => "tourism_boundary",
+            Self::Platforms => "platforms",
+            Self::DetailLand => "detail_land",
+            Self::DetailBuildings => "detail_buildings",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum TagStorage {
+    Arena { arena: Arc<TagArena>, range: Range<u32> },
+    Owned(Arc<HashMap<String, String>>),
+}
+
+/// Cheap feature-local view into one layer's decoded key/value tables.
+/// Cloning a view only increments the layer arena's refcount; tag strings
+/// and pairs remain shared by every point/path emitted for that feature.
+#[derive(Clone, Debug)]
+pub struct TagView {
+    storage: TagStorage,
+    layer_override: Option<SyntheticLayer>,
+}
+
+impl TagView {
+    fn from_arena(arena: Arc<TagArena>, range: Range<u32>) -> Self {
+        Self { storage: TagStorage::Arena { arena, range }, layer_override: None }
+    }
+
+    fn from_owned(tags: HashMap<String, String>) -> Self {
+        Self { storage: TagStorage::Owned(Arc::new(tags)), layer_override: None }
+    }
+
+    fn set_layer(&mut self, layer: &'static str) {
+        self.layer_override = Some(SyntheticLayer::from_str(layer));
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        if key == "layer" {
+            if let Some(layer) = self.layer_override {
+                return Some(layer.value());
+            }
+        }
+        match &self.storage {
+            TagStorage::Arena { arena, range } => arena.pairs
+                [range.start as usize..range.end as usize]
+                .iter()
+                .rev()
+                .find_map(|&(key_id, value_id)| {
+                    (arena.key(key_id)? == key).then(|| arena.value(value_id)).flatten()
+                }),
+            TagStorage::Owned(tags) => tags.get(key).map(String::as_str),
+        }
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn iter(&self) -> TagIter<'_> {
+        let inner = match &self.storage {
+            TagStorage::Arena { arena, range } => TagIterInner::Arena {
+                arena,
+                cursor: range.start as usize,
+                end: range.end as usize,
+            },
+            TagStorage::Owned(tags) => TagIterInner::Owned(tags.iter()),
+        };
+        TagIter { tags: self, inner, yielded_override: false }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    pub fn to_owned_map(&self) -> HashMap<String, String> {
+        self.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect()
+    }
+}
+
+impl From<HashMap<String, String>> for TagView {
+    fn from(tags: HashMap<String, String>) -> Self {
+        Self::from_owned(tags)
+    }
+}
+
+impl TagLookup for TagView {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.get(key)
+    }
+}
+
+/// Compatibility name used by the existing tile feature structs and sinks.
+pub type TagSet = TagView;
+
+enum TagIterInner<'a> {
+    Arena { arena: &'a TagArena, cursor: usize, end: usize },
+    Owned(std::collections::hash_map::Iter<'a, String, String>),
+}
+
+pub struct TagIter<'a> {
+    tags: &'a TagView,
+    inner: TagIterInner<'a>,
+    yielded_override: bool,
+}
+
+#[derive(Default)]
+struct BakeScratch {
+    key_ids: Vec<Option<u16>>,
+    value_ids: Vec<Option<u32>>,
+    wanted_values: Vec<bool>,
+    raw_tag_pairs: Vec<(u16, u32)>,
+    geometry_cmds: Vec<u32>,
+    geometry_path: Vec<(i32, i32)>,
+    static_tag_values: Vec<(&'static str, u32)>,
+    tag_arenas: Vec<TagArenaBuffers>,
+    way_buffers: Vec<Vec<TileWay>>,
+    point_buffers: Vec<Vec<((f32, f32), TagSet)>>,
+    way_point_buffers: Vec<Vec<(f32, f32)>>,
+    way_dz_buffers: Vec<Vec<f32>>,
+    output_hints: HashMap<(u32, bool, bool), OutputCapacityHints>,
+    tess_vertices: Vec<VVertex>,
+    tess_indices: Vec<u32>,
+}
+
+thread_local! {
+    /// One scratch allocation set per pool worker. Leases return their
+    /// cleared buffers on drop, including parse errors, so consecutive tile
+    /// jobs reuse capacity without synchronization or global allocator work.
+    static BAKE_SCRATCH: std::cell::RefCell<BakeScratch> = Default::default();
+}
+
+#[derive(Default)]
+struct ParseScratchLease {
+    key_ids: Vec<Option<u16>>,
+    value_ids: Vec<Option<u32>>,
+    wanted_values: Vec<bool>,
+    raw_tag_pairs: Vec<(u16, u32)>,
+    geometry_cmds: Vec<u32>,
+    geometry_path: Vec<(i32, i32)>,
+    static_tag_values: Vec<(&'static str, u32)>,
+}
+
+impl ParseScratchLease {
+    fn take() -> Self {
+        BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            Self {
+                key_ids: std::mem::take(&mut scratch.key_ids),
+                value_ids: std::mem::take(&mut scratch.value_ids),
+                wanted_values: std::mem::take(&mut scratch.wanted_values),
+                raw_tag_pairs: std::mem::take(&mut scratch.raw_tag_pairs),
+                geometry_cmds: std::mem::take(&mut scratch.geometry_cmds),
+                geometry_path: std::mem::take(&mut scratch.geometry_path),
+                static_tag_values: std::mem::take(&mut scratch.static_tag_values),
+            }
+        })
+    }
+}
+
+impl Drop for ParseScratchLease {
+    fn drop(&mut self) {
+        self.key_ids.clear();
+        self.value_ids.clear();
+        self.wanted_values.clear();
+        self.raw_tag_pairs.clear();
+        self.geometry_cmds.clear();
+        self.geometry_path.clear();
+        self.static_tag_values.clear();
+        BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.key_ids = std::mem::take(&mut self.key_ids);
+            scratch.value_ids = std::mem::take(&mut self.value_ids);
+            scratch.wanted_values = std::mem::take(&mut self.wanted_values);
+            scratch.raw_tag_pairs = std::mem::take(&mut self.raw_tag_pairs);
+            scratch.geometry_cmds = std::mem::take(&mut self.geometry_cmds);
+            scratch.geometry_path = std::mem::take(&mut self.geometry_path);
+            scratch.static_tag_values = std::mem::take(&mut self.static_tag_values);
+        });
+    }
+}
+
+fn take_tag_arena_buffers() -> TagArenaBuffers {
+    BAKE_SCRATCH.with(|slot| slot.borrow_mut().tag_arenas.pop().unwrap_or_default())
+}
+
+fn take_way_geometry_buffers(source_len: usize) -> (Vec<(f32, f32)>, Vec<f32>) {
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        let mut points = scratch.way_point_buffers.pop().unwrap_or_default();
+        let mut dz = scratch.way_dz_buffers.pop().unwrap_or_default();
+        points.clear();
+        dz.clear();
+        let needed = source_len.saturating_add(1);
+        if points.capacity() < needed {
+            points.reserve(needed);
+        }
+        (points, dz)
+    })
+}
+
+fn recycle_way_points(mut points: Vec<(f32, f32)>) {
+    points.clear();
+    let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().way_point_buffers.push(points));
+}
+
+fn recycle_way_dz(mut dz: Vec<f32>) {
+    dz.clear();
+    let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().way_dz_buffers.push(dz));
+}
+
+fn output_capacity_hints(
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+) -> OutputCapacityHints {
+    BAKE_SCRATCH.with(|slot| {
+        slot.borrow()
+            .output_hints
+            .get(&(render_zoom, buildings_3d, build_road_core))
+            .copied()
+            .unwrap_or_default()
+    })
+}
+
+fn remember_output_capacity_hints(
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+    hints: OutputCapacityHints,
+) {
+    BAKE_SCRATCH.with(|slot| {
+        slot.borrow_mut()
+            .output_hints
+            .insert((render_zoom, buildings_3d, build_road_core), hints);
+    });
+}
+
+fn take_tess_scratch() -> (Vec<VVertex>, Vec<u32>) {
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        (
+            std::mem::take(&mut scratch.tess_vertices),
+            std::mem::take(&mut scratch.tess_indices),
+        )
+    })
+}
+
+fn recycle_tess_scratch(vertices: &mut Vec<VVertex>, indices: &mut Vec<u32>) {
+    vertices.clear();
+    indices.clear();
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.tess_vertices = std::mem::take(vertices);
+        scratch.tess_indices = std::mem::take(indices);
+    });
+}
+
+impl<'a> Iterator for TagIter<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = match &mut self.inner {
+                TagIterInner::Owned(iter) => {
+                    iter.next().map(|(key, value)| (key.as_str(), value.as_str()))
+                }
+                TagIterInner::Arena { arena, cursor, end } => {
+                    let index = *cursor;
+                    if index >= *end {
+                        None
+                    } else {
+                        *cursor += 1;
+                        let (key_id, value_id) = arena.pairs[index];
+                        let key = arena.key(key_id)?;
+                        // HashMap insertion semantics: for duplicate keys the
+                        // last pair in the feature wins.
+                        if arena.pairs[index + 1..*end]
+                            .iter()
+                            .any(|&(later, _)| later == key_id)
+                        {
+                            continue;
+                        }
+                        Some((key, arena.value(value_id)?))
+                    }
+                }
+            };
+            if let Some((key, value)) = next {
+                if self.tags.layer_override.is_some() && key == "layer" {
+                    continue;
+                }
+                return Some((key, value));
+            }
+            if !self.yielded_override {
+                self.yielded_override = true;
+                if let Some(layer) = self.tags.layer_override {
+                    return Some(("layer", layer.value()));
+                }
+            }
+            return None;
+        }
+    }
+}
 
 #[derive(Debug)]
 struct WayData {
@@ -559,7 +1008,6 @@ impl TileBuffers {
 
 #[derive(Clone, Debug)]
 struct StrokeDrawJob {
-    sort_rank: i16,
     style: StrokeStyle,
     points: Vec<(f32, f32)>,
     /// Physical solid-road geometry joins its tier's boolean surface mesh.
@@ -677,7 +1125,7 @@ pub(crate) struct RoadSurfaceKey {
 impl RoadSurfaceKey {
     fn from_way(
         style: StrokeStyle,
-        tags: &HashMap<String, String>,
+        tags: &impl TagLookup,
         dz: Option<&[f32]>,
     ) -> Self {
         let bridge = tag_is_truthy(tags, "bridge");
@@ -794,10 +1242,10 @@ fn road_surface_param5(key: RoadSurfaceKey, phase: u8) -> f32 {
 /// select paint groups inside the shared pipeline, not a different renderer.
 /// Patterned/dashed passes remain vector overlays.
 fn is_solid_road_surface(
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     style: &StrokeStyle,
 ) -> bool {
-    let layer = tags.get("layer").map(String::as_str).unwrap_or("");
+    let layer = tags.get("layer").unwrap_or("");
     tags.contains_key("highway")
         // Road-area polygons already enter the union as their complete
         // plaza contour. Treating their styled outline as a second physical
@@ -843,8 +1291,8 @@ struct RoadJoinMeta {
 }
 
 impl RoadJoinMeta {
-    fn from_tags(tags: &HashMap<String, String>) -> Self {
-        let highway = tags.get("highway").map(String::as_str);
+    fn from_tags(tags: &impl TagLookup) -> Self {
+        let highway = tags.get("highway");
         let family = match highway {
             Some("motorway" | "motorway_link") => RoadJoinFamily::Motorway,
             Some("trunk" | "trunk_link") => RoadJoinFamily::Trunk,
@@ -1622,10 +2070,12 @@ fn endpoint_continuation_grade_corrections(
             }
         }
     }
-    by_end
+    let mut corrections: Vec<_> = by_end
         .into_iter()
         .map(|(end, target_dz)| RoadTierGradeCorrection { end, target_dz })
-        .collect()
+        .collect();
+    corrections.sort_unstable_by_key(|correction| correction.end);
+    corrections
 }
 
 /// Move one endpoint to a through-road deck and taper that correction
@@ -1867,7 +2317,7 @@ pub fn build_tile_buffers_from_body(
 
     let mut nodes = HashMap::<i64, (f64, f64)>::new();
     let mut ways = Vec::<WayData>::new();
-    let mut tagged_points = Vec::<((f32, f32), HashMap<String, String>)>::new();
+    let mut tagged_points = Vec::<((f32, f32), TagSet)>::new();
 
     for element in parsed.elements {
         match element.kind.as_str() {
@@ -1876,7 +2326,7 @@ pub fn build_tile_buffers_from_body(
                     nodes.insert(element.id, (lon, lat));
                     if let Some(tags) = element.tags {
                         let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
-                        tagged_points.push(((world.x as f32, world.y as f32), tags));
+                        tagged_points.push(((world.x as f32, world.y as f32), tags.into()));
                     }
                 }
             }
@@ -1905,17 +2355,19 @@ pub fn build_tile_buffers_from_body(
         let points = projected.into_iter().map(|(_, point)| point).collect();
         tile_ways.push(TileWay {
             points,
-            tags: way.tags,
+            tags: way.tags.into(),
             closed: way.closed,
             dz: None,
             fidx: None,
+            feature_group: None,
+            ring_index: None,
         });
     }
 
     Ok(build_tile_buffers_from_features(
         tile_key,
-        tile_ways,
-        tagged_points,
+        &tile_ways,
+        &tagged_points,
         theme,
         render_zoom,
         false,
@@ -1942,6 +2394,39 @@ fn icon_inclusion_zoom(render_zoom: u32) -> f32 {
 }
 
 pub fn build_tile_buffers_from_mvt(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    overlay_tiles: &[OverlayTileData],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    want_fringe: bool,
+    build_road_core: bool,
+) -> Result<TileBuffers, String> {
+    build_tile_buffers_from_mvt_with_parser(
+        parse_mvt_tile_erased,
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        overlay_tiles,
+        theme,
+        render_zoom,
+        buildings_3d,
+        want_fringe,
+        build_road_core,
+    )
+}
+
+type MvtParseFn = fn(&[u8], TileKey, &mut dyn MvtSink) -> Result<(), String>;
+
+#[allow(clippy::too_many_arguments)]
+fn build_tile_buffers_from_mvt_with_parser(
+    parse_mvt: MvtParseFn,
     tile_key: TileKey,
     raw_tile_data: &[u8],
     detail_tile_data: Option<&[u8]>,
@@ -2018,7 +2503,7 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
     profiler.lap("dz-parse", "");
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    parse_mvt(&pbf_data, tile_key, &mut collector)?;
     profiler.lap("mvt-parse", "");
     // Compose micro-POIs (trees, benches, bins…) and, in 2.5D mode, building
     // footprints with real heights from the all-tag detail archive over the
@@ -2040,7 +2525,8 @@ pub fn build_tile_buffers_from_mvt(
         || collect_detail_corridors
     {
         if let Some(detail_data) = detail_tile_data {
-            if let Err(err) = merge_detail_features(
+            if let Err(err) = merge_detail_features_with_parser(
+                parse_mvt,
                 detail_data,
                 tile_key,
                 render_scale,
@@ -2089,8 +2575,8 @@ pub fn build_tile_buffers_from_mvt(
     Ok(build_tile_buffers_from_features_profiled(
         profiler,
         tile_key,
-        collector.ways,
-        collector.points,
+        &collector.ways,
+        &collector.points,
         theme,
         render_zoom,
         buildings_3d,
@@ -2124,7 +2610,8 @@ impl MvtSink for BridgeDzCollector {
         _tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     ) {
         if points.len() < 2 {
@@ -2139,7 +2626,9 @@ impl MvtSink for BridgeDzCollector {
             tags,
             closed: close,
             dz: None,
-            fidx: None,
+            fidx: Some(meta.feature_index),
+            feature_group: meta.feature_group,
+            ring_index: Some(meta.path_index),
         });
     }
 
@@ -2148,7 +2637,7 @@ impl MvtSink for BridgeDzCollector {
         _tile_key: TileKey,
         _extent: u32,
         _point: (i32, i32),
-        _tags: HashMap<String, String>,
+        _tags: TagSet,
     ) {
     }
 }
@@ -2162,7 +2651,7 @@ struct BaseDzProfile {
 fn base_dz_profile_from_way(
     way: TileWay,
 ) -> Option<((String, u32, u32), BaseDzProfile)> {
-    if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+    if way.tags.get("layer") != Some("base_dz") {
         return None;
     }
     let (Some(layer), Some(fidx), Some(pidx), Some(dz)) = (
@@ -2190,7 +2679,7 @@ fn base_dz_profile_from_way(
         return None;
     }
     Some((
-        (layer.clone(), fidx, pidx),
+        (layer.to_string(), fidx, pidx),
         BaseDzProfile { points: way.points, decks },
     ))
 }
@@ -2205,7 +2694,7 @@ fn parse_base_dz_map(
     let mut collector = BridgeDzCollector { next_feature_id: 1, ways: Vec::new() };
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let mut map = HashMap::new();
-    for way in collector.ways {
+    for way in collector.ways.drain(..) {
         if let Some((key, profile)) = base_dz_profile_from_way(way) {
             map.insert(key, profile);
         }
@@ -2326,8 +2815,8 @@ fn parse_bridge_dz_corridors(
     };
     let units_per_m = (TILE_SIZE / tile_span_m.max(1.0)) as f32;
     let mut corridors = Vec::new();
-    for way in collector.ways {
-        if way.tags.get("layer").map(|v| v.as_str()) != Some("bridge_dz") {
+    for way in collector.ways.drain(..) {
+        if way.tags.get("layer") != Some("bridge_dz") {
             continue;
         }
         let Some(dz_tag) = way.tags.get("dz") else {
@@ -2370,7 +2859,7 @@ fn merge_overlay_features(
     overlay: &OverlayTileData,
     tile_key: TileKey,
     render_scale: f32,
-    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
 ) -> Result<(), String> {
     let pbf_data = decode_vector_tile_payload(&overlay.raw)?;
@@ -2380,7 +2869,7 @@ fn merge_overlay_features(
     let offset_x = overlay.quadrant_x as f32 * TILE_SIZE as f32;
     let offset_y = overlay.quadrant_y as f32 * TILE_SIZE as f32;
     let transform = |p: (f32, f32)| (p.0 * scale - offset_x, p.1 * scale - offset_y);
-    for (point, tags) in collector.points {
+    for (point, tags) in collector.points.drain(..) {
         let point = transform(point);
         if point.0 < -32.0
             || point.1 < -32.0
@@ -2390,7 +2879,7 @@ fn merge_overlay_features(
             continue;
         }
         if overlay.filter != 0
-            && tags.get("layer").map(|v| v.as_str()) == Some("chargers")
+            && tags.get("layer") == Some("chargers")
         {
             let kw = tags
                 .get("max_kw")
@@ -2403,7 +2892,7 @@ fn merge_overlay_features(
         }
         points.push((point, tags));
     }
-    for mut way in collector.ways {
+    for mut way in collector.ways.drain(..) {
         for point in way.points.iter_mut() {
             *point = transform(*point);
         }
@@ -2417,6 +2906,7 @@ fn merge_overlay_features(
 /// extractor ignores that layer, so base-poi labels are never duplicated),
 /// and in 2.5D mode building polygons retagged `detail_buildings`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn merge_detail_features(
     detail_data: &[u8],
     tile_key: TileKey,
@@ -2424,17 +2914,72 @@ fn merge_detail_features(
     want_points: bool,
     want_buildings: bool,
     collect_corridors: bool,
-    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
     corridors: &mut Vec<BridgeCorridor>,
 ) -> Result<(), String> {
-    let census_start = ways.len();
+    merge_detail_features_with_parser(
+        parse_mvt_tile_erased,
+        detail_data,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+        points,
+        ways,
+        corridors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_detail_features_with_parser(
+    parse_mvt: MvtParseFn,
+    detail_data: &[u8],
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+    points: &mut Vec<((f32, f32), TagSet)>,
+    ways: &mut Vec<TileWay>,
+    corridors: &mut Vec<BridgeCorridor>,
+) -> Result<(), String> {
+    let collector = parse_detail_features_with_parser(
+        parse_mvt,
+        detail_data,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+    )?;
+    merge_detail_features_from_collector(
+        collector,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+        points,
+        ways,
+        corridors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_detail_features_with_parser(
+    parse_mvt: MvtParseFn,
+    detail_data: &[u8],
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+) -> Result<MvtLocalCollector, String> {
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
-    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
-    // buffers carry all street icons; the shader reveals by live zoom.
-    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     // Combined archives carry base AND detail layers in one tile; this
     // pass only consumes the raw osm_* layers, and of those only the
     // geometry classes the flags below reach:
@@ -2448,7 +2993,27 @@ fn merge_detail_features(
         lines: collect_corridors || want_platform_zoom,
         polygons: want_buildings || want_platform_zoom || want_points,
     };
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    parse_mvt(&pbf_data, tile_key, &mut collector)?;
+    Ok(collector)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_detail_features_from_collector(
+    mut collector: MvtLocalCollector,
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+    points: &mut Vec<((f32, f32), TagSet)>,
+    ways: &mut Vec<TileWay>,
+    corridors: &mut Vec<BridgeCorridor>,
+) -> Result<(), String> {
+    let census_start = ways.len();
+    let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
+    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
+    // buffers carry all street icons; the shader reveals by live zoom.
+    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     for way in &collector.ways {
         if !collect_corridors {
             break;
@@ -2457,10 +3022,10 @@ fn merge_detail_features(
             continue;
         }
         let tags = &way.tags;
-        if tags.get("layer").map(|v| v.as_str()) != Some("osm_lines") {
+        if tags.get("layer") != Some("osm_lines") {
             continue;
         }
-        let bridge = tags.get("bridge").map(|v| v.as_str()).unwrap_or("");
+        let bridge = tags.get("bridge").unwrap_or("");
         if !(bridge == "yes" || bridge == "viaduct") {
             continue;
         }
@@ -2503,8 +3068,8 @@ fn merge_detail_features(
         });
     }
     if want_points {
-        for (point, mut tags) in collector.points {
-            if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
+        for (point, mut tags) in collector.points.drain(..) {
+            if tags.get("layer") != Some("osm_points") {
                 continue;
             }
             // Attraction nodes (zoo animals) carry a label with no icon.
@@ -2522,7 +3087,7 @@ fn merge_detail_features(
                     }
                 }
             }
-            tags.insert("layer".to_string(), "micro_pois".to_string());
+            tags.set_layer("micro_pois");
             points.push((point, tags));
         }
     }
@@ -2530,7 +3095,7 @@ fn merge_detail_features(
     // 2D and 3D modes; buildings only when the 3D pass wants them.
     let want_platforms = render_zoom >= 15.5;
     if want_buildings || want_platforms || want_points {
-        for mut way in collector.ways {
+        for mut way in collector.ways.drain(..) {
             // Polygon-anchored POIs (parking lots and garages, shops and
             // offices mapped on their building) icon at the centroid like
             // carto; the icon-collision pass dedups against any base node.
@@ -2538,11 +3103,11 @@ fn merge_detail_features(
                 // Underground garages span whole blocks; carto shows their
                 // entrance node, not a centroid P in the middle of nowhere.
                 let underground =
-                    way.tags.get("parking").map(|v| v.as_str()) == Some("underground");
+                    way.tags.get("parking") == Some("underground");
                 if let Some((icon, _)) = micro_icon_for_tags(&way.tags).filter(|_| !underground) {
                     if icon_horizon >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
                         let mut tags = way.tags.clone();
-                        tags.insert("layer".to_string(), "micro_pois".to_string());
+                        tags.set_layer("micro_pois");
                         points.push((ring_centroid(&way.points), tags));
                     }
                 }
@@ -2550,7 +3115,7 @@ fn merge_detail_features(
             // Plain building ways AND assembled multipolygon relations
             // (palaces, courtyarded blocks) both carry building geometry.
             let from_polygons = matches!(
-                way.tags.get("layer").map(|value| value.as_str()),
+                way.tags.get("layer"),
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
             // Pedestrian squares mapped as highway=pedestrian + area=yes
@@ -2563,19 +3128,18 @@ fn merge_detail_features(
                 if let Some(barrier) = way.tags.get("barrier") {
                     if want_platforms
                         && matches!(
-                            barrier.as_str(),
+                            barrier,
                             "wall" | "fence" | "retaining_wall" | "city_wall" | "hedge"
                         )
                     {
-                        way.tags
-                            .insert("layer".to_string(), "barrier_line".to_string());
+                        way.tags.set_layer("barrier_line");
                         ways.push(way);
                     }
                     continue;
                 }
                 let is_ped_area = tag_is_truthy(&way.tags, "area")
                     && matches!(
-                        way.tags.get("highway").map(|v| v.as_str()),
+                        way.tags.get("highway"),
                         Some("pedestrian" | "footway")
                     );
                 // Attractions are areas by convention; clipping may have
@@ -2583,7 +3147,7 @@ fn merge_detail_features(
                 let is_attraction_ring = way.tags.contains_key("name")
                     && (way.tags.contains_key("attraction")
                         || way.tags.contains_key("zoo")
-                        || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"));
+                        || way.tags.get("tourism") == Some("attraction"));
                 let target_layer = if is_ped_area {
                     Some("street_polygons")
                 } else if is_attraction_ring {
@@ -2598,7 +3162,7 @@ fn merge_detail_features(
                             way.points.push(first);
                         }
                         way.closed = true;
-                        way.tags.insert("layer".to_string(), layer.to_string());
+                        way.tags.set_layer(layer);
                         ways.push(way);
                     }
                 }
@@ -2611,11 +3175,11 @@ fn merge_detail_features(
             if !ring_closed {
                 continue;
             }
-            let is_platform = way.tags.get("railway").map(|v| v.as_str()) == Some("platform")
-                || way.tags.get("public_transport").map(|v| v.as_str()) == Some("platform");
+            let is_platform = way.tags.get("railway") == Some("platform")
+                || way.tags.get("public_transport") == Some("platform");
             if is_platform {
                 if want_platforms {
-                    way.tags.insert("layer".to_string(), "platforms".to_string());
+                    way.tags.set_layer("platforms");
                     ways.push(way);
                 }
                 continue;
@@ -2624,23 +3188,22 @@ fn merge_detail_features(
             // the z14 base tiles; at street zoom the detail archive fills
             // them back in. Bigger landuse stays with the base tile.
             let is_green_patch = matches!(
-                way.tags.get("landuse").map(|v| v.as_str()),
+                way.tags.get("landuse"),
                 Some("grass" | "village_green" | "flowerbed" | "meadow")
             ) || matches!(
-                way.tags.get("leisure").map(|v| v.as_str()),
+                way.tags.get("leisure"),
                 Some("garden")
             ) || matches!(
-                way.tags.get("natural").map(|v| v.as_str()),
+                way.tags.get("natural"),
                 Some("scrub" | "heath" | "shrubbery" | "sand" | "beach" | "shingle")
             );
             // Zoo perimeter draws carto's purple boundary line.
             if matches!(
-                way.tags.get("tourism").map(|v| v.as_str()),
+                way.tags.get("tourism"),
                 Some("zoo" | "theme_park")
             ) {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "tourism_boundary".to_string());
+                    way.tags.set_layer("tourism_boundary");
                     ways.push(way);
                 }
                 continue;
@@ -2661,19 +3224,18 @@ fn merge_detail_features(
             let is_attraction = way.tags.contains_key("name")
                 && (way.tags.contains_key("attraction")
                     || way.tags.contains_key("zoo")
-                    || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"))
+                    || way.tags.get("tourism") == Some("attraction"))
                 && !(want_buildings && (is_building || is_building_part));
             if is_attraction {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "attraction_area".to_string());
+                    way.tags.set_layer("attraction_area");
                     ways.push(way);
                 }
                 continue;
             }
             if is_green_patch {
                 if want_platforms {
-                    way.tags.insert("layer".to_string(), "detail_land".to_string());
+                    way.tags.set_layer("detail_land");
                     ways.push(way);
                 }
                 continue;
@@ -2682,13 +3244,12 @@ fn merge_detail_features(
             // base generalizes away; route them into the existing street-
             // area pipeline so fill, rank and labels all apply.
             let is_pedestrian_area = matches!(
-                way.tags.get("highway").map(|v| v.as_str()),
+                way.tags.get("highway"),
                 Some("pedestrian" | "footway")
-            ) || way.tags.get("place").map(|v| v.as_str()) == Some("square");
+            ) || way.tags.get("place") == Some("square");
             if is_pedestrian_area {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "street_polygons".to_string());
+                    way.tags.set_layer("street_polygons");
                     ways.push(way);
                 }
                 continue;
@@ -2701,7 +3262,7 @@ fn merge_detail_features(
             }
             // Underground volumes (metro halls mapped as building:part,
             // parking cellars) must never extrude above ground.
-            if way.tags.get("location").map(|v| v.as_str()) == Some("underground")
+            if way.tags.get("location") == Some("underground")
                 || way
                     .tags
                     .get("osm_layer")
@@ -2709,8 +3270,7 @@ fn merge_detail_features(
             {
                 continue;
             }
-            way.tags
-                .insert("layer".to_string(), "detail_buildings".to_string());
+            way.tags.set_layer("detail_buildings");
             ways.push(way);
         }
     }
@@ -2720,7 +3280,7 @@ fn merge_detail_features(
         let mut census = std::collections::BTreeMap::<String, usize>::new();
         for way in ways.iter().skip(census_start) {
             for key in way.tags.keys() {
-                *census.entry(key.clone()).or_default() += 1;
+                *census.entry(key.to_string()).or_default() += 1;
             }
         }
         trace!("map.census", "z{}/{}/{}: {:?}", tile_key.z, tile_key.x, tile_key.y, census);
@@ -2889,7 +3449,7 @@ fn chaikin_smooth_dz(
 
 /// Building height in meters from OSM tags: explicit `height`, else
 /// `building:levels` × 3m + roof allowance, else a modest default.
-fn building_height_m(tags: &HashMap<String, String>) -> f32 {
+fn building_height_m(tags: &impl TagLookup) -> f32 {
     if let Some(height) = tags.get("height") {
         let digits: String = height
             .trim()
@@ -2914,7 +3474,7 @@ fn building_height_m(tags: &HashMap<String, String>) -> f32 {
 
 /// Base height (bottom of the volume) for building:part features:
 /// `min_height` meters, else `building:min_level` x 3m.
-fn building_min_height_m(tags: &HashMap<String, String>) -> f32 {
+fn building_min_height_m(tags: &impl TagLookup) -> f32 {
     if let Some(min_height) = tags.get("min_height") {
         let digits: String = min_height
             .trim()
@@ -3245,7 +3805,7 @@ fn append_roof_edge_ao(
 /// A way in tile-local coordinates ready for styling/tessellation.
 pub struct TileWay {
     pub points: Vec<(f32, f32)>,
-    pub tags: HashMap<String, String>,
+    pub tags: TagSet,
     pub closed: bool,
     /// Baked per-vertex deck height (m), aligned with `points` — from the
     /// base_dz overlay join. The way lifts off its own profile.
@@ -3254,6 +3814,10 @@ pub struct TileWay {
     /// the baked fill stream (protobuf field 100, payload v2-fills-1).
     /// None for ways that did not come from a plain base-tile decode.
     pub fidx: Option<u32>,
+    /// Parse-local polygon identity and ring order, kept as integers instead
+    /// of allocating internal string tags for every emitted ring.
+    pub feature_group: Option<u64>,
+    pub ring_index: Option<u32>,
 }
 
 /// Stage clock for `map.tile_profile`: per-stage wall time, so the
@@ -3458,10 +4022,13 @@ fn fringe_free_bake_keeps_road_core_byte_identical() {
                 tags: HashMap::from([
                     ("layer".to_string(), "streets".to_string()),
                     ("highway".to_string(), "primary".to_string()),
-                ]),
+                ])
+                .into(),
                 closed: false,
                 dz: None,
                 fidx: None,
+                feature_group: None,
+                ring_index: None,
             },
             TileWay {
                 points: vec![(24.0, 80.0), (232.0, 80.0)],
@@ -3469,17 +4036,20 @@ fn fringe_free_bake_keeps_road_core_byte_identical() {
                     ("layer".to_string(), "streets".to_string()),
                     ("highway".to_string(), "tram".to_string()),
                     ("rail".to_string(), "true".to_string()),
-                ]),
+                ])
+                .into(),
                 closed: false,
                 dz: None,
                 fidx: None,
+                feature_group: None,
+                ring_index: None,
             },
         ];
         build_tile_buffers_from_features_profiled(
             TileProfiler::new(),
             TileKey { z: 14, x: 0, y: 0 },
-            ways,
-            Vec::new(),
+            &ways,
+            &Vec::new(),
             &probe_compiled_theme(),
             16,
             false,
@@ -3604,8 +4174,8 @@ impl TileProfiler {
 #[allow(clippy::too_many_arguments)]
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
-    tile_ways: Vec<TileWay>,
-    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    tile_ways: &[TileWay],
+    tagged_points: &[((f32, f32), TagSet)],
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
@@ -3641,8 +4211,8 @@ fn build_tile_buffers_from_features(
 fn build_tile_buffers_from_features_profiled(
     mut profiler: TileProfiler,
     tile_key: TileKey,
-    tile_ways: Vec<TileWay>,
-    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    tile_ways: &[TileWay],
+    tagged_points: &[((f32, f32), TagSet)],
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
@@ -3654,6 +4224,7 @@ fn build_tile_buffers_from_features_profiled(
     baked_fills: Vec<BakedFillFeature>,
     baked_faces: Option<BakedFacesBucket>,
 ) -> TileBuffers {
+    let capacity_hints = output_capacity_hints(render_zoom, buildings_3d, build_road_core);
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -3710,15 +4281,25 @@ fn build_tile_buffers_from_features_profiled(
     };
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
-    let mut labels = Vec::<TileLabel>::new();
-    let mut pin_hits = Vec::<PinHit>::new();
-    let mut icon_jobs =
-        Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32, f32)>::new();
-    let mut tree_points_3d = Vec::<(f32, f32)>::new();
-    let mut signal_points_3d = Vec::<(f32, f32)>::new();
-    for (point, tags) in &tagged_points {
+    let mut labels = Vec::<TileLabel>::with_capacity(capacity_hints.labels);
+    let mut pin_hits = Vec::<PinHit>::with_capacity(capacity_hints.pin_hits);
+    let mut icon_jobs = Vec::<(
+        (f32, f32),
+        &'static IconMesh,
+        u8,
+        u8,
+        f32,
+        u8,
+        f32,
+        f32,
+        f32,
+        f32,
+    )>::with_capacity(capacity_hints.icon_jobs);
+    let mut tree_points_3d = Vec::<(f32, f32)>::with_capacity(capacity_hints.tree_points);
+    let mut signal_points_3d = Vec::<(f32, f32)>::with_capacity(capacity_hints.signal_points);
+    for (point, tags) in tagged_points {
         let mut label_point = *point;
-        let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+        let layer = tags.get("layer").unwrap_or("");
         // Overlay points (chargers, transit stops) show earlier than the
         // dense base-POI iconography. Chargers tier by power: an ultra-fast
         // site matters at road-trip zoom, a street post doesn't.
@@ -3816,7 +4397,7 @@ fn build_tile_buffers_from_features_profiled(
                             if charger_kw >= 50.0 { 26.0f32 } else { 20.0 }
                         } else if layer == "stops" {
                             12.0
-                        } else if tags.get("layer").map(|v| v.as_str()) == Some("pois") {
+                        } else if tags.get("layer") == Some("pois") {
                             18.0
                         } else {
                             0.0
@@ -3864,7 +4445,7 @@ fn build_tile_buffers_from_features_profiled(
                         for key in ["name", "operator", "city", "max_kw", "evses", "connectors"] {
                             if let Some(value) = tags.get(key) {
                                 if !value.trim().is_empty() {
-                                    info.push((key.to_string(), value.clone()));
+                                    info.push((key.to_string(), value.to_string()));
                                 }
                             }
                         }
@@ -3987,33 +4568,37 @@ fn build_tile_buffers_from_features_profiled(
     // winding-consistent by construction. This lets fill() derive the AA
     // fill-side sign from ring orientation instead of O(V^2) probing.
     tess.set_trust_fill_winding(true);
-    let mut tess_verts = Vec::<VVertex>::new();
-    let mut tess_indices = Vec::<u32>::new();
+    let (mut tess_verts, mut tess_indices) = take_tess_scratch();
+    tess_verts.clear();
+    tess_indices.clear();
 
-    // NOTE: do NOT pre-reserve these to "final" sizes. A generous
-    // reservation (tried at up to 24M floats) made 12 concurrent builders
-    // first-touch ~240MB of fresh zero pages each and serialized the whole
-    // pool on the kernel fault path — the buildings stage went 340ms ->
-    // 3000ms in-app while staying at 11ms in the serial harness.
-    let mut fill_indices = Vec::<u32>::new();
-    let mut fill_vertices = Vec::<f32>::new();
-    let mut casing_indices = Vec::<u32>::new();
-    let mut casing_vertices = Vec::<f32>::new();
-    let mut stroke_indices = Vec::<u32>::new();
-    let mut stroke_vertices = Vec::<f32>::new();
-    let mut icon_indices = Vec::<u32>::new();
-    let mut icon_vertices = Vec::<f32>::new();
-    let mut shadow_disc_instances = Vec::<f32>::new();
+    // The previous tile in this worker's same render/mode bucket is a tight
+    // capacity predictor. Unlike the old multi-million-element blanket
+    // reserve, it avoids realloc growth without overcommitting every worker.
+    let mut fill_indices = Vec::<u32>::with_capacity(capacity_hints.fill_indices);
+    let mut fill_vertices = Vec::<f32>::with_capacity(capacity_hints.fill_vertices);
+    let mut casing_indices = Vec::<u32>::with_capacity(capacity_hints.casing_indices);
+    let mut casing_vertices = Vec::<f32>::with_capacity(capacity_hints.casing_vertices);
+    let mut stroke_indices = Vec::<u32>::with_capacity(capacity_hints.stroke_indices);
+    let mut stroke_vertices = Vec::<f32>::with_capacity(capacity_hints.stroke_vertices);
+    let mut icon_indices = Vec::<u32>::with_capacity(capacity_hints.icon_indices);
+    let mut icon_vertices = Vec::<f32>::with_capacity(capacity_hints.icon_vertices);
+    let mut shadow_disc_instances =
+        Vec::<f32>::with_capacity(capacity_hints.shadow_instances);
     // Building walls as instance records; see WALL_INSTANCE_FLOATS.
-    let mut wall_instances = Vec::<f32>::new();
+    let mut wall_instances = Vec::<f32>::with_capacity(capacity_hints.wall_instances);
     // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
-    let mut tree_template_vertices = Vec::<f32>::new();
-    let mut tree_template_indices = Vec::<u32>::new();
-    let mut tree_cross_template_vertices = Vec::<f32>::new();
-    let mut tree_cross_template_indices = Vec::<u32>::new();
-    let mut tree_instances = Vec::<f32>::new();
-    let mut road_icon_indices = Vec::<u32>::new();
-    let mut road_icon_vertices = Vec::<f32>::new();
+    let mut tree_template_vertices =
+        Vec::<f32>::with_capacity(capacity_hints.tree_template_vertices);
+    let mut tree_template_indices =
+        Vec::<u32>::with_capacity(capacity_hints.tree_template_indices);
+    let mut tree_cross_template_vertices =
+        Vec::<f32>::with_capacity(capacity_hints.tree_cross_template_vertices);
+    let mut tree_cross_template_indices =
+        Vec::<u32>::with_capacity(capacity_hints.tree_cross_template_indices);
+    let mut tree_instances = Vec::<f32>::with_capacity(capacity_hints.tree_instances);
+    let mut road_icon_indices = Vec::<u32>::with_capacity(capacity_hints.road_icon_indices);
+    let mut road_icon_vertices = Vec::<f32>::with_capacity(capacity_hints.road_icon_vertices);
     let mut fill_zbias = 0.0_f32;
     let mut casing_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
@@ -4037,7 +4622,7 @@ fn build_tile_buffers_from_features_profiled(
     // blocks) keep their holes.
     let has_detail_buildings = tile_ways
         .iter()
-        .any(|way| way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings"));
+        .any(|way| way.tags.get("layer") == Some("detail_buildings"));
     struct BuildingGroup {
         rings: Vec<FillRing>,
         height_m: f32,
@@ -4045,13 +4630,13 @@ fn build_tile_buffers_from_features_profiled(
         is_part: bool,
     }
     let mut building_groups = Vec::<BuildingGroup>::new();
-    let mut building_group_lookup = HashMap::<String, usize>::new();
+    let mut building_group_lookup = HashMap::<u64, usize>::new();
     // Building-age layer active: index BAG polygons by quantized centroid
     // so extruded buildings can pick up their bouwjaar tint (BAG footprints
     // match OSM buildings nearly 1:1).
     let mut bag_centroid_colors = HashMap::<(i32, i32), u32>::new();
     for way in tile_ways.iter() {
-        if way.tags.get("layer").map(|v| v.as_str()) == Some("bag")
+        if way.tags.get("layer") == Some("bag")
             && way.closed
             && way.points.len() >= 3
         {
@@ -4066,7 +4651,7 @@ fn build_tile_buffers_from_features_profiled(
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut plaza_rings: Vec<(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)> = Vec::new();
-    let mut fill_group_lookup = HashMap::<(String, u32, u32), usize>::new();
+    let mut fill_group_lookup = HashMap::<(u64, u32, u32), usize>::new();
     // Baked fill join: (baker Layer discriminant, per-layer feature index).
     let baked_fill_lookup: HashMap<(u8, u32), usize> = baked_fills
         .iter()
@@ -4075,7 +4660,7 @@ fn build_tile_buffers_from_features_profiled(
         .collect();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
-        if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
+        if way.tags.get("layer") == Some("detail_buildings") {
             let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
                 continue;
             };
@@ -4091,10 +4676,8 @@ fn build_tile_buffers_from_features_profiled(
                 continue;
             }
             let feature_key = way
-                .tags
-                .get(MVT_INTERNAL_FEATURE_KEY)
-                .cloned()
-                .unwrap_or_else(|| format!("bldg:{}", prepared_way.way_index));
+                .feature_group
+                .unwrap_or(u64::MAX - prepared_way.way_index as u64);
             let group_index =
                 if let Some(index) = building_group_lookup.get(&feature_key).copied() {
                     index
@@ -4112,11 +4695,7 @@ fn build_tile_buffers_from_features_profiled(
                     });
                     index
                 };
-            let ring_order = way
-                .tags
-                .get(MVT_INTERNAL_RING_INDEX_KEY)
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(order);
+            let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
             building_groups[group_index].rings.push(FillRing {
                 order: ring_order,
                 points: ring_points,
@@ -4148,7 +4727,7 @@ fn build_tile_buffers_from_features_profiled(
 
         let area_label_ok = render_zoom >= 15
             || matches!(
-                way.tags.get("layer").map(|value| value.as_str()),
+                way.tags.get("layer"),
                 Some("natura2000" | "wetlands")
             );
         if area_label_ok {
@@ -4156,7 +4735,7 @@ fn build_tile_buffers_from_features_profiled(
                 labels.push(label);
             }
         }
-        let source_layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+        let source_layer = way.tags.get("layer").unwrap_or("");
         if !structural_bridge_area_visible(source_layer, buildings_3d) {
             continue;
         }
@@ -4164,10 +4743,8 @@ fn build_tile_buffers_from_features_profiled(
             continue;
         };
         let feature_key = way
-            .tags
-            .get(MVT_INTERNAL_FEATURE_KEY)
-            .cloned()
-            .unwrap_or_else(|| format!("way:{}", prepared_way.way_index));
+            .feature_group
+            .unwrap_or(u64::MAX - prepared_way.way_index as u64);
         let pattern = fill_pattern_shape(&way.tags);
         let alpha = fill_alpha_for_tags(&way.tags);
         let group_key = (feature_key, color, pattern.to_bits() ^ alpha.to_bits());
@@ -4176,7 +4753,7 @@ fn build_tile_buffers_from_features_profiled(
         } else {
             let index = fill_groups.len();
             fill_group_lookup.insert(group_key, index);
-            let mvt_layer = way.tags.get("layer").map(|v| v.as_str()).unwrap_or("");
+            let mvt_layer = way.tags.get("layer").unwrap_or("");
             let deckable =
                 matches!(mvt_layer, "street_polygons" | "streets_med" | "streets_low")
                     && !tag_is_truthy(&way.tags, "tunnel");
@@ -4203,7 +4780,7 @@ fn build_tile_buffers_from_features_profiled(
                 baked,
                 material: fill_material_for_tags(&way.tags),
                 late: matches!(
-                    way.tags.get("layer").map(|v| v.as_str()),
+                    way.tags.get("layer"),
                     Some("gemeenten" | "wijken" | "buurten")
                 ),
                 deck_m,
@@ -4217,7 +4794,7 @@ fn build_tile_buffers_from_features_profiled(
         // Road-surface polygons join the road tier unions instead of the
         // fill pipeline: the junction plaza and its road class must be ONE
         // surface (2D reference: plazas paint over minor-road centers).
-        let plaza_layer = way.tags.get("layer").map(|v| v.as_str()).unwrap_or("");
+        let plaza_layer = way.tags.get("layer").unwrap_or("");
         if build_road_core
             && matches!(plaza_layer, "street_polygons" | "streets_med" | "streets_low")
             && !tag_is_truthy(&way.tags, "tunnel")
@@ -4231,11 +4808,7 @@ fn build_tile_buffers_from_features_profiled(
             ));
             continue;
         }
-        let ring_order = way
-            .tags
-            .get(MVT_INTERNAL_RING_INDEX_KEY)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(order);
+        let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
         let signed_area = polygon_signed_area(&ring_points);
         if signed_area.abs() <= POLYGON_AREA_EPSILON {
             continue;
@@ -5366,7 +5939,7 @@ fn build_tile_buffers_from_features_profiled(
         // handful inherit highway-like OSM tags; letting those fall through
         // stroke styling made the supposedly stable road core differ between
         // flat and tilted bakes and could add spurious road slivers.
-        if way.tags.get("layer").map(String::as_str) == Some("detail_buildings") {
+        if way.tags.get("layer") == Some("detail_buildings") {
             continue;
         }
         // Road labels are mode-independent but are cheap to extract. Keep
@@ -5381,7 +5954,7 @@ fn build_tile_buffers_from_features_profiled(
         // street polygons and their centerline stroke style is None, but
         // the direction arrows must survive.
         let implicit_oneway = matches!(
-            way.tags.get("junction").map(|v| v.as_str()),
+            way.tags.get("junction"),
             Some("roundabout") | Some("circular")
         );
         let arrow_reverse = (render_zoom >= 15
@@ -5428,7 +6001,6 @@ fn build_tile_buffers_from_features_profiled(
                 px_to_units,
             ) {
                 stroke_jobs.push(StrokeDrawJob {
-                    sort_rank: dots.sort_rank,
                     style: dots,
                     points: prepared_way.points.clone(),
                     solid_road_surface: false,
@@ -5455,7 +6027,6 @@ fn build_tile_buffers_from_features_profiled(
                 };
             }
             stroke_jobs.push(StrokeDrawJob {
-                sort_rank: style.sort_rank,
                 style,
                 points: prepared_way.points.clone(),
                 solid_road_surface,
@@ -5491,9 +6062,9 @@ fn build_tile_buffers_from_features_profiled(
     profiler.lap("buildings", &format!("fill={}KB", fill_3d_vertices.len() * 4 / 1024));
 
     let mut union_tiers =
-        HashMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
-    let mut union_way_meta = HashMap::<RoadSurfaceKey, Vec<RoadJoinMeta>>::new();
-    let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
+        BTreeMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
+    let mut union_way_meta = BTreeMap::<RoadSurfaceKey, Vec<RoadJoinMeta>>::new();
+    let mut grouped_strokes = BTreeMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in stroke_jobs {
         if job.solid_road_surface {
             let key = job
@@ -5513,7 +6084,6 @@ fn build_tile_buffers_from_features_profiled(
     for (_key, (style, polylines)) in grouped_strokes {
         for points in merge_stroke_polylines(&polylines) {
             merged_stroke_jobs.push(StrokeDrawJob {
-                sort_rank: style.sort_rank,
                 style,
                 points,
                 solid_road_surface: false,
@@ -5526,13 +6096,7 @@ fn build_tile_buffers_from_features_profiled(
 
     // Deterministic paint order: rank, then style bits (HashMap iteration
     // order must not leak into the render).
-    merged_stroke_jobs.sort_unstable_by_key(|job| {
-        (
-            job.sort_rank,
-            job.style.center.color,
-            job.style.center.width.to_bits(),
-        )
-    });
+    merged_stroke_jobs.sort_unstable_by_key(|job| StrokeStyleKey::from(job.style));
     let clip_bounds = tile_clip_bounds(ROAD_PAINT_CLIP_PADDING);
     // Overzoomed tiles magnify the source tile's coordinate quantization
     // into visibly angular curves (ovals read as polygons at 8-16x). A
@@ -5571,9 +6135,12 @@ fn build_tile_buffers_from_features_profiled(
     // deck profile. MVT feature boundaries often put a slip-road endpoint
     // against the middle of its mainline's segment rather than at a shared
     // node, so the exact-node joint pass below cannot discover this case.
-    let mut join_ways: Vec<RoadTierJoinWay> = union_tiers
+    let mut sorted_tier_keys: Vec<RoadSurfaceKey> = union_tiers.keys().copied().collect();
+    sorted_tier_keys.sort_unstable();
+    let mut join_ways: Vec<RoadTierJoinWay> = sorted_tier_keys
         .iter()
-        .flat_map(|(key, (style, ways))| {
+        .flat_map(|key| {
+            let (style, ways) = &union_tiers[key];
             let half_width = style
                 .casing
                 .map_or(style.center.width, |casing| {
@@ -6060,6 +6627,7 @@ fn build_tile_buffers_from_features_profiled(
             buildings: std::mem::take(&mut captured_building_groups),
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
+        recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
         return TileBuffers {
             pin_hits: Vec::new(),
             fill_indices: Vec::new(),
@@ -7018,6 +7586,35 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         String::new()
     };
+    remember_output_capacity_hints(
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+        OutputCapacityHints {
+            labels: labels.len(),
+            pin_hits: pin_hits.len(),
+            icon_jobs: icon_jobs.len(),
+            tree_points: tree_points_3d.len(),
+            signal_points: signal_points_3d.len(),
+            fill_indices: fill_indices.len() + fill_3d_indices.len(),
+            fill_vertices: fill_vertices.len() + fill_3d_vertices.len(),
+            casing_indices: casing_indices.len(),
+            casing_vertices: casing_vertices.len(),
+            stroke_indices: stroke_indices.len(),
+            stroke_vertices: stroke_vertices.len(),
+            icon_indices: icon_indices.len(),
+            icon_vertices: icon_vertices.len(),
+            shadow_instances: shadow_disc_instances.len(),
+            wall_instances: wall_instances.len(),
+            tree_template_vertices: tree_template_vertices.len(),
+            tree_template_indices: tree_template_indices.len(),
+            tree_cross_template_vertices: tree_cross_template_vertices.len(),
+            tree_cross_template_indices: tree_cross_template_indices.len(),
+            tree_instances: tree_instances.len(),
+            road_icon_indices: road_icon_indices.len(),
+            road_icon_vertices: road_icon_vertices.len(),
+        },
+    );
     let mut icon_vertices = icon_vertices;
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
@@ -7087,6 +7684,7 @@ fn build_tile_buffers_from_features_profiled(
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
     let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);
+    recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -8196,14 +8794,15 @@ pub trait MvtSink {
     /// of keys per feature (multilingual names, addr:*) that no consumer
     /// below the icon zooms ever reads.
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
-        None
+        Some(point_keys())
     }
     fn add_path(
         &mut self,
         tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     );
     fn add_point(
@@ -8211,8 +8810,16 @@ pub trait MvtSink {
         tile_key: TileKey,
         extent: u32,
         point: (i32, i32),
-        tags: HashMap<String, String>,
+        tags: TagSet,
     );
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MvtPathMeta {
+    pub feature_index: u32,
+    pub path_index: u32,
+    /// Parse-local identity shared by all rings of one polygon feature.
+    pub feature_group: Option<u64>,
 }
 
 /// Collects MVT features directly in tile-local f32 coordinates with
@@ -8242,12 +8849,17 @@ const DETAIL_WAY_KEYS: &[&str] = &[
     "name", "attraction", "zoo", "tourism", "public_transport", "landuse", "leisure",
     "natural", "building", "building:part", "height", "building:levels", "min_height",
     "building:min_level", "location", "place", "parking", "surface", "access", "service",
-    "link", "rail", "waterway", "ref",
+    "link", "rail", "waterway", "ref", "boundary", "class", "subclass", "kind",
+    "junction", "oneway", "oneway_reverse", "mode", "osm_layer", "bouwjaar",
+    "aantal_inwoners", "buurtcode", "wijkcode", "gemeentecode", "naam", "naam_n2k",
+    "buurtnaam", "wijknaam", "gemeentenaam",
+    "__makepad_osm_id", "__makepad_osm_type", "L", "F", "P", "dz", "hw",
 ];
 
 const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
     "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office", "operator",
-    "shop", "osm_layer", "kerb", "bus", "shelter",
+    "shop", "kerb", "bus", "shelter", "housename", "housenumber", "station",
+    "population", "evses", "city", "connectors", "name:latin", "name:en", "name_int",
 ];
 
 static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
@@ -8271,7 +8883,7 @@ struct MvtLocalCollector {
     min_dist_sq: f32,
     next_feature_id: u64,
     ways: Vec<TileWay>,
-    points: Vec<((f32, f32), HashMap<String, String>)>,
+    points: Vec<((f32, f32), TagSet)>,
     /// Baked dense deck profiles keyed (source layer, feature index, path
     /// index) — validated and substituted during collection.
     base_dz: HashMap<(String, u32, u32), BaseDzProfile>,
@@ -8280,14 +8892,46 @@ struct MvtLocalCollector {
 impl MvtLocalCollector {
     fn new(render_scale: f32) -> Self {
         let min_dist = 0.35 / render_scale.max(0.001);
+        let (mut ways, mut points) = BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            (
+                scratch.way_buffers.pop().unwrap_or_default(),
+                scratch.point_buffers.pop().unwrap_or_default(),
+            )
+        });
+        ways.clear();
+        points.clear();
         Self {
             layer_filter: LayerParseFilter::All,
             min_dist_sq: min_dist * min_dist,
             next_feature_id: 1,
-            ways: Vec::new(),
-            points: Vec::new(),
+            ways,
+            points,
             base_dz: HashMap::new(),
         }
+    }
+}
+
+impl Drop for MvtLocalCollector {
+    fn drop(&mut self) {
+        while let Some(way) = self.ways.pop() {
+            let TileWay { points, tags, dz, .. } = way;
+            // Drop the tag view before borrowing the scratch slot: the
+            // last arena reference recycles its own buffers into that slot.
+            drop(tags);
+            recycle_way_points(points);
+            if let Some(dz) = dz {
+                recycle_way_dz(dz);
+            }
+        }
+        self.points.clear();
+        let mut ways = std::mem::take(&mut self.ways);
+        let mut points = std::mem::take(&mut self.points);
+        let _ = BAKE_SCRATCH.try_with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.way_buffers.push(std::mem::take(&mut ways));
+            scratch.point_buffers.push(std::mem::take(&mut points));
+        });
     }
 }
 
@@ -8316,33 +8960,9 @@ impl MvtSink for MvtLocalCollector {
     }
 
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
-        // Every key the detail-merge way consumers (corridors, barriers,
-        // platforms, attraction/pedestrian/green rings, building extrusion)
-        // or downstream styling of their rewritten layers can read. Point
-        // features are the one consumer with an open-ended key set
-        // (micro_icon_for_tags), so the whitelist only arms when the point
-        // layers are off — below the icon zooms, exactly where the tag mass
-        // hurts.
-        // Point layers add the (bounded) icon-matcher key set: every key
-        // icons.rs or the point/attraction routing in merge_detail_features
-        // reads. micro POIs carry dozens of address/name-translation tags
-        // that nothing consumes — at the kf16 icon horizon this parse was
-        // ~140ms/tile with the whitelist forced off.
-        #[cfg(not(target_arch = "wasm32"))]
-        static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        #[cfg(not(target_arch = "wasm32"))]
-        let no_whitelist =
-            *NO_WHITELIST.get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some());
-        #[cfg(target_arch = "wasm32")]
-        let no_whitelist = false;
-        if no_whitelist {
-            return None;
-        }
-        match self.layer_filter {
-            LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
-            LayerParseFilter::DetailLayers { points: true, .. } => Some(point_keys()),
-            _ => None,
-        }
+        // Applied in every parse mode. This is the complete bounded union
+        // consumed by styling, labels, overlays, detail merge and icons.
+        Some(point_keys())
     }
 
     fn add_path(
@@ -8350,7 +8970,8 @@ impl MvtSink for MvtLocalCollector {
         _tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        mut tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     ) {
         if points.len() < 2 {
@@ -8359,54 +8980,32 @@ impl MvtSink for MvtLocalCollector {
         // Baked dz joins on (source layer, feature idx, path idx). Its dense
         // geometry replaces the sparse base path only when both raw
         // endpoints still match, so a stale bake fails closed.
-        let feature_index = tags.remove(MVT_INTERNAL_FIDX_KEY);
-        let path_index = tags.remove(MVT_INTERNAL_PIDX_KEY);
         let scale = TILE_SIZE as f32 / extent.max(1) as f32;
         let profile = if self.base_dz.is_empty() {
             None
         } else {
-            match (tags.get("layer"), feature_index.as_deref(), path_index) {
-                (Some(layer), Some(fidx), Some(pidx)) => {
-                    match (fidx.parse::<u32>(), pidx.parse::<u32>()) {
-                        (Ok(fidx), Ok(pidx)) => self
-                            .base_dz
-                            .get(&(layer.clone(), fidx, pidx))
-                            .and_then(|profile| {
-                                base_dz_profile_projected_points(
-                                    profile, points, scale, close,
-                                )
-                                .map(|projected| BaseDzProfile {
-                                    points: projected,
-                                    decks: profile.decks.clone(),
-                                })
-                            }),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
+            tags.get("layer").and_then(|layer| {
+                self.base_dz
+                    .get(&(layer.to_string(), meta.feature_index, meta.path_index))
+                    .and_then(|profile| {
+                        base_dz_profile_projected_points(profile, points, scale, close).map(
+                            |projected| BaseDzProfile {
+                                points: projected,
+                                decks: profile.decks.clone(),
+                            },
+                        )
+                    })
+            })
         };
-        let source: Vec<((f32, f32), Option<f32>)> = if let Some(profile) = profile {
-            profile
-                .points
-                .into_iter()
-                .zip(profile.decks.into_iter().map(Some))
-                .collect()
-        } else {
-            points
-                .iter()
-                .map(|&(x, y)| ((x as f32 * scale, y as f32 * scale), None))
-                .collect()
-        };
-        let mut out = Vec::<(f32, f32)>::with_capacity(source.len() + 1);
-        let mut out_dz = Vec::<f32>::new();
+        let source_len = profile.as_ref().map_or(points.len(), |profile| profile.points.len());
+        let (mut out, mut out_dz) = take_way_geometry_buffers(source_len);
         let mut last: Option<(f32, f32)> = None;
-        for (point, deck) in source {
+        let mut push_point = |point: (f32, f32), deck: Option<f32>| {
             if let Some(prev) = last {
                 let dx = point.0 - prev.0;
                 let dy = point.1 - prev.1;
                 if dx * dx + dy * dy < self.min_dist_sq {
-                    continue;
+                    return;
                 }
             }
             out.push(point);
@@ -8414,8 +9013,19 @@ impl MvtSink for MvtLocalCollector {
                 out_dz.push(deck);
             }
             last = Some(point);
+        };
+        if let Some(profile) = profile {
+            for (point, deck) in profile.points.into_iter().zip(profile.decks) {
+                push_point(point, Some(deck));
+            }
+        } else {
+            for &(x, y) in points {
+                push_point((x as f32 * scale, y as f32 * scale), None);
+            }
         }
         if out.len() < 2 {
+            recycle_way_points(out);
+            recycle_way_dz(out_dz);
             return;
         }
         if close {
@@ -8426,17 +9036,25 @@ impl MvtSink for MvtLocalCollector {
                 }
             }
             if out.len() < 4 {
+                recycle_way_points(out);
+                recycle_way_dz(out_dz);
                 return;
             }
         }
-        let dz = (!out_dz.is_empty() && out_dz.iter().any(|&v| v.abs() > 0.05))
-            .then_some(out_dz);
+        let dz = if !out_dz.is_empty() && out_dz.iter().any(|&v| v.abs() > 0.05) {
+            Some(out_dz)
+        } else {
+            recycle_way_dz(out_dz);
+            None
+        };
         self.ways.push(TileWay {
             points: out,
             tags,
             closed: close,
             dz,
-            fidx: feature_index.as_deref().and_then(|v| v.parse::<u32>().ok()),
+            fidx: Some(meta.feature_index),
+            feature_group: meta.feature_group,
+            ring_index: Some(meta.path_index),
         });
     }
 
@@ -8445,7 +9063,7 @@ impl MvtSink for MvtLocalCollector {
         _tile_key: TileKey,
         extent: u32,
         point: (i32, i32),
-        tags: HashMap<String, String>,
+        tags: TagSet,
     ) {
         let scale = TILE_SIZE as f32 / extent.max(1) as f32;
         self.points
@@ -8480,37 +9098,6 @@ impl MvtGeomType {
             2 => Self::LineString,
             3 => Self::Polygon,
             _ => Self::Unknown,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-enum MvtValue {
-    String(String),
-    Float(f32),
-    Double(f64),
-    Int(i64),
-    UInt(u64),
-    SInt(i64),
-    Bool(bool),
-}
-
-impl MvtValue {
-    fn to_tag_string(&self) -> String {
-        match self {
-            Self::String(value) => value.clone(),
-            Self::Float(value) => format!("{}", value),
-            Self::Double(value) => format!("{}", value),
-            Self::Int(value) => format!("{}", value),
-            Self::UInt(value) => format!("{}", value),
-            Self::SInt(value) => format!("{}", value),
-            Self::Bool(value) => {
-                if *value {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
         }
     }
 }
@@ -9292,7 +9879,7 @@ fn emit_baked_fill_body(
 pub fn parse_mvt_tile(
     tile_data: &[u8],
     tile_key: TileKey,
-    builder: &mut impl MvtSink,
+    builder: &mut (impl MvtSink + ?Sized),
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     while pos < tile_data.len() {
@@ -9310,17 +9897,25 @@ pub fn parse_mvt_tile(
     Ok(())
 }
 
+fn parse_mvt_tile_erased(
+    tile_data: &[u8],
+    tile_key: TileKey,
+    builder: &mut dyn MvtSink,
+) -> Result<(), String> {
+    parse_mvt_tile(tile_data, tile_key, builder)
+}
+
 fn parse_mvt_layer(
     layer_data: &[u8],
     tile_key: TileKey,
-    builder: &mut impl MvtSink,
+    builder: &mut (impl MvtSink + ?Sized),
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     let mut layer_name = String::new();
     let mut extent = 4096_u32;
     let mut features = Vec::<&[u8]>::new();
-    let mut keys = Vec::<String>::new();
-    let mut values = Vec::<MvtValue>::new();
+    let mut raw_keys = Vec::<&[u8]>::new();
+    let mut raw_values = Vec::<&[u8]>::new();
 
     while pos < layer_data.len() {
         let key = read_pb_varint(layer_data, &mut pos)?;
@@ -9332,14 +9927,8 @@ fn parse_mvt_layer(
                 layer_name = String::from_utf8_lossy(slice).into_owned();
             }
             (2, 2) => features.push(read_pb_len_slice(layer_data, &mut pos)?),
-            (3, 2) => {
-                let slice = read_pb_len_slice(layer_data, &mut pos)?;
-                keys.push(String::from_utf8_lossy(slice).into_owned());
-            }
-            (4, 2) => {
-                let value = parse_mvt_value(read_pb_len_slice(layer_data, &mut pos)?)?;
-                values.push(value);
-            }
+            (3, 2) => raw_keys.push(read_pb_len_slice(layer_data, &mut pos)?),
+            (4, 2) => raw_values.push(read_pb_len_slice(layer_data, &mut pos)?),
             (5, 0) => extent = read_pb_varint(layer_data, &mut pos)? as u32,
             _ => skip_pb_field(layer_data, &mut pos, wire)?,
         }
@@ -9351,178 +9940,473 @@ fn parse_mvt_layer(
     if !builder.wants_layer(&layer_name) {
         return Ok(());
     }
-    // Key-level lazy skip: one bool per key-table entry.
-    let key_wanted: Option<Vec<bool>> = builder.tag_key_whitelist(&layer_name).map(|whitelist| {
-        keys.iter()
-            .map(|key| whitelist.contains(&key.as_str()))
-            .collect()
-    });
+    let mut scratch = ParseScratchLease::take();
+    // Resolve raw key-table slots to compact ids once. Even a sink asking
+    // for all tags is capped by the engine's consumer whitelist: discarded
+    // keys and the values referenced only by them are never decoded.
+    let sink_whitelist = builder.tag_key_whitelist(&layer_name).unwrap_or(point_keys());
+    let TagArenaBuffers { mut strings, mut keys, mut values, mut pairs } =
+        take_tag_arena_buffers();
+    strings.clear();
+    keys.clear();
+    values.clear();
+    pairs.clear();
+    let key_ids = &mut scratch.key_ids;
+    key_ids.clear();
+    if key_ids.capacity() < raw_keys.len() {
+        key_ids.reserve(raw_keys.len());
+    }
+    for raw in raw_keys {
+        let wanted = std::str::from_utf8(raw).ok().filter(|key| {
+            point_keys().contains(key) && sink_whitelist.contains(key)
+        });
+        if let Some(key) = wanted {
+            let id = arena_key_id(&mut strings, &mut keys, key)?;
+            key_ids.push(Some(id));
+        } else {
+            key_ids.push(None);
+        }
+    }
+
+    let raw_pairs = &mut scratch.raw_tag_pairs;
+    raw_pairs.clear();
+    let wanted_values = &mut scratch.wanted_values;
+    wanted_values.clear();
+    wanted_values.resize(raw_values.len(), false);
+    let mut pending = Vec::<PendingMvtFeature<'_>>::with_capacity(features.len());
     for (feature_index, feature_data) in features.into_iter().enumerate() {
-        parse_mvt_feature(
+        if let Some(feature) = scan_mvt_feature(
             feature_index as u32,
             feature_data,
+            &key_ids,
+            raw_pairs,
+            wanted_values,
+        )? {
+            pending.push(feature);
+        }
+    }
+
+    let value_ids = &mut scratch.value_ids;
+    value_ids.clear();
+    value_ids.resize(raw_values.len(), None);
+    for (raw_index, (raw, wanted)) in raw_values
+        .into_iter()
+        .zip(wanted_values.iter().copied())
+        .enumerate()
+    {
+        if wanted {
+            let value_id = parse_mvt_value_into(raw, &mut strings, &mut values)?;
+            value_ids[raw_index] = Some(value_id);
+        }
+    }
+
+    let needed_pairs = raw_pairs.len() + pending.len() * 2;
+    if pairs.capacity() < needed_pairs {
+        pairs.reserve(needed_pairs);
+    }
+    let layer_key = arena_key_id(&mut strings, &mut keys, "layer")?;
+    let layer_value = arena_value_id(&mut strings, &mut values, &layer_name)?;
+    let static_values = &mut scratch.static_tag_values;
+    static_values.clear();
+    for feature in &mut pending {
+        let start = pairs.len();
+        for &(key_id, raw_value_id) in
+            &raw_pairs[feature.raw_tags.start..feature.raw_tags.end]
+        {
+            if let Some(value_id) = value_ids.get(raw_value_id as usize).copied().flatten() {
+                pairs.push((key_id, value_id));
+            }
+        }
+        normalize_arena_tags(
             &layer_name,
-            &keys,
-            &values,
-            key_wanted.as_deref(),
+            feature.geom_type,
+            &mut strings,
+            &mut keys,
+            &mut values,
+            static_values,
+            layer_key,
+            layer_value,
+            &mut pairs,
+            start,
+        )?;
+        feature.tags = u32::try_from(start).map_err(|_| "mvt tag arena exceeds u32".to_string())?
+            ..u32::try_from(pairs.len()).map_err(|_| "mvt tag arena exceeds u32".to_string())?;
+    }
+
+    let arena = Arc::new(TagArena { strings, keys, values, pairs });
+    for feature in pending {
+        parse_mvt_feature(
+            feature,
+            arena.clone(),
             extent,
             tile_key,
             builder,
+            &mut scratch.geometry_cmds,
+            &mut scratch.geometry_path,
         )?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn parse_mvt_feature(
+struct PendingMvtFeature<'a> {
     feature_index: u32,
-    feature_data: &[u8],
-    layer_name: &str,
-    keys: &[String],
-    values: &[MvtValue],
-    key_wanted: Option<&[bool]>,
-    extent: u32,
-    tile_key: TileKey,
-    builder: &mut impl MvtSink,
-) -> Result<(), String> {
-    let mut pos = 0_usize;
-    let mut feature_id: Option<u64> = None;
-    let mut tag_indexes = Vec::<u32>::new();
-    let mut geom_type = MvtGeomType::Unknown;
-    let mut geometry_cmds = Vec::<u32>::new();
+    geom_type: MvtGeomType,
+    geometry: &'a [u8],
+    raw_tags: Range<usize>,
+    tags: Range<u32>,
+}
 
+fn scan_mvt_feature<'a>(
+    feature_index: u32,
+    feature_data: &'a [u8],
+    key_ids: &[Option<u16>],
+    raw_pairs: &mut Vec<(u16, u32)>,
+    wanted_values: &mut [bool],
+) -> Result<Option<PendingMvtFeature<'a>>, String> {
+    let start = raw_pairs.len();
+    let mut pos = 0_usize;
+    let mut geom_type = MvtGeomType::Unknown;
+    let mut geometry = &[][..];
     while pos < feature_data.len() {
         let key = read_pb_varint(feature_data, &mut pos)?;
         let field = (key >> 3) as u32;
         let wire = (key & 0x7) as u8;
         match (field, wire) {
-            (1, 0) => feature_id = Some(read_pb_varint(feature_data, &mut pos)?),
             (2, 2) => {
                 let packed = read_pb_len_slice(feature_data, &mut pos)?;
-                tag_indexes = read_packed_u32(packed)?;
+                let mut tag_pos = 0;
+                while tag_pos < packed.len() {
+                    let key_index = read_pb_varint(packed, &mut tag_pos)? as usize;
+                    if tag_pos >= packed.len() {
+                        break;
+                    }
+                    let value_index = read_pb_varint(packed, &mut tag_pos)? as usize;
+                    let Some(Some(key_id)) = key_ids.get(key_index) else {
+                        continue;
+                    };
+                    if value_index >= wanted_values.len() {
+                        continue;
+                    }
+                    wanted_values[value_index] = true;
+                    raw_pairs.push((*key_id, value_index as u32));
+                }
             }
             (3, 0) => geom_type = MvtGeomType::from_u64(read_pb_varint(feature_data, &mut pos)?),
-            (4, 2) => {
-                let packed = read_pb_len_slice(feature_data, &mut pos)?;
-                geometry_cmds = read_packed_u32(packed)?;
-            }
+            (4, 2) => geometry = read_pb_len_slice(feature_data, &mut pos)?,
             _ => skip_pb_field(feature_data, &mut pos, wire)?,
         }
     }
-
     if geom_type == MvtGeomType::Unknown {
-        return Ok(());
+        raw_pairs.truncate(start);
+        return Ok(None);
     }
+    Ok(Some(PendingMvtFeature {
+        feature_index,
+        geom_type,
+        geometry,
+        raw_tags: start..raw_pairs.len(),
+        tags: 0..0,
+    }))
+}
 
-    let mut tags = HashMap::<String, String>::new();
-    for pair in tag_indexes.chunks_exact(2) {
-        let key_index = pair[0] as usize;
-        let value_index = pair[1] as usize;
-        if let Some(wanted) = key_wanted {
-            if !wanted.get(key_index).copied().unwrap_or(false) {
-                continue;
-            }
-        }
-        let Some(key) = keys.get(key_index) else {
-            continue;
-        };
-        let Some(value) = values.get(value_index) else {
-            continue;
-        };
-        tags.insert(key.clone(), value.to_tag_string());
-    }
-    normalize_mvt_tags(layer_name, geom_type, &mut tags);
-
-    let paths = decode_mvt_geometry(&geometry_cmds, geom_type)?;
-    if geom_type == MvtGeomType::Point {
+fn parse_mvt_feature(
+    feature: PendingMvtFeature<'_>,
+    arena: Arc<TagArena>,
+    extent: u32,
+    tile_key: TileKey,
+    builder: &mut (impl MvtSink + ?Sized),
+    geometry_cmds: &mut Vec<u32>,
+    geometry_path: &mut Vec<(i32, i32)>,
+) -> Result<(), String> {
+    let tags = TagSet::from_arena(arena, feature.tags);
+    if feature.geom_type == MvtGeomType::Point {
         if !should_emit_mvt_point_label_feature(&tags) {
             return Ok(());
         }
-        for path in paths {
-            let Some(point) = path.first().copied() else {
-                continue;
-            };
+        decode_mvt_points(feature.geometry, |point| {
             builder.add_point(tile_key, extent, point, tags.clone());
-        }
+        })?;
         return Ok(());
     }
 
-    let polygon_feature_key = if geom_type == MvtGeomType::Polygon {
-        let raw_id = feature_id.unwrap_or_else(|| builder.alloc_feature_id());
-        Some(format!("{}:{}", layer_name, raw_id))
+    read_packed_u32_into(feature.geometry, geometry_cmds)?;
+    let feature_group = if feature.geom_type == MvtGeomType::Polygon {
+        Some(builder.alloc_feature_id())
     } else {
         None
     };
-
-    for (ring_index, mut path) in paths.into_iter().enumerate() {
+    decode_mvt_geometry_each(
+        geometry_cmds.as_slice(),
+        feature.geom_type,
+        geometry_path,
+        |ring_index, path| {
         if path.len() < 2 {
-            continue;
+            return;
         }
-        let close = geom_type == MvtGeomType::Polygon;
-        if close && path.first().copied() != path.last().copied() {
-            if let Some(first) = path.first().copied() {
-                path.push(first);
-            }
-        }
+        let close = feature.geom_type == MvtGeomType::Polygon;
         if close && path.len() < 4 {
-            continue;
+            return;
         }
-        let mut path_tags = tags.clone();
-        if let Some(feature_key) = &polygon_feature_key {
-            path_tags.insert(MVT_INTERNAL_FEATURE_KEY.to_string(), feature_key.clone());
-            path_tags.insert(
-                MVT_INTERNAL_RING_INDEX_KEY.to_string(),
-                ring_index.to_string(),
-            );
-        }
-        // Join keys for the baked base_dz overlay: feature index within
-        // the source layer + path index within the feature, in decode
-        // order (the bake tool enumerates identically).
-        path_tags.insert(MVT_INTERNAL_FIDX_KEY.to_string(), feature_index.to_string());
-        path_tags.insert(MVT_INTERNAL_PIDX_KEY.to_string(), ring_index.to_string());
-        builder.add_path(tile_key, extent, &path, path_tags, close);
-    }
+        builder.add_path(
+            tile_key,
+            extent,
+            path,
+            tags.clone(),
+            MvtPathMeta {
+                feature_index: feature.feature_index,
+                path_index: ring_index as u32,
+                feature_group,
+            },
+            close,
+        );
+        },
+    )?;
 
     Ok(())
 }
 
-fn normalize_mvt_tags(
+fn decode_mvt_geometry_each(
+    commands: &[u32],
+    geom_type: MvtGeomType,
+    path: &mut Vec<(i32, i32)>,
+    mut emit: impl FnMut(usize, &[(i32, i32)]),
+) -> Result<(), String> {
+    path.clear();
+    let mut x = 0_i32;
+    let mut y = 0_i32;
+    let mut index = 0_usize;
+    let mut path_index = 0_usize;
+    let flush = |path: &mut Vec<(i32, i32)>, path_index: &mut usize, emit: &mut dyn FnMut(usize, &[(i32, i32)])| {
+        if path.is_empty() {
+            return;
+        }
+        emit(*path_index, path);
+        *path_index += 1;
+        path.clear();
+    };
+    while index < commands.len() {
+        let header = commands[index];
+        index += 1;
+        let command_id = header & 0x7;
+        let count = header >> 3;
+        match command_id {
+            1 => {
+                for _ in 0..count {
+                    flush(path, &mut path_index, &mut emit);
+                    if index + 1 >= commands.len() {
+                        return Err("mvt geometry move_to missing arguments".to_string());
+                    }
+                    x = x.wrapping_add(zigzag_decode_u32(commands[index]));
+                    y = y.wrapping_add(zigzag_decode_u32(commands[index + 1]));
+                    index += 2;
+                    path.push((x, y));
+                }
+            }
+            2 => {
+                for _ in 0..count {
+                    if index + 1 >= commands.len() {
+                        return Err("mvt geometry line_to missing arguments".to_string());
+                    }
+                    x = x.wrapping_add(zigzag_decode_u32(commands[index]));
+                    y = y.wrapping_add(zigzag_decode_u32(commands[index + 1]));
+                    index += 2;
+                    path.push((x, y));
+                }
+            }
+            7 => {
+                if geom_type == MvtGeomType::Polygon && !path.is_empty() {
+                    let first = path[0];
+                    if path.last().copied() != Some(first) {
+                        path.push(first);
+                    }
+                }
+            }
+            _ => return Err(format!("mvt geometry unknown command {}", command_id)),
+        }
+    }
+    flush(path, &mut path_index, &mut emit);
+    Ok(())
+}
+
+fn decode_mvt_points(
+    commands: &[u8],
+    mut emit: impl FnMut((i32, i32)),
+) -> Result<(), String> {
+    let mut pos = 0_usize;
+    let mut x = 0_i32;
+    let mut y = 0_i32;
+    while pos < commands.len() {
+        let header = read_pb_varint(commands, &mut pos)? as u32;
+        let command_id = header & 0x7;
+        let count = header >> 3;
+        match command_id {
+            1 => {
+                for _ in 0..count {
+                    x = x.wrapping_add(zigzag_decode_u32(
+                        read_pb_varint(commands, &mut pos)? as u32,
+                    ));
+                    y = y.wrapping_add(zigzag_decode_u32(
+                        read_pb_varint(commands, &mut pos)? as u32,
+                    ));
+                    emit((x, y));
+                }
+            }
+            7 => {}
+            _ => return Err(format!("mvt point geometry unknown command {}", command_id)),
+        }
+    }
+    Ok(())
+}
+
+fn push_arena_string(
+    strings: &mut String,
+    ranges: &mut Vec<(u32, u32)>,
+    value: &str,
+) -> Result<u32, String> {
+    let start = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    strings.push_str(value);
+    let end = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    let id = u32::try_from(ranges.len()).map_err(|_| "mvt string table exceeds u32".to_string())?;
+    ranges.push((start, end));
+    Ok(id)
+}
+
+fn arena_string<'a>(
+    strings: &'a str,
+    ranges: &[(u32, u32)],
+    id: u32,
+) -> Option<&'a str> {
+    let range = *ranges.get(id as usize)?;
+    strings.get(range.0 as usize..range.1 as usize)
+}
+
+fn arena_key_id(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    key: &str,
+) -> Result<u16, String> {
+    if let Some(index) = keys
+        .iter()
+        .position(|&(start, end)| strings.get(start as usize..end as usize) == Some(key))
+    {
+        return u16::try_from(index).map_err(|_| "mvt key table exceeds u16".to_string());
+    }
+    let id = u16::try_from(keys.len()).map_err(|_| "mvt key table exceeds u16".to_string())?;
+    push_arena_string(strings, keys, key)?;
+    Ok(id)
+}
+
+fn arena_value_id(
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+    value: &str,
+) -> Result<u32, String> {
+    if let Some(index) = values.iter().position(|&range| {
+        strings.get(range.0 as usize..range.1 as usize) == Some(value)
+    }) {
+        return u32::try_from(index).map_err(|_| "mvt value table exceeds u32".to_string());
+    }
+    push_arena_string(strings, values, value)
+}
+
+fn arena_tag_value_id(
+    strings: &str,
+    keys: &[(u32, u32)],
+    pairs: &[(u16, u32)],
+    start: usize,
+    key: &str,
+) -> Option<u32> {
+    pairs[start..].iter().rev().find_map(|&(key_id, value_id)| {
+        (arena_string(strings, keys, key_id as u32)? == key).then_some(value_id)
+    })
+}
+
+fn arena_ensure_tag(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    values: &mut Vec<(u32, u32)>,
+    static_values: &mut Vec<(&'static str, u32)>,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+    key: &str,
+    value: &'static str,
+) -> Result<(), String> {
+    if arena_tag_value_id(strings, keys, pairs, start, key).is_none() {
+        let key_id = arena_key_id(strings, keys, key)?;
+        let value_id = if let Some(id) = static_values
+            .iter()
+            .find_map(|&(known, id)| (known == value).then_some(id))
+        {
+            id
+        } else {
+            let id = arena_value_id(strings, values, value)?;
+            static_values.push((value, id));
+            id
+        };
+        pairs.push((key_id, value_id));
+    }
+    Ok(())
+}
+
+fn arena_ensure_tag_value_id(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+    key: &str,
+    value_id: u32,
+) -> Result<(), String> {
+    if arena_tag_value_id(strings, keys, pairs, start, key).is_none() {
+        pairs.push((arena_key_id(strings, keys, key)?, value_id));
+    }
+    Ok(())
+}
+
+fn normalize_arena_tags(
     layer_name: &str,
     geom_type: MvtGeomType,
-    tags: &mut HashMap<String, String>,
-) {
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    values: &mut Vec<(u32, u32)>,
+    static_values: &mut Vec<(&'static str, u32)>,
+    layer_key: u16,
+    layer_value: u32,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+) -> Result<(), String> {
     // The source-layer name OWNS the "layer" key. OSM's own layer=-1/1
     // stacking tag collides with it and silently broke recognition of any
     // layer-tagged feature (the Artis zoo way, bridges, tunnels) — keep
     // the OSM value under "osm_layer" instead.
-    if let Some(previous) = tags.insert("layer".to_string(), layer_name.to_string()) {
-        if previous != layer_name {
-            tags.insert("osm_layer".to_string(), previous);
+    let previous_layer = arena_tag_value_id(strings, keys, pairs, start, "layer");
+    pairs.push((layer_key, layer_value));
+    if let Some(previous) = previous_layer {
+        if arena_string(strings, values, previous).is_some_and(|value| value != layer_name) {
+            let osm_layer = arena_key_id(strings, keys, "osm_layer")?;
+            pairs.push((osm_layer, previous));
         }
     }
 
     match layer_name {
         "building" | "buildings" => {
-            tags.entry("building".to_string())
-                .or_insert_with(|| "yes".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "building", "yes")?;
         }
         "water" | "water_polygons" | "water_polygons_labels" | "ocean" => {
             if geom_type == MvtGeomType::Polygon {
-                tags.entry("natural".to_string())
-                    .or_insert_with(|| "water".to_string());
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "natural", "water")?;
             } else {
-                tags.entry("waterway".to_string())
-                    .or_insert_with(|| "river".to_string());
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "waterway", "river")?;
             }
         }
         "waterway" | "water_lines" | "water_lines_labels" | "dam_lines" | "pier_lines" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("subclass").cloned())
-                .or_else(|| tags.get("class").cloned())
-                .unwrap_or_else(|| "river".to_string());
-            tags.entry("waterway".to_string()).or_insert(value);
+            let value_id = ["kind", "subclass", "class"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            if let Some(value_id) = value_id {
+                arena_ensure_tag_value_id(strings, keys, pairs, start, "waterway", value_id)?;
+            } else {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "waterway", "river")?;
+            }
         }
         "transportation"
         | "transportation_name"
@@ -9536,46 +10420,49 @@ fn normalize_mvt_tags(
         | "aerialways"
         | "ferries"
         | "public_transport" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("subclass").cloned())
-                .or_else(|| tags.get("class").cloned())
-                .unwrap_or_else(|| "residential".to_string());
-            tags.entry("highway".to_string())
-                .or_insert_with(|| normalize_highway_kind(&value));
+            let value_id = ["kind", "subclass", "class"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            if let Some(value_id) = value_id {
+                let value = arena_string(strings, values, value_id).unwrap_or("");
+                if let Some(normalized) = normalized_highway_static(value) {
+                    arena_ensure_tag(strings, keys, values, static_values, pairs, start, "highway", normalized)?;
+                } else {
+                    arena_ensure_tag_value_id(strings, keys, pairs, start, "highway", value_id)?;
+                }
+            } else {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "highway", "residential")?;
+            }
         }
         "railway" => {
-            tags.entry("railway".to_string())
-                .or_insert_with(|| "rail".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "railway", "rail")?;
         }
         "park" => {
-            tags.entry("leisure".to_string())
-                .or_insert_with(|| "park".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "leisure", "park")?;
         }
         "landuse" | "landcover" | "land" | "sites" | "pois" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("class").cloned())
-                .or_else(|| tags.get("subclass").cloned())
-                .unwrap_or_else(|| "residential".to_string());
-            if is_leisure_kind(&value) {
-                tags.entry("leisure".to_string())
-                    .or_insert_with(|| "park".to_string());
+            let value_id = ["kind", "class", "subclass"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            let value = value_id.and_then(|id| arena_string(strings, values, id));
+            if value.is_some_and(is_leisure_kind) {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "leisure", "park")?;
+            } else if let Some(value_id) = value_id {
+                arena_ensure_tag_value_id(strings, keys, pairs, start, "landuse", value_id)?;
             } else {
-                tags.entry("landuse".to_string()).or_insert(value);
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "landuse", "residential")?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
+fn should_emit_mvt_point_label_feature(tags: &impl TagLookup) -> bool {
     let Some(layer) = tags.get("layer") else {
         return false;
     };
-    match layer.as_str() {
+    match layer {
         "addresses" => tags
             .get("housenumber")
             .or_else(|| tags.get("housename"))
@@ -9597,17 +10484,15 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
     }
 }
 
-fn normalize_highway_kind(kind: &str) -> String {
+fn normalized_highway_static(kind: &str) -> Option<&'static str> {
     match kind {
-        "motorway_link" => "motorway".to_string(),
-        "trunk_link" => "trunk".to_string(),
-        "primary_link" => "primary".to_string(),
-        "secondary_link" => "secondary".to_string(),
-        "tertiary_link" => "tertiary".to_string(),
-        "major_road" => "primary".to_string(),
-        "minor_road" => "residential".to_string(),
-        "path" => "path".to_string(),
-        other => other.to_string(),
+        "motorway_link" => Some("motorway"),
+        "trunk_link" => Some("trunk"),
+        "primary_link" | "major_road" => Some("primary"),
+        "secondary_link" => Some("secondary"),
+        "tertiary_link" => Some("tertiary"),
+        "minor_road" => Some("residential"),
+        _ => None,
     }
 }
 
@@ -9618,9 +10503,74 @@ fn is_leisure_kind(kind: &str) -> bool {
     )
 }
 
-fn parse_mvt_value(bytes: &[u8]) -> Result<MvtValue, String> {
+fn push_arena_display(
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+    value: impl std::fmt::Display,
+) -> Result<u32, String> {
+    let start = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    write!(strings, "{value}").map_err(|_| "failed to format mvt value".to_string())?;
+    let end = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    let id = u32::try_from(values.len()).map_err(|_| "mvt value table exceeds u32".to_string())?;
+    values.push((start, end));
+    Ok(id)
+}
+
+fn parse_mvt_value_into(
+    bytes: &[u8],
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+) -> Result<u32, String> {
     let mut pos = 0_usize;
-    let mut value = MvtValue::String(String::new());
+    let mut value_id = None;
+    while pos < bytes.len() {
+        let key = read_pb_varint(bytes, &mut pos)?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        value_id = Some(match (field, wire) {
+            (1, 2) => {
+                let slice = read_pb_len_slice(bytes, &mut pos)?;
+                let value = String::from_utf8_lossy(slice);
+                push_arena_string(strings, values, &value)?
+            }
+            (2, 5) => push_arena_display(
+                strings,
+                values,
+                f32::from_bits(read_pb_fixed32(bytes, &mut pos)?),
+            )?,
+            (3, 1) => push_arena_display(
+                strings,
+                values,
+                f64::from_bits(read_pb_fixed64(bytes, &mut pos)?),
+            )?,
+            (4, 0) => push_arena_display(strings, values, read_pb_varint(bytes, &mut pos)? as i64)?,
+            (5, 0) => push_arena_display(strings, values, read_pb_varint(bytes, &mut pos)?)?,
+            (6, 0) => push_arena_display(
+                strings,
+                values,
+                zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?),
+            )?,
+            (7, 0) => push_arena_string(
+                strings,
+                values,
+                if read_pb_varint(bytes, &mut pos)? != 0 { "true" } else { "false" },
+            )?,
+            _ => {
+                skip_pb_field(bytes, &mut pos, wire)?;
+                continue;
+            }
+        });
+    }
+    match value_id {
+        Some(id) => Ok(id),
+        None => push_arena_string(strings, values, ""),
+    }
+}
+
+#[cfg(test)]
+fn parse_mvt_value(bytes: &[u8]) -> Result<String, String> {
+    let mut pos = 0_usize;
+    let mut value = String::new();
     while pos < bytes.len() {
         let key = read_pb_varint(bytes, &mut pos)?;
         let field = (key >> 3) as u32;
@@ -9628,20 +10578,27 @@ fn parse_mvt_value(bytes: &[u8]) -> Result<MvtValue, String> {
         match (field, wire) {
             (1, 2) => {
                 let slice = read_pb_len_slice(bytes, &mut pos)?;
-                value = MvtValue::String(String::from_utf8_lossy(slice).into_owned());
+                value = String::from_utf8_lossy(slice).into_owned();
             }
-            (2, 5) => value = MvtValue::Float(f32::from_bits(read_pb_fixed32(bytes, &mut pos)?)),
-            (3, 1) => value = MvtValue::Double(f64::from_bits(read_pb_fixed64(bytes, &mut pos)?)),
-            (4, 0) => value = MvtValue::Int(read_pb_varint(bytes, &mut pos)? as i64),
-            (5, 0) => value = MvtValue::UInt(read_pb_varint(bytes, &mut pos)?),
-            (6, 0) => value = MvtValue::SInt(zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?)),
-            (7, 0) => value = MvtValue::Bool(read_pb_varint(bytes, &mut pos)? != 0),
+            (2, 5) => value = f32::from_bits(read_pb_fixed32(bytes, &mut pos)?).to_string(),
+            (3, 1) => value = f64::from_bits(read_pb_fixed64(bytes, &mut pos)?).to_string(),
+            (4, 0) => value = (read_pb_varint(bytes, &mut pos)? as i64).to_string(),
+            (5, 0) => value = read_pb_varint(bytes, &mut pos)?.to_string(),
+            (6, 0) => value = zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?).to_string(),
+            (7, 0) => {
+                value = if read_pb_varint(bytes, &mut pos)? != 0 {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
             _ => skip_pb_field(bytes, &mut pos, wire)?,
         }
     }
     Ok(value)
 }
 
+#[cfg(test)]
 fn decode_mvt_geometry(
     commands: &[u32],
     geom_type: MvtGeomType,
@@ -9713,13 +10670,13 @@ fn zigzag_decode_u64(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
-fn read_packed_u32(bytes: &[u8]) -> Result<Vec<u32>, String> {
+fn read_packed_u32_into(bytes: &[u8], out: &mut Vec<u32>) -> Result<(), String> {
+    out.clear();
     let mut pos = 0_usize;
-    let mut out = Vec::new();
     while pos < bytes.len() {
         out.push(read_pb_varint(bytes, &mut pos)? as u32);
     }
-    Ok(out)
+    Ok(())
 }
 
 fn read_pb_fixed32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
@@ -9815,6 +10772,626 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
 }
 
 #[cfg(test)]
+mod tag_arena_tests {
+    use super::*;
+
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn bytes_field(field: u64, value: &[u8], out: &mut Vec<u8>) {
+        varint(field << 3 | 2, out);
+        varint(value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn value_string(value: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        bytes_field(1, value.as_bytes(), &mut out);
+        out
+    }
+
+    fn duplicate_and_unwanted_tag_tile() -> Vec<u8> {
+        let mut packed_tags = Vec::new();
+        // name=first, discard=secret, name=second, amenity=bench.
+        for value in [0, 0, 1, 1, 3, 2, 2, 3] {
+            varint(value, &mut packed_tags);
+        }
+        let mut geometry = Vec::new();
+        for value in [9, 0, 0] {
+            varint(value, &mut geometry);
+        }
+        let mut feature = Vec::new();
+        bytes_field(2, &packed_tags, &mut feature);
+        varint(3 << 3, &mut feature);
+        varint(1, &mut feature);
+        bytes_field(4, &geometry, &mut feature);
+
+        let mut layer = Vec::new();
+        bytes_field(1, b"osm_points", &mut layer);
+        bytes_field(2, &feature, &mut layer);
+        for key in ["name", "discard", "amenity", "name"] {
+            bytes_field(3, key.as_bytes(), &mut layer);
+        }
+        for value in ["first", "secret", "second", "bench"] {
+            bytes_field(4, &value_string(value), &mut layer);
+        }
+        varint(5 << 3, &mut layer);
+        varint(4096, &mut layer);
+        varint(15 << 3, &mut layer);
+        varint(2, &mut layer);
+
+        let mut tile = Vec::new();
+        bytes_field(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn arena_view_matches_owned_map_after_whitelist_and_duplicate_resolution() {
+        #[derive(Default)]
+        struct Sink {
+            tags: Option<TagSet>,
+        }
+        impl MvtSink for Sink {
+            fn alloc_feature_id(&mut self) -> u64 { 1 }
+            fn add_path(
+                &mut self,
+                _tile_key: TileKey,
+                _extent: u32,
+                _points: &[(i32, i32)],
+                _tags: TagSet,
+                _meta: MvtPathMeta,
+                _close: bool,
+            ) {}
+            fn add_point(
+                &mut self,
+                _tile_key: TileKey,
+                _extent: u32,
+                _point: (i32, i32),
+                tags: TagSet,
+            ) {
+                self.tags = Some(tags);
+            }
+        }
+
+        let mut sink = Sink::default();
+        parse_mvt_tile(
+            &duplicate_and_unwanted_tag_tile(),
+            TileKey { z: 14, x: 0, y: 0 },
+            &mut sink,
+        )
+        .unwrap();
+        let tags = sink.tags.unwrap();
+        let expected = HashMap::from([
+            ("name".to_string(), "second".to_string()),
+            ("amenity".to_string(), "bench".to_string()),
+            ("layer".to_string(), "osm_points".to_string()),
+        ]);
+        assert_eq!(tags.get("name"), Some("second"));
+        assert!(tags.contains_key("amenity"));
+        assert!(!tags.contains_key("discard"));
+        assert_eq!(tags.to_owned_map(), expected);
+        assert_eq!(tags.iter().count(), expected.len());
+    }
+
+    fn legacy_parse_mvt_tile(
+        tile_data: &[u8],
+        tile_key: TileKey,
+        builder: &mut dyn MvtSink,
+    ) -> Result<(), String> {
+        let mut tile_pos = 0;
+        while tile_pos < tile_data.len() {
+            let key = read_pb_varint(tile_data, &mut tile_pos)?;
+            if ((key >> 3) as u32, (key & 7) as u8) != (3, 2) {
+                skip_pb_field(tile_data, &mut tile_pos, (key & 7) as u8)?;
+                continue;
+            }
+            let layer_data = read_pb_len_slice(tile_data, &mut tile_pos)?;
+            let mut pos = 0;
+            let mut layer_name = String::new();
+            let mut extent = 4096_u32;
+            let mut features = Vec::<&[u8]>::new();
+            let mut keys = Vec::<String>::new();
+            let mut values = Vec::<String>::new();
+            while pos < layer_data.len() {
+                let key = read_pb_varint(layer_data, &mut pos)?;
+                let field = (key >> 3) as u32;
+                let wire = (key & 7) as u8;
+                match (field, wire) {
+                    (1, 2) => {
+                        layer_name = String::from_utf8_lossy(
+                            read_pb_len_slice(layer_data, &mut pos)?,
+                        )
+                        .into_owned();
+                    }
+                    (2, 2) => features.push(read_pb_len_slice(layer_data, &mut pos)?),
+                    (3, 2) => keys.push(
+                        String::from_utf8_lossy(read_pb_len_slice(layer_data, &mut pos)?)
+                            .into_owned(),
+                    ),
+                    (4, 2) => values.push(parse_mvt_value(
+                        read_pb_len_slice(layer_data, &mut pos)?,
+                    )?),
+                    (5, 0) => extent = read_pb_varint(layer_data, &mut pos)? as u32,
+                    _ => skip_pb_field(layer_data, &mut pos, wire)?,
+                }
+            }
+            // This intentionally matches the old order: every key/value
+            // table was decoded before an unwanted layer was rejected.
+            if !builder.wants_layer(&layer_name) {
+                continue;
+            }
+            for (feature_index, feature) in features.into_iter().enumerate() {
+                let mut pos = 0;
+                let mut tag_indexes = Vec::<u32>::new();
+                let mut geometry = Vec::<u32>::new();
+                let mut geom_type = MvtGeomType::Unknown;
+                while pos < feature.len() {
+                    let key = read_pb_varint(feature, &mut pos)?;
+                    let field = (key >> 3) as u32;
+                    let wire = (key & 7) as u8;
+                    match (field, wire) {
+                        (2, 2) => read_packed_u32_into(
+                            read_pb_len_slice(feature, &mut pos)?,
+                            &mut tag_indexes,
+                        )?,
+                        (3, 0) => {
+                            geom_type = MvtGeomType::from_u64(read_pb_varint(feature, &mut pos)?)
+                        }
+                        (4, 2) => read_packed_u32_into(
+                            read_pb_len_slice(feature, &mut pos)?,
+                            &mut geometry,
+                        )?,
+                        _ => skip_pb_field(feature, &mut pos, wire)?,
+                    }
+                }
+                if geom_type == MvtGeomType::Unknown {
+                    continue;
+                }
+                let mut tags = HashMap::<String, String>::new();
+                for pair in tag_indexes.chunks_exact(2) {
+                    let Some(key) = keys.get(pair[0] as usize) else { continue };
+                    let Some(value) = values.get(pair[1] as usize) else { continue };
+                    tags.insert(key.clone(), value.clone());
+                }
+                legacy_normalize_mvt_tags(&layer_name, geom_type, &mut tags);
+                let paths = decode_mvt_geometry(&geometry, geom_type)?;
+                if geom_type == MvtGeomType::Point {
+                    if !should_emit_mvt_point_label_feature(&tags) {
+                        continue;
+                    }
+                    for path in paths {
+                        if let Some(point) = path.first().copied() {
+                            builder.add_point(
+                                tile_key,
+                                extent.max(1),
+                                point,
+                                TagSet::from(tags.clone()),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                let feature_group = (geom_type == MvtGeomType::Polygon)
+                    .then(|| builder.alloc_feature_id());
+                for (path_index, path) in paths.into_iter().enumerate() {
+                    if path.len() < 2 || (geom_type == MvtGeomType::Polygon && path.len() < 4) {
+                        continue;
+                    }
+                    builder.add_path(
+                        tile_key,
+                        extent.max(1),
+                        &path,
+                        TagSet::from(tags.clone()),
+                        MvtPathMeta {
+                            feature_index: feature_index as u32,
+                            path_index: path_index as u32,
+                            feature_group,
+                        },
+                        geom_type == MvtGeomType::Polygon,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn legacy_normalize_mvt_tags(
+        layer_name: &str,
+        geom_type: MvtGeomType,
+        tags: &mut HashMap<String, String>,
+    ) {
+        if let Some(previous) = tags.insert("layer".to_string(), layer_name.to_string()) {
+            if previous != layer_name {
+                tags.insert("osm_layer".to_string(), previous);
+            }
+        }
+        let first = |tags: &HashMap<String, String>, keys: &[&str]| {
+            keys.iter().find_map(|key| tags.get(*key).cloned())
+        };
+        match layer_name {
+            "building" | "buildings" => {
+                tags.entry("building".to_string()).or_insert_with(|| "yes".to_string());
+            }
+            "water" | "water_polygons" | "water_polygons_labels" | "ocean" => {
+                let (key, value) = if geom_type == MvtGeomType::Polygon {
+                    ("natural", "water")
+                } else {
+                    ("waterway", "river")
+                };
+                tags.entry(key.to_string()).or_insert_with(|| value.to_string());
+            }
+            "waterway" | "water_lines" | "water_lines_labels" | "dam_lines" | "pier_lines" => {
+                let value = first(tags, &["kind", "subclass", "class"])
+                    .unwrap_or_else(|| "river".to_string());
+                tags.entry("waterway".to_string()).or_insert(value);
+            }
+            "transportation"
+            | "transportation_name"
+            | "road"
+            | "streets"
+            | "street_polygons"
+            | "street_labels"
+            | "street_labels_points"
+            | "streets_polygons_labels"
+            | "bridges"
+            | "aerialways"
+            | "ferries"
+            | "public_transport" => {
+                let value = first(tags, &["kind", "subclass", "class"])
+                    .unwrap_or_else(|| "residential".to_string());
+                let value = normalized_highway_static(&value).unwrap_or(&value).to_string();
+                tags.entry("highway".to_string()).or_insert(value);
+            }
+            "railway" => {
+                tags.entry("railway".to_string()).or_insert_with(|| "rail".to_string());
+            }
+            "park" => {
+                tags.entry("leisure".to_string()).or_insert_with(|| "park".to_string());
+            }
+            "landuse" | "landcover" | "land" | "sites" | "pois" => {
+                let value = first(tags, &["kind", "class", "subclass"])
+                    .unwrap_or_else(|| "residential".to_string());
+                if is_leisure_kind(&value) {
+                    tags.entry("leisure".to_string()).or_insert_with(|| "park".to_string());
+                } else {
+                    tags.entry("landuse".to_string()).or_insert(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn count_allocations<T>(f: impl FnOnce() -> T) -> (usize, T) {
+        MAP_ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+        MAP_COUNT_ALLOCATIONS.store(true, Ordering::SeqCst);
+        let value = f();
+        MAP_COUNT_ALLOCATIONS.store(false, Ordering::SeqCst);
+        (MAP_ALLOCATION_COUNT.load(Ordering::Relaxed), value)
+    }
+
+    #[test]
+    #[ignore]
+    fn detail_parse_merge_allocations_drop_by_at_least_100x() {
+        let data = std::fs::read("../seed-files/amsterdam-tiles/z14-x8414-y5384.decoded")
+            .expect("Amsterdam allocation fixture is missing");
+        let key = TileKey { z: 14, x: 8414, y: 5384 };
+
+        let run_mvt_parse = |parse_mvt: MvtParseFn| {
+            let mut collector = MvtLocalCollector::new(4.0);
+            collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
+            parse_mvt(&data, key, &mut collector).unwrap();
+            (collector.points.len(), collector.ways.len())
+        };
+        let run_detail_merge = |parse_mvt: MvtParseFn| {
+            let mut points = Vec::new();
+            let mut ways = Vec::new();
+            let mut corridors = Vec::new();
+            merge_detail_features_with_parser(
+                parse_mvt,
+                &data,
+                key,
+                4.0,
+                true,
+                true,
+                true,
+                &mut points,
+                &mut ways,
+                &mut corridors,
+            )
+            .unwrap();
+            (points.len(), ways.len(), corridors.len())
+        };
+
+        // Warm thread-local feature, arena and path capacities before
+        // measuring the steady-state worker path.
+        let _ = run_mvt_parse(legacy_parse_mvt_tile);
+        let _ = run_mvt_parse(parse_mvt_tile_erased);
+        let _ = run_detail_merge(legacy_parse_mvt_tile);
+        let _ = run_detail_merge(parse_mvt_tile_erased);
+
+        let legacy_parse_start = std::time::Instant::now();
+        let (legacy_parse_allocs, legacy_parse_checksum) =
+            count_allocations(|| run_mvt_parse(legacy_parse_mvt_tile));
+        let legacy_parse_elapsed = legacy_parse_start.elapsed();
+        let arena_parse_start = std::time::Instant::now();
+        let (arena_parse_allocs, arena_parse_checksum) =
+            count_allocations(|| run_mvt_parse(parse_mvt_tile_erased));
+        let arena_parse_elapsed = arena_parse_start.elapsed();
+        assert_eq!(arena_parse_checksum, legacy_parse_checksum);
+
+        let legacy_merge_start = std::time::Instant::now();
+        let (legacy_merge_allocs, legacy_merge_checksum) =
+            count_allocations(|| run_detail_merge(legacy_parse_mvt_tile));
+        let legacy_merge_elapsed = legacy_merge_start.elapsed();
+        let arena_merge_start = std::time::Instant::now();
+        let (arena_merge_allocs, arena_merge_checksum) =
+            count_allocations(|| run_detail_merge(parse_mvt_tile_erased));
+        let arena_merge_elapsed = arena_merge_start.elapsed();
+        assert_eq!(arena_merge_checksum, legacy_merge_checksum);
+
+        let legacy_total = legacy_parse_allocs + legacy_merge_allocs;
+        let arena_total = arena_parse_allocs + arena_merge_allocs;
+        println!(
+            "mvt-parse: legacy={} allocs {:?}, arena={} allocs {:?}; detail-merge: legacy={} allocs {:?}, arena={} allocs {:?}; total={} -> {} ({:.1}x fewer)",
+            legacy_parse_allocs,
+            legacy_parse_elapsed,
+            arena_parse_allocs,
+            arena_parse_elapsed,
+            legacy_merge_allocs,
+            legacy_merge_elapsed,
+            arena_merge_allocs,
+            arena_merge_elapsed,
+            legacy_total,
+            arena_total,
+            legacy_total as f64 / arena_total.max(1) as f64,
+        );
+        assert!(
+            legacy_total >= arena_total.saturating_mul(100),
+            "expected >=100x fewer allocations, got legacy={legacy_total} arena={arena_total}"
+        );
+    }
+
+    fn percentile_ms(samples: &mut [std::time::Duration], percentile: usize) -> f64 {
+        samples.sort_unstable();
+        let index = (samples.len() - 1) * percentile / 100;
+        samples[index].as_secs_f64() * 1000.0
+    }
+
+    fn assert_tile_buffers_equal(actual: &TileBuffers, legacy: &TileBuffers, path: &str) {
+        macro_rules! same_vec {
+            ($field:ident) => {
+                if actual.$field != legacy.$field {
+                    let first = actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .position(|(left, right)| left != right);
+                    panic!(
+                        "bake parity failed for {path}: {} differs (arena {}, legacy {}, first {:?}: {:?} vs {:?})",
+                        stringify!($field),
+                        actual.$field.len(),
+                        legacy.$field.len(),
+                        first,
+                        first.and_then(|index| actual.$field.get(index)),
+                        first.and_then(|index| legacy.$field.get(index)),
+                    );
+                }
+            };
+        }
+        macro_rules! same_float_vec {
+            ($field:ident) => {
+                if actual.$field.len() != legacy.$field.len()
+                    || actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .any(|(left, right)| left.to_bits() != right.to_bits())
+                {
+                    let first = actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .position(|(left, right)| left.to_bits() != right.to_bits());
+                    panic!(
+                        "bake parity failed for {path}: {} differs (arena {}, legacy {}, first {:?})",
+                        stringify!($field),
+                        actual.$field.len(),
+                        legacy.$field.len(),
+                        first,
+                    );
+                }
+            };
+        }
+        same_vec!(pin_hits);
+        same_vec!(fill_indices);
+        same_vec!(fill_vertices);
+        same_vec!(fill_misc_indices);
+        same_float_vec!(fill_misc_vertices);
+        same_vec!(casing_vertices);
+        same_vec!(casing_indices);
+        same_vec!(stroke_indices);
+        same_vec!(stroke_vertices);
+        same_vec!(icon_indices);
+        same_float_vec!(icon_vertices);
+        same_vec!(icon_high_indices);
+        same_float_vec!(icon_high_vertices);
+        for (field, actual_instances, legacy_instances) in [
+            ("icon_instances", &actual.icon_instances, &legacy.icon_instances),
+            (
+                "icon_high_instances",
+                &actual.icon_high_instances,
+                &legacy.icon_high_instances,
+            ),
+        ] {
+            assert_eq!(actual_instances.len(), legacy_instances.len(), "{field}: {path}");
+            for (index, (actual_instance, legacy_instance)) in
+                actual_instances.iter().zip(legacy_instances).enumerate()
+            {
+                assert_eq!(actual_instance.mesh_slot, legacy_instance.mesh_slot, "{field} slot {path} #{index}");
+                assert!(
+                    actual_instance.data.len() == legacy_instance.data.len()
+                        && actual_instance
+                            .data
+                            .iter()
+                            .zip(&legacy_instance.data)
+                            .all(|(left, right)| left.to_bits() == right.to_bits()),
+                    "{field} data {path} #{index}"
+                );
+            }
+        }
+        same_float_vec!(shadow_disc_instances);
+        same_vec!(fringe_indices);
+        same_vec!(fringe_vertices);
+        same_vec!(fill_3d_indices);
+        same_vec!(fill_3d_vertices);
+        same_vec!(fill_3d_misc_indices);
+        same_float_vec!(fill_3d_misc_vertices);
+        same_vec!(wall_indices);
+        same_float_vec!(wall_vertices);
+        same_float_vec!(wall_instances);
+        same_vec!(tree_indices);
+        same_float_vec!(tree_vertices);
+        same_vec!(tree_cross_indices);
+        same_float_vec!(tree_cross_vertices);
+        same_vec!(tree_template_indices);
+        same_float_vec!(tree_template_vertices);
+        same_vec!(tree_cross_template_indices);
+        same_float_vec!(tree_cross_template_vertices);
+        same_float_vec!(tree_instances);
+        same_vec!(road_icon_indices);
+        same_float_vec!(road_icon_vertices);
+        same_vec!(labels);
+        assert_eq!(actual.feature_count, legacy.feature_count, "feature count: {path}");
+        assert_eq!(actual.render_zoom, legacy.render_zoom, "render zoom: {path}");
+        assert_eq!(actual.mode_overlay_only, legacy.mode_overlay_only, "mode: {path}");
+    }
+
+    #[test]
+    #[ignore]
+    fn amsterdam_tilebuffers_are_identical_and_detail_stage_is_timed() {
+        let theme = CompiledMapTheme::default();
+        let mut legacy_parse_times = Vec::with_capacity(25);
+        let mut arena_parse_times = Vec::with_capacity(25);
+        let mut legacy_merge_times = Vec::with_capacity(25);
+        let mut arena_merge_times = Vec::with_capacity(25);
+
+        for x in 8412..=8416 {
+            for y in 5382..=5386 {
+                let key = TileKey { z: 14, x, y };
+                let path = format!(
+                    "../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded"
+                );
+                let data = std::fs::read(&path)
+                    .unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+
+                let collect = |parse_mvt: MvtParseFn| {
+                    let mut collector = MvtLocalCollector::new(4.0);
+                    collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
+                    let start = std::time::Instant::now();
+                    parse_mvt(&data, key, &mut collector).unwrap();
+                    (collector, start.elapsed())
+                };
+                let (legacy_collector, legacy_parse_elapsed) = collect(legacy_parse_mvt_tile);
+                let (arena_collector, arena_parse_elapsed) = collect(parse_mvt_tile_erased);
+                legacy_parse_times.push(legacy_parse_elapsed);
+                arena_parse_times.push(arena_parse_elapsed);
+                assert_eq!(
+                    arena_collector.ways.len(),
+                    legacy_collector.ways.len(),
+                    "base way count: {path}"
+                );
+                for (index, (arena_way, legacy_way)) in arena_collector
+                    .ways
+                    .iter()
+                    .zip(&legacy_collector.ways)
+                    .enumerate()
+                {
+                    let mut legacy_tags = legacy_way.tags.to_owned_map();
+                    legacy_tags.retain(|key, _| point_keys().contains(&key.as_str()));
+                    assert_eq!(arena_way.tags.to_owned_map(), legacy_tags, "base tags {path} #{index}");
+                    assert_eq!(arena_way.points, legacy_way.points, "base points {path} #{index}");
+                    assert_eq!(arena_way.closed, legacy_way.closed, "base closed {path} #{index}");
+                    assert_eq!(arena_way.fidx, legacy_way.fidx, "base fidx {path} #{index}");
+                    assert_eq!(arena_way.ring_index, legacy_way.ring_index, "base ring {path} #{index}");
+                }
+
+                let measure = |parse_mvt: MvtParseFn| {
+                    let mut points = Vec::new();
+                    let mut ways = Vec::new();
+                    let mut corridors = Vec::new();
+                    let start = std::time::Instant::now();
+                    merge_detail_features_with_parser(
+                        parse_mvt,
+                        &data,
+                        key,
+                        4.0,
+                        true,
+                        true,
+                        true,
+                        &mut points,
+                        &mut ways,
+                        &mut corridors,
+                    )
+                    .unwrap();
+                    start.elapsed()
+                };
+                legacy_merge_times.push(measure(legacy_parse_mvt_tile));
+                arena_merge_times.push(measure(parse_mvt_tile_erased));
+
+                let build = |parse_mvt: MvtParseFn| {
+                    build_tile_buffers_from_mvt_with_parser(
+                        parse_mvt,
+                        key,
+                        &data,
+                        Some(&data),
+                        None,
+                        false,
+                        &[],
+                        &theme,
+                        16,
+                        true,
+                        true,
+                        true,
+                    )
+                    .unwrap()
+                };
+                let mut legacy = build(legacy_parse_mvt_tile);
+                let mut arena = build(parse_mvt_tile_erased);
+                let mut arena_repeat = build(parse_mvt_tile_erased);
+                // Wall time is deliberately the only non-deterministic
+                // TileBuffers field; all streams, labels, pin hits and icon
+                // instances remain in this equality assertion.
+                legacy.stage_summary.clear();
+                arena.stage_summary.clear();
+                arena_repeat.stage_summary.clear();
+                assert_tile_buffers_equal(&arena, &arena_repeat, &format!("{path} (repeat)"));
+                assert_tile_buffers_equal(&arena, &legacy, &path);
+            }
+        }
+
+        let legacy_parse_median = percentile_ms(&mut legacy_parse_times, 50);
+        let legacy_parse_p95 = percentile_ms(&mut legacy_parse_times, 95);
+        let arena_parse_median = percentile_ms(&mut arena_parse_times, 50);
+        let arena_parse_p95 = percentile_ms(&mut arena_parse_times, 95);
+        let legacy_merge_median = percentile_ms(&mut legacy_merge_times, 50);
+        let legacy_merge_p95 = percentile_ms(&mut legacy_merge_times, 95);
+        let arena_merge_median = percentile_ms(&mut arena_merge_times, 50);
+        let arena_merge_p95 = percentile_ms(&mut arena_merge_times, 95);
+        println!(
+            "Amsterdam mvt-parse (25 tiles): legacy median={legacy_parse_median:.3}ms p95={legacy_parse_p95:.3}ms; arena median={arena_parse_median:.3}ms p95={arena_parse_p95:.3}ms"
+        );
+        println!(
+            "Amsterdam detail-merge (25 tiles): legacy median={legacy_merge_median:.3}ms p95={legacy_merge_p95:.3}ms; arena median={arena_merge_median:.3}ms p95={arena_merge_p95:.3}ms"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bridge_probe_tests {
     use super::*;
 
@@ -9865,7 +11442,7 @@ mod bridge_probe_tests {
             let clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
             for (order, way) in collector.ways.iter().enumerate() {
                 let Some(fidx) = way.fidx else { continue };
-                let layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+                let layer = way.tags.get("layer").unwrap_or("");
                 let Some(layer_id) = baked_layer_discriminant(layer) else {
                     continue;
                 };
@@ -9882,11 +11459,7 @@ mod bridge_probe_tests {
                 if signed_area.abs() <= POLYGON_AREA_EPSILON {
                     continue;
                 }
-                let ring_order = way
-                    .tags
-                    .get(MVT_INTERNAL_RING_INDEX_KEY)
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(order);
+                let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
                 rings_of.entry((layer_id, fidx)).or_default().push(FillRing {
                     order: ring_order,
                     points: ring_points,
@@ -10071,7 +11644,7 @@ mod bridge_probe_tests {
                 Default::default();
             let mut point_layers: std::collections::BTreeMap<String, usize> = Default::default();
             for (_pos, tags) in &collector.points {
-                let layer = tags.get("layer").cloned().unwrap_or_default();
+                let layer = tags.get("layer").unwrap_or_default().to_owned();
                 *point_layers.entry(layer).or_default() += 1;
             }
             for (layer, count) in &point_layers {
@@ -10102,8 +11675,8 @@ mod bridge_probe_tests {
                         .get("natural")
                         .or_else(|| tags.get("amenity"))
                         .or_else(|| tags.get("highway"))
-                        .cloned()
-                        .unwrap_or_else(|| "other".into());
+                        .unwrap_or("other")
+                        .to_owned();
                     *kinds.entry(kind).or_default() += 1;
                 }
                 println!("  DETAIL-MERGE points={} ways={}", points.len(), ways.len());
@@ -10113,7 +11686,7 @@ mod bridge_probe_tests {
             }
             let mut street_kind: std::collections::BTreeMap<String, usize> = Default::default();
             for way in &collector.ways {
-                let layer = way.tags.get("layer").cloned().unwrap_or_default();
+                let layer = way.tags.get("layer").unwrap_or_default().to_owned();
                 let e = per_layer.entry(layer.clone()).or_default();
                 e.0 += 1;
                 e.1 += way.points.len();
@@ -10122,8 +11695,8 @@ mod bridge_probe_tests {
                         .tags
                         .get("kind")
                         .or_else(|| way.tags.get("highway"))
-                        .cloned()
-                        .unwrap_or_default();
+                        .unwrap_or_default()
+                        .to_owned();
                     *street_kind.entry(kind).or_default() += 1;
                 }
             }
@@ -10631,17 +12204,15 @@ mod bridge_probe_tests {
             decks: vec![5.5, 0.0, 5.5],
         };
         let tags = || {
-            HashMap::from([
-                ("layer".to_string(), "streets".to_string()),
-                (MVT_INTERNAL_FIDX_KEY.to_string(), "0".to_string()),
-                (MVT_INTERNAL_PIDX_KEY.to_string(), "0".to_string()),
-            ])
+            TagSet::from(HashMap::from([("layer".to_string(), "streets".to_string())]))
         };
         let raw = [(0, 0), (2048, 0)];
 
         let mut collector = MvtLocalCollector::new(1.0);
         collector.base_dz.insert(key.clone(), profile.clone());
-        collector.add_path(TileKey { z: 14, x: 0, y: 0 }, 4096, &raw, tags(), false);
+        collector.add_path(
+            TileKey { z: 14, x: 0, y: 0 }, 4096, &raw, tags(), MvtPathMeta::default(), false,
+        );
         assert_eq!(collector.ways[0].points, profile.points);
         assert_eq!(collector.ways[0].dz.as_deref(), Some(profile.decks.as_slice()));
 
@@ -10658,6 +12229,7 @@ mod bridge_probe_tests {
             4096,
             &raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(stale_endpoint.ways[0].points, [(0.0, 0.0), (128.0, 0.0)]);
@@ -10677,6 +12249,7 @@ mod bridge_probe_tests {
             4096,
             &bent_raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(
@@ -10705,6 +12278,7 @@ mod bridge_probe_tests {
             4096,
             &diagonal_raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(
@@ -11466,7 +13040,7 @@ mod bridge_probe_tests {
             parse_mvt_tile(&pbf, key, &mut collector).unwrap();
             println!("=== tile {tx}/{ty} target local ({lx:.0},{ly:.0})");
             for way in &collector.ways {
-                if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+                if way.tags.get("layer") != Some("base_dz") {
                     continue;
                 }
                 let near = way.points.iter().any(|&(px, py)| {
@@ -11486,9 +13060,9 @@ mod bridge_probe_tests {
                 }
                 println!(
                     "L={} F={} P={} closed={} pts={} start=({:.0},{:.0}) end=({:.0},{:.0}) dz={:?}",
-                    way.tags.get("L").map(|v| v.as_str()).unwrap_or(""),
-                    way.tags.get("F").map(|v| v.as_str()).unwrap_or(""),
-                    way.tags.get("P").map(|v| v.as_str()).unwrap_or(""),
+                    way.tags.get("L").unwrap_or(""),
+                    way.tags.get("F").unwrap_or(""),
+                    way.tags.get("P").unwrap_or(""),
                     way.closed,
                     way.points.len(),
                     way.points.first().map(|p| p.0).unwrap_or(0.0),
@@ -11670,7 +13244,7 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _p: (i32, i32),
-                _t: HashMap<String, String>,
+                _t: TagSet,
             ) {
             }
             fn add_path(
@@ -11678,10 +13252,11 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _pts: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                _meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let bridge = tags.get("bridge").map(|v| v.as_str()).unwrap_or("");
+                let bridge = tags.get("bridge").unwrap_or("");
                 if bridge == "yes" || bridge == "viaduct" {
                     let mut kv: Vec<String> = tags
                         .iter()
@@ -11717,7 +13292,7 @@ mod bridge_probe_tests {
         let ocean_ways: Vec<_> = collector
             .ways
             .iter()
-            .filter(|way| way.closed && way.tags.get("natural").map(String::as_str) == Some("water"))
+            .filter(|way| way.closed && way.tags.get("natural") == Some("water"))
             .collect();
         println!("coastal z14: {} ocean ways", ocean_ways.len());
         assert!(!ocean_ways.is_empty());
@@ -11756,7 +13331,7 @@ mod bridge_probe_tests {
         .unwrap();
         let water: Vec<_> = ways
             .iter()
-            .filter(|way| way.tags.get("natural").map(String::as_str) == Some("water"))
+            .filter(|way| way.tags.get("natural") == Some("water"))
             .collect();
         println!("shifted z9->z14: {} water ways, {} pts first", water.len(),
             water.first().map(|w| w.points.len()).unwrap_or(0));
@@ -11880,26 +13455,19 @@ mod bridge_probe_tests {
                 _tile_key: TileKey,
                 _extent: u32,
                 points: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let (Some(layer), Some(fidx), Some(pidx)) = (
-                    tags.get("layer"),
-                    tags.get(MVT_INTERNAL_FIDX_KEY),
-                    tags.get(MVT_INTERNAL_PIDX_KEY),
-                ) else {
+                let Some(layer) = tags.get("layer") else {
                     return;
                 };
-                let key = (
-                    layer.clone(),
-                    fidx.parse::<u32>().unwrap_or(9999),
-                    pidx.parse::<u32>().unwrap_or(9999),
-                );
-                if tags.get("layer").map(|v| v.as_str()) == Some("streets") {
+                let key = (layer.to_owned(), meta.feature_index, meta.path_index);
+                if tags.get("layer") == Some("streets") {
                     if let Some(value) = tags.get("oneway") {
                         self.oneway += 1;
-                        if !self.oneway_values.contains(value) {
-                            self.oneway_values.push(value.clone());
+                        if !self.oneway_values.iter().any(|item| item == value) {
+                            self.oneway_values.push(value.to_owned());
                         }
                     }
                 }
@@ -11934,7 +13502,7 @@ mod bridge_probe_tests {
                 _tile_key: TileKey,
                 _extent: u32,
                 _point: (i32, i32),
-                _tags: HashMap<String, String>,
+                _tags: TagSet,
             ) {
             }
         }
@@ -12007,7 +13575,7 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _p: (i32, i32),
-                _t: HashMap<String, String>,
+                _t: TagSet,
             ) {
             }
             fn add_path(
@@ -12015,11 +13583,12 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _pts: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                _meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let layer = tags.get("layer").cloned().unwrap_or_default();
-                let name = tags.get("name").cloned().unwrap_or_default();
+                let layer = tags.get("layer").unwrap_or_default().to_owned();
+                let name = tags.get("name").unwrap_or_default().to_owned();
                 let interesting = name.contains("brug")
                     || name.contains("Europaboulevard")
                     || tags.contains_key("bridge");
@@ -12054,12 +13623,12 @@ mod bridge_probe_tests {
         parse_mvt_tile(&pbf, key, &mut collector).unwrap();
         let mut by_layer = std::collections::HashMap::<String, usize>::new();
         for way in &collector.ways {
-            let layer = way.tags.get("layer").cloned().unwrap_or_default();
+            let layer = way.tags.get("layer").unwrap_or_default().to_owned();
             *by_layer.entry(layer).or_default() += 1;
             if way.tags.contains_key("building:part") {
                 println!(
                     "PART layer={} closed={} pts={} id={:?} h={:?} min={:?}",
-                    way.tags.get("layer").cloned().unwrap_or_default(),
+                    way.tags.get("layer").unwrap_or_default(),
                     way.closed,
                     way.points.len(),
                     way.tags.get("__makepad_osm_id"),
@@ -12090,8 +13659,8 @@ mod bridge_probe_tests {
                 let mut collector = MvtLocalCollector::new(1.0);
                 parse_mvt_tile(&pbf, key, &mut collector).unwrap();
                 for (_, tags) in &collector.points {
-                    if tags.get("layer").map(|v| v.as_str()) == Some("place_labels") {
-                        let name = tags.get("name").cloned().unwrap_or_default();
+                    if tags.get("layer") == Some("place_labels") {
+                        let name = tags.get("name").unwrap_or_default();
                         if name.contains("Amsterdam") || name.contains("Haarlem") {
                             let mut t: Vec<_> = tags.iter().collect();
                             t.sort();
@@ -12719,7 +14288,7 @@ mod bridge_probe_tests {
                         .get("__makepad_osm_id")
                         .and_then(|v| v.parse::<i64>().ok())
                     {
-                        if way.tags.get("__makepad_osm_type").map(|v| v.as_str()) == Some("way") {
+                        if way.tags.get("__makepad_osm_type") == Some("way") {
                             max_id = max_id.max(id);
                         }
                         if id == 1391036659 {
@@ -12744,7 +14313,7 @@ mod bridge_probe_tests {
             let mut admitted = 0;
             let mut labeled = 0;
             for way in &ways {
-                if way.tags.get("layer").map(|v| v.as_str()) == Some("attraction_area") {
+                if way.tags.get("layer") == Some("attraction_area") {
                     admitted += 1;
                     let ring = normalize_polygon_ring(&way.points);
                     let label = ring.as_ref().and_then(|ring| {

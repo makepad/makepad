@@ -11,6 +11,7 @@ use super::label::{
     LABEL_CLASS_AMENITY, LABEL_CLASS_CULTURE, LABEL_CLASS_DEFAULT, LABEL_CLASS_GREEN,
     LABEL_CLASS_MUTED, LABEL_CLASS_SHOP, LABEL_CLASS_TRANSPORT, LABEL_CLASS_TREE, LABEL_CLASS_HEALTH,
 };
+use super::geometry::TagLookup;
 use crate::makepad_draw::vector::{
     document::SvgNode, parse::parse_svg, LineJoin, PathCmd, Tessellator, VVertex, VectorPath,
 };
@@ -311,12 +312,12 @@ fn build_disc_mesh(radius: f32) -> Option<IconMesh> {
 
 /// Micro-POI symbols sourced from the all-tag detail archive (not present in
 /// shortbread pois): trees, benches, bins, recycling, playgrounds, artwork.
-pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
-    if tags.get("natural").map(|v| v.as_str()) == Some("tree") {
+pub fn micro_icon_for_tags(tags: &impl TagLookup) -> Option<(&'static str, u8)> {
+    if tags.get("natural") == Some("tree") {
         return Some(("tree", LABEL_CLASS_TREE));
     }
     if let Some(amenity) = tags.get("amenity") {
-        return match amenity.as_str() {
+        return match amenity {
             "bench" => Some(("bench", LABEL_CLASS_MUTED)),
             "waste_basket" | "waste_disposal" => Some(("waste_basket", LABEL_CLASS_MUTED)),
             "recycling" => Some(("recycling", LABEL_CLASS_MUTED)),
@@ -327,7 +328,7 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
             _ => None,
         };
     }
-    if tags.get("highway").map(|v| v.as_str()) == Some("traffic_signals") {
+    if tags.get("highway") == Some("traffic_signals") {
         return Some(("traffic_signals", LABEL_CLASS_MUTED));
     }
     // Offices (TomTom etc.) only exist in the detail archive; carto shows
@@ -336,14 +337,14 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
         return Some(("dot", LABEL_CLASS_MUTED));
     }
     if let Some(leisure) = tags.get("leisure") {
-        return match leisure.as_str() {
+        return match leisure {
             "playground" => Some(("playground", LABEL_CLASS_GREEN)),
             "picnic_table" => Some(("bench", LABEL_CLASS_GREEN)),
             _ => None,
         };
     }
     if let Some(tourism) = tags.get("tourism") {
-        return match tourism.as_str() {
+        return match tourism {
             "artwork" => Some(("statue", LABEL_CLASS_CULTURE)),
             "information" => Some(("information", LABEL_CLASS_CULTURE)),
             _ => None,
@@ -351,17 +352,17 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
     }
     // Building/station entrances (door icon, high zoom only — the caller
     // gates the zoom).
-    if tags.get("railway").map(|v| v.as_str()) == Some("subway_entrance") {
+    if tags.get("railway") == Some("subway_entrance") {
         return Some(("entrance", LABEL_CLASS_TRANSPORT));
     }
     if let Some(entrance) = tags.get("entrance") {
-        return match entrance.as_str() {
+        return match entrance {
             "no" => None,
             _ => Some(("entrance", LABEL_CLASS_MUTED)),
         };
     }
     if let Some(historic) = tags.get("historic") {
-        return match historic.as_str() {
+        return match historic {
             "memorial" | "monument" | "statue" => Some(("statue", LABEL_CLASS_CULTURE)),
             _ => None,
         };
@@ -370,8 +371,8 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
 }
 
 /// Map shortbread poi attributes to a symbol + label color class.
-pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
-    match tags.get("layer").map(|v| v.as_str()) {
+pub fn icon_for_tags(tags: &impl TagLookup) -> Option<(&'static str, u8)> {
+    match tags.get("layer") {
         Some("micro_pois") => return micro_icon_for_tags(tags),
         // Geodata overlays (layers.md). Charger pins color by BRAND —
         // red is exclusively Tesla Superchargers; other brands split
@@ -398,7 +399,7 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
         _ => {}
     }
     if let Some(shop) = tags.get("shop") {
-        let name = match shop.as_str() {
+        let name = match shop {
             "supermarket" => "supermarket",
             "bakery" => "bakery",
             "butcher" => "butcher",
@@ -417,7 +418,7 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
         return Some((name, LABEL_CLASS_SHOP));
     }
     if let Some(amenity) = tags.get("amenity") {
-        return match amenity.as_str() {
+        return match amenity {
             "restaurant" | "food_court" => Some(("restaurant", LABEL_CLASS_AMENITY)),
             "cafe" => Some(("cafe", LABEL_CLASS_AMENITY)),
             "fast_food" => Some(("fast_food", LABEL_CLASS_AMENITY)),
@@ -438,7 +439,7 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
         };
     }
     if let Some(tourism) = tags.get("tourism") {
-        return match tourism.as_str() {
+        return match tourism {
             "hotel" | "guest_house" | "hostel" => Some(("hotel", LABEL_CLASS_CULTURE)),
             "museum" | "gallery" => Some(("museum", LABEL_CLASS_CULTURE)),
             "information" => Some(("information", LABEL_CLASS_CULTURE)),

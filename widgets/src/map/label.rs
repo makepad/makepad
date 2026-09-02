@@ -122,13 +122,13 @@ pub struct LabelPerfStats {
 // --- Label extraction ---
 
 pub fn extract_way_label(
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     points: &[(f32, f32)],
 ) -> Option<TileLabel> {
     if points.len() < 2 {
         return None;
     }
-    let source_layer = tags.get("layer").cloned().unwrap_or_default();
+    let source_layer = tags.get("layer").unwrap_or_default().to_string();
     // Transit route lines label with their line ref ("5", "52", "A") along
     // the way, like street names.
     if source_layer == "routes" {
@@ -140,7 +140,7 @@ pub fn extract_way_label(
         if path_points.len() < 2 {
             return None;
         }
-        let mode = tags.get("mode").cloned().unwrap_or_default();
+        let mode = tags.get("mode").unwrap_or_default().to_string();
         // "Tram 7" / "Metro 52" — the mode makes the number meaningful.
         let text = match mode.as_str() {
             "tram" => format!("Tram {line_ref}"),
@@ -192,8 +192,8 @@ pub fn extract_way_label(
     let name = select_label_text(tags)?;
     let road_kind = tags
         .get("highway")
-        .cloned()
-        .unwrap_or_else(|| "residential".to_string());
+        .unwrap_or("residential")
+        .to_string();
     let priority = road_label_priority(&road_kind);
     let path_points = simplify_label_path(points);
     if path_points.len() < 2 {
@@ -230,12 +230,12 @@ pub fn poi_class_hex(color_class: u8) -> u32 {
 }
 
 /// Carto-style POI color grouping from shortbread poi attributes.
-pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
+pub fn poi_color_class(tags: &impl TagLookup) -> u8 {
     if tags.contains_key("shop") {
         return LABEL_CLASS_SHOP;
     }
     if let Some(amenity) = tags.get("amenity") {
-        return match amenity.as_str() {
+        return match amenity {
             "restaurant" | "cafe" | "fast_food" | "bar" | "pub" | "biergarten" | "food_court"
             | "ice_cream" | "nightclub" => LABEL_CLASS_AMENITY,
             "theatre" | "cinema" | "arts_centre" | "library" | "museum" | "place_of_worship" => {
@@ -256,14 +256,14 @@ pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
 /// Name label for a named area — greens (parks/gardens) and pedestrian
 /// squares — placed at its centroid.
 pub fn extract_area_label(
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     centroid: (f32, f32),
 ) -> Option<TileLabel> {
     // CBS district overlays: gemeente / wijk / buurt names at the area
     // centroid, staged by zoom at candidate time (tier in road_kind).
     if let Some(layer) = tags.get("layer") {
-        if matches!(layer.as_str(), "gemeenten" | "wijken" | "buurten") {
-            let (name_field, tier) = match layer.as_str() {
+        if matches!(layer, "gemeenten" | "wijken" | "buurten") {
+            let (name_field, tier) = match layer {
                 "gemeenten" => ("gemeentenaam", 'g'),
                 "wijken" => ("wijknaam", 'w'),
                 _ => ("buurtnaam", 'b'),
@@ -275,7 +275,7 @@ pub fn extract_area_label(
             return Some(TileLabel {
                 text: name,
                 priority: 2,
-                source_layer: layer.clone(),
+                source_layer: layer.to_string(),
                 road_kind: format!(
                     "adm{}{:.0}x{:.0}",
                     tier,
@@ -292,7 +292,7 @@ pub fn extract_area_label(
     }
     // Geodata nature overlays name their areas with Dutch source columns.
     if let Some(layer) = tags.get("layer") {
-        if matches!(layer.as_str(), "natura2000" | "wetlands") {
+        if matches!(layer, "natura2000" | "wetlands") {
             let name = tags
                 .get("naam_n2k")
                 .or_else(|| tags.get("naam"))
@@ -313,18 +313,18 @@ pub fn extract_area_label(
     }
     let is_green = tags.contains_key("leisure")
         || matches!(
-            tags.get("landuse").map(|value| value.as_str()),
+            tags.get("landuse"),
             Some("grass" | "forest" | "meadow" | "village_green" | "recreation_ground" | "cemetery")
         );
     let is_square = matches!(
-        tags.get("highway").map(|value| value.as_str()),
+        tags.get("highway"),
         Some("pedestrian" | "footway")
-    ) || tags.get("place").map(|value| value.as_str()) == Some("square");
+    ) || tags.get("place") == Some("square");
     // Zoo enclosures and attractions (animal names at Artis, monuments).
     let is_attraction = tags.contains_key("attraction")
         || tags.contains_key("zoo")
         || matches!(
-            tags.get("tourism").map(|value| value.as_str()),
+            tags.get("tourism"),
             Some("attraction" | "zoo" | "theme_park")
         );
     if !is_green && !is_square && !is_attraction {
@@ -350,8 +350,8 @@ pub fn extract_area_label(
     })
 }
 
-pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) -> Option<TileLabel> {
-    let source_layer = tags.get("layer").cloned().unwrap_or_default();
+pub fn extract_point_label(tags: &impl TagLookup, point: (f32, f32)) -> Option<TileLabel> {
+    let source_layer = tags.get("layer").unwrap_or_default().to_string();
     match source_layer.as_str() {
         "addresses" => {
             let number = tags
@@ -378,7 +378,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         "micro_pois" => {
             let is_office = tags.contains_key("office");
             let is_named_parking =
-                tags.get("amenity").map(|v| v.as_str()) == Some("parking");
+                tags.get("amenity") == Some("parking");
             let is_attraction =
                 tags.contains_key("attraction") || tags.contains_key("zoo");
             if !is_office && !is_named_parking && !is_attraction {
@@ -444,7 +444,6 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
             let kind = match tags
                 .get("kind")
                 .or_else(|| tags.get("place"))
-                .map(|value| value.as_str())
                 .unwrap_or("")
             {
                 "capital" | "state_capital" | "city" => "city",
@@ -553,8 +552,8 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
     let name = select_label_text(tags)?;
     let road_kind = tags
         .get("highway")
-        .cloned()
-        .unwrap_or_else(|| "residential".to_string());
+        .unwrap_or("residential")
+        .to_string();
     let priority = road_label_priority(&road_kind);
     Some(TileLabel {
         text: name,
@@ -625,6 +624,9 @@ pub fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
             .then_with(|| a_label.text.cmp(&b_label.text))
             .then_with(|| a_label.name_key.cmp(&b_label.name_key))
             .then_with(|| a_label.road_kind.cmp(&b_label.road_kind))
+            .then_with(|| a_label.source_layer.cmp(&b_label.source_layer))
+            .then_with(|| a_label.bbox.0.total_cmp(&b_label.bbox.0))
+            .then_with(|| a_label.bbox.1.total_cmp(&b_label.bbox.1))
     });
     labels.extend(
         compacted

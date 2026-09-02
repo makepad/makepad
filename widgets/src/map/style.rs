@@ -1,4 +1,4 @@
-use super::geometry::{is_road_polygon_layer, tag_is, tag_is_truthy};
+use super::geometry::{is_road_polygon_layer, tag_is, tag_is_truthy, TagLookup};
 use crate::makepad_draw::*;
 use std::collections::HashMap;
 
@@ -667,8 +667,8 @@ impl CompiledMapTheme {
 
 /// Fill opacity: overlay tints are translucent so the base map reads
 /// through; everything else stays opaque.
-pub fn fill_alpha_for_tags(tags: &HashMap<String, String>) -> f32 {
-    match tags.get("layer").map(|value| value.as_str()) {
+pub fn fill_alpha_for_tags(tags: &impl TagLookup) -> f32 {
+    match tags.get("layer") {
         Some("natura2000" | "wetlands") => 0.22,
         Some("vk100" | "vk500") => 0.45,
         Some("gemeenten" | "wijken" | "buurten") => 0.32,
@@ -680,16 +680,16 @@ pub fn fill_alpha_for_tags(tags: &HashMap<String, String>) -> f32 {
 /// Procedural fill texture, carto-style: 30 = staggered dot stipple
 /// (courtyard gardens), 31 = diagonal hatch (playgrounds), 32 = staggered
 /// open circles (woods/forests/cemeteries — tree rings). 0 = solid.
-pub fn fill_pattern_shape(tags: &HashMap<String, String>) -> f32 {
-    match tags.get("leisure").map(|value| value.as_str()) {
+pub fn fill_pattern_shape(tags: &impl TagLookup) -> f32 {
+    match tags.get("leisure") {
         Some("garden") => return 30.0,
         Some("playground") => return 31.0,
         _ => {}
     }
     if matches!(
-        tags.get("landuse").map(|value| value.as_str()),
+        tags.get("landuse"),
         Some("cemetery" | "forest")
-    ) || tags.get("natural").map(|value| value.as_str()) == Some("wood")
+    ) || tags.get("natural") == Some("wood")
     {
         return 32.0;
     }
@@ -698,7 +698,7 @@ pub fn fill_pattern_shape(tags: &HashMap<String, String>) -> f32 {
 
 /// Building-age color from BAG bouwjaar — shared by the flat choropleth
 /// fill and the 3D building tint.
-pub fn bag_year_color(tags: &HashMap<String, String>) -> Option<u32> {
+pub fn bag_year_color(tags: &impl TagLookup) -> Option<u32> {
     let bouwjaar = tags
         .get("bouwjaar")
         .and_then(|value| value.parse::<f64>().ok())
@@ -718,7 +718,7 @@ pub fn bag_year_color(tags: &HashMap<String, String>) -> Option<u32> {
 
 pub fn fill_color_for_tags(
     theme: &CompiledMapTheme,
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     closed: bool,
     render_zoom: u32,
 ) -> Option<u32> {
@@ -729,7 +729,7 @@ pub fn fill_color_for_tags(
     if tags.contains_key("building") {
         return theme.building_fill;
     }
-    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+    let layer = tags.get("layer").unwrap_or("");
     if is_road_polygon_layer(layer) {
         return theme.street_area_fill;
     }
@@ -768,7 +768,6 @@ pub fn fill_color_for_tags(
             .get("buurtcode")
             .or_else(|| tags.get("wijkcode"))
             .or_else(|| tags.get("gemeentecode"))
-            .map(|value| value.as_str())
             .unwrap_or("");
         let mut h: u32 = 5381;
         for b in code.bytes() {
@@ -798,14 +797,14 @@ pub fn fill_color_for_tags(
         return theme.water_fill;
     }
     if matches!(
-        tags.get("natural").map(|value| value.as_str()),
+        tags.get("natural"),
         Some("scrub" | "heath" | "shrubbery")
     ) {
         // carto scrub green; the detail archive routes these as natural=*.
         return theme.landuse_fills.get("grass").copied().or(theme.landuse_default);
     }
     if matches!(
-        tags.get("natural").map(|value| value.as_str()),
+        tags.get("natural"),
         Some("sand" | "beach" | "shingle")
     ) {
         // zoo enclosures, dunes, riverbanks — carto's pale sand tan.
@@ -844,23 +843,23 @@ pub fn fill_color_for_tags(
 /// shiny.md material id (carried in param3 of shape-0 fills) for a fill's
 /// tags: water and green areas get per-pixel effects behind uniform gates;
 /// everything else stays 0 = the untouched legacy path.
-pub fn fill_material_for_tags(tags: &HashMap<String, String>) -> f32 {
-    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+pub fn fill_material_for_tags(tags: &impl TagLookup) -> f32 {
+    let layer = tags.get("layer").unwrap_or("");
     if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") || layer == "ocean"
     {
         return MAT_WATER;
     }
     if matches!(
-        tags.get("natural").map(|value| value.as_str()),
+        tags.get("natural"),
         Some("scrub" | "heath" | "shrubbery")
     ) {
         return MAT_GREEN;
     }
     let is_green = matches!(
-        tags.get("leisure").map(|value| value.as_str()),
+        tags.get("leisure"),
         Some("park" | "nature_reserve" | "garden" | "golf_course" | "pitch" | "village_green")
     ) || matches!(
-        tags.get("landuse").map(|value| value.as_str()),
+        tags.get("landuse"),
         Some(
             "grass"
                 | "forest"
@@ -881,11 +880,11 @@ pub fn fill_material_for_tags(tags: &HashMap<String, String>) -> f32 {
 /// Semantic paint order for the fill pass (carto-like): land/landcover as the
 /// base, sites above land, water above both, then buildings, then road areas.
 /// Raw MVT layer order painted `land`/`sites` over the buildings.
-pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
+pub fn fill_layer_rank(tags: &impl TagLookup) -> u8 {
     if tags.contains_key("building") {
         return 40;
     }
-    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+    let layer = tags.get("layer").unwrap_or("");
     if is_road_polygon_layer(layer) {
         // above base land, but below sites/parks — pedestrian plazas like
         // Bellamyplein must not paint over the park inside them
@@ -915,7 +914,7 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
     // otherwise lose to protobuf feature order (Bellamyplein rendered gray).
     let is_green = tags.contains_key("leisure")
         || matches!(
-            tags.get("landuse").map(|value| value.as_str()),
+            tags.get("landuse"),
             Some(
                 "grass"
                     | "forest"
@@ -935,14 +934,14 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
                 // playground inside a park) must never tie — equal ranks
                 // shimmer in the tilt-mode micro-depth.
                 if let Some(leisure) = tags.get("leisure") {
-                    match leisure.as_str() {
+                    match leisure {
                         "park" | "nature_reserve" => 16,
                         "garden" | "golf_course" => 17,
                         "pitch" | "playground" => 19,
                         _ => 16,
                     }
                 } else {
-                    match tags.get("landuse").map(|value| value.as_str()) {
+                    match tags.get("landuse") {
                         Some("grass") => 18,
                         _ => 17,
                     }
@@ -1011,13 +1010,13 @@ fn is_pedestrian_bridge_member(highway: &str) -> bool {
 
 pub fn stroke_style_for_tags(
     theme: &CompiledMapTheme,
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     _tile_zoom: u32,
     render_zoom: u32,
     zoom_mult: f32,
     px_to_units: f32,
 ) -> Option<StrokeStyle> {
-    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+    let layer = tags.get("layer").unwrap_or("");
     if is_road_polygon_layer(layer) || layer == "bridges" {
         // Pedestrian squares / wide path areas get carto's thin gray edge
         // from street level; the fill itself comes from the fill pass.
@@ -1062,7 +1061,7 @@ pub fn stroke_style_for_tags(
     }
     // Walls/fences dark thin, hedges green (detail archive).
     if layer == "barrier_line" {
-        let (color, width) = match tags.get("barrier").map(|value| value.as_str()) {
+        let (color, width) = match tags.get("barrier") {
             Some("hedge") => (0x9dc29a, 1.6),
             Some("fence") => (0xaaaaaa, 0.7),
             _ => (0x8a8a8a, 1.0),
@@ -1108,8 +1107,8 @@ pub fn stroke_style_for_tags(
                 0xd7263d, 0x1b9e4b, 0x2456d7, 0xf2760c, 0x8e2bbf, 0x0b8f8f,
                 0xc72b8e, 0x8a5a2b, 0x5a7d00, 0x364fc7,
             ];
-            let mode = tags.get("mode").map(|v| v.as_str()).unwrap_or("");
-            let line_ref = tags.get("ref").map(|v| v.as_str()).unwrap_or("");
+            let mode = tags.get("mode").unwrap_or("");
+            let line_ref = tags.get("ref").unwrap_or("");
             let (color, width) = match mode {
                 "rail" => (0x37474f, 2.0),
                 "ferry" => (0x1b78c4, 2.0),
@@ -1278,7 +1277,7 @@ pub fn stroke_style_for_tags(
             // carto grays out paths you can't freely walk (zoos, private
             // grounds) instead of the public salmon.
             if matches!(
-                tags.get("access").map(|value| value.as_str()),
+                tags.get("access"),
                 Some("private" | "no" | "customers")
             ) {
                 style.center.color = 0x9c9c9c;
@@ -1451,7 +1450,7 @@ pub fn contrast_edge(color: u32) -> u32 {
 /// the span (they do on osm.org).
 pub fn thin_bridge_dots_for_tags(
     theme: &CompiledMapTheme,
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     render_zoom: u32,
     zoom_mult: f32,
     px_to_units: f32,
@@ -1474,7 +1473,7 @@ pub fn thin_bridge_dots_for_tags(
     style.sort_rank = style.sort_rank.saturating_add(1);
     style.center.expand_class = EXPAND_CLASS_THIN;
     if matches!(
-        tags.get("access").map(|value| value.as_str()),
+        tags.get("access"),
         Some("private" | "no" | "customers")
     ) {
         style.center.color = 0x9c9c9c;
@@ -1487,7 +1486,7 @@ fn rail_stroke_style(
     template: StrokeTemplate,
     heavy: bool,
     render_zoom: u32,
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     rank_bias: i16,
     width_scale: f32,
 ) -> StrokeStyle {
