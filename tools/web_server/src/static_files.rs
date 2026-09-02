@@ -9,13 +9,13 @@ use makepad_network::HttpServerHeaders;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{CString, OsString},
-    fs::{File, Metadata},
+    fs::{self, File, Metadata, OpenOptions},
     fmt::Write as _,
-    io::{Read, Seek},
+    io::{Read, Seek, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::{mpsc::{self, SyncSender, TrySendError}, Mutex},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -26,12 +26,13 @@ use std::os::unix::fs::MetadataExt;
 
 const REPORT_LIMIT: usize = 8_192;
 pub const REPORT_BODY_LIMIT: usize = REPORT_LIMIT;
-const REPORTS_PER_MINUTE: u32 = 10;
+pub const CRASH_BODY_LIMIT: usize = 64 * 1024;
+const REPORTS_PER_MINUTE: u32 = 30;
+const GLOBAL_REPORTS_PER_MINUTE: u32 = 600;
 const REPORT_WINDOW: Duration = Duration::from_secs(60);
 const MAX_REPORT_CLIENTS: usize = 4_096;
 const LOG_QUEUE_CAPACITY: usize = 256;
-const GLOBAL_REPORT_BURST: f64 = 256.0;
-const GLOBAL_REPORTS_PER_SECOND: f64 = 2.0;
+const CRASH_LOG_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct ReportWindow {
@@ -45,8 +46,7 @@ pub struct ReportRateLimiter {
     entries: HashMap<IpAddr, ReportWindow>,
     expirations: VecDeque<(Instant, IpAddr)>,
     capacity: usize,
-    global_tokens: f64,
-    global_updated: Instant,
+    global: Option<ReportWindow>,
 }
 
 impl ReportRateLimiter {
@@ -55,8 +55,7 @@ impl ReportRateLimiter {
             entries: HashMap::new(),
             expirations: VecDeque::new(),
             capacity: capacity.max(1),
-            global_tokens: GLOBAL_REPORT_BURST,
-            global_updated: Instant::now(),
+            global: None,
         }
     }
 
@@ -82,16 +81,17 @@ impl ReportRateLimiter {
         if !self.entries.contains_key(&ip) && self.entries.len() >= self.capacity {
             return false;
         }
-        if let Some(elapsed) = now.checked_duration_since(self.global_updated) {
-            self.global_tokens = (self.global_tokens
-                + elapsed.as_secs_f64() * GLOBAL_REPORTS_PER_SECOND)
-                .min(GLOBAL_REPORT_BURST);
-            self.global_updated = now;
+        if self
+            .global
+            .is_none_or(|window| now.saturating_duration_since(window.started) >= REPORT_WINDOW)
+        {
+            self.global = Some(ReportWindow { started: now, count: 0 });
         }
-        if self.global_tokens < 1.0 {
+        let global = self.global.as_mut().expect("global window initialized");
+        if global.count >= GLOBAL_REPORTS_PER_MINUTE {
             return false;
         }
-        self.global_tokens -= 1.0;
+        global.count += 1;
         let entry = self.entries.entry(ip).or_insert_with(|| {
             self.expirations.push_back((now + REPORT_WINDOW, ip));
             ReportWindow { started: now, count: 0 }
@@ -110,9 +110,15 @@ enum ReportSource {
     Pending(HttpServerPendingBody),
 }
 
+#[derive(Clone, Copy)]
+enum ReportKind {
+    Crash,
+    LegacyGet,
+}
+
 struct ReportLogJob {
     ip: IpAddr,
-    encoded: bool,
+    kind: ReportKind,
     source: ReportSource,
     response: Option<HttpServerResponseSender>,
 }
@@ -126,6 +132,10 @@ pub struct StaticHandler {
 
 impl StaticHandler {
     pub fn new(root: &Path) -> Result<Self, String> {
+        Self::new_with_data_dir(root, None)
+    }
+
+    pub fn new_with_data_dir(root: &Path, data_dir: Option<&Path>) -> Result<Self, String> {
         ensure_static_platform()?;
         let root = root
             .canonicalize()
@@ -137,6 +147,7 @@ impl StaticHandler {
         }
         validate_docroot_permissions(&root)?;
         validate_root_identity(&root, &root_fd)?;
+        let crash_log = data_dir.unwrap_or(&root).join("crash.log");
         let (log_tx, log_rx) = mpsc::sync_channel::<ReportLogJob>(LOG_QUEUE_CAPACITY);
         std::thread::Builder::new()
             .name("web-report-log".into())
@@ -149,9 +160,15 @@ impl StaticHandler {
                             Err(()) => continue,
                         },
                     };
-                    log_report(job.ip, &bytes, job.encoded);
+                    let result = prepare_report_body(job.kind, &bytes)
+                        .and_then(|body| append_crash_report(&crash_log, job.ip, &body).map_err(|_| ReportError::Io));
                     if let Some(response) = job.response {
-                        send_response(&response, no_content("no-store", ""));
+                        let result = match result {
+                            Ok(()) => report_response(204, ""),
+                            Err(ReportError::Utf8) => report_response(400, "body must be UTF-8"),
+                            Err(ReportError::Io) => report_response(500, "failed to store crash report"),
+                        };
+                        send_response(&response, result);
                     }
                 }
             })
@@ -173,6 +190,14 @@ impl StaticHandler {
         headers: &HttpServerHeaders,
         sender: &HttpServerResponseSender,
     ) {
+        if headers.path == "/api/crash" {
+            if headers.verb == "OPTIONS" {
+                send_response(sender, report_options());
+            } else {
+                send_response(sender, report_method_not_allowed());
+            }
+            return;
+        }
         if headers.path == "/$report_error" {
             if matches!(headers.verb.as_str(), "GET" | "HEAD") {
                 let raw = headers
@@ -181,8 +206,7 @@ impl StaticHandler {
                     .unwrap_or("")
                     .strip_prefix("data=")
                     .unwrap_or(headers.search.as_deref().unwrap_or(""));
-                self.report(headers, raw.as_bytes(), true);
-                send_response(sender, no_content("no-store", ""));
+                self.report(headers, raw.as_bytes(), ReportKind::LegacyGet, sender);
             } else if headers.verb == "OPTIONS" {
                 send_response(sender, options_response(true));
             } else {
@@ -207,11 +231,16 @@ impl StaticHandler {
         body: &[u8],
         sender: &HttpServerResponseSender,
     ) -> bool {
-        if headers.path != "/$report_error" {
-            return false;
+        let (kind, limit) = match headers.path.as_str() {
+            "/api/crash" => (ReportKind::Crash, CRASH_BODY_LIMIT),
+            "/$report_error" => (ReportKind::LegacyGet, REPORT_BODY_LIMIT),
+            _ => return false,
+        };
+        if body.len() > limit {
+            send_response(sender, report_response(413, "request body too large"));
+            return true;
         }
-        self.report(headers, body, false);
-        send_response(sender, no_content("no-store", ""));
+        self.report(headers, body, kind, sender);
         true
     }
 
@@ -221,16 +250,18 @@ impl StaticHandler {
         body: HttpServerPendingBody,
         sender: &HttpServerResponseSender,
     ) -> Result<(), HttpServerPendingBody> {
-        if headers.path != "/$report_error" {
-            return Err(body);
-        }
+        let kind = match headers.path.as_str() {
+            "/api/crash" => ReportKind::Crash,
+            "/$report_error" => ReportKind::LegacyGet,
+            _ => return Err(body),
+        };
         let Some(ip) = self.admit_report(headers) else {
-            body.reject(no_content("no-store", ""));
+            body.reject(report_response(429, "rate limit exceeded"));
             return Ok(());
         };
         let job = ReportLogJob {
             ip,
-            encoded: false,
+            kind,
             source: ReportSource::Pending(body),
             response: Some(sender.clone()),
         };
@@ -238,7 +269,7 @@ impl StaticHandler {
             Ok(()) => {}
             Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => {
                 if let ReportSource::Pending(body) = job.source {
-                    body.reject(no_content("no-store", ""));
+                    body.reject(report_response(429, "report queue is full"));
                 }
             }
         }
@@ -395,10 +426,26 @@ impl StaticHandler {
         send_response(sender, HttpServerResponse::from_file(header, selected, offset, body_len));
     }
 
-    fn report(&self, headers: &HttpServerHeaders, bytes: &[u8], encoded: bool) {
-        let Some(ip) = self.admit_report(headers) else { return };
-        let source = ReportSource::Ready(bytes[..bytes.len().min(REPORT_LIMIT * 3)].to_vec());
-        let _ = self.log_tx.try_send(ReportLogJob { ip, encoded, source, response: None });
+    fn report(
+        &self,
+        headers: &HttpServerHeaders,
+        bytes: &[u8],
+        kind: ReportKind,
+        sender: &HttpServerResponseSender,
+    ) {
+        let Some(ip) = self.admit_report(headers) else {
+            send_response(sender, report_response(429, "rate limit exceeded"));
+            return;
+        };
+        let job = ReportLogJob {
+            ip,
+            kind,
+            source: ReportSource::Ready(bytes.to_vec()),
+            response: Some(sender.clone()),
+        };
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = self.log_tx.try_send(job) {
+            send_response(sender, report_response(429, "report queue is full"));
+        }
     }
 
     fn admit_report(&self, headers: &HttpServerHeaders) -> Option<IpAddr> {
@@ -428,24 +475,52 @@ fn validate_relative_components(relative: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn log_report(ip: IpAddr, bytes: &[u8], encoded: bool) {
-    let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(REPORT_LIMIT * 3)]);
-    let decoded = if encoded {
-        percent_decode(&raw, REPORT_LIMIT).unwrap_or_else(|_| "invalid percent encoding".into())
-    } else {
-        percent_decode(&raw, REPORT_LIMIT)
-            .unwrap_or_else(|_| raw.chars().take(REPORT_LIMIT).collect())
-    };
-    let clean: String = decoded
-        .chars()
-        .take(REPORT_LIMIT)
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    eprintln!(
-        "{{\"event\":\"browser_error\",\"peer\":{},\"message\":{}}}",
-        json_string(&ip.to_string()),
-        json_string(clean.trim())
-    );
+#[derive(Clone, Copy)]
+enum ReportError {
+    Utf8,
+    Io,
+}
+
+fn prepare_report_body(kind: ReportKind, bytes: &[u8]) -> Result<String, ReportError> {
+    match kind {
+        ReportKind::Crash => std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| ReportError::Utf8),
+        ReportKind::LegacyGet => {
+            let raw = std::str::from_utf8(bytes).map_err(|_| ReportError::Utf8)?;
+            let decoded = percent_decode(raw, REPORT_LIMIT)
+                .unwrap_or_else(|_| "invalid percent encoding".into());
+            Ok(format!(
+                "{{\"kind\":\"legacy-get\",\"data\":{}}}",
+                json_string(&decoded)
+            ))
+        }
+    }
+}
+
+fn append_crash_report(path: &Path, ip: IpAddr, body: &str) -> std::io::Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let line = crash_log_line(now.as_millis(), ip, body);
+    append_rotating(path, &line, CRASH_LOG_LIMIT)
+}
+
+fn crash_log_line(unix_ms: u128, ip: IpAddr, body: &str) -> Vec<u8> {
+    let body = body.replace('\r', "\\r").replace('\n', "\\n");
+    format!("{unix_ms} {ip} {body}\n").into_bytes()
+}
+
+fn append_rotating(path: &Path, line: &[u8], limit: u64) -> std::io::Result<()> {
+    let current_len = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    if current_len > 0 && current_len.saturating_add(line.len() as u64) > limit {
+        let rotated = path.with_file_name("crash.log.1");
+        match fs::remove_file(&rotated) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(path, rotated)?;
+    }
+    OpenOptions::new().create(true).append(true).open(path)?.write_all(line)
 }
 
 #[cfg(unix)]
@@ -674,7 +749,7 @@ pub fn cloudflare_peer(ip: IpAddr) -> bool {
 }
 
 pub fn client_ip(headers: &HttpServerHeaders) -> IpAddr {
-    let peer = normalize_client_ip(headers.addr.ip());
+    let peer = normalize_mapped_ip(headers.addr.ip());
     let client = if cloudflare_peer(peer) {
         let mut forwarded = headers
             .lines
@@ -686,11 +761,19 @@ pub fn client_ip(headers: &HttpServerHeaders) -> IpAddr {
             .filter(|_| forwarded.next().is_none())
             .filter(|value| !value.contains(','))
             .and_then(|value| value.parse().ok())
+            .map(normalize_mapped_ip)
             .unwrap_or(peer)
     } else {
         peer
     };
-    normalize_client_ip(client)
+    client
+}
+
+fn normalize_mapped_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some() => IpAddr::V4(ip.to_ipv4_mapped().unwrap()),
+        _ => ip,
+    }
 }
 
 fn sibling_brotli(path: &str) -> String {
@@ -1043,6 +1126,30 @@ fn no_content(cache: &str, extra: &str) -> HttpServerResponse {
     response(204, None, cache, extra, Vec::new())
 }
 
+fn report_response(status: u16, message: &str) -> HttpServerResponse {
+    response(
+        status,
+        (status != 204).then_some("text/plain; charset=utf-8"),
+        "private, no-cache",
+        "",
+        if status == 204 { Vec::new() } else { message.as_bytes().to_vec() },
+    )
+}
+
+fn report_method_not_allowed() -> HttpServerResponse {
+    response(
+        405,
+        Some("text/plain; charset=utf-8"),
+        "private, no-cache",
+        "Allow: POST, OPTIONS\r\n",
+        b"method not allowed".to_vec(),
+    )
+}
+
+fn report_options() -> HttpServerResponse {
+    no_content("private, no-cache", "Allow: POST, OPTIONS\r\n")
+}
+
 fn options_response(report: bool) -> HttpServerResponse {
     let methods = if report { "GET, HEAD, POST, OPTIONS" } else { "GET, HEAD, OPTIONS" };
     no_content(
@@ -1150,7 +1257,7 @@ mod tests {
         let trusted = headers("173.245.48.1", Some("2001:db8:1234:5678:abcd::1"));
         assert_eq!(
             client_ip(&trusted),
-            "2001:db8:1234:5678::".parse::<IpAddr>().unwrap()
+            "2001:db8:1234:5678:abcd::1".parse::<IpAddr>().unwrap()
         );
 
         let mapped_peer = headers("::ffff:173.245.48.1", Some("::ffff:198.51.100.7"));
@@ -1173,16 +1280,45 @@ mod tests {
     }
 
     #[test]
-    fn report_limiter_has_a_global_token_bucket() {
-        let mut limiter = ReportRateLimiter::new(300);
+    fn report_limiter_has_a_global_minute_limit() {
+        let mut limiter = ReportRateLimiter::new(GLOBAL_REPORTS_PER_MINUTE as usize + 1);
         let now = Instant::now();
-        for subnet in 0..GLOBAL_REPORT_BURST as u128 {
+        for subnet in 0..GLOBAL_REPORTS_PER_MINUTE as u128 {
             let ip = IpAddr::V6(Ipv6Addr::from((0x2001_0db8u128 << 96) | (subnet << 64)));
             assert!(limiter.allow_at(ip, now));
         }
         let next = IpAddr::V6("3001:db8::1".parse().unwrap());
         assert!(!limiter.allow_at(next, now));
-        assert!(limiter.allow_at(next, now + Duration::from_millis(500)));
+        assert!(limiter.allow_at(next, now + REPORT_WINDOW));
+    }
+
+    #[test]
+    fn crash_log_line_escapes_newlines_without_changing_other_bytes() {
+        let body = "{\n\"stack\":\"line\\nvalue\"\r\n}";
+        let line = String::from_utf8(crash_log_line(
+            123,
+            "192.0.2.4".parse().unwrap(),
+            body,
+        ))
+        .unwrap();
+        assert_eq!(line, "123 192.0.2.4 {\\n\"stack\":\"line\\nvalue\"\\r\\n}\n");
+    }
+
+    #[test]
+    fn crash_log_rotates_one_generation() {
+        let base = std::env::temp_dir().join(format!(
+            "makepad-crash-log-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir(&base).unwrap();
+        let path = base.join("crash.log");
+        fs::write(&path, b"123456").unwrap();
+        fs::write(base.join("crash.log.1"), b"stale").unwrap();
+        append_rotating(&path, b"next\n", 8).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"next\n");
+        assert_eq!(fs::read(base.join("crash.log.1")).unwrap(), b"123456");
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]
