@@ -17,8 +17,10 @@
 
 #[cfg(feature = "faces")]
 pub mod faces;
+pub mod mkmap;
 pub mod nav_build;
 pub mod native;
 pub mod progress;
+pub mod repack;
 pub mod testmap;
 pub mod versatiles;
