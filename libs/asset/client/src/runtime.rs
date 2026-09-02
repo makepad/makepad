@@ -687,6 +687,15 @@ impl ClientRuntime {
                         runtime.events.push_back(ClientEvent::Failed { id, error: error.clone() });
                     }
                 }
+                StaticStoreEvent::FetchProgress { id, bytes, total } => {
+                    if let Some(active) = runtime.active.get(&id) {
+                        runtime.events.push_back(ClientEvent::Progress {
+                            id: active.request_id,
+                            bytes,
+                            total,
+                        });
+                    }
+                }
                 StaticStoreEvent::FetchDone { id, output } => {
                     if let Some(active) = runtime.active.remove(&id) {
                         let result = static_output(output, active.kind);
