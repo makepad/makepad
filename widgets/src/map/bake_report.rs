@@ -10,7 +10,7 @@
 use super::geometry::{lon_lat_to_normalized, tile_world_size, TileKey, TILE_SIZE};
 use super::style::probe_compiled_theme;
 use super::tile::{
-    load_local_tile_batch, TileBuffers, SHADOW_DISC_INSTANCE_FLOATS,
+    load_local_tile_batch, TileBuffers, MAP_PROP_INSTANCE_BYTES, SHADOW_DISC_INSTANCE_FLOATS,
 };
 use crate::makepad_draw::vector::{
     decode_face_vertex, decode_fill_vertex, decode_road_vertex, FACE_TYPED_VERTEX_BYTES,
@@ -195,6 +195,10 @@ fn amsterdam_start_view_bake_report() {
     let mut total_shadow_disc_instances = 0usize;
     let mut total_wall_instance_bytes = 0usize;
     let mut total_tree_instance_bytes = 0usize;
+    let mut total_stalk_instance_bytes = 0usize;
+    let mut total_stalk_instances = 0usize;
+    let mut total_stoplight_instance_bytes = 0usize;
+    let mut total_stoplight_instances = 0usize;
     let mut icon_kinds = std::collections::BTreeMap::new();
     let mut fill_kinds = std::collections::BTreeMap::new();
     let mut face_kinds = std::collections::BTreeMap::new();
@@ -296,6 +300,16 @@ fn amsterdam_start_view_bake_report() {
             + b.tree_cross_template_indices.len()
             + b.tree_cross_template_vertices.len())
             * 4;
+        total_stalk_instance_bytes += (b.stalk_template_indices.len()
+            + b.stalk_template_vertices.len())
+            * 4
+            + b.stalk_instances.len() * MAP_PROP_INSTANCE_BYTES;
+        total_stalk_instances += b.stalk_instances.len();
+        total_stoplight_instance_bytes += (b.stoplight_template_indices.len()
+            + b.stoplight_template_vertices.len())
+            * 4
+            + b.stoplight_instances.len() * MAP_PROP_INSTANCE_BYTES;
+        total_stoplight_instances += b.stoplight_instances.len();
         classify_packed(&b.icon_vertices, &mut icon_kinds);
         classify_fill_packed(&b.fill_vertices, &mut fill_kinds);
         classify_face_packed(&b.face_vertices, &mut face_kinds);
@@ -374,6 +388,20 @@ fn amsterdam_start_view_bake_report() {
         "tree_inst",
         mib(total_tree_instance_bytes),
         total_tree_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64
+    );
+    println!(
+        "  {:<16} {:>8.1} MiB {:>5.1}%  ({} instances)",
+        "stalk_inst",
+        mib(total_stalk_instance_bytes),
+        total_stalk_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64,
+        total_stalk_instances,
+    );
+    println!(
+        "  {:<16} {:>8.1} MiB {:>5.1}%  ({} instances)",
+        "stoplight_inst",
+        mib(total_stoplight_instance_bytes),
+        total_stoplight_instance_bytes as f64 * 100.0 / total_bytes.max(1) as f64,
+        total_stoplight_instances,
     );
     for (name, kinds) in [
         ("icon", &icon_kinds),
