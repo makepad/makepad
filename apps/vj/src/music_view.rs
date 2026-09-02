@@ -2207,15 +2207,12 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
                         deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // Beat jump: four bars back / forward on the deck's own
-                        // grid (shift: sixteen), so a synced deck stays in phase.
-                        deck_a_jump_back := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
-                        }
                         // One beat back, one beat on — the nudge a hand makes
-                        // when the drop lands a hair early. A beat is a GRID
-                        // measurement, so these do nothing until a grid does:
-                        // there is no length to step by before one lands.
+                        // when the drop lands a hair early — and a phrase with a
+                        // modifier held: shift takes four bars, control sixteen.
+                        // A beat is a GRID measurement, so these do nothing until
+                        // a grid does: there is no length to step by before one
+                        // lands.
                         //
                         // NOT mirrored on deck B, for the reason the loop marks
                         // are not: these point along the TRACK, and back is on
@@ -2223,9 +2220,6 @@ script_mod! {
                         // deck it belongs to.
                         deck_a_beat_back := MusicButton{width: 22 height: 24 text: "<"}
                         deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
-                        deck_a_jump_fwd := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
-                        }
                         deck_a_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
@@ -2765,16 +2759,10 @@ script_mod! {
                         deck_b_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
-                        deck_b_jump_back := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
-                        }
                         // NOT mirrored, exactly as the loop marks above are
                         // not: back is left on every transport in the room.
                         deck_b_beat_back := MusicButton{width: 22 height: 24 text: "<"}
                         deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
-                        deck_b_jump_fwd := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
-                        }
                         deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
                         deck_b_play := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
@@ -2877,327 +2865,333 @@ script_mod! {
                 // asked it to carry. FromB keeps that 320 as the starting
                 // place rather than as the law, so widening the set list
                 // costs the listing exactly what it gains.
-                lists_split := Splitter{
+                // The pair the loops page replaces: hidden as one, so the loops
+                // page gets the whole column rather than a seam and two blanks.
+                lists_pair := View{
                     width: Fill
                     height: Fill
-                    axis: SplitterAxis.Horizontal
-                    align: SplitterAlign.FromB(320.0)
-                    // The seam the rest of the console uses: near-invisible
-                    // at rest, accent under the pointer.
-                    size: 6.0
-                    draw_bg +: {
-                        color_bg: #x14171c
-                        color: #x222830
-                        color_hover: #x46312b
-                        color_drag: #xff5c39
-                        splitter_pad: 2.0
-                        bar_size: 72.0
-                    }
-                    a: View{
+                    lists_split := Splitter{
                         width: Fill
                         height: Fill
-                        library_drop := RoundedView{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 4
-                        // Invisible until a file is dragged over it: the border
-                        // is how this column says a drop would land here.
+                        axis: SplitterAxis.Horizontal
+                        align: SplitterAlign.FromB(320.0)
+                        // The seam the rest of the console uses: near-invisible
+                        // at rest, accent under the pointer.
+                        size: 6.0
                         draw_bg +: {
-                            color: #x00000000
-                            border_color: #x00000000
-                            border_size: 1.0
-                            border_radius: 8.0
+                            color_bg: #x14171c
+                            color: #x222830
+                            color_hover: #x46312b
+                            color_drag: #xff5c39
+                            splitter_pad: 2.0
+                            bar_size: 72.0
                         }
-                        View{
+                        a: View{
                             width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            align: Align{x: 0.0, y: 0.5}
-                            // Catalog-only controls: the local listing is neither
-                            // searched nor paginated, so these fold away with it.
-                            music_catalog := View{
+                            height: Fill
+                            library_drop := RoundedView{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 4
+                            // Invisible until a file is dragged over it: the border
+                            // is how this column says a drop would land here.
+                            draw_bg +: {
+                                color: #x00000000
+                                border_color: #x00000000
+                                border_size: 1.0
+                                border_radius: 8.0
+                            }
+                            View{
                                 width: Fill
                                 height: Fit
                                 flow: Right
                                 spacing: 6
                                 align: Align{x: 0.0, y: 0.5}
-                                // Twelve characters of query, eight of category: the
-                                // floors below which a field stops being a field. The
-                                // search box takes whatever the row does not spend;
-                                // the category cell is narrowed by
-                                // `App::sync_library_density` when the console does.
-                                music_search := TextInput{
-                                    // Twelve characters of query at the floor, and a
-                                    // ceiling: past ~488 the box is just a long empty
-                                    // trough, and the row's other controls can use it.
-                                    width: Fill{min: 96. max: 488.}
-                                    // One line, always: the themed input wraps its
-                                    // text by default, and a long query is not worth
-                                    // making the whole row two lines tall.
-                                    flow: Flow.Right{wrap: false}
-                                    empty_text: "search music…"
-                                }
-                                music_category_cell := View{
-                                    width: 96
+                                // Catalog-only controls: the local listing is neither
+                                // searched nor paginated, so these fold away with it.
+                                music_catalog := View{
+                                    width: Fill
                                     height: Fit
-                                    music_category := TextInput{
-                                        width: Fill
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
+                                    // Twelve characters of query, eight of category: the
+                                    // floors below which a field stops being a field. The
+                                    // search box takes whatever the row does not spend;
+                                    // the category cell is narrowed by
+                                    // `App::sync_library_density` when the console does.
+                                    music_search := TextInput{
+                                        // Twelve characters of query at the floor, and a
+                                        // ceiling: past ~488 the box is just a long empty
+                                        // trough, and the row's other controls can use it.
+                                        width: Fill{min: 96. max: 488.}
+                                        // One line, always: the themed input wraps its
+                                        // text by default, and a long query is not worth
+                                        // making the whole row two lines tall.
                                         flow: Flow.Right{wrap: false}
-                                        empty_text: "category"
-                                        // The explorer opens filtered to
-                                        // music (the model's default);
-                                        // showing the word keeps the box
-                                        // honest — clear it for all audio.
-                                        text: "music"
+                                        empty_text: "search music…"
+                                    }
+                                    music_category_cell := View{
+                                        width: 96
+                                        height: Fit
+                                        music_category := TextInput{
+                                            width: Fill
+                                            flow: Flow.Right{wrap: false}
+                                            empty_text: "category"
+                                            // The explorer opens filtered to
+                                            // music (the model's default);
+                                            // showing the word keeps the box
+                                            // honest — clear it for all audio.
+                                            text: "music"
+                                        }
+                                    }
+                                    music_go := MusicChipButton{
+                                        text: "Search"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/search.svg") }
+                                    }
+                                    music_more := MusicChipButton{
+                                        text: "More"
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/more.svg") }
                                     }
                                 }
-                                music_go := MusicChipButton{
-                                    text: "Search"
-                                    draw_icon +: { svg: crate_resource("self:resources/icons/search.svg") }
+                                // Narrow the listing to what has already been worked
+                                // out. Several at once AND together: "a key and a
+                                // tempo" is the harmonic-mixing question, and it is
+                                // not answerable one column at a time.
+                                //
+                                // One chip that drops a list of ticks, not four chips
+                                // in a row: four of them cost most of a narrow
+                                // console's line to say something the operator reads
+                                // once a set. Closed, the chip carries the count, so
+                                // a filter that is narrowing the listing still says
+                                // so without being opened.
+                                //
+                                // OUTSIDE `music_catalog`, which folds away with the
+                                // local listing: STEMS/KARAOKE/KEY/BPM is work that
+                                // has been done or not, and a local file answers that
+                                // question exactly as a catalog row does. Search and
+                                // More are catalog-only; this is not.
+                                //
+                                // Height PINNED to the chips it now sits between —
+                                // its own line let it stand at 18, and four points
+                                // short in this row reads as a mistake.
+                                music_has_filter := DropToggles{
+                                    height: 22
+                                    text: "FILTER"
+                                    labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
                                 }
-                                music_more := MusicChipButton{
-                                    text: "More"
-                                    draw_icon +: { svg: crate_resource("self:resources/icons/more.svg") }
+                                music_local := MusicChipButton{
+                                    text: "LOCAL FILES"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/folder.svg") }
+                                }
+                                // The same IMPORT CONTENT flow the VJ page has: pick a
+                                // folder, and its media publishes into the store no-copy.
+                                music_import := MusicChipButton{
+                                    text: "IMPORT"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/import.svg") }
+                                }
+                                // The explorer's menu: what may be worked out
+                                // ahead of the set, which columns each list
+                                // carries, and where the cache lives. A MENU
+                                // mark rather than a gear — a gear promises
+                                // settings for the thing beside it, and this
+                                // opens the lists' own menu. Icon-only, so it
+                                // takes the house icon button rather than a bare
+                                // Button, which would leave the glyph off-centre.
+                                music_prep_cfg := MusicIconButton{
+                                    width: 24
+                                    height: 20
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/menu.svg") }
+                                }
+                                // Fit, not a fixed 90: the count is four characters and a
+                                // slash, and the dead width it used to carry pushed the
+                                // load target away from it for nothing.
+                                music_count := MusicLabel{width: Fit text: ""}
+                                // Hides on a narrow console: the dropdown beside
+                                // it collapses to its icon there, and a word
+                                // introducing a wordless control is the first
+                                // thing that should go.
+                                music_load_label := MusicLabel{text: "load"}
+                                // Each target wears a mark, so a narrow console
+                                // can drop the words and still be read: the
+                                // decks are A and B on every other surface here,
+                                // OFF is the power sign, and the mix target is a
+                                // fader. The height is PINNED because the face
+                                // is `height: Fit` — collapsed to its icon it
+                                // would otherwise stand six points shorter than
+                                // the chips it sits between.
+                                deck_target := DropDown{
+                                    height: 22
+                                    labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]
+                                    icons: [
+                                        crate_resource("self:resources/icons/auto.svg")
+                                        crate_resource("self:resources/icons/deck_a.svg")
+                                        crate_resource("self:resources/icons/deck_b.svg")
+                                        crate_resource("self:resources/icons/off.svg")
+                                        crate_resource("self:resources/icons/mix.svg")
+                                    ]
+                                }
+                                // Latched, the deck a picked track lands on starts as
+                                // soon as its decode finishes — "select and it plays".
+                                // An EJECT turned a quarter turn: the bar leads,
+                                // the triangle follows. A plain play triangle
+                                // here reads as "play", which is a different
+                                // button on every deck in the room — and it has
+                                // to survive losing its word, because this chip
+                                // collapses to its icon on a narrow console like
+                                // the rest of the row.
+                                music_autoplay := MusicChipButton{
+                                    text: "AUTOPLAY"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/autoplay.svg") }
                                 }
                             }
-                            // Narrow the listing to what has already been worked
-                            // out. Several at once AND together: "a key and a
-                            // tempo" is the harmonic-mixing question, and it is
-                            // not answerable one column at a time.
-                            //
-                            // One chip that drops a list of ticks, not four chips
-                            // in a row: four of them cost most of a narrow
-                            // console's line to say something the operator reads
-                            // once a set. Closed, the chip carries the count, so
-                            // a filter that is narrowing the listing still says
-                            // so without being opened.
-                            //
-                            // OUTSIDE `music_catalog`, which folds away with the
-                            // local listing: STEMS/KARAOKE/KEY/BPM is work that
-                            // has been done or not, and a local file answers that
-                            // question exactly as a catalog row does. Search and
-                            // More are catalog-only; this is not.
-                            //
-                            // Height PINNED to the chips it now sits between —
-                            // its own line let it stand at 18, and four points
-                            // short in this row reads as a mistake.
-                            music_has_filter := DropToggles{
-                                height: 22
-                                text: "FILTER"
-                                labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
-                                draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
-                            }
-                            music_local := MusicChipButton{
-                                text: "LOCAL FILES"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/folder.svg") }
-                            }
-                            // The same IMPORT CONTENT flow the VJ page has: pick a
-                            // folder, and its media publishes into the store no-copy.
-                            music_import := MusicChipButton{
-                                text: "IMPORT"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/import.svg") }
-                            }
-                            // The explorer's menu: what may be worked out
-                            // ahead of the set, which columns each list
-                            // carries, and where the cache lives. A MENU
-                            // mark rather than a gear — a gear promises
-                            // settings for the thing beside it, and this
-                            // opens the lists' own menu. Icon-only, so it
-                            // takes the house icon button rather than a bare
-                            // Button, which would leave the glyph off-centre.
-                            music_prep_cfg := MusicIconButton{
-                                width: 24
-                                height: 20
-                                draw_icon +: { svg: crate_resource("self:resources/icons/menu.svg") }
-                            }
-                            // Fit, not a fixed 90: the count is four characters and a
-                            // slash, and the dead width it used to carry pushed the
-                            // load target away from it for nothing.
-                            music_count := MusicLabel{width: Fit text: ""}
-                            // Hides on a narrow console: the dropdown beside
-                            // it collapses to its icon there, and a word
-                            // introducing a wordless control is the first
-                            // thing that should go.
-                            music_load_label := MusicLabel{text: "load"}
-                            // Each target wears a mark, so a narrow console
-                            // can drop the words and still be read: the
-                            // decks are A and B on every other surface here,
-                            // OFF is the power sign, and the mix target is a
-                            // fader. The height is PINNED because the face
-                            // is `height: Fit` — collapsed to its icon it
-                            // would otherwise stand six points shorter than
-                            // the chips it sits between.
-                            deck_target := DropDown{
-                                height: 22
-                                labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]
-                                icons: [
-                                    crate_resource("self:resources/icons/auto.svg")
-                                    crate_resource("self:resources/icons/deck_a.svg")
-                                    crate_resource("self:resources/icons/deck_b.svg")
-                                    crate_resource("self:resources/icons/off.svg")
-                                    crate_resource("self:resources/icons/mix.svg")
-                                ]
-                            }
-                            // Latched, the deck a picked track lands on starts as
-                            // soon as its decode finishes — "select and it plays".
-                            // An EJECT turned a quarter turn: the bar leads,
-                            // the triangle follows. A plain play triangle
-                            // here reads as "play", which is a different
-                            // button on every deck in the room — and it has
-                            // to survive losing its word, because this chip
-                            // collapses to its icon on a narrow console like
-                            // the rest of the row.
-                            music_autoplay := MusicChipButton{
-                                text: "AUTOPLAY"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/autoplay.svg") }
-                            }
-                        }
-                        // The music import's whole face, on a line of its own.
-                        // It began wedged into the control row above, where the
-                        // fixed-width chrome squeezed it to eight pixels — a
-                        // refusal nobody could read looks exactly like a drop
-                        // that did nothing. A Fill line cannot be squeezed, and
-                        // an empty one costs a few pixels of height.
-                        // Only on screen while it has something to say: an empty
-                        // label still costs a row between the search and the list.
-                        music_import_status := MusicLabel{
-                            visible: false
-                            width: Fill
-                            text: ""
-                            draw_text.color: #xff5c39
-                        }
-                        // The column heads. Every one of them sorts: a click takes
-                        // the order, a second click reverses it, and the arrow in the
-                        // label says which column is holding it.
-                        //
-                        // Twelve generic cells, matching the row's twelve — see the
-                        // note on `row_col0`. Which column each carries comes from
-                        // the operator's layout at sync time, so the heads and the
-                        // cells under them are reordered by one decision rather than
-                        // by two that could disagree.
-                        //
-                        // The CELL carries the width, not the head: a Button's walk
-                        // is private, so the head fills a box the host can size.
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
-                            align: Align{x: 0.0, y: 0.5}
-                            MusicLabel{width: 26 text: ""}
-                            // The same FILL box the rows put their cells in,
-                            // so the heads narrow exactly as the cells under
-                            // them do. See `row_cells`.
-                            th_cells := View{
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            clip_x: true
-                            align: Align{x: 0.0, y: 0.5}
-                            th_cell0 := View{width: 0 height: Fit th_head0 := MusicColHead{width: Fill text: ""}}
-                            th_cell1 := View{width: 0 height: Fit th_head1 := MusicColHead{width: Fill text: ""}}
-                            th_cell2 := View{width: 0 height: Fit th_head2 := MusicColHead{width: Fill text: ""}}
-                            th_cell3 := View{width: 0 height: Fit th_head3 := MusicColHead{width: Fill text: ""}}
-                            th_cell4 := View{width: 0 height: Fit th_head4 := MusicColHead{width: Fill text: ""}}
-                            th_cell5 := View{width: 0 height: Fit th_head5 := MusicColHead{width: Fill text: ""}}
-                            th_cell6 := View{width: 0 height: Fit th_head6 := MusicColHead{width: Fill text: ""}}
-                            th_cell7 := View{width: 0 height: Fit th_head7 := MusicColHead{width: Fill text: ""}}
-                            th_cell8 := View{width: 0 height: Fit th_head8 := MusicColHead{width: Fill text: ""}}
-                            th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
-                            th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
-                            th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
-                            }
-                            // Stands in for the row's headphone + queue
-                            // chips, so a head sits over its own column
-                            // rather than 24 points to the right of it.
-                            MusicLabel{width: 50 text: ""}
-                            // What the filters left, and what the background
-                            // passes are doing about the rest — at the
-                            // explorer's right edge, level with the heads.
-                            //
-                            // It used to hold a whole line for one short
-                            // string. Up here it costs the width of the string
-                            // and nothing when there is no string: FIT, never
-                            // Fill, because a Fill would claim the right end of
-                            // the row while empty and stand every head off its
-                            // own column for nothing.
-                            //
-                            // While a count IS showing the heads do sit that
-                            // much to the left of their cells. That is the
-                            // trade this placement makes, and the count is
-                            // short and comes and goes.
-                            music_prep_status := MusicLabel{width: Fit text: ""}
-                        }
-                        music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
-                    }
-                    }
-                    b: View{
-                        width: Fill
-                        height: Fill
-                        queue_drop := RoundedView{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 4
-                        // Invisible until a file is dragged over it: the border
-                        // is how this column says a drop would land here.
-                        draw_bg +: {
-                            color: #x00000000
-                            border_color: #x00000000
-                            border_size: 1.0
-                            border_radius: 8.0
-                        }
-                        View{
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 6
-                            align: Align{x: 0.0, y: 0.5}
-                            Label{
-                                text: "QUEUE"
+                            // The music import's whole face, on a line of its own.
+                            // It began wedged into the control row above, where the
+                            // fixed-width chrome squeezed it to eight pixels — a
+                            // refusal nobody could read looks exactly like a drop
+                            // that did nothing. A Fill line cannot be squeezed, and
+                            // an empty one costs a few pixels of height.
+                            // Only on screen while it has something to say: an empty
+                            // label still costs a row between the search and the list.
+                            music_import_status := MusicLabel{
+                                visible: false
+                                width: Fill
+                                text: ""
                                 draw_text.color: #xff5c39
-                                draw_text.text_style: theme.font_bold{font_size: 10}
                             }
-                            queue_count := MusicLabel{width: Fill text: ""}
-                            // Queue policy lives with the queue it governs:
-                            // recycling and the pick order. The transition style
-                            // moved into the AUTO DJ gear modal.
-                            queue_repeat := MusicChipButton{
-                                height: 20
-                                text: "REPEAT"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") }
+                            // The column heads. Every one of them sorts: a click takes
+                            // the order, a second click reverses it, and the arrow in the
+                            // label says which column is holding it.
+                            //
+                            // Twelve generic cells, matching the row's twelve — see the
+                            // note on `row_col0`. Which column each carries comes from
+                            // the operator's layout at sync time, so the heads and the
+                            // cells under them are reordered by one decision rather than
+                            // by two that could disagree.
+                            //
+                            // The CELL carries the width, not the head: a Button's walk
+                            // is private, so the head fills a box the host can size.
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                padding: Inset{left: 6.0 right: 6.0 top: 0.0 bottom: 0.0}
+                                align: Align{x: 0.0, y: 0.5}
+                                MusicLabel{width: 26 text: ""}
+                                // The same FILL box the rows put their cells in,
+                                // so the heads narrow exactly as the cells under
+                                // them do. See `row_cells`.
+                                th_cells := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                clip_x: true
+                                align: Align{x: 0.0, y: 0.5}
+                                th_cell0 := View{width: 0 height: Fit th_head0 := MusicColHead{width: Fill text: ""}}
+                                th_cell1 := View{width: 0 height: Fit th_head1 := MusicColHead{width: Fill text: ""}}
+                                th_cell2 := View{width: 0 height: Fit th_head2 := MusicColHead{width: Fill text: ""}}
+                                th_cell3 := View{width: 0 height: Fit th_head3 := MusicColHead{width: Fill text: ""}}
+                                th_cell4 := View{width: 0 height: Fit th_head4 := MusicColHead{width: Fill text: ""}}
+                                th_cell5 := View{width: 0 height: Fit th_head5 := MusicColHead{width: Fill text: ""}}
+                                th_cell6 := View{width: 0 height: Fit th_head6 := MusicColHead{width: Fill text: ""}}
+                                th_cell7 := View{width: 0 height: Fit th_head7 := MusicColHead{width: Fill text: ""}}
+                                th_cell8 := View{width: 0 height: Fit th_head8 := MusicColHead{width: Fill text: ""}}
+                                th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
+                                th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
+                                th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
+                                }
+                                // Stands in for the row's headphone + queue
+                                // chips, so a head sits over its own column
+                                // rather than 24 points to the right of it.
+                                MusicLabel{width: 50 text: ""}
+                                // What the filters left, and what the background
+                                // passes are doing about the rest — at the
+                                // explorer's right edge, level with the heads.
+                                //
+                                // It used to hold a whole line for one short
+                                // string. Up here it costs the width of the string
+                                // and nothing when there is no string: FIT, never
+                                // Fill, because a Fill would claim the right end of
+                                // the row while empty and stand every head off its
+                                // own column for nothing.
+                                //
+                                // While a count IS showing the heads do sit that
+                                // much to the left of their cells. That is the
+                                // trade this placement makes, and the count is
+                                // short and comes and goes.
+                                music_prep_status := MusicLabel{width: Fit text: ""}
                             }
-                            queue_shuffle := MusicChipButton{
-                                height: 20
-                                text: "SHUFFLE"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/shuffle.svg") }
-                            }
-                            queue_clear := MusicChipButton{
-                                height: 20
-                                text: "Clear"
-                                draw_icon +: { svg: crate_resource("self:resources/icons/square_x.svg") }
-                            }
+                            music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                         }
-                        // Compact: the 320-wide panel cannot seat the explorer's
-                        // fixed columns — they squeezed the Fill title to nothing,
-                        // which is why the queue used to read as bare numbers.
-                        music_queue := mod.widgets.VjTrackList{
-                            show_queue_button: false
-                            show_unqueue_button: true
                         }
-                        // The DOCKED home of the pre-listen player: under the
-                        // queue, exactly where the mockup parks it.
-                        phones_dock := View{
-                            visible: false
+                        b: View{
                             width: Fill
-                            height: Fit
-                            phones_dock_player := mod.widgets.VjPhonesPlayer{}
+                            height: Fill
+                            queue_drop := RoundedView{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 4
+                            // Invisible until a file is dragged over it: the border
+                            // is how this column says a drop would land here.
+                            draw_bg +: {
+                                color: #x00000000
+                                border_color: #x00000000
+                                border_size: 1.0
+                                border_radius: 8.0
+                            }
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                align: Align{x: 0.0, y: 0.5}
+                                Label{
+                                    text: "QUEUE"
+                                    draw_text.color: #xff5c39
+                                    draw_text.text_style: theme.font_bold{font_size: 10}
+                                }
+                                queue_count := MusicLabel{width: Fill text: ""}
+                                // Queue policy lives with the queue it governs:
+                                // recycling and the pick order. The transition style
+                                // moved into the AUTO DJ gear modal.
+                                queue_repeat := MusicChipButton{
+                                    height: 20
+                                    text: "REPEAT"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") }
+                                }
+                                queue_shuffle := MusicChipButton{
+                                    height: 20
+                                    text: "SHUFFLE"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/shuffle.svg") }
+                                }
+                                queue_clear := MusicChipButton{
+                                    height: 20
+                                    text: "Clear"
+                                    draw_icon +: { svg: crate_resource("self:resources/icons/square_x.svg") }
+                                }
+                            }
+                            // Compact: the 320-wide panel cannot seat the explorer's
+                            // fixed columns — they squeezed the Fill title to nothing,
+                            // which is why the queue used to read as bare numbers.
+                            music_queue := mod.widgets.VjTrackList{
+                                show_queue_button: false
+                                show_unqueue_button: true
+                            }
+                            // The DOCKED home of the pre-listen player: under the
+                            // queue, exactly where the mockup parks it.
+                            phones_dock := View{
+                                visible: false
+                                width: Fill
+                                height: Fit
+                                phones_dock_player := mod.widgets.VjPhonesPlayer{}
+                            }
                         }
-                    }
+                        }
                     }
                 }
                 loops_drop := RoundedView{

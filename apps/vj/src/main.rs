@@ -25,6 +25,9 @@ use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::MusicImporter;
 
+/// The third list tab: the loops page that stands in for the explorer and
+/// the queue together.
+const LISTS_LOOPS: usize = 2;
 mod apc40;
 mod archive_stream;
 mod archive_ui;
@@ -3316,8 +3319,6 @@ struct DeckRefs {
     loop_in: ButtonRef,
     loop_out: ButtonRef,
     loop_scan: ButtonRef,
-    jump_back: ButtonRef,
-    jump_fwd: ButtonRef,
     phase_flip: ButtonRef,
     mute: ButtonRef,
     sync: ButtonRef,
@@ -3369,8 +3370,6 @@ impl DeckRefs {
             loop_in: ui.button(cx, ids.loop_in),
             loop_out: ui.button(cx, ids.loop_out),
             loop_scan: ui.button(cx, ids.loop_scan),
-            jump_back: ui.button(cx, ids.jump_back),
-            jump_fwd: ui.button(cx, ids.jump_fwd),
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             sync: ui.button(cx, ids.sync),
@@ -3474,8 +3473,6 @@ struct MusicDeckIds {
     loop_in: &'static [LiveId],
     loop_out: &'static [LiveId],
     loop_scan: &'static [LiveId],
-    jump_back: &'static [LiveId],
-    jump_fwd: &'static [LiveId],
     phase_flip: &'static [LiveId],
     mute: &'static [LiveId],
     sync: &'static [LiveId],
@@ -3530,8 +3527,6 @@ impl MusicDeckIds {
                 loop_in: ids!(deck_a_loop_in),
                 loop_out: ids!(deck_a_loop_out),
                 loop_scan: ids!(deck_a_loop_scan),
-                jump_back: ids!(deck_a_jump_back),
-                jump_fwd: ids!(deck_a_jump_fwd),
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 sync: ids!(deck_a_sync),
@@ -3614,8 +3609,6 @@ impl MusicDeckIds {
                 loop_in: ids!(deck_b_loop_in),
                 loop_out: ids!(deck_b_loop_out),
                 loop_scan: ids!(deck_b_loop_scan),
-                jump_back: ids!(deck_b_jump_back),
-                jump_fwd: ids!(deck_b_jump_fwd),
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 sync: ids!(deck_b_sync),
@@ -6909,10 +6902,13 @@ pub struct App {
     #[rust]
     status_bar_wrapped: bool,
     /// Whether the bottom panels are taking turns, and which one is up.
-    /// The loop splat is the default; explorer and queue remain one tap away.
+    /// Whether the lists take turns. Starts true so the first geometry event
+    /// always paints the lists once, whatever width it reports.
     #[rust(true)]
     lists_tabbed: bool,
-    #[rust(2usize)]
+    /// Which list is up: the explorer (with the queue beside it when there
+    /// is room) is the landing; the loops page is one tap away.
+    #[rust(0usize)]
     lists_shown: usize,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
@@ -17109,7 +17105,9 @@ p2 {}
         self.ui.redraw(cx);
     }
 
-    /// The explorer, queue and loop splat always take turns behind tabs.
+    /// Whether the explorer and the queue have to take turns: wide, they
+    /// stand side by side; narrow, they tab. The loops page is a third tab
+    /// at every width, standing in for the pair.
     fn sync_lists_tabs(&mut self, cx: &mut Cx, event: &Event) {
         let Event::WindowGeomChange(ev) = event else { return };
         let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
@@ -17118,7 +17116,24 @@ p2 {}
         if ev.window_id != main_id || !cx.windows.is_valid(main_id) {
             return;
         }
-        let tabbed = true;
+        let native = cx.windows[main_id].native_dpi_factor();
+        let physical = ev.new_geom.inner_size * ev.new_geom.dpi_factor;
+        // The console's OWN scale, off the WINDOW — never off the lists' own
+        // small share (see `console_lists_tabbed`'s doc comment for why that
+        // collapses).
+        let dpi = console_scale::console_dpi(physical.x, physical.y, native);
+        // The width the LISTS get, in points: the operator's own drag, or
+        // the automatic share once they stand beside the decks. Computed
+        // fresh from this event's own geometry rather than `self.lists_beside`
+        // / `lists_extent`, for the same reason `sync_deck_tabs` does — a
+        // resize that ignored the drag was reverting the tabs the moment
+        // the window so much as twitched.
+        let lists_points = if console_scale::console_lists_beside(physical.x, physical.y, native) {
+            console_scale::lists_width_beside(physical.x / dpi, self.lists_width_set)
+        } else {
+            physical.x / dpi
+        };
+        let tabbed = console_scale::console_lists_tabbed(lists_points * dpi, dpi);
         if tabbed == self.lists_tabbed {
             return;
         }
@@ -17128,38 +17143,52 @@ p2 {}
         self.resync_layout(cx);
     }
 
-    /// Show whichever list is up, and light its tab.
+    /// Show whichever lists are up, and light their tabs.
+    ///
+    /// Wide, the explorer and the queue stand side by side in their splitter
+    /// and the strip offers the loops page as the alternative to that pair;
+    /// narrow, the three take turns. The pair goes as one, so the loops page
+    /// gets the whole column rather than a seam beside a blank.
     fn paint_lists_tabs(&mut self, cx: &mut Cx) {
         let tabbed = self.lists_tabbed;
+        let loops = self.lists_shown == LISTS_LOOPS;
         let strip = self.ui.view(cx, ids!(lists_tab_strip));
-        if strip.visible() != tabbed {
-            strip.set_visible(cx, tabbed);
+        if !strip.visible() {
+            strip.set_visible(cx, true);
         }
-        for (index, list) in [ids!(library_drop), ids!(queue_drop), ids!(loops_drop)]
-            .into_iter()
-            .enumerate()
-        {
-            let visible = !tabbed || index == self.lists_shown;
+        let pair = self.ui.view(cx, ids!(lists_pair));
+        if pair.visible() != !loops {
+            pair.set_visible(cx, !loops);
+        }
+        for (index, list) in [ids!(library_drop), ids!(queue_drop)].into_iter().enumerate() {
+            let visible = !loops && (!tabbed || index == self.lists_shown);
             let view = self.ui.widget(cx, list);
             if view.visible() != visible {
                 view.set_visible(cx, visible);
             }
         }
-        if tabbed {
-            for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1), ids!(lists_tab_2)]
-                .into_iter()
-                .enumerate()
-            {
-                self.paint_lit(cx, tab, index == self.lists_shown);
-            }
+        let page = self.ui.widget(cx, ids!(loops_drop));
+        if page.visible() != loops {
+            page.set_visible(cx, loops);
+        }
+        for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1), ids!(lists_tab_2)]
+            .into_iter()
+            .enumerate()
+        {
+            let lit = if index == LISTS_LOOPS {
+                loops
+            } else if tabbed {
+                index == self.lists_shown
+            } else {
+                !loops
+            };
+            self.paint_lit(cx, tab, lit);
         }
     }
 
-    /// A list tab was pressed.
+    /// A list tab was pressed. Wide, the explorer and queue tabs both mean
+    /// the pair; the loops tab is a page at every width.
     fn handle_lists_tabs(&mut self, cx: &mut Cx, actions: &Actions) {
-        if !self.lists_tabbed {
-            return;
-        }
         for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1), ids!(lists_tab_2)]
             .into_iter()
             .enumerate()
@@ -24032,15 +24061,25 @@ p2 {}
                 let cmds = self.decks.loop_double(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            // One beat either way. Dead until the grid lands — the engine
-            // refuses rather than guessing a beat length, so an early press
-            // does nothing instead of throwing the playhead somewhere.
-            if refs.beat_back.clicked(actions) {
-                let cmds = self.decks.nudge_beats(deck, -1.0);
-                self.run_deck_cmds(cx, cmds);
-            }
-            if refs.beat_fwd.clicked(actions) {
-                let cmds = self.decks.nudge_beats(deck, 1.0);
+            // One beat either way, or a phrase with a modifier held: shift is
+            // four bars, control sixteen. Dead until the grid lands — the
+            // engine refuses rather than guessing a beat length, so an early
+            // press does nothing instead of throwing the playhead somewhere.
+            //
+            // Named for what they do, so the sign here never has to lie about
+            // it. The bar-sized jumps take the operator's hand back from the
+            // autopilot; a one-beat nudge is the correction it expects.
+            for (button, sign) in [(&refs.beat_back, -1.0), (&refs.beat_fwd, 1.0)] {
+                let Some(modifiers) = button.clicked_modifiers(actions) else { continue };
+                let cmds = if modifiers.control {
+                    self.deck_hands_on();
+                    self.decks.beat_jump(deck, sign * 16.0 * 4.0)
+                } else if modifiers.shift {
+                    self.deck_hands_on();
+                    self.decks.beat_jump(deck, sign * 4.0 * 4.0)
+                } else {
+                    self.decks.nudge_beats(deck, sign)
+                };
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.loop_in.clicked(actions) {
@@ -24055,14 +24094,6 @@ p2 {}
             }
             if refs.loop_scan.clicked(actions) {
                 self.open_loop_scan_modal(cx, deck);
-            }
-            for (button, sign) in [(&refs.jump_back, -1.0), (&refs.jump_fwd, 1.0)] {
-                if let Some(modifiers) = button.clicked_modifiers(actions) {
-                    self.deck_hands_on();
-                    let bars = if modifiers.shift { 16.0 } else { 4.0 };
-                    let cmds = self.decks.beat_jump(deck, sign * bars * 4.0);
-                    self.run_deck_cmds(cx, cmds);
-                }
             }
             if refs.phase_flip.clicked(actions) {
                 self.flip_deck_beat_phase(cx, deck);
