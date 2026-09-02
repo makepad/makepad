@@ -152,8 +152,7 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support,
-                small_font_aliases: window.makepad_small_font_aliases === true
+                has_thread_support: this.wasm._has_thread_support
             },
             window_info: this.window_info,
         });

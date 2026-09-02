@@ -273,43 +273,11 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     }
 }
 
-fn should_skip_eager_resource_load(abs_path: &str) -> bool {
-    is_heavy_bundled_fallback_font_path(abs_path)
-}
-
-#[cfg(any(test, target_arch = "wasm32"))]
-fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
-    match path.replace('\\', "/").as_str() {
-        "makepad_widgets/resources/GoNotoKurrent-Bold.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-SemiBold.ttf")
-        }
-        "makepad_widgets/resources/GoNotoKurrent-Regular.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/LXGWWenKaiRegular.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/LXGWWenKaiBold.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/NotoColorEmoji.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        _ => None,
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
-    let mut dep_path = dep_path;
     let mut base_path = String::new();
     if let crate::cx::OsType::Web(params) = &cx.os_type {
         base_path = web_resource_base_path(&params.pathname);
-        if params.small_font_aliases {
-            if let Some(remapped) = remapped_small_font_dependency_path(dep_path) {
-                dep_path = remapped;
-            }
-        }
     }
     if base_path.is_empty() {
         dep_path.to_string()
@@ -338,33 +306,76 @@ fn web_resource_base_path(pathname: &str) -> String {
     base_path.trim_start_matches('/').to_string()
 }
 
-fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
-    if !is_widgets_resources_path(path) {
+fn register_crate_resource_parts(
+    vm: &mut ScriptVm,
+    res_type: ScriptHandleType,
+    crate_part: &str,
+    file_path: &str,
+) -> ScriptValue {
+    let Some((abs_path, dependency_path, web_url)) =
+        resolve_crate_resource_paths(vm, crate_part, file_path)
+    else {
+        return NIL;
+    };
+    let heap_key = vm.bx.heap.heap_key();
+    let cx = vm.host.cx_mut();
+    if let Some(existing) = cx
+        .script_data
+        .resources
+        .get_handle_by_abs_path(heap_key, &abs_path)
+    {
+        return existing.into();
+    }
+
+    let handle_gc = CxScriptResourceGc {
+        resources: cx.script_data.resources.resources.clone(),
+        handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
+        handle: ScriptHandle::ZERO,
+        heap_key,
+    };
+    let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+    if cx
+        .script_data
+        .resources
+        .attach_handle_for_path(heap_key, &abs_path, handle)
+    {
+        return handle.into();
+    }
+
+    cx.script_data.resources.insert_resource(
+        heap_key,
+        CxScriptResource {
+            abs_path,
+            dependency_path,
+            web_url,
+            data: CxScriptResourceData::NotLoaded,
+            handles: vec![handle],
+        },
+    );
+    handle.into()
+}
+
+/// Register a stable logical `crate_name/path` without evaluating a second
+/// script branch. FontPolicy uses this to turn only its selected members into
+/// resource handles.
+pub fn register_crate_resource_path(vm: &mut ScriptVm, logical_path: &str) -> ScriptValue {
+    let Some((crate_part, file_path)) = logical_path.split_once('/') else {
+        return NIL;
+    };
+    let res_type = vm.handle_type(id_lut!(res));
+    register_crate_resource_parts(vm, res_type, crate_part, file_path)
+}
+
+fn font_policy_declares_path(font_set: crate::FontSet, dependency_path: Option<&str>) -> bool {
+    let Some(dependency_path) = dependency_path else {
         return false;
-    }
-    matches!(
-        resource_basename(path),
-        Some(name)
-            if name.eq_ignore_ascii_case("LXGWWenKaiRegular.ttf")
-                || name.eq_ignore_ascii_case("LXGWWenKaiBold.ttf")
-                || name.eq_ignore_ascii_case("NotoColorEmoji.ttf")
-    )
-}
-
-fn is_widgets_resources_path(path: &str) -> bool {
-    let mut prev_is_widgets = false;
-    for component in path.split(['/', '\\']) {
-        let is_resources = component.eq_ignore_ascii_case("resources");
-        if prev_is_widgets && is_resources {
-            return true;
-        }
-        prev_is_widgets = component.eq_ignore_ascii_case("widgets");
-    }
-    false
-}
-
-fn resource_basename(path: &str) -> Option<&str> {
-    path.rsplit(['/', '\\']).next()
+    };
+    font_set
+        .policy()
+        .assets
+        .iter()
+        .any(|asset| asset.resource_path == dependency_path)
 }
 
 impl Cx {
@@ -483,6 +494,30 @@ impl Cx {
         );
     }
 
+    /// Start every resource declared by the selected application font set.
+    /// This changes timing only: it never adds resources beyond FontPolicy.
+    pub fn preload_font_set(&mut self) {
+        let policy = self.font_set().policy();
+        let handles = {
+            let resources = self.script_data.resources.resources.borrow();
+            policy
+                .assets
+                .iter()
+                .filter_map(|asset| {
+                    resources
+                        .iter()
+                        .find(|resource| {
+                            resource.dependency_path.as_deref() == Some(asset.resource_path)
+                        })
+                        .and_then(|resource| resource.handles.first().copied())
+                })
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            self.load_script_resource(handle);
+        }
+    }
+
     /// Load all script resources that are still pending.
     ///
     /// Each platform uses a different loading strategy:
@@ -502,11 +537,14 @@ impl Cx {
         #[cfg(target_arch = "wasm32")]
         let crate_manifests = self.script_data.crate_manifests.borrow().clone();
 
+        let font_set = self.font_set();
         let handles = {
             let resources = self.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .filter(|res| !should_skip_eager_resource_load(&res.abs_path))
+                .filter(|resource| {
+                    !font_policy_declares_path(font_set, resource.dependency_path.as_deref())
+                })
                 .filter_map(|res| res.handles.first().copied())
                 .collect::<Vec<_>>()
         };
@@ -544,52 +582,22 @@ impl Cx {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        remapped_small_font_dependency_path, should_skip_eager_resource_load,
-        web_resource_base_path,
-    };
+    use super::{font_policy_declares_path, web_resource_base_path};
 
     #[test]
-    fn skips_only_heavy_widgets_fallback_fonts() {
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/LXGWWenKaiRegular.ttf"
-        ));
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
-        ));
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/NotoColorEmoji.ttf"
-        ));
-        assert!(!should_skip_eager_resource_load(
-            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
-        ));
-        assert!(!should_skip_eager_resource_load(
-            "/tmp/app/resources/LXGWWenKaiRegular.ttf"
-        ));
-    }
-
-    #[test]
-    fn remaps_only_known_small_font_fallback_dependency_paths() {
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
+    fn eager_resource_loading_defers_the_selected_font_policy() {
+        assert!(font_policy_declares_path(
+            crate::FontSet::Latin,
             Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiBold.ttf"),
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/NotoColorEmoji.ttf"),
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
-            None
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("app/resources/LXGWWenKaiRegular.ttf"),
-            None
-        );
+        ));
+        assert!(!font_policy_declares_path(
+            crate::FontSet::Latin,
+            Some("makepad_widgets/resources/LXGWWenKaiRegular.ttf")
+        ));
+        assert!(font_policy_declares_path(
+            crate::FontSet::International,
+            Some("makepad_widgets/resources/LXGWWenKaiRegular.ttf")
+        ));
     }
 
     #[test]
@@ -1011,57 +1019,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let path_string = vm.string_with(path, |_vm, s| s.to_string());
 
             if let Some(path_string) = path_string {
-                // Parse "crate:path" format
                 if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
-                    if let Some((abs_path, dependency_path, web_url)) =
-                        resolve_crate_resource_paths(vm, crate_part, file_path)
-                    {
-                        let heap_key = vm.bx.heap.heap_key();
-                        let cx = vm.host.cx_mut();
-                        if let Some(existing) = cx
-                            .script_data
-                            .resources
-                            .get_handle_by_abs_path(heap_key, &abs_path)
-                        {
-                            return existing.into();
-                        }
-
-                        let handle_gc = CxScriptResourceGc {
-                            resources: cx.script_data.resources.resources.clone(),
-                            handles_by_abs_path: cx
-                                .script_data
-                                .resources
-                                .handles_by_abs_path
-                                .clone(),
-                            handle: ScriptHandle::ZERO,
-                            heap_key,
-                        };
-                        let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
-
-                        // Another heap (typically the main VM) may already
-                        // track this path — attach our local handle to the
-                        // shared entry; never reuse a foreign heap's handle.
-                        if cx
-                            .script_data
-                            .resources
-                            .attach_handle_for_path(heap_key, &abs_path, handle)
-                        {
-                            return handle.into();
-                        }
-
-                        cx.script_data.resources.insert_resource(
-                            heap_key,
-                            CxScriptResource {
-                                abs_path,
-                                dependency_path,
-                                web_url,
-                                data: CxScriptResourceData::NotLoaded,
-                                handles: vec![handle],
-                            },
-                        );
-
-                        return handle.into();
-                    }
+                    return register_crate_resource_parts(vm, res_type, crate_part, file_path);
                 }
             }
 

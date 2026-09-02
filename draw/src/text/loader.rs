@@ -2,7 +2,7 @@ use {
     super::{
         font::{Font, FontId},
         font_face::FontFace,
-        font_family::{FontFamily, FontFamilyId},
+        font_family::{FontDiagnostics, FontFamily, FontFamilyId},
         rasterizer,
         rasterizer::Rasterizer,
         shaper,
@@ -80,6 +80,7 @@ impl Loader {
             let cached_ids: Vec<FontId> = cached.fonts().iter().map(|f| f.id()).collect();
             if cached_ids == definition.font_ids
                 && definition.expected_member_count == definition.font_ids.len()
+                && cached.diagnostics() == &definition.diagnostics
             {
                 return;
             }
@@ -114,15 +115,12 @@ impl Loader {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| panic!("font family {:?} is not defined", id));
-        FontFamily::new(
-            id,
-            self.shaper.clone(),
-            definition
-                .font_ids
-                .into_iter()
-                .map(|font_id| self.get_or_load_font(font_id).clone())
-                .collect(),
-        )
+        let fonts = definition
+            .font_ids
+            .into_iter()
+            .map(|font_id| self.get_or_load_font(font_id).clone())
+            .collect();
+        FontFamily::new(id, self.shaper.clone(), fonts, definition.diagnostics)
     }
 
     pub fn get_or_load_font(&mut self, id: FontId) -> &Rc<Font> {
@@ -175,6 +173,7 @@ pub struct Settings {
 pub struct FontFamilyDefinition {
     pub font_ids: Vec<FontId>,
     pub expected_member_count: usize,
+    pub diagnostics: FontDiagnostics,
 }
 
 #[derive(Clone, Debug)]
@@ -191,10 +190,10 @@ pub struct FontDefinition {
 
 #[cfg(test)]
 mod tests {
-    use super::{FontDefinition, Loader};
+    use super::{FontDefinition, FontFamilyDefinition, Loader};
     use crate::{
         makepad_platform::SharedBytes,
-        text::{font::FontId, layouter},
+        text::{font::FontId, font_family::FontDiagnostics, layouter},
     };
     use std::path::PathBuf;
 
@@ -224,6 +223,59 @@ mod tests {
         let first = loader.get_or_load_font(font_id).clone();
         let second = loader.get_or_load_font(font_id).clone();
         assert!(std::rc::Rc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn glyph_miss_does_not_start_or_discover_a_font_load() {
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let font_id: FontId = 0xCAFE_C001_u64.into();
+        let family_id = 0xCAFE_C002_u64.into();
+        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+            .expect("font bytes should load");
+        loader.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        loader.define_font_family(
+            family_id,
+            FontFamilyDefinition {
+                font_ids: vec![font_id],
+                expected_member_count: 1,
+                diagnostics: FontDiagnostics {
+                    role: "regular".to_string(),
+                    set: "Latin".to_string(),
+                    tried: vec!["ibm_plex_text".to_string()],
+                },
+            },
+        );
+
+        let family = loader.get_or_load_font_family_rc(family_id);
+        let before = (
+            loader.font_definitions.len(),
+            loader.font_cache.len(),
+            loader.font_family_definitions.len(),
+            loader.font_family_cache.len(),
+        );
+        let shaped = family.get_or_shape("\u{10FFFF}".into());
+
+        assert!(shaped.glyphs.iter().any(|glyph| glyph.id == 0));
+        assert_eq!(
+            before,
+            (
+                loader.font_definitions.len(),
+                loader.font_cache.len(),
+                loader.font_family_definitions.len(),
+                loader.font_family_cache.len(),
+            ),
+            "shaping a miss must only exhaust the declared in-memory chain"
+        );
     }
 
     fn bundled_variable_font_path() -> PathBuf {
