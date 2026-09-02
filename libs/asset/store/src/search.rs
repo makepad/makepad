@@ -46,6 +46,8 @@
 //!   provenance, not even for the owner — normalized (control bytes stripped,
 //!   whitespace collapsed) and byte-bounded at char boundaries.
 
+#![cfg_attr(any(target_arch = "wasm32", feature = "embedded"), allow(dead_code))]
+
 use crate::auth::PrincipalId;
 use crate::budget::Budgets;
 use crate::catalog::{fixed16, validate_namespace};

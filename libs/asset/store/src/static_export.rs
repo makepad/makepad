@@ -8,6 +8,7 @@
 use crate::error::{io_err, ServerError, ServerResult};
 use crate::host::api::{asset_manifest_value, kind_str, media_str, role_str};
 use crate::host::json::{obj, s, Value};
+use crate::static_export_core::{brotli_bytes, ExportEntry, ExportPlan, ExportSink, ExportStep};
 use crate::{
     AssetServerCore, CandidateState, PublicExportAsset, PublicExportFilter,
 };
@@ -17,7 +18,6 @@ use makepad_asset_data::{
     Redistribution, VariantSetId, VariantSetManifest,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const STATIC_FORMAT_VERSION: u16 = 1;
@@ -112,14 +112,14 @@ struct FileRecord {
     encoding: Option<&'static str>,
 }
 
-struct Output {
-    root: PathBuf,
+struct Output<'a> {
+    sink: &'a mut dyn ExportSink,
     files: BTreeMap<String, FileRecord>,
 }
 
-impl Output {
-    fn new(root: PathBuf) -> Self {
-        Self { root, files: BTreeMap::new() }
+impl<'a> Output<'a> {
+    fn new(sink: &'a mut dyn ExportSink) -> Self {
+        Self { sink, files: BTreeMap::new() }
     }
 
     fn route(
@@ -147,12 +147,52 @@ impl Output {
         content_type: &'static str,
         encoding: Option<&'static str>,
     ) -> ServerResult<()> {
+        let entry = ExportEntry {
+            path: path.to_string(),
+            bytes: bytes.to_vec(),
+            content_type,
+            content_encoding: encoding,
+        };
         if let Some(old) = self.files.get(path) {
             if old.byte_len == bytes.len() as u64 && old.sha256 == sha256_hex(bytes) {
                 return Ok(());
             }
             return Err(ServerError::Conflict { what: "static export route" });
         }
+        drive_export_entry(self.sink, entry.clone())?;
+        self.files.insert(
+            path.to_string(),
+            FileRecord {
+                path: path.to_string(),
+                byte_len: bytes.len() as u64,
+                sha256: sha256_hex(bytes),
+                content_type: entry.content_type,
+                encoding: entry.content_encoding,
+            },
+        );
+        Ok(())
+    }
+
+    fn write_untracked(&mut self, entry: ExportEntry) -> ServerResult<()> {
+        drive_export_entry(self.sink, entry)
+    }
+}
+
+fn drive_export_entry(sink: &mut dyn ExportSink, entry: ExportEntry) -> ServerResult<()> {
+    let mut plan = ExportPlan::default();
+    plan.push(entry);
+    while matches!(plan.step(sink)?, ExportStep::Pending { .. }) {}
+    Ok(())
+}
+
+struct FileSink {
+    root: PathBuf,
+}
+
+impl ExportSink for FileSink {
+    fn write_entry(&mut self, entry: &ExportEntry) -> ServerResult<()> {
+        let path = entry.path.as_str();
+        let bytes = entry.bytes.as_slice();
         let relative = path.strip_prefix('/').ok_or(ServerError::InvalidInput {
             what: "static export relative path",
         })?;
@@ -162,27 +202,8 @@ impl Output {
         })?;
         std::fs::create_dir_all(parent).map_err(io_err("static export create directory"))?;
         std::fs::write(&disk, bytes).map_err(io_err("static export write file"))?;
-        self.files.insert(
-            path.to_string(),
-            FileRecord {
-                path: path.to_string(),
-                byte_len: bytes.len() as u64,
-                sha256: sha256_hex(bytes),
-                content_type,
-                encoding,
-            },
-        );
         Ok(())
     }
-}
-
-fn brotli_bytes(bytes: &[u8]) -> ServerResult<Vec<u8>> {
-    let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 9, 20);
-    writer
-        .write_all(bytes)
-        .map_err(io_err("static export brotli encode"))?;
-    writer.flush().map_err(io_err("static export brotli flush"))?;
-    Ok(writer.into_inner())
 }
 
 fn rights_public(manifest: &AssetManifest) -> bool {
@@ -612,7 +633,8 @@ pub fn export_static(
         return Err(ServerError::Conflict { what: "static export staging exists" });
     }
     std::fs::create_dir_all(&staging).map_err(io_err("static export create staging"))?;
-    let result = export_into(core, &staging, options);
+    let mut sink = FileSink { root: staging.clone() };
+    let result = export_into(core, &mut sink, options);
     match result {
         Ok(report) => {
             if let Err(error) = std::fs::rename(&staging, out_dir) {
@@ -630,7 +652,7 @@ pub fn export_static(
 
 fn export_into(
     core: &AssetServerCore,
-    staging: &Path,
+    sink: &mut dyn ExportSink,
     options: &StaticExportOptions,
 ) -> ServerResult<StaticExportReport> {
     let mut roots = Vec::new();
@@ -910,7 +932,7 @@ fn export_into(
         }
     }
 
-    let mut output = Output::new(staging.to_path_buf());
+    let mut output = Output::new(sink);
     let mut generated_ms = 0u64;
     for root in &kept_roots {
         generated_ms = generated_ms.max(root.row.created_ms).max(root.row.search.updated_ms);
@@ -1194,14 +1216,19 @@ fn export_into(
     .to_json();
     output.route("/v1/health", health.as_bytes(), "application/json", true)?;
     let manifest = manifest_value(&snapshot_id, &server_id, file_values(&output.files)).to_json();
-    let manifest_path = staging.join("v1/static/manifest.json");
-    std::fs::create_dir_all(manifest_path.parent().unwrap())
-        .map_err(io_err("static export create manifest directory"))?;
-    std::fs::write(&manifest_path, manifest.as_bytes())
-        .map_err(io_err("static export write manifest"))?;
+    output.write_untracked(ExportEntry {
+        path: "/v1/static/manifest.json".into(),
+        bytes: manifest.as_bytes().to_vec(),
+        content_type: "application/json",
+        content_encoding: None,
+    })?;
     let manifest_br = brotli_bytes(manifest.as_bytes())?;
-    std::fs::write(staging.join("v1/static/manifest.json.br"), manifest_br)
-        .map_err(io_err("static export write manifest brotli"))?;
+    output.write_untracked(ExportEntry {
+        path: "/v1/static/manifest.json.br".into(),
+        bytes: manifest_br,
+        content_type: "application/json",
+        content_encoding: Some("br"),
+    })?;
 
     report.snapshot_id = snapshot_id;
     report.server_id = server_id;

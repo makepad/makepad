@@ -12,14 +12,18 @@
 
 use crate::auth::Auth;
 use crate::budget::Budgets;
-use crate::cas::{BlobCommit, BlobWriter, Cas};
+use crate::cas::BlobCommit;
+use crate::cas_file::{BlobWriter, FsCas};
 use crate::catalog::{Catalog, CandidateState, CATALOG_SCHEMA};
+use crate::core::{
+    CatalogCore, PublicExportFilter, PublicExportPage, PublishBatchItem, PublishBatchOutcome,
+    SERVER_SCHEMA_VERSION,
+};
 use crate::error::{io_err, ServerError, ServerResult};
-use crate::search::{kind_name, kind_parse, AssetAnnotation};
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
 use makepad_asset_data::{
-    AssetAlias, AssetId, AssetKind, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
+    AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
 };
 use std::path::Path;
 
@@ -68,12 +72,17 @@ use std::path::Path;
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 13;
-
 pub struct AssetServerCore {
-    db: Db,
-    cas: Cas,
-    budgets: Budgets,
+    core: CatalogCore,
+    cas: FsCas,
+}
+
+impl std::ops::Deref for AssetServerCore {
+    type Target = CatalogCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
 fn user_version(db: &Db) -> ServerResult<i64> {
@@ -108,7 +117,7 @@ fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
 /// openers serialize on the writer lock and every step applies exactly once;
 /// a crash between steps leaves a valid older version that the next open
 /// finishes migrating. Unknown versions (newer builds, corruption) refuse.
-fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
+fn migrate(db: &Db, cas: &FsCas, budgets: &Budgets) -> ServerResult<()> {
     loop {
         let version = user_version(db)?;
         if version == SERVER_SCHEMA_VERSION {
@@ -271,91 +280,6 @@ pub struct RefRescanPage {
     pub next: Option<BlobId>,
 }
 
-/// One asset of a batch publication: the complete publish an asset needs —
-/// canonical manifest bytes (already carrying its asset id and blob refs),
-/// its searchable annotation, and an optional alias head.
-#[derive(Clone, Debug)]
-pub struct PublishBatchItem {
-    pub namespace: String,
-    pub manifest_bytes: Vec<u8>,
-    pub annotation: AssetAnnotation,
-    pub alias: Option<AssetAlias>,
-}
-
-/// What one batch item became.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PublishBatchOutcome {
-    pub asset_id: AssetId,
-    pub revision: AssetRevisionId,
-    /// The revision was already published (a replayed page); annotation and
-    /// alias were refreshed idempotently.
-    pub already_published: bool,
-}
-
-/// One public alias head returned by [`AssetServerCore::public_export_page`].
-/// The target is guaranteed to be a live, published candidate.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicAliasHead {
-    pub alias: AssetAlias,
-    pub target: AssetRevisionRef,
-    pub updated_ms: u64,
-    pub published_ms: u64,
-}
-
-/// One normalized public-only posting. Private prompt/provenance postings
-/// have zero public weight and never enter this projection.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicSearchTerm {
-    pub term: String,
-    pub weight: u64,
-}
-
-/// The fields an unauthenticated catalog/search surface is allowed to see.
-/// Owner ids, prompts, free-form provenance, and visibility internals are
-/// deliberately not representable by this type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicSearchProjection {
-    pub title: String,
-    pub description: String,
-    pub kind: Option<AssetKind>,
-    pub categories: Vec<String>,
-    pub tags: Vec<String>,
-    pub creator: String,
-    pub generator: String,
-    pub backend: String,
-    pub model: String,
-    pub updated_ms: u64,
-    pub terms: Vec<PublicSearchTerm>,
-}
-
-/// One bounded, path-safe asset row for a public static snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicExportAsset {
-    pub asset_id: AssetId,
-    pub namespace: String,
-    pub created_ms: u64,
-    pub aliases: Vec<PublicAliasHead>,
-    pub search: PublicSearchProjection,
-}
-
-/// A keyset page over live assets with public annotations and at least one
-/// published alias head. `next` is passed back as `after` to continue.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PublicExportPage {
-    pub assets: Vec<PublicExportAsset>,
-    pub next: Option<AssetId>,
-}
-
-/// Filters for the public export enumeration API. The page is always bounded
-/// by the core's configured search-result budget.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PublicExportFilter<'a> {
-    pub namespace: Option<&'a str>,
-    pub kind: Option<AssetKind>,
-    pub after: Option<AssetId>,
-    pub limit: u32,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoverReport {
     pub cas_temps_removed: u64,
@@ -374,7 +298,7 @@ impl AssetServerCore {
         // integer-domain cast (c_int binds, i64 columns) relies on these.
         budgets.validate()?;
         std::fs::create_dir_all(root).map_err(io_err("server create root"))?;
-        let cas = Cas::open(&root.join("cas"), &budgets)?;
+        let cas = FsCas::open(&root.join("cas"), &budgets)?;
         let db = Db::open(&root.join("catalog.sqlite3"), budgets.db_busy_timeout_ms)?;
 
         // WAL is required, not a preference: it is what makes a reader crash
@@ -397,7 +321,7 @@ impl AssetServerCore {
         db.exec("set foreign keys", "PRAGMA foreign_keys=ON")?;
 
         migrate(&db, &cas, &budgets)?;
-        Ok(Self { db, cas, budgets })
+        Ok(Self { core: CatalogCore::from_parts(db, budgets), cas })
     }
 
     /// Restart recovery: purge orphan CAS temp files, finish or abandon blob
@@ -438,7 +362,7 @@ impl AssetServerCore {
         crate::variants::Variants { db: &self.db, budgets: &self.budgets }
     }
 
-    pub fn cas(&self) -> &Cas {
+    pub fn cas(&self) -> &FsCas {
         &self.cas
     }
 
@@ -461,186 +385,7 @@ impl AssetServerCore {
         &self,
         filter: PublicExportFilter<'_>,
     ) -> ServerResult<PublicExportPage> {
-        if filter.limit == 0 || filter.limit > self.budgets.max_search_results {
-            return Err(ServerError::OverBudget {
-                what: "public export page size",
-                limit: self.budgets.max_search_results as u64,
-                found: filter.limit as u64,
-            });
-        }
-        if let Some(namespace) = filter.namespace {
-            crate::catalog::validate_namespace(namespace)?;
-        }
-        let mut s = self.db.prepare(
-            "public export page",
-            "SELECT a.asset_id, a.namespace, a.created_ms,
-                    sa.title, sa.description, sa.kind, sa.creator,
-                    sa.generator, sa.backend, sa.model, sa.updated_ms
-             FROM assets a
-             JOIN search_annotations sa ON sa.asset_id = a.asset_id
-             WHERE a.retired_ms IS NULL
-               AND sa.visibility = 'public' AND sa.live = 1
-               AND (?1 IS NULL OR a.namespace = ?1)
-               AND (?2 IS NULL OR sa.kind = ?2)
-               AND (?3 IS NULL OR a.asset_id > ?3)
-               AND EXISTS(
-                    SELECT 1 FROM asset_aliases aa
-                    JOIN candidates c ON c.kind='asset'
-                       AND c.owner_id=aa.asset_id AND c.revision=aa.head_revision
-                    WHERE aa.asset_id=a.asset_id AND c.state='published'
-                      AND c.retired_ms IS NULL)
-             ORDER BY a.asset_id LIMIT ?4",
-        )?;
-        match filter.namespace {
-            Some(namespace) => s.bind_text(1, namespace)?,
-            None => s.bind_null(1)?,
-        }
-        match filter.kind {
-            Some(kind) => s.bind_text(2, kind_name(kind))?,
-            None => s.bind_null(2)?,
-        }
-        match filter.after {
-            Some(asset_id) => s.bind_blob(3, asset_id.as_bytes())?,
-            None => s.bind_null(3)?,
-        }
-        s.bind_u64(4, filter.limit as u64 + 1)?;
-
-        let mut base = Vec::new();
-        while s.step()? {
-            base.push((
-                AssetId::from_bytes(crate::catalog::fixed16(
-                    &s.column_blob(0),
-                    "public export asset id",
-                )?),
-                s.column_text(1),
-                s.column_u64(2),
-                s.column_text(3),
-                s.column_text(4),
-                if s.column_is_null(5) {
-                    None
-                } else {
-                    Some(kind_parse(&s.column_text(5)).ok_or(ServerError::InvalidState {
-                        what: "public export annotation kind",
-                        state: "unknown",
-                    })?)
-                },
-                s.column_text(6),
-                s.column_text(7),
-                s.column_text(8),
-                s.column_text(9),
-                s.column_u64(10),
-            ));
-        }
-        drop(s);
-        let more = base.len() > filter.limit as usize;
-        base.truncate(filter.limit as usize);
-        let next = if more { base.last().map(|row| row.0) } else { None };
-        let mut assets = Vec::with_capacity(base.len());
-        for (
-            asset_id,
-            namespace,
-            created_ms,
-            title,
-            description,
-            kind,
-            creator,
-            generator,
-            backend,
-            model,
-            updated_ms,
-        ) in base
-        {
-            let mut aliases = Vec::new();
-            let mut a = self.db.prepare(
-                "public export aliases",
-                "SELECT aa.alias, aa.head_revision, aa.updated_ms, c.published_ms
-                 FROM asset_aliases aa
-                 JOIN candidates c ON c.kind='asset' AND c.owner_id=aa.asset_id
-                    AND c.revision=aa.head_revision
-                 WHERE aa.asset_id=?1 AND c.state='published' AND c.retired_ms IS NULL
-                 ORDER BY aa.alias LIMIT ?2",
-            )?;
-            a.bind_blob(1, asset_id.as_bytes())?;
-            a.bind_u64(2, self.budgets.max_search_index_terms as u64 + 1)?;
-            while a.step()? {
-                aliases.push(PublicAliasHead {
-                    alias: AssetAlias::new(a.column_text(0))?,
-                    target: AssetRevisionRef {
-                        asset_id,
-                        revision: AssetRevisionId::from_bytes(crate::catalog::fixed32(
-                            &a.column_blob(1),
-                            "public export alias revision",
-                        )?),
-                    },
-                    updated_ms: a.column_u64(2),
-                    published_ms: a.column_u64(3),
-                });
-            }
-            drop(a);
-            if aliases.len() > self.budgets.max_search_index_terms as usize {
-                return Err(ServerError::OverBudget {
-                    what: "public export aliases per asset",
-                    limit: self.budgets.max_search_index_terms as u64,
-                    found: aliases.len() as u64,
-                });
-            }
-
-            let mut categories = Vec::new();
-            let mut tags = Vec::new();
-            let mut l = self.db.prepare(
-                "public export labels",
-                "SELECT kind, label FROM search_labels
-                 WHERE asset_id=?1 ORDER BY kind, label",
-            )?;
-            l.bind_blob(1, asset_id.as_bytes())?;
-            while l.step()? {
-                if l.column_text(0) == "category" {
-                    categories.push(l.column_text(1));
-                } else {
-                    tags.push(l.column_text(1));
-                }
-            }
-            drop(l);
-
-            let mut terms = Vec::new();
-            let mut p = self.db.prepare(
-                "public export postings",
-                "SELECT term, SUM(weight) FROM (
-                     SELECT term, weight_public AS weight FROM search_postings
-                     WHERE asset_id=?1 AND weight_public>0
-                     UNION ALL
-                     SELECT term, weight FROM search_alias_postings
-                     WHERE asset_id=?1 AND weight>0
-                 ) GROUP BY term ORDER BY term",
-            )?;
-            p.bind_blob(1, asset_id.as_bytes())?;
-            while p.step()? {
-                terms.push(PublicSearchTerm {
-                    term: p.column_text(0),
-                    weight: p.column_u64(1),
-                });
-            }
-            assets.push(PublicExportAsset {
-                asset_id,
-                namespace,
-                created_ms,
-                aliases,
-                search: PublicSearchProjection {
-                    title,
-                    description,
-                    kind,
-                    categories,
-                    tags,
-                    creator,
-                    generator,
-                    backend,
-                    model,
-                    updated_ms,
-                    terms,
-                },
-            });
-        }
-        Ok(PublicExportPage { assets, next })
+        self.core.public_export_page(filter)
     }
 
     // ---- blob garbage collection -------------------------------------------

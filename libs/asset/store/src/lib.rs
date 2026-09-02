@@ -49,30 +49,55 @@
 //! transport auth secrets, and randomness for opaque IDs.
 
 pub mod auth;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub mod blobrefs;
 pub mod budget;
 pub mod cas;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+mod cas_file;
 pub mod catalog;
+pub mod core;
+#[cfg(any(target_arch = "wasm32", feature = "embedded"))]
+pub mod embedded;
 pub mod error;
 pub mod gc;
 pub mod imports;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub mod observe;
 pub mod search;
 pub mod seed;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub mod server;
+pub mod static_export_core;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub mod static_export;
 pub mod variants;
 mod sqlite;
 mod synonyms;
 
 pub use auth::{token_hash, Auth, Capability, PrincipalId, Scope};
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use blobrefs::{BlobRef, BlobRefs, RefScan, RefState};
 pub use budget::Budgets;
-pub use cas::{BlobCommit, BlobWriter, Cas};
+pub use cas::{BlobCommit, Cas, MemoryCas};
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+pub use cas_file::{BlobWriter, FsCas};
 pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
+pub use core::{
+    AssetDetail, CatalogCore, PublicAliasHead, PublicExportAsset, PublicExportFilter,
+    PublicExportPage, PublicSearchProjection, PublicSearchTerm, PublishBatchItem,
+    PublishBatchOutcome, SERVER_SCHEMA_VERSION,
+};
+#[cfg(any(target_arch = "wasm32", feature = "embedded"))]
+pub use embedded::{
+    BlobReadOperation, BlobUpload, CapabilityMode, ChunkProgress, EmbeddedStore, LongOperation,
+    OperationStage, PublishRequest, PublishStage, StoreCapability, StoreError, StoreResult,
+    StoreUnavailable,
+};
 pub use error::{ServerError, ServerResult};
-pub use gc::{Gc, GcConfig, GcPhase, GcStatus};
+pub use gc::{Gc, GcConfig, GcDeleteIntent, GcPhase, GcStatus, GcStep, PhysicalDelete};
 pub use imports::{ImportEntryRow, ImportReport, Imports};
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use observe::{ObserveConfig, Outcome as ObserveOutcome};
 pub use variants::{
     DerivationOutcome, DerivationStatus, DerivedResult, Variants, MAX_DERIVATION_ROUNDS,
@@ -82,19 +107,25 @@ pub use search::{
     SearchPage, SearchQuery, SearchViewer, ViewerScope, Visibility, ANNOTATABLE_KINDS,
 };
 pub use seed::{stock_asset_id, SeedAsset, SeedReport, StockSeedSource};
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use server::{
-    AssetServerCore, BlobRefCommit, PublishBatchItem, PublishBatchOutcome, RecoverReport,
-    PublicAliasHead, PublicExportAsset, PublicExportFilter, PublicExportPage,
-    PublicSearchProjection, PublicSearchTerm, RefRescanPage, SERVER_SCHEMA_VERSION,
+    AssetServerCore, BlobRefCommit, RecoverReport, RefRescanPage,
 };
+pub use static_export_core::{brotli_bytes, ExportEntry, ExportPlan, ExportSink, ExportStep};
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use static_export::{export_static, StaticExportOptions, StaticExportReport};
 
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub mod host;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use host::{
     AssetServer, BlobRefPolicy, DiscoveryConfig, LISTEN_FILE, ServerConfig,
     DEFAULT_DISCOVERY_PORT,
 };
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use host::discovery;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use host::json;
+#[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 pub use host::util;
