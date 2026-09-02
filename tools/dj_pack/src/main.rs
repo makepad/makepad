@@ -185,6 +185,7 @@ struct PreparedAudio {
     digest: String,
     title: String,
     artist: String,
+    comment: String,
 }
 
 fn prepare_audio(path: &Path) -> Result<PreparedAudio, String> {
@@ -207,7 +208,13 @@ fn prepare_audio(path: &Path) -> Result<PreparedAudio, String> {
         .to_string();
     let title = clean_text(tags.title.as_deref().unwrap_or(&fallback), 512);
     let artist = clean_text(tags.artist.as_deref().unwrap_or(&fallback), 512);
-    Ok(PreparedAudio { path: path.to_path_buf(), bytes, media, frames, sample_rate, digest, title, artist })
+    let comment = clean_text(
+        id3_comment(&bytes).as_deref().unwrap_or(""),
+        makepad_asset_client::wire::MAX_SNIPPET_BYTES,
+    );
+    Ok(PreparedAudio {
+        path: path.to_path_buf(), bytes, media, frames, sample_rate, digest, title, artist, comment,
+    })
 }
 
 fn deck_frames(decoded: &DecodedAudio) -> Result<Vec<[i16; 2]>, String> {
@@ -940,6 +947,7 @@ struct PackTrack {
     side_files: Vec<makepad_asset_client::side_channels::SideChannelFile>,
     rights: Rights,
     license_text: String,
+    description: String,
 }
 
 fn run_pack(args: PackArgs) -> Result<(), String> {
@@ -967,7 +975,7 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         }
         if args.dry_run {
             let has_lyrics = load_lyrics(&args, &audio.digest)?.is_some();
-            let _ = load_rights(path)?;
+            let (_, _, description) = load_rights(&audio)?;
             let stem_roles = if stems_complete {
                 ",StemDrums,StemBass,StemVocals,StemOther"
             } else {
@@ -979,7 +987,7 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
                 "omitted (no complete cache)"
             };
             println!(
-                "DRY RUN {} -> {} digest={} roles=Audio{}{} stems={}",
+                "DRY RUN {} -> {} digest={} roles=Audio{}{} stems={} description={description:?}",
                 audio.path.display(),
                 alias,
                 audio.digest,
@@ -1003,8 +1011,8 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         let lyrics = load_lyrics(&args, &audio.digest)?;
         let (analysis, splat) = load_or_analyze(&args, &audio, stems_complete)?;
         let side_files = side_channel_files_with_analysis(oggs, lyrics, Some(analysis), splat);
-        let (rights, license_text) = load_rights(path)?;
-        tracks.push(PackTrack { audio, alias, side_files, rights, license_text });
+        let (rights, license_text, description) = load_rights(&audio)?;
+        tracks.push(PackTrack { audio, alias, side_files, rights, license_text, description });
     }
     if args.dry_run {
         return Ok(());
@@ -1068,8 +1076,8 @@ fn load_lyrics(args: &PackArgs, digest: &str) -> Result<Option<String>, String> 
         .map_err(|_| format!("{}: lyrics JSON is not UTF-8", path.display()))
 }
 
-fn load_rights(audio: &Path) -> Result<(Rights, String), String> {
-    let path = audio.parent().unwrap_or_else(|| Path::new(".")).join("LICENSE.txt");
+fn load_rights(audio: &PreparedAudio) -> Result<(Rights, String, String), String> {
+    let path = audio.path.parent().unwrap_or_else(|| Path::new(".")).join("LICENSE.txt");
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("{}: required licence beside audio: {error}", path.display()))?;
     let text = String::from_utf8(bytes.clone())
@@ -1087,12 +1095,45 @@ fn load_rights(audio: &Path) -> Result<(Rights, String), String> {
         terms_digest: Some(sha256(&bytes)),
         terms_url: "https://creativecommons.org/publicdomain/zero/1.0/legalcode".to_string(),
         credits: String::new(),
-        source: audio.file_name().and_then(|name| name.to_str()).unwrap_or("track").to_string(),
+        source: audio.path.file_name().and_then(|name| name.to_str()).unwrap_or("track").to_string(),
         source_archive: None,
         redistribution: Redistribution::Allowed,
         derivatives: DerivativePolicy::Allowed,
     };
-    Ok((rights, clean_text(&text, makepad_asset_data::limits::MAX_DESCRIPTION_BYTES)))
+    let source = license_source_url(&text, &audio.path).unwrap_or_else(|| audio.comment.clone());
+    let description = track_description(&audio.title, &audio.artist, &source);
+    let license_text = if text.len() <= makepad_asset_data::limits::MAX_DESCRIPTION_BYTES
+        && text.chars().all(|character| {
+            !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+        })
+    {
+        text
+    } else {
+        String::new()
+    };
+    Ok((rights, license_text, description))
+}
+
+fn license_source_url(license: &str, audio: &Path) -> Option<String> {
+    let file_name = audio.file_name()?.to_str()?;
+    let file_name_lower = file_name.to_ascii_lowercase();
+    let line = license.lines().find(|line| line.to_ascii_lowercase().contains(&file_name_lower))?;
+    let start = line.find("https://").or_else(|| line.find("http://"))?;
+    let url = line[start..]
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(|character: char| matches!(character, ')' | ']' | '}' | ',' | ';'));
+    let url = clean_text(url, makepad_asset_client::wire::MAX_SNIPPET_BYTES);
+    (!url.is_empty()).then_some(url)
+}
+
+fn track_description(title: &str, artist: &str, source: &str) -> String {
+    let text = if source.is_empty() {
+        format!("{title} — {artist} — CC0 1.0")
+    } else {
+        format!("{title} — {artist} — CC0 1.0 — {source}")
+    };
+    clean_text(&text, makepad_asset_client::wire::MAX_SNIPPET_BYTES)
 }
 
 fn track_alias(artist: &str, title: &str) -> Result<AssetAlias, String> {
@@ -1126,15 +1167,114 @@ fn slug(input: &str, max: usize, fallback: &str) -> String {
 
 fn clean_text(input: &str, max: usize) -> String {
     let mut out = String::new();
+    let mut pending_space = false;
     for character in input.chars() {
-        if out.len() + character.len_utf8() > max {
-            break;
-        }
-        if character == '\n' || character == '\t' || !character.is_control() {
+        if character.is_whitespace() || character.is_control() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
             out.push(character);
         }
     }
-    out.trim().to_string()
+    if out.len() > max {
+        const ELLIPSIS: &str = "…";
+        let mut end = max.saturating_sub(ELLIPSIS.len()).min(out.len());
+        while !out.is_char_boundary(end) { end -= 1; }
+        out.truncate(end);
+        while out.ends_with(' ') { out.pop(); }
+        if max >= ELLIPSIS.len() { out.push_str(ELLIPSIS); }
+    }
+    out
+}
+
+fn id3_comment(bytes: &[u8]) -> Option<String> {
+    let header = bytes.get(..10)?;
+    if &header[..3] != b"ID3" { return None; }
+    let version = header[3];
+    if !(2..=4).contains(&version) { return None; }
+    let body_len = syncsafe(&header[6..10]);
+    let end = 10usize.checked_add(body_len)?.min(bytes.len());
+    let mut at = 10usize;
+    if header[5] & 0x40 != 0 {
+        let raw = bytes.get(at..at + 4)?;
+        let size = if version >= 4 {
+            syncsafe(raw)
+        } else {
+            (u32::from_be_bytes(raw.try_into().ok()?) as usize).saturating_add(4)
+        };
+        at = at.checked_add(size.max(4))?;
+    }
+    let (id_len, frame_header_len) = if version == 2 { (3usize, 6usize) } else { (4, 10) };
+    while at.checked_add(frame_header_len)? <= end {
+        let id = bytes.get(at..at + id_len)?;
+        if id.first() == Some(&0) { break; }
+        let size = if version == 2 {
+            let raw = bytes.get(at + 3..at + 6)?;
+            ((raw[0] as usize) << 16) | ((raw[1] as usize) << 8) | raw[2] as usize
+        } else if version >= 4 {
+            syncsafe(bytes.get(at + 4..at + 8)?)
+        } else {
+            u32::from_be_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?) as usize
+        };
+        let body_start = at.checked_add(frame_header_len)?;
+        let body_end = body_start.checked_add(size)?;
+        if body_end > end { break; }
+        if id == b"COMM" || id == b"COM" {
+            return decode_id3_comment(bytes.get(body_start..body_end)?);
+        }
+        at = body_end;
+    }
+    None
+}
+
+fn syncsafe(raw: &[u8]) -> usize {
+    raw.iter().fold(0usize, |value, byte| (value << 7) | (byte & 0x7f) as usize)
+}
+
+fn decode_id3_comment(body: &[u8]) -> Option<String> {
+    let encoding = *body.first()?;
+    let payload = body.get(4..)?; // encoding byte plus the three-byte language
+    let text = match encoding {
+        0 | 3 => {
+            let start = payload.iter().position(|byte| *byte == 0).map_or(0, |at| at + 1);
+            decode_id3_string(encoding, &payload[start..])
+        }
+        1 | 2 => {
+            let start = payload
+                .chunks_exact(2)
+                .position(|pair| pair == [0, 0])
+                .map_or(0, |at| at * 2 + 2);
+            decode_id3_string(encoding, &payload[start..])
+        }
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+fn decode_id3_string(encoding: u8, bytes: &[u8]) -> String {
+    match encoding {
+        0 => bytes.iter().map(|byte| *byte as char).collect(),
+        1 | 2 => {
+            let (bytes, big_endian) = match (encoding, bytes) {
+                (1, [0xff, 0xfe, rest @ ..]) => (rest, false),
+                (1, [0xfe, 0xff, rest @ ..]) => (rest, true),
+                (1, rest) => (rest, false),
+                (_, rest) => (rest, true),
+            };
+            let units = bytes.chunks_exact(2).map(|pair| {
+                if big_endian {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                }
+            }).collect::<Vec<_>>();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 fn asset_id_from_audio(bytes: &[u8]) -> AssetId {
@@ -1195,7 +1335,7 @@ fn make_manifest(track: &PackTrack, asset_id: AssetId) -> Result<(AssetManifest,
 fn make_annotation(track: &PackTrack) -> AssetAnnotation {
     AssetAnnotation {
         title: track.audio.title.clone(),
-        description: track.license_text.clone(),
+        description: track.description.clone(),
         kind: Some(AssetKind::Audio),
         categories: vec!["music".to_string()],
         tags: vec!["music".to_string(), "stems".to_string()],
@@ -1205,7 +1345,7 @@ fn make_annotation(track: &PackTrack) -> AssetAnnotation {
         backend: "ai-hub".to_string(),
         model: "bs-roformer-4stem".to_string(),
         prompt: String::new(),
-        provenance: format!("decoded PCM digest {}", track.audio.digest),
+        provenance: track.license_text.clone(),
         visibility: Visibility::Public,
     }
 }
@@ -1358,6 +1498,26 @@ mod tests {
     }
 
     #[test]
+    fn id3_comment_is_available_as_the_source_fallback() {
+        let mut payload = vec![3];
+        payload.extend_from_slice(b"eng\0https://example.test/from-id3");
+        let mut frame = b"COMM".to_vec();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&[0, 0]);
+        frame.extend_from_slice(&payload);
+        let mut tag = b"ID3\x03\0\0".to_vec();
+        let size = frame.len();
+        tag.extend_from_slice(&[
+            ((size >> 21) & 0x7f) as u8,
+            ((size >> 14) & 0x7f) as u8,
+            ((size >> 7) & 0x7f) as u8,
+            (size & 0x7f) as u8,
+        ]);
+        tag.extend_from_slice(&frame);
+        assert_eq!(id3_comment(&tag).as_deref(), Some("https://example.test/from-id3"));
+    }
+
+    #[test]
     fn thirty_second_tone_splits_and_stitches_without_a_seam() {
         let frames = SAMPLE_RATE as usize * 30;
         let body_limit = stems_request_body_len(3 * CHUNK_STEP).unwrap() as u64;
@@ -1401,7 +1561,9 @@ mod tests {
         std::fs::create_dir_all(&lyrics).unwrap();
         let audio_path = tracks.join("tone.ogg");
         std::fs::write(&audio_path, tone_ogg(2)).unwrap();
-        std::fs::write(tracks.join("LICENSE.txt"), "CC0 1.0 Universal\nsynthetic fixture").unwrap();
+        let license_text = "Demo tracks — CC0 1.0 Universal\n\
+- tone.ogg — https://example.test/tone\n";
+        std::fs::write(tracks.join("LICENSE.txt"), license_text).unwrap();
         let audio = prepare_audio(&audio_path).unwrap();
         let stems = tone_stems(2);
         write_cache(&cache, &audio.digest, &stems).unwrap();
@@ -1434,9 +1596,24 @@ mod tests {
         assert!(static_manifest.contains("\"revisions\""));
         assert!(static_manifest.contains("\"role\":\"lyrics\""));
         assert!(static_manifest.contains("\"role\":\"dj_analysis\""));
+        assert!(static_manifest.contains(
+            "\"description\":\"tone — tone — CC0 1.0 — https://example.test/tone\""
+        ));
+        assert!(!static_manifest.contains("Demo tracks — CC0 1.0 Universal"));
         assert!(std::fs::read_dir(site.join("assets")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("revisions")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("blobs")).unwrap().next().is_some());
+
+        {
+            let core = AssetServerCore::open(&dir.0.join("store"), Budgets::default_v1()).unwrap();
+            let head = core
+                .catalog()
+                .resolve_asset_alias(&AssetAlias::from_str("music/tone/tone").unwrap())
+                .unwrap()
+                .unwrap();
+            let annotation = core.search().annotation(&head.asset_id).unwrap().unwrap();
+            assert_eq!(annotation.provenance, license_text);
+        }
 
         // The exact same pack is a revision replay and atomically replaces the snapshot.
         run_pack(PackArgs {

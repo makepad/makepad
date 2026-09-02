@@ -533,6 +533,92 @@ fn static_snapshot_accepts_the_vj_music_query() {
 }
 
 #[test]
+fn static_snapshot_normalizes_overlong_multiline_search_text() {
+    let mut fixture = fixture();
+    let mut manifest = makepad_asset_client::json::parse(
+        &fixture.routes["/v1/static/manifest.json"],
+    ).unwrap();
+    let Value::Obj(root) = &mut manifest else { unreachable!() };
+    let Value::Obj(search) = &mut root.iter_mut().find(|(key, _)| key == "search").unwrap().1
+        else { unreachable!() };
+    let Value::Arr(documents) = &mut search
+        .iter_mut()
+        .find(|(key, _)| key == "documents")
+        .unwrap()
+        .1
+        else { unreachable!() };
+    let asset_text = fixture.asset.to_string();
+    let document = documents.iter_mut().find(|document| {
+        document.get("asset_id").and_then(Value::as_str) == Some(asset_text.as_str())
+    }).unwrap();
+    let Value::Obj(fields) = document else { unreachable!() };
+    let replacements = [
+        (
+            "title",
+            format!("Long\n title {}", "é".repeat(makepad_asset_client::wire::MAX_TITLE_BYTES)),
+        ),
+        (
+            "description",
+            format!(
+                "First line\n\tsecond line {}",
+                "é".repeat(makepad_asset_client::wire::MAX_SNIPPET_BYTES),
+            ),
+        ),
+        (
+            "creator",
+            format!("Long\n creator {}", "é".repeat(makepad_asset_client::wire::MAX_FILTER_VALUE_BYTES)),
+        ),
+    ];
+    for (key, replacement) in replacements {
+        fields.iter_mut().find(|(name, _)| name == key).unwrap().1 = s(replacement);
+    }
+    fields.iter_mut().find(|(name, _)| name == "tags").unwrap().1 = Value::Arr(vec![
+        s(format!("Long\n tag {}", "é".repeat(makepad_asset_client::wire::MAX_FILTER_VALUE_BYTES))),
+        s("public"),
+    ]);
+    fixture.routes.insert(
+        "/v1/static/manifest.json".into(),
+        manifest.to_json().into_bytes(),
+    );
+
+    let transport = MockTransport {
+        next: 1,
+        routes: fixture.routes,
+        ready: VecDeque::new(),
+        truncated_manifest: false,
+    };
+    let mut store = StaticStore::start(
+        BaseUrl::parse("https://static.example").unwrap(),
+        Box::new(transport),
+        Box::new(MemoryCacheStore::new(1024 * 1024)),
+    ).unwrap();
+    for _ in 0..4 {
+        let _ = store.poll();
+        if store.is_ready() { break; }
+    }
+    assert!(store.is_ready());
+
+    let mut query = makepad_asset_client::CatalogQuery::browse(10);
+    query.namespace = Some("stock".into());
+    query.facets = 10;
+    let page = store.catalog_search(&query, None).unwrap();
+    let hit = page.hits.iter().find(|hit| hit.asset_id == fixture.asset).unwrap();
+    assert!(hit.title.len() <= makepad_asset_client::wire::MAX_TITLE_BYTES);
+    assert!(hit.title.ends_with('…'));
+    assert!(hit.creator.len() <= makepad_asset_client::wire::MAX_FILTER_VALUE_BYTES);
+    assert!(hit.creator.ends_with('…'));
+    assert!(hit.snippet.starts_with("First line second line "));
+    assert!(hit.snippet.len() <= makepad_asset_client::wire::MAX_SNIPPET_BYTES);
+    assert!(hit.snippet.ends_with('…'));
+    assert!(!hit.snippet.chars().any(char::is_control));
+    assert!(page.facets.iter().any(|facet| {
+        facet.label.starts_with("Long tag ")
+            && facet.label.ends_with('…')
+            && facet.label.len() <= makepad_asset_client::wire::MAX_FILTER_VALUE_BYTES
+    }));
+}
+
+#[test]
 fn platform_runtime_reads_static_export_and_deduplicates_digests() {
     let _serial = socket_test_lock();
     let fixture = fixture();
