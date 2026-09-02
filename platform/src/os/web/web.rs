@@ -76,8 +76,8 @@ impl Cx {
         accept.join(",")
     }
 
-    /// WebGL cannot blit a private render target to CPU without an extra
-    /// readPixels path that this backend does not expose yet.
+    /// The direct path stays unavailable: WebGL readback must not synchronously
+    /// stall the browser's UI thread. Use `request_render_texture_capture`.
     pub fn debug_read_render_texture(
         &mut self,
         _texture: &crate::texture::Texture,
@@ -85,17 +85,25 @@ impl Cx {
         None
     }
 
-    /// Renderer-owned texture capture (see the metal backend): not
-    /// implemented here — callers fall back to `debug_read_render_texture`.
-    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
-        false
+    /// Queue a WebGL2 PBO/fence readback. The bridge polls the fence on later
+    /// animation frames and returns raw RGBA8 bytes without blocking this call.
+    pub fn request_render_texture_capture(&mut self, texture: &crate::texture::Texture) -> bool {
+        let tid = texture.texture_id();
+        let Some(alloc) = self.textures[tid].alloc.as_ref() else { return false };
+        if alloc.width == 0 || alloc.height == 0 {
+            return false;
+        }
+        self.os.from_wasm(FromWasmRequestRenderTextureCapture {
+            texture_id: tid.0,
+        });
+        true
     }
 
     #[allow(clippy::type_complexity)]
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        Vec::new()
+        std::mem::take(&mut self.os.render_texture_captures)
     }
 
     fn normalize_web_pathname(pathname: &str) -> String {
@@ -338,6 +346,33 @@ impl Cx {
                         self.finish_web_storage_request(request_id, op, result)
                     {
                         storage_responses.push(response);
+                    }
+                }
+                live_id!(ToWasmRenderTextureCapture) => {
+                    let tw = ToWasmRenderTextureCapture::read_to_wasm(&mut to_wasm);
+                    if tw.error.is_empty() {
+                        if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
+                            self.os.render_texture_captures.push((
+                                texture_id,
+                                tw.width,
+                                tw.height,
+                                tw.data.into_vec_u8(),
+                            ));
+                            self.redraw_all();
+                        }
+                    } else {
+                        crate::error!("web render texture capture failed: {}", tw.error);
+                        if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
+                            // Wake the waiting owner immediately. Zero geometry is
+                            // the existing capture tuple's unambiguous failure form.
+                            self.os.render_texture_captures.push((
+                                texture_id,
+                                0,
+                                0,
+                                Vec::new(),
+                            ));
+                            self.redraw_all();
+                        }
                     }
                 }
 
@@ -1274,6 +1309,7 @@ impl CxOsApi for Cx {
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
             ToWasmStorageResult::to_js_code(),
+            ToWasmRenderTextureCapture::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
@@ -1348,6 +1384,7 @@ impl CxOsApi for Cx {
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
+            FromWasmRequestRenderTextureCapture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
@@ -1455,6 +1492,8 @@ pub struct CxOs {
     pub(crate) from_wasm_js: Vec<String>,
 
     pub(crate) media: CxWebMedia,
+    pub(crate) render_texture_captures:
+        Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
 }
 
 impl Default for CxOs {
@@ -1474,6 +1513,7 @@ impl Default for CxOs {
             from_wasm_js: Vec::new(),
 
             media: CxWebMedia::default(),
+            render_texture_captures: Vec::new(),
         }
     }
 }

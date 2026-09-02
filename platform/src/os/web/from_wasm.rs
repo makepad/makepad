@@ -374,6 +374,14 @@ pub struct FromWasmBeginRenderTexture {
     pub depth_target: WDepthTarget,
 }
 
+/// Starts an asynchronous WebGL2 readback of a render-target texture.
+/// JavaScript uses a pixel-pack buffer plus a fence and reports the bytes
+/// through `ToWasmRenderTextureCapture` on a later animation frame.
+#[derive(FromWasm)]
+pub struct FromWasmRequestRenderTextureCapture {
+    pub texture_id: usize,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmBeginRenderCanvas {
     pub clear_color: WColor,
