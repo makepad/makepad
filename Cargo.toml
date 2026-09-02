@@ -282,6 +282,9 @@ strip = true
 inherits = "release"
 debug = true
 
+[profile.test.package.makepad-stitch]
+opt-level = 1
+
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3
 #[profile.dev.package.makepad-live-compiler]
