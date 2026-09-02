@@ -1,0 +1,105 @@
+use crate::{
+    api::{start_production_load, ServiceRegistry},
+    config::Config,
+    static_files::StaticHandler,
+};
+use makepad_network::{
+    http_server::{HttpServer, HttpServerRequest},
+    NetworkConfig, NetworkRuntime,
+};
+use std::{path::PathBuf, sync::mpsc};
+
+pub fn run(config: Config) -> Result<(), String> {
+    let registry = ServiceRegistry::new(config.major_graph.is_some());
+    run_with_registry(config, registry, true)
+}
+
+/// Runs the HTTP/static dispatcher with an injected service registry. This
+/// keeps API plumbing independently testable without special production
+/// flags or an alternate protocol.
+pub fn run_with_registry(
+    config: Config,
+    registry: std::sync::Arc<ServiceRegistry>,
+    load_production_data: bool,
+) -> Result<(), String> {
+    let static_handler = StaticHandler::new(&config.root)?;
+    let data_root = canonical_data_root(&config, static_handler.root())?;
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    let listen = config.listen;
+    let Some(_listen_thread) = runtime.start_http_server(HttpServer {
+        listen_address: listen,
+        post_max_size: 2 * 1024 * 1024,
+        request: request_sender,
+    }) else {
+        return Err(format!("failed to bind {listen}"));
+    };
+    println!("makepad-web-server listening on http://{listen}");
+
+    if load_production_data {
+        if let Some(data_root) = data_root {
+            start_production_load(config, data_root, registry.clone());
+        }
+    }
+
+    while let Ok(request) = request_receiver.recv() {
+        match request {
+            HttpServerRequest::Get { headers, response_sender } => {
+                if !registry.handle_get(&headers, &response_sender) {
+                    static_handler.handle_get(&headers, &response_sender);
+                }
+            }
+            HttpServerRequest::Post { headers, body, response } => {
+                if !registry.handle_post(&headers, &body, &response)
+                    && !static_handler.handle_post(&headers, &body, &response)
+                {
+                    static_handler.handle_get(&headers, &response);
+                }
+            }
+            HttpServerRequest::ConnectWebSocket { response_sender, .. } => {
+                let _ = response_sender.send(Vec::new());
+            }
+            HttpServerRequest::DisconnectWebSocket { .. }
+            | HttpServerRequest::BinaryMessage { .. }
+            | HttpServerRequest::TextMessage { .. } => {}
+        }
+    }
+    Err("HTTP request channel closed".into())
+}
+
+fn canonical_data_root(config: &Config, static_root: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    let Some(data_dir) = &config.data_dir else { return Ok(None) };
+    let data_root = data_dir
+        .canonicalize()
+        .map_err(|error| format!("canonicalize data root {}: {error}", data_dir.display()))?;
+    if !data_root.is_dir() {
+        return Err(format!("data root {} is not a directory", data_root.display()));
+    }
+    if data_root.starts_with(static_root) || static_root.starts_with(&data_root) {
+        return Err("--data-dir and --root must not overlap".into());
+    }
+    Ok(Some(data_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    #[test]
+    fn rejects_data_inside_public_root() {
+        let base = std::env::temp_dir().join(format!(
+            "makepad-web-roots-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let root = base.join("site");
+        let data = root.join("private");
+        fs::create_dir_all(&data).unwrap();
+        let mut config = Config::parse([root.to_string_lossy().as_ref()]).unwrap();
+        config.data_dir = Some(data);
+        let static_handler = StaticHandler::new(&root).unwrap();
+        assert!(canonical_data_root(&config, static_handler.root()).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+}
