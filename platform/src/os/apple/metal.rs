@@ -322,22 +322,31 @@ impl Cx {
                 };
 
                 let geometry = &mut self.geometries[geometry_id];
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
 
                 if geometry.dirty_vertices || geometry.os.vertex_buffer.inner.is_none() {
-                    let bytes = (geometry.vertices.len() * std::mem::size_of::<f32>()) as u64;
+                    let bytes = geometry.vertices.byte_len() as u64;
                     self.os.vertex_buffer_bytes_uploaded =
                         self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
                     geometry
                         .os
                         .vertex_buffer
-                        .update(metal_cx, &geometry.vertices);
+                        .update(metal_cx, geometry.vertices.as_bytes());
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.index_buffer.inner.is_none() {
-                    let bytes = (geometry.indices.len() * std::mem::size_of::<u32>()) as u64;
+                    let bytes = geometry.indices.as_bytes().len() as u64;
                     self.os.vertex_buffer_bytes_uploaded =
                         self.os.vertex_buffer_bytes_uploaded.saturating_add(bytes);
-                    geometry.os.index_buffer.update(metal_cx, &geometry.indices);
+                    geometry
+                        .os
+                        .index_buffer
+                        .update(metal_cx, geometry.indices.as_bytes());
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -557,12 +566,20 @@ impl Cx {
                     .vertices_done
                     .saturating_add((geometry.index_count as u64).saturating_mul(instances));
                 if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
+                    let index_type = match geometry.index_width {
+                        2 => MTLIndexType::UInt16,
+                        4 => MTLIndexType::UInt32,
+                        width => {
+                            crate::error!("invalid resident index width {width}; skipping draw");
+                            continue;
+                        }
+                    };
                     let () = unsafe {
                         msg_send![
                             encoder,
                             drawIndexedPrimitives: MTLPrimitiveType::Triangle
                             indexCount: geometry.index_count as u64
-                            indexType: MTLIndexType::UInt32
+                            indexType: index_type
                             indexBuffer: inner.buffer.as_id()
                             indexBufferOffset: 0
                             instanceCount: instances

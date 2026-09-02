@@ -2,7 +2,7 @@ use crate::{
     cx::Cx,
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderInputs},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
     makepad_math::*,
     makepad_wasm_bridge::*,
@@ -76,6 +76,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: draw_item.os.inst_vb_id.unwrap(),
                         data: WasmPtrF32::new(draw_item.instances.as_ref().unwrap()),
+                        byte_data: WasmPtrU8::new(&[]),
                     });
                     draw_call.instance_dirty = false;
                 }
@@ -175,16 +176,34 @@ impl Cx {
                 };
 
                 let geometry = &mut self.geometries[geometry_id];
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
 
                 if geometry.dirty_vertices || geometry.os.vb_id.is_none() {
                     if geometry.os.vb_id.is_none() {
                         geometry.os.vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
-                    self.os.from_wasm(FromWasmAllocArrayBuffer {
-                        buffer_id: geometry.os.vb_id.unwrap(),
-                        data: WasmPtrF32::new(&geometry.vertices),
-                    });
+                    match &geometry.vertices {
+                        crate::geometry::VertexData::F32(v) => {
+                            self.os.from_wasm(FromWasmAllocArrayBuffer {
+                                buffer_id: geometry.os.vb_id.unwrap(),
+                                data: WasmPtrF32::new(v),
+                                byte_data: WasmPtrU8::new(&[]),
+                            });
+                        }
+                        crate::geometry::VertexData::Bytes(v) => {
+                            self.os.from_wasm(FromWasmAllocArrayBuffer {
+                                buffer_id: geometry.os.vb_id.unwrap(),
+                                data: WasmPtrF32::new(&[]),
+                                byte_data: WasmPtrU8::new(v),
+                            });
+                        }
+                    }
                     geometry.dirty_vertices = false;
                 }
 
@@ -193,10 +212,41 @@ impl Cx {
                         geometry.os.ib_id = Some(self.os.index_buffers);
                         self.os.index_buffers += 1;
                     }
-                    self.os.from_wasm(FromWasmAllocIndexBuffer {
-                        buffer_id: geometry.os.ib_id.unwrap(),
-                        data: WasmPtrU32::new(&geometry.indices),
-                    });
+                    match geometry.index_width {
+                        4 => {
+                            let Some(v) = geometry.indices.as_u32() else {
+                                crate::error!("u32 index staging does not match resident index width");
+                                continue;
+                            };
+                            self.os.from_wasm(FromWasmAllocIndexBuffer {
+                                buffer_id: geometry.os.ib_id.unwrap(),
+                                data: WasmPtrU32::new(v),
+                                byte_data: WasmPtrU8::new(&[]),
+                                index_width: 4,
+                            });
+                        }
+                        2 => {
+                            let Some(v) = geometry.indices.as_u16() else {
+                                crate::error!("u16 index staging does not match resident index width");
+                                continue;
+                            };
+                            self.os.from_wasm(FromWasmAllocIndexBuffer {
+                                buffer_id: geometry.os.ib_id.unwrap(),
+                                data: WasmPtrU32::new(&[]),
+                                byte_data: WasmPtrU8::new(unsafe {
+                                    std::slice::from_raw_parts(
+                                        v.as_ptr() as *const u8,
+                                        v.len() * 2,
+                                    )
+                                }),
+                                index_width: 2,
+                            });
+                        }
+                        width => {
+                            crate::error!("invalid resident index width {width}; skipping draw");
+                            continue;
+                        }
+                    }
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -263,6 +313,7 @@ impl Cx {
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
+                    index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
@@ -431,7 +482,7 @@ impl Cx {
     pub fn webgl_compile_shaders(&mut self) {
         let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
         for draw_shader_id in compile_set {
-            let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code) = {
+            let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code, geom_attribs, inst_attribs) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
@@ -448,6 +499,16 @@ impl Cx {
                     .iter()
                     .map(|v| v.to_from_wasm_texture_input())
                     .collect();
+                let compact = cx_shader.mapping.geometry_is_compact()
+                    || cx_shader.mapping.instances.has_compact();
+                let (geom_attribs, inst_attribs) = if compact {
+                    (
+                        Self::webgl_typed_attribs("geom", &cx_shader.mapping.geometries),
+                        Self::webgl_typed_attribs("inst", &cx_shader.mapping.instances),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 (
                     vertex,
                     pixel,
@@ -455,6 +516,8 @@ impl Cx {
                     cx_shader.mapping.instances.total_slots,
                     textures,
                     cx_shader.mapping.flags.debug_code,
+                    geom_attribs,
+                    inst_attribs,
                 )
             };
 
@@ -482,6 +545,8 @@ impl Cx {
                     geometry_slots,
                     instance_slots,
                     textures,
+                    geom_attribs,
+                    inst_attribs,
                 });
                 self.draw_shaders.os_shaders.push(shp);
                 os_shader_id = Some(shader_id);
@@ -490,6 +555,35 @@ impl Cx {
             self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
         }
         self.draw_shaders.compile_set.clear();
+    }
+
+    fn webgl_typed_attribs(prefix: &str, inputs: &DrawShaderInputs) -> Vec<WVertexAttrib> {
+        let stride = if inputs.stride_bytes != 0 {
+            inputs.stride_bytes
+        } else {
+            inputs.total_slots * 4
+        };
+        inputs
+            .inputs
+            .iter()
+            .map(|input| WVertexAttrib {
+                name: format!("{}_{}", prefix, input.id),
+                offset: input.byte_offset as u32,
+                size: input.attr_format.component_count() as u32,
+                stride: stride as u32,
+                gl_type: input.attr_format.gl_type_code(),
+                normalized: if input.attr_format.is_normalized() {
+                    1
+                } else {
+                    0
+                },
+                integer: if input.attr_format.is_integer_fetch() {
+                    1
+                } else {
+                    0
+                },
+            })
+            .collect()
     }
 }
 

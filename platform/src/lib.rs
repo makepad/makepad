@@ -214,7 +214,8 @@ pub use {
             DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
         },
         game_input::*,
-        geometry::{Geometry, GeometryId},
+        geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
+        draw_shader::{DrawShaderAttrFormat, DrawShaderInputPacking, DrawShaderInputs},
         gpu_info::GpuPerformance,
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,

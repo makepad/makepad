@@ -263,6 +263,17 @@ pub struct FromWasmRequestPermission {
 // WebGL API
 
 #[derive(FromWasm)]
+pub struct WVertexAttrib {
+    pub name: String,
+    pub offset: u32,
+    pub size: u32,
+    pub stride: u32,
+    pub gl_type: u32,
+    pub normalized: u32,
+    pub integer: u32,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,
     pub vertex: String,
@@ -270,18 +281,23 @@ pub struct FromWasmCompileWebGLShader {
     pub geometry_slots: usize,
     pub instance_slots: usize,
     pub textures: Vec<WTextureInput>,
+    pub geom_attribs: Vec<WVertexAttrib>,
+    pub inst_attribs: Vec<WVertexAttrib>,
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmAllocArrayBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrF32,
+    pub byte_data: WasmPtrU8,
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmAllocIndexBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrU32,
+    pub byte_data: WasmPtrU8,
+    pub index_width: u32,
 }
 
 #[derive(FromWasm)]
@@ -395,6 +411,7 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {}
 pub struct FromWasmDrawCall {
     pub vao_id: usize,
     pub shader_id: usize,
+    pub index_width: u32,
     pub depth_write: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
