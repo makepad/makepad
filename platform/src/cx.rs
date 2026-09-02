@@ -935,3 +935,21 @@ mod memory_budget_tests {
         );
     }
 }
+
+impl Cx {
+    /// True while the platform is still compiling draw shaders it was handed
+    /// and is therefore dropping (WebGL) their draw calls. Native backends
+    /// build pipelines inside the paint that first uses them and never
+    /// answer true. An offscreen bake that captures pixels polls this before
+    /// trusting a frame: a capture drawn while its program links is black.
+    pub fn draw_shaders_pending(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.os.webgl_shaders_pending > 0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
+}

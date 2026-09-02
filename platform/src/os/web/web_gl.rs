@@ -285,7 +285,12 @@ impl Cx {
                     });
                 }
 
-                let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+                // A custom-camera texture pass uploads its Y-flipped copy
+                // (see `setup_render_pass`); everything else its own.
+                let pass_uniforms: &[f32] = match &self.passes[draw_pass_id].os.flipped_uniforms {
+                    Some(flipped) => flipped.as_slice(),
+                    None => self.passes[draw_pass_id].pass_uniforms.as_slice(),
+                };
                 let instances = if sh.mapping.instances.total_slots == 0 {
                     0
                 } else {
@@ -317,7 +322,7 @@ impl Cx {
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     backface_culling: draw_call.options.backface_culling,
-                    pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
+                    pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
                     user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
@@ -341,22 +346,49 @@ impl Cx {
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let pass = &mut self.passes[draw_pass_id];
         pass.set_dpi_factor(dpi_factor);
+        // WebGL render-to-texture coordinates are vertically inverted relative
+        // to onscreen canvas rendering: an FBO's rows are stored bottom-up.
+        // Every offscreen pass therefore renders with its projection's Y
+        // inverted, so the texels land in the same top-left row order Metal
+        // and D3D produce and every consumer plain-samples. The JS side pairs
+        // this with a clockwise front face for texture passes (the flip
+        // reverses triangle winding), so backface culling keeps culling the
+        // same faces it culls on the canvas.
+        pass.os.flipped_uniforms = None;
         if to_texture {
-            // WebGL render-to-texture coordinates are vertically inverted relative to
-            // onscreen canvas rendering. Flip Y in the projection for offscreen passes.
-            let offset = pass_rect.pos + pass.view_shift;
-            let size = pass_rect.size * pass.view_scale;
-            pass.pass_uniforms.camera_projection = Mat4f::ortho(
-                offset.x as f32,
-                (offset.x + size.x) as f32,
-                (offset.y + size.y) as f32,
-                offset.y as f32,
-                100.0,
-                -100.0,
-                1.0,
-                1.0,
-            );
-            pass.pass_uniforms.camera_view = Mat4f::identity();
+            if pass.keep_camera_matrix {
+                // A custom camera (3D scenes, VJ effects, mesh views): the
+                // pass owns its matrices. Overwriting them with the 2D ortho
+                // — what this branch did before — drew every 3D scene with a
+                // pixel-space projection, which is how the web effect
+                // thumbnails came out as their clear colour. Keep the
+                // caller's uniforms untouched (the retained draw list
+                // re-executes on repaints without the app re-setting the
+                // camera, so the flip must never accumulate) and upload a
+                // flipped copy instead.
+                let mut flipped = pass.pass_uniforms.clone();
+                for m in [&mut flipped.camera_projection, &mut flipped.camera_projection_r] {
+                    m.v[1] = -m.v[1];
+                    m.v[5] = -m.v[5];
+                    m.v[9] = -m.v[9];
+                    m.v[13] = -m.v[13];
+                }
+                pass.os.flipped_uniforms = Some(flipped.as_slice().to_vec());
+            } else {
+                let offset = pass_rect.pos + pass.view_shift;
+                let size = pass_rect.size * pass.view_scale;
+                pass.pass_uniforms.camera_projection = Mat4f::ortho(
+                    offset.x as f32,
+                    (offset.x + size.x) as f32,
+                    (offset.y + size.y) as f32,
+                    offset.y as f32,
+                    100.0,
+                    -100.0,
+                    1.0,
+                    1.0,
+                );
+                pass.pass_uniforms.camera_view = Mat4f::identity();
+            }
         } else {
             if !pass.keep_camera_matrix {
                 pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
@@ -589,6 +621,7 @@ impl Cx {
                 });
                 self.draw_shaders.os_shaders.push(shp);
                 self.os.webgl_shaders_queued_this_frame += 1;
+                self.os.webgl_shaders_pending += 1;
                 os_shader_id = Some(shader_id);
             }
 
@@ -671,7 +704,14 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CxOsPass {}
+pub struct CxOsPass {
+    /// The pass uniforms a custom-camera (`keep_camera_matrix`) texture pass
+    /// actually uploads: the caller's matrices with the projection's Y
+    /// inverted for WebGL's bottom-up render targets. `None` for canvas
+    /// passes and for 2D texture passes, whose ortho is built flipped. Kept
+    /// as the upload slice (`DrawPassUniforms::as_slice`).
+    pub flipped_uniforms: Option<Vec<f32>>,
+}
 
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {}

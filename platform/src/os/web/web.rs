@@ -443,6 +443,12 @@ impl Cx {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmWebGLShadersDone) => {
+                    let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_pending =
+                        self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                }
+
                 live_id!(ToWasmPaintDirty) => {
                     if let Some(window_id) = self.windows.current_id_zero() {
                         if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
@@ -1349,6 +1355,7 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmWebGLShadersDone::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1525,6 +1532,10 @@ pub struct CxOs {
     pub(crate) vaos: usize,
     pub(crate) webgl_first_draw_logged: bool,
     pub(crate) webgl_shaders_queued_this_frame: usize,
+    /// WebGL programs queued for compile that JavaScript has not yet reported
+    /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
+    /// on those programs are dropped by the browser side.
+    pub(crate) webgl_shaders_pending: usize,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1548,6 +1559,7 @@ impl Default for CxOs {
             vaos: 0,
             webgl_first_draw_logged: false,
             webgl_shaders_queued_this_frame: 0,
+            webgl_shaders_pending: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
