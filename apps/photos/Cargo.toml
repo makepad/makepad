@@ -1,0 +1,46 @@
+# photos — the picture wall as an app, part of the Makepad family (wm hosts
+# it as a tile or in-process as a module; terminal, files, sheets are its
+# siblings). The wall is the stock `TileGrid` from makepad-image-tiles over
+# a baked library; this crate adds the app around it: the library choice,
+# the search over what the pictures say, and the tools the assistant calls.
+#
+# photos runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# the shared --stdin-loop client runtime every Makepad app has — and as a
+# module (src/module.rs) the window manager seats in an isolate of its own.
+
+[package]
+name = "makepad-photos"
+version = "0.1.0"
+edition = "2021"
+default-run = "photos"
+
+[[bin]]
+name = "photos"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+name = "makepad_photos"
+path = "src/lib.rs"
+
+[features]
+default = ["standalone"]
+# The standalone window: the F10 overlay and the port toward it. A host
+# that links the MODULE (makepad-wm) leaves this off and gets the lib only.
+standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+# The wall itself: the baked tape library and the pannable, zoomable grid.
+makepad-image-tiles = { path = "../../libs/image_tiles" }
+# The assistant: the F10 overlay in this window, and the tools the wall
+# exposes to it (src/ai.rs).
+makepad-aichat = { path = "../aichat", optional = true }
+# The window manager's vocabulary for the standalone window: the bar's
+# title and the polite close (the module has no window of its own).
+makepad-wm-api = { path = "../../libs/wm_api", optional = true }
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }

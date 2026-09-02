@@ -183,14 +183,21 @@ pub struct TilePyramid {
     pub levels: Vec<Planes>,
 }
 
-/// Decode PNG/JPEG (or whatever else the magic bytes say) to an ImageBuffer.
+/// Decode PNG, JPEG, GIF or WebP (or whatever else the magic bytes say)
+/// to an ImageBuffer. A GIF gives its first frame.
 pub fn decode_image(bytes: &[u8]) -> Result<ImageBuffer, String> {
     let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
     let is_jpg = bytes.starts_with(&[0xff, 0xd8]);
+    let is_gif = bytes.starts_with(b"GIF8");
+    let is_webp = bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP";
     let result = if is_png {
         ImageBuffer::from_png(bytes)
     } else if is_jpg {
         ImageBuffer::from_jpg(bytes)
+    } else if is_gif {
+        ImageBuffer::from_gif(bytes)
+    } else if is_webp {
+        ImageBuffer::from_webp(bytes)
     } else {
         ImageBuffer::from_jpg(bytes).or_else(|_| ImageBuffer::from_png(bytes))
     };

@@ -6,6 +6,7 @@ workspace.members = [
     "apps/aichat",
     "apps/finance",
     "apps/sheets",
+    "apps/photos",
     "libs/wm_theme",
     "libs/wm_api",
     "libs/app_module",

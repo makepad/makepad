@@ -42,6 +42,8 @@ fn linked_modules() -> Vec<&'static dyn AppModule> {
     let mut out: Vec<&'static dyn AppModule> = Vec::new();
     #[cfg(feature = "app-sheets")]
     out.push(&makepad_sheets::SHEETS_MODULE);
+    #[cfg(feature = "app-photos")]
+    out.push(&makepad_photos::PHOTOS_MODULE);
     out
 }
 
