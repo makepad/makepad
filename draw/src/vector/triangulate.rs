@@ -4,6 +4,9 @@ use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
 /// Packed GPU layout: see `pack_vector_record` / VectorVertexPacked.
 pub const VECTOR_PACKED_FLOATS_PER_VERTEX: usize = 12;
+/// Packed map-fill layout: xy, unorm8 colour, f16(code/coverage), depths.
+pub const FILL_PACKED_FLOATS_PER_VERTEX: usize = 5;
+const FILL_PARAM5_STEP: f32 = 0.00001;
 
 #[inline]
 fn f16_bits(value: f32) -> u32 {
@@ -95,6 +98,85 @@ pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
     }
     out
 }
+
+/// The compact fill shader has one code lane for the exact shape/material
+/// pairs emitted by the map's ground-fill pass. Pattern codes imply their
+/// material because the inherited pixel path ignores material for shapes
+/// 30..32. Everything else must stay on `VectorVertexPacked`.
+#[inline]
+pub fn map_fill_variant_code(record: &[f32]) -> Option<f32> {
+    if record.len() < VECTOR_FLOATS_PER_VERTEX
+        || record[8] <= 1e5
+        || record[8] >= 1.5e6
+        || record[11] != 0.0
+        || record[12] != 0.0
+        || record[13] != 0.0
+        || record[15] != 0.0
+    {
+        return None;
+    }
+    let (shape, material) = (record[10], record[14]);
+    if shape == 0.0 && (material == 0.0 || material == 3.0 || material == 5.0) {
+        Some(material)
+    } else if (shape == 30.0 || shape == 31.0 || shape == 32.0)
+        && (material == 0.0 || material == 3.0 || material == 5.0)
+    {
+        Some(shape)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn pack_fill_depths(zbias: f32, param5: f32) -> f32 {
+    let z = (zbias.max(0.0) / VECTOR_ZBIAS_STEP)
+        .round()
+        .min(u16::MAX as f32) as u32;
+    let p = (param5.max(0.0) / FILL_PARAM5_STEP)
+        .round()
+        .min(u16::MAX as f32) as u32;
+    f32::from_bits(z | (p << 16))
+}
+
+/// Decode the fixed-point depth pair carried in `FillVertexPacked::zbias`.
+/// Public for precision tests and CPU diagnostics; shaders perform the
+/// equivalent decode via `unpack4u8`.
+#[inline]
+pub fn unpack_fill_depths(value: f32) -> (f32, f32) {
+    let bits = value.to_bits();
+    (
+        (bits & 0xffff) as f32 * VECTOR_ZBIAS_STEP,
+        (bits >> 16) as f32 * FILL_PARAM5_STEP,
+    )
+}
+
+/// One logical 19-float ground-fill record -> five GPU slots (20 bytes).
+/// Returns `None` for strokes, lifted/decked geometry, gradients and any
+/// shape/material pair not handled by the compact fill shader.
+#[inline]
+pub fn pack_fill_record(record: &[f32]) -> Option<[f32; FILL_PACKED_FLOATS_PER_VERTEX]> {
+    let code = map_fill_variant_code(record)?;
+    Some([
+        record[0],
+        record[1],
+        pack_unorm8x4(record[4], record[5], record[6], record[7]),
+        pack_pair_f16(code, record[2]),
+        pack_fill_depths(record[18], record[16]),
+    ])
+}
+
+/// Pack a buffer already classified as compact map fills.
+pub fn pack_fill_vertices(vertices: &[f32]) -> Vec<f32> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * FILL_PACKED_FLOATS_PER_VERTEX);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        out.extend_from_slice(
+            &pack_fill_record(record).expect("non-fill record in compact map fill stream"),
+        );
+    }
+    out
+}
+
 /// IEEE 754 binary16 decode — inverse of `f16_bits` above.
 #[inline]
 fn f16_bits_to_f32(h: u32) -> f32 {
@@ -169,6 +251,31 @@ fn midpoint_packed_record(a: &[f32], b: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PE
     ]
 }
 
+fn midpoint_fill_packed_record(
+    a: &[f32],
+    b: &[f32],
+) -> [f32; FILL_PACKED_FLOATS_PER_VERTEX] {
+    let m = |x: f32, y: f32| (x + y) * 0.5;
+    let ac = unpack_unorm8x4(a[2]);
+    let bc = unpack_unorm8x4(b[2]);
+    let (acode, aaa) = unpack_pair_f16(a[3]);
+    let (bcode, baa) = unpack_pair_f16(b[3]);
+    let (az, ap) = unpack_fill_depths(a[4]);
+    let (bz, bp) = unpack_fill_depths(b[4]);
+    [
+        m(a[0], b[0]),
+        m(a[1], b[1]),
+        pack_unorm8x4(
+            m(ac[0], bc[0]),
+            m(ac[1], bc[1]),
+            m(ac[2], bc[2]),
+            m(ac[3], bc[3]),
+        ),
+        pack_pair_f16(m(acode, bcode), m(aaa, baa)),
+        pack_fill_depths(m(az, bz), m(ap, bp)),
+    ]
+}
+
 /// Crack-free midpoint refinement of an already-PACKED tile mesh: every
 /// edge longer than `max_edge` (tile-local units) splits until the fixpoint
 /// — shared midpoints via the edge map so neighboring triangles agree, the
@@ -176,8 +283,36 @@ fn midpoint_packed_record(a: &[f32], b: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PE
 /// space-warp mode, whose curved fold any long flat chord would slice
 /// through; the triangulator itself is untouched — this runs on its output.
 pub fn subdivide_packed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, max_edge: f32) {
+    subdivide_packed_mesh_with::<VECTOR_PACKED_FLOATS_PER_VERTEX>(
+        indices,
+        vertices,
+        max_edge,
+        midpoint_packed_record,
+    );
+}
+
+/// Fill-layout twin used after builder-thread packing. Space-warp refinement
+/// therefore stays on the main thread without restoring 19-float records.
+pub fn subdivide_fill_packed_mesh(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<f32>,
+    max_edge: f32,
+) {
+    subdivide_packed_mesh_with::<FILL_PACKED_FLOATS_PER_VERTEX>(
+        indices,
+        vertices,
+        max_edge,
+        midpoint_fill_packed_record,
+    );
+}
+
+fn subdivide_packed_mesh_with<const S: usize>(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<f32>,
+    max_edge: f32,
+    midpoint_record: impl Fn(&[f32], &[f32]) -> [f32; S] + Copy,
+) {
     use std::collections::HashMap;
-    const S: usize = VECTOR_PACKED_FLOATS_PER_VERTEX;
     if indices.is_empty() || vertices.len() < S || max_edge <= 0.0 {
         return;
     }
@@ -227,7 +362,7 @@ pub fn subdivide_packed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, ma
                 let mut rb = [0f32; S];
                 ra.copy_from_slice(&vertices[vi..vi + S]);
                 rb.copy_from_slice(&vertices[vj..vj + S]);
-                let record = midpoint_packed_record(&ra, &rb);
+                let record = midpoint_record(&ra, &rb);
                 vertices.extend_from_slice(&record);
                 let midpoint = (vertices.len() / S - 1) as u32;
                 midpoints.insert(key, midpoint);

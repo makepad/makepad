@@ -4,8 +4,8 @@ use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
-    append_tessellated_geometry_decked, compute_clip_radii, pack_vector_vertices,
-    VECTOR_PACKED_FLOATS_PER_VERTEX,
+    append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
+    pack_fill_vertices, pack_vector_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
@@ -80,6 +80,9 @@ pub enum TileLoadState {
     LoadingLocal,
     Ready {
         fill_geometry: Option<Geometry>,
+        /// Non-fill records formerly interleaved with ground fills (building
+        /// outline strokes), retained on the generic vector layout.
+        fill_misc_geometry: Option<Geometry>,
         casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
         icon_geometry: Option<Geometry>,
@@ -159,6 +162,7 @@ pub struct TileFade {
     /// mode-dependent fill/icon overlay cross-fades.
     pub reuse_road_core: bool,
     pub fill_geometry: Option<Geometry>,
+    pub fill_misc_geometry: Option<Geometry>,
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
     pub icon_geometry: Option<Geometry>,
@@ -343,6 +347,8 @@ pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
     pub fill_indices: Vec<u32>,
     pub fill_vertices: Vec<f32>,
+    pub fill_misc_indices: Vec<u32>,
+    pub fill_misc_vertices: Vec<f32>,
     pub casing_indices: Vec<u32>,
     pub casing_vertices: Vec<f32>,
     pub stroke_indices: Vec<u32>,
@@ -410,6 +416,8 @@ impl TileBuffers {
     pub fn byte_size(&self) -> usize {
         (self.fill_indices.len()
             + self.fill_vertices.len()
+            + self.fill_misc_indices.len()
+            + self.fill_misc_vertices.len()
             + self.casing_indices.len()
             + self.casing_vertices.len()
             + self.stroke_indices.len()
@@ -3407,6 +3415,45 @@ fn profile_clock_elapsed_is_non_negative() {
     assert!(clock.elapsed_seconds() >= 0.0);
 }
 
+#[cfg(test)]
+#[test]
+fn compact_fill_record_roundtrips_within_packed_precision() {
+    use crate::makepad_draw::vector::{
+        pack_fill_record, unpack_fill_depths, unpack_pair_f16,
+        FILL_PACKED_FLOATS_PER_VERTEX,
+    };
+
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 123.25;
+    record[1] = -45.5;
+    record[2] = 0.37;
+    record[4..8].copy_from_slice(&[0.13, 0.47, 0.81, 0.62]);
+    record[8] = 1e6;
+    record[10] = 30.0;
+    record[14] = 5.0;
+    record[16] = 0.00873;
+    record[18] = 0.004321;
+
+    let packed = pack_fill_record(&record).unwrap();
+    assert_eq!(packed.len(), FILL_PACKED_FLOATS_PER_VERTEX);
+    assert_eq!(
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::FillVertexPacked>(),
+        20
+    );
+    assert_eq!((packed[0], packed[1]), (record[0], record[1]));
+    let (code, coverage) = unpack_pair_f16(packed[3]);
+    assert_eq!(code, 30.0);
+    assert!((coverage - record[2]).abs() <= 0.00025);
+    let rgba = packed[2].to_bits();
+    for (channel, shift) in record[4..8].iter().zip([0, 8, 16, 24]) {
+        let unpacked = ((rgba >> shift) & 0xff) as f32 / 255.0;
+        assert!((unpacked - channel).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let (zbias, param5) = unpack_fill_depths(packed[4]);
+    assert!((zbias - record[18]).abs() <= VECTOR_ZBIAS_STEP * 0.5 + f32::EPSILON);
+    assert!((param5 - record[16]).abs() <= 0.000005 + f32::EPSILON);
+}
+
 struct TileProfiler {
     on: bool,
     last: ProfileClock,
@@ -6359,6 +6406,8 @@ fn build_tile_buffers_from_features_profiled(
             pin_hits: Vec::new(),
             fill_indices: Vec::new(),
             fill_vertices: Vec::new(),
+            fill_misc_indices: Vec::new(),
+            fill_misc_vertices: Vec::new(),
             casing_indices: Vec::new(),
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),
@@ -7355,10 +7404,21 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
+    // The ground stream is compact only for polygon-fill variants. Building
+    // outline strokes are the sole generic records emitted into this pass;
+    // keep them in a sibling stream so their stroke expansion stays intact.
+    let mut fill_vertices = fill_vertices;
+    let mut fill_indices = fill_indices;
+    let (fill_misc_vertices, fill_misc_indices) = split_band_by(
+        &mut fill_vertices,
+        &mut fill_indices,
+        |record| map_fill_variant_code(record).is_none(),
+    );
     // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
     // main-thread pack was 10-15ms per street tile and throttled the
     // upload drain to one tile per frame).
-    let fill_vertices = pack_vector_vertices(&fill_vertices);
+    let fill_vertices = pack_fill_vertices(&fill_vertices);
+    let fill_misc_vertices = pack_vector_vertices(&fill_misc_vertices);
     let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
     let casing_vertices = pack_vector_vertices(&casing_vertices);
     let stroke_vertices = pack_vector_vertices(&stroke_vertices);
@@ -7372,6 +7432,8 @@ fn build_tile_buffers_from_features_profiled(
         pin_hits,
         fill_indices,
         fill_vertices,
+        fill_misc_indices,
+        fill_misc_vertices,
         casing_indices,
         casing_vertices,
         stroke_indices,
@@ -10564,6 +10626,8 @@ mod bridge_probe_tests {
             pin_hits: Vec::new(),
             fill_indices: Vec::new(),
             fill_vertices: Vec::new(),
+            fill_misc_indices: Vec::new(),
+            fill_misc_vertices: Vec::new(),
             casing_indices: Vec::new(),
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),

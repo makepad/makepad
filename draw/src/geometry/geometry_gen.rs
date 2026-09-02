@@ -108,6 +108,27 @@ pub struct VectorVertexPacked {
     pub zbias: f32,
 }
 
+/// Map polygon fills need only their tile-local position, premultiplied
+/// colour, fill/material variant, AA coverage and the two depth ladders.
+/// The final slot bit-packs those ladders; see `pack_fill_record`.
+#[derive(Clone, Script, ScriptHook)]
+#[repr(C)]
+pub struct FillVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    /// f16(shape/material code) | f16(fill AA coverage)
+    #[live]
+    pub params: f32,
+    /// u16 flat zbias ticks | u16 tilted param5 ticks
+    #[live]
+    pub zbias: f32,
+}
+
 /// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
 /// instance anchor, f16 uv pair, stroke distance. 16 bytes; the anchor,
 /// colour, zoom floor and depth ride the instance instead of every vertex.
@@ -296,6 +317,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertexPacked);
     let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
     set_script_value!(vm, geom.VectorGeomPacked = vpgen);
+    set_script_value_to_pod!(vm, geom.FillVertexPacked);
+    let fpgen = shared(vm, id!(FillGeomPacked), GeometryGen::from_triangle_2d_fill_packed);
+    set_script_value!(vm, geom.FillGeomPacked = fpgen);
     // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
     set_script_value_to_pod!(vm, geom.IconVertexPacked);
     let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
@@ -378,6 +402,25 @@ impl GeometryGen {
         let mut g = Self::default();
         for _ in 0..3 {
             g.vertices.extend_from_slice(&[0.0, 0.0, crate::vector::pack_pair_f16(0.5, 1.0), 0.0]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_fill_packed() -> GeometryGen {
+        let mut g = Self::default();
+        let logical = [
+            0.0, 0.0, 0.5, 1.0,
+            1.0, 1.0, 1.0, 1.0,
+            1e6, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0,
+            0.0,
+        ];
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(
+                &crate::vector::pack_fill_record(&logical).expect("placeholder is a map fill"),
+            );
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
