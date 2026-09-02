@@ -246,12 +246,17 @@ impl ThumbSource for NativeThumbSource {
 struct DemoThumbSource;
 
 impl DemoThumbSource {
-    const IMAGES: [&'static [u8]; 3] = [
-        include_bytes!("../demos/ducky.png"),
-        include_bytes!("../demos/mixer.png"),
-        include_bytes!("../demos/xr.png"),
+    const IMAGES: [&'static [u8]; 8] = [
+        include_bytes!("../demos/rubber-duck-illustration.png"),
+        include_bytes!("../demos/amusement-ride.jpg"),
+        include_bytes!("../demos/royal-esplanade-panorama.jpg"),
+        include_bytes!(concat!(env!("OUT_DIR"), "/aurora-vignette.png")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/canyon-vignette.png")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/lagoon-vignette.png")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/meadow-vignette.png")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/twilight-vignette.png")),
     ];
-    const VIDEO_STILL: &'static [u8] = include_bytes!("../demos/ducky.png");
+    const VIDEO_STILL: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cinema-still.png"));
 
     fn bytes(path: &Path) -> &'static [u8] {
         if crate::model::is_playable_video(path) {
@@ -509,12 +514,22 @@ mod tests {
     }
 
     #[test]
-    fn demo_source_returns_decodable_images_and_video_stills() {
-        for path in [Path::new("/Demo/Pictures/IMG_00042.jpg"), Path::new("/Demo/Videos/clip-0001.mp4")] {
-            let bytes = DemoThumbSource::bytes(path);
-            assert!(decode_image_from_data(bytes).is_ok(), "embedded demo thumb for {} did not decode", path.display());
+    fn demo_source_pool_is_distinct_decodable_and_uses_one_video_still() {
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(DemoThumbSource::IMAGES.len() + 1, 9);
+        for (slot, bytes) in DemoThumbSource::IMAGES.iter().copied().enumerate() {
+            assert!(seen.insert(bytes), "demo picture slots contain duplicate bytes at slot {slot}");
+            assert!(decode_image_from_data(bytes).is_ok(), "demo picture slot {slot} did not decode");
+        }
+        assert!(seen.insert(DemoThumbSource::VIDEO_STILL), "the designated video still duplicates a picture slot");
+        assert!(decode_image_from_data(DemoThumbSource::VIDEO_STILL).is_ok(), "the designated video still did not decode");
+
+        for path in [Path::new("/Demo/Videos/clip-0001.mp4"), Path::new("/Demo/Videos/camera-0003.mkv")] {
+            assert_eq!(DemoThumbSource::bytes(path), DemoThumbSource::VIDEO_STILL);
             assert!(DemoThumbSource.decode(path).is_some());
         }
-        assert_eq!(DemoThumbSource::bytes(Path::new("/Demo/Videos/a.mp4")), DemoThumbSource::VIDEO_STILL);
+        let total_bytes = DemoThumbSource::IMAGES.iter().map(|bytes| bytes.len()).sum::<usize>()
+            + DemoThumbSource::VIDEO_STILL.len();
+        assert!(total_bytes < 1_500_000, "embedded demo picture pool is {total_bytes} bytes");
     }
 }
