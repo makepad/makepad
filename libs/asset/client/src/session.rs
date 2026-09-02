@@ -22,6 +22,7 @@ use crate::api::ApiEndpoints;
 use crate::client::{AssetClient, ClientConfig};
 use crate::discovery::{content_client_caps, DiscoveryListener};
 use crate::error::{ClientError, ClientResult};
+use crate::location::{BaseUrl, ClientLocation, ClientMode};
 use crate::runtime::{ClientRuntime, RuntimeConfig};
 use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
 use crate::util::now_ms;
@@ -33,6 +34,9 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
+    /// Static configurations bypass discovery and select portable transport
+    /// and memory-cache primitives. Native configurations leave this `None`.
+    pub location: Option<ClientLocation>,
     /// Explicit endpoints; `None` = LAN discovery.
     pub endpoints: Option<ApiEndpoints>,
     /// Expected server identity. With discovery it selects the beacon; with
@@ -68,6 +72,7 @@ pub struct SessionConfig {
 impl SessionConfig {
     pub fn new(cache_parent: impl Into<PathBuf>) -> SessionConfig {
         SessionConfig {
+            location: None,
             endpoints: None,
             server_id: None,
             token: None,
@@ -83,7 +88,16 @@ impl SessionConfig {
         }
     }
 
+    pub fn static_site(base_url: BaseUrl) -> SessionConfig {
+        let mut config = SessionConfig::new(PathBuf::new());
+        config.location = Some(ClientLocation::StaticSite(base_url));
+        config
+    }
+
     fn validate(&self) -> ClientResult<()> {
+        if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
+            return Err(ClientError::InvalidInput { what: "static site bearer token" });
+        }
         self.subscriber.validate()?;
         if self.catalog_cache_leaf.is_empty()
             || self.media_lanes.is_empty()
@@ -161,6 +175,12 @@ pub struct SessionConnector {
 impl SessionConnector {
     pub fn start(config: SessionConfig) -> ClientResult<SessionConnector> {
         config.validate()?;
+        if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
+            return Err(ClientError::Unavailable {
+                capability: "static_site_session",
+                mode: ClientMode::StaticWeb,
+            });
+        }
         let (tx, rx) = channel();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_worker = stopping.clone();
