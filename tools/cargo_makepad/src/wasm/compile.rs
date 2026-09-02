@@ -780,12 +780,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        let underscore_build_crate = build_crate.replace('-', "_");
-        let dst_dir = app_dir.join(underscore_build_crate).join("resources");
+        // The app resolves `self://` through its own module path, which for a bin target is
+        // the BIN name (`files`), not the package name (`makepad-files`): package under that.
+        let underscore_build_bin = build_bin.replace('-', "_");
+        let dst_dir = app_dir.join(&underscore_build_bin).join("resources");
         font_package.copy_tree_filtered(
             &local_resources_path,
             &dst_dir,
-            &format!("{}/resources", build_crate.replace('-', "_")),
+            &format!("{underscore_build_bin}/resources"),
             no_skip,
             |dest_path| {
                 let dest_path = dest_path.to_path_buf();
