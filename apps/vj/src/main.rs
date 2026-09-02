@@ -6940,6 +6940,9 @@ pub struct App {
     /// The master clipped and has not been cleared.
     #[rust]
     console_clip: ClipLatch,
+    /// The console's height when its grip was grabbed.
+    #[rust]
+    console_grab: Option<f64>,
     /// How far the console has read the process log, and the lines it kept.
     #[rust]
     console_log_cursor: u64,
@@ -17267,6 +17270,25 @@ p2 {}
         }
     }
 
+    /// The pane the console shares with the explorer, in layout points.
+    ///
+    /// Measured from POSITIONS, not from a size: a `Fill` view reports the
+    /// room it asked for rather than the room it got, so the page body reads
+    /// 32 points taller than it draws — the models row underneath takes that
+    /// back — and the lists inherit the over-ask. The floor is therefore read
+    /// off the row that stands on it, and the pane is the distance from the
+    /// lists up to there. Until that row has drawn, the pane's own size will
+    /// do.
+    fn console_room(&mut self, cx: &mut Cx) -> f64 {
+        let pane = self.ui.widget(cx, ids!(lists_pair)).area().rect(cx);
+        let floor = self.ui.widget(cx, ids!(models_row)).area().rect(cx).pos.y;
+        if floor > pane.pos.y {
+            floor - crate::console::GAP_POINTS - pane.pos.y
+        } else {
+            pane.size.y
+        }
+    }
+
     /// Show the console the way its state says. Every set is guarded, so a
     /// settled console does no work at all.
     fn paint_console(&mut self, cx: &mut Cx) {
@@ -17280,20 +17302,7 @@ p2 {}
         // anything that re-applies the panel puts the declared ones straight
         // back.
         //
-        // The pane is measured from POSITIONS, not from a size: a `Fill` view
-        // reports the room it asked for rather than the room it got, so the
-        // page body reads 32 points taller than it draws — the models row
-        // underneath takes that back — and the lists inherit the over-ask.
-        // The floor is therefore read off the row that stands on it, and the
-        // pane is the distance from the lists up to there. Until that row has
-        // drawn, the pane's own size will do.
-        let top = self.ui.widget(cx, ids!(lists_pair)).area().rect(cx);
-        let floor = self.ui.widget(cx, ids!(models_row)).area().rect(cx).pos.y;
-        let room = if floor > top.pos.y {
-            floor - crate::console::GAP_POINTS - top.pos.y
-        } else {
-            top.size.y
-        };
+        let room = self.console_room(cx);
         let strip = self.console.extent(room);
         let explorer =
             (room - crate::console::GAP_POINTS - strip).max(crate::console::OPEN_MIN_POINTS);
@@ -17370,6 +17379,44 @@ p2 {}
                     changed = true;
                 }
             }
+        }
+        // The grip, in the same idiom as the one between the decks and the
+        // lists: painted hover, and the height stored on release so a size
+        // clamped on the way does not spring back.
+        let grip = self.ui.view(cx, ids!(console_grip));
+        for (action, lit) in [
+            (grip.finger_hover_in(actions), true),
+            (grip.finger_hover_out(actions), false),
+        ] {
+            if action.is_none() {
+                continue;
+            }
+            let mut view = self.ui.widget(cx, ids!(console_grip));
+            let color: u32 = if lit { 0xffff_ff5c } else { 0xffff_ff1f };
+            script_apply_eval!(cx, view, {
+                draw_bg +: { color: #(color) }
+            });
+            self.ui.redraw(cx);
+        }
+        if grip.finger_down(actions).is_some() {
+            let room = self.console_room(cx);
+            self.console_grab = Some(self.console.extent(room));
+        }
+        if let Some(moved) = grip.finger_move(actions) {
+            if let Some(start) = self.console_grab {
+                // The console lies BELOW the grip, so dragging up grows it.
+                let travel = moved.abs_start.y - moved.abs.y;
+                let room = self.console_room(cx);
+                self.console.set_open_height(start + travel, room);
+                self.paint_console(cx);
+                self.resync_layout(cx);
+            }
+        }
+        if grip.finger_up(actions).is_some() && self.console_grab.take().is_some() {
+            let room = self.console_room(cx);
+            let settled = self.console.extent(room);
+            self.console.set_open_height(settled, room);
+            self.save_preprocess_settings();
         }
         // The filter narrows the tail as it is typed; clearing drops what
         // has been kept rather than what the process log holds.
