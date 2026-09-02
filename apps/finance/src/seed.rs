@@ -17,8 +17,6 @@
 //! directly without a filesystem.
 
 use crate::date::{self, Day};
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
-use crate::db::Db;
 use crate::model::*;
 use crate::money::{Currency, EUR};
 
@@ -143,52 +141,6 @@ pub fn generate(years: i32, today: Day) -> Ledger {
     ledger.categories.categories.sort_by_key(|category| (category.sort_order, category.id));
     ledger.scheduled.sort_by_key(|item| (item.next_due, item.id));
     ledger
-}
-
-/// Fill an empty native file with a generated household. Returns a one-line
-/// summary for the status bar.
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
-pub fn populate(db: &mut Db, years: i32) -> Result<String, String> {
-    let today = date::today();
-    let ledger = generate(years, today);
-    persist(db, &ledger)?;
-    let start = date::month_start(date::add_months(today, -(years * 12 - 1)));
-    Ok(format!(
-        "{} transactions across {} accounts, {} to {}",
-        ledger.transactions.len(),
-        ledger.accounts.len(),
-        date::format_short(start),
-        date::format_short(today)
-    ))
-}
-
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "demo")))]
-fn persist(db: &mut Db, ledger: &Ledger) -> Result<(), String> {
-    for account in &ledger.accounts {
-        db.insert_account(account)?;
-    }
-    for category in &ledger.categories.categories {
-        db.insert_category(category)?;
-    }
-    db.transact(|conn| {
-        for txn in &ledger.transactions {
-            crate::db::insert_transaction_on(conn, txn)?;
-        }
-        Ok(())
-    })?;
-    for txn in ledger.transactions.iter().filter(|txn| txn.is_split()) {
-        db.update_transaction(txn)?;
-    }
-    for budget in &ledger.budgets {
-        db.insert_budget(budget)?;
-    }
-    for rule in &ledger.rules {
-        db.insert_rule(rule)?;
-    }
-    for scheduled in &ledger.scheduled {
-        db.insert_scheduled(scheduled)?;
-    }
-    db.set_setting("base_currency", ledger.base_currency.code)
 }
 
 struct Accounts {
@@ -848,10 +800,135 @@ fn generate_scheduled(accounts: &Accounts, cats: &Cats, today: Day) -> Vec<Sched
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn fingerprint(ledger: &Ledger) -> u64 {
+        // Every model here derives Debug over all of its named fields. Sort
+        // each table by its durable key, then length-frame and hash those
+        // complete structural records so neither ordering nor concatenation
+        // ambiguity can hide a difference.
+        let mut rows = vec![format!("currency:{:?}", ledger.base_currency)];
+
+        let mut accounts: Vec<_> = ledger.accounts.iter().collect();
+        accounts.sort_by_key(|account| account.id);
+        rows.extend(accounts.into_iter().map(|account| format!("account:{account:?}")));
+
+        let mut categories: Vec<_> = ledger.categories.categories.iter().collect();
+        categories.sort_by_key(|category| category.id);
+        rows.extend(categories.into_iter().map(|category| format!("category:{category:?}")));
+
+        let mut transactions = ledger.transactions.clone();
+        transactions.sort_by_key(|txn| txn.id);
+        for txn in &mut transactions {
+            txn.splits.sort_by_key(|split| split.id);
+        }
+        rows.extend(transactions.into_iter().map(|txn| format!("transaction:{txn:?}")));
+
+        let mut payees: Vec<_> = ledger.payees.iter().collect();
+        payees.sort_by_key(|payee| payee.id);
+        rows.extend(payees.into_iter().map(|payee| format!("payee:{payee:?}")));
+
+        let mut budgets = ledger.budgets.clone();
+        budgets.sort_by_key(|budget| (budget.category, budget.month));
+        rows.extend(budgets.into_iter().map(|budget| format!("budget:{budget:?}")));
+
+        let mut rules: Vec<_> = ledger.rules.iter().collect();
+        rules.sort_by_key(|rule| rule.id);
+        rows.extend(rules.into_iter().map(|rule| format!("rule:{rule:?}")));
+
+        let mut scheduled: Vec<_> = ledger.scheduled.iter().collect();
+        scheduled.sort_by_key(|item| item.id);
+        rows.extend(scheduled.into_iter().map(|item| format!("scheduled:{item:?}")));
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for row in rows {
+            for byte in (row.len() as u64).to_le_bytes().into_iter().chain(row.bytes()) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    fn entity_ids(ledger: &Ledger) -> Vec<(&'static str, Vec<Id>)> {
+        vec![
+            ("accounts", ledger.accounts.iter().map(|item| item.id).collect()),
+            (
+                "categories",
+                ledger.categories.categories.iter().map(|item| item.id).collect(),
+            ),
+            ("transactions", ledger.transactions.iter().map(|item| item.id).collect()),
+            (
+                "splits",
+                ledger
+                    .transactions
+                    .iter()
+                    .flat_map(|txn| txn.splits.iter().map(|split| split.id))
+                    .collect(),
+            ),
+            ("payees", ledger.payees.iter().map(|item| item.id).collect()),
+            ("rules", ledger.rules.iter().map(|item| item.id).collect()),
+            ("scheduled", ledger.scheduled.iter().map(|item| item.id).collect()),
+        ]
+    }
+
+    fn assert_unique_ids(ledger: &Ledger) {
+        for (kind, ids) in entity_ids(ledger) {
+            let mut unique = HashSet::new();
+            for id in ids {
+                assert_ne!(id, NO_ID, "{kind} contains an unassigned id");
+                assert!(unique.insert(id), "duplicate {kind} id {id}");
+            }
+        }
+        let budget_keys: HashSet<_> =
+            ledger.budgets.iter().map(|entry| (entry.category, entry.month)).collect();
+        assert_eq!(budget_keys.len(), ledger.budgets.len(), "duplicate budget key");
+    }
+
+    fn assert_references_resolve(ledger: &Ledger) {
+        let accounts: HashSet<_> = ledger.accounts.iter().map(|account| account.id).collect();
+        let categories: HashSet<_> =
+            ledger.categories.categories.iter().map(|category| category.id).collect();
+        for category in &ledger.categories.categories {
+            if let Some(parent) = category.parent {
+                assert!(categories.contains(&parent), "missing parent category {parent}");
+            }
+        }
+        for txn in &ledger.transactions {
+            assert!(accounts.contains(&txn.account), "missing transaction account {}", txn.account);
+            if let Some(category) = txn.category {
+                assert!(categories.contains(&category), "missing transaction category {category}");
+            }
+            for split in &txn.splits {
+                if let Some(category) = split.category {
+                    assert!(categories.contains(&category), "missing split category {category}");
+                }
+            }
+        }
+        for payee in &ledger.payees {
+            if let Some(category) = payee.default_category {
+                assert!(categories.contains(&category), "missing payee category {category}");
+            }
+        }
+        for budget in &ledger.budgets {
+            assert!(categories.contains(&budget.category), "missing budget category");
+        }
+        for rule in &ledger.rules {
+            if let Some(category) = rule.set_category {
+                assert!(categories.contains(&category), "missing rule category {category}");
+            }
+        }
+        for item in &ledger.scheduled {
+            assert!(accounts.contains(&item.account), "missing scheduled account");
+            if let Some(category) = item.category {
+                assert!(categories.contains(&category), "missing scheduled category");
+            }
+        }
+    }
 
     #[test]
     fn the_demo_file_is_a_coherent_household() {
-        let today = date::from_ymd(2026, 9, 1);
+        let today = date::from_ymd(2026, 8, 28);
         let ledger = generate(DEFAULT_YEARS, today);
 
         // Enough to fill every screen.
@@ -868,12 +945,18 @@ mod tests {
 
         // Every transfer pair balances — the invariant the whole
         // net-worth number rests on.
-        let groups: std::collections::HashSet<Id> =
-            ledger.transactions.iter().filter_map(|t| t.transfer_group).collect();
-        assert!(groups.len() > 20, "expected many transfers, got {}", groups.len());
-        for group in groups {
-            assert!(ledger.transfer_is_balanced(group), "transfer {group} does not cancel");
+        let mut groups: HashMap<Id, Vec<&Transaction>> = HashMap::new();
+        for txn in ledger.transactions.iter().filter(|txn| txn.transfer_group.is_some()) {
+            groups.entry(txn.transfer_group.unwrap()).or_default().push(txn);
         }
+        assert!(groups.len() > 20, "expected many transfers, got {}", groups.len());
+        for (group, rows) in groups {
+            assert_eq!(rows.len(), 2, "transfer {group} must have exactly two rows");
+            assert_eq!(rows[0].amount, -rows[1].amount, "transfer {group} must cancel");
+        }
+
+        assert_unique_ids(&ledger);
+        assert_references_resolve(&ledger);
 
         // Splits sum to their transaction.
         let split_count = ledger.transactions.iter().filter(|t| t.is_split()).count();
@@ -912,12 +995,12 @@ mod tests {
 
     #[test]
     fn the_same_seed_produces_the_same_file() {
-        let today = date::from_ymd(2026, 9, 1);
-        let one = generate(1, today);
-        let two = generate(1, today);
-        assert_eq!(one.transactions.len(), two.transactions.len());
-        let sum_a: i64 = one.transactions.iter().map(|t| t.amount).sum();
-        let sum_b: i64 = two.transactions.iter().map(|t| t.amount).sum();
-        assert_eq!(sum_a, sum_b);
+        let today = date::from_ymd(2026, 8, 28);
+        let one = generate(2, today);
+        let two = generate(2, today);
+        assert_eq!(fingerprint(&one), fingerprint(&two));
+        assert_eq!(entity_ids(&one), entity_ids(&two), "generated ids must be stable");
+        assert_unique_ids(&one);
+        assert_unique_ids(&two);
     }
 }
