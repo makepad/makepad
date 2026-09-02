@@ -2194,6 +2194,9 @@ impl Mixer {
     /// Mix one device buffer. The buffer must already be zeroed; on lock
     /// contention it stays silent rather than ever blocking the device.
     pub fn render(&self, device_rate: f64, output: &mut AudioBuffer) {
+        // Every buffer, not once: the flag is per thread and some hosts reset
+        // it between callbacks. See `music_dsp::flush_denormals_to_zero`.
+        crate::music_dsp::flush_denormals_to_zero();
         if device_rate <= 0.0 {
             return;
         }
@@ -3483,6 +3486,21 @@ mod tests {
             error < 0.001,
             "the wrap must keep its overshoot: {error:.4}s off after ~200 laps"
         );
+    }
+
+    #[test]
+    fn every_callback_arms_flush_to_zero() {
+        // Some hosts reset the flag behind the app's back between buffers,
+        // so the callback cannot arm it once and trust it: each render
+        // re-arms. Disarm here as such a host would, render one buffer, and
+        // the thread must be flushing again.
+        crate::music_dsp::set_flush_denormals(false);
+        let mixer = Mixer::new();
+        render(&mixer, 48_000.0, 64);
+        let tiny = std::hint::black_box(f32::MIN_POSITIVE);
+        let half = std::hint::black_box(0.5f32);
+        assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
+        crate::music_dsp::set_flush_denormals(false);
     }
 
     #[test]

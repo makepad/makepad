@@ -28,6 +28,65 @@
 //!   every band sits at unity and the filter is centred, keeping an
 //!   untouched deck bit-transparent.
 
+// ---------------------------------------------------------------------------
+// the floating-point environment
+// ---------------------------------------------------------------------------
+
+/// Arm flush-to-zero on the calling thread: a result too small to be a
+/// normal number becomes exactly zero, and a denormal input is read as zero.
+///
+/// Every recursive filter here — the crossover, the sweep, the stretcher's
+/// overlap state — decays into the denormal range when its deck goes quiet,
+/// and a denormal multiply costs the FPU a hundred times a normal one: the
+/// classic crackle that appears exactly when a kill is engaged or a deck is
+/// paused. The flag is per thread and cheap to set, and some hosts reset it
+/// behind the app's back, so the device callback arms it every buffer.
+pub fn flush_denormals_to_zero() {
+    set_flush_denormals(true);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub(crate) fn set_flush_denormals(on: bool) {
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64 as arch;
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86 as arch;
+    // MXCSR bit 15 flushes results, bit 6 reads denormal inputs as zero.
+    const FLUSH_TO_ZERO: u32 = 1 << 15;
+    const DENORMALS_ARE_ZERO: u32 = 1 << 6;
+    // The control register is per thread; reading and writing it is two
+    // instructions with no side effect beyond the two flags below.
+    #[allow(deprecated)]
+    unsafe {
+        let current = arch::_mm_getcsr();
+        let wanted = if on {
+            current | FLUSH_TO_ZERO | DENORMALS_ARE_ZERO
+        } else {
+            current & !(FLUSH_TO_ZERO | DENORMALS_ARE_ZERO)
+        };
+        if wanted != current {
+            arch::_mm_setcsr(wanted);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn set_flush_denormals(on: bool) {
+    // FPCR bit 24 is flush-to-zero for both results and inputs.
+    const FLUSH_TO_ZERO: u64 = 1 << 24;
+    unsafe {
+        let current: u64;
+        std::arch::asm!("mrs {0}, fpcr", out(reg) current);
+        let wanted = if on { current | FLUSH_TO_ZERO } else { current & !FLUSH_TO_ZERO };
+        if wanted != current {
+            std::arch::asm!("msr fpcr, {0}", in(reg) wanted);
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+pub(crate) fn set_flush_denormals(_on: bool) {}
+
 use std::f32::consts::PI;
 
 // ---------------------------------------------------------------------------
@@ -1415,6 +1474,27 @@ mod tests {
         }
         assert!((scratch.rate() - 1.08).abs() < 1e-3, "rate {}", scratch.rate());
         assert!(!scratch.active());
+    }
+
+    // ---- floating-point environment ---------------------------------------
+
+    #[test]
+    fn flush_denormals_to_zero_makes_a_denormal_product_vanish() {
+        // A filter that has gone quiet decays into the denormal range, where
+        // every multiply costs a hundred times more; the audio thread wants
+        // those flushed to exactly zero. The product below is denormal on
+        // every target this runs on.
+        let tiny = std::hint::black_box(f32::MIN_POSITIVE);
+        let half = std::hint::black_box(0.5f32);
+        flush_denormals_to_zero();
+        assert_eq!(tiny * half, 0.0, "armed: a denormal product flushes to zero");
+        // The flag is per thread and this thread runs other tests: put it
+        // back, and prove the arithmetic is honest again.
+        set_flush_denormals(false);
+        assert!(
+            std::hint::black_box(tiny) * std::hint::black_box(half) > 0.0,
+            "disarmed: the denormal is a number again"
+        );
     }
 
     // ---- allocation ------------------------------------------------------
