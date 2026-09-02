@@ -1,16 +1,33 @@
 use super::geometry::TileKey;
 use crate::makepad_draw::*;
 use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, MkmapLeaf, MkmapRoot};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const LEAF_CACHE_CAPACITY: usize = 32;
+const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+const FILE_CACHE_CAPACITY: usize = 8;
+const MAX_ARCHIVE_WAITERS: usize = 64;
+const MAX_ROOT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_COALESCE_MAX_GAP: u64 = 64 * 1024;
 const DEFAULT_COALESCE_MAX_LEN: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
+
+pub type ArchiveWorkerPool = Arc<TagThreadPool<ReadToken>>;
+
+pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
+    Arc::new(TagThreadPool::new(cx, 2))
+}
+
+pub fn next_archive_task_token() -> ReadToken {
+    static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+    ReadToken(NEXT_TOKEN.fetch_add(1, Ordering::Relaxed).max(1))
+}
 
 #[derive(Debug)]
 pub struct ReadCompletion {
@@ -28,19 +45,28 @@ pub trait ByteSource {
         len: u64,
         token: ReadToken,
     );
+    fn cancel(&mut self, cx: &mut Cx, token: ReadToken);
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion>;
+}
+
+#[derive(Default)]
+struct ShardFileCache {
+    files: HashMap<u32, std::fs::File>,
+    lru: VecDeque<u32>,
 }
 
 /// Local `.mkmap` reads performed by Makepad workers, never by the UI thread.
 pub struct FileByteSource {
     dir: PathBuf,
     completions: ToUIReceiver<ReadCompletion>,
-    workers: Option<TagThreadPool<ReadToken>>,
-    shard_files: std::sync::Arc<std::sync::Mutex<HashMap<u32, std::fs::File>>>,
+    workers: ArchiveWorkerPool,
+    shard_files: Arc<Mutex<ShardFileCache>>,
+    cancelled: Arc<Mutex<HashSet<ReadToken>>>,
+    active: Arc<Mutex<HashSet<ReadToken>>>,
 }
 
 impl FileByteSource {
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    pub fn new(path: impl AsRef<Path>, workers: ArchiveWorkerPool) -> Self {
         let path = path.as_ref();
         let dir = if path.file_name().is_some_and(|name| name == "root.mkidx") {
             path.parent().unwrap_or(Path::new(".")).to_path_buf()
@@ -50,43 +76,97 @@ impl FileByteSource {
         Self {
             dir,
             completions: Default::default(),
-            workers: None,
+            workers,
             shard_files: Default::default(),
+            cancelled: Default::default(),
+            active: Default::default(),
         }
-    }
-
-    fn workers(&mut self, cx: &mut Cx) -> &TagThreadPool<ReadToken> {
-        self.workers
-            .get_or_insert_with(|| TagThreadPool::new(cx, 1))
     }
 }
 
 impl ByteSource for FileByteSource {
-    fn request_root(&mut self, cx: &mut Cx, token: ReadToken) {
+    fn request_root(&mut self, _cx: &mut Cx, token: ReadToken) {
         let path = self.dir.join("root.mkidx");
         let sender = self.completions.sender();
-        self.workers(cx).execute_rev(token, move |_| {
+        let cancelled = self.cancelled.clone();
+        let active = self.active.clone();
+        let _ = self.active.lock().map(|mut set| set.insert(token));
+        self.workers.execute_rev(token, move |_| {
+            if cancelled.lock().is_ok_and(|set| set.contains(&token)) {
+                let _ = cancelled.lock().map(|mut set| set.remove(&token));
+                let _ = active.lock().map(|mut set| set.remove(&token));
+                return;
+            }
             let result = std::fs::read(&path)
-                .map_err(|err| format!("read {}: {err}", path.display()));
-            let _ = sender.send(ReadCompletion { token, result });
+                .map_err(|err| format!("read {}: {err}", path.display()))
+                .and_then(|bytes| {
+                    (bytes.len() <= MAX_ROOT_BYTES)
+                        .then_some(bytes)
+                        .ok_or_else(|| "mkmap root exceeds byte limit".to_string())
+                });
+            let was_cancelled = cancelled
+                .lock()
+                .map(|mut set| set.remove(&token))
+                .unwrap_or(true);
+            let _ = active.lock().map(|mut set| set.remove(&token));
+            if !was_cancelled {
+                let _ = sender.send(ReadCompletion { token, result });
+            }
         });
     }
 
     fn request_range(
         &mut self,
-        cx: &mut Cx,
+        _cx: &mut Cx,
         shard: u32,
         offset: u64,
         len: u64,
         token: ReadToken,
     ) {
+        if len == 0 || len > MAX_RANGE_BYTES || offset.checked_add(len).is_none() {
+            let _ = self.completions.sender().send(ReadCompletion {
+                token,
+                result: Err("invalid mkmap file range".to_string()),
+            });
+            return;
+        }
         let path = self.dir.join(format!("tiles-{shard:03}.mkshard"));
         let sender = self.completions.sender();
         let shard_files = self.shard_files.clone();
-        self.workers(cx).execute_rev(token, move |_| {
+        let cancelled = self.cancelled.clone();
+        let active = self.active.clone();
+        let _ = self.active.lock().map(|mut set| set.insert(token));
+        self.workers.execute_rev(token, move |_| {
+            if cancelled.lock().is_ok_and(|set| set.contains(&token)) {
+                let _ = cancelled.lock().map(|mut set| set.remove(&token));
+                let _ = active.lock().map(|mut set| set.remove(&token));
+                return;
+            }
             let result = read_file_range(&path, shard, offset, len, &shard_files);
-            let _ = sender.send(ReadCompletion { token, result });
+            let was_cancelled = cancelled
+                .lock()
+                .map(|mut set| set.remove(&token))
+                .unwrap_or(true);
+            let _ = active.lock().map(|mut set| set.remove(&token));
+            if !was_cancelled {
+                let _ = sender.send(ReadCompletion { token, result });
+            }
         });
+    }
+
+    fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
+        let is_active = self
+            .active
+            .lock()
+            .is_ok_and(|active| active.contains(&token));
+        if is_active {
+            let _ = self.cancelled.lock().map(|mut set| set.insert(token));
+        }
+        let dropped = self.workers.retain_queued(|queued| *queued != token);
+        if !dropped.is_empty() {
+            let _ = self.cancelled.lock().map(|mut set| set.remove(&token));
+            let _ = self.active.lock().map(|mut set| set.remove(&token));
+        }
     }
 
     fn poll(&mut self, _cx: &mut Cx, _event: &Event) -> Vec<ReadCompletion> {
@@ -103,7 +183,7 @@ fn read_file_range(
     shard: u32,
     offset: u64,
     len: u64,
-    shard_files: &std::sync::Mutex<HashMap<u32, std::fs::File>>,
+    shard_files: &Mutex<ShardFileCache>,
 ) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -111,14 +191,21 @@ fn read_file_range(
     let mut files = shard_files
         .lock()
         .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?;
-    if !files.contains_key(&shard) {
-        files.insert(
+    if !files.files.contains_key(&shard) {
+        while files.files.len() >= FILE_CACHE_CAPACITY {
+            if let Some(oldest) = files.lru.pop_front() {
+                files.files.remove(&oldest);
+            }
+        }
+        files.files.insert(
             shard,
             std::fs::File::open(path)
                 .map_err(|err| format!("open {}: {err}", path.display()))?,
         );
     }
-    let file = files.get_mut(&shard).unwrap();
+    files.lru.retain(|cached| *cached != shard);
+    files.lru.push_back(shard);
+    let file = files.files.get_mut(&shard).unwrap();
     file.seek(SeekFrom::Start(offset))
         .map_err(|err| format!("seek {}: {err}", path.display()))?;
     let mut bytes = vec![0; len];
@@ -170,6 +257,14 @@ impl HttpRangeByteSource {
                 offset,
                 len,
             } => {
+                if len > MAX_RANGE_BYTES {
+                    self.ready.push_back(ReadCompletion {
+                        token: pending.token,
+                        result: Err("mkmap HTTP range exceeds byte limit".to_string()),
+                    });
+                    cx.redraw_all();
+                    return;
+                }
                 let Some(end) = offset
                     .checked_add(len)
                     .filter(|_| len != 0)
@@ -179,6 +274,7 @@ impl HttpRangeByteSource {
                         token: pending.token,
                         result: Err("invalid mkmap HTTP range".to_string()),
                     });
+                    cx.redraw_all();
                     return;
                 };
                 (
@@ -194,6 +290,29 @@ impl HttpRangeByteSource {
         }
         self.requests.insert(request_id, pending);
         cx.http_request(request_id, request);
+    }
+
+    fn retry_or_complete(
+        &mut self,
+        cx: &mut Cx,
+        mut pending: PendingHttpRead,
+        result: Result<Vec<u8>, String>,
+    ) -> Option<ReadCompletion> {
+        match result {
+            Ok(bytes) => Some(ReadCompletion {
+                token: pending.token,
+                result: Ok(bytes),
+            }),
+            Err(_error) if pending.retry_count == 0 => {
+                pending.retry_count = 1;
+                self.issue(cx, pending);
+                None
+            }
+            Err(error) => Some(ReadCompletion {
+                token: pending.token,
+                result: Err(error),
+            }),
+        }
     }
 
     fn content_range(response: &HttpResponse) -> Option<&str> {
@@ -254,29 +373,44 @@ impl ByteSource for HttpRangeByteSource {
                     let Some(pending) = self.requests.remove(request_id) else {
                         continue;
                     };
-                    out.push(ReadCompletion {
-                        token: pending.token,
-                        result: validate_http_response(&pending.kind, response),
-                    });
+                    if let Some(completion) = self.retry_or_complete(
+                        cx,
+                        pending.clone(),
+                        validate_http_response(&pending.kind, response),
+                    ) {
+                        out.push(completion);
+                    }
                 }
                 NetworkResponse::HttpError { request_id, error } => {
-                    let Some(mut pending) = self.requests.remove(request_id) else {
+                    let Some(pending) = self.requests.remove(request_id) else {
                         continue;
                     };
-                    if pending.retry_count == 0 {
-                        pending.retry_count = 1;
-                        self.issue(cx, pending);
-                    } else {
-                        out.push(ReadCompletion {
-                            token: pending.token,
-                            result: Err(format!("mkmap HTTP transport: {}", error.message)),
-                        });
+                    if let Some(completion) = self.retry_or_complete(
+                        cx,
+                        pending,
+                        Err(format!("mkmap HTTP transport: {}", error.message)),
+                    ) {
+                        out.push(completion);
                     }
                 }
                 _ => {}
             }
         }
         out
+    }
+
+    fn cancel(&mut self, cx: &mut Cx, token: ReadToken) {
+        let request_ids: Vec<LiveId> = self
+            .requests
+            .iter()
+            .filter(|(_, pending)| pending.token == token)
+            .map(|(request_id, _)| *request_id)
+            .collect();
+        for request_id in request_ids {
+            self.requests.remove(&request_id);
+            cx.cancel_http_request(request_id);
+        }
+        self.ready.retain(|completion| completion.token != token);
     }
 }
 
@@ -287,6 +421,12 @@ fn validate_http_response(kind: &HttpReadKind, response: &HttpResponse) -> Resul
                 return Err(format!(
                     "mkmap root requires HTTP 200, got {}",
                     response.status_code
+                ));
+            }
+            let body_len = response.body.as_ref().map_or(0, Vec::len);
+            if !(112..=MAX_ROOT_BYTES).contains(&body_len) {
+                return Err(format!(
+                    "mkmap root response length is invalid: {body_len}"
                 ));
             }
         }
@@ -354,7 +494,7 @@ pub struct TileBytes {
 enum WaitStage {
     Root,
     Leaf(usize),
-    Blob,
+    Blob(BlobRef),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -366,8 +506,41 @@ struct TileWaiter {
 #[derive(Clone, Copy, Debug)]
 enum PendingRead {
     Root { generation: u64 },
-    Leaf { generation: u64, index: usize },
-    Blob { generation: u64, key: TileKey },
+    Leaf {
+        generation: u64,
+        index: usize,
+        shard_count: u32,
+        start_tile_id: u64,
+        end_tile_id: u64,
+    },
+    Blob { generation: u64, blob: BlobRef },
+}
+
+impl PendingRead {
+    fn generation(self) -> u64 {
+        match self {
+            Self::Root { generation }
+            | Self::Leaf { generation, .. }
+            | Self::Blob { generation, .. } => generation,
+        }
+    }
+}
+
+struct BlobInFlight {
+    token: ReadToken,
+    generation: u64,
+    waiters: HashSet<TileKey>,
+}
+
+enum ProcessedRead {
+    Root(Result<MkmapRoot, String>),
+    Leaf(Result<MkmapLeaf, String>),
+    Blob(Result<Vec<u8>, String>),
+}
+
+struct ProcessedCompletion {
+    token: ReadToken,
+    result: ProcessedRead,
 }
 
 #[derive(Clone, Debug)]
@@ -380,43 +553,49 @@ struct CachedLeaf {
 /// per-tile waiters are all shared across requests.
 pub struct TileArchive<S: ByteSource> {
     source: S,
-    root: Option<MkmapRoot>,
+    workers: ArchiveWorkerPool,
+    processed: ToUIReceiver<ProcessedCompletion>,
+    processing: HashSet<ReadToken>,
+    root: Option<Arc<MkmapRoot>>,
     root_error: Option<String>,
     root_in_flight: Option<ReadToken>,
     leaves: HashMap<usize, CachedLeaf>,
     leaf_lru_clock: u64,
     leaf_in_flight: HashMap<usize, ReadToken>,
+    blob_in_flight: HashMap<BlobRef, BlobInFlight>,
     waiters: HashMap<TileKey, TileWaiter>,
     pending_reads: HashMap<ReadToken, PendingRead>,
     ready: VecDeque<TileBytes>,
     generation: Option<u64>,
-    next_token: u64,
 }
 
 impl<S: ByteSource> TileArchive<S> {
-    pub fn new(source: S) -> Self {
+    pub fn new(source: S, workers: ArchiveWorkerPool) -> Self {
         Self {
             source,
+            workers,
+            processed: Default::default(),
+            processing: HashSet::new(),
             root: None,
             root_error: None,
             root_in_flight: None,
             leaves: HashMap::new(),
             leaf_lru_clock: 0,
             leaf_in_flight: HashMap::new(),
+            blob_in_flight: HashMap::new(),
             waiters: HashMap::new(),
             pending_reads: HashMap::new(),
             ready: VecDeque::new(),
             generation: None,
-            next_token: 1,
         }
     }
 
     pub fn zoom_range(&self) -> Option<(u32, u32)> {
-        self.root.as_ref().map(MkmapRoot::zoom_range)
+        self.root.as_ref().map(|root| root.zoom_range())
     }
 
     pub fn metadata(&self) -> Option<&HashMap<String, String>> {
-        self.root.as_ref().map(MkmapRoot::metadata)
+        self.root.as_ref().map(|root| root.metadata())
     }
 
     pub fn request_tile(&mut self, cx: &mut Cx, key: TileKey, generation: u64) {
@@ -424,13 +603,20 @@ impl<S: ByteSource> TileArchive<S> {
             return;
         }
         if self.generation != Some(generation) {
-            self.reset_generation(generation);
+            self.reset_generation(cx, generation);
         }
         if self.waiters.contains_key(&key) {
             return;
         }
-        if let Some(error) = self.root_error.clone() {
-            self.finish(key, generation, TileBytesResult::Error(error));
+        if self.root_error.is_some() {
+            self.reload(cx, generation);
+        }
+        if self.waiters.len() >= MAX_ARCHIVE_WAITERS {
+            self.finish(
+                key,
+                generation,
+                TileBytesResult::Error("mkmap waiter limit reached".to_string()),
+            );
             cx.redraw_all();
             return;
         }
@@ -454,34 +640,71 @@ impl<S: ByteSource> TileArchive<S> {
 
     pub fn drain(&mut self, cx: &mut Cx, event: &Event) -> Vec<TileBytes> {
         for completion in self.source.poll(cx, event) {
+            let Some(pending) = self.pending_reads.get(&completion.token).copied() else {
+                continue;
+            };
+            if self.generation != Some(pending.generation())
+                || !self.processing.insert(completion.token)
+            {
+                continue;
+            }
+            let bytes = match completion.result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.processing.remove(&completion.token);
+                    self.pending_reads.remove(&completion.token);
+                    self.complete_error(pending, error);
+                    self.advance_waiters(cx);
+                    continue;
+                }
+            };
+            let root = self.root.clone();
+            let sender = self.processed.sender();
+            let token = completion.token;
+            self.workers.execute_rev(token, move |_| {
+                let result = match pending {
+                    PendingRead::Root { .. } => ProcessedRead::Root(MkmapRoot::parse(&bytes)),
+                    PendingRead::Leaf {
+                        shard_count,
+                        start_tile_id,
+                        end_tile_id,
+                        ..
+                    } => ProcessedRead::Leaf(MkmapLeaf::parse_for_root(
+                        &bytes,
+                        shard_count,
+                        start_tile_id,
+                        end_tile_id,
+                    )),
+                    PendingRead::Blob { .. } => ProcessedRead::Blob(
+                        root.ok_or_else(|| "mkmap root disappeared".to_string())
+                            .and_then(|root| root.decode_blob(&bytes)),
+                    ),
+                };
+                let _ = sender.send(ProcessedCompletion { token, result });
+            });
+        }
+        while let Ok(completion) = self.processed.try_recv() {
+            self.processing.remove(&completion.token);
             let Some(pending) = self.pending_reads.remove(&completion.token) else {
                 continue;
             };
-            let pending_generation = match pending {
-                PendingRead::Root { generation }
-                | PendingRead::Leaf { generation, .. }
-                | PendingRead::Blob { generation, .. } => generation,
-            };
-            if self.generation != Some(pending_generation) {
+            if self.generation != Some(pending.generation()) {
                 continue;
             }
-            match pending {
-                PendingRead::Root { generation } => {
+            match (pending, completion.result) {
+                (PendingRead::Root { generation }, ProcessedRead::Root(result)) => {
                     self.root_in_flight = None;
-                    match completion.result.and_then(|bytes| MkmapRoot::parse(&bytes)) {
-                        Ok(root) => self.root = Some(root),
+                    match result {
+                        Ok(root) => self.root = Some(Arc::new(root)),
                         Err(error) => {
                             self.root_error = Some(error.clone());
                             self.fail_waiters(generation, |_| true, error);
                         }
                     }
                 }
-                PendingRead::Leaf {
-                    generation,
-                    index,
-                } => {
+                (PendingRead::Leaf { generation, index, .. }, ProcessedRead::Leaf(result)) => {
                     self.leaf_in_flight.remove(&index);
-                    match completion.result.and_then(|bytes| MkmapLeaf::parse(&bytes)) {
+                    match result {
                         Ok(leaf) => self.insert_leaf(index, leaf),
                         Err(error) => self.fail_waiters(
                             generation,
@@ -490,51 +713,47 @@ impl<S: ByteSource> TileArchive<S> {
                         ),
                     }
                 }
-                PendingRead::Blob { generation, key } => match completion.result {
-                    Ok(bytes) => {
-                        let result = self
-                            .root
-                            .as_ref()
-                            .ok_or_else(|| "mkmap root disappeared".to_string())
-                            .and_then(|root| root.decode_blob(&bytes));
-                        match result {
-                            Ok(bytes) => self.finish(key, generation, TileBytesResult::Bytes(bytes)),
-                            Err(error) => {
-                                self.finish(key, generation, TileBytesResult::Error(error))
-                            }
-                        }
-                    }
-                    Err(error) => self.finish(key, generation, TileBytesResult::Error(error)),
-                },
+                (PendingRead::Blob { generation, blob }, ProcessedRead::Blob(result)) => {
+                    self.complete_blob(generation, blob, result);
+                }
+                (pending, _) => self.complete_error(
+                    pending,
+                    "mkmap worker returned mismatched completion".to_string(),
+                ),
             }
             self.advance_waiters(cx);
+            self.enforce_leaf_cache_bounds();
         }
         self.ready.drain(..).collect()
     }
 
-    fn reset_generation(&mut self, generation: u64) {
+    pub fn reset_generation(&mut self, cx: &mut Cx, generation: u64) {
+        for token in self.pending_reads.keys().copied().collect::<Vec<_>>() {
+            self.source.cancel(cx, token);
+            self.workers.retain_queued(|queued| *queued != token);
+        }
         self.root = None;
         self.root_error = None;
         self.root_in_flight = None;
         self.leaves.clear();
         self.leaf_in_flight.clear();
+        self.blob_in_flight.clear();
         self.waiters.clear();
         self.pending_reads.clear();
+        self.processing.clear();
         self.ready.clear();
         self.generation = Some(generation);
     }
 
-    fn token(&mut self) -> ReadToken {
-        let token = ReadToken(self.next_token);
-        self.next_token = self.next_token.wrapping_add(1).max(1);
-        token
+    pub fn reload(&mut self, cx: &mut Cx, generation: u64) {
+        self.reset_generation(cx, generation);
     }
 
     fn ensure_root(&mut self, cx: &mut Cx, generation: u64) {
         if self.root_in_flight.is_some() {
             return;
         }
-        let token = self.token();
+        let token = next_archive_task_token();
         self.root_in_flight = Some(token);
         self.pending_reads
             .insert(token, PendingRead::Root { generation });
@@ -550,7 +769,7 @@ impl<S: ByteSource> TileArchive<S> {
             let Some(waiter) = self.waiters.get(&key).copied() else {
                 continue;
             };
-            if waiter.stage == WaitStage::Blob {
+            if matches!(waiter.stage, WaitStage::Blob(_)) {
                 continue;
             }
             let Some(tile_id) = tile_id_for_key(key) else {
@@ -574,34 +793,49 @@ impl<S: ByteSource> TileArchive<S> {
             };
             match cached {
                 Some(Some(blob)) => {
-                    let token = self.token();
-                    self.pending_reads.insert(
-                        token,
-                        PendingRead::Blob {
-                            generation: waiter.generation,
-                            key,
-                        },
-                    );
-                    self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob;
-                    self.source.request_range(
-                        cx,
-                        blob.shard,
-                        blob.offset,
-                        blob.len,
-                        token,
-                    );
+                    self.waiters.get_mut(&key).unwrap().stage = WaitStage::Blob(blob);
+                    if let Some(in_flight) = self.blob_in_flight.get_mut(&blob) {
+                        in_flight.waiters.insert(key);
+                    } else {
+                        let token = next_archive_task_token();
+                        self.pending_reads.insert(
+                            token,
+                            PendingRead::Blob {
+                                generation: waiter.generation,
+                                blob,
+                            },
+                        );
+                        self.blob_in_flight.insert(
+                            blob,
+                            BlobInFlight {
+                                token,
+                                generation: waiter.generation,
+                                waiters: HashSet::from([key]),
+                            },
+                        );
+                        self.source.request_range(
+                            cx,
+                            blob.shard,
+                            blob.offset,
+                            blob.len,
+                            token,
+                        );
+                    }
                 }
                 Some(None) => self.finish(key, waiter.generation, TileBytesResult::Missing),
                 None => {
                     self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
                     if !self.leaf_in_flight.contains_key(&record.index) {
-                        let token = self.token();
+                        let token = next_archive_task_token();
                         self.leaf_in_flight.insert(record.index, token);
                         self.pending_reads.insert(
                             token,
                             PendingRead::Leaf {
                                 generation: waiter.generation,
                                 index: record.index,
+                                shard_count: self.root.as_ref().unwrap().shard_count(),
+                                start_tile_id: record.start_tile_id,
+                                end_tile_id: record.end_tile_id,
                             },
                         );
                         self.source.request_range(
@@ -626,7 +860,17 @@ impl<S: ByteSource> TileArchive<S> {
                 used: self.leaf_lru_clock,
             },
         );
-        if self.leaves.len() > LEAF_CACHE_CAPACITY {
+    }
+
+    fn enforce_leaf_cache_bounds(&mut self) {
+        while self.leaves.len() > LEAF_CACHE_CAPACITY
+            || self
+                .leaves
+                .values()
+                .map(|cached| cached.leaf.retained_bytes())
+                .sum::<usize>()
+                > LEAF_CACHE_BYTE_CAPACITY
+        {
             if let Some(oldest) = self
                 .leaves
                 .iter()
@@ -634,8 +878,102 @@ impl<S: ByteSource> TileArchive<S> {
                 .map(|(index, _)| *index)
             {
                 self.leaves.remove(&oldest);
+            } else {
+                break;
             }
         }
+    }
+
+    fn complete_error(&mut self, pending: PendingRead, error: String) {
+        match pending {
+            PendingRead::Root { generation } => {
+                self.root_in_flight = None;
+                self.root_error = Some(error.clone());
+                self.fail_waiters(generation, |_| true, error);
+            }
+            PendingRead::Leaf { generation, index, .. } => {
+                self.leaf_in_flight.remove(&index);
+                self.fail_waiters(
+                    generation,
+                    |waiter| waiter.stage == WaitStage::Leaf(index),
+                    error,
+                );
+            }
+            PendingRead::Blob { generation, blob } => {
+                self.complete_blob(generation, blob, Err(error));
+            }
+        }
+    }
+
+    fn complete_blob(
+        &mut self,
+        generation: u64,
+        blob: BlobRef,
+        result: Result<Vec<u8>, String>,
+    ) {
+        let Some(in_flight) = self.blob_in_flight.remove(&blob) else {
+            return;
+        };
+        if in_flight.generation != generation {
+            return;
+        }
+        for key in in_flight.waiters {
+            if self
+                .waiters
+                .get(&key)
+                .is_some_and(|waiter| waiter.stage == WaitStage::Blob(blob))
+            {
+                let result = match &result {
+                    Ok(bytes) => TileBytesResult::Bytes(bytes.clone()),
+                    Err(error) => TileBytesResult::Error(error.clone()),
+                };
+                self.finish(key, generation, result);
+            }
+        }
+    }
+
+    pub fn cancel_tile(&mut self, cx: &mut Cx, key: TileKey) {
+        let Some(waiter) = self.waiters.remove(&key) else {
+            return;
+        };
+        match waiter.stage {
+            WaitStage::Root => {
+                if !self.waiters.values().any(|waiter| waiter.stage == WaitStage::Root) {
+                    if let Some(token) = self.root_in_flight.take() {
+                        self.cancel_token(cx, token);
+                    }
+                }
+            }
+            WaitStage::Leaf(index) => {
+                if !self
+                    .waiters
+                    .values()
+                    .any(|waiter| waiter.stage == WaitStage::Leaf(index))
+                {
+                    if let Some(token) = self.leaf_in_flight.remove(&index) {
+                        self.cancel_token(cx, token);
+                    }
+                }
+            }
+            WaitStage::Blob(blob) => {
+                let cancel = self.blob_in_flight.get_mut(&blob).is_some_and(|in_flight| {
+                    in_flight.waiters.remove(&key);
+                    in_flight.waiters.is_empty()
+                });
+                if cancel {
+                    if let Some(in_flight) = self.blob_in_flight.remove(&blob) {
+                        self.cancel_token(cx, in_flight.token);
+                    }
+                }
+            }
+        }
+    }
+
+    fn cancel_token(&mut self, cx: &mut Cx, token: ReadToken) {
+        self.source.cancel(cx, token);
+        self.workers.retain_queued(|queued| *queued != token);
+        self.pending_reads.remove(&token);
+        self.processing.remove(&token);
     }
 
     fn fail_waiters(
@@ -729,12 +1067,18 @@ pub enum MapTileArchive {
 }
 
 impl MapTileArchive {
-    pub fn file(path: impl AsRef<Path>) -> Self {
-        Self::File(TileArchive::new(FileByteSource::new(path)))
+    pub fn file(path: impl AsRef<Path>, workers: ArchiveWorkerPool) -> Self {
+        Self::File(TileArchive::new(
+            FileByteSource::new(path, workers.clone()),
+            workers,
+        ))
     }
 
-    pub fn http(root_url: impl Into<String>) -> Self {
-        Self::Http(TileArchive::new(HttpRangeByteSource::new(root_url)))
+    pub fn http(root_url: impl Into<String>, workers: ArchiveWorkerPool) -> Self {
+        Self::Http(TileArchive::new(
+            HttpRangeByteSource::new(root_url),
+            workers,
+        ))
     }
 
     pub fn request_tile(&mut self, cx: &mut Cx, key: TileKey, generation: u64) {
@@ -748,6 +1092,20 @@ impl MapTileArchive {
         match self {
             Self::File(archive) => archive.drain(cx, event),
             Self::Http(archive) => archive.drain(cx, event),
+        }
+    }
+
+    pub fn cancel_tile(&mut self, cx: &mut Cx, key: TileKey) {
+        match self {
+            Self::File(archive) => archive.cancel_tile(cx, key),
+            Self::Http(archive) => archive.cancel_tile(cx, key),
+        }
+    }
+
+    pub fn reset_generation(&mut self, cx: &mut Cx, generation: u64) {
+        match self {
+            Self::File(archive) => archive.reset_generation(cx, generation),
+            Self::Http(archive) => archive.reset_generation(cx, generation),
         }
     }
 
@@ -779,6 +1137,7 @@ mod tests {
     struct MockByteSource {
         requests: Vec<MockRequest>,
         completions: VecDeque<ReadCompletion>,
+        cancelled: Vec<ReadToken>,
     }
 
     impl ByteSource for MockByteSource {
@@ -805,6 +1164,10 @@ mod tests {
         fn poll(&mut self, _cx: &mut Cx, _event: &Event) -> Vec<ReadCompletion> {
             self.completions.drain(..).collect()
         }
+
+        fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
+            self.cancelled.push(token);
+        }
     }
 
     fn write_varint(mut value: u64, out: &mut Vec<u8>) {
@@ -830,7 +1193,7 @@ mod tests {
         .unwrap()
     }
 
-    fn tiny_parts(keys: [TileKey; 2]) -> (Vec<u8>, Vec<u8>) {
+    fn tiny_parts(keys: [TileKey; 2], shared_blob: bool) -> (Vec<u8>, Vec<u8>) {
         let ids = keys.map(|key| mkmap_tile_id(key.z as u8, key.x as u32, key.y as u32));
         assert!(ids[0] < ids[1]);
         let mut leaf_raw = Vec::new();
@@ -841,7 +1204,7 @@ mod tests {
         write_varint(3, &mut leaf_raw);
         write_varint(ids[1] - ids[0], &mut leaf_raw);
         write_varint(0, &mut leaf_raw);
-        write_varint(300, &mut leaf_raw);
+        write_varint(if shared_blob { 200 } else { 300 }, &mut leaf_raw);
         write_varint(3, &mut leaf_raw);
         let leaf = brotli(&leaf_raw);
 
@@ -886,28 +1249,162 @@ mod tests {
         (root, leaf)
     }
 
-    #[test]
-    fn range_response_requires_exact_206() {
-        let kind = HttpReadKind::Range {
-            shard: 0,
-            offset: 10,
-            len: 4,
-        };
-        let response = |status, body: &[u8]| HttpResponse {
+    fn response(status: u16, range: Option<&str>, body: &[u8]) -> HttpResponse {
+        HttpResponse {
             metadata_id: LiveId::empty(),
             status_code: status,
-            headers: BTreeMap::from([(
-                "Content-Range".to_string(),
-                vec!["bytes 10-13/100".to_string()],
-            )]),
+            headers: range
+                .map(|range| {
+                    BTreeMap::from([("Content-Range".to_string(), vec![range.to_string()])])
+                })
+                .unwrap_or_default(),
             body: Some(body.to_vec()),
-        };
-        assert!(validate_http_response(&kind, &response(200, b"abcd")).is_err());
-        assert!(validate_http_response(&kind, &response(206, b"abc")).is_err());
-        assert_eq!(
-            validate_http_response(&kind, &response(206, b"abcd")).unwrap(),
-            b"abcd"
+        }
+    }
+
+    fn poll_until(
+        archive: &mut TileArchive<MockByteSource>,
+        cx: &mut Cx,
+        mut done: impl FnMut(&TileArchive<MockByteSource>) -> bool,
+    ) -> Vec<TileBytes> {
+        let mut completed = Vec::new();
+        for _ in 0..2_000 {
+            completed.extend(archive.drain(cx, &Event::Startup));
+            if done(archive) {
+                return completed;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("archive worker did not complete");
+    }
+
+    fn retry_http_range(first: HttpResponse, second: HttpResponse) -> ReadCompletion {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let token = next_archive_task_token();
+        source.request_range(&mut cx, 0, 10, 4, token);
+        let first_id = *source.requests.keys().next().unwrap();
+        assert!(source
+            .poll(
+                &mut cx,
+                &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                    request_id: first_id,
+                    response: first,
+                }]),
+            )
+            .is_empty());
+        assert_eq!(source.requests.len(), 1, "first failure must retry once");
+        let retry_id = *source.requests.keys().next().unwrap();
+        assert_ne!(retry_id, first_id);
+        let completed = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id: retry_id,
+                response: second,
+            }]),
         );
+        assert_eq!(completed.len(), 1);
+        completed.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn http_correlates_ids_and_retries_every_validation_failure_once() {
+        let good = response(206, Some("bytes 10-13/100"), b"abcd");
+        for bad in [
+            response(200, None, b"abcd"),
+            response(404, None, b"nope"),
+            response(500, None, b"nope"),
+            response(206, None, b"abcd"),
+            response(206, Some("bytes 11-14/100"), b"abcd"),
+            response(206, Some("bytes 10-13/100"), b"abc"),
+        ] {
+            assert_eq!(retry_http_range(bad, good.clone()).result.unwrap(), b"abcd");
+        }
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let first = next_archive_task_token();
+        let second = next_archive_task_token();
+        source.request_range(&mut cx, 0, 10, 4, first);
+        source.request_range(&mut cx, 0, 20, 4, second);
+        let request_id = source
+            .requests
+            .iter()
+            .find(|(_, pending)| pending.token == second)
+            .map(|(id, _)| *id)
+            .unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id,
+                response: response(206, Some("bytes 20-23/100"), b"wxyz"),
+            }]),
+        );
+        assert_eq!(done[0].token, second);
+        assert!(source.requests.values().any(|pending| pending.token == first));
+
+        let request_id = source
+            .requests
+            .iter()
+            .find(|(_, pending)| pending.token == first)
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(source
+            .poll(
+                &mut cx,
+                &Event::NetworkResponses(vec![NetworkResponse::HttpError {
+                    request_id,
+                    error: HttpError {
+                        message: "offline".to_string(),
+                        metadata_id: LiveId::empty(),
+                    },
+                }]),
+            )
+            .is_empty());
+        let retry_id = source
+            .requests
+            .iter()
+            .find(|(_, pending)| pending.token == first)
+            .map(|(id, _)| *id)
+            .unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpError {
+                request_id: retry_id,
+                error: HttpError {
+                    message: "still offline".to_string(),
+                    metadata_id: LiveId::empty(),
+                },
+            }]),
+        );
+        assert!(done[0].result.as_ref().unwrap_err().contains("still offline"));
+    }
+
+    #[test]
+    fn root_truncation_retries_then_reports_second_attempt() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let token = next_archive_task_token();
+        source.request_root(&mut cx, token);
+        let first_id = *source.requests.keys().next().unwrap();
+        assert!(source
+            .poll(
+                &mut cx,
+                &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                    request_id: first_id,
+                    response: response(200, None, b"short"),
+                }]),
+            )
+            .is_empty());
+        let retry_id = *source.requests.keys().next().unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id: retry_id,
+                response: response(404, None, b"missing"),
+            }]),
+        );
+        assert!(done[0].result.as_ref().unwrap_err().contains("404"));
     }
 
     #[test]
@@ -934,14 +1431,15 @@ mod tests {
     }
 
     #[test]
-    fn archive_deduplicates_root_and_leaf_and_tolerates_duplicate_out_of_order_reads() {
+    fn archive_deduplicates_root_leaf_and_writer_shared_blob() {
         let keys = [
             TileKey { z: 1, x: 0, y: 0 },
             TileKey { z: 1, x: 0, y: 1 },
         ];
-        let (root, leaf) = tiny_parts(keys);
+        let (root, leaf) = tiny_parts(keys, true);
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut archive = TileArchive::new(MockByteSource::default());
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
         archive.request_tile(&mut cx, keys[0], 7);
         archive.request_tile(&mut cx, keys[1], 7);
         assert_eq!(archive.source.requests.len(), 1);
@@ -950,13 +1448,9 @@ mod tests {
         };
         archive.source.completions.push_back(ReadCompletion {
             token: root_token,
-            result: Ok(root.clone()),
-        });
-        archive.source.completions.push_back(ReadCompletion {
-            token: root_token,
             result: Ok(root),
         });
-        assert!(archive.drain(&mut cx, &Event::Startup).is_empty());
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 2);
         assert_eq!(archive.source.requests.len(), 2);
         let MockRequest::Range {
             shard,
@@ -972,30 +1466,55 @@ mod tests {
             token: leaf_token,
             result: Ok(leaf),
         });
-        assert!(archive.drain(&mut cx, &Event::Startup).is_empty());
-        assert_eq!(archive.source.requests.len(), 4);
-
-        let blob_requests: Vec<(ReadToken, u64)> = archive.source.requests[2..]
-            .iter()
-            .map(|request| match *request {
-                MockRequest::Range { token, offset, .. } => (token, offset),
-                MockRequest::Root(_) => panic!("blob request was root"),
-            })
-            .collect();
-        for (token, offset) in blob_requests.iter().rev() {
-            archive.source.completions.push_back(ReadCompletion {
-                token: *token,
-                result: Ok(if *offset == 200 { b"one" } else { b"two" }.to_vec()),
-            });
-        }
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 3);
+        assert_eq!(archive.source.requests.len(), 3, "shared blob needs one range");
+        let MockRequest::Range { token, offset, .. } = archive.source.requests[2] else {
+            panic!("third request was not a blob")
+        };
+        assert_eq!(offset, 200);
         archive.source.completions.push_back(ReadCompletion {
-            token: blob_requests[0].0,
-            result: Ok(b"duplicate".to_vec()),
+            token,
+            result: Ok(b"one".to_vec()),
         });
-        let done = archive.drain(&mut cx, &Event::Startup);
+        let done = poll_until(&mut archive, &mut cx, |archive| archive.waiters.is_empty());
         assert_eq!(done.len(), 2);
         assert!(done.iter().any(|tile| tile.key == keys[0]));
         assert!(done.iter().any(|tile| tile.key == keys[1]));
+    }
+
+    #[test]
+    fn shared_blob_read_cancels_only_after_its_last_waiter() {
+        let keys = [
+            TileKey { z: 1, x: 0, y: 0 },
+            TileKey { z: 1, x: 0, y: 1 },
+        ];
+        let (root, leaf) = tiny_parts(keys, true);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
+        archive.request_tile(&mut cx, keys[0], 1);
+        archive.request_tile(&mut cx, keys[1], 1);
+        let MockRequest::Root(root_token) = archive.source.requests[0] else { unreachable!() };
+        archive.source.completions.push_back(ReadCompletion {
+            token: root_token,
+            result: Ok(root),
+        });
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 2);
+        let MockRequest::Range { token: leaf_token, .. } = archive.source.requests[1] else {
+            unreachable!()
+        };
+        archive.source.completions.push_back(ReadCompletion {
+            token: leaf_token,
+            result: Ok(leaf),
+        });
+        let _ = poll_until(&mut archive, &mut cx, |archive| archive.source.requests.len() >= 3);
+        let MockRequest::Range { token: blob_token, .. } = archive.source.requests[2] else {
+            unreachable!()
+        };
+        archive.cancel_tile(&mut cx, keys[0]);
+        assert!(!archive.source.cancelled.contains(&blob_token));
+        archive.cancel_tile(&mut cx, keys[1]);
+        assert!(archive.source.cancelled.contains(&blob_token));
     }
 
     #[test]
@@ -1004,19 +1523,132 @@ mod tests {
             TileKey { z: 1, x: 0, y: 0 },
             TileKey { z: 1, x: 0, y: 1 },
         ];
-        let (root, _) = tiny_parts(keys);
+        let (root, _) = tiny_parts(keys, false);
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut archive = TileArchive::new(MockByteSource::default());
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
         archive.request_tile(&mut cx, keys[0], 1);
         let MockRequest::Root(stale_token) = archive.source.requests[0] else {
             panic!("first request was not root")
         };
         archive.request_tile(&mut cx, keys[1], 2);
+        assert!(archive.source.cancelled.contains(&stale_token));
         archive.source.completions.push_back(ReadCompletion {
             token: stale_token,
             result: Ok(root),
         });
         assert!(archive.drain(&mut cx, &Event::Startup).is_empty());
         assert_eq!(archive.source.requests.len(), 2);
+    }
+
+    #[test]
+    fn root_error_can_reload_without_poisoning_the_generation() {
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
+        archive.request_tile(&mut cx, key, 9);
+        let MockRequest::Root(token) = archive.source.requests[0] else { unreachable!() };
+        archive.source.completions.push_back(ReadCompletion {
+            token,
+            result: Err("root unavailable".to_string()),
+        });
+        assert!(matches!(
+            archive.drain(&mut cx, &Event::Startup)[0].result,
+            TileBytesResult::Error(_)
+        ));
+        archive.request_tile(&mut cx, key, 9);
+        assert_eq!(archive.source.requests.len(), 2);
+    }
+
+    #[test]
+    fn waiter_and_leaf_lru_are_bounded() {
+        let keys = [
+            TileKey { z: 1, x: 0, y: 0 },
+            TileKey { z: 1, x: 0, y: 1 },
+        ];
+        let (_, leaf_bytes) = tiny_parts(keys, false);
+        let leaf = MkmapLeaf::parse(&leaf_bytes).unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(MockByteSource::default(), workers);
+        for x in 0..=MAX_ARCHIVE_WAITERS {
+            archive.request_tile(
+                &mut cx,
+                TileKey {
+                    z: 7,
+                    x: x as i32,
+                    y: 0,
+                },
+                1,
+            );
+        }
+        assert_eq!(archive.waiters.len(), MAX_ARCHIVE_WAITERS);
+        assert_eq!(archive.ready.len(), 1);
+        for index in 0..=LEAF_CACHE_CAPACITY {
+            archive.insert_leaf(index, leaf.clone());
+        }
+        archive.enforce_leaf_cache_bounds();
+        assert_eq!(archive.leaves.len(), LEAF_CACHE_CAPACITY);
+        assert!(!archive.leaves.contains_key(&0));
+    }
+
+    #[test]
+    fn file_source_is_async_bounded_and_shared_across_generations() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let token = next_archive_task_token();
+        let dir = PathBuf::from(format!("target/map-archive-test-{}", token.0));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("root.mkidx"), vec![7_u8; 112]).unwrap();
+        for shard in 0..10_u32 {
+            std::fs::write(dir.join(format!("tiles-{shard:03}.mkshard")), [shard as u8]).unwrap();
+        }
+
+        let mut first = FileByteSource::new(&dir, workers.clone());
+        let second = FileByteSource::new(&dir, workers.clone());
+        assert!(Arc::ptr_eq(&first.workers, &second.workers));
+        first.request_root(&mut cx, token);
+        for shard in 0..10_u32 {
+            first.request_range(&mut cx, shard, 0, 1, next_archive_task_token());
+        }
+        let mut completions = Vec::new();
+        for _ in 0..2_000 {
+            completions.extend(first.poll(&mut cx, &Event::Startup));
+            if completions.len() == 11 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(completions.len(), 11);
+        assert!(first.shard_files.lock().unwrap().files.len() <= FILE_CACHE_CAPACITY);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn http_reset_cancels_and_ignores_stale_error_without_retry() {
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = TileArchive::new(
+            HttpRangeByteSource::new("https://tiles.invalid/world.mkmap"),
+            workers,
+        );
+        archive.request_tile(&mut cx, key, 1);
+        let stale_id = *archive.source.requests.keys().next().unwrap();
+        archive.reset_generation(&mut cx, 2);
+        assert!(archive.source.requests.is_empty());
+        let done = archive.drain(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpError {
+                request_id: stale_id,
+                error: HttpError {
+                    message: "late".to_string(),
+                    metadata_id: LiveId::empty(),
+                },
+            }]),
+        );
+        assert!(done.is_empty());
+        assert!(archive.source.requests.is_empty());
     }
 }

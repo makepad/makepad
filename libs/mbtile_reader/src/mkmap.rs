@@ -31,6 +31,9 @@ const MAGIC: &[u8; 8] = b"MKMAPIX1";
 const VERSION: u32 = 2;
 const HEADER_LEN: usize = 112;
 const ROOT_RECORD_LEN: usize = 36;
+const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LEAF_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
 // --- Hilbert tile ids (identical to the writer) ---
 
@@ -113,19 +116,21 @@ pub struct MkmapTileRef {
 
 fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64> {
     let mut value = 0_u64;
-    let mut shift = 0_u32;
-    loop {
+    for byte_index in 0..10_u32 {
         let byte = *input.get(*offset).ok_or(Error::CorruptVarint)?;
         *offset += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-        if shift > 63 {
+        if byte_index == 9 && byte & 0xfe != 0 {
             return Err(Error::CorruptVarint);
         }
+        value |= u64::from(byte & 0x7f) << (byte_index * 7);
+        if byte & 0x80 == 0 {
+            if byte_index != 0 && byte & 0x7f == 0 {
+                return Err(Error::CorruptVarint);
+            }
+            return Ok(value);
+        }
     }
+    Err(Error::CorruptVarint)
 }
 
 /// Metadata section: varint KV pairs (count, then length-prefixed key and
@@ -150,10 +155,13 @@ fn parse_metadata_kv(bytes: &[u8]) -> Result<HashMap<String, String>> {
         let value = read_string(&mut cursor)?;
         out.insert(key, value);
     }
+    if cursor != bytes.len() {
+        return Err(corrupt());
+    }
     Ok(out)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct BlobRef {
     pub shard: u32,
     pub offset: u64,
@@ -178,6 +186,8 @@ struct RootRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootRecordRef {
     pub index: usize,
+    pub start_tile_id: u64,
+    pub end_tile_id: u64,
     pub shard: u32,
     pub dir_offset: u64,
     pub dir_len: u64,
@@ -214,6 +224,9 @@ impl MkmapRoot {
         let tile_count = read_u64(24);
         let min_zoom = bytes[40];
         let max_zoom = bytes[41];
+        if min_zoom > max_zoom || max_zoom > 30 {
+            return Err(Error::CorruptRecord("mkmap zoom range"));
+        }
         let section = |slot: usize| -> Result<&[u8]> {
             let offset = usize::try_from(read_u64(slot))
                 .map_err(|_| Error::CorruptRecord("mkmap section bounds"))?;
@@ -231,7 +244,7 @@ impl MkmapRoot {
                 .into_iter()
                 .collect(),
         )?;
-        let metadata_bytes = brotli.decode(section(48)?)?;
+        let metadata_bytes = brotli.decode_limited(section(48)?, MAX_METADATA_BYTES)?;
         let metadata = parse_metadata_kv(&metadata_bytes)?;
         let codec = TileCodec::from_metadata(&metadata)?;
         let shared_dict = section(64)?.to_vec();
@@ -239,15 +252,40 @@ impl MkmapRoot {
         if root_raw.len() % ROOT_RECORD_LEN != 0 {
             return Err(Error::CorruptRecord("mkmap root alignment"));
         }
+        if root_raw.len() / ROOT_RECORD_LEN != shard_count as usize
+            || (tile_count != 0 && shard_count == 0)
+        {
+            return Err(Error::CorruptRecord("mkmap header counts"));
+        }
+        let root_packed = section(96)?;
+        if !root_packed.is_empty()
+            && brotli.decode_limited(root_packed, root_raw.len())? != root_raw
+        {
+            return Err(Error::CorruptRecord("mkmap root copies"));
+        }
         let mut records = Vec::with_capacity(root_raw.len() / ROOT_RECORD_LEN);
         for record in root_raw.chunks_exact(ROOT_RECORD_LEN) {
-            records.push(RootRecord {
+            let record = RootRecord {
                 start_tile_id: u64::from_le_bytes(record[0..8].try_into().unwrap()),
                 end_tile_id: u64::from_le_bytes(record[8..16].try_into().unwrap()),
                 shard: u32::from_le_bytes(record[16..20].try_into().unwrap()),
                 dir_offset: u64::from_le_bytes(record[20..28].try_into().unwrap()),
                 dir_len: u64::from_le_bytes(record[28..36].try_into().unwrap()),
-            });
+            };
+            if record.start_tile_id > record.end_tile_id
+                || record.shard >= shard_count
+                || record.dir_len == 0
+                || record.dir_len > MAX_LEAF_BYTES as u64
+                || record.dir_offset.checked_add(record.dir_len).is_none()
+                || records
+                    .last()
+                    .is_some_and(|previous: &RootRecord| {
+                        previous.end_tile_id >= record.start_tile_id
+                    })
+            {
+                return Err(Error::CorruptRecord("mkmap root record"));
+            }
+            records.push(record);
         }
         Ok(MkmapRoot {
             metadata,
@@ -277,6 +315,8 @@ impl MkmapRoot {
                 let record = self.records[index];
                 RootRecordRef {
                     index,
+                    start_tile_id: record.start_tile_id,
+                    end_tile_id: record.end_tile_id,
                     shard: record.shard,
                     dir_offset: record.dir_offset,
                     dir_len: record.dir_len,
@@ -285,7 +325,9 @@ impl MkmapRoot {
     }
 
     pub fn decode_blob(&self, bytes: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        self.codec.decode(bytes).map_err(|err| err.to_string())
+        self.codec
+            .decode_limited(bytes, MAX_TILE_BYTES)
+            .map_err(|err| err.to_string())
     }
 
     pub fn metadata(&self) -> &HashMap<String, String> {
@@ -321,16 +363,32 @@ pub struct MkmapLeaf {
 
 impl MkmapLeaf {
     pub fn parse(packed: &[u8]) -> std::result::Result<MkmapLeaf, String> {
-        Self::parse_inner(packed).map_err(|err| err.to_string())
+        Self::parse_inner(packed, None).map_err(|err| err.to_string())
     }
 
-    fn parse_inner(packed: &[u8]) -> Result<MkmapLeaf> {
+    pub fn parse_for_root(
+        packed: &[u8],
+        shard_count: u32,
+        start_tile_id: u64,
+        end_tile_id: u64,
+    ) -> std::result::Result<MkmapLeaf, String> {
+        Self::parse_inner(
+            packed,
+            Some((shard_count, start_tile_id, end_tile_id)),
+        )
+        .map_err(|err| err.to_string())
+    }
+
+    fn parse_inner(
+        packed: &[u8],
+        bounds: Option<(u32, u64, u64)>,
+    ) -> Result<MkmapLeaf> {
         let raw = TileCodec::from_metadata(
             &[("compression".to_string(), "br".to_string())]
                 .into_iter()
                 .collect(),
         )?
-        .decode(packed)?;
+        .decode_limited(packed, MAX_LEAF_BYTES)?;
         let mut cursor = 0_usize;
         let count = usize::try_from(read_varint(&raw, &mut cursor)?)
             .map_err(|_| Error::CorruptRecord("mkmap leaf count"))?;
@@ -339,14 +397,27 @@ impl MkmapLeaf {
         }
         let mut entries = Vec::with_capacity(count);
         let mut tile_id = 0_u64;
-        for _ in 0..count {
+        for index in 0..count {
+            let delta = read_varint(&raw, &mut cursor)?;
+            if index != 0 && delta == 0 {
+                return Err(Error::CorruptRecord("mkmap leaf tile order"));
+            }
             tile_id = tile_id
-                .checked_add(read_varint(&raw, &mut cursor)?)
+                .checked_add(delta)
                 .ok_or(Error::CorruptRecord("mkmap leaf tile id"))?;
             let shard = u32::try_from(read_varint(&raw, &mut cursor)?)
                 .map_err(|_| Error::CorruptRecord("mkmap leaf shard"))?;
             let blob_offset = read_varint(&raw, &mut cursor)?;
             let len = read_varint(&raw, &mut cursor)?;
+            if len == 0
+                || len > MAX_TILE_BYTES as u64
+                || blob_offset.checked_add(len).is_none()
+                || bounds.is_some_and(|(shard_count, start, end)| {
+                    shard >= shard_count || tile_id < start || tile_id > end
+                })
+            {
+                return Err(Error::CorruptRecord("mkmap leaf entry"));
+            }
             entries.push(LeafEntry {
                 tile_id,
                 blob: BlobRef {
@@ -356,6 +427,9 @@ impl MkmapLeaf {
                 },
             });
         }
+        if cursor != raw.len() {
+            return Err(Error::CorruptRecord("mkmap leaf trailing bytes"));
+        }
         Ok(MkmapLeaf { entries })
     }
 
@@ -364,6 +438,10 @@ impl MkmapLeaf {
             .binary_search_by_key(&tile_id, |entry| entry.tile_id)
             .ok()
             .map(|index| self.entries[index].blob)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.entries.len().saturating_mul(std::mem::size_of::<LeafEntry>())
     }
 }
 
@@ -440,10 +518,17 @@ impl MkmapReader {
     /// Read and decode one root record's leaf directory (no caching — the
     /// caller decides whether the entries are worth keeping).
     fn read_leaf(&mut self, record_index: usize) -> Result<MkmapLeaf> {
-        let record = &self.root.records[record_index];
+        let record = self.root.records[record_index];
         let (shard, offset, len) = (record.shard, record.dir_offset, record.dir_len);
         let packed = self.read_range(shard, offset, len)?;
-        MkmapLeaf::parse_inner(&packed)
+        MkmapLeaf::parse_inner(
+            &packed,
+            Some((
+                self.root.shard_count,
+                record.start_tile_id,
+                record.end_tile_id,
+            )),
+        )
     }
 
     fn resolve(&mut self, zoom: u8, x: u32, y: u32) -> Result<Option<BlobRef>> {
@@ -667,7 +752,7 @@ mod tests {
         write_varint(7, &mut leaf_raw);
         write_varint(3, &mut leaf_raw);
         write_varint(second - first, &mut leaf_raw);
-        write_varint(1, &mut leaf_raw);
+        write_varint(0, &mut leaf_raw);
         write_varint(11, &mut leaf_raw);
         write_varint(5, &mut leaf_raw);
         let leaf = brotli(&leaf_raw);
@@ -693,7 +778,7 @@ mod tests {
         let mut header = vec![0_u8; HEADER_LEN];
         header[0..8].copy_from_slice(MAGIC);
         header[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        header[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        header[12..16].copy_from_slice(&1_u32.to_le_bytes());
         header[24..32].copy_from_slice(&2_u64.to_le_bytes());
         header[40] = 1;
         header[41] = 1;
@@ -714,18 +799,55 @@ mod tests {
         (header, leaf, first, second)
     }
 
+    fn root_with_records(template: &[u8], shard_count: u32, root_raw: &[u8]) -> Vec<u8> {
+        let section = |slot: usize| {
+            let offset = u64::from_le_bytes(template[slot..slot + 8].try_into().unwrap()) as usize;
+            let len =
+                u64::from_le_bytes(template[slot + 8..slot + 16].try_into().unwrap()) as usize;
+            template[offset..offset + len].to_vec()
+        };
+        let metadata = section(48);
+        let dict = section(64);
+        let packed = brotli(root_raw);
+        let mut root = template[..HEADER_LEN].to_vec();
+        root[12..16].copy_from_slice(&shard_count.to_le_bytes());
+        let mut cursor = HEADER_LEN as u64;
+        for (slot, bytes) in [(48, &metadata), (64, &dict), (80, &root_raw.to_vec()), (96, &packed)] {
+            root[slot..slot + 8].copy_from_slice(&cursor.to_le_bytes());
+            root[slot + 8..slot + 16].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+            cursor += bytes.len() as u64;
+        }
+        root.extend_from_slice(&metadata);
+        root.extend_from_slice(&dict);
+        root.extend_from_slice(root_raw);
+        root.extend_from_slice(&packed);
+        root
+    }
+
+    fn record(start: u64, end: u64, shard: u32, offset: u64, len: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&end.to_le_bytes());
+        out.extend_from_slice(&shard.to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out
+    }
+
     #[test]
     fn pure_root_and_leaf_parsers_locate_tiles() {
         let (root_bytes, leaf_bytes, first, second) = tiny_archive_parts();
         let root = MkmapRoot::parse(&root_bytes).unwrap();
         assert_eq!(root.zoom_range(), (1, 1));
         assert_eq!(root.tile_count(), 2);
-        assert_eq!(root.shard_count(), 2);
+        assert_eq!(root.shard_count(), 1);
         assert_eq!(root.metadata().get("compression").map(String::as_str), Some("gzip"));
         assert_eq!(
             root.locate(first),
             Some(RootRecordRef {
                 index: 0,
+                start_tile_id: first,
+                end_tile_id: second,
                 shard: 0,
                 dir_offset: 100,
                 dir_len: leaf_bytes.len() as u64,
@@ -746,11 +868,92 @@ mod tests {
         assert_eq!(
             leaf.find(second),
             Some(BlobRef {
-                shard: 1,
+                shard: 0,
                 offset: 11,
                 len: 5,
             })
         );
+    }
+
+    #[test]
+    fn malformed_roots_and_varints_are_rejected() {
+        let (root, _, first, second) = tiny_archive_parts();
+
+        let mut bad_zoom = root.clone();
+        bad_zoom[40] = 2;
+        bad_zoom[41] = 1;
+        assert!(MkmapRoot::parse(&bad_zoom).is_err());
+
+        assert!(MkmapRoot::parse(&root_with_records(
+            &root,
+            1,
+            &record(second, first, 0, 10, 1),
+        ))
+        .is_err());
+        assert!(MkmapRoot::parse(&root_with_records(
+            &root,
+            1,
+            &record(first, second, 1, 10, 1),
+        ))
+        .is_err());
+        assert!(MkmapRoot::parse(&root_with_records(
+            &root,
+            1,
+            &record(first, second, 0, 10, 0),
+        ))
+        .is_err());
+        assert!(MkmapRoot::parse(&root_with_records(
+            &root,
+            1,
+            &record(first, second, 0, 0, MAX_LEAF_BYTES as u64 + 1),
+        ))
+        .is_err());
+
+        let mut overlapping = record(first, second, 0, 10, 1);
+        overlapping.extend_from_slice(&record(second, second + 1, 1, 20, 1));
+        assert!(MkmapRoot::parse(&root_with_records(&root, 2, &overlapping)).is_err());
+
+        for bytes in [
+            vec![0x80, 0x00],
+            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02],
+            vec![0x80; 10],
+        ] {
+            assert!(read_varint(&bytes, &mut 0).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_leaf_entries_are_rejected_before_lookup() {
+        let (_, _, first, second) = tiny_archive_parts();
+        let leaf = |delta: u64, shard: u64, len: u64| {
+            let mut raw = Vec::new();
+            write_varint(1, &mut raw);
+            write_varint(delta, &mut raw);
+            write_varint(shard, &mut raw);
+            write_varint(0, &mut raw);
+            write_varint(len, &mut raw);
+            brotli(&raw)
+        };
+        assert!(MkmapLeaf::parse_for_root(&leaf(first, 0, 0), 1, first, second).is_err());
+        assert!(MkmapLeaf::parse_for_root(
+            &leaf(first, 0, MAX_TILE_BYTES as u64 + 1),
+            1,
+            first,
+            second,
+        )
+        .is_err());
+        assert!(MkmapLeaf::parse_for_root(&leaf(first, 1, 1), 1, first, second).is_err());
+        assert!(MkmapLeaf::parse_for_root(&leaf(second + 1, 0, 1), 1, first, second).is_err());
+
+        let mut duplicate = Vec::new();
+        write_varint(2, &mut duplicate);
+        for delta in [first, 0] {
+            write_varint(delta, &mut duplicate);
+            write_varint(0, &mut duplicate);
+            write_varint(0, &mut duplicate);
+            write_varint(1, &mut duplicate);
+        }
+        assert!(MkmapLeaf::parse_for_root(&brotli(&duplicate), 1, first, second).is_err());
     }
 
     /// A container walk recovers each tile's address from its id alone, so
