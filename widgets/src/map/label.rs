@@ -623,6 +623,8 @@ pub fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
             .then_with(|| b_rank.cmp(&a_rank))
             .then_with(|| b.0.total_cmp(&a.0))
             .then_with(|| a_label.text.cmp(&b_label.text))
+            .then_with(|| a_label.name_key.cmp(&b_label.name_key))
+            .then_with(|| a_label.road_kind.cmp(&b_label.road_kind))
     });
     labels.extend(
         compacted

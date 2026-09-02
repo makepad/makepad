@@ -16,17 +16,21 @@ use std::collections::HashMap;
 use std::path::Path;
 
 mod codec;
+mod map_tags;
 mod mkmap;
+mod protobuf;
 #[cfg(not(target_arch = "wasm32"))]
 mod writer;
 pub use codec::{
     compress_tile, compression_metadata_rows, TileCodec, TileCompression,
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
+pub use map_tags::{DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS};
 pub use mkmap::{
     mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapRoot, MkmapTileRef,
     RootRecordRef, TileArchiveReader,
 };
+pub use protobuf::{read_pb_len_slice, read_pb_varint, skip_pb_field};
 #[cfg(not(target_arch = "wasm32"))]
 pub use mkmap::MkmapReader;
 #[cfg(not(target_arch = "wasm32"))]

@@ -505,6 +505,13 @@ impl MkmapReader {
         self.root.shard_count()
     }
 
+    /// Number of root records. Writers currently emit one record per shard;
+    /// keeping this separate from `shard_count` makes record-wise streaming
+    /// explicit for archive transformation tools.
+    pub fn root_record_count(&self) -> usize {
+        self.root.records.len()
+    }
+
     /// The shared dictionary the carried metadata declares, if any — the
     /// bytes an extracted archive has to re-declare to stay decodable.
     pub fn dict(&self) -> Option<&[u8]> {
@@ -586,6 +593,33 @@ impl MkmapReader {
     /// time, so the whole archive enumerates in bounded memory.
     pub fn for_each_tile_ref(&mut self, callback: impl FnMut(MkmapTileRef)) -> Result<()> {
         self.for_each_tile_ref_in_range(0, u64::MAX, callback)
+    }
+
+    /// Walk one root record's leaf, retaining only that leaf directory.
+    /// This is the shard-at-a-time path used by `.mkmap` rewriters.
+    pub fn for_each_root_record_tile_ref(
+        &mut self,
+        record_index: usize,
+        mut callback: impl FnMut(MkmapTileRef),
+    ) -> Result<()> {
+        if record_index >= self.root.records.len() {
+            return Err(Error::InvalidInput(
+                "mkmap root record is out of range".to_string(),
+            ));
+        }
+        for entry in self.read_leaf(record_index)?.entries {
+            let (zoom, x, y) = mkmap_zxy_from_tile_id(entry.tile_id);
+            callback(MkmapTileRef {
+                tile_id: entry.tile_id,
+                zoom,
+                x,
+                y,
+                shard: entry.blob.shard,
+                offset: entry.blob.offset,
+                len: entry.blob.len,
+            });
+        }
+        Ok(())
     }
 
     /// [`MkmapReader::for_each_tile_ref`] restricted to a tile-id window.
