@@ -34,6 +34,8 @@
 pub mod backend;
 #[cfg(feature = "beats-native")]
 pub mod beats_backend;
+#[cfg(feature = "stems-native")]
+pub mod stems_backend;
 pub mod body_native_backend;
 pub mod chat_wire;
 pub use makepad_base64;

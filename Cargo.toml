@@ -148,6 +148,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/dj_pack",
     "libs/system_speech",
     # === tests ===
     "platform/script/test",

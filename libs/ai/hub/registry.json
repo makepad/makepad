@@ -1,6 +1,31 @@
 {
  "models": [
   {
+   "id": "bs-roformer-4stem",
+   "domain": "stems",
+   "backend": "stems",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training",
+    "summary": "BS-RoFormer four-stem separator checkpoint and implementation are MIT licensed.",
+    "restriction": "none"
+   },
+   "vram_gb": 6.0,
+   "note": "Contract: input_b64 is a 44.1 kHz stereo PCM WAV. Output is application/vnd.makepad.stems-f32: drums, bass, other and vocals as planar stereo f32.",
+   "files": [
+    {
+     "role": "weights",
+     "repo": "ZFTurbo/Music-Source-Separation-Training",
+     "path": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v1.0.12/model_bs_roformer_ep_17_sdr_9.6568.ckpt",
+     "cache_as": "stems/model_bs_roformer_ep_17_sdr_9.6568.ckpt",
+     "size": 527385512,
+     "sha256": "3e9daecd70aaed5b5a0d1f861cc4d77eaa45afb3fc6301b1cf32c1be0f5868fb"
+    }
+   ]
+  },
+  {
    "id": "beat-this",
    "domain": "beats",
    "backend": "beats",

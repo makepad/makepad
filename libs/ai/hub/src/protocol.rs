@@ -390,9 +390,13 @@ pub struct GenerateRequestJson {
     pub queue_policy: Option<String>,
 
     // -- binary input (cross-stage chaining: image->mesh, image->video i2v,
-    //    image->world; also STT/captioning later) --
+    //    image->world; also audio analysis such as stems) --
     /// Base64 input payload, typically a PNG from an earlier pipeline stage
     /// (fetched from another box's /artifact and relayed by the client).
+    /// Stems (`bs-roformer-4stem`): a 44.1 kHz stereo PCM WAV. The result is
+    /// one [`STEMS_ARTIFACT_CONTENT_TYPE`] artifact containing four planar
+    /// stereo f32 stems in model order (drums, bass, other, vocals).
+    ///
     /// Music (`minimax-music3*`): an optional REFERENCE CLIP — any audio
     /// file the service decodes (WAV, MP3, FLAC, Ogg Vorbis; sniffed from
     /// the bytes), <= 50 MB, 2..60 s after decode (longer keeps its loudest
@@ -622,6 +626,122 @@ pub struct NamedInputJson {
 pub struct GenerateResponseJson {
     pub job_id: Option<String>,
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Stems artifact wire
+// ---------------------------------------------------------------------------
+
+/// Binary artifact returned by the stems domain. This is deliberately a
+/// transport format, not the VJ cache format: the client writes the received
+/// f32 samples through `StemCache`, preserving that cache's span-local gain
+/// quantization and completeness rules.
+pub const STEMS_ARTIFACT_CONTENT_TYPE: &str = "application/vnd.makepad.stems-f32";
+const STEMS_ARTIFACT_MAGIC: &[u8; 4] = b"MPST";
+const STEMS_ARTIFACT_VERSION: u16 = 1;
+const STEMS_ARTIFACT_CHANNELS: usize = 8;
+const STEMS_ARTIFACT_HEADER: usize = 20;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StemsArtifact {
+    pub sample_rate: u32,
+    pub frames: usize,
+    /// Stem-major planar channels: drums L/R, bass L/R, other L/R, vocals L/R.
+    pub channels: [Vec<f32>; STEMS_ARTIFACT_CHANNELS],
+}
+
+/// Encode a checked stems result. The exact-length check keeps a malformed
+/// backend result from becoming a wire artifact another process could trust.
+pub fn encode_stems_artifact(value: &StemsArtifact) -> Result<Vec<u8>, String> {
+    if value.sample_rate == 0 || value.frames == 0 {
+        return Err("stems artifact needs a non-zero rate and frame count".to_string());
+    }
+    if value.channels.iter().any(|channel| channel.len() != value.frames) {
+        return Err("stems artifact channel length mismatch".to_string());
+    }
+    let payload = value
+        .frames
+        .checked_mul(STEMS_ARTIFACT_CHANNELS)
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    let mut out = Vec::with_capacity(
+        STEMS_ARTIFACT_HEADER
+            .checked_add(payload)
+            .ok_or_else(|| "stems artifact size overflow".to_string())?,
+    );
+    out.extend_from_slice(STEMS_ARTIFACT_MAGIC);
+    out.extend_from_slice(&STEMS_ARTIFACT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(4u16).to_le_bytes());
+    out.extend_from_slice(&value.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(value.frames as u64).to_le_bytes());
+    for channel in &value.channels {
+        for sample in channel {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
+/// Decode the exact, bounded artifact shape. Length is validated before any
+/// sample allocation, so hostile frame counts cannot drive an allocation.
+pub fn decode_stems_artifact(bytes: &[u8]) -> Result<StemsArtifact, String> {
+    if bytes.len() < STEMS_ARTIFACT_HEADER || &bytes[..4] != STEMS_ARTIFACT_MAGIC {
+        return Err("not a Makepad stems artifact".to_string());
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let stems = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if version != STEMS_ARTIFACT_VERSION || stems != 4 {
+        return Err(format!("unsupported stems artifact version/count {version}/{stems}"));
+    }
+    let sample_rate = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let frames_u64 = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+    let frames = usize::try_from(frames_u64)
+        .map_err(|_| "stems artifact frame count does not fit this machine".to_string())?;
+    if sample_rate == 0 || frames == 0 {
+        return Err("stems artifact needs a non-zero rate and frame count".to_string());
+    }
+    let payload = frames
+        .checked_mul(STEMS_ARTIFACT_CHANNELS)
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    let expected = STEMS_ARTIFACT_HEADER
+        .checked_add(payload)
+        .ok_or_else(|| "stems artifact size overflow".to_string())?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "stems artifact length mismatch: got {}, expected {expected}",
+            bytes.len()
+        ));
+    }
+    let mut at = STEMS_ARTIFACT_HEADER;
+    let channels = std::array::from_fn(|_| {
+        let mut channel = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            channel.push(f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()));
+            at += 4;
+        }
+        channel
+    });
+    Ok(StemsArtifact { sample_rate, frames, channels })
+}
+
+#[cfg(test)]
+mod stems_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn stems_artifact_round_trip_and_length_refusal() {
+        let artifact = StemsArtifact {
+            sample_rate: 44_100,
+            frames: 3,
+            channels: std::array::from_fn(|channel| {
+                (0..3).map(|frame| channel as f32 + frame as f32 / 10.0).collect()
+            }),
+        };
+        let bytes = encode_stems_artifact(&artifact).unwrap();
+        assert_eq!(decode_stems_artifact(&bytes).unwrap(), artifact);
+        assert!(decode_stems_artifact(&bytes[..bytes.len() - 1]).is_err());
+    }
 }
 
 // ---------------------------------------------------------------------------

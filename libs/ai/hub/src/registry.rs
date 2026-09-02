@@ -200,6 +200,8 @@ pub enum Domain {
     Stt,
     /// Audio -> beat and downbeat tracking JSON.
     Beats,
+    /// Stereo music -> four separated stems.
+    Stems,
     /// Audio -> polyphonic note transcription JSON/MIDI.
     Notes,
     /// Audio -> music-structure sections.
@@ -236,6 +238,7 @@ impl Domain {
             "ocr" => Some(Domain::Ocr),
             "stt" => Some(Domain::Stt),
             "beats" => Some(Domain::Beats),
+            "stems" => Some(Domain::Stems),
             "notes" => Some(Domain::Notes),
             "sections" => Some(Domain::Sections),
             "garment" => Some(Domain::Garment),
@@ -270,6 +273,7 @@ impl Domain {
             Domain::Ocr => "ocr",
             Domain::Stt => "stt",
             Domain::Beats => "beats",
+            Domain::Stems => "stems",
             Domain::Notes => "notes",
             Domain::Sections => "sections",
             Domain::Garment => "garment",
@@ -475,7 +479,7 @@ impl Registry {
         for model in wire.models {
             let domain = Domain::parse(&model.domain).ok_or_else(|| {
                 AssetAiError::Registry(format!(
-                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion|music|paint|edit|upscale|control|inpaint|enhance|splat|vision|ocr|beats|notes|sections|garment)",
+                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion|music|paint|edit|upscale|control|inpaint|enhance|splat|vision|ocr|beats|stems|notes|sections|garment)",
                     model.id, model.domain
                 ))
             })?;
@@ -909,6 +913,11 @@ mod tests {
         );
         assert!(final_weights.path.starts_with("https://cloud.cp.jku.at/"));
         assert!(beats.file_by_role("weights-small").unwrap().optional);
+        let stems = registry.find("bs-roformer-4stem").unwrap();
+        assert_eq!(stems.domain, Domain::Stems);
+        assert_eq!(stems.backend, "stems");
+        assert_eq!(stems.files.len(), 1);
+        assert_eq!(stems.file_by_role("weights").unwrap().size, Some(527_385_512));
         let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
         assert_eq!(hunyuan.domain, Domain::Paint);
         assert_eq!(hunyuan.backend, "paint");
@@ -1847,6 +1856,7 @@ mod tests {
     fn local_app_domains_round_trip() {
         for (text, domain) in [
             ("beats", Domain::Beats),
+            ("stems", Domain::Stems),
             ("notes", Domain::Notes),
             ("sections", Domain::Sections),
             ("garment", Domain::Garment),
