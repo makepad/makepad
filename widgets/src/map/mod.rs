@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod drape;
 pub mod geometry;
 pub(crate) mod icons;

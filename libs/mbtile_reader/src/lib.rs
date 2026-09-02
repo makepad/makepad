@@ -23,7 +23,8 @@ pub use codec::{
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
 pub use mkmap::{
-    mkmap_tile_id, mkmap_zxy_from_tile_id, MkmapReader, MkmapTileRef, TileArchiveReader,
+    mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapReader, MkmapRoot,
+    MkmapTileRef, RootRecordRef, TileArchiveReader,
 };
 pub use writer::{tile_rowid_xyz, MbtilesWriter, MbtilesWriterStats, WriterValue};
 
