@@ -130,6 +130,12 @@ pub fn camera_path_limit(
     distance: f32,
     clearance: f32,
     minimum: f32,
+    // The body the camera films (0 = none): never an obstruction. A ride
+    // pivot sits INSIDE a tall kinematic body — the Coaster Park loco is
+    // 0.83 m half-high and the scaled ride pivot 0.65 m over its centre —
+    // and a slab test that starts inside the filmed box clamped the boom
+    // to its one-metre minimum whatever the wheel asked (2026-09-02).
+    ignore: u64,
 ) -> f32 {
     const STEPS: i32 = 32;
     // A streamed level's walls and ceilings first, as an exact swept ray
@@ -157,7 +163,7 @@ pub fn camera_path_limit(
     let mut entity_step: i32 = i32::MAX;
     if step_t > 0.0 {
         'entities: for e in &world.entities {
-            if e.sensor || e.shell || e.tag == "scenery" {
+            if e.id == ignore || e.sensor || e.shell || e.tag == "scenery" {
                 continue;
             }
             if !matches!(
@@ -232,8 +238,8 @@ const LEVEL_LENS_RADIUS: f32 = 0.25;
 /// How far the third-person boom may extend before hitting geometry: march
 /// from the pivot toward the camera and stop half a metre before a solid,
 /// retaining the historical one-metre minimum for close walls.
-pub fn camera_boom_limit(world: &GameWorld, pivot: Vec3f, dir: Vec3f, boom: f32) -> f32 {
-    camera_path_limit(world, pivot, dir, boom, 0.5, 1.0)
+pub fn camera_boom_limit(world: &GameWorld, pivot: Vec3f, dir: Vec3f, boom: f32, ignore: u64) -> f32 {
+    camera_path_limit(world, pivot, dir, boom, 0.5, 1.0, ignore)
 }
 
 // ── hurtbox bands (mix.md §5.4.2 / K3) ──────────────────────────────────
@@ -724,7 +730,7 @@ mod level_boom_tests {
         // Driving boom: 13 m back and up at ~17° from a pivot 1.1 m up.
         let pivot = vec3f(0.0, 1.1, 0.0);
         let dir = crate::vec3_normalize(vec3f(0.0, 0.3, 1.0));
-        let boom = camera_boom_limit(&world, pivot, dir, 13.0);
+        let boom = camera_boom_limit(&world, pivot, dir, 13.0, 0);
         // The ceiling is 0.9 m above the pivot: hit at t = 0.9 / 0.287 ≈ 3.1
         // for the centre ray, sooner for the lens's upper ray; minus the
         // half-metre clearance. Well inside the corridor either way.
@@ -739,7 +745,7 @@ mod level_boom_tests {
         let world = corridor();
         // Pivot 0.6 m from the +x wall, boom straight into it.
         let pivot = vec3f(0.4, 1.0, 0.0);
-        let boom = camera_boom_limit(&world, pivot, vec3f(1.0, 0.0, 0.0), 8.0);
+        let boom = camera_boom_limit(&world, pivot, vec3f(1.0, 0.0, 0.0), 8.0, 0);
         assert!(
             boom < 1.0,
             "a level wall 0.6 m away must beat the 1 m minimum (got {boom})"
@@ -751,7 +757,7 @@ mod level_boom_tests {
     fn open_ground_leaves_the_boom_alone() {
         let mut world = corridor();
         world.level = None;
-        let boom = camera_boom_limit(&world, vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.3, 1.0), 13.0);
+        let boom = camera_boom_limit(&world, vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.3, 1.0), 13.0, 0);
         assert_eq!(boom, 13.0);
     }
 
@@ -763,7 +769,7 @@ mod level_boom_tests {
         let world = corridor();
         let pivot = vec3f(0.0, 1.0, 0.0);
         let dir = crate::vec3_normalize(vec3f(0.15, 0.0, 1.0));
-        let boom = camera_boom_limit(&world, pivot, dir, 8.0);
+        let boom = camera_boom_limit(&world, pivot, dir, 8.0, 0);
         let centre_hit = (1.0 - pivot.x) / dir.x;
         assert!(
             boom < centre_hit - 0.5 - 0.5,

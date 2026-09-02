@@ -1850,7 +1850,9 @@ impl ShadowRebuildGate {
             return true;
         }
         match self.pending {
-            Some((k, since)) if k == key => now - since >= settle,
+            // A hair of slack: `t + 0.2 - t` is a few ulps under 0.2 in f64,
+            // and a settle that never fires is a rebuild that never comes.
+            Some((k, since)) if k == key => now - since + 1.0e-9 >= settle,
             // New key (first change, or changed again mid-wait): the settle
             // clock restarts — the world is still being edited.
             _ => {

@@ -144,10 +144,21 @@ script_mod! {
                                 height: Fill
                             }
                         }
-                        desk := WmDesk{
-                            Tile := MpRunView{}
-                            // An in-process module instance's tile (module_view.rs).
-                            ModuleTile := MpModuleView{}
+                        // THE DESK ROW: the AI pane on the LEFT reserves a
+                        // strip (its own width, animated by the slide) and
+                        // the desk fills what is left, so the tiles reflow
+                        // beside the pane instead of vanishing under it
+                        // (decision 17; shell/ai_pane.rs).
+                        desk_row := View{
+                            width: Fill
+                            height: Fill
+                            flow: Right
+                            shell_ai_pane := ShellAiPane{}
+                            desk := WmDesk{
+                                Tile := MpRunView{}
+                                // An in-process module instance's tile (module_view.rs).
+                                ModuleTile := MpModuleView{}
+                            }
                         }
                     }
                     // The shell's floating surfaces, over the desk: the
@@ -157,9 +168,6 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Overlay
-                        // The AI pane: over the tiles, under every other
-                        // shell surface (shell/ai_pane.rs).
-                        shell_ai_pane := ShellAiPane{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
                         shell_notes := ShellNotifications{}
@@ -331,6 +339,9 @@ pub struct App {
     /// registration, the routing (see ai_bus.rs).
     #[rust]
     ai_bus: AiBus,
+    /// Which of the theme's wallpapers is up (SUPER+CTRL+SPACE cycles).
+    #[rust]
+    background_index: usize,
     /// The instances this process hosts itself (module_host.rs): one
     /// isolate each, seated in a `ModuleTile`.
     #[rust]
@@ -1575,14 +1586,13 @@ impl App {
         self.with_ai_pane(cx, |_, p| p.is_open()).unwrap_or(false)
     }
 
-    /// The desk rect the pane hangs off: the desk's last drawn rect, or
-    /// the window's startup proportions before the first draw.
+    /// The desk ROW the pane and the desk share: its last drawn rect, or
+    /// the window's startup proportions before the first draw. The desk
+    /// also learns whether the pane is mid-slide, so its tiles snap to the
+    /// narrowing layout every frame instead of tweening after it.
     fn sync_ai_pane_geometry(&mut self, cx: &mut Cx) {
-        let rect = self
-            .desk(cx)
-            .borrow_mut::<WmDesk>()
-            .map(|d| d.desk_rect)
-            .unwrap_or_default();
+        let row = self.ui.view(cx, ids!(desk_row)).area();
+        let rect = if row.is_valid(cx) { row.rect(cx) } else { Rect::default() };
         let rect = if rect.size.x > 1.0 {
             rect
         } else {
@@ -1592,7 +1602,13 @@ impl App {
             }
         };
         let gap = self.state_mut().gaps_out;
-        self.with_ai_pane(cx, |_, p| p.set_geometry(rect, gap));
+        let sliding = self
+            .with_ai_pane(cx, |_, p| {
+                p.set_geometry(rect, gap);
+                p.is_sliding()
+            })
+            .unwrap_or(false);
+        self.state_mut().pane_sliding = sliding;
     }
 
     /// F10 / `--test-action ai`.
@@ -2306,8 +2322,8 @@ impl App {
 
     /// SUPER+CTRL+SPACE — the theme's next wallpaper.
     fn next_background(&mut self, cx: &mut Cx) {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
-        let idx = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.background_index += 1;
+        let idx = self.background_index;
         self.apply_background(cx, idx);
     }
 
@@ -3534,6 +3550,7 @@ impl MatchEvent for App {
             gaps_out: desk::GAPS_OUT,
             dragging: Vec::new(),
             drop_hint: None,
+            pane_sliding: false,
         });
         self.next_id = 1;
         // The hosting registry: the linked modules, the person's overrides
