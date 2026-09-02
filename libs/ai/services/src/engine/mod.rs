@@ -19,12 +19,14 @@
 //! state's generation moved.
 
 pub mod core;
+pub mod no_model;
 pub mod registry;
 
 #[cfg(feature = "engine")]
 pub mod models;
 
 pub use core::{EngineCore, EngineEvent, DOCTRINE};
+pub use no_model::{NoModel, NoModelWithReason};
 pub use registry::{RegistryUp, ServiceRegistry, MAX_INSTANCES};
 
 /// One tool as the model is told about it: the canonical dotted name, a

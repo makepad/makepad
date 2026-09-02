@@ -217,6 +217,10 @@ pub struct Cx {
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
     pub tweak_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
+    /// The AI chat overlay's remote dispatcher (`/ai`, `/ai/transcript`):
+    /// registered by the aichat crate when an app links it, the same way
+    /// the widgets crate registers the tweaker's. `(op, params) -> JSON`.
+    pub ai_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -572,6 +576,7 @@ impl Cx {
             widget_query_callback: None,
             widget_snapshot_callback: None,
             tweak_callback: None,
+            ai_callback: None,
             net,
 
             script_data: CxScriptData {

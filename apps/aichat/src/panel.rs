@@ -13,7 +13,9 @@
 
 use crate::bus::ServiceBus;
 use crate::settings::AiSettings;
-use makepad_ai_services::engine::models::{build_model, provider_rows, NoModelWithReason};
+#[cfg(feature = "engine")]
+use makepad_ai_services::engine::models::{build_model, provider_rows};
+use makepad_ai_services::engine::NoModelWithReason;
 use makepad_ai_services::engine::{EngineCore, EngineEvent, ServiceRegistry};
 use makepad_ai_services::state::*;
 use makepad_ai_services::wire::ToolOutcome;
@@ -260,17 +262,23 @@ impl AiChatPanel {
     fn ensure_engine(&mut self) -> &mut EngineCore {
         if self.engine.is_none() {
             let settings = self.settings().clone();
-            let model = match build_model(&settings.provider, settings.local_only) {
-                Ok(m) => m,
-                Err(reason) => Box::new(NoModelWithReason::new(reason)),
-            };
+            // The real models ride the `engine` feature; a build without a
+            // runtime (the web page) says so and keeps the tool console.
+            #[cfg(feature = "engine")]
+            let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) = (
+                match build_model(&settings.provider, settings.local_only) {
+                    Ok(m) => m,
+                    Err(reason) => Box::new(NoModelWithReason::new(reason)),
+                },
+                provider_rows(settings.local_only),
+            );
+            #[cfg(not(feature = "engine"))]
+            let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) =
+                (Box::new(NoModelWithReason::new("this build has no model runtime")), Vec::new());
             let mut core = EngineCore::new(self.registry.clone(), model, None);
-            {
-                let rows = provider_rows(settings.local_only);
-                // The state is the panel's window into the core; the core
-                // owns it, so provider facts go in through the core.
-                core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
-            }
+            // The state is the panel's window into the core; the core owns
+            // it, so provider facts go in through the core.
+            core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
             self.engine = Some(core);
         }
         self.engine.as_mut().unwrap()
@@ -278,6 +286,11 @@ impl AiChatPanel {
 
     fn now(cx: &Cx) -> f64 {
         cx.seconds_since_app_start()
+    }
+
+    /// A line as if typed and sent — the bridge's `/ai?say=`.
+    pub fn say(&mut self, cx: &mut Cx, text: String) {
+        self.send(cx, text);
     }
 
     fn send(&mut self, cx: &mut Cx, text: String) {

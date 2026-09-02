@@ -163,6 +163,14 @@ mod imp {
             wait: bool,
             tx: Sender<Reply>,
         },
+        /// An AI-overlay operation (`/ai`, `/ai/transcript`): parsed here,
+        /// answered by `Cx::ai_callback` (registered by the aichat crate).
+        Ai {
+            op: String,
+            args: Vec<(String, String)>,
+            wait: bool,
+            tx: Sender<Reply>,
+        },
         Quit(Sender<Reply>),
         /// The hot-patchable constant tables of the compiled shaders (one
         /// shader, or all that have entries).
@@ -985,6 +993,27 @@ mod imp {
                     }
                 }
             }
+            Cmd::Ai { op, args, wait, tx } => {
+                let result = match cx.ai_callback {
+                    Some(callback) => callback(cx, &op, &args),
+                    None => Err("no AI overlay (this app does not link makepad-aichat)".to_string()),
+                };
+                match result {
+                    Ok(json) => {
+                        if wait {
+                            frame_waiters()
+                                .lock()
+                                .unwrap()
+                                .push((cx.repaint_id + 1, tx, Some(json)));
+                        } else {
+                            let _ = tx.send(Reply::Text(json));
+                        }
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(Reply::Err(msg));
+                    }
+                }
+            }
             Cmd::Quit(tx) => {
                 let line = "[makepad-remote] remote quit".to_string();
                 println!("{line}");
@@ -1152,6 +1181,11 @@ mod imp {
             // The tweaker overlay (design feedback). Thin: parse here, decide
             // in the widgets-side callback. `wait` answers after the next
             // drawn frame so a following grab sees the change.
+            // The AI chat overlay (apps/aichat, seated in every Window on F10):
+            // `/ai?on=1|0` toggles, `/ai?say=TEXT` types a line, `/ai/transcript`
+            // reads the conversation. Answered by `Cx::ai_callback`.
+            "/ai" => route_ai(if p.get(&["say"]).is_some() { "say" } else { "toggle" }, p, true),
+            "/ai/transcript" => route_ai("transcript", p, false),
             "/tweak" => route_tweak("toggle", p, true),
             "/tweak/state" => route_tweak("state", p, false),
             "/tweak/apply" => route_tweak("apply", p, true),
@@ -1319,6 +1353,13 @@ mod imp {
                 json_str(&crate::makepad_error_log::trace_topics())
             ),
         )
+    }
+
+    fn route_ai(op: &str, p: &Params, wait: bool) -> Out {
+        let op = op.to_string();
+        let args = p.0.clone();
+        let timeout = if wait { 6 } else { 4 };
+        reply_to_out(ask(move |tx| Cmd::Ai { op, args, wait, tx }, timeout))
     }
 
     fn route_tweak(op: &str, p: &Params, wait: bool) -> Out {
