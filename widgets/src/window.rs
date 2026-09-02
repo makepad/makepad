@@ -1466,6 +1466,21 @@ impl WindowRef {
             inner.window.handle.restore(cx);
         }
     }
+
+    /// Minimize the window (the platform's own animation, if any).
+    pub fn minimize(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.minimize(cx);
+        }
+    }
+
+    /// Close the window through the platform, the way its own caption
+    /// button does — the app sees the ordinary window-close path.
+    pub fn close(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.close(cx);
+        }
+    }
     /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
     /// other backends ignore it).
     pub fn set_chromeless_when_maximized(&self, cx: &mut Cx, chromeless: bool) {

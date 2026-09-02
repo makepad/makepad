@@ -164,6 +164,9 @@ impl ShellGallery {
         self.demo_toggle = true;
         self.bar.data = BarData::fixture();
         self.bar.pad_left = 8.0;
+        // The gallery shows the window controls on every platform: this is
+        // where their look is checked, macOS included.
+        self.bar.window_controls = true;
         self.menu.open_at(cx, "", MenuSkin::Menu);
         self.launcher.open_at(cx, "apps", MenuSkin::Launcher);
         self.keys.open_at(cx, "learn.keybindings", MenuSkin::Menu);
@@ -560,6 +563,16 @@ impl ShellGallery {
             };
             match wa.cast::<ShellBarAction>() {
                 ShellBarAction::Press(module) => {
+                    if matches!(module, BarModule::WindowMin | BarModule::WindowMax | BarModule::WindowClose) {
+                        // A picture of the controls: the gallery window is
+                        // not minimized, maximized or closed by them.
+                        log!("gallery: window control {:?} pressed", module);
+                        if module == BarModule::WindowMax {
+                            self.bar.data.maximized = !self.bar.data.maximized;
+                        }
+                        self.redraw(cx);
+                        continue;
+                    }
                     if let Some(kind) = PanelKind::for_module(module) {
                         let anchor = self.bar.module_rect(module).unwrap_or_default();
                         self.bar_panel.toggle(cx, kind, anchor);

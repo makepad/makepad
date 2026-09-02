@@ -600,6 +600,39 @@ fn curl(url: &str) -> Option<Vec<u8>> {
     Some(out.stdout)
 }
 
+/// Fetch a theme's wallpapers from the omarchy repo into its `backgrounds`
+/// folder when that folder is empty — the bundled default theme ships its
+/// colours but not its pictures, so a fresh install has nothing behind the
+/// desk until this runs. Off the UI thread (the caller spawns it); the
+/// pictures are applied when the desk notices them (`theme_backgrounds`).
+/// Nothing when the folder already has pictures or the network is away.
+pub fn fetch_backgrounds_if_missing(name: &str) -> usize {
+    let dir = themes_dir().join(name).join("backgrounds");
+    if !theme_backgrounds(name).is_empty() {
+        return 0;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let listing_url = format!("{}/{}/backgrounds", OMARCHY_API, name);
+    let Some(listing) = curl(&listing_url) else {
+        return 0;
+    };
+    let listing = String::from_utf8_lossy(&listing);
+    let mut fetched = 0usize;
+    for part in listing.split("\"download_url\"") {
+        let Some(url) = part.split('"').nth(1).filter(|u| u.starts_with("https://")) else {
+            continue;
+        };
+        let Some(file) = url.rsplit('/').next() else {
+            continue;
+        };
+        if let Some(bytes) = curl(url) {
+            let _ = std::fs::write(dir.join(file), bytes);
+            fetched += 1;
+        }
+    }
+    fetched
+}
+
 /// Download an omarchy theme by name and CONVERT it: theme.splash plus the
 /// background images. Accepts "Tokyo Night" or "tokyo-night".
 pub fn import_omarchy_theme(name: &str) -> Result<String, String> {
@@ -621,28 +654,9 @@ pub fn import_omarchy_theme(name: &str) -> Result<String, String> {
     std::fs::write(dir.join("theme.splash"), splash_source(&theme))
         .map_err(|e| e.to_string())?;
 
-    // Backgrounds via the github contents API listing.
-    let listing_url = format!("{}/{}/backgrounds", OMARCHY_API, slug);
-    let mut fetched = 0usize;
-    if let Some(listing) = curl(&listing_url) {
-        let listing = String::from_utf8_lossy(&listing);
-        for part in listing.split("\"download_url\"") {
-            let Some(url) = part
-                .split('"')
-                .nth(1)
-                .filter(|u| u.starts_with("https://"))
-            else {
-                continue;
-            };
-            let Some(file) = url.rsplit('/').next() else {
-                continue;
-            };
-            if let Some(bytes) = curl(url) {
-                let _ = std::fs::write(dir.join("backgrounds").join(file), bytes);
-                fetched += 1;
-            }
-        }
-    }
+    // Backgrounds via the github contents API listing — the same fetch a
+    // fresh install runs for the bundled theme on its own.
+    let fetched = fetch_backgrounds_if_missing(&slug);
 
     Ok(format!(
         "imported '{}' to splash ({} backgrounds) at {}",

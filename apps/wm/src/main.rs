@@ -275,6 +275,10 @@ pub struct App {
     /// The clock's alternate format (right-click cycles it, `formatAlt`).
     #[rust]
     clock_alt: bool,
+    /// The theme's wallpapers are being fetched (a fresh install ships the
+    /// colours, not the pictures); the tick applies the first one to land.
+    #[rust]
+    backgrounds_pending: bool,
     /// Which bar module's flyout is open, for the accent pill.
     #[rust]
     shell_panel_open: Option<BarModule>,
@@ -2320,6 +2324,30 @@ impl App {
         self.redraw_all(cx);
     }
 
+    /// A theme with no pictures yet fetches them from the omarchy repo on a
+    /// thread of its own; the desk shows the first one when it lands (the
+    /// tick polls `theme_backgrounds` while `backgrounds_pending`). The
+    /// bundled default theme ships without wallpapers, so a fresh install
+    /// gets the omarchy look on its own; no network, no pictures, no harm.
+    fn fetch_backgrounds_if_missing(&mut self) {
+        if !host::processes_available() {
+            return;
+        }
+        let name = self.state_mut().theme_name.clone();
+        if !theme::theme_backgrounds(&name).is_empty() {
+            return;
+        }
+        self.backgrounds_pending = true;
+        log!("wm: theme '{}' has no wallpapers; fetching them", name);
+        let _ = std::thread::Builder::new()
+            .name("wm-backgrounds".into())
+            .spawn(move || {
+                let n = theme::fetch_backgrounds_if_missing(&name);
+                log!("wm: fetched {} wallpaper(s) for '{}'", n, name);
+                SignalToUI::set_ui_signal();
+            });
+    }
+
     /// SUPER+CTRL+SPACE — the theme's next wallpaper.
     fn next_background(&mut self, cx: &mut Cx) {
         self.background_index += 1;
@@ -2592,14 +2620,38 @@ impl App {
         data.workspaces = workspaces;
         data.active_window = (!title.is_empty()).then_some(title);
         data.open_panel = self.shell_panel_open;
+        // The middle window control reads "restore" while maximized.
+        data.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
         let bar = self.ui.widget(cx, ids!(shell_bar));
         {
             let mut borrowed = bar.borrow_mut::<shell::bar::ShellBar>();
             if let Some(b) = borrowed.as_mut() {
                 b.data = data;
+                // Where the platform draws no caption buttons, the bar does.
+                b.window_controls = shell::bar::window_controls_default();
             }
         }
         self.redraw_all(cx);
+    }
+
+    /// The bar's window controls: the same three calls the stock caption
+    /// bar makes on its own buttons (widgets/src/window.rs).
+    fn window_control(&mut self, cx: &mut Cx, module: BarModule) -> bool {
+        let window = self.ui.window(cx, ids!(main_window));
+        match module {
+            BarModule::WindowMin => window.minimize(cx),
+            BarModule::WindowMax => {
+                if window.is_fullscreen(cx) {
+                    window.restore(cx);
+                } else {
+                    window.maximize(cx);
+                }
+            }
+            BarModule::WindowClose => window.close(cx),
+            _ => return false,
+        }
+        log!("wm: window control {:?}", module);
+        true
     }
 
     /// The bar IS this window's caption, so it has to be tall enough to
@@ -3633,6 +3685,7 @@ impl MatchEvent for App {
         }
 
         self.apply_background(cx, 0);
+        self.fetch_backgrounds_if_missing();
         self.update_bar(cx);
         self.update_status(cx);
         // The platform installs a default menu whose Quit is ⌘Q — which
@@ -3684,6 +3737,14 @@ impl MatchEvent for App {
                     BarModule::ActiveWindow => {
                         if let Some(focus) = self.state_mut().layout.focused_client() {
                             self.focus_client(cx, focus);
+                        }
+                    }
+                    control @ (BarModule::WindowMin | BarModule::WindowMax | BarModule::WindowClose) => {
+                        // The gallery's bar is a picture of one: its
+                        // controls log (shell/gallery.rs), never close or
+                        // shrink the window they are drawn in.
+                        if !self.gallery {
+                            self.window_control(cx, control);
                         }
                     }
                     other => self.toggle_shell_panel(cx, other),
@@ -4014,6 +4075,13 @@ impl AppMain for App {
         if let Event::Timer(te) = event {
             if self.tick.is_timer(te).is_some() && self.state.is_some() {
                 self.reap_exited(cx);
+                if self.backgrounds_pending {
+                    let name = self.state_mut().theme_name.clone();
+                    if !theme::theme_backgrounds(&name).is_empty() {
+                        self.backgrounds_pending = false;
+                        self.apply_background(cx, 0);
+                    }
+                }
                 self.drain_client_lines(cx);
                 self.explain_first_exec_scan(cx);
                 self.update_status(cx);

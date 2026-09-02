@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "build_support/cef_dist.rs"]
+mod cef_dist;
+
 fn target_platform() -> Option<&'static str> {
     let os = env::var("CARGO_CFG_TARGET_OS").ok()?;
     let arch = env::var("CARGO_CFG_TARGET_ARCH").ok()?;
@@ -41,18 +44,6 @@ fn parse_cef_version(include_dir: &Path) -> Option<String> {
     None
 }
 
-fn run_download_script(workspace_root: &Path, platform: &str) {
-    let script = workspace_root.join("tools/download_cef.sh");
-    let status = Command::new(&script)
-        .arg("--platform")
-        .arg(platform)
-        .status()
-        .unwrap_or_else(|err| panic!("failed to execute {}: {err}", script.display()));
-    if !status.success() {
-        panic!("{} failed with status {status}", script.display());
-    }
-}
-
 fn build_macos_helper(manifest_dir: &Path, dist_dir: &Path, include_dir: &Path) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let helper_source = manifest_dir.join("helper_main_macos.c");
@@ -84,14 +75,30 @@ fn build_macos_helper(manifest_dir: &Path, dist_dir: &Path, include_dir: &Path) 
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_DIST_DIR");
-    println!("cargo:rerun-if-changed=../../tools/download_cef.sh");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_VERSION");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_OFFLINE");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_DRY_RUN");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_PLATFORM");
+    println!("cargo:rerun-if-changed=build_support/cef_dist.rs");
     println!("cargo:rerun-if-changed=helper_main_macos.c");
     println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_13800)");
     println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_14600)");
 
-    let Some(platform) = target_platform() else {
-        return;
+    // MAKEPAD_CEF_PLATFORM: a dry-run aid — resolve the index for another
+    // platform from this host (what WOULD be fetched for linux64, say)
+    // without cross-compiling. Only honoured together with
+    // MAKEPAD_CEF_DRY_RUN; a real build always links its own target.
+    let dry_run = env::var("MAKEPAD_CEF_DRY_RUN").map(|v| v != "0").unwrap_or(false);
+    let platform: String = match env::var("MAKEPAD_CEF_PLATFORM").ok().filter(|_| dry_run) {
+        Some(forced) => forced,
+        None => match target_platform() {
+            Some(p) => p.to_string(),
+            None => return,
+        },
     };
+    let platform = platform.as_str();
+    let pin = env::var("MAKEPAD_CEF_VERSION").ok().filter(|v| !v.trim().is_empty());
+    let offline = env::var("MAKEPAD_CEF_OFFLINE").map(|v| v != "0").unwrap_or(false);
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir
@@ -105,21 +112,40 @@ fn main() {
         })
         .to_path_buf();
 
-    let dist_dir = env::var_os("MAKEPAD_CEF_DIST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            workspace_root
-                .join("local/cef-prebuilt")
-                .join(format!("current-{platform}"))
-        });
+    let prebuilt_dir = workspace_root.join("local/cef-prebuilt");
 
-    if !dist_dir.exists() {
-        run_download_script(&workspace_root, platform);
+    if dry_run {
+        // Resolve and report, download nothing: the plan for this (or the
+        // forced) platform with the pin applied. The build then goes on
+        // with whatever dist THIS target already has, so a dry run is a
+        // normal, complete build that also printed what it would fetch.
+        match cef_dist::plan(&prebuilt_dir, platform, pin.as_deref()) {
+            Ok(plan) => println!("cargo:warning=cef dry run — {}", plan.describe().replace('\n', " ")),
+            Err(e) => println!("cargo:warning=cef dry run failed — {e}"),
+        }
     }
+    let platform = match target_platform() {
+        Some(p) => p,
+        None => return,
+    };
 
-    if !dist_dir.exists() {
-        panic!("CEF distribution not found at {}", dist_dir.display());
-    }
+    // MAKEPAD_CEF_DIST_DIR names a distribution directly and is used as
+    // it is; otherwise the prebuilt dir's pointer for this platform, else a
+    // download into it. A platform that already has a dist is never bumped.
+    let dist_dir = match env::var_os("MAKEPAD_CEF_DIST_DIR").map(PathBuf::from) {
+        Some(dir) => {
+            if !dir.join("include").is_dir() {
+                panic!(
+                    "MAKEPAD_CEF_DIST_DIR={} is not a CEF distribution (no include/ inside it); unset it to let the build fetch one into {}",
+                    dir.display(),
+                    prebuilt_dir.display()
+                );
+            }
+            dir
+        }
+        None => cef_dist::ensure_dist(&prebuilt_dir, platform, pin.as_deref(), offline)
+            .unwrap_or_else(|e| panic!("{e}")),
+    };
 
     let dist_dir = dist_dir
         .canonicalize()
