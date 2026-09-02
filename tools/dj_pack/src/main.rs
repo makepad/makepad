@@ -21,8 +21,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_STEM_CACHE: &str = "local/vj/stem-cache";
-const DEFAULT_LYRICS_CACHE: &str = "local/vj/lyrics-cache";
 const STEM_OGG_NAMES: [&str; 4] = ["drums.ogg", "bass.ogg", "vocals.ogg", "other.ogg"];
 
 fn usage() -> &'static str {
@@ -31,14 +29,14 @@ fn usage() -> &'static str {
 USAGE:\n\
   makepad-dj-pack stems <audio>... --hub <URL|auto> --out <stem-cache-dir>\n\
   makepad-dj-pack pack --store <root> --site-out <dir> [--stem-cache <dir>]\n\
-                       [--lyrics-cache <dir>] [--dry-run] <audio>...\n\
+                       [--lyrics-cache <dir>] [--require-stems] [--dry-run] <audio>...\n\
 \n\
 stems decodes locally with makepad-audio-decode, sends 44.1 kHz stereo PCM\n\
 to the hub's stems capability, and writes VJ StemCache + four Ogg files. It\n\
 never loads or runs a separation model. --hub auto listens for fleet beacons.\n\
-pack defaults to local/vj/stem-cache and local/vj/lyrics-cache, publishes the\n\
-original audio plus four stems and <digest>.json lyrics when present, then\n\
-exports /v1/health, catalogs, aliases, revisions and /v1/blobs for StaticStore."
+pack reads stem and lyrics caches only when their directories are explicitly\n\
+given, publishes the original audio plus available side channels, then exports\n\
+/v1/health, catalogs, aliases, revisions and /v1/blobs for StaticStore."
 }
 
 fn main() {
@@ -107,8 +105,9 @@ fn parse_stems(args: &[String]) -> Result<StemsArgs, String> {
 struct PackArgs {
     store: PathBuf,
     site_out: PathBuf,
-    stem_cache: PathBuf,
-    lyrics_cache: PathBuf,
+    stem_cache: Option<PathBuf>,
+    lyrics_cache: Option<PathBuf>,
+    require_stems: bool,
     dry_run: bool,
     audio: Vec<PathBuf>,
 }
@@ -116,8 +115,9 @@ struct PackArgs {
 fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
     let mut store = None;
     let mut site_out = None;
-    let mut stem_cache = PathBuf::from(DEFAULT_STEM_CACHE);
-    let mut lyrics_cache = PathBuf::from(DEFAULT_LYRICS_CACHE);
+    let mut stem_cache = None;
+    let mut lyrics_cache = None;
+    let mut require_stems = false;
     let mut dry_run = false;
     let mut audio = Vec::new();
     let mut index = 0;
@@ -133,12 +133,17 @@ fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
             }
             "--stem-cache" => {
                 index += 1;
-                stem_cache = PathBuf::from(args.get(index).ok_or("--stem-cache needs a directory")?);
+                stem_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--stem-cache needs a directory")?,
+                ));
             }
             "--lyrics-cache" => {
                 index += 1;
-                lyrics_cache = PathBuf::from(args.get(index).ok_or("--lyrics-cache needs a directory")?);
+                lyrics_cache = Some(PathBuf::from(
+                    args.get(index).ok_or("--lyrics-cache needs a directory")?,
+                ));
             }
+            "--require-stems" => require_stems = true,
             "--dry-run" => dry_run = true,
             "-h" | "--help" => {
                 println!("{}", usage());
@@ -157,6 +162,7 @@ fn parse_pack(args: &[String]) -> Result<PackArgs, String> {
         site_out: site_out.ok_or("pack requires --site-out <dir>")?,
         stem_cache,
         lyrics_cache,
+        require_stems,
         dry_run,
         audio,
     })
@@ -562,33 +568,49 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         }
         let model_frames = model_pcm(&audio).left.len();
         let header = CacheHeader::for_track(model_frames as u64);
+        let stems_complete = args.stem_cache.as_deref().is_some_and(|root| {
+            makepad_ai_stems::cache_is_complete_on_disk(root, &audio.digest, &header)
+        });
+        if !stems_complete && args.require_stems {
+            return Err(format!("required stem cache {} is not complete", audio.digest));
+        }
         if args.dry_run {
-            let oggs_present = STEM_OGG_NAMES
-                .iter()
-                .all(|name| args.stem_cache.join(&audio.digest).join(name).is_file());
-            if !oggs_present
-                && !makepad_ai_stems::cache_is_complete_on_disk(
-                    &args.stem_cache,
-                    &audio.digest,
-                    &header,
-                )
-            {
-                return Err(format!("stem cache {} is incomplete", audio.digest));
-            }
             let has_lyrics = load_lyrics(&args, &audio.digest)?.is_some();
             let _ = load_rights(path)?;
+            let stem_roles = if stems_complete {
+                ",StemDrums,StemBass,StemVocals,StemOther"
+            } else {
+                ""
+            };
+            let stem_report = if stems_complete {
+                "cached"
+            } else {
+                "omitted (no complete cache)"
+            };
             println!(
-                "DRY RUN {} -> {} digest={} roles=Audio,StemDrums,StemBass,StemVocals,StemOther{}",
+                "DRY RUN {} -> {} digest={} roles=Audio{}{} stems={}",
                 audio.path.display(),
                 alias,
                 audio.digest,
-                if has_lyrics { ",Lyrics" } else { "" }
+                stem_roles,
+                if has_lyrics { ",Lyrics" } else { "" },
+                stem_report
             );
             continue;
         }
-        let oggs = ensure_cached_oggs(&args.stem_cache, &audio.digest, &header, !args.dry_run)?;
+        let oggs = if stems_complete {
+            let root = args.stem_cache.as_deref().expect("complete cache has a root");
+            Some(ensure_cached_oggs(root, &audio.digest, &header, true)?)
+        } else {
+            println!(
+                "{}: packing without stems (no complete stem cache {})",
+                audio.path.display(),
+                audio.digest
+            );
+            None
+        };
         let lyrics = load_lyrics(&args, &audio.digest)?;
-        let side_files = side_channel_files(Some(oggs), lyrics);
+        let side_files = side_channel_files(oggs, lyrics);
         let (rights, license_text) = load_rights(path)?;
         tracks.push(PackTrack { audio, alias, side_files, rights, license_text });
     }
@@ -635,10 +657,13 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
 }
 
 fn load_lyrics(args: &PackArgs, digest: &str) -> Result<Option<String>, String> {
-    let candidates = [
-        args.stem_cache.join(digest).join("lyrics.json"),
-        args.lyrics_cache.join(format!("{digest}.json")),
-    ];
+    let mut candidates = Vec::new();
+    if let Some(root) = &args.stem_cache {
+        candidates.push(root.join(digest).join("lyrics.json"));
+    }
+    if let Some(root) = &args.lyrics_cache {
+        candidates.push(root.join(format!("{digest}.json")));
+    }
     let Some(path) = candidates.iter().find(|path| path.is_file()) else {
         return Ok(None);
     };
@@ -942,8 +967,9 @@ mod tests {
         run_pack(PackArgs {
             store: dir.0.join("store"),
             site_out: dir.0.join("site"),
-            stem_cache: cache,
-            lyrics_cache: lyrics,
+            stem_cache: Some(cache),
+            lyrics_cache: Some(lyrics),
+            require_stems: false,
             dry_run: false,
             audio: vec![audio_path],
         })
@@ -964,11 +990,100 @@ mod tests {
         run_pack(PackArgs {
             store: dir.0.join("store"),
             site_out: dir.0.join("site"),
-            stem_cache: dir.0.join("stem-cache"),
-            lyrics_cache: dir.0.join("lyrics-cache"),
+            stem_cache: Some(dir.0.join("stem-cache")),
+            lyrics_cache: Some(dir.0.join("lyrics-cache")),
+            require_stems: false,
             dry_run: false,
             audio: vec![tracks.join("tone.ogg")],
         })
         .unwrap();
+    }
+
+    #[test]
+    fn pack_omits_missing_stems_without_touching_empty_cache() {
+        let dir = TestDir::new("empty-cache");
+        let tracks = dir.0.join("tracks");
+        let cache = dir.0.join("stem-cache");
+        std::fs::create_dir_all(&tracks).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let audio_path = tracks.join("tone.ogg");
+        std::fs::write(&audio_path, tone_ogg(1)).unwrap();
+        std::fs::write(tracks.join("LICENSE.txt"), "CC0 1.0 Universal\nsynthetic fixture")
+            .unwrap();
+        let digest = prepare_audio(&audio_path).unwrap().digest;
+
+        let error = run_pack(PackArgs {
+            store: dir.0.join("required-store"),
+            site_out: dir.0.join("required-site"),
+            stem_cache: Some(cache.clone()),
+            lyrics_cache: None,
+            require_stems: true,
+            dry_run: false,
+            audio: vec![audio_path.clone()],
+        })
+        .unwrap_err();
+        assert!(error.contains(&digest));
+
+        run_pack(PackArgs {
+            store: dir.0.join("store"),
+            site_out: dir.0.join("site"),
+            stem_cache: Some(cache.clone()),
+            lyrics_cache: None,
+            require_stems: false,
+            dry_run: false,
+            audio: vec![audio_path],
+        })
+        .unwrap();
+
+        assert!(std::fs::read_dir(&cache).unwrap().next().is_none());
+        let static_manifest =
+            std::fs::read_to_string(dir.0.join("site/v1/static/manifest.json")).unwrap();
+        assert!(!static_manifest.contains("\"role\":\"stem_"));
+    }
+
+    #[test]
+    fn dry_run_writes_nothing_in_read_only_directory() {
+        let dir = TestDir::new("dry-run-read-only");
+        let tracks = dir.0.join("tracks");
+        std::fs::create_dir_all(&tracks).unwrap();
+        let audio_path = tracks.join("tone.ogg");
+        std::fs::write(&audio_path, tone_ogg(1)).unwrap();
+        std::fs::write(tracks.join("LICENSE.txt"), "CC0 1.0 Universal\nsynthetic fixture")
+            .unwrap();
+
+        let original_permissions = std::fs::metadata(&dir.0).unwrap().permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        std::fs::set_permissions(&dir.0, read_only_permissions).unwrap();
+        let result = run_pack(PackArgs {
+            store: dir.0.join("store"),
+            site_out: dir.0.join("site"),
+            stem_cache: Some(dir.0.join("stem-cache")),
+            lyrics_cache: Some(dir.0.join("lyrics-cache")),
+            require_stems: false,
+            dry_run: true,
+            audio: vec![audio_path],
+        });
+        std::fs::set_permissions(&dir.0, original_permissions).unwrap();
+
+        result.unwrap();
+        assert!(!dir.0.join("store").exists());
+        assert!(!dir.0.join("site").exists());
+        assert!(!dir.0.join("stem-cache").exists());
+        assert!(!dir.0.join("lyrics-cache").exists());
+    }
+
+    #[test]
+    fn pack_cache_directories_are_opt_in() {
+        let args = parse_pack(&[
+            "--store".into(),
+            "store".into(),
+            "--site-out".into(),
+            "site".into(),
+            "tone.ogg".into(),
+        ])
+        .unwrap();
+        assert!(args.stem_cache.is_none());
+        assert!(args.lyrics_cache.is_none());
     }
 }
