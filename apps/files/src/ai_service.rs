@@ -2,7 +2,7 @@
 //!
 //! Hosted by the window manager, the app opens one [`AiServicePort`] with
 //! the manifest from `chat_tools::service_manifest` and answers the calls
-//! that come back through it. The tools are the same four the app's own
+//! that come back through it. The tools are the same seven the app's own
 //! panel has; what is new is how they run: every call carries the
 //! engine's `call_id`, the answer carries it back, and the person (or the
 //! router) can give up on a call mid-walk. The old panel's runner is
@@ -40,7 +40,7 @@ struct ServiceJob {
 
 /// What the worker sends back, in the order it happened.
 pub enum ServiceReply {
-    Result(ToolResult),
+    Result { result: ToolResult, mutated: bool },
     Progress { call_id: String, note: String, permille: u16 },
 }
 
@@ -64,9 +64,9 @@ impl ServiceRunner {
         let (reply_tx, replies) = channel::<ServiceReply>();
         thread::spawn(move || {
             while let Ok(ServiceJob { call_id, job, cancel }) = job_rx.recv() {
-                let result = if cancel.load(Ordering::Relaxed) {
+                let (result, mutated) = if cancel.load(Ordering::Relaxed) {
                     // Given up on while it waited its turn: never started.
-                    ToolResult::cancelled(&call_id)
+                    (ToolResult::cancelled(&call_id), false)
                 } else {
                     let progress_tx = reply_tx.clone();
                     let progress_id = call_id.clone();
@@ -82,12 +82,13 @@ impl ServiceRunner {
                     if cancel.load(Ordering::Relaxed) {
                         // The walk stopped early on the flag: what it has
                         // is a floor nobody asked for any more.
-                        ToolResult::cancelled(&call_id)
+                        (ToolResult::cancelled(&call_id), false)
                     } else {
-                        result_for(&call_id, outcome)
+                        let mutated = outcome.mutated;
+                        (result_for(&call_id, outcome), mutated)
                     }
                 };
-                if reply_tx.send(ServiceReply::Result(result)).is_err() {
+                if reply_tx.send(ServiceReply::Result { result, mutated }).is_err() {
                     return;
                 }
                 SignalToUI::set_ui_signal();
@@ -122,7 +123,7 @@ impl ServiceRunner {
     pub fn drain(&mut self) -> Vec<ServiceReply> {
         let replies: Vec<ServiceReply> = self.replies.try_iter().collect();
         for reply in &replies {
-            if let ServiceReply::Result(result) = reply {
+            if let ServiceReply::Result { result, .. } = reply {
                 self.live.remove(&result.call_id);
             }
         }
@@ -183,7 +184,7 @@ mod tests {
         let mut out = Vec::new();
         while out.len() < n && Instant::now() < deadline {
             for reply in runner.drain() {
-                if let ServiceReply::Result(r) = reply {
+                if let ServiceReply::Result { result: r, .. } = reply {
                     out.push(r);
                 }
             }

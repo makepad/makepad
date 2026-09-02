@@ -295,6 +295,9 @@ impl EngineCore {
                 self.state.status = Status::Loading { phase, fraction };
             }
             ModelEvent::Ready => {
+                // The chip follows the model's own account of where it runs
+                // (the local election settles on a route only now).
+                self.state.provider_label = self.model.label();
                 if !self.turn_active {
                     self.state.status = Status::Idle;
                 }

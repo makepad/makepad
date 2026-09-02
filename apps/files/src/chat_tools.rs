@@ -1,9 +1,11 @@
-//! What the chat panel's model is allowed to do: look, and nothing else.
+//! What the chat panel's model is allowed to read and change.
 //!
-//! Four tools, all read-only — list a folder, read the head of a text file,
-//! stat one path, and measure where a folder's bytes are. There is no write,
-//! no move, no delete and no shell here, and there is no way to add one from
-//! the model's side: [`run`] is a closed match over four names.
+//! Four bounded read tools inspect paths; three mutation tools make a folder,
+//! rename one item, or move one item to the platform Trash. On the desktop bus
+//! those three wait for confirmation because their manifest risk is
+//! `Destructive`. There is
+//! no permanent delete or shell, and [`run`] is a closed match over the seven
+//! names.
 //!
 //! Every path the model names goes through [`resolve`] first. It expands `~`,
 //! folds `.` and `..` away *lexically* (so `~/../../etc` is refused before the
@@ -57,26 +59,48 @@ const MEASURE_ENTRIES: usize = 400_000;
 /// panel's `ToolSpec`s and the desktop bus's manifest read the SAME name,
 /// sentence and schema, so the two can never drift apart. Every schema is
 /// an argument object (`"type":"object"`), which the wire insists on.
-const TOOL_TABLE: [(&str, &str, &str); 4] = [
+const TOOL_TABLE: [(&str, &str, &str, Risk); 7] = [
     (
         "list_dir",
         "List what is directly inside a folder: each entry's name, whether it is a folder, its kind and its size. Bounded to the first 200 entries. Use this before saying anything about what a folder contains.",
         r#"{"type":"object","properties":{"path":{"type":"string","description":"folder path; ~ means the home folder, and a relative path is read from the folder the user is in"}},"required":["path"]}"#,
+        Risk::Read,
     ),
     (
         "read_file",
         "Read the beginning of a text file (at most 16 kB). Binary files are refused with a note of what they are instead. Use this to answer questions about what a file actually says.",
         r#"{"type":"object","properties":{"path":{"type":"string"},"max_bytes":{"type":"integer","description":"how much to read, up to 16384"}},"required":["path"]}"#,
+        Risk::Read,
     ),
     (
         "stat",
         "One path's kind, size and modification time. Cheap — use it when you only need to know what something is.",
         r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        Risk::Read,
     ),
     (
         "treemap_summary",
         "Where a folder's bytes actually are: its heaviest direct children with their recursive sizes and file counts. This is what the treemap draws. Use it for 'what is taking up the space' questions.",
         r#"{"type":"object","properties":{"path":{"type":"string"},"top":{"type":"integer","description":"how many children to list, up to 12"}},"required":["path"]}"#,
+        Risk::Read,
+    ),
+    (
+        "mkdir",
+        "Create a folder inside the home-folder jail. Refuses an existing path.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"new folder path"}},"required":["path"]}"#,
+        Risk::Destructive,
+    ),
+    (
+        "rename",
+        "Rename one file or folder inside the home-folder jail. The new name must be a bare name and must not already exist.",
+        r#"{"type":"object","properties":{"path":{"type":"string"},"new_name":{"type":"string","description":"bare new name, with no path separators"}},"required":["path","new_name"]}"#,
+        Risk::Destructive,
+    ),
+    (
+        "trash",
+        "Move one file or folder inside the home-folder jail to the platform Trash. It is never permanently deleted.",
+        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        Risk::Destructive,
     ),
 ];
 
@@ -85,24 +109,21 @@ const TOOL_TABLE: [(&str, &str, &str); 4] = [
 pub fn tools() -> Vec<ToolSpec> {
     TOOL_TABLE
         .iter()
-        .map(|(name, description, schema)| ToolSpec::new(*name, *description, *schema))
+        .map(|(name, description, schema, _)| ToolSpec::new(*name, *description, *schema))
         .collect()
 }
 
-/// The same four tools as the desktop assistant learns them over the bus
-/// (`ai_service.rs`). All of them only look, so all of them are `Read`.
+/// The same seven tools as the desktop assistant learns them over the bus
+/// (`ai_service.rs`). Mutations are `Destructive`, so the router confirms
+/// them before a call reaches this app.
 pub fn service_manifest() -> ServiceManifest {
     let mut manifest = ServiceManifest::new(
         "files",
         "Files",
-        "The file browser. Its tools only read: list a folder, read the head of \
-         a text file, stat one path, and measure where a folder's bytes are \
-         (the treemap). Paths may be absolute, `~` for the home folder, or \
-         relative to the folder the person is looking at (its context line \
-         says which); anything outside the home is refused.",
+        "The file browser. Its tools list folders, read text, inspect metadata, measure folder sizes, create folders, rename items, and move items to Trash. Paths may be absolute, `~` for the home folder, or relative to the folder the person is looking at; anything outside the home is refused. Mutations require confirmation.",
     );
-    for (name, description, schema) in TOOL_TABLE {
-        manifest = manifest.with_tool(ToolDef::new(name, description, schema, Risk::Read));
+    for (name, description, schema, risk) in TOOL_TABLE {
+        manifest = manifest.with_tool(ToolDef::new(name, description, schema, risk));
     }
     manifest
 }
@@ -123,6 +144,8 @@ pub struct ToolOutcome {
     /// What the model is told.
     pub text: String,
     pub is_error: bool,
+    /// A successful filesystem mutation asks the UI to relist its folder.
+    pub mutated: bool,
 }
 
 /// The tool worker: one thread, one job at a time, results in call order.
@@ -176,8 +199,17 @@ pub fn run(job: &ToolJob) -> ToolOutcome {
 /// answer), and `progress` hears a permille as `treemap_summary` finishes
 /// each direct child — the only tool slow enough to be worth watching.
 pub fn run_with(job: &ToolJob, cancel: &AtomicBool, progress: &dyn Fn(u16)) -> ToolOutcome {
+    run_with_vfs(job, vfs().as_ref(), cancel, progress)
+}
+
+fn run_with_vfs(
+    job: &ToolJob,
+    fs: &dyn crate::vfs::Vfs,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u16),
+) -> ToolOutcome {
     let raw = arg(&job.args, "path");
-    let resolved = resolve(raw, &job.home, &job.cwd);
+    let resolved = resolve_with(raw, &job.home, &job.cwd, fs);
     let path = match resolved {
         Ok(path) => path,
         Err(error) => {
@@ -185,27 +217,32 @@ pub fn run_with(job: &ToolJob, cancel: &AtomicBool, progress: &dyn Fn(u16)) -> T
                 note: format!("refused {}", short(Path::new(raw), &job.home)),
                 text: error,
                 is_error: true,
+                mutated: false,
             }
         }
     };
     let shown = short(&path, &job.home);
     match job.name.as_str() {
-        "list_dir" => finish(list_dir(&path), format!("looked at {shown}"), shown),
+        "list_dir" => finish(list_dir(fs, &path), format!("looked at {shown}"), shown),
         "read_file" => {
             let max = number(arg(&job.args, "max_bytes")).unwrap_or(READ_LIMIT);
-            finish(read_file(&path, max), format!("read {shown}"), shown)
+            finish(read_file(fs, &path, max), format!("read {shown}"), shown)
         }
-        "stat" => finish(stat(&path), format!("checked {shown}"), shown),
+        "stat" => finish(stat(fs, &path), format!("checked {shown}"), shown),
         "treemap_summary" => {
             let top = number(arg(&job.args, "top"))
                 .unwrap_or(SUMMARY_TOP)
                 .clamp(1, SUMMARY_TOP);
-            finish(summary(&path, top, cancel, progress), format!("measured {shown}"), shown)
+            finish(summary(fs, &path, top, cancel, progress), format!("measured {shown}"), shown)
         }
+        "mkdir" => mkdir(fs, &path, &shown),
+        "rename" => rename(fs, &path, arg(&job.args, "new_name"), &job.home, &shown),
+        "trash" => trash(fs, &path, &job.home, &shown),
         other => ToolOutcome {
             note: format!("unknown tool {other}"),
             text: format!("there is no tool called {other}"),
             is_error: true,
+            mutated: false,
         },
     }
 }
@@ -222,11 +259,34 @@ fn finish(result: Result<(String, String), String>, verb: String, shown: String)
             },
             text,
             is_error: false,
+            mutated: false,
         },
         Err(error) => ToolOutcome {
             note: format!("could not read {shown}"),
             text: error,
             is_error: true,
+            mutated: false,
+        },
+    }
+}
+
+fn refused(shown: &str, text: impl Into<String>) -> ToolOutcome {
+    ToolOutcome {
+        note: format!("refused {shown}"),
+        text: text.into(),
+        is_error: true,
+        mutated: false,
+    }
+}
+
+fn mutation(result: Result<String, String>, note: String, failed_note: String) -> ToolOutcome {
+    match result {
+        Ok(text) => ToolOutcome { note, text, is_error: false, mutated: true },
+        Err(text) => ToolOutcome {
+            note: failed_note,
+            text,
+            is_error: true,
+            mutated: false,
         },
     }
 }
@@ -236,6 +296,10 @@ fn finish(result: Result<(String, String), String>, verb: String, shown: String)
 /// The path the model named, as a real path inside the user's home — or an
 /// explanation of why it is not going to get one.
 pub fn resolve(raw: &str, home: &Path, cwd: &Path) -> Result<PathBuf, String> {
+    resolve_with(raw, home, cwd, vfs().as_ref())
+}
+
+fn resolve_with(raw: &str, home: &Path, cwd: &Path, fs: &dyn crate::vfs::Vfs) -> Result<PathBuf, String> {
     let wanted = expand(raw, home, cwd);
     // Lexically first, so a path that walks out of the home is refused without
     // the disk being touched at all.
@@ -248,14 +312,31 @@ pub fn resolve(raw: &str, home: &Path, cwd: &Path) -> Result<PathBuf, String> {
     }
     // Then for real: canonicalising is what follows a symlink, and a link out
     // of the home is exactly the case the lexical check cannot see.
-    let real = match vfs().canonicalize(&wanted) {
+    let real = match fs.canonicalize(&wanted) {
         Ok(real) => real,
-        // The demo filesystem has no paths on disk at all, and neither does a
-        // path that is simply not there; both are the same answer here.
-        Err(_) if crate::vfs::is_demo() => wanted.clone(),
-        Err(error) => return Err(format!("{}: {error}", wanted.display())),
+        // A mutation may name a leaf that does not exist yet. Resolve the
+        // nearest existing ancestor so a symlink cannot smuggle that leaf
+        // outside the jail, then put the missing suffix back.
+        Err(_) if fs.is_demo() => wanted.clone(),
+        Err(first_error) => {
+            let mut ancestor = wanted.clone();
+            let mut suffix = Vec::new();
+            let canonical = loop {
+                let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+                    return Err(format!("{}: {first_error}", wanted.display()));
+                };
+                suffix.push(name);
+                if !ancestor.pop() {
+                    return Err(format!("{}: {first_error}", wanted.display()));
+                }
+                if let Ok(real) = fs.canonicalize(&ancestor) {
+                    break real;
+                }
+            };
+            suffix.into_iter().rev().fold(canonical, |path, name| path.join(name))
+        }
     };
-    let real_home = vfs().canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let real_home = fs.canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     if !within(&real, &real_home) {
         return Err(format!(
             "refused: {} leads outside {} — this assistant only looks inside the home folder",
@@ -336,6 +417,7 @@ fn arg<'a>(args: &'a [(String, String)], key: &str) -> &'a str {
 pub fn measure_for_test(path: &Path, cancel: &AtomicBool) -> (u64, u32, bool) {
     let mut budget = MEASURE_ENTRIES;
     measure(
+        vfs().as_ref(),
         path,
         makepad_widgets::Cx::monotonic_now() + MEASURE_BUDGET_SECS,
         &mut budget,
@@ -350,11 +432,131 @@ fn number(text: &str) -> Option<usize> {
 
 // ---------------------------------------------------------------- the tools
 
-fn list_dir(path: &Path) -> Result<(String, String), String> {
-    if !vfs().is_dir(path) {
+fn mkdir(fs: &dyn crate::vfs::Vfs, path: &Path, shown: &str) -> ToolOutcome {
+    if fs.exists(path) {
+        return refused(shown, format!("refused: {shown} already exists"));
+    }
+    mutation(
+        fs.mkdir(path).map(|()| format!("created folder {shown}")),
+        format!("created {shown}"),
+        format!("could not create {shown}"),
+    )
+}
+
+fn rename(
+    fs: &dyn crate::vfs::Vfs,
+    path: &Path,
+    new_name: &str,
+    home: &Path,
+    shown: &str,
+) -> ToolOutcome {
+    if let Some(problem) = crate::rename::name_error(new_name) {
+        return refused(shown, format!("refused: {problem}"));
+    }
+    if new_name.contains('\\') {
+        return refused(shown, "refused: a name cannot contain a path separator");
+    }
+    if path == home {
+        return refused(shown, "refused: the home folder itself cannot be renamed");
+    }
+    if !fs.exists(path) {
+        return refused(shown, format!("refused: there is nothing at {shown}"));
+    }
+    let Some(parent) = path.parent() else {
+        return refused(shown, format!("refused: {shown} has no parent folder"));
+    };
+    let target = parent.join(new_name);
+    if !within(&target, home) {
+        return refused(shown, "refused: the renamed path would leave the home folder");
+    }
+    if fs.exists(&target) {
+        return refused(
+            shown,
+            format!("refused: {} already exists", short(&target, home)),
+        );
+    }
+    let target_shown = short(&target, home);
+    mutation(
+        fs.rename(path, &target)
+            .map(|()| format!("renamed {shown} to {target_shown}")),
+        format!("renamed {shown} to {new_name}"),
+        format!("could not rename {shown}"),
+    )
+}
+
+fn trash(fs: &dyn crate::vfs::Vfs, path: &Path, home: &Path, shown: &str) -> ToolOutcome {
+    if path == home {
+        return refused(shown, "refused: the home folder itself cannot be trashed");
+    }
+    if !fs.exists(path) {
+        return refused(shown, format!("refused: there is nothing at {shown}"));
+    }
+    let trash_dir = crate::ops::trash_dir(home);
+    let trash_dir = match resolve_with(&trash_dir.display().to_string(), home, home, fs) {
+        Ok(path) => path,
+        Err(error) => return refused(shown, error),
+    };
+    if path == trash_dir {
+        return refused(shown, "refused: the Trash folder itself cannot be trashed");
+    }
+    if !fs.exists(&trash_dir) {
+        if let Err(error) = fs.mkdir(&trash_dir) {
+            return mutation(
+                Err(error),
+                String::new(),
+                format!("could not reach Trash for {shown}"),
+            );
+        }
+    } else if !fs.is_dir(&trash_dir) {
+        return refused(shown, "refused: the Trash path is not a folder");
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return refused(shown, format!("refused: {shown} has no movable name"));
+    };
+    let target = unique_destination(fs, &trash_dir, name);
+    mutation(
+        fs.rename(path, &target)
+            .map(|()| format!("moved {shown} to Trash as {}", target.file_name().unwrap().to_string_lossy())),
+        format!("trashed {shown}"),
+        format!("could not trash {shown}"),
+    )
+}
+
+/// Collision handling identical to the operations engine: suffix before an
+/// extension, or at the end for an extensionless name and a dotfile.
+fn unique_destination(fs: &dyn crate::vfs::Vfs, dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !fs.exists(&candidate) {
+        return candidate;
+    }
+    let path = Path::new(name);
+    let (stem, ext) = match (path.file_stem(), path.extension()) {
+        (Some(stem), Some(ext)) => (
+            stem.to_string_lossy().into_owned(),
+            ext.to_string_lossy().into_owned(),
+        ),
+        _ => (name.to_string(), String::new()),
+    };
+    let mut n = 2u64;
+    loop {
+        let candidate_name = if ext.is_empty() {
+            format!("{name} ({n})")
+        } else {
+            format!("{stem} ({n}).{ext}")
+        };
+        let candidate = dir.join(candidate_name);
+        if !fs.exists(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+fn list_dir(fs: &dyn crate::vfs::Vfs, path: &Path) -> Result<(String, String), String> {
+    if !fs.is_dir(path) {
         return Err(format!("{} is not a folder", path.display()));
     }
-    let entries = vfs().read_dir(path, false)?;
+    let entries = fs.read_dir(path, false)?;
     let total = entries.len();
     let mut out = format!("{} — {total} entries", path.display());
     if total > LIST_LIMIT {
@@ -372,15 +574,15 @@ fn list_dir(path: &Path) -> Result<(String, String), String> {
     Ok((format!("{total} entries"), out))
 }
 
-fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> {
-    if vfs().is_dir(path) {
+fn read_file(fs: &dyn crate::vfs::Vfs, path: &Path, max_bytes: usize) -> Result<(String, String), String> {
+    if fs.is_dir(path) {
         return Err(format!(
             "{} is a folder — use list_dir on it",
             path.display()
         ));
     }
-    let size = vfs().stat(path)?.size;
-    let data = vfs().read_bytes(path, max_bytes.clamp(1, READ_LIMIT))?;
+    let size = fs.stat(path)?.size;
+    let data = fs.read_bytes(path, max_bytes.clamp(1, READ_LIMIT))?;
     let kind = model::kind_for(path, false);
     let looked_at = data.len().min(4096);
     if data[..looked_at].contains(&0) {
@@ -426,8 +628,8 @@ fn read_file(path: &Path, max_bytes: usize) -> Result<(String, String), String> 
     Ok((model::format_size(cut as u64, false), out))
 }
 
-fn stat(path: &Path) -> Result<(String, String), String> {
-    let entry = entry_for(path)?;
+fn stat(fs: &dyn crate::vfs::Vfs, path: &Path) -> Result<(String, String), String> {
+    let entry = entry_for(fs, path)?;
     let mut out = format!(
         "{}\nkind: {}\nsize: {}\nmodified: {}",
         path.display(),
@@ -447,14 +649,14 @@ fn stat(path: &Path) -> Result<(String, String), String> {
 
 /// The entry for one path: straight off the disk when there is one, out of the
 /// parent's listing otherwise (which is the only way the demo can answer).
-fn entry_for(path: &Path) -> Result<FileEntry, String> {
-    if let Some(entry) = model::entry_at(path) {
+fn entry_for(fs: &dyn crate::vfs::Vfs, path: &Path) -> Result<FileEntry, String> {
+    if let Ok(entry) = fs.stat(path) {
         return Ok(entry);
     }
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent to look in", path.display()))?;
-    vfs()
+    fs
         .read_dir(parent, true)?
         .into_iter()
         .find(|e| e.path == path)
@@ -462,23 +664,24 @@ fn entry_for(path: &Path) -> Result<FileEntry, String> {
 }
 
 fn summary(
+    fs: &dyn crate::vfs::Vfs,
     path: &Path,
     top: usize,
     cancel: &AtomicBool,
     progress: &dyn Fn(u16),
 ) -> Result<(String, String), String> {
-    if !vfs().is_dir(path) {
+    if !fs.is_dir(path) {
         // A file has no children; saying so beats an empty table.
-        return stat(path);
+        return stat(fs, path);
     }
-    let entries = vfs().read_dir(path, false)?;
+    let entries = fs.read_dir(path, false)?;
     let deadline = makepad_widgets::Cx::monotonic_now() + MEASURE_BUDGET_SECS;
     let mut budget = MEASURE_ENTRIES;
     let mut measured: Vec<(String, u64, u32, bool)> = Vec::new();
     let mut complete = true;
     for (index, entry) in entries.iter().enumerate() {
         if entry.is_dir {
-            let (bytes, files, done) = measure(&entry.path, deadline, &mut budget, 0, cancel);
+            let (bytes, files, done) = measure(fs, &entry.path, deadline, &mut budget, 0, cancel);
             complete &= done;
             measured.push((entry.name.clone(), bytes, files, done));
         } else {
@@ -529,6 +732,7 @@ fn summary(
 /// that stopped early is a floor, and the caller says so rather than passing
 /// it off as the answer.
 fn measure(
+    fs: &dyn crate::vfs::Vfs,
     path: &Path,
     deadline: f64,
     budget: &mut usize,
@@ -544,13 +748,13 @@ fn measure(
     }
     // Never walk through a link: the tree below it is somebody else's, and it
     // can lead straight back to where we started.
-    if vfs().is_symlink(path).unwrap_or(false) {
+    if fs.is_symlink(path).unwrap_or(false) {
         return (0, 0, true);
     }
-    if model::skip_for_scan(path, &vfs().home()) {
+    if model::skip_for_scan(path, &fs.home()) {
         return (0, 0, true);
     }
-    let Ok(entries) = vfs().read_dir(path, true) else {
+    let Ok(entries) = fs.read_dir(path, true) else {
         return (0, 0, true);
     };
     let mut bytes = 0u64;
@@ -559,7 +763,8 @@ fn measure(
     for entry in entries {
         *budget = budget.saturating_sub(1);
         if entry.is_dir {
-            let (child_bytes, child_files, done) = measure(&entry.path, deadline, budget, depth + 1, cancel);
+            let (child_bytes, child_files, done) =
+                measure(fs, &entry.path, deadline, budget, depth + 1, cancel);
             bytes += child_bytes;
             files += child_files;
             complete &= done;
@@ -580,6 +785,7 @@ fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vfs::Vfs;
 
     fn home() -> PathBuf {
         PathBuf::from("/Users/someone")
@@ -653,7 +859,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_and_a_safe_name() {
         let tools = tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 7);
         for tool in &tools {
             assert!(tool
                 .name
@@ -663,34 +869,104 @@ mod tests {
             assert!(tool.parameters.contains("\"properties\""));
             assert!(!tool.description.is_empty());
         }
-        // Nothing that writes, moves, deletes or runs anything.
-        for forbidden in ["write", "delete", "move", "rename", "run", "exec", "shell"] {
-            assert!(
-                !tools.iter().any(|t| t.name.contains(forbidden)),
-                "a {forbidden} tool must never exist here"
-            );
-        }
+        assert!(tools.iter().any(|tool| tool.name == "mkdir"));
+        assert!(tools.iter().any(|tool| tool.name == "rename"));
+        assert!(tools.iter().any(|tool| tool.name == "trash"));
     }
 
     #[test]
-    fn the_bus_manifest_is_the_same_four_tools_and_validates() {
+    fn the_bus_manifest_has_the_table_and_validates() {
         let manifest = service_manifest();
         assert_eq!(manifest.id, "files");
         manifest.validate().expect("a manifest the wire accepts");
         assert_eq!(manifest.tools.len(), TOOL_TABLE.len());
-        for ((name, description, schema), tool) in TOOL_TABLE.iter().zip(&manifest.tools) {
+        for ((name, description, schema, risk), tool) in TOOL_TABLE.iter().zip(&manifest.tools) {
             assert_eq!(tool.name, *name);
             assert_eq!(tool.description, *description);
             assert_eq!(tool.parameters, *schema);
-            assert_eq!(tool.risk, Risk::Read, "{name} only looks");
+            assert_eq!(tool.risk, *risk);
             assert!(schema.contains(r#""type":"object""#), "{name}: an argument object");
         }
-        // Nothing that writes, moves, deletes or runs anything.
-        for forbidden in ["write", "delete", "move", "rename", "run", "exec", "shell"] {
-            assert!(
-                !manifest.tools.iter().any(|t| t.name.contains(forbidden)),
-                "a {forbidden} tool must never exist here"
+        for name in ["list_dir", "read_file", "stat", "treemap_summary"] {
+            assert_eq!(manifest.tool(name).unwrap().risk, Risk::Read);
+        }
+        for name in ["mkdir", "rename", "trash"] {
+            assert_eq!(manifest.tool(name).unwrap().risk, Risk::Destructive);
+        }
+    }
+
+    fn demo_job(home: &Path, name: &str, args: &[(&str, &str)]) -> ToolJob {
+        ToolJob {
+            name: name.to_string(),
+            args: args
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            cwd: home.join("Documents"),
+            home: home.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn mkdir_rename_and_trash_mutate_the_demo_vfs() {
+        let fs = crate::demo::DemoVfs::new();
+        let home = fs.home();
+        let created = home.join("Documents/assistant-created");
+        let renamed = home.join("Documents/assistant-renamed");
+
+        let outcome = run_with_vfs(
+            &demo_job(&home, "mkdir", &[("path", "assistant-created")]),
+            &fs,
+            &AtomicBool::new(false),
+            &|_| {},
+        );
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(outcome.mutated);
+        assert!(fs.is_dir(&created));
+
+        let outcome = run_with_vfs(
+            &demo_job(
+                &home,
+                "rename",
+                &[("path", "assistant-created"), ("new_name", "assistant-renamed")],
+            ),
+            &fs,
+            &AtomicBool::new(false),
+            &|_| {},
+        );
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(!fs.exists(&created));
+        assert!(fs.is_dir(&renamed));
+
+        let outcome = run_with_vfs(
+            &demo_job(&home, "trash", &[("path", "assistant-renamed")]),
+            &fs,
+            &AtomicBool::new(false),
+            &|_| {},
+        );
+        assert!(!outcome.is_error, "{}", outcome.text);
+        assert!(!fs.exists(&renamed));
+        assert!(fs.is_dir(&crate::ops::trash_dir(&home).join("assistant-renamed")));
+    }
+
+    #[test]
+    fn every_mutation_refuses_a_jail_escape() {
+        let fs = crate::demo::DemoVfs::new();
+        let home = fs.home();
+        for (tool, args) in [
+            ("mkdir", vec![("path", "/Outside/new")]),
+            ("rename", vec![("path", "/Outside/item"), ("new_name", "new")]),
+            ("trash", vec![("path", "/Outside/item")]),
+        ] {
+            let outcome = run_with_vfs(
+                &demo_job(&home, tool, &args),
+                &fs,
+                &AtomicBool::new(false),
+                &|_| {},
             );
+            assert!(outcome.is_error, "{tool}");
+            assert!(outcome.text.contains("refused"), "{tool}: {}", outcome.text);
+            assert!(!outcome.mutated, "{tool}");
         }
     }
 

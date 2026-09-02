@@ -386,6 +386,42 @@ impl TileGrid {
         self.area.redraw(cx);
     }
 
+    /// Every picture on the grid: id, title, link — what a host searches
+    /// over (the SMBC hover text rides in the title).
+    pub fn items(&self) -> Vec<(ItemId, String, String)> {
+        self.items.iter().map(|i| (i.id, i.title.to_string(), i.link.to_string())).collect()
+    }
+
+    pub fn count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Glide the camera onto one picture so it fills most of the view.
+    /// False when the id is not on the grid.
+    pub fn show_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        let Some(found) = self.items.iter().find(|i| i.id == item) else {
+            return false;
+        };
+        let (pos, size) = (found.pos, found.size);
+        if self.view_rect.size.x < 1.0 || self.view_rect.size.y < 1.0 {
+            return false;
+        }
+        let fit_x = self.view_rect.size.x * 0.7 / size.x.max(0.01) as f64;
+        let fit_y = self.view_rect.size.y * 0.7 / size.y.max(0.01) as f64;
+        self.zoom_anchor = None;
+        self.user_moved = true;
+        self.cam_scale_t = fit_x.min(fit_y).clamp(self.min_scale, 6000.0);
+        self.cam_pos_t = Vec2d { x: (pos.x + size.x * 0.5) as f64, y: (pos.y + size.y * 0.5) as f64 };
+        if !self.cam_ready {
+            self.cam_pos = self.cam_pos_t;
+            self.cam_scale = self.cam_scale_t;
+            self.cam_ready = true;
+        }
+        self.next_frame = cx.new_next_frame();
+        self.area.redraw(cx);
+        true
+    }
+
     fn ensure_open(&mut self, cx: &mut Cx) {
         if self.opened {
             return;
