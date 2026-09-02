@@ -13599,6 +13599,11 @@ p2 {}
         for cmd in cmds {
             match cmd {
                 DeckCmd::LoadTrack { deck, gen, item } => {
+                    log!(
+                        "deck-load: requested deck={deck:?} gen={gen} revision={} role=audio blob={}",
+                        item.revision,
+                        item.media_blob
+                    );
                     // A new load supersedes whatever the last one was still
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
@@ -13639,13 +13644,25 @@ p2 {}
                         });
                         continue;
                     }
-                    let Some(up) = self.up.as_mut() else { continue };
-                    let Some(runtime) = up.media.get_mut(AUDIO_LANE) else { continue };
+                    let Some(up) = self.up.as_mut() else {
+                        log!("deck-load: request stopped deck={deck:?} gen={gen}: no session");
+                        continue;
+                    };
+                    let Some(runtime) = up.media.get_mut(AUDIO_LANE) else {
+                        log!(
+                            "deck-load: request stopped deck={deck:?} gen={gen}: audio lane {AUDIO_LANE} absent (lanes={})",
+                            up.media.len()
+                        );
+                        continue;
+                    };
                     if let Ok(id) = runtime.submit(ClientRequest::FetchBlob {
                         blob: item.media_blob,
                         expected_len: Some(item.media_len),
                         pin: false,
                     }) {
+                        log!(
+                            "deck-load: asset-client queued deck={deck:?} gen={gen} role=audio request={id}"
+                        );
                         self.media_reqs.insert(
                             (AUDIO_LANE, id),
                             MediaPurpose::Deck { deck, gen, media: item.media },
@@ -15190,7 +15207,16 @@ p2 {}
             for event in events {
                 let id = event.id();
                 match event {
-                    ClientEvent::Started { .. } | ClientEvent::Progress { .. } => {}
+                    ClientEvent::Started { .. } => {
+                        if let Some(MediaPurpose::Deck { deck, gen, .. }) =
+                            self.media_reqs.get(&(lane, id))
+                        {
+                            log!(
+                                "deck-load: asset-client fetch issued deck={deck:?} gen={gen} role=audio request={id}"
+                            );
+                        }
+                    }
+                    ClientEvent::Progress { .. } => {}
                     ClientEvent::Done { output, .. } => {
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
                             continue;
@@ -15246,6 +15272,9 @@ p2 {}
                                 }
                             }
                             MediaPurpose::Deck { deck, gen, media } => {
+                                log!(
+                                    "deck-load: bytes arrived deck={deck:?} gen={gen} role=audio"
+                                );
                                 self.decode.submit(DecodeJob::Deck { deck, gen, source, media });
                             }
                             MediaPurpose::Preview { gen, media } => {
@@ -15332,6 +15361,7 @@ p2 {}
                 }
             }
             MediaPurpose::Deck { deck, gen, .. } => {
+                log!("deck-load: failed deck={deck:?} gen={gen}: fetch {error}");
                 self.set_web_status_error(format!("music load: {error}"));
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
@@ -16433,6 +16463,7 @@ p2 {}
                         self.run_deck_cmds(cx, cmds);
                         self.run_deck_cmds(cx, trim_cmds);
                         if installed {
+                            log!("deck-load: ready deck={deck:?} gen={gen}");
                             // Marks saved for this track come back with it,
                             // and so does the red marker: a track starts
                             // where the operator left it, not at the top.
@@ -16473,6 +16504,7 @@ p2 {}
                         self.sync_deck_controls(cx);
                     }
                     Err(error) => {
+                        log!("deck-load: failed deck={deck:?} gen={gen}: {error}");
                         self.set_web_status_error(format!("music decode: {error}"));
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
@@ -24850,6 +24882,12 @@ p2 {}
                 }
             };
             if let Some(item) = self.track_item_at(index) {
+                log!(
+                    "deck-load: row clicked asset={} revision={} target={:?}",
+                    item.asset,
+                    item.revision,
+                    self.deck_target
+                );
                 self.deck_hands_on();
                 let cmds = self.decks.click(item, self.deck_target);
                 self.run_deck_cmds(cx, cmds);

@@ -3490,10 +3490,21 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
 fn run_heavy_job(job: DecodeJob) -> DecodeDone {
     match job {
         DecodeJob::Deck { deck, gen, source, media } => {
+            makepad_widgets::log!(
+                "deck-load: decode started deck={deck:?} gen={gen} media={media:?}"
+            );
             let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = wave_peaks(&pcm, WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
+            match &result {
+                Ok(_) => makepad_widgets::log!(
+                    "deck-load: decode finished deck={deck:?} gen={gen} ok"
+                ),
+                Err(error) => makepad_widgets::log!(
+                    "deck-load: decode finished deck={deck:?} gen={gen} error={error}"
+                ),
+            }
             DecodeDone::Deck { deck, gen, result }
         }
         DecodeJob::Pad { pad, gen, revision, source, media } => {

@@ -162,5 +162,10 @@ pub fn session_config_from_env() -> SessionConfig {
 pub fn session_config_from_env() -> SessionConfig {
     let base = makepad_asset_client::BaseUrl::parse("https://makepad.nl/vj/store/")
         .expect("valid built-in VJ static-store URL");
-    SessionConfig::static_site(base)
+    let mut config = SessionConfig::static_site(base);
+    // Keep the same lane indices as the native VJ. In particular, deck
+    // audio is hard-routed to AUDIO_LANE (2); StaticSite's generic one-lane
+    // default cannot service that request.
+    config.media_lanes = crate::lanes::lane_leaves();
+    config
 }
