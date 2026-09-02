@@ -192,7 +192,8 @@ use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
-    RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
+    ClientMode, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
+    TierPreference,
 };
 use makepad_asset_data::{
     Anchor, AssetId, AssetKind, AssetManifest, AssetRevisionId, BlobId, DeviceTier, FileRole,
@@ -2811,6 +2812,7 @@ script_mod! {
             }
 
             output_window := Window{
+                create_on_start: false
                 window.title: "VJ Output"
                 window.inner_size: vec2(1280, 720)
                 window.position: vec2(720, 220)
@@ -3721,9 +3723,9 @@ struct BillboardSlot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum OutputWindowLifecycle {
     #[default]
-    Open,
     Closed,
     Opening,
+    Open,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3742,6 +3744,17 @@ fn output_window_command(
         OutputWindowLifecycle::Opening => None,
         OutputWindowLifecycle::Open if is_macos => Some(OutputWindowCommand::Deminiaturize),
         OutputWindowLifecycle::Open => Some(OutputWindowCommand::Restore),
+    }
+}
+
+fn output_window_available() -> Result<(), ClientError> {
+    if cfg!(target_arch = "wasm32") {
+        Err(ClientError::Unavailable {
+            capability: "output_window",
+            mode: ClientMode::StaticWeb,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -6937,10 +6950,6 @@ pub struct App {
     // demand instead of leaving its WindowHandle permanently closed.
     #[rust(OutputWindowLifecycle::default())]
     output_window_lifecycle: OutputWindowLifecycle,
-    /// One-shot: close the output window on the first pump tick unless
-    /// `VJ_OUTPUT=1` (default-closed is cleaner while testing).
-    #[rust(true)]
-    output_close_on_start: bool,
     /// Which console page and which output page are up. A walked level
     /// raycasts its collision mesh sixty times a second and re-renders a
     /// full pass; `sync_mesh_liveness` uses these to stop that for a picture
@@ -13682,20 +13691,6 @@ p2 {}
         // Lazy vjeffect thumbnails: feed the one-at-a-time offscreen
         // renderer and land its finished sheets in the thumb decode lane.
         self.pump_fx_thumbs(cx);
-        // The output window starts CLOSED (cleaner for testing; the OUTPUT
-        // button reopens it). Done here, not in Startup, because the native
-        // window may not exist yet at Startup; `VJ_OUTPUT=1` keeps the old
-        // open-at-launch behaviour. One-shot.
-        if self.output_close_on_start {
-            let wanted_open = std::env::var("VJ_OUTPUT").is_ok_and(|v| v == "1");
-            let output = self.ui.window(cx, ids!(output_window));
-            if wanted_open {
-                self.output_close_on_start = false;
-            } else if output.window_id().is_some() {
-                self.close_output_window(cx);
-                self.output_close_on_start = false;
-            }
-        }
         self.retry_lighting_if_due();
         // Refresh the worker watchdog and, only while the physical button is
         // held, its shorter hazardous-output heartbeat.
@@ -17693,10 +17688,11 @@ p2 {}
         }
     }
 
-    fn open_output_window(&mut self, cx: &mut Cx) {
+    fn open_output_window(&mut self, cx: &mut Cx) -> Result<(), ClientError> {
+        output_window_available()?;
         let output = self.ui.window(cx, ids!(output_window));
         let Some(window_id) = output.window_id() else {
-            return;
+            return Ok(());
         };
         let command = output_window_command(
             self.output_window_lifecycle,
@@ -17728,6 +17724,7 @@ p2 {}
             }
             None => {}
         }
+        Ok(())
     }
 
     /// Put the output window away. The widget tree, its render pass and the
@@ -17735,6 +17732,13 @@ p2 {}
     /// `OutputWindowCommand::Recreate` reopens — so this is symmetric with
     /// `open_output_window` and never rebuilds the Root.
     fn close_output_window(&mut self, cx: &mut Cx) {
+        if output_window_available().is_err()
+            || self.output_window_lifecycle == OutputWindowLifecycle::Closed
+        {
+            self.output_window_lifecycle = OutputWindowLifecycle::Closed;
+            self.sync_output_button(cx);
+            return;
+        }
         let output = self.ui.window(cx, ids!(output_window));
         let Some(window_id) = output.window_id() else {
             return;
@@ -24440,6 +24444,13 @@ p2 {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.status_text = "starting…".to_string();
+        let output_available = output_window_available().is_ok();
+        self.ui
+            .button(cx, ids!(open_output))
+            .set_enabled(cx, output_available);
+        self.ui
+            .widget(cx, ids!(open_output))
+            .set_disabled(cx, !output_available);
         #[cfg(target_arch = "wasm32")]
         self.browser_store.start(cx);
         self.decode.start(cx.thread_spawner());
@@ -25944,7 +25955,12 @@ impl MatchEvent for App {
             // output window away again.
             match self.output_window_lifecycle {
                 OutputWindowLifecycle::Open => self.close_output_window(cx),
-                _ => self.open_output_window(cx),
+                _ => {
+                    if let Err(error) = self.open_output_window(cx) {
+                        log!("output window refused: {error}");
+                        self.status_text = error.to_string();
+                    }
+                }
             }
         }
     }
@@ -26753,6 +26769,10 @@ mod sync_tests {
 
     #[test]
     fn output_window_recreates_after_close_and_restores_when_still_alive() {
+        assert_eq!(
+            output_window_command(OutputWindowLifecycle::default(), false),
+            Some(OutputWindowCommand::Recreate)
+        );
         assert_eq!(
             output_window_command(OutputWindowLifecycle::Closed, false),
             Some(OutputWindowCommand::Recreate)

@@ -434,6 +434,22 @@ impl WindowHandle {
         window
     }
 
+    /// Cancels the create queued by [`Self::new`] while leaving the stable
+    /// window slot available for an explicit later `CreateWindow`.
+    ///
+    /// This only affects a surface that has not been created yet and never
+    /// closes an existing native window.
+    pub fn cancel_initial_create(&self, cx: &mut Cx) -> bool {
+        let window_id = self.window_id();
+        if cx.windows[window_id].is_created {
+            return false;
+        }
+        let old_len = cx.platform_ops.len();
+        cx.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::CreateWindow(id) if *id == window_id));
+        cx.platform_ops.len() != old_len
+    }
+
     /// Creates a popup window that must be explicitly closed by the app.
     ///
     /// The framework sends `Event::PopupDismissed` when the popup should be
