@@ -294,15 +294,27 @@ pub fn word_match(haystack: &str, pattern: &str) -> bool {
     false
 }
 
-/// The checkout root when wm runs from `target/<profile>/wm`, else
-/// MAKEPAD_WM_ROOT, else none.
+/// The checkout root: `MAKEPAD_WM_ROOT`, else the checkout above the
+/// running exe (`target/<profile>/wm`), else the checkout at or above the
+/// current directory — a wm started from the repo root with its target
+/// dir elsewhere (CARGO_TARGET_DIR) is still running out of a checkout,
+/// and every app is then one `cargo run` away.
 pub fn repo_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("MAKEPAD_WM_ROOT") {
         return Some(PathBuf::from(root));
     }
-    let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent()?.to_path_buf();
-    for _ in 0..4 {
+    let from_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .and_then(|dir| checkout_at_or_above(&dir));
+    from_exe.or_else(|| std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)))
+}
+
+/// The nearest directory at or above `start` (four levels at most) that is
+/// a makepad checkout: a workspace `Cargo.toml` beside a `local/` dir.
+fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    for _ in 0..5 {
         if dir.join("Cargo.toml").exists() && dir.join("local").exists() {
             return Some(dir);
         }
@@ -311,11 +323,15 @@ pub fn repo_root() -> Option<PathBuf> {
     None
 }
 
-/// Resolve a sibling binary of the running wm executable.
+/// Resolve a sibling binary of the running wm executable (`.exe` on
+/// Windows, where a bare name never exists).
 pub fn resolve_bin(bin: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let path = dir.join(bin);
+    let mut path = dir.join(bin);
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
     path.exists().then_some(path)
 }
 
