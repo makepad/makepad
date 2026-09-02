@@ -22,6 +22,7 @@ where they are RELATIVE to each other; never place tiles, never invent
 coordinates. The source's first statement:
     let p = world.plan({
       seed: 7,
+      biome: "temperate",   // the WORLD: temperate | alpine | desert | woodland | tundra
       terrain: {size: 200, relief: "rolling"},      // flat | rolling | hilly | mountain
       landforms: [{id: "crag", kind: "ridge", at: "northwest", r: 50, height: 22}],
       water: [{id: "brook", kind: "river", from: "west", to: "east", width: 9}],
@@ -45,6 +46,18 @@ Kinds: landform mountain|hill|ridge|valley|crater|plateau · water river ·
 corridor road|highway|rail|monorail (`closed: true` + `size` = a loop;
 `path: [vec3…]` = exact waypoints; `radius` rounds corners) · place
 town|village|city (`size`: tiny|small|medium|large or metres).
+BIOMES: `biome` shapes the whole map — alpine = jagged ridged peaks, a
+snowline (snow ground, snow on roofs and decks, white road shoulders),
+frozen tarns, pines then bare rock above the treeline; desert = dunes,
+mesas, sand and dry grass, every river a dry WADI (carved, bridged, no
+water), lakes are the only water = OASES, cacti and scrub; woodland =
+rolling loam under dense broadleaf; tundra = flat moss, frozen lakes you
+walk on, low shrubs. Ground grips by material (sand and snow slow, ice
+slides). `biomes: [{id, kind, at, r}]` paints regions blended at their
+edges. "a snowy mountain world with a village in the valley" =
+world.plan({biome: "alpine", places: [{kind: "village", at: "centre"}]}).
+Savanna, tropical, volcanic are REFUSED by name. game.ground_paint
+({biome, seed}) repaints a running world's ground alone.
 ANCHORS: "north"/"south"/"east"/"west"/"northeast"…/"centre";
 "<river>:east_bank|west_bank|north_bank|south_bank|centre|source|mouth";
 "<place>:north|south|east|west|centre"; "<corridor>@0.3" (fraction along
@@ -107,6 +120,13 @@ world (they are deterministic from seed):
   per slot + game.autodrive (rivals) + game.race({laps}). The circuit is
   RATED: design_speed above what its corners hold is refused (grow size);
   runoff (m) is a buffer nothing builds in. A kart track = small size.
+  HILLY WORKS: on game.terrain({relief:"hilly"}) the deck rides the hills
+  (cut into crests, bridged over dips) and the car drives the track, not
+  the ground. The PLAYER is a game.racecar (SIM tier) placed on slots[0];
+  it can flip. Rivals: a game.racecar per other slot + game.autodrive(id,
+  {points: waypoints}). The driver cycles cameras with C (chase, cockpit,
+  hood, trackside TV, orbit). A hilly race with rivals = terrain hilly + racetrack +
+  racecar on slots[0] + rivals autodriving the waypoints + game.race.
 - game.coaster({pos, heading, lift_height, loops, corkscrews, hills}) ->
   {line, slot, station}: a ROLLERCOASTER in one call — solved against the
   g limits, on pylons, loops and corkscrews real; then game.train({line,
@@ -276,6 +296,10 @@ EDITING A LIVE WORLD — route by the NATURE of the ask, never its size:
   (…-head/-upper/-lower) never. Read the description's "from behind"
   segment — the player sees the back. changed:false = a no-op, offer
   `alternatives`.
+- WEBCAM CONTROL ("make my webcam control me", "control my character with
+  the camera"): ONE call, game.mocap() — the camera drives the player's own
+  rig on a fleet body box. game.mocap({who: <entity id>}) puppeteers another
+  rigged character; game.mocap_off() releases it.
 - REMOVE a spawned thing: world.remove({tag}). TUNE ("make it night",
   "cars slower"): world.tune({time: 22} | {car_speed: 0.6}) — retroactive,
   nothing else changes. ADD MANY ("a forest", "a crowd"):
@@ -310,3 +334,19 @@ mountain in the glide path — move it). It parks an AI plane that flies
 circuits above the registry's altitude floor; game.helipad({pos}) for
 helicopters. Planes that reach the map edge are turned back, then brought
 home to the strip. Never hand-build a runway from boxes.
+RINGS (a flying game): after `let F = game.airfield({...})`,
+game.rings({start: F.b, heading: F.heading, count, radius, spacing, altitude:
+{min, max}}) lays a SOLVED ring course over the hills — a smooth loop of
+torus gates the plane can fly (turn radius and climb angle are hard limits,
+every gate over the ground and inside the map, a clearance tube nothing is
+built through). game.ring_run({player: plane}) arms the run; game.ring_status()
+feeds the HUD (passed/missed/next/next_dist/time/best/event + airspeed, agl,
+heading, throttle). The player's plane: game.plane({model: "sim", pos: near
+F.a, yaw}) on a game.spawnpoint + game.player_character 2.9 m beside the wing
+root and 1.9 m behind the centre, facing down the strip (E boards only within
+3.5 m and in the pilot's forward cone; C cycles chase/cockpit/orbit/tower/
+flyby). radius is the RING's radius in metres (3..20, 6.5 for a trainer),
+spacing >= 120 m for the 80 m default turn; terrain amp <= 8 or game.airfield
+finds no flat ground and returns nil (never read F.b from nil). "make me a
+ring flying course over the hills" = terrain hilly + airfield + rings + plane
++ pilot + a HUD from ring_status. Never place rings by hand.
