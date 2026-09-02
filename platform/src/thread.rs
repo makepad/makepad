@@ -35,8 +35,9 @@ pub use makepad_network::{
     UiWaker,
 };
 
-pub fn lock_from_ui<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // A browser UI thread cannot use the futex wait that a contended wasm Mutex::lock performs.
+fn lock_without_wasm_wait<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Browser UI and AudioWorklet threads cannot use the futex wait that a
+    // contended wasm Mutex::lock performs.
     #[cfg(target_arch = "wasm32")]
     loop {
         match mutex.try_lock() {
@@ -47,6 +48,16 @@ pub fn lock_from_ui<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+pub fn lock_from_ui<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock_without_wasm_wait(mutex)
+}
+
+/// Lock from a realtime audio callback without entering `Atomics.wait` on
+/// wasm. Native targets retain the ordinary blocking mutex behaviour.
+pub fn lock_from_audio<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock_without_wasm_wait(mutex)
 }
 
 pub(crate) fn wake_ui_event_loop() {
