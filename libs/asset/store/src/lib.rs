@@ -84,8 +84,8 @@ pub use cas::{BlobCommit, Cas, MemoryCas};
 pub use cas_file::{BlobWriter, FsCas};
 pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
 pub use core::{
-    AssetDetail, CatalogCore, PublicAliasHead, PublicExportAsset, PublicExportFilter,
-    PublicExportPage, PublicSearchProjection, PublicSearchTerm, PublishBatchItem,
+    AssetDetail, CatalogCore, PublicAliasHead, PublicAssetRevision, PublicExportAsset,
+    PublicExportFilter, PublicExportPage, PublicSearchProjection, PublicSearchTerm, PublishBatchItem,
     PublishBatchOutcome, SERVER_SCHEMA_VERSION,
 };
 #[cfg(any(target_arch = "wasm32", feature = "embedded"))]

@@ -10,7 +10,7 @@ use crate::host::api::{asset_manifest_value, kind_str, media_str, role_str};
 use crate::host::json::{obj, s, Value};
 use crate::static_export_core::{brotli_bytes, ExportEntry, ExportPlan, ExportSink, ExportStep};
 use crate::{
-    AssetServerCore, CandidateState, PublicExportAsset, PublicExportFilter,
+    AssetServerCore, PublicExportAsset, PublicExportFilter,
 };
 use makepad_asset_data::{
     sha256, sha256_hex, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
@@ -59,9 +59,13 @@ pub struct StaticExportReport {
     pub blobs_present: u64,
     pub blobs_omitted: u64,
     pub unique_blob_bytes: u64,
+    pub live_assets_considered: u64,
     pub excluded_rights: u64,
     pub excluded_budget: u64,
     pub excluded_kind_mismatch: u64,
+    pub excluded_namespace_mismatch: u64,
+    pub excluded_no_published_revisions: u64,
+    pub excluded_limit: u64,
 }
 
 #[derive(Clone)]
@@ -657,16 +661,11 @@ fn export_into(
 ) -> ServerResult<StaticExportReport> {
     let mut roots = Vec::new();
     let mut after = None;
-    let wanted = options.limit.unwrap_or(u64::MAX);
-    while (roots.len() as u64) < wanted {
-        let page_size = core
-            .budgets()
-            .max_search_results
-            .min((wanted - roots.len() as u64).min(u32::MAX as u64) as u32)
-            .max(1);
+    loop {
+        let page_size = core.budgets().max_search_results;
         let page = core.public_export_page(PublicExportFilter {
-            namespace: options.namespace.as_deref(),
-            kind: options.kind,
+            namespace: None,
+            kind: None,
             after,
             limit: page_size,
         })?;
@@ -680,14 +679,38 @@ fn export_into(
     let mut graph = BTreeMap::new();
     let mut denied = BTreeSet::new();
     let mut allowed_roots = Vec::new();
-    let mut report = StaticExportReport::default();
+    let mut report = StaticExportReport {
+        live_assets_considered: roots.len() as u64,
+        ..StaticExportReport::default()
+    };
     for root in roots {
+        if options
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| root.row.namespace != namespace)
+        {
+            report.excluded_namespace_mismatch += 1;
+            continue;
+        }
+        if root.row.revisions.is_empty() {
+            report.excluded_no_published_revisions += 1;
+            continue;
+        }
+        if options.kind.is_some_and(|kind| {
+            root.row.revisions.iter().any(|revision| revision.kind != kind)
+        }) {
+            report.excluded_kind_mismatch += 1;
+            continue;
+        }
+        if allowed_roots.len() as u64 == options.limit.unwrap_or(u64::MAX) {
+            report.excluded_limit += 1;
+            continue;
+        }
         let mut allowed = true;
-        let mut kind_mismatch = false;
-        for alias in &root.row.aliases {
+        for revision in &root.row.revisions {
             if !load_revision(
                 core,
-                alias.target,
+                revision.target,
                 0,
                 &mut BTreeSet::new(),
                 &mut denied,
@@ -696,18 +719,9 @@ fn export_into(
                 allowed = false;
                 break;
             }
-            if let Some(kind) = options.kind {
-                if graph[&alias.target.revision].kind != kind {
-                    kind_mismatch = true;
-                    allowed = false;
-                    break;
-                }
-            }
         }
         if allowed {
             allowed_roots.push(root);
-        } else if kind_mismatch {
-            report.excluded_kind_mismatch += 1;
         } else {
             report.excluded_rights += 1;
         }
@@ -722,7 +736,10 @@ fn export_into(
     let mut mandatory_global: BTreeMap<BlobId, u64> = BTreeMap::new();
     let mut kept_roots = Vec::new();
     for root in allowed_roots {
-        let revisions = closure(root.row.aliases.iter().map(|alias| alias.target.revision), &graph);
+        let revisions = closure(
+            root.row.revisions.iter().map(|revision| revision.target.revision),
+            &graph,
+        );
         let mandatory = root_mandatory_blobs(&revisions, &graph, &variants)?;
         let per_asset = mandatory.values().try_fold(0u64, |sum, value| sum.checked_add(*value));
         let Some(per_asset) = per_asset else {
@@ -759,7 +776,12 @@ fn export_into(
     let reachable = closure(
         kept_roots
             .iter()
-            .flat_map(|root| root.row.aliases.iter().map(|alias| alias.target.revision)),
+            .flat_map(|root| {
+                root.row
+                    .revisions
+                    .iter()
+                    .map(|revision| revision.target.revision)
+            }),
         &graph,
     );
     let variants: Vec<RewrittenSet> = variants
@@ -769,7 +791,10 @@ fn export_into(
 
     let mut revision_owners: BTreeMap<AssetRevisionId, BTreeSet<AssetId>> = BTreeMap::new();
     for root in &kept_roots {
-        let own = closure(root.row.aliases.iter().map(|alias| alias.target.revision), &graph);
+        let own = closure(
+            root.row.revisions.iter().map(|revision| revision.target.revision),
+            &graph,
+        );
         for revision in own {
             revision_owners.entry(revision).or_default().insert(root.row.asset_id);
         }
@@ -936,6 +961,9 @@ fn export_into(
     let mut generated_ms = 0u64;
     for root in &kept_roots {
         generated_ms = generated_ms.max(root.row.created_ms).max(root.row.search.updated_ms);
+        for revision in &root.row.revisions {
+            generated_ms = generated_ms.max(revision.staged_ms).max(revision.published_ms);
+        }
         for alias in &root.row.aliases {
             generated_ms = generated_ms.max(alias.updated_ms).max(alias.published_ms);
         }
@@ -959,10 +987,14 @@ fn export_into(
         }
     }
     for root in &kept_roots {
-        let mut revisions = BTreeSet::new();
+        let revisions: BTreeSet<_> = root
+            .row
+            .revisions
+            .iter()
+            .map(|revision| rewritten[&revision.target.revision].id)
+            .collect();
         for alias in &root.row.aliases {
             let export_revision = rewritten[&alias.target.revision].id;
-            revisions.insert(export_revision);
             let alias_value = obj(vec![
                 ("alias", s(alias.alias.to_string())),
                 ("asset_id", s(root.row.asset_id.to_string())),
@@ -1001,34 +1033,21 @@ fn export_into(
             ("created_ms", Value::Int(root.row.created_ms as i64)),
             ("revisions", Value::Arr(revisions.iter().map(|revision| s(revision.to_string())).collect())),
         ]));
-        let candidates = root
+        let mut candidates = root
             .row
-            .aliases
+            .revisions
             .iter()
-            .map(|alias| {
-                let row = core
-                    .catalog()
-                    .asset_candidates(&root.row.asset_id, 512)?
-                    .into_iter()
-                    .find(|candidate| candidate.revision == alias.target.revision)
-                    .ok_or(ServerError::NotFound { what: "static export candidate" })?;
-                if row.state != CandidateState::Published {
-                    return Err(ServerError::InvalidState {
-                        what: "static export candidate",
-                        state: "not published",
-                    });
-                }
-                Ok(obj(vec![
-                    ("revision", s(rewritten[&alias.target.revision].id.to_string())),
+            .map(|revision| {
+                obj(vec![
+                    ("revision", s(rewritten[&revision.target.revision].id.to_string())),
                     ("state", s("published")),
-                    ("staged_ms", Value::Int(row.staged_ms as i64)),
-                    ("published_ms", Value::Int(row.published_ms.unwrap_or(0) as i64)),
+                    ("staged_ms", Value::Int(revision.staged_ms as i64)),
+                    ("published_ms", Value::Int(revision.published_ms as i64)),
                     ("quarantined_ms", Value::Null),
                     ("retired_ms", Value::Null),
-                ]))
+                ])
             })
-            .collect::<ServerResult<Vec<_>>>()?;
-        let mut candidates = candidates;
+            .collect::<Vec<_>>();
         candidates.sort_by(|a, b| a.to_json().cmp(&b.to_json()));
         candidates.dedup();
         let detail = obj(vec![
@@ -1045,10 +1064,11 @@ fn export_into(
             true,
         )?;
         let search = &root.row.search;
+        let kind = root.row.revisions.last().map(|revision| revision.kind);
         search_values.push(obj(vec![
             ("asset_id", s(root.row.asset_id.to_string())),
             ("namespace", s(root.row.namespace.clone())),
-            ("kind", match search.kind { Some(kind) => s(kind_str(kind)), None => Value::Null }),
+            ("kind", match kind { Some(kind) => s(kind_str(kind)), None => Value::Null }),
             ("title", s(search.title.clone())),
             ("description", s(search.description.clone())),
             ("categories", values(&search.categories)),
@@ -1188,6 +1208,7 @@ fn export_into(
                 ("include_video_up_to", Value::Int(options.include_video_up_to as i64)),
             ])),
             ("totals", obj(vec![
+                ("live_assets_considered", Value::Int(report.live_assets_considered as i64)),
                 ("assets", Value::Int(kept_roots.len() as i64)),
                 ("aliases", Value::Int(alias_values.len() as i64)),
                 ("revisions", Value::Int(exported_revisions.len() as i64)),
@@ -1199,6 +1220,9 @@ fn export_into(
                 ("rights", Value::Int(report.excluded_rights as i64)),
                 ("budget", Value::Int(report.excluded_budget as i64)),
                 ("kind_mismatch", Value::Int(report.excluded_kind_mismatch as i64)),
+                ("namespace_mismatch", Value::Int(report.excluded_namespace_mismatch as i64)),
+                ("no_published_revisions", Value::Int(report.excluded_no_published_revisions as i64)),
+                ("limit", Value::Int(report.excluded_limit as i64)),
             ])),
         ])
     };
