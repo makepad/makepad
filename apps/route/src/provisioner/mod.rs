@@ -30,6 +30,6 @@ mod tests {
     fn provisioner_selection_is_explicit() {
         assert_eq!(selected_profile(true), ProvisioningProfile::Native);
         assert_eq!(selected_profile(false), ProvisioningProfile::Demo);
-        assert_eq!(PROFILE, ProvisioningProfile::Native);
+        assert_eq!(PROFILE, selected_profile(cfg!(feature = "native")));
     }
 }

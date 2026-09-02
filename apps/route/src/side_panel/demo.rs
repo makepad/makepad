@@ -18,7 +18,7 @@ script_mod! {
         draw_text +: {text_style: theme.font_regular{font_size: 10}}
     }
 
-    mod.widgets.RouteSidePanel = View{
+    mod.widgets.RouteSidePanel = SolidView{
         width: 390
         height: Fill
         flow: Down

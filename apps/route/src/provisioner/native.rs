@@ -32,7 +32,8 @@ impl MapProvisioner {
             return None;
         }
         if self.build.paths.archive.is_file() {
-            return self.adopt_test_map(cx, map);
+            self.adopt_existing_test_map(cx, map);
+            return None;
         }
         self.build.offer_if_no_map(false);
         if self.build.is_offered() {
@@ -44,7 +45,7 @@ impl MapProvisioner {
     pub fn handle_event(&mut self, cx: &mut Cx, map: &MapViewRef) -> ProvisionerUpdate {
         let changed = self.build.poll();
         let nav_basename = if matches!(self.build.stage, crate::testmap::Stage::Done) {
-            self.adopt_test_map(cx, map)
+            self.adopt_completed_test_map(cx, map)
         } else {
             None
         };
@@ -54,14 +55,21 @@ impl MapProvisioner {
         }
     }
 
-    fn adopt_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
+    fn adopt_existing_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) {
         if self.adopted {
-            return None;
+            return;
         }
         self.adopted = true;
         let archive = self.build.paths.archive.to_string_lossy().into_owned();
         map.set_source_paths(cx, &archive, &archive, "");
         map.set_overlay_paths(cx, "");
+    }
+
+    fn adopt_completed_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
+        if self.adopted {
+            return None;
+        }
+        self.adopt_existing_test_map(cx, map);
         map.set_center(cx, crate::AMSTERDAM_CENTER.0, crate::AMSTERDAM_CENTER.1);
         Some(self.build.paths.nav_basename.to_string_lossy().into_owned())
     }

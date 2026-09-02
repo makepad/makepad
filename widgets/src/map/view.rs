@@ -1679,6 +1679,9 @@ pub struct MapView {
     /// probed at z13/z12 — those tiles cannot exist.
     #[rust]
     local_source_zoom_range: Option<(u32, u32)>,
+    /// Last non-default range announced for this source installation.
+    #[rust]
+    local_source_logged_zoom_range: Option<(u32, u32)>,
     #[rust]
     local_source_zoom_range_path: Option<String>,
     /// True when the metadata read ran while the archive file existed.
@@ -3884,6 +3887,7 @@ impl MapView {
         self.archive_pending_tiles.clear();
         self.pending_ready_tiles.clear();
         self.local_source_zoom_range = None;
+        self.local_source_logged_zoom_range = None;
         self.local_source_zoom_range_path = None;
         self.local_source_zoom_range_checked = false;
     }
@@ -6077,12 +6081,15 @@ impl MapView {
         let range = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range);
         if let Some((min, max)) = range {
             self.local_source_zoom_range = Some((min, max));
-            if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
-                log!(
-                    "MapView: archive declares zoom range z{}-z{}; clamping tile requests",
-                    min,
-                    max
-                );
+            if self.local_source_logged_zoom_range != Some((min, max)) {
+                if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
+                    log!(
+                        "MapView: archive declares zoom range z{}-z{}; clamping tile requests",
+                        min,
+                        max
+                    );
+                }
+                self.local_source_logged_zoom_range = Some((min, max));
             }
         }
     }
@@ -6411,6 +6418,7 @@ impl MapView {
         // Force the zoom-range probe to re-read: the new archive declares
         // its own minzoom/maxzoom (a city extract is not the planet).
         self.local_source_zoom_range = None;
+        self.local_source_logged_zoom_range = None;
         self.local_source_zoom_range_path = None;
         self.local_source_zoom_range_checked = false;
         self.redraw(cx);
