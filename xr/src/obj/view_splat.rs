@@ -21,8 +21,9 @@ use crate::obj::splat_sort::{
 };
 use makepad_splat::{load_splat_from_bytes, SplatFileFormat};
 use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
-use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError, time::Instant};
+use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
 
+use crate::util::clock::Instant;
 use crate::util::scene_draw::{
     compose_scene_node_transform, scene_node_world_transform_from_cx, scene_state_from_cx,
     SceneState3D,

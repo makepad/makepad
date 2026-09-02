@@ -47,10 +47,13 @@ impl SessionId {
         use std::sync::atomic::AtomicU64;
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
+        #[cfg(target_arch = "wasm32")]
+        let t = n.rotate_left(29);
         // Uniqueness, not secrecy: session authz is the transport layer's
         // bearer token, never knowledge of this id.
         let mix = t ^ (std::process::id() as u64).rotate_left(32) ^ n.rotate_left(17);

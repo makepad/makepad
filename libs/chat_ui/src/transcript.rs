@@ -62,7 +62,7 @@ pub struct ChatData {
     pub activity: String,
     /// See [`ChatData::set_activity`]: when the current activity appeared,
     /// and whether a clear is waiting for the minimum display time.
-    pub activity_shown_at: Option<std::time::Instant>,
+    pub activity_shown_at: Option<Instant>,
     pub activity_clear_pending: bool,
     /// Live reasoning text (the think block so far), for the porthole under
     /// the think dots.
@@ -71,14 +71,42 @@ pub struct ChatData {
     /// · qwen3-27b"). Set by the feed, rendered by the host.
     pub status: String,
     pub is_streaming: bool,
-    pub last_delta: Option<std::time::Instant>,
+    pub last_delta: Option<Instant>,
     /// How fast the reply on screen is arriving (see [`RateMeter`]).
     pub rate: RateMeter,
 }
 
 // ------------------------------------------------------------------- rate
 
-use std::time::{Duration, Instant};
+use makepad_widgets::Cx;
+use std::ops::Add;
+use std::time::Duration;
+
+/// Instant-shaped value backed by Makepad's cross-platform monotonic clock.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Instant(f64);
+
+impl Instant {
+    pub fn now() -> Self {
+        Self(Cx::monotonic_now())
+    }
+
+    fn checked_sub(self, value: Duration) -> Option<Self> {
+        Some(Self(self.0 - value.as_secs_f64()))
+    }
+
+    fn duration_since(self, earlier: Self) -> Duration {
+        Duration::from_secs_f64((self.0 - earlier.0).max(0.0))
+    }
+}
+
+impl Add<Duration> for Instant {
+    type Output = Self;
+
+    fn add(self, value: Duration) -> Self {
+        Self(self.0 + value.as_secs_f64())
+    }
+}
 
 /// The live rate averages over the last stretch rather than the whole
 /// reply: a reader wants to see the CURRENT speed (a box that just picked
@@ -286,7 +314,7 @@ impl ChatData {
     pub fn push_delta(text: &str) {
         if let Ok(mut data) = CHAT.write() {
             data.streaming_text.push_str(text);
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             // This lane (a device-local agent) hands us text, never a token
             // count, so the rate is an estimate and says so.
             data.rate.record(now, text.len(), None, None, None, None);
@@ -307,7 +335,7 @@ impl ChatData {
         visible: Option<u32>,
     ) {
         if let Ok(mut data) = CHAT.write() {
-            data.rate.record(std::time::Instant::now(), bytes, gen_tokens, lanes, think, visible);
+            data.rate.record(Instant::now(), bytes, gen_tokens, lanes, think, visible);
         }
     }
 
@@ -319,7 +347,7 @@ impl ChatData {
             if data.streaming_text != text {
                 data.streaming_text.clear();
                 data.streaming_text.push_str(text);
-                data.last_delta = Some(std::time::Instant::now());
+                data.last_delta = Some(Instant::now());
             }
         }
     }
@@ -403,7 +431,7 @@ impl ChatData {
     pub fn live_rate_label() -> Option<String> {
         let data = CHAT.read().ok()?;
         data.is_streaming
-            .then(|| data.rate.live_label(std::time::Instant::now()))
+            .then(|| data.rate.live_label(Instant::now()))
             .flatten()
     }
 
@@ -422,7 +450,7 @@ impl ChatData {
     /// second — the flicker reads as a glitch, not a status.
     pub fn set_activity(text: &str) {
         if let Ok(mut data) = CHAT.write() {
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             if text.is_empty() {
                 // A clear only lands once the current status had its beat.
                 match data.activity_shown_at {

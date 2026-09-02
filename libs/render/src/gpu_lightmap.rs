@@ -1657,7 +1657,7 @@ impl GpuLightmapBaker {
         if let Some(state) = self.state.as_ref() {
             batch.sort_by_key(|ri| matches!(state.regions[*ri].kind, RegionKind::Ground));
         }
-        let t0 = std::time::Instant::now();
+        let t0 = Cx::monotonic_now();
         let mut passes = 0;
         if !batch.is_empty() {
             passes += self.encode_batch(cx, sun_dir, &batch);
@@ -1665,7 +1665,7 @@ impl GpuLightmapBaker {
         if let Some(frame) = csm {
             passes += self.encode_cascades(cx, static_casters, movers, &frame);
         }
-        let us = t0.elapsed().as_micros() as u64;
+        let us = ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64;
         self.csm_last = csm;
         if !batch.is_empty() {
             self.bake_frames += 1;

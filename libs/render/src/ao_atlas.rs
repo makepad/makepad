@@ -35,7 +35,7 @@
 //! comparison bakes, and this pipeline reproduces those bakes rather than
 //! unifying them.
 
-use makepad_draw::makepad_math::*;
+use makepad_draw::{makepad_math::*, Cx};
 
 /// Texels per world unit of triangle edge. Kenney props are authored around
 /// 1 unit = 1 metre, so this is roughly "a sample every 3cm". A pack atlas
@@ -494,7 +494,7 @@ pub fn bake_into_authored(
     // opposite winding; all three ports collapse the pairs to one
     // consistently-oriented triangle per surface, each by its own method.)
     let baker = AoBakerKind::current();
-    let t_bake = std::time::Instant::now();
+    let t_bake = Cx::monotonic_now();
     match baker {
         AoBakerKind::Lightmapper => {
             // The port tool's dedup: keep the FIRST twin of each coincident
@@ -1349,7 +1349,7 @@ pub fn bake_into_authored(
         forensics::LAST.with(|l| *l.borrow_mut() = Some(captured));
     }
     atlas.bake_evaluator = baker.name();
-    atlas.bake_seconds += t_bake.elapsed().as_secs_f64();
+    atlas.bake_seconds += Cx::monotonic_now() - t_bake;
 
     *positions = out_pos;
     *normals = out_nrm;

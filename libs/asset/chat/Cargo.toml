@@ -21,6 +21,8 @@ makepad-asset-data = { path = "../data" }
 makepad-asset-client = { path = "../client" }
 makepad-ai-hub = { path = "../../ai/hub", default-features = false }
 makepad-network = { path = "../../../platform/network" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The broker-side `assets.query` tool: read-only SQL over the co-located
 # server's own catalog file (see src/catalog_sql.rs).
 makepad-sqlite = { path = "../../sqlite_query" }

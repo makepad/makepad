@@ -1369,6 +1369,7 @@ pub struct MusicProgress<'a> {
 /// honest bar from the first second; `cancel()` is polled throughout and
 /// stops the run with `cancelled: true` and whatever landed so far — never a
 /// rollback, the catalog rows already published are real.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn import_music(
     client: &mut AssetClient,
     root: &Path,
@@ -1397,6 +1398,7 @@ pub fn import_music(
 /// not a root, so the scan and the publish have to be separable — and the
 /// two callers then share every line that matters: the planner, the pool of
 /// bakers, the one-writer publish loop, and the report.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn import_music_scan(
     client: &mut AssetClient,
     scan: &MusicScan,

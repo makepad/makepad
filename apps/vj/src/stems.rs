@@ -826,7 +826,9 @@ impl StemsPool {
         let (prefetch_tx, prefetch_jobs) = channel::<StemsJob>();
         let (out, rx) = channel::<StemsMsg>();
         let deck_waiting = Arc::new(AtomicBool::new(false));
+        #[cfg(not(target_arch = "wasm32"))]
         let waiting = deck_waiting.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::thread::Builder::new()
             .name("vj-stems".into())
             .spawn(move || {
@@ -1048,6 +1050,8 @@ impl StemsPool {
                     }
                 }
             });
+        #[cfg(target_arch = "wasm32")]
+        drop((jobs, prefetch_jobs, out, root, checkpoint, budget_bytes));
         StemsPool { tx, prefetch_tx, deck_waiting, rx }
     }
 
@@ -1588,4 +1592,3 @@ mod tests {
         assert_eq!(makepad_ai_stems::Stem::Vocals as usize, 3);
     }
 }
-

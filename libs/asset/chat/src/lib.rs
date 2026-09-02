@@ -38,6 +38,10 @@
 //! providers), [`responses`] (shared Responses API driver),
 //! [`fleet_http`] (minimal bounded HTTP for the fleet wire).
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod catalog_sql;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/catalog_sql.rs"]
 pub mod catalog_sql;
 pub mod claude {
     pub use makepad_ai_hub::providers::claude::*;
@@ -50,6 +54,10 @@ pub mod codex_cli {
 }
 pub mod context;
 pub mod dispatch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fleet_discovery;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/fleet_discovery.rs"]
 pub mod fleet_discovery;
 pub mod fleet_http {
     pub use makepad_ai_hub::providers::fleet_http::*;

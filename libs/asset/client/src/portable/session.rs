@@ -110,6 +110,7 @@ pub enum SessionMsg {
 
 pub struct SessionConnector {
     runtime: Option<ClientRuntime>,
+    media: Vec<ClientRuntime>,
     messages: VecDeque<SessionMsg>,
     stopped: bool,
 }
@@ -122,9 +123,22 @@ impl SessionConnector {
         client.cache = config.cache;
         let store = crate::static_store::StaticStore::platform(base.clone(), client.cache.max_ram_bytes)?;
         let runtime = ClientRuntime::start_static_store(store, config.catalog_runtime)?;
+        let mut media = Vec::with_capacity(config.media_lanes.len().max(1));
+        for _ in 0..config.media_lanes.len().max(1) {
+            let store = crate::static_store::StaticStore::platform(
+                base.clone(),
+                client.cache.max_ram_bytes,
+            )?;
+            media.push(ClientRuntime::start_static_store(store, config.catalog_runtime)?);
+        }
         let mut messages = VecDeque::new();
         messages.push_back(SessionMsg::Status(SessionStatus::Connecting { server: base.to_string() }));
-        Ok(Self { runtime: Some(runtime), messages, stopped: false })
+        Ok(Self {
+            runtime: Some(runtime),
+            media,
+            messages,
+            stopped: false,
+        })
     }
 
     pub fn poll(&mut self) -> Vec<SessionMsg> {
@@ -144,8 +158,9 @@ impl SessionConnector {
                 let server_id = runtime.server_id().unwrap();
                 let label = location.to_string();
                 let capabilities = location.capabilities();
+                let media = std::mem::take(&mut self.media);
                 out.push(SessionMsg::Up(Box::new(SessionHandles {
-                    catalog: runtime, media: Vec::new(), subscriber: CatalogSubscriber::null(),
+                    catalog: runtime, media, subscriber: CatalogSubscriber::null(),
                     server_label: label.clone(), server_id, location, endpoints: None, token: None,
                     capabilities,
                 })));

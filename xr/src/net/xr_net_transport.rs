@@ -1,4 +1,5 @@
 use super::*;
+use crate::util::clock::Instant;
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
@@ -8,7 +9,7 @@ use std::{
         mpsc, Arc,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Debug)]

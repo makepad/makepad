@@ -21,6 +21,7 @@ use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_
 use crate::pads::PadKey;
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -269,7 +270,7 @@ impl PlayMode {
 const MAX_PINGPONG_CACHE_BYTES: usize = if usize::BITS >= 64 {
     17_179_869_184_u64
 } else {
-    usize::MAX as u64
+    (usize::MAX - 1) as u64
 } as usize;
 
 /// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
@@ -288,7 +289,7 @@ const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 const REVERSE_WINDOW_MAX_BYTES: usize = if usize::BITS >= 64 {
     4_294_967_296_u64
 } else {
-    usize::MAX as u64
+    (usize::MAX - 1) as u64
 } as usize;
 
 struct SlotShared {
@@ -1959,12 +1960,23 @@ pub fn decode_audio_clip(
     media: MediaType,
     max_frames: usize,
 ) -> Result<TrackPcm, String> {
+    decode_audio_source(&DecodeSource::Path(path.clone()), media, max_frames)
+}
+
+fn decode_audio_source(
+    source: &DecodeSource,
+    media: MediaType,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
     match media {
         MediaType::Wav => {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let bytes = source.read_bytes()?;
             parse_wav(&bytes, max_frames)
         }
         MediaType::Mp4 => {
+            let DecodeSource::Path(path) = source else {
+                return Err("hardware MP4 audio decode is unavailable for in-memory web blobs".into());
+            };
             // Cache objects are digest-only names; AVURLAsset keys off the
             // extension. Lease a typed hard link the same way video slots do.
             let input = DecoderInput::prepare(path, MediaType::Mp4)?;
@@ -1997,7 +2009,7 @@ pub fn decode_audio_clip(
         // MP3 and Ogg Vorbis go through the repo's own decoders, the same way
         // WAV does: whole file in, interleaved PCM out, no platform codec.
         MediaType::Mp3 | MediaType::Ogg => {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let bytes = source.read_bytes()?;
             let format = if matches!(media, MediaType::Mp3) {
                 AudioFormat::Mp3
             } else {
@@ -2021,6 +2033,15 @@ pub fn decode_audio_clip(
             Ok(TrackPcm { frames, sample_rate: audio.rate.max(1) })
         }
         other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+impl DecodeSource {
+    fn read_bytes(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Path(path) => std::fs::read(path).map_err(|error| error.to_string()),
+            Self::Bytes(bytes) => Ok(bytes.to_vec()),
+        }
     }
 }
 
@@ -2183,11 +2204,11 @@ impl UiStep {
 // ---------------------------------------------------------------------------
 
 pub enum DecodeJob {
-    Deck { deck: DeckId, gen: u64, path: PathBuf, media: MediaType },
+    Deck { deck: DeckId, gen: u64, source: DecodeSource, media: MediaType },
     /// The headphone pre-listen: the same full decode as a deck, plus the
     /// overview strip for the mini player's seek bar.
-    Preview { gen: u64, path: PathBuf, media: MediaType },
-    Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, path: PathBuf, media: MediaType },
+    Preview { gen: u64, source: DecodeSource, media: MediaType },
+    Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, source: DecodeSource, media: MediaType },
     /// Read + parse + fully prepare a GLB for the 3D program slot: the UI
     /// thread only uploads the finished result.
     MeshPrep { gen: u64, path: PathBuf },
@@ -2228,11 +2249,45 @@ pub enum DecodeJob {
     /// doc comment.
     Thumb {
         revision: AssetRevisionId,
-        path: PathBuf,
+        source: DecodeSource,
         sheet: Option<(ThumbnailCells, f32)>,
         legacy_may_be_sheet: bool,
         epoch: u64,
     },
+}
+
+/// Verified encoded media can be backed by the native cache filesystem or
+/// by the portable static store's in-memory object cache. Audio/image
+/// decoders consume this one seam, so web callers never invent fake paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeSource {
+    Path(PathBuf),
+    Bytes(Arc<[u8]>),
+}
+
+impl From<PathBuf> for DecodeSource {
+    fn from(path: PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl From<makepad_asset_client::BlobContent> for DecodeSource {
+    fn from(content: makepad_asset_client::BlobContent) -> Self {
+        match content {
+            makepad_asset_client::BlobContent::Bytes(bytes) => Self::Bytes(bytes),
+            #[cfg(not(target_arch = "wasm32"))]
+            makepad_asset_client::BlobContent::VerifiedPath(path) => Self::Path(path),
+        }
+    }
+}
+
+impl DecodeSource {
+    pub fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Bytes(_) => None,
+        }
+    }
 }
 
 /// Largest GLB the mesh lane will lift into memory.
@@ -2586,9 +2641,64 @@ fn decode_thumb(
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
 ) -> Result<ThumbPixels, String> {
-    let mut pixels = decode_thumb_full(path, sheet, legacy_may_be_sheet)?;
+    decode_thumb_source(
+        &DecodeSource::Path(path.clone()),
+        sheet,
+        legacy_may_be_sheet,
+    )
+}
+
+fn decode_thumb_source(
+    source: &DecodeSource,
+    sheet: Option<(ThumbnailCells, f32)>,
+    legacy_may_be_sheet: bool,
+) -> Result<ThumbPixels, String> {
+    let mut pixels = match source {
+        DecodeSource::Path(path) => decode_thumb_full(path, sheet, legacy_may_be_sheet)?,
+        DecodeSource::Bytes(bytes) => decode_thumb_image_bytes(bytes, sheet)?,
+    };
     fit_thumb_for_tiles(&mut pixels);
     Ok(pixels)
+}
+
+fn decode_thumb_image_bytes(
+    bytes: &[u8],
+    sheet: Option<(ThumbnailCells, f32)>,
+) -> Result<ThumbPixels, String> {
+    if bytes.len() as u64 > MAX_THUMB_BYTES {
+        return Err(format!("thumbnail over byte budget: {}", bytes.len()));
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Err("hardware video thumbnails are unavailable for in-memory web blobs".into());
+    }
+    let image = if bytes.starts_with(&[0xff, 0xd8]) {
+        makepad_widgets::ImageBuffer::from_jpg(bytes)
+    } else {
+        makepad_widgets::ImageBuffer::from_png(bytes)
+    }
+    .map_err(|error| format!("thumbnail decode failed: {error:?}"))?;
+    let (width, height) = (image.width, image.height);
+    if width == 0 || height == 0 || width > MAX_THUMB_DIM || height > MAX_THUMB_DIM {
+        return Err(format!("thumbnail dimensions out of bounds: {width}x{height}"));
+    }
+    let pixels = ThumbPixels {
+        bgra: image.data,
+        width,
+        height,
+        frames: Vec::new(),
+        fps: sheet.map_or(0.0, |(_, fps)| fps),
+    };
+    Ok(match sheet {
+        Some((cells, fps)) => declared_thumb(
+            pixels.width,
+            pixels.height,
+            &pixels.bgra,
+            cells,
+            fps,
+        )
+        .unwrap_or(pixels),
+        None => pixels,
+    })
 }
 
 /// Whole-integer box shrink so `w`x`h` fits [`MAX_TILE_TEX_DIM`]; 1 = leave
@@ -3241,7 +3351,7 @@ const MAX_PENDING_THUMBS: usize = 64;
 
 struct PendingThumb {
     revision: AssetRevisionId,
-    path: PathBuf,
+    source: DecodeSource,
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
     epoch: u64,
@@ -3379,19 +3489,19 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
 
 fn run_heavy_job(job: DecodeJob) -> DecodeDone {
     match job {
-        DecodeJob::Deck { deck, gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+        DecodeJob::Deck { deck, gen, source, media } => {
+            let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = wave_peaks(&pcm, WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
             DecodeDone::Deck { deck, gen, result }
         }
-        DecodeJob::Pad { pad, gen, revision, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES).map(Arc::new);
+        DecodeJob::Pad { pad, gen, revision, source, media } => {
+            let result = decode_audio_source(&source, media, MAX_PAD_FRAMES).map(Arc::new);
             DecodeDone::Pad { pad, gen, revision, result }
         }
-        DecodeJob::Preview { gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+        DecodeJob::Preview { gen, source, media } => {
+            let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = preview_wave_bins(&pcm, PREVIEW_WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
@@ -3459,7 +3569,9 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
 /// 4 workers.
 pub struct DecodePool {
     heavy_tx: Sender<DecodeJob>,
+    heavy_rx: Option<Receiver<DecodeJob>>,
     thumb_queue: Arc<ThumbQueue>,
+    done_tx: Sender<DecodeDone>,
     rx: Receiver<DecodeDone>,
 }
 
@@ -3471,18 +3583,29 @@ impl Default for DecodePool {
 
 impl DecodePool {
     pub fn new() -> DecodePool {
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let (heavy_workers, thumb_workers) = lane_sizes(cpus);
-
         let (heavy_tx, job_rx) = channel::<DecodeJob>();
         let (done_tx, rx) = channel::<DecodeDone>();
+        DecodePool {
+            heavy_tx,
+            heavy_rx: Some(job_rx),
+            thumb_queue: Arc::new(ThumbQueue::new(1)),
+            done_tx,
+            rx,
+        }
+    }
+
+    /// Start the CPU lanes through Makepad's native/web-worker executor.
+    /// Construction starts no OS primitive, so the web build never falls
+    /// through `std::thread::spawn` and silently loses its decoder.
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(job_rx) = self.heavy_rx.take() else { return };
+        let (heavy_workers, thumb_workers) = lane_sizes(spawner.available_parallelism().get());
+        self.thumb_queue.set_width(thumb_workers);
         let job_rx = Arc::new(Mutex::new(job_rx));
         for i in 0..heavy_workers {
             let jobs = job_rx.clone();
-            let done = done_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(format!("vj-decode-heavy-{i}"))
-                .spawn(move || loop {
+            let done = self.done_tx.clone();
+            match spawner.spawn(move || loop {
                     let job = {
                         let guard = jobs.lock().unwrap();
                         guard.recv()
@@ -3492,34 +3615,35 @@ impl DecodePool {
                     if done.send(out).is_err() {
                         return;
                     }
-                });
+                }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => makepad_widgets::log!("vj decode worker {i} unavailable: {error}"),
+            }
         }
 
-        let thumb_queue = Arc::new(ThumbQueue::new(thumb_workers));
         for i in 0..thumb_workers {
-            let queue = thumb_queue.clone();
-            let done = done_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(format!("vj-decode-thumb-{i}"))
-                .spawn(move || loop {
+            let queue = self.thumb_queue.clone();
+            let done = self.done_tx.clone();
+            match spawner.spawn(move || loop {
                     let Some(job) = queue.pop() else { return };
-                    let result = decode_thumb(&job.path, job.sheet, job.legacy_may_be_sheet);
+                    let result = decode_thumb_source(&job.source, job.sheet, job.legacy_may_be_sheet);
                     queue.finished();
                     let out = DecodeDone::Thumb { revision: job.revision, result };
                     if done.send(out).is_err() {
                         return;
                     }
-                });
+                }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => makepad_widgets::log!("vj thumbnail worker {i} unavailable: {error}"),
+            }
         }
-
-        DecodePool { heavy_tx, thumb_queue, rx }
     }
 
     pub fn submit(&self, job: DecodeJob) {
         match job {
-            DecodeJob::Thumb { revision, path, sheet, legacy_may_be_sheet, epoch } => {
+            DecodeJob::Thumb { revision, source, sheet, legacy_may_be_sheet, epoch } => {
                 self.thumb_queue
-                    .push(PendingThumb { revision, path, sheet, legacy_may_be_sheet, epoch });
+                    .push(PendingThumb { revision, source, sheet, legacy_may_be_sheet, epoch });
             }
             other => {
                 let _ = self.heavy_tx.send(other);
@@ -4200,12 +4324,17 @@ mod tests {
         std::fs::write(&bad, b"not a wav").unwrap();
 
         let pool = DecodePool::new();
-        pool.submit(DecodeJob::Deck { deck: DeckId::A, gen: 7, path: good, media: MediaType::Wav });
+        pool.submit(DecodeJob::Deck {
+            deck: DeckId::A,
+            gen: 7,
+            source: good.into(),
+            media: MediaType::Wav,
+        });
         pool.submit(DecodeJob::Pad {
             pad: PadKey::from_bytes([2; 16]),
             gen: 9,
             revision: AssetRevisionId::from_bytes([3; 32]),
-            path: bad,
+            source: bad.into(),
             media: MediaType::Wav,
         });
         let deadline = crate::clock::Instant::now() + Duration::from_secs(10);
@@ -4261,7 +4390,7 @@ mod tests {
         for i in 0..3u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("w{i}.png")),
+                source: PathBuf::from(format!("w{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
@@ -4294,7 +4423,7 @@ mod tests {
         let stale = AssetRevisionId::from_bytes([1u8; 32]);
         queue.push(PendingThumb {
             revision: stale,
-            path: PathBuf::from("stale.png"),
+            source: PathBuf::from("stale.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 1,
@@ -4302,7 +4431,7 @@ mod tests {
         // A newer epoch retires the pending job for the old one.
         queue.push(PendingThumb {
             revision: AssetRevisionId::from_bytes([2u8; 32]),
-            path: PathBuf::from("live.png"),
+            source: PathBuf::from("live.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
@@ -4315,7 +4444,7 @@ mod tests {
         for i in 0..(MAX_PENDING_THUMBS + 2) {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("o{i}.png")),
+                source: PathBuf::from(format!("o{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 5,
@@ -4336,7 +4465,7 @@ mod tests {
         for i in 0..10u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("t{i}.png")),
+                source: PathBuf::from(format!("t{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
@@ -4344,7 +4473,11 @@ mod tests {
         }
         for expect in (0..10u32).rev() {
             let job = queue.pop().expect("job available");
-            assert_eq!(job.path, PathBuf::from(format!("t{expect}.png")), "must be newest-first");
+            assert_eq!(
+                job.source,
+                DecodeSource::Path(PathBuf::from(format!("t{expect}.png"))),
+                "must be newest-first"
+            );
         }
 
         // Staleness: jobs stamped with an epoch older than the newest one
@@ -4353,7 +4486,7 @@ mod tests {
         for i in 0..5u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("old{i}.png")),
+                source: PathBuf::from(format!("old{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 1,
@@ -4361,13 +4494,13 @@ mod tests {
         }
         queue.push(PendingThumb {
             revision: AssetRevisionId::from_bytes([9; 32]),
-            path: PathBuf::from("fresh.png"),
+            source: PathBuf::from("fresh.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
         });
         let job = queue.pop().expect("the fresh-epoch job survives");
-        assert_eq!(job.path, PathBuf::from("fresh.png"));
+        assert_eq!(job.source, DecodeSource::Path(PathBuf::from("fresh.png")));
         assert!(
             queue.state.lock().unwrap().stack.is_empty(),
             "stale jobs must be dropped when popped, not left behind"
@@ -4378,7 +4511,7 @@ mod tests {
         for i in 0..(MAX_PENDING_THUMBS + 3) {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([0; 32]),
-                path: PathBuf::from(format!("p{i}.png")),
+                source: PathBuf::from(format!("p{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
@@ -4387,8 +4520,8 @@ mod tests {
         let remaining = queue.state.lock().unwrap();
         assert_eq!(remaining.stack.len(), MAX_PENDING_THUMBS);
         assert_eq!(
-            remaining.stack.front().unwrap().path,
-            PathBuf::from("p3.png"),
+            remaining.stack.front().unwrap().source,
+            DecodeSource::Path(PathBuf::from("p3.png")),
             "the three oldest (p0..p2) must have been dropped to stay at the cap"
         );
     }
@@ -4412,7 +4545,7 @@ mod tests {
             std::fs::write(&path, b"not an image").unwrap();
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path,
+                source: path.into(),
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,
@@ -4450,7 +4583,7 @@ mod tests {
             std::fs::write(&path, b"not an image").unwrap();
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path,
+                source: path.into(),
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,

@@ -19,6 +19,7 @@ use crate::{
     ARTNET_BROADCAST_ADDR, CONTROLLER_INSTANCE_LOCK_ADDR, DMX_FRAME_DT, DMX_FRAME_HZ,
 };
 use makepad_micro_serde::*;
+use makepad_platform::Cx;
 use std::{
     net::UdpSocket,
     path::{Path, PathBuf},
@@ -26,9 +27,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::JoinHandle;
 
 /// Clip grid + VJ mixer slider. Lighting must not consume these.
 pub const VJ_CLIP_NOTE_MAX: u8 = 39;
@@ -46,7 +48,7 @@ pub const NOTE_SCENE_LAUNCH_HI: u8 = 86;
 pub const NOTE_WRITE: u8 = 81;
 pub const NOTE_POWER: u8 = 89;
 
-const SCENE_UI_COOLDOWN: Duration = Duration::from_millis(350);
+const SCENE_UI_COOLDOWN_SECS: f64 = 0.350;
 pub const SCENE_COUNT: usize = 13;
 
 /// True when this MIDI message belongs to the VJ clip grid or crossfader.
@@ -76,7 +78,7 @@ pub struct DeskState {
     pub buttons: ControllerButtons,
     pub last_scene: Option<usize>,
     write_preset: bool,
-    scene_cooldown_until: Instant,
+    scene_cooldown_until: f64,
 }
 
 impl Default for DeskState {
@@ -88,7 +90,7 @@ impl Default for DeskState {
             buttons,
             last_scene: None,
             write_preset: false,
-            scene_cooldown_until: Instant::now(),
+            scene_cooldown_until: Cx::monotonic_now(),
         }
     }
 }
@@ -182,12 +184,12 @@ impl DeskState {
             self.buttons.preset[index] = false;
             return DeskEvent::Continuous;
         }
-        if Instant::now() < self.scene_cooldown_until {
+        if Cx::monotonic_now() < self.scene_cooldown_until {
             return DeskEvent::Ignored;
         }
         self.buttons.preset.fill(false);
         self.buttons.preset[index] = true;
-        self.scene_cooldown_until = Instant::now() + SCENE_UI_COOLDOWN;
+        self.scene_cooldown_until = Cx::monotonic_now() + SCENE_UI_COOLDOWN_SECS;
         if self.write_preset {
             presets.save_slot(index, &self.state);
             self.last_scene = Some(index);
@@ -320,10 +322,17 @@ pub struct RoomShow {
     packets: Arc<Mutex<u64>>,
     presets: PresetBank,
     stop: Arc<AtomicBool>,
+    #[cfg(not(target_arch = "wasm32"))]
     thread: Option<JoinHandle<()>>,
 }
 
 impl RoomShow {
+    #[cfg(target_arch = "wasm32")]
+    pub fn start(_preset_dir: PathBuf, _target_addr: String) -> Result<Self, String> {
+        Err("Art-Net room control is unavailable on web".to_string())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(preset_dir: PathBuf, target_addr: String) -> Result<Self, String> {
         let presets = PresetBank::new(preset_dir);
         let mut desk = DeskState::default();
@@ -357,7 +366,7 @@ impl RoomShow {
                 let mut clock = 0.0f64;
                 let mut sent = 0u64;
                 while !worker_stop.load(Ordering::Acquire) {
-                    let started = Instant::now();
+                    let started = Cx::monotonic_now();
                     let desk = worker_shared.lock().unwrap().clone();
                     universe.set_sequence((sent % 255 + 1) as u8);
                     {
@@ -374,9 +383,9 @@ impl RoomShow {
                         worker_presets.save_current(&desk.state);
                         persist = 0;
                     }
-                    let spent = started.elapsed();
-                    if spent < Duration::from_secs_f64(DMX_FRAME_DT) {
-                        std::thread::sleep(Duration::from_secs_f64(DMX_FRAME_DT) - spent);
+                    let spent = Cx::monotonic_now() - started;
+                    if spent < DMX_FRAME_DT {
+                        std::thread::sleep(Duration::from_secs_f64(DMX_FRAME_DT - spent));
                     }
                 }
                 // Terminal blackout must reach the node that received the live
@@ -450,6 +459,7 @@ impl RoomShow {
 impl Drop for RoomShow {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

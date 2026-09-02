@@ -48,7 +48,7 @@ use crate::clock::Instant;
 pub const MAX_FLOW_CACHE_BYTES: usize = if usize::BITS >= 64 {
     4_294_967_296_u64
 } else {
-    usize::MAX as u64
+    (usize::MAX - 1) as u64
 } as usize;
 
 /// Largest mp4 the `mkfl` scan will lift into memory to parse the box walk.

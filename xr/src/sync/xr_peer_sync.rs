@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::util::clock::Instant;
 use crate::scene::{
     arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point_geometry_only,
 };
@@ -6,7 +7,7 @@ use makepad_widgets::event::{XrSyncAnchor, XrSyncAnchorExtrema};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{mpsc::TryRecvError, Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[path = "alignment.rs"]

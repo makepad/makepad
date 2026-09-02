@@ -300,7 +300,7 @@ fn convert_inner(
     let mut prev: Option<FramePyramid> = None;
     let mut rgb = Vec::new();
     let passthrough = scale == 1 && out_w == src_w && out_h == src_h;
-    let mut last_report = std::time::Instant::now();
+    let mut last_report = makepad_platform::Cx::monotonic_now();
     progress(ConvertProgress { frames: 0, expected, fraction: 0.0 });
 
     loop {
@@ -358,8 +358,9 @@ fn convert_inner(
         }
         prev = Some(pyramid);
         frames += 1;
-        if last_report.elapsed().as_millis() >= 150 {
-            last_report = std::time::Instant::now();
+        let now = makepad_platform::Cx::monotonic_now();
+        if now - last_report >= 0.15 {
+            last_report = now;
             progress(ConvertProgress {
                 frames,
                 expected,

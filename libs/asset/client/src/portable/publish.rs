@@ -4,9 +4,10 @@ use crate::client::AssetClient;
 use crate::error::{ClientError, ClientResult};
 use crate::location::ClientMode;
 use makepad_asset_data::{
-    Anchor, AssetAlias, AssetId, AssetKind, AssetRevisionId, AssetRevisionRef, Axis, BlobId,
-    Bounds, Capabilities, CoordinateSystem, DerivativePolicy, DeviceTier, FileRole, MediaType,
-    Pivot, Redistribution, Rights, ThumbnailMedia, ThumbnailView, Vec3,
+    Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
+    AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
+    DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
+    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 use std::path::PathBuf;
 
@@ -114,6 +115,20 @@ impl PublishRights {
             derivatives: rights.derivatives,
         }
     }
+
+    fn as_manifest_rights(&self) -> Rights {
+        Rights {
+            license: self.license.clone(),
+            license_revision: self.license_revision.clone(),
+            terms_digest: self.terms_digest,
+            terms_url: self.terms_url.clone(),
+            credits: self.credits.clone(),
+            source: self.source.clone(),
+            source_archive: self.source_archive,
+            redistribution: self.redistribution,
+            derivatives: self.derivatives,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +185,80 @@ impl PublishRequest {
             stats: PublishStats::default(),
             manifest_provenance: None,
         }
+    }
+
+    /// Build the same canonical immutable revision the native publisher
+    /// sends to a socket store. Browser-local services use this transport-
+    /// free half, then commit it through the embedded store.
+    pub fn manifest_for_asset(
+        &self,
+        asset_id: AssetId,
+    ) -> ClientResult<(Vec<u8>, AssetRevisionId)> {
+        let mut manifest = AssetManifest {
+            asset_id,
+            kind: self.kind,
+            files: vec![AssetFile {
+                role: self.artifact.role,
+                tier: DeviceTier::Any,
+                lod: 0,
+                media: self.artifact.media,
+                blob: BlobId::hash_of(&self.artifact.bytes),
+                byte_len: self.artifact.bytes.len() as u64,
+                dims: self.artifact.dims.map(|(width, height)| ImageDims { width, height }),
+            }],
+            dependencies: Vec::new(),
+            thumbnail: Some(ThumbnailMeta {
+                blob: BlobId::hash_of(&self.thumbnail.bytes),
+                media: self.thumbnail.media,
+                width: self.thumbnail.width,
+                height: self.thumbnail.height,
+                byte_len: self.thumbnail.bytes.len() as u64,
+                views: self.thumbnail.views.clone(),
+            }),
+            metrics: Metrics {
+                total_bytes: (self.artifact.bytes.len() + self.thumbnail.bytes.len()) as u64,
+                triangles: self.stats.triangles,
+                vertices: self.stats.vertices,
+                joints: self.stats.joints,
+                clips: self.stats.clips,
+                max_texture_dim: self
+                    .thumbnail
+                    .width
+                    .max(self.thumbnail.height)
+                    .max(self.artifact.dims.map_or(0, |(width, height)| width.max(height))),
+                media_millis: self.artifact.media_millis,
+            },
+            coordinate_system: CoordinateSystem {
+                units_per_meter: 1.0,
+                up: Axis::YPos,
+                forward: Axis::ZNeg,
+                pivot: Pivot::Origin,
+            },
+            bounds: Bounds {
+                min: Vec3::new(-0.5, -0.5, -0.5),
+                max: Vec3::new(0.5, 0.5, 0.5),
+            },
+            anchors: Vec::new(),
+            capabilities: Capabilities {
+                loopable: matches!(self.kind, AssetKind::Audio | AssetKind::Video),
+                ..Capabilities::default()
+            },
+            spawn_recipe: None,
+            provenance: self.manifest_provenance.as_ref().map(|value| Provenance {
+                generator: value.generator.clone(),
+                model: value.model.clone(),
+                version: value.version.clone(),
+                seed: value.seed,
+                parents: value.parents.clone(),
+                params_digest: value.params_digest,
+            }),
+            rights: self.rights.as_manifest_rights(),
+        };
+        manifest.canonicalize();
+        manifest.validate().map_err(ClientError::Content)?;
+        let bytes = manifest.to_canonical_bytes().map_err(ClientError::Content)?;
+        let revision = manifest.revision().map_err(ClientError::Content)?;
+        Ok((bytes, revision))
     }
 }
 

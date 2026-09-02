@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::util::clock::Instant;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::{
     io,
@@ -8,7 +9,7 @@ use std::{
         mpsc, Arc,
     },
     thread::JoinHandle,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 mod xr_net_protocol;
@@ -393,10 +394,7 @@ impl XrNetAlignmentDescriptorDumpPair {
         local_descriptor: XrNetAlignmentDescriptorFrame,
         remote_descriptor: XrNetAlignmentDescriptorFrame,
     ) -> Self {
-        let captured_at_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-            .unwrap_or(0);
+        let captured_at_unix_ms = (Cx::time_now().max(0.0) * 1000.0) as u64;
         Self {
             format_version: Self::FORMAT_VERSION,
             captured_at_unix_ms,
@@ -720,10 +718,7 @@ fn accept_seq(last: Option<u32>, next: u32) -> bool {
 }
 
 fn default_node_id() -> u64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let now = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u128;
     let pid = std::process::id() as u128;
     LiveId::from_str(&format!("xr-net-{}-{}", now, pid)).0
 }

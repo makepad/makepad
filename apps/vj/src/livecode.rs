@@ -124,6 +124,7 @@ fn origin_file(stem: &str) -> Option<PathBuf> {
 /// and for the thumbnail lane, which must premix inputs for a document that
 /// shapes the program picture instead of drawing its own. So it is read
 /// from the file, once, and remembered against that file's mtime.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn observed_is_transition(stem: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, (u128, bool)>>> = OnceLock::new();
     let Some(path) = origin_file(stem) else { return false };
@@ -152,8 +153,14 @@ pub fn observed_is_transition(stem: &str) -> bool {
     is
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn observed_is_transition(_stem: &str) -> bool {
+    false
+}
+
 /// Run the observer for this process's hosted store until `stop` flips.
 /// Blocking — call it on the worker thread that has just finished seeding.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_observer(client: &mut makepad_asset_client::AssetClient, stop: &AtomicBool) {
     let mut config = makepad_asset_store::observe::ObserveConfig::vjfx(origins());
     // The one thing an engine name cannot tell the store: a scene engine
