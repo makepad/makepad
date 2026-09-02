@@ -18,16 +18,20 @@
 //! than a status line that waits forever: the channel disconnecting
 //! mid-run is itself the error.
 
-use makepad_asset_client::{
-    ApiEndpoints, AssetClient, ClientConfig, PublishRequest, StoreCapabilities,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
+use makepad_asset_client::{PublishRequest, StoreCapabilities};
 use makepad_asset_data::BlobId;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_asset_importer::music_import::{
     self, MusicProgress, MusicReport, MusicStage, TrackOutcome,
 };
+#[cfg(target_arch = "wasm32")]
+use makepad_asset_importer::music_import::{self, TrackOutcome};
 use makepad_widgets::makepad_platform::file_dialogs::VirtualFile;
 use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::collections::{HashSet, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -89,6 +93,7 @@ pub struct MusicImportSummary {
 }
 
 impl MusicImportSummary {
+    #[cfg(not(target_arch = "wasm32"))]
     fn from_report(report: &MusicReport) -> MusicImportSummary {
         let notes = report
             .skipped
@@ -749,6 +754,10 @@ mod tests {
         ));
         assert!(stems_may_run(
             StoreCapabilities::native(),
+            crate::decks::ProcessMode::Live,
+        ));
+        assert!(!stems_may_run(
+            StoreCapabilities::static_site(),
             crate::decks::ProcessMode::Live,
         ));
     }

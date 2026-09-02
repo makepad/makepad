@@ -36,7 +36,10 @@ use makepad_ai_stems::{CacheHeader, StemCache, Stem};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::RecvTimeoutError;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// How long the worker waits on the deck inbox before looking at the

@@ -42,7 +42,9 @@
 use makepad_widgets::*;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 use crate::clock::Instant;
@@ -283,7 +285,11 @@ fn worker() -> &'static Sender<Job> {
         let (tx, rx) = mpsc::channel::<Job>();
         // One thread, only ever sleeping and writing two small files. It
         // outlives the app by design: there is nothing to shut down and
-        // nothing it holds that matters at exit.
+        // nothing it holds that matters at exit. The web build has no
+        // observed origin on disk, so the status files are not written.
+        #[cfg(target_arch = "wasm32")]
+        drop(rx);
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::thread::Builder::new()
             .name("vj-livecode-status".to_string())
             .spawn(move || {
