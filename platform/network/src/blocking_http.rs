@@ -1567,7 +1567,7 @@ fn read_sized(
     if want > req.limits.max_body_bytes {
         return Err(Error::ResponseTooLarge);
     }
-    let mut body = Vec::new();
+    let mut body = Vec::with_capacity(want);
     if prefix.len() > want {
         return Err(Error::InvalidResponse);
     }
@@ -1601,7 +1601,8 @@ fn read_until_close(
     }
     let mut tmp = [0u8; 8192];
     loop {
-        let n = match read_watch(transport, &mut tmp, &req.cancel, deadline) {
+        let read_len = capped_read_len(req.limits.max_body_bytes, body.len(), tmp.len());
+        let n = match read_watch(transport, &mut tmp[..read_len], &req.cancel, deadline) {
             Ok(0) => break,
             Ok(n) => n,
             Err(Error::Reset) => return Err(Error::Reset),
@@ -1610,6 +1611,9 @@ fn read_until_close(
         let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > req.limits.max_body_bytes {
             return Err(Error::ResponseTooLarge);
+        }
+        if req.limits.max_body_bytes != usize::MAX {
+            body.reserve_exact(n);
         }
         body.extend_from_slice(&tmp[..n]);
     }
@@ -1670,6 +1674,9 @@ fn read_chunked(
         src.read_exact(&mut crlf, &req.cancel, deadline)?;
         if crlf != *b"\r\n" {
             return Err(Error::InvalidResponse);
+        }
+        if req.limits.max_body_bytes != usize::MAX {
+            body.reserve_exact(take);
         }
         body.extend_from_slice(&chunk);
     }
@@ -1750,6 +1757,15 @@ fn check_watch(cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
         return Err(Error::Timeout);
     }
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capped_read_len(max_body: usize, received: usize, buffer_len: usize) -> usize {
+    max_body
+        .saturating_sub(received)
+        .saturating_add(1)
+        .min(buffer_len)
+        .max(1)
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, Error> {
@@ -2186,6 +2202,9 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     let ValidatedHeaders { headers, content_length, chunked } =
         validate_response_headers(parsed, &req.limits)?;
     let no_body = req.method.is_head() || status == 204 || status == 304;
+    if !no_body && content_length.is_some_and(|len| len > req.limits.max_body_bytes as u64) {
+        return Err(Error::ResponseTooLarge);
+    }
     let body = if no_body {
         Vec::new()
     } else {
@@ -2402,11 +2421,12 @@ fn winhttp_read_body(
     loop {
         check_watch(cancel, deadline)?;
         let mut read = 0u32;
+        let read_len = capped_read_len(max_body, body.len(), buf.len());
         let ok = request.invoke(cancel, deadline, |p| unsafe {
             WinHttpReadData(
                 p,
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
-                buf.len() as u32,
+                read_len as u32,
                 &mut read,
             )
         })?;
@@ -2420,6 +2440,9 @@ fn winhttp_read_body(
         let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > max_body {
             return Err(Error::ResponseTooLarge);
+        }
+        if max_body != usize::MAX {
+            body.reserve_exact(n);
         }
         body.extend_from_slice(&buf[..n]);
     }

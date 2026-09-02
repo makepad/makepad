@@ -84,13 +84,21 @@ fn run_http_request(
     write_request(&mut stream, request, &split, use_tls)
         .map_err(|e| format!("write failed: {e}"))?;
 
-    let (status_code, headers_string, mut body_prefix, chunked) =
-        read_response_head(&mut stream, cancel_flag).map_err(|e| format!("read failed: {e}"))?;
     let max_body = request.max_response_body_bytes;
+    let (status_code, headers_string, mut body_prefix, chunked) =
+        match read_response_head(&mut stream, cancel_flag, max_body) {
+            Ok(response) => response,
+            Err(ReadHeadError::BodyLimit) => {
+                stream.shutdown();
+                return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
+            }
+            Err(ReadHeadError::Io(error)) => return Err(format!("read failed: {error}")),
+        };
     let declared = content_length_of(&headers_string);
     if (!matches!(request.method, crate::types::HttpMethod::HEAD) && declared > max_body)
         || body_prefix.len() as u64 > max_body
     {
+        stream.shutdown();
         return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
     }
 
@@ -113,11 +121,13 @@ fn run_http_request(
             if cancel_flag.load(Ordering::SeqCst) {
                 return Err("request cancelled".to_string());
             }
-            match stream.read(&mut buf) {
+            let read_len = capped_read_len(max_body, streamed, buf.len());
+            match stream.read(&mut buf[..read_len]) {
                 Ok(0) => break,
                 Ok(n) => {
                     streamed = streamed.saturating_add(n as u64);
                     if streamed > max_body {
+                        stream.shutdown();
                         return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
                     }
                     let _ = response_sender.send(NetworkResponse::HttpStreamChunk {
@@ -158,6 +168,11 @@ fn run_http_request(
     }
 
     let mut body = std::mem::take(&mut body_prefix);
+    if max_body != u64::MAX && declared > 0 {
+        if let Ok(declared) = usize::try_from(declared) {
+            body.reserve_exact(declared.saturating_sub(body.len()));
+        }
+    }
     let total = declared;
     let mut last_emit = 0usize;
     let emit_progress = |loaded: u64| {
@@ -172,11 +187,16 @@ fn run_http_request(
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("request cancelled".to_string());
         }
-        match stream.read(&mut buf) {
+        let read_len = capped_read_len(max_body, body.len() as u64, buf.len());
+        match stream.read(&mut buf[..read_len]) {
             Ok(0) => break,
             Ok(n) => {
                 if body.len().saturating_add(n) as u64 > max_body {
+                    stream.shutdown();
                     return Err(crate::HTTP_BODY_LIMIT_ERROR.to_string());
+                }
+                if max_body != u64::MAX && declared == 0 {
+                    body.reserve_exact(n);
                 }
                 body.extend_from_slice(&buf[..n]);
                 if body.len().saturating_sub(last_emit) >= 256 * 1024 {
@@ -269,27 +289,33 @@ fn write_request(
     stream.flush()
 }
 
+enum ReadHeadError {
+    Io(io::Error),
+    BodyLimit,
+}
+
 fn read_response_head(
     stream: &mut SocketStream,
     cancel_flag: &AtomicBool,
-) -> io::Result<(u16, String, Vec<u8>, bool)> {
+    max_body: u64,
+) -> Result<(u16, String, Vec<u8>, bool), ReadHeadError> {
     let mut data = Vec::with_capacity(8192);
     let mut buf = [0u8; 4096];
     let mut header_end = None;
 
     while header_end.is_none() {
         if cancel_flag.load(Ordering::SeqCst) {
-            return Err(io::Error::new(
+            return Err(ReadHeadError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "request cancelled",
-            ));
+            )));
         }
         match stream.read(&mut buf) {
             Ok(0) => {
-                return Err(io::Error::new(
+                return Err(ReadHeadError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "connection closed before HTTP headers",
-                ));
+                )));
             }
             Ok(n) => {
                 data.extend_from_slice(&buf[..n]);
@@ -305,13 +331,17 @@ fn read_response_head(
             {
                 continue;
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(ReadHeadError::Io(err)),
         }
     }
 
     let header_end = header_end.unwrap();
     let head = &data[..header_end];
-    let body_prefix = data[header_end..].to_vec();
+    let body_prefix = &data[header_end..];
+    if body_prefix.len() as u64 > max_body {
+        return Err(ReadHeadError::BodyLimit);
+    }
+    let body_prefix = body_prefix.to_vec();
     let head_str = String::from_utf8_lossy(head);
 
     let mut lines = head_str.split("\r\n");
@@ -344,6 +374,14 @@ fn read_response_head(
     }
 
     Ok((status_code, headers_string, body_prefix, chunked))
+}
+
+fn capped_read_len(max_body: u64, received: u64, buffer_len: usize) -> usize {
+    let through_first_excess = max_body.saturating_sub(received).saturating_add(1);
+    usize::try_from(through_first_excess)
+        .unwrap_or(buffer_len)
+        .min(buffer_len)
+        .max(1)
 }
 
 fn find_header_end(data: &[u8]) -> Option<usize> {

@@ -1,7 +1,7 @@
 use {
     crate::types::{HttpError, HttpProgress, HttpRequest, HttpResponse, NetworkResponse},
     makepad_apple_sys::*,
-    makepad_apple_sys::{objc_block, objc_block_invoke},
+    makepad_apple_sys::objc_block_invoke,
     makepad_live_id::LiveId,
     std::{collections::BTreeMap, ptr, ptr::NonNull, sync::mpsc::Sender, sync::Once},
 };
@@ -15,6 +15,10 @@ struct UrlSessionDataDelegateContext {
     sender: Sender<NetworkResponse>,
     request_id: LiveId,
     metadata_id: LiveId,
+    received: u64,
+    max_body_bytes: u64,
+    is_head: bool,
+    failed: bool,
 }
 
 fn url_session_data_delegate_class() -> *const Class {
@@ -46,14 +50,27 @@ pub(crate) fn url_session_delegate_class() -> *const Class {
 
 pub fn define_url_session_data_delegate() -> *const Class {
     extern "C" fn did_receive_response(
-        _this: &Object,
+        this: &Object,
         _: Sel,
         _session: ObjcId,
-        _data_task: ObjcId,
-        _response: ObjcId,
+        data_task: ObjcId,
+        response: ObjcId,
         completion: ObjcId,
     ) {
         unsafe {
+            let context_box: u64 = *this.get_ivar("context_box");
+            let mut ctx: Box<UrlSessionDataDelegateContext> =
+                Box::from_raw(context_box as *mut _);
+            ctx.received = 0;
+            let expected: i64 = msg_send![response, expectedContentLength];
+            if !ctx.is_head && expected > 0 && expected as u64 > ctx.max_body_bytes {
+                ctx.failed = true;
+                let () = msg_send![data_task, cancel];
+                let _ = Box::into_raw(ctx);
+                objc_block_invoke!(completion, invoke((0): u64));
+                return;
+            }
+            let _ = Box::into_raw(ctx);
             objc_block_invoke!(completion, invoke((NSURLSessionResponseAllow): u64));
         }
     }
@@ -67,24 +84,40 @@ pub fn define_url_session_data_delegate() -> *const Class {
     ) {
         unsafe {
             let context_box: u64 = *this.get_ivar("context_box");
-            let context_box: Box<UrlSessionDataDelegateContext> =
+            let mut context_box: Box<UrlSessionDataDelegateContext> =
                 Box::from_raw(context_box as *mut _);
 
             let bytes: *const u8 = msg_send![data, bytes];
             let length: usize = msg_send![data, length];
-            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
-
-            let message = NetworkResponse::HttpStreamChunk {
-                request_id: context_box.request_id,
-                response: HttpResponse {
-                    headers: Default::default(),
-                    metadata_id: context_box.metadata_id,
-                    status_code: 0,
-                    body: Some(data_bytes.to_vec()),
-                },
+            if context_box.failed
+                || context_box.received.saturating_add(length as u64)
+                    > context_box.max_body_bytes
+            {
+                context_box.failed = true;
+                let () = msg_send![_data_task, cancel];
+                let _ = Box::into_raw(context_box);
+                return;
+            }
+            context_box.received += length as u64;
+            let data_bytes: &[u8] = if bytes.is_null() || length == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(bytes, length)
             };
 
-            let _ = context_box.sender.send(message);
+            if !data_bytes.is_empty() {
+                let message = NetworkResponse::HttpStreamChunk {
+                    request_id: context_box.request_id,
+                    response: HttpResponse {
+                        headers: Default::default(),
+                        metadata_id: context_box.metadata_id,
+                        status_code: 0,
+                        body: Some(data_bytes.to_vec()),
+                    },
+                };
+
+                let _ = context_box.sender.send(message);
+            }
             let _ = Box::into_raw(context_box);
         }
     }
@@ -101,7 +134,16 @@ pub fn define_url_session_data_delegate() -> *const Class {
             let context_box: Box<UrlSessionDataDelegateContext> =
                 Box::from_raw(context_box as *mut _);
 
-            if error != nil {
+            if context_box.failed {
+                let message = NetworkResponse::HttpError {
+                    request_id: context_box.request_id,
+                    error: HttpError {
+                        metadata_id: context_box.metadata_id,
+                        message: crate::HTTP_BODY_LIMIT_ERROR.to_string(),
+                    },
+                };
+                let _ = context_box.sender.send(message);
+            } else if error != nil {
                 let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                 let message = NetworkResponse::HttpError {
                     request_id: context_box.request_id,
@@ -152,6 +194,9 @@ pub fn define_url_session_data_delegate() -> *const Class {
         }
         return superclass as *const Class;
     };
+    if let Some(protocol) = Protocol::get("NSURLSessionDataDelegate") {
+        decl.add_protocol(protocol);
+    }
 
     unsafe {
         decl.add_method(
@@ -230,11 +275,18 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
                 ctx.expected = expected as u64;
                 if !ctx.is_head && ctx.expected > ctx.max_body_bytes {
                     ctx.failed = true;
+                    let () = msg_send![_data_task, cancel];
                     let _ = Box::into_raw(ctx);
                     objc_block_invoke!(completion, invoke((0): u64));
                     return;
                 }
-                ctx.body.reserve(expected as usize);
+                if !ctx.is_head {
+                    if ctx.max_body_bytes == u64::MAX {
+                        ctx.body.reserve(expected as usize);
+                    } else {
+                        ctx.body.reserve_exact(expected as usize);
+                    }
+                }
             } else {
                 ctx.expected = 0;
             }
@@ -277,6 +329,9 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
                 ctx.failed = true;
                 let () = msg_send![_data_task, cancel];
             } else if !ctx.failed && !bytes.is_null() && length > 0 {
+                if ctx.max_body_bytes != u64::MAX {
+                    ctx.body.reserve_exact(length);
+                }
                 ctx.body.extend_from_slice(std::slice::from_raw_parts(bytes, length));
             }
             if ctx.body.len().saturating_sub(ctx.last_emit) >= PROGRESS_EVERY {
@@ -362,6 +417,9 @@ pub fn define_url_session_buffer_delegate() -> *const Class {
         }
         return superclass as *const Class;
     };
+    if let Some(protocol) = Protocol::get("NSURLSessionDataDelegate") {
+        decl.add_protocol(protocol);
+    }
 
     unsafe {
         decl.add_method(
@@ -531,43 +589,7 @@ impl AppleHttpRequests {
                 // than two minutes or NSURLSession kills the transfer and we
                 // retry, which is worse for the remote host.
                 let () = msg_send![config, setTimeoutIntervalForResource: 1800.0];
-                if is_streaming {
-                    msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: nil delegateQueue:nil]
-                } else {
-                    let context_box = Box::into_raw(Box::new(UrlSessionBufferContext {
-                        request_id,
-                        metadata_id,
-                        sender: networking_sender.clone(),
-                        body: Vec::new(),
-                        expected: 0,
-                        last_emit: 0,
-                        status_code: 0,
-                        headers: BTreeMap::new(),
-                        max_body_bytes: request.max_response_body_bytes,
-                        is_head: matches!(request.method, crate::types::HttpMethod::HEAD),
-                        failed: false,
-                    })) as u64;
-                    let buffer_delegate: ObjcId =
-                        msg_send![url_session_buffer_delegate_class(), new];
-                    (*buffer_delegate).set_ivar("context_box", context_box);
-                    let session: ObjcId = msg_send![
-                        class!(NSURLSession),
-                        sessionWithConfiguration: config
-                        delegate: buffer_delegate
-                        delegateQueue: nil
-                    ];
-                    let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
-                    let () = msg_send![data_task, resume];
-                    self.requests.push(HttpReq {
-                        request_id,
-                        data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap()),
-                        session: Some(RcObjcId::from_unowned(NonNull::new(session).unwrap())),
-                        session_delegate: Some(RcObjcId::from_unowned(
-                            NonNull::new(buffer_delegate).unwrap(),
-                        )),
-                    });
-                    return;
-                }
+                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: nil delegateQueue:nil]
             };
 
             if is_streaming {
@@ -575,6 +597,10 @@ impl AppleHttpRequests {
                     request_id,
                     metadata_id,
                     sender: networking_sender,
+                    received: 0,
+                    max_body_bytes: request.max_response_body_bytes,
+                    is_head: matches!(request.method, crate::types::HttpMethod::HEAD),
+                    failed: false,
                 })) as u64;
                 let data_delegate_instance: ObjcId =
                     msg_send![url_session_data_delegate_class(), new];
@@ -590,58 +616,32 @@ impl AppleHttpRequests {
                     session_delegate: None,
                 });
             } else {
-                let sender = networking_sender.clone();
-                let response_handler =
-                    objc_block!(move |data: ObjcId, response: ObjcId, error: ObjcId| {
-                        if error != ptr::null_mut() {
-                            let error_str: String =
-                                nsstring_to_string(msg_send![error, localizedDescription]);
-                            let _ = sender.send(NetworkResponse::HttpError {
-                                request_id,
-                                error: HttpError {
-                                    metadata_id,
-                                    message: error_str,
-                                },
-                            });
-                            return;
-                        }
-
-                        let bytes: *const u8 = msg_send![data, bytes];
-                        let length: usize = msg_send![data, length];
-                        let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
-                        let status_code: u16 = msg_send![response, statusCode];
-                        let headers: ObjcId = msg_send![response, allHeaderFields];
-
-                        let mut http_response = HttpResponse::new(
-                            metadata_id,
-                            status_code,
-                            Default::default(),
-                            Some(data_bytes.to_vec()),
-                        );
-
-                        let key_enumerator: ObjcId = msg_send![headers, keyEnumerator];
-                        let mut key: ObjcId = msg_send![key_enumerator, nextObject];
-                        while key != ptr::null_mut() {
-                            let value: ObjcId = msg_send![headers, objectForKey: key];
-                            let key_str = nsstring_to_string(key);
-                            let value_str = nsstring_to_string(value);
-                            http_response.set_header(key_str, value_str);
-                            key = msg_send![key_enumerator, nextObject];
-                        }
-
-                        let _ = sender.send(NetworkResponse::HttpResponse {
-                            request_id,
-                            response: http_response,
-                        });
-                    });
-
-                let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
+                let context_box = Box::into_raw(Box::new(UrlSessionBufferContext {
+                    request_id,
+                    metadata_id,
+                    sender: networking_sender,
+                    body: Vec::new(),
+                    expected: 0,
+                    last_emit: 0,
+                    status_code: 0,
+                    headers: BTreeMap::new(),
+                    max_body_bytes: request.max_response_body_bytes,
+                    is_head: matches!(request.method, crate::types::HttpMethod::HEAD),
+                    failed: false,
+                })) as u64;
+                let buffer_delegate: ObjcId =
+                    msg_send![url_session_buffer_delegate_class(), new];
+                (*buffer_delegate).set_ivar("context_box", context_box);
+                let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
+                let () = msg_send![data_task, setDelegate: buffer_delegate];
                 let () = msg_send![data_task, resume];
                 self.requests.push(HttpReq {
                     request_id,
                     data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap()),
-                    session: None,
-                    session_delegate: None,
+                    session: Some(RcObjcId::from_unowned(NonNull::new(session).unwrap())),
+                    session_delegate: Some(RcObjcId::from_unowned(
+                        NonNull::new(buffer_delegate).unwrap(),
+                    )),
                 });
             }
         }
