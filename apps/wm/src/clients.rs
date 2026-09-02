@@ -609,6 +609,36 @@ pub struct ClientSlot {
     pub pane: bool,
 }
 
+impl ClientSlot {
+    /// The slot of an IN-PROCESS module instance (aicontrol §3): a window
+    /// in the layout like any other — the bar, alt-tab and the `os` service
+    /// see it — with no process behind it: no child, no socket, no build.
+    pub fn module(id: ClientId, app: &str, title: &str) -> ClientSlot {
+        ClientSlot {
+            id,
+            app: app.to_string(),
+            title: title.to_string(),
+            child: None,
+            sender: None,
+            socket: None,
+            window_id: 0,
+            ready: true,
+            pwd: None,
+            is_preview: false,
+            warm: false,
+            open_at: Some(Instant::now()),
+            opened_warm: false,
+            takes_focus: true,
+            via_cargo: false,
+            status: String::new(),
+            linked: false,
+            linked_at: None,
+            closing: None,
+            pane: false,
+        }
+    }
+}
+
 /// How long a client gets to honor a close request before it is killed.
 pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 

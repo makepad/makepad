@@ -21,7 +21,7 @@
 use crate::hub::ClientId;
 use makepad_ai_services::wire::*;
 use makepad_strict_json as json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The WM's own service endpoint.
 pub const OS_ENDPOINT: &str = "os";
@@ -34,6 +34,9 @@ pub enum Route {
     ToPane(String),
     /// A call for the WM itself; answer with `os_reply`.
     Os(ServiceCall),
+    /// A frame for an IN-PROCESS instance (a module the WM hosts itself):
+    /// the host runs its executor and answers with `local_reply`.
+    Local(ClientId, ServiceDown),
     Drop,
 }
 
@@ -42,6 +45,10 @@ pub struct AiBus {
     pub pane_client: Option<ClientId>,
     /// The last manifest each client registered, for replay.
     manifests: HashMap<ClientId, ServiceManifest>,
+    /// Clients that are module instances in this process (`m<id>`
+    /// endpoints): no socket, their frames are made and answered here.
+    /// This leg is what the web superbuild runs everything on.
+    locals: HashSet<ClientId>,
 }
 
 impl AiBus {
@@ -49,8 +56,44 @@ impl AiBus {
         EndpointId(format!("w{client}"))
     }
 
-    fn client_of(endpoint: &EndpointId) -> Option<ClientId> {
-        endpoint.as_str().strip_prefix('w')?.parse::<ClientId>().ok()
+    /// `w<id>` for a process client, `m<id>` for an in-process instance.
+    pub fn endpoint_for(&self, client: ClientId) -> EndpointId {
+        if self.locals.contains(&client) {
+            EndpointId(format!("m{client}"))
+        } else {
+            Self::endpoint_of(client)
+        }
+    }
+
+    /// (is local, client) from an endpoint string; `None` for neither kind.
+    fn client_of(endpoint: &EndpointId) -> Option<(bool, ClientId)> {
+        let s = endpoint.as_str();
+        let local = match s.chars().next() {
+            Some('w') => false,
+            Some('m') => true,
+            _ => return None,
+        };
+        s[1..].parse::<ClientId>().ok().map(|c| (local, c))
+    }
+
+    /// An in-process instance joins the bus: remembered like any client's
+    /// registration (so the replay carries it) and announced to the pane
+    /// now with the frame this returns.
+    pub fn register_local(&mut self, client: ClientId, manifest: ServiceManifest) -> String {
+        self.locals.insert(client);
+        self.manifests.insert(client, manifest.clone());
+        HostedUp { from: Some(self.endpoint_for(client)), msg: ServiceUp::Register { manifest, port_tag: 0 } }.to_json()
+    }
+
+    /// An in-process instance's answer, as a frame for the pane.
+    pub fn local_reply(&self, client: ClientId, result: ToolResult) -> String {
+        HostedUp { from: Some(self.endpoint_for(client)), msg: ServiceUp::Result(result) }.to_json()
+    }
+
+    pub fn local_clients(&self) -> Vec<ClientId> {
+        let mut out: Vec<ClientId> = self.locals.iter().copied().collect();
+        out.sort_unstable();
+        out
     }
 
     pub fn is_pane(&self, client: ClientId) -> bool {
@@ -119,7 +162,7 @@ impl AiBus {
         for client in self.registered_clients() {
             out.push(
                 HostedUp {
-                    from: Some(Self::endpoint_of(client)),
+                    from: Some(self.endpoint_for(client)),
                     msg: ServiceUp::Register { manifest: self.manifests[&client].clone(), port_tag: 0 },
                 }
                 .to_json(),
@@ -129,10 +172,12 @@ impl AiBus {
     }
 
     /// The pane-state broadcast: one `ChatOpen` frame per registered
-    /// client, addressed to its endpoint.
+    /// PROCESS client, addressed to its endpoint (an in-process instance
+    /// hears it from the host directly).
     pub fn chat_open_frames(&self, open: bool) -> Vec<(ClientId, String)> {
         self.registered_clients()
             .into_iter()
+            .filter(|client| !self.locals.contains(client))
             .map(|client| {
                 let frame = HostedDown { to: Some(Self::endpoint_of(client)), msg: ServiceDown::ChatOpen { open } };
                 (client, frame.to_json())
@@ -153,7 +198,10 @@ impl AiBus {
                 };
             }
             return match Self::client_of(&to) {
-                Some(target) if self.manifests.contains_key(&target) => Route::ToClient(target, down.to_json()),
+                Some((true, target)) if self.locals.contains(&target) => Route::Local(target, down.msg),
+                Some((false, target)) if !self.locals.contains(&target) && self.manifests.contains_key(&target) => {
+                    Route::ToClient(target, down.to_json())
+                }
                 _ => Route::Drop,
             };
         }
@@ -179,7 +227,9 @@ impl AiBus {
             return None;
         }
         self.manifests.remove(&client)?;
-        Some(HostedUp { from: Some(Self::endpoint_of(client)), msg: ServiceUp::Unregister }.to_json())
+        let from = Some(self.endpoint_for(client));
+        self.locals.remove(&client);
+        Some(HostedUp { from, msg: ServiceUp::Unregister }.to_json())
     }
 
     /// The WM's answer to one of its own calls, as a frame for the pane.
@@ -293,5 +343,55 @@ mod tests {
         assert!(manifest.validate().is_ok());
         assert!(manifest.tool("open").is_some());
         assert_eq!(manifest.tools.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod local_tests {
+    use super::*;
+
+    fn sheets() -> ServiceManifest {
+        ServiceManifest::new("sheets", "Sheets", "The spreadsheet.").with_tool(ToolDef::new(
+            "summary",
+            "The sheet on screen.",
+            r#"{"type":"object","properties":{}}"#,
+            Risk::Read,
+        ))
+    }
+
+    #[test]
+    fn an_in_process_instance_is_a_local_endpoint_on_the_same_bus() {
+        let mut bus = AiBus { pane_client: Some(9), ..Default::default() };
+        // Registering announces it with an `m` endpoint, and the replay
+        // carries it like any client's registration.
+        let announce = bus.register_local(4, sheets());
+        let up = HostedUp::parse(&announce).unwrap();
+        assert_eq!(up.from, Some(EndpointId("m4".into())));
+        assert!(matches!(up.msg, ServiceUp::Register { .. }));
+        assert_eq!(bus.local_clients(), vec![4]);
+        let replay = bus.replay(AiBus::os_manifest(&[]));
+        assert_eq!(replay.len(), 2);
+        assert!(replay[1].contains("\"m4\""));
+        // A call addressed to it is the host's to run; the wrong kind of
+        // address for the same id drops.
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into() };
+        let down = HostedDown { to: Some(EndpointId("m4".into())), msg: ServiceDown::Call(call.clone()) };
+        match bus.on_custom(9, &down.to_json()) {
+            Route::Local(4, ServiceDown::Call(c)) => assert_eq!(c.call_id, "c1"),
+            _ => panic!("expected Local"),
+        }
+        let wrong = HostedDown { to: Some(EndpointId("w4".into())), msg: ServiceDown::Call(call) };
+        assert!(matches!(bus.on_custom(9, &wrong.to_json()), Route::Drop));
+        // The answer goes up from the local endpoint.
+        let reply = bus.local_reply(4, ToolResult::ok("c1", "Sheet 1", ""));
+        let up = HostedUp::parse(&reply).unwrap();
+        assert_eq!(up.from, Some(EndpointId("m4".into())));
+        // ChatOpen goes to process clients only; the host tells locals itself.
+        assert!(bus.chat_open_frames(true).is_empty());
+        // Death: an Unregister from the local endpoint, then nothing.
+        let bye = bus.client_died(4).unwrap();
+        assert!(bye.contains("Unregister") && bye.contains("\"m4\""));
+        assert!(bus.local_clients().is_empty());
+        assert!(bus.client_died(4).is_none());
     }
 }

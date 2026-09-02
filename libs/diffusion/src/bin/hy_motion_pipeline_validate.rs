@@ -132,7 +132,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut arguments = std::env::args().skip(1);
-    let usage = "usage: hy-motion-pipeline-validate <Qwen3-8B-dir> <CLIP-dir> <latest.ckpt> <dump_wooden-dir> <oracle-npy-dir>";
+    let usage = "usage: hy-motion-pipeline-validate <Qwen3-8B-dir> <CLIP-dir> <latest.ckpt> <dump_wooden-dir> <oracle-npy-dir> [--soak-runs N]";
     let paths = HyMotionModelPaths::new(
         PathBuf::from(arguments.next().ok_or(usage)?),
         PathBuf::from(arguments.next().ok_or(usage)?),
@@ -140,9 +140,15 @@ fn run() -> Result<(), String> {
         PathBuf::from(arguments.next().ok_or(usage)?),
     );
     let oracle_dir = PathBuf::from(arguments.next().ok_or(usage)?);
-    if arguments.next().is_some() {
-        return Err(usage.to_string());
-    }
+    let soak_runs = match arguments.next().as_deref() {
+        None => 3,
+        Some("--soak-runs") => arguments
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or("--soak-runs expects an integer")?,
+        Some(_) => return Err(usage.to_string()),
+    };
+    if arguments.next().is_some() { return Err(usage.to_string()); }
 
     let load_started = Instant::now();
     let (mut pipeline, load) = HyMotionPipeline::load(&paths).map_err(|error| error.to_string())?;
@@ -386,10 +392,6 @@ fn run() -> Result<(), String> {
     }
     println!("pipeline_denoise_cancel_recovery=green");
 
-    let soak_runs = std::env::var("HY_MOTION_SOAK_RUNS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(3);
     let mut soak_max_s = 0.0f64;
     for run_index in 0..soak_runs {
         let repeat = pipeline

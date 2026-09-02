@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 // --- minimal .npy reader ---------------------------------------------------
 
 struct Npy {
-    shape: Vec<usize>,
     descr: String,
     data: Vec<u8>,
 }
@@ -58,12 +57,11 @@ fn load_npy(path: &Path) -> Result<Npy, String> {
         .and_then(|rest| rest.split('(').nth(1))
         .and_then(|rest| rest.split(')').next())
         .ok_or_else(|| format!("{}: no shape", path.display()))?;
-    let shape: Vec<usize> = shape_text
+    let _shape: Vec<usize> = shape_text
         .split(',')
         .filter_map(|part| part.trim().parse::<usize>().ok())
         .collect();
     Ok(Npy {
-        shape,
         descr,
         data: bytes[header_start + header_len..].to_vec(),
     })
@@ -173,13 +171,12 @@ fn main() {
 }
 
 fn opts_loop() -> usize {
-    // --loop N is parsed generically into OPTS; read from env fallback too.
+    // --loop N is parsed generically from argv.
     std::env::args()
         .collect::<Vec<_>>()
         .windows(2)
         .find(|pair| pair[0] == "--loop")
         .and_then(|pair| pair[1].parse().ok())
-        .or_else(|| std::env::var("H3_LOOP").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(0)
 }
 

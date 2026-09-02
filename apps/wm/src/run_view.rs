@@ -982,3 +982,49 @@ impl Widget for MpRunView {
         }
     }
 }
+
+impl crate::tile::TileHost for MpRunView {
+    fn client(&self) -> Option<ClientId> {
+        MpRunView::client(self)
+    }
+
+    fn set_status_line(&mut self, cx: &mut Cx, line: &str) {
+        MpRunView::set_status_line(self, cx, line)
+    }
+
+    fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
+        MpRunView::focus_keyboard(self, cx)
+    }
+
+    fn release_keyboard(&mut self, cx: &mut Cx) {
+        MpRunView::release_keyboard(self, cx)
+    }
+
+    fn set_takes_key_focus(&mut self, on: bool) {
+        MpRunView::set_takes_key_focus(self, on)
+    }
+
+    fn set_remote_cursor(&mut self, cx: &mut Cx, cursor: MouseCursor) {
+        MpRunView::set_remote_cursor(self, cx, cursor)
+    }
+
+    fn has_frame(&self) -> bool {
+        MpRunView::has_frame(self)
+    }
+
+    fn arrival_fade(&self) -> f32 {
+        MpRunView::arrival_fade(self)
+    }
+
+    fn set_target_size(&mut self, size: Option<Vec2d>) {
+        MpRunView::set_target_size(self, size)
+    }
+
+    fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>) {
+        MpRunView::set_close_crop(self, crop)
+    }
+
+    fn set_fade(&mut self, fade: f32) {
+        MpRunView::set_fade(self, fade)
+    }
+}

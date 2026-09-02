@@ -31,3 +31,13 @@ makepad-wm-api = { path = "../../libs/wm_api" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+# In-process hosting (aicontrol §3): the module contract, the palette applied
+# into each instance's isolate, and the modules this build links.
+makepad-app-module = { path = "../../libs/app_module" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-sheets = { path = "../sheets", default-features = false, optional = true }
+
+[features]
+default = ["app-sheets"]
+# Sheets linked in as a module (hosting is still Process unless switched).
+app-sheets = ["dep:makepad-sheets"]

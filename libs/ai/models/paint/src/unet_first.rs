@@ -7,7 +7,7 @@ use crate::torch_bin::{self, TorchDtype};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_add_rows_broadcast, gpu_concat_cols, gpu_concat_rows, gpu_conv2d_nchw_cached,
     gpu_conv2d_nchw_packed, gpu_conv2d_planar_cached, gpu_conv2d_planar_strided, gpu_device_available,
-    gpu_download, gpu_group_norm_planar, gpu_linear_f32_resident, gpu_linear_nt_cached,
+    gpu_download, gpu_group_norm_planar, gpu_linear_nt_cached,
     gpu_linear_nt_cached_f16, gpu_to_f16, gpu_to_f32,
     gpu_group_norm_nchw, gpu_nchw_add_channel, gpu_nchw_add_channel_inplace, gpu_nchw_to_planar,
     gpu_paint_group_norm_batched,
@@ -133,8 +133,6 @@ pub(crate) fn unpack_planar_host(
 }
 
 struct CachedLinear {
-    weight: GpuTensor,
-    bias: Option<GpuTensor>,
     f16_bytes: Vec<u8>,
     bias_host: Vec<f32>,
     n: usize,
@@ -146,11 +144,6 @@ pub struct UnetFirst {
     /// Step-invariant encoder K/V (`{prefix}|{tag}`). Same GEMM, once per job.
     enc_kv: RefCell<HashMap<String, (GpuTensor, GpuTensor)>>,
     enc_lin: RefCell<HashMap<String, GpuTensor>>,
-}
-
-/// Inference extras use fp16 GEMM + hd=64 flash. Tap canaries stay fp32.
-pub(crate) fn paint_fast() -> bool {
-    std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() != Ok("1")
 }
 
 fn half_to_f32(bits: u16) -> f32 {
@@ -254,21 +247,15 @@ impl UnetFirst {
         if weight.shape.len() != 2 {
             return Err(format!("{prefix} weight shape {:?}", weight.shape));
         }
-        let w = gpu_upload(&weight.data, weight.shape[0], weight.shape[1])?;
-        let (b, bias_host) = if bias {
+        let bias_host = if bias {
             let bias = self.get(&format!("{prefix}.bias"))?;
-            (
-                Some(gpu_upload(&bias.data, 1, bias.data.len())?),
-                bias.data.clone(),
-            )
+            bias.data.clone()
         } else {
-            (None, Vec::new())
+            Vec::new()
         };
         self.linear_gpu.borrow_mut().insert(
             prefix.to_string(),
             CachedLinear {
-                weight: w,
-                bias: b,
                 f16_bytes: f16_bytes(&weight.data),
                 bias_host,
                 n: weight.shape[0],
@@ -288,7 +275,7 @@ impl UnetFirst {
         let lin = cache
             .get(prefix)
             .ok_or_else(|| format!("linear cache miss {prefix}"))?;
-        if paint_fast() && x.is_half() {
+        if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
                 NS,
@@ -300,7 +287,7 @@ impl UnetFirst {
                 }],
                 &lin.bias_host,
             )
-        } else if paint_fast() {
+        } else {
             gpu_linear_nt_cached(
                 x,
                 NS,
@@ -312,8 +299,6 @@ impl UnetFirst {
                 }],
                 &lin.bias_host,
             )
-        } else {
-            gpu_linear_f32_resident(x, &lin.weight, lin.bias.as_ref())
         }
     }
 
@@ -336,7 +321,7 @@ impl UnetFirst {
             return Err(format!("qkv n {} {} {}", lq.n, lk.n, lv.n));
         }
         let hidden = lq.n;
-        let qkv = if paint_fast() && x.is_half() {
+        let qkv = if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
                 NS,
@@ -362,7 +347,7 @@ impl UnetFirst {
                 ],
                 &[],
             )?
-        } else if paint_fast() {
+        } else {
             gpu_linear_nt_cached(
                 x,
                 NS,
@@ -388,8 +373,6 @@ impl UnetFirst {
                 ],
                 &[],
             )?
-        } else {
-            return Err("linear_qkv is inference-only".into());
         };
         drop(cache);
         let qt = gpu_slice_cols(&qkv, 0, hidden)?;
@@ -605,7 +588,7 @@ impl UnetFirst {
             return Ok(Vec::new());
         }
         let plane = width * height;
-        if paint_fast() && xs.len() > 1 {
+        if xs.len() > 1 {
             let refs: Vec<&GpuTensor> = xs.iter().collect();
             let stacked = gpu_concat_cols(&refs)?;
             let gn = gpu_paint_group_norm_batched(
@@ -677,16 +660,9 @@ impl UnetFirst {
             GN_EPS,
         )?;
         let y = self.conv_n(&n1, width, height, &format!("{prefix}.conv1"), 3, 1)?;
-        let cout = self.get(&format!("{prefix}.conv1.weight"))?.shape[0];
-        let temb_g = if paint_fast() {
-            let temb_in = gpu_upload(temb, 1, temb.len())?;
-            let temb_act = gpu_silu(&temb_in)?;
-            self.linear_cached(&temb_act, &format!("{prefix}.time_emb_proj"), true)?
-        } else {
-            let temb_act: Vec<f32> = temb.iter().map(|v| v / (1.0 + (-v).exp())).collect();
-            let temb_proj = self.linear(&temb_act, &format!("{prefix}.time_emb_proj"))?;
-            gpu_upload(&temb_proj, cout, 1)?
-        };
+        let temb_in = gpu_upload(temb, 1, temb.len())?;
+        let temb_act = gpu_silu(&temb_in)?;
+        let temb_g = self.linear_cached(&temb_act, &format!("{prefix}.time_emb_proj"), true)?;
         let n2w = self.get(&format!("{prefix}.norm2.weight"))?;
         let n2b = self.get(&format!("{prefix}.norm2.bias"))?;
         let has_skip = self.w.contains_key(&format!("{prefix}.conv_shortcut.weight"));
@@ -695,7 +671,7 @@ impl UnetFirst {
         } else {
             None
         };
-        let y2 = if paint_fast() && y.len() > 1 {
+        let y2 = if y.len() > 1 {
             let refs: Vec<&GpuTensor> = y.iter().collect();
             let stacked = gpu_concat_cols(&refs)?;
             let stacked = gpu_add_rows_broadcast(&stacked, &temb_g)?;
@@ -834,8 +810,7 @@ impl UnetFirst {
     }
 
     /// Official ResNet on one stacked `[C, n*H*W]` tensor: GN, conv, time
-    /// linear, residual. Inference-only (`paint_fast`); tap canaries keep
-    /// [`Self::resnet_n`].
+    /// linear, residual.
     pub(crate) fn resnet_batch(
         &self,
         x: &BatchAct,
@@ -969,16 +944,12 @@ impl UnetFirst {
         };
         x.expect(12, width, height, "conv_in")?;
         // Official nn.Conv2d is fp16 NCHW. Stay HALF through the walk.
-        let x = if paint_fast() {
-            BatchAct {
-                t: gpu_to_f16(&x.t)?,
-                n: x.n,
-                c: x.c,
-                w: x.w,
-                h: x.h,
-            }
-        } else {
-            x
+        let x = BatchAct {
+            t: gpu_to_f16(&x.t)?,
+            n: x.n,
+            c: x.c,
+            w: x.w,
+            h: x.h,
         };
         self.conv_batch(&x, "unet.conv_in", 3, 1)
     }

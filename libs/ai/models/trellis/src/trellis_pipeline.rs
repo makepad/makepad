@@ -9,7 +9,7 @@ use crate::trellis::{
     t2_cfg_combine, t2_euler_step, t2_occupancy_coords, t2_rope_tables, t2_ss_grid_coords,
     t2_t_sequence, T2SamplerConfig, T2_SS_CHANNELS, T2_SS_TOKENS,
 };
-use crate::trellis_dit::{t2_kv_cache_enabled, t2_upload_rope, T2CrossKv, T2Dit};
+use crate::trellis_dit::{t2_upload_rope, T2CrossKv, T2Dit};
 use crate::trellis_vae::T2SsDec;
 use crate::Result;
 
@@ -150,7 +150,6 @@ pub fn t2_sample_flow_concat_ctl(
     };
     // Per-stage cross-attn KV caches: cond / neg_cond are fixed across every
     // forward of this sampling run.
-    let use_kv_cache = t2_kv_cache_enabled();
     let mut pos_kv = T2CrossKv::default();
     let mut neg_kv = T2CrossKv::default();
     let mut fwd_index = 0usize;
@@ -160,17 +159,16 @@ pub fn t2_sample_flow_concat_ctl(
         }
         let t1000 = (1000.0 * t) as f32;
         let input = build_input(x);
-        let pos_cache = use_kv_cache.then_some(&mut pos_kv);
-        let (mut velocity, _) = dit.forward(&input, tokens, t1000, cond, rope, pos_cache, &[])?;
+        let (mut velocity, _) =
+            dit.forward(&input, tokens, t1000, cond, rope, Some(&mut pos_kv), &[])?;
         on_forward(fwd_index, t, x, &velocity);
         fwd_index += 1;
         if cfg_active {
             if cancel() {
                 return Err(crate::DiffusionError::Cancelled);
             }
-            let neg_cache = use_kv_cache.then_some(&mut neg_kv);
             let (neg_velocity, _) =
-                dit.forward(&input, tokens, t1000, neg_cond, rope, neg_cache, &[])?;
+                dit.forward(&input, tokens, t1000, neg_cond, rope, Some(&mut neg_kv), &[])?;
             on_forward(fwd_index, t, x, &neg_velocity);
             fwd_index += 1;
             t2_cfg_combine(

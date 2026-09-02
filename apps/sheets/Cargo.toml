@@ -15,15 +15,25 @@ default-run = "sheets"
 [[bin]]
 name = "sheets"
 path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+name = "makepad_sheets"
+path = "src/lib.rs"
 
 [features]
-default = []
+default = ["standalone"]
 demo = []
+# The standalone window: the F10 overlay and the port toward it. A host
+# that links the MODULE (makepad-wm) leaves this off and gets the lib only.
+standalone = ["dep:makepad-aichat"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the one read tool the
 # sheet exposes to it (src/ai.rs).
-makepad-aichat = { path = "../aichat" }
+makepad-aichat = { path = "../aichat", optional = true }
 makepad-ai-services = { path = "../../libs/ai/services" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }

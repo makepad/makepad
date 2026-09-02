@@ -24,33 +24,11 @@
 //! runtime. So a Windows box with no NVIDIA card, or with the card removed
 //! after the build, transcribes on the CPU.
 //!
-//! [`set_enabled`] is a process-wide runtime kill switch over *both* backends,
-//! used by `src/bin/whisper_parity.rs` to run the same audio twice in one
-//! process.
-
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static ENABLED: AtomicBool = AtomicBool::new(true);
-
-/// Enable/disable GPU acceleration for the rest of the process. Returns the
-/// previous setting. Disabling forces the pure CPU path; results stay correct
-/// either way, which is exactly what the parity harness checks.
-pub fn set_enabled(enabled: bool) -> bool {
-    ENABLED.swap(enabled, Ordering::Relaxed)
-}
-
-#[inline]
-fn on() -> bool {
-    ENABLED.load(Ordering::Relaxed)
-}
 
 /// `"metal"`, `"cuda"` or `"cpu"` — what the next `try_*` call will actually
 /// reach. Reported by the test binaries so a run can never be mislabelled.
 pub fn backend_name() -> &'static str {
-    if !on() {
-        return "cpu";
-    }
     if crate::whisper::metal_backend::is_requested() {
         return "metal";
     }
@@ -64,16 +42,13 @@ pub fn backend_name() -> &'static str {
 /// between shapes of the same computation (see `src/cpu/decoder.rs`), so it
 /// must not claim more than [`backend_name`] does.
 pub(crate) fn is_requested() -> bool {
-    on() && (crate::whisper::metal_backend::is_requested() || crate::whisper::cuda_backend::is_available())
+    crate::whisper::metal_backend::is_requested() || crate::whisper::cuda_backend::is_available()
 }
 
 /// Try Metal, then CUDA. Exactly one of the two is ever non-stub in a given
 /// build, so the ordering is documentation rather than policy.
 macro_rules! dispatch {
     ($name:ident ( $($arg:expr),* $(,)? )) => {{
-        if !on() {
-            return None;
-        }
         if let Some(out) = crate::whisper::metal_backend::$name($($arg),*) {
             return Some(out);
         }
