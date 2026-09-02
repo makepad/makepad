@@ -1464,6 +1464,9 @@ mod tests {
     }
 
     impl Vfs for SpyDemoVfs {
+        fn now_secs(&self) -> u64 {
+            DEMO_NOW_SECS
+        }
         fn home(&self) -> PathBuf {
             self.0.home()
         }
