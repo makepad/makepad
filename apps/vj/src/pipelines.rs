@@ -233,10 +233,7 @@ struct JobHandle {
 type JobRegistry = Arc<Mutex<HashMap<[u8; 16], Arc<JobHandle>>>>;
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    (makepad_widgets::Cx::time_now().max(0.0) * 1000.0) as u64
 }
 
 /// 16 identity bytes from time + tag + a counter. Ids are local to this

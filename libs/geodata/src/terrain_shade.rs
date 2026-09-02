@@ -282,6 +282,8 @@ impl TerrainShader {
 }
 
 #[cfg(test)]
+// Native CPU benchmark assertions use std deadlines only inside tests.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

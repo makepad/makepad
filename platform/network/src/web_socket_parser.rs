@@ -1,5 +1,5 @@
 use crate::digest::{base64_encode, Sha1};
-use std::time::{SystemTime, UNIX_EPOCH};
+use makepad_live_id::LiveId;
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -149,11 +149,11 @@ impl WebSocketMessageHeader {
 
     // TODO Improve this using a proper random number generator
     fn random_byte() -> u8 {
-        let num = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("duration_since failed")
-            .subsec_nanos();
-        num as u8
+        let mut value = LiveId::unique().0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        (value.wrapping_mul(0x94d0_49bb_1331_11eb) >> 56) as u8
     }
 }
 

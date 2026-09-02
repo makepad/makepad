@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -564,10 +564,7 @@ fn unique_capture_path(dir: &Path) -> Result<PathBuf, String> {
 /// (`set_script_local_utc_offset_secs`), UTC otherwise — the same convention
 /// every other timestamp the platform formats follows.
 fn local_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = Cx::time_now().max(0.0) as i64;
     let (y, mo, d, h, mi, s) = civil_from_unix(now.saturating_add(script_local_utc_offset_secs()));
     format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
@@ -614,13 +611,13 @@ fn encode_loop(
     let height = (first.height & !1).max(2);
 
     // Let the audio device announce its rate before the AAC track is created.
-    let grace_until = Instant::now() + AUDIO_RATE_GRACE;
+    let grace_until = Cx::monotonic_now() + AUDIO_RATE_GRACE.as_secs_f64();
     let audio_rate = loop {
         let rate = audio.lock().map(|q| q.rate).unwrap_or(0);
         if rate != 0 {
             break rate;
         }
-        if Instant::now() >= grace_until || stopped(&slot) {
+        if Cx::monotonic_now() >= grace_until || stopped(&slot) {
             break FALLBACK_AUDIO_RATE;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -648,19 +645,19 @@ fn encode_loop(
     blit_into(&mut canvas, width, height, &first.rgba, first.width, first.height);
     recycle(&slot, first.rgba);
 
-    let start = Instant::now();
+    let start = Cx::monotonic_now();
     let mut frame_index: u64 = 0;
     let mut audio_pushed: u64 = 0;
     let mut encode_error: Option<String> = None;
     let mut encoded: u64 = 0;
-    let mut push_time = Duration::ZERO;
+    let mut push_time = 0.0;
 
     loop {
         // Video frame `frame_index` covers [n/fps, (n+1)/fps).
         let pts_100ns = (frame_index as u128 * 10_000_000u128 / fps as u128) as i64;
-        let t0 = Instant::now();
+        let t0 = Cx::monotonic_now();
         let push = encoder.push_frame_rgba8(&canvas, Some(pts_100ns));
-        push_time += t0.elapsed();
+        push_time += Cx::monotonic_now() - t0;
         encoded += 1;
         if let Err(err) = push {
             encode_error = Some(format!("video frame {frame_index}: {err}"));
@@ -675,7 +672,7 @@ fn encode_loop(
         // Sleep to the next tick, then take whatever the window presented
         // meanwhile. Nothing new = the screen did not change; the frame is
         // repeated so the file keeps real time.
-        let deadline = start + tick_duration(frame_index + 1, fps);
+        let deadline = start + tick_duration(frame_index + 1, fps).as_secs_f64();
         let next = take_frame(&slot, Some(deadline));
         if let Some(frame) = next {
             blit_into(&mut canvas, width, height, &frame.rgba, frame.width, frame.height);
@@ -686,7 +683,7 @@ fn encode_loop(
 
         // Wall clock decides the next index, so an encoder that fell behind
         // leaves a gap instead of stretching the recording.
-        let elapsed = start.elapsed().as_secs_f64();
+        let elapsed = Cx::monotonic_now() - start;
         let wanted = (elapsed * fps as f64).round() as u64;
         frame_index = wanted.max(frame_index + 1);
     }
@@ -694,7 +691,7 @@ fn encode_loop(
     // The one line that says whether the requested rate was actually held.
     // `encode ms/frame` over the frame budget (1000/fps) is the ceiling; when
     // it exceeds the budget the wall clock leaves gaps and `gaps` counts them.
-    let wall = start.elapsed().as_secs_f64().max(1e-6);
+    let wall = (Cx::monotonic_now() - start).max(1e-6);
     let dropped = slot.0.lock().map(|s| s.dropped).unwrap_or(0);
     let audio_dropped = audio.lock().map(|q| q.dropped).unwrap_or(0);
     log!(
@@ -708,7 +705,7 @@ fn encode_loop(
         frame_index.saturating_sub(encoded.saturating_sub(1)),
         dropped,
         audio_dropped,
-        push_time.as_secs_f64() * 1000.0 / encoded.max(1) as f64,
+        push_time * 1000.0 / encoded.max(1) as f64,
         1000.0 / fps as f64,
     );
 
@@ -749,7 +746,7 @@ fn recycle(slot: &Arc<(Mutex<FrameSlot>, Condvar)>, buffer: Vec<u8>) {
 /// of `None` waits indefinitely (until stop).
 fn take_frame(
     slot: &Arc<(Mutex<FrameSlot>, Condvar)>,
-    deadline: Option<Instant>,
+    deadline: Option<f64>,
 ) -> Option<CapturedFrame> {
     let (lock, cvar) = &**slot;
     let mut guard = lock.lock().ok()?;
@@ -762,11 +759,13 @@ fn take_frame(
         }
         match deadline {
             Some(deadline) => {
-                let now = Instant::now();
+                let now = Cx::monotonic_now();
                 if now >= deadline {
                     return None;
                 }
-                let (next, timeout) = cvar.wait_timeout(guard, deadline - now).ok()?;
+                let (next, timeout) = cvar
+                    .wait_timeout(guard, Duration::from_secs_f64(deadline - now))
+                    .ok()?;
                 guard = next;
                 if timeout.timed_out() && guard.pending.is_none() {
                     return None;

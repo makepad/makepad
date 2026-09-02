@@ -1,4 +1,6 @@
 #![cfg(all(feature = "web", not(target_arch = "wasm32")))]
+// Native transport comparison test uses blocking socket deadlines.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 mod common;
 

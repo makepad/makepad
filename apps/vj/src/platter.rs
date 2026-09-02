@@ -15,7 +15,7 @@
 //! the handover is a cue, not a jump back to where it was left.
 
 use std::sync::Arc;
-use std::time::Instant;
+use crate::clock::Instant;
 
 use crate::media::{Frame, PlayMode};
 use crate::transport::{BeatInput, Events, Mode, Timeline, Transport};

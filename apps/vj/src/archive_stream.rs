@@ -28,7 +28,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 /// One prefetch window. Archive H.264 transcodes run ~0.8 Mbit/s, so this
 /// is ~15 s of video per request; a 1080p original is ~3 s.

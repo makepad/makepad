@@ -361,8 +361,8 @@ fn discover(
 ) -> Option<(ApiEndpoints, Option<[u8; 16]>)> {
     let mut listener =
         DiscoveryListener::start(config.discovery_port, 10_000, now_ms).ok()?;
-    let deadline =
-        std::time::Instant::now() + Duration::from_millis(config.discovery_wait_ms);
+    let deadline = makepad_platform::Cx::monotonic_now()
+        + Duration::from_millis(config.discovery_wait_ms).as_secs_f64();
     let found = loop {
         if stopping.load(Ordering::Acquire) {
             break None;
@@ -374,7 +374,7 @@ fn discover(
         if let Some(server) = candidate {
             break Some(server);
         }
-        if std::time::Instant::now() >= deadline {
+        if makepad_platform::Cx::monotonic_now() >= deadline {
             break None;
         }
         std::thread::sleep(Duration::from_millis(100));

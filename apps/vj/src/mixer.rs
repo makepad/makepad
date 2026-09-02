@@ -2207,7 +2207,7 @@ impl Mixer {
             self.contended_callbacks.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        let render_started = std::time::Instant::now();
+        let render_started = crate::clock::Instant::now();
         let s = &mut *s;
         let rate = device_rate as f32;
         let channels = output.channel_count();

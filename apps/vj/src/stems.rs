@@ -1340,7 +1340,7 @@ mod tests {
 
     /// Everything the pool says about one job, up to and including `Done`.
     fn run_to_done(pool: &StemsPool, timeout: std::time::Duration) -> Vec<StemsMsg> {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = crate::clock::Instant::now() + timeout;
         let mut out = Vec::new();
         loop {
             let batch = pool.poll();
@@ -1348,7 +1348,7 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, StemsMsg::Done { .. }) || matches!(m, StemsMsg::Status { working: false, .. }));
             out.extend(batch);
-            if done || std::time::Instant::now() >= deadline {
+            if done || crate::clock::Instant::now() >= deadline {
                 return out;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1522,7 +1522,7 @@ mod tests {
         let mut writer = ChunkWriter::new(chunk_frames(rate), chunk_count(pcm.frames.len(), rate));
         // Cut the run short by dropping the receiver after the first spans:
         // run to the end here, then check the cache carries what it made.
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         run_demixer(&job, &mut model, Some(&mut cache), &mut writer, 0, &tx, &|| false)
             .expect("demix");
         let demixed = published(&rx);
@@ -1542,7 +1542,7 @@ mod tests {
         let mut cache = StemCache::open(&root, &digest, header).unwrap();
         let (tx, rx) = channel::<StemsMsg>();
         let mut writer = ChunkWriter::new(chunk_frames(rate), chunk_count(pcm.frames.len(), rate));
-        let reloaded = std::time::Instant::now();
+        let reloaded = crate::clock::Instant::now();
         let resume = run_cached(&job, &mut cache, &mut writer, 0, &tx);
         let cached = published(&rx);
         eprintln!(

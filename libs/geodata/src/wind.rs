@@ -10,7 +10,6 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Subset region (lon 2..9 E, lat 48..56 N covers NL + approaches).
 pub const WIND_WEST: f64 = 2.0;
@@ -255,10 +254,7 @@ impl WindSync {
     }
 
     fn now_unix() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        makepad_platform::Cx::time_now().max(0.0) as u64
     }
 
     /// Cached field without any network contact.

@@ -101,8 +101,18 @@ struct ArchiveTileParts {
 #[cfg(not(target_arch = "wasm32"))]
 struct ArchiveWatchResult {
     path: String,
-    mtime: Option<std::time::SystemTime>,
+    mtime: Option<u128>,
     zoom_range: Option<(u32, u32)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn archive_mtime(path: &Path) -> Option<u128> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
 }
 
 script_mod! {
@@ -1857,7 +1867,7 @@ pub struct MapView {
     archive_watch_timer: Timer,
     #[cfg(not(target_arch = "wasm32"))]
     #[rust]
-    archive_watch_mtime: Option<std::time::SystemTime>,
+    archive_watch_mtime: Option<u128>,
     // Label placement cache: while panning at the same zoom over the same
     // tiles, last placement's glyphs are redrawn shifted by the pan delta
     // instead of re-scanning/re-shaping/re-colliding thousands of labels.
@@ -3188,7 +3198,7 @@ impl MapView {
                     } else {
                         archive_path
                     };
-                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
+                    let mtime = archive_mtime(&probe);
                     let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
                         Path::new(&path),
                     )
@@ -7421,6 +7431,8 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 }
 
 #[cfg(test)]
+// Native map tests use wall-clock values only to make temporary paths unique.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use makepad_mbtile_reader::MbtilesWriter;
@@ -7439,10 +7451,7 @@ mod tests {
         max_zoom: &str,
         tile_zoom: u8,
     ) -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = Cx::time_now().to_bits();
         let path = std::path::PathBuf::from(format!("target/{name}-{nonce}.mbtiles"));
         std::fs::create_dir_all("target").unwrap();
         let mut writer = MbtilesWriter::create(&path).unwrap();
@@ -7507,7 +7516,7 @@ mod tests {
         );
         map.local_source_zoom_range = Some((4, 6));
         map.local_source_zoom_range_checked = true;
-        map.archive_watch_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        map.archive_watch_mtime = archive_mtime(&path);
 
         <MapView as Widget>::handle_event(
             &mut map,

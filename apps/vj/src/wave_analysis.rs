@@ -34,7 +34,7 @@ use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::Instant;
+use crate::clock::Instant;
 
 /// The independent judge of the grid this file publishes: a second onset
 /// front end, a second tracker, and the standard beat-tracking metrics.

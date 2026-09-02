@@ -45,7 +45,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 /// How long after a load the settle pass harvests compile errors. A draw
 /// shader compiles on the next draw of the host that loaded it; a couple of
@@ -338,10 +339,7 @@ pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    (makepad_widgets::Cx::time_now().max(0.0) * 1000.0) as u64
 }
 
 /// Write one document's verdict: the per-document status file (whole text)

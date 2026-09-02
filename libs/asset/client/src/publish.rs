@@ -1416,10 +1416,7 @@ fn mint_asset_id() -> AssetId {
     use std::hash::{BuildHasher, Hasher};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+    let now = makepad_platform::Cx::time_now().to_bits();
     let mut bytes = [0u8; 16];
     for (i, chunk) in bytes.chunks_mut(8).enumerate() {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();

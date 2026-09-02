@@ -1475,7 +1475,7 @@ fn run_job(
     }
 
     // The vocals stem, read straight out of the separation cache.
-    let started = std::time::Instant::now();
+    let started = crate::clock::Instant::now();
     status(&out.clone(), &job, "lyrics: reading vocals…");
     let (mono, rate) = match read_vocals_mono(&job) {
         Ok(pair) => pair,
@@ -2725,7 +2725,7 @@ mod tests {
         let mut cache = StemCache::open(crate::stems::cache_dir(), &digest, header.clone())
             .expect("stem cache");
         if !cache.is_complete() {
-            let started = std::time::Instant::now();
+            let started = crate::clock::Instant::now();
             let mut model =
                 StemsModel::load(&crate::stems::checkpoint_path()).expect("checkpoint");
             let buffer = {
@@ -2765,7 +2765,7 @@ mod tests {
             duration_secs: duration,
             bake: true,
         };
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         let (mono, rate) = read_vocals_mono(&job).expect("vocals");
         let read_secs = started.elapsed().as_secs_f64();
         let envelope = VocalEnvelope::build(&mono, rate);
@@ -2931,7 +2931,7 @@ mod tests {
                     continue;
                 }
                 let window = samples[from..to].to_vec();
-                let started = std::time::Instant::now();
+                let started = crate::clock::Instant::now();
                 let pieces = backend.transcribe(&window, "en").expect("pass 2");
                 eprintln!(
                     "    pass2 [{:.2}..{:.2}] {:.2}s wall -> {} piece(s): {}",

@@ -93,7 +93,7 @@ use makepad_widgets::makepad_platform::video_file::{
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use crate::clock::Instant;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

@@ -2243,7 +2243,7 @@ mod tests {
         let original = band_envelopes(&mono, rate);
         let out_dir = root.join("target/drum_ab");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         let hits = transcribe_drums(&mono, rate, &clock);
         let elapsed = started.elapsed();
         let Some(rendered) = render_hits(&hits, &clock, rate, mono.len()) else { return };
@@ -2278,7 +2278,7 @@ mod tests {
         pattern.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
         let Some(samples) = render_kit(&pattern, 4) else { return };
         let clock = LoopClock { bpm: 120.0, bars: 4, beats_per_bar: 4 };
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         let hits = transcribe_drums(&samples, RATE, &clock);
         let elapsed = started.elapsed();
         eprintln!("transcribe_drums 4 bars @120: {elapsed:?} ({} hits)", hits.len());

@@ -1148,7 +1148,7 @@ impl VjFxView {
             Engine::Emitters(e) => e.emitters.len(),
             _ => 0,
         };
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         let (spawns, errors, used) = cx.with_vm(|vm| {
             vm.bx.captured_errors = Some(Vec::new());
             // Input snapshot: what the tick can see.
@@ -1403,7 +1403,7 @@ impl VjFxView {
         };
 
         // CPU path: regen if the engine needs it (static engines: once).
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         let dirty = doc.engine.regen(self.frame_dt, time, phase, &mut self.mesh);
         if dirty {
             self.regen_ms = t0.elapsed().as_secs_f32() * 1000.0;

@@ -22,7 +22,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ScriptModKey {
@@ -268,19 +268,19 @@ pub struct ScriptVm<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptRunBudget {
-    pub soft_deadline: Instant,
-    pub hard_deadline: Instant,
+    pub soft_deadline: f64,
+    pub hard_deadline: f64,
     pub sample_interval_instructions: u32,
     pub instructions_until_sample: u32,
 }
 
 impl ScriptRunBudget {
     pub fn from_durations(soft: Duration, hard: Duration, sample_interval_instructions: u32) -> Self {
-        let now = Instant::now();
+        let now = crate::clock::monotonic_now();
         let sample_interval_instructions = sample_interval_instructions.max(1);
         Self {
-            soft_deadline: now + soft,
-            hard_deadline: now + hard,
+            soft_deadline: now + soft.as_secs_f64(),
+            hard_deadline: now + hard.as_secs_f64(),
             sample_interval_instructions,
             instructions_until_sample: sample_interval_instructions,
         }
@@ -791,7 +791,7 @@ impl<'a> ScriptVm<'a> {
         }
         budget.instructions_until_sample = budget.sample_interval_instructions;
 
-        let now = Instant::now();
+        let now = crate::clock::monotonic_now();
         if now >= budget.hard_deadline {
             return Some(ScriptRunBudgetHit::Hard);
         }

@@ -110,10 +110,7 @@ pub fn build_raster(
         "geodata_built_unix",
         format!(
             "{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
+            makepad_platform::Cx::time_now().max(0.0) as u64
         ),
     );
     for (_, (zoom, x, y, data)) in tiles {

@@ -11,6 +11,9 @@
 //!   partial file,
 //! - shutdown drains what was accepted and joins every worker.
 
+// Native threaded runtime test: std deadlines cannot enter the wasm library.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod common;
 
 use common::*;

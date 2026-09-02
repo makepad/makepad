@@ -2215,7 +2215,7 @@ fn corpus_evaluation() {
                 eprintln!("  SKIP (decode) {}", path.display());
                 continue;
             };
-            let started = std::time::Instant::now();
+            let started = crate::clock::Instant::now();
             let report = evaluate(&path, &pcm);
             print_track(&report, started.elapsed().as_secs_f64());
             reports.push(report);
@@ -2242,7 +2242,7 @@ fn corpus_evaluation() {
             eprintln!("  SKIP (decode) {}", path.display());
             continue;
         };
-        let started = std::time::Instant::now();
+        let started = crate::clock::Instant::now();
         let report = evaluate(path, &pcm);
         print_track(&report, started.elapsed().as_secs_f64());
         reports.push(report);

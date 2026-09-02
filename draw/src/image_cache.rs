@@ -15,7 +15,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 pub use makepad_gif::DecodingError as GifDecodeErrors;
 pub use makepad_webp::DecodingError as WebpDecodeErrors;
@@ -826,7 +825,7 @@ fn image_decode_debug_enabled() -> bool {
 }
 
 #[inline]
-fn decode_timing_start() -> Option<Instant> {
+fn decode_timing_start() -> Option<f64> {
     if !image_decode_debug_enabled() {
         return None;
     }
@@ -836,7 +835,7 @@ fn decode_timing_start() -> Option<Instant> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        Some(Instant::now())
+        Some(Cx::monotonic_now())
     }
 }
 
@@ -1756,7 +1755,7 @@ where
                     log!(
                         "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
                         image_path.display(),
-                        start.elapsed().as_secs_f64() * 1000.0,
+                        (Cx::monotonic_now() - start) * 1000.0,
                         status
                     );
                 } else {
@@ -1807,7 +1806,7 @@ pub fn process_async_image_load(
                 log!(
                     "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
                     image_path.display(),
-                    upload_start.elapsed().as_secs_f64() * 1000.0,
+                    (Cx::monotonic_now() - upload_start) * 1000.0,
                     width,
                     height
                 );

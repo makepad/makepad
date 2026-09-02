@@ -46,7 +46,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 /// Namespace archive imports land in — its own, so a search filter or a
 /// wipe can address "what came from the archive" without touching local

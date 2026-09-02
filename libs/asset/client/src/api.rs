@@ -2898,6 +2898,8 @@ fn stage_token_ok(t: &str) -> bool {
 }
 
 #[cfg(test)]
+// Native API tests use std deadlines to prove validation performs no I/O.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
