@@ -617,3 +617,51 @@ impl CxDrawPass {
         self.pass_uniforms.camera_inv_r = Mat4f::identity();
     }
 }
+
+/// The size of a pass's depth attachment, in device pixels.
+///
+/// A pass rendering into a texture the caller chose takes that texture's
+/// allocation: the WM hands its clients power-of-two shared textures larger
+/// than the pass. A pass drawing into its own targets, or a window, sizes the
+/// depth buffer like its colour buffers, from the pass rect.
+// Only the D3D11 backend binds strict-size depth views; the other backends
+// clip to the smallest attachment and size depth from the pass.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn depth_attachment_size(
+    target_alloc: Option<(usize, usize)>,
+    pass_size: DVec2,
+    dpi_factor: f64,
+) -> (usize, usize) {
+    target_alloc.unwrap_or_else(|| {
+        let size = pass_size * dpi_factor;
+        (size.x as usize, size.y as usize)
+    })
+}
+
+#[cfg(test)]
+mod depth_attachment_size_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_pass_sizes_depth_from_the_pass_rect() {
+        assert_eq!(depth_attachment_size(None, dvec2(1126.0, 680.0), 2.0), (2252, 1360));
+        assert_eq!(depth_attachment_size(None, dvec2(800.0, 600.0), 1.0), (800, 600));
+    }
+
+    #[test]
+    fn a_hosted_pass_sizes_depth_from_the_shared_texture_allocation() {
+        // The WM's Windows allocation for a 1126x680 tile at dpi 2.
+        assert_eq!(
+            depth_attachment_size(Some((4096, 2048)), dvec2(1126.0, 680.0), 2.0),
+            (4096, 2048)
+        );
+    }
+
+    #[test]
+    fn the_target_allocation_wins_even_when_smaller_than_the_pass() {
+        assert_eq!(
+            depth_attachment_size(Some((1024, 512)), dvec2(1126.0, 680.0), 2.0),
+            (1024, 512)
+        );
+    }
+}
