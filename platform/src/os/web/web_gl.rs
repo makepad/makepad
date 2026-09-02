@@ -398,7 +398,12 @@ impl Cx {
     }
 
     pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
-        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+        // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
+        // skipped, as on Metal — unwrapping it took the whole web app down.
+        let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            crate::error!("Draw pass has no draw list!");
+            return;
+        };
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
@@ -432,7 +437,12 @@ impl Cx {
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
-        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+        // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
+        // skipped, as on Metal — unwrapping it took the whole web app down.
+        let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            crate::error!("Draw pass has no draw list!");
+            return;
+        };
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
