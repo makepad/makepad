@@ -3,6 +3,7 @@ workspace.members = [
     "apps/browser",
     "apps/terminal",
     "apps/wm",
+    "apps/aichat",
     "apps/finance",
     "apps/sheets",
     "libs/wm_theme",

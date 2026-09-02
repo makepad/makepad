@@ -103,6 +103,45 @@ impl ServiceRegistry {
         Ok(endpoint)
     }
 
+    /// Plug in a service whose endpoint ANOTHER host already issued — the
+    /// window manager's bus hands the aichat child endpoints it minted, and
+    /// this registry adopts them instead of minting its own.
+    pub fn register_as(
+        &self,
+        link: ServiceLink,
+        endpoint: EndpointId,
+        location: &str,
+        parent: Option<EndpointId>,
+    ) -> Result<(), String> {
+        link.manifest.validate()?;
+        if !is_opaque_id(endpoint.as_str()) {
+            return Err("bad endpoint".into());
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.entries.contains_key(&endpoint) {
+            return Err("endpoint already registered".into());
+        }
+        if inner.entries.len() >= MAX_INSTANCES {
+            return Err(format!("too many instances ({MAX_INSTANCES})"));
+        }
+        let same_app = inner.order.iter().filter(|e| inner.entries[*e].manifest.id == link.manifest.id).count();
+        let display_name = if same_app == 0 {
+            link.manifest.label.clone()
+        } else {
+            format!("{} ({})", link.manifest.label, same_app + 1)
+        };
+        let mut location = location.to_string();
+        truncate_to_char_boundary(&mut location, MAX_META_BYTES);
+        let meta = InstanceMeta { app_id: link.manifest.id.clone(), display_name, parent, location, focus_epoch: 0 };
+        inner.entries.insert(
+            endpoint.clone(),
+            Entry { manifest: link.manifest.clone(), meta, context: String::new(), link, port_tag: None },
+        );
+        inner.order.push(endpoint);
+        inner.generation += 1;
+        Ok(())
+    }
+
     /// Forget an instance: its link is dropped, its children with it.
     pub fn unregister(&self, endpoint: &EndpointId) {
         let mut inner = self.inner.lock().unwrap();
