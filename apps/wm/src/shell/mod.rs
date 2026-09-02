@@ -20,6 +20,7 @@
 
 use makepad_widgets::*;
 
+pub mod ai_pane;
 pub mod bar;
 pub mod gallery;
 pub mod launcher;
@@ -33,6 +34,7 @@ pub mod ui;
 /// the theme has been evaluated (the DSL below reads `mod.wm_theme`).
 pub fn script_mod(vm: &mut ScriptVm) {
     ui::script_mod(vm);
+    ai_pane::script_mod(vm);
     bar::script_mod(vm);
     menu::script_mod(vm);
     osd::script_mod(vm);

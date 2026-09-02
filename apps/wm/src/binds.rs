@@ -80,6 +80,11 @@ pub enum WmAction {
     BackgroundNext,
     /// Nested-mode only: arm the SUPER+ALT layer for the next key.
     ArmAltLayer,
+    /// F10 — the assistant's pane slides in or out (aicontrol decision 8:
+    /// under the WM, the WM takes F10 for whatever runs inside it). Not a
+    /// keymap row: it carries no Omarchy layer, so `main.rs` matches the
+    /// bare key before the map.
+    ToggleAi,
 }
 
 /// Which Omarchy modifier layer a bind lives on.
