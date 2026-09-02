@@ -34,7 +34,7 @@ mod bookmarks;
 mod chat_agent;
 #[cfg(feature = "chat")]
 mod chat_panel;
-#[cfg(feature = "chat")]
+mod ai_service;
 mod chat_tools;
 mod contents;
 mod demo;
@@ -69,6 +69,8 @@ use crate::{
     chat_panel::{ChatState, ChatVoice},
     chat_tools::{ToolJob, ToolRunner},
 };
+use crate::ai_service::{ServiceReply, ServiceRunner};
+use makepad_ai_services::port::{AiServicePort, PortEvent};
 
 #[cfg(not(feature = "chat"))]
 mod no_chat {
@@ -1802,6 +1804,19 @@ pub struct App {
     chat_about: String,
     #[rust]
     map_tools_note: String,
+
+    // ------------------------------------------------------------- AI bus
+    /// The app's service on the desktop's AI bus: open while the window
+    /// manager hosts this process, `None` standalone (see ai_service.rs).
+    #[rust]
+    ai_port: Option<AiServicePort>,
+    /// The bus's tool worker, made on the first call.
+    #[rust]
+    ai_runner: Option<ServiceRunner>,
+    /// The context line last sent over the bus, so a selection that did not
+    /// change sends nothing.
+    #[rust]
+    ai_context: String,
 }
 
 /// One finished tool call, waiting for its turn-mates.
@@ -2579,10 +2594,131 @@ impl App {
         }
     }
 
+    // --------------------------------------------------------------- AI bus
+
+    /// Open the service toward the window manager. Nothing standalone (the
+    /// port says no); nothing twice.
+    fn open_ai_port(&mut self, cx: &mut Cx) {
+        if self.ai_port.is_some() {
+            return;
+        }
+        self.ai_port = AiServicePort::hosted(cx, chat_tools::service_manifest());
+        if self.ai_port.is_some() {
+            log!("files: AI service opened toward the window manager");
+        }
+    }
+
+    fn on_ai_port_events(&mut self, cx: &mut Cx, events: Vec<PortEvent>) {
+        for event in events {
+            match event {
+                PortEvent::Registered(endpoint) => {
+                    log!("files: AI service registered as {}", endpoint.as_str());
+                    // A (re)registration starts the context afresh.
+                    self.ai_context.clear();
+                    self.refresh_ai_context(cx);
+                }
+                PortEvent::Call(call) => {
+                    let (cwd, home) = (self.current_dir(), self.home.clone());
+                    self.ai_runner
+                        .get_or_insert_with(ServiceRunner::new)
+                        .submit(&call, cwd, home);
+                }
+                PortEvent::Cancel { call_id } => {
+                    if let Some(runner) = self.ai_runner.as_mut() {
+                        runner.cancel(&call_id);
+                    }
+                }
+                PortEvent::ChatOpen { open } => {
+                    // The desktop's pane is the chat now: the app's own panel
+                    // steps aside (Cmd+K brings it back on purpose).
+                    #[cfg(feature = "chat")]
+                    if open && self.chat_open {
+                        self.toggle_chat(cx);
+                    }
+                    #[cfg(not(feature = "chat"))]
+                    let _ = open;
+                }
+            }
+        }
+    }
+
+    /// The worker's answers and progress go back over the port.
+    fn drain_ai_replies(&mut self, _cx: &mut Cx) {
+        let Some(runner) = self.ai_runner.as_mut() else {
+            return;
+        };
+        let replies = runner.drain();
+        let Some(port) = self.ai_port.as_ref() else {
+            return;
+        };
+        for reply in replies {
+            match reply {
+                ServiceReply::Result(result) => port.reply(result),
+                ServiceReply::Progress {
+                    call_id,
+                    note,
+                    permille,
+                } => port.progress(&call_id, &note, permille),
+            }
+        }
+    }
+
+    /// What the assistant is told about where the person is — the folder,
+    /// the view and the selection — whenever that changes. This is how
+    /// "my downloads" means the folder on screen.
+    fn refresh_ai_context(&mut self, cx: &mut Cx) {
+        if self.ai_port.is_none() {
+            return;
+        }
+        let text = self.ai_context_line(cx);
+        if text == self.ai_context {
+            return;
+        }
+        self.ai_context = text.clone();
+        if let Some(port) = self.ai_port.as_ref() {
+            port.set_context(&text);
+        }
+    }
+
+    fn ai_context_line(&mut self, cx: &mut Cx) -> String {
+        let Some(tab) = self.tabs.get(self.tab) else {
+            return String::new();
+        };
+        let mode = tab.mode;
+        let dir = self.current_dir();
+        let mut out = format!(
+            "The person is looking at {} in the {} view.",
+            chat_tools::short(&dir, &self.home),
+            mode.label(),
+        );
+        let selected = self
+            .with_contents(cx, |contents, _| contents.selected_entries())
+            .unwrap_or_default();
+        if selected.is_empty() {
+            out.push_str(" Nothing is selected.");
+        } else {
+            out.push_str(&format!(" Selected ({}):", selected.len()));
+            for entry in selected.iter().take(12) {
+                out.push_str(&format!(
+                    " {} ({}, {});",
+                    entry.name,
+                    entry.kind_text(),
+                    entry.size_text()
+                ));
+            }
+            if selected.len() > 12 {
+                out.push_str(&format!(" …and {} more", selected.len() - 12));
+            }
+        }
+        out
+    }
+
     /// The window manager's side of the conversation.
     fn handle_wm_event(&mut self, cx: &mut Cx, event: &makepad_wm_api::WmEvent) {
         if matches!(event, makepad_wm_api::WmEvent::Adopted) {
             self.wake(cx);
+            // Adopted into a real tile: now it is a running Files.
+            self.open_ai_port(cx);
         }
         if !self.preview.on_wm_event(event) {
             return;
@@ -4172,6 +4308,7 @@ impl App {
     /// button states. Called from `report`, so it follows every selection
     /// change — and only touches a widget when its text actually changed.
     fn refresh_chat(&mut self, cx: &mut Cx) {
+        self.refresh_ai_context(cx);
         let mode = self.tabs[self.tab].mode;
         let picked = self.chat_subject(cx);
         #[cfg(feature = "chat")]
@@ -4848,6 +4985,12 @@ impl MatchEvent for App {
             Some(Ops::new(Box::new(SignalToUI::set_ui_signal)))
         };
         self.home = vfs().home();
+        // The desktop's assistant hears about this instance now — unless it
+        // is a warm-pool standby, which waits for `Adopted` so a dormant
+        // process never shows up as a running Files.
+        if !makepad_wm_api::warm_start() {
+            self.open_ai_port(cx);
+        }
         // The demo must not write to the real home, so its bookmarks live and
         // die with the window.
         self.bookmarks = if vfs::is_demo() {
@@ -5225,12 +5368,21 @@ impl AppMain for App {
             }
             #[cfg(feature = "chat")]
             self.drain_chat(cx);
+            self.drain_ai_replies(cx);
             self.preview.poll();
         }
         if let Event::Custom(json) = event {
             if let Some(wm) = makepad_wm_api::WmEvent::parse(json) {
                 self.handle_wm_event(cx, &wm);
             }
+        }
+        // The bus's frames ride the same channel under their own envelope.
+        let port_events = match self.ai_port.as_mut() {
+            Some(port) => port.handle_event(cx, event),
+            None => Vec::new(),
+        };
+        if !port_events.is_empty() {
+            self.on_ai_port_events(cx, port_events);
         }
         if self.focus_next.is_event(event).is_some() {
             self.apply_focus(cx);
