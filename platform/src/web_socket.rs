@@ -257,7 +257,7 @@ impl Cx {
         *sender = Some(tx);
         drop(sender);
 
-        self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_thread(move || {
             let mut app_to_studio = AppToStudioVec(Vec::new());
             let mut first_message_time = None;
             let default_collect_time = Duration::from_millis(16);
@@ -304,7 +304,9 @@ impl Cx {
                 }
             }
             *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = None;
-        });
+        }) {
+            task.detach();
+        }
     }
 
     #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]

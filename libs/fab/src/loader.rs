@@ -78,7 +78,7 @@ impl LoadCoordinator {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let seq_ref = self.seq.clone();
         Cx::post_action(ShellAction::LoadStarted(path.clone()));
-        cx.spawn_thread(move || {
+        if let Ok(task) = cx.spawn_thread(move || {
             let guard_path = path.clone();
             let guard_seq = seq_ref.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -92,7 +92,9 @@ impl LoadCoordinator {
                     });
                 }
             }
-        });
+        }) {
+            task.detach();
+        }
     }
 
     fn load_on_worker(

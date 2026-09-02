@@ -51,6 +51,21 @@ onmessage = async function (e) {
     let env = {
         memory: thread_info.memory,
 
+        js_wake_ui() {
+            postMessage({ kind: 'wake_ui' });
+        },
+
+        js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
+            postMessage({
+                kind: 'spawn_request',
+                request_id,
+                context_ptr,
+                stack_size,
+                name: u8_to_string(name_ptr, name_len)
+            });
+            return 1;
+        },
+
         js_console_error: (str_ptr, str_len) => {
             console.error(u8_to_string(str_ptr, str_len))
         },
@@ -357,32 +372,35 @@ onmessage = async function (e) {
     }
 
     let wasm = null;
-    const doit = inner_wasm => {
+    let entry_started = false;
+    const doit = async inner_wasm => {
         wasm = inner_wasm;
-        return instantiate_secondary(wasm, env).then(() => {
-            if (!thread_info.wasm_bindgen) {
-                wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
-                wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
-            } else {
-                wasm.exports.__wbindgen_start();
-            }
-            if (thread_info.timer > 0) {
-                this.setInterval(() => {
-                    wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
-                }, thread_info.timer);
-            }
-            else {
-                wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
-                close();
-            }
-        });
+        await instantiate_secondary(wasm, env);
+        if (!thread_info.wasm_bindgen) {
+            wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
+            wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+        } else {
+            wasm.exports.__wbindgen_start();
+        }
+        postMessage({ kind: 'started', request_id: thread_info.request_id });
+        entry_started = true;
+        wasm.exports.wasm_thread_entrypoint(thread_info.request_id, thread_info.context_ptr);
+        postMessage({ kind: 'finished', request_id: thread_info.request_id });
     };
-    if (thread_info.wasm_bindgen) {
-        let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
-        await doit(inner_wasm);
-    } else {
-        WebAssembly.instantiate(thread_info.module, { env }).then(doit, error => {
-            console.error("Cannot instantiate wasm" + error);
-        })
+    try {
+        if (thread_info.wasm_bindgen) {
+            let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
+            await doit(inner_wasm);
+        } else {
+            const result = await WebAssembly.instantiate(thread_info.module, { env });
+            await doit(result.instance || result);
+        }
+    } catch (error) {
+        console.error("Makepad worker failed", error);
+        postMessage({
+            kind: entry_started ? 'trapped' : 'failed_to_start',
+            request_id: thread_info.request_id,
+            error: String(error)
+        });
     }
 }

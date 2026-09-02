@@ -551,7 +551,9 @@ impl AiWorker {
     fn new(cx: &mut Cx) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        cx.spawn_thread(move || ai_worker_loop(command_rx, event_tx));
+        if let Ok(task) = cx.spawn_thread(move || ai_worker_loop(command_rx, event_tx)) {
+            task.detach();
+        }
         Self {
             command_tx,
             event_rx,

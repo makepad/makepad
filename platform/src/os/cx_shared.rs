@@ -425,7 +425,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_thread(move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
@@ -439,7 +439,9 @@ impl Cx {
                 },
             );
             let _ = sender.send(result);
-        });
+        }) {
+            task.detach();
+        }
     }
 
     fn prepare_studio_run_view_rgba(
@@ -1130,6 +1132,9 @@ impl Cx {
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
+        if !matches!(event, Event::Shutdown) {
+            crate::thread::service_scheduler(self, event);
+        }
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
@@ -1175,6 +1180,10 @@ impl Cx {
         self.handle_triggers();
         self.handle_actions();
         self.handle_pending_clear_hover();
+        if matches!(event, Event::Shutdown) {
+            crate::thread::service_scheduler(self, event);
+            self.thread_spawner.close_runtime();
+        }
     }
 
     #[allow(dead_code)]

@@ -170,7 +170,8 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
-                    self.cpu_cores = tw.cpu_cores as usize;
+                    self.cpu_cores = (tw.cpu_cores as usize).max(1);
+                    crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,
@@ -192,7 +193,6 @@ impl Cx {
                     self.set_physical_keyboard_state(true);
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
-                    //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
 
                 live_id!(ToWasmResizeWindow) => {
@@ -365,6 +365,7 @@ impl Cx {
                         }
                         4 => {
                             self.call_event_handler(&Event::Shutdown);
+                            self.thread_spawner.close_runtime();
                         }
                         _ => {}
                     }
@@ -1352,33 +1353,10 @@ impl CxOsApi for Cx {
             FromWasmSeekVideoPlayback::to_js_code(),
             FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
-        #[cfg(target_feature = "atomics")]
-        self.os
-            .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
         (Self::monotonic_now() - self.os.start_time).max(0.0)
-    }
-
-    #[cfg(target_feature = "atomics")]
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer: 0,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    fn spawn_thread<F>(&mut self, _f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
@@ -1430,28 +1408,6 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
-    #[cfg(target_feature = "atomics")]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-        let closure_box: Box<dyn Fn() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, _timer: u32, _f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-    }
-
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
     }
@@ -1465,30 +1421,6 @@ impl Cx {
 extern "C" {
     pub fn js_time_now() -> f64;
     pub fn js_monotonic_now() -> f64;
-}
-
-#[export_name = "wasm_thread_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
-    closure();
-}
-
-#[export_name = "wasm_thread_timer_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
-    closure();
-    let _ = Box::into_raw(closure);
-}
-
-#[export_name = "wasm_thread_alloc_tls_and_stack"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
-    let mut v = Vec::<u64>::new();
-    v.reserve_exact(tls_size as usize);
-    let mut v = std::mem::ManuallyDrop::new(v);
-    v.as_mut_ptr() as u32
 }
 
 // storage buffers for graphics API related platform

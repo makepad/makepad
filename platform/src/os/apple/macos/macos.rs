@@ -2354,13 +2354,6 @@ impl CxOsApi for Cx {
         self.update_macos_pointer_capture_pacing();
     }
 
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
-    }
-
     fn start_stdin_service(&mut self) {
         // macOS studio mode routes control and frame messages over websocket.
         // No separate stdin-side texture sharing service is required.

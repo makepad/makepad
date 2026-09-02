@@ -18,6 +18,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+pub(crate) fn wake_ui_event_loop() {
+    // Headless bounded loops do not sleep in an OS wait primitive.
+}
+
 #[derive(Default, Clone)]
 pub struct CxOsDrawList {}
 

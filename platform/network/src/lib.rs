@@ -24,7 +24,9 @@ pub use crate::types::{
     SplitUrl, WebSocketMessage, WebSocketTransport, WsMessage, WsSend,
 };
 pub use crate::ui_signal::{
-    FromUIReceiver, FromUISender, SignalFromUI, SignalToUI, ToUIReceiver, ToUISender,
+    install_ui_waker, to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender,
+    ReceiverAlreadyTaken, SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender,
+    ToUIReceiver, ToUISender, UiWaker,
 };
 pub use crate::utils::HttpServerHeaders;
 pub use crate::web_socket_parser::{

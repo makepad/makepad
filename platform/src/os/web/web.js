@@ -6,14 +6,6 @@ export class WasmWebBrowser extends WasmBridge {
         if (wasm === undefined) {
             return
         }
-        /*
-        window.onbeforeunload = _ => {
-            this.clear_memory_refs();
-            for (let worker of this.workers) {
-                worker.terminate();
-            }
-        }*/
-
         this.wasm_app = this.wasm_create_app();
 
         this.create_js_message_bridge(this.wasm_app);
@@ -34,8 +26,10 @@ export class WasmWebBrowser extends WasmBridge {
         };
         this.xr_supported = false;
         this.signal_timeout = null;
-        this.workers = [];
+        this.workers = new Map();
+        this.thread_stack_arena = [];
         this.thread_stack_size = 2 * 1024 * 1024;
+        this.ui_wake_queued = false;
         this.buffer_upload_serial = 0;
         this.loader_removed = false;
         this.loader_seen_animation_frame = false;
@@ -53,6 +47,53 @@ export class WasmWebBrowser extends WasmBridge {
 
     js_monotonic_now() {
         return performance.now() / 1000.0;
+    }
+
+    js_wake_ui() {
+        if (this.ui_wake_queued) {
+            return;
+        }
+        this.ui_wake_queued = true;
+        queueMicrotask(() => {
+            this.ui_wake_queued = false;
+            const flags = this.exports.wasm_check_signal();
+            if (flags !== 0) {
+                this.to_wasm.ToWasmSignal({ flags });
+                this.do_wasm_pump();
+            }
+        });
+    }
+
+    js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
+        if (!this.wasm._has_thread_support) {
+            return 0;
+        }
+        const name = this.u8_to_string(name_ptr, name_len);
+        this.create_thread({ request_id, context_ptr, stack_size, name });
+        return 1;
+    }
+
+    shutdown_thread_runtime() {
+        for (const [request_id, record] of this.workers) {
+            record.closed = true;
+            record.worker.terminate();
+            if (record.started) {
+                this.exports.wasm_thread_worker_lost(request_id);
+            } else {
+                this.exports.wasm_thread_failed_to_start(request_id);
+            }
+            if (!record.thread_info.wasm_bindgen && record.thread_info.tls_ptr) {
+                this.thread_stack_arena.push({
+                    ptr: record.thread_info.tls_ptr,
+                    words: record.thread_info.alloc_words
+                });
+            }
+        }
+        this.workers.clear();
+        for (const block of this.thread_stack_arena) {
+            this.exports.wasm_thread_dealloc_tls_and_stack(block.ptr, block.words);
+        }
+        this.thread_stack_arena.length = 0;
     }
 
     emit_app_lifecycle(state) {
@@ -105,6 +146,9 @@ export class WasmWebBrowser extends WasmBridge {
                 this.emit_app_shutdown();
             }
             this.do_wasm_pump();
+            if (!event.persisted) {
+                this.shutdown_thread_runtime();
+            }
         });
 
         window.addEventListener("pageshow", (event) => {
@@ -144,9 +188,12 @@ export class WasmWebBrowser extends WasmBridge {
         await this.query_xr_capabilities();
         this.update_window_info();
 
+        const hardware_concurrency = Number.isFinite(navigator.hardwareConcurrency)
+            ? Math.max(1, Math.floor(navigator.hardwareConcurrency))
+            : 1;
         this.to_wasm.ToWasmInit({
             gpu_info: this.gpu_info,
-            cpu_cores: navigator.hardwareConcurrency,
+            cpu_cores: hardware_concurrency,
             xr_capabilities: this.xr_capabilities,
             browser_info: {
                 protocol: location.protocol + "",
@@ -870,7 +917,7 @@ export class WasmWebBrowser extends WasmBridge {
 
     }
 
-    alloc_thread_stack(context_ptr, timer = 0) {
+    alloc_thread_stack(request_id, context_ptr, requested_stack_size) {
         if (!this.wasm._has_thread_support) {
             console.warn("alloc_thread_stack unavailable: wasm threading support is disabled");
             return null;
@@ -880,13 +927,17 @@ export class WasmWebBrowser extends WasmBridge {
             return null;
         }
         var ret = {
-            timer,
+            request_id,
             module: this.wasm._module,
             secondary_module: this.wasm._secondary_module,
             memory: this.wasm._memory,
             context_ptr
         };
         if (typeof this.exports.__wbindgen_start !== 'undefined') {
+            if (requested_stack_size && requested_stack_size !== this.thread_stack_size) {
+                console.warn("custom worker stack size is unavailable for wasm-bindgen workers");
+                return null;
+            }
             ret.wasm_bindgen = true;
         } else {
             if (this.exports.__tls_size === undefined) {
@@ -897,15 +948,25 @@ export class WasmWebBrowser extends WasmBridge {
                 console.warn("alloc_thread_stack unavailable: missing wasm_thread_alloc_tls_and_stack export");
                 return null;
             }
-            let tls_size = this.exports.__tls_size.value;
-            tls_size += 8 - (tls_size & 7); // align it to 8 bytes
-            let stack_size = this.thread_stack_size; // 8mb
-            if ((tls_size + stack_size) & 7 != 0) {
+            const raw_tls_size = this.exports.__tls_size.value;
+            const tls_size = (raw_tls_size + 7) & ~7;
+            // Manual workers use a real 2 MiB default. A validated Rust
+            // ThreadOptions::stack_size can override it per worker.
+            const stack_size = requested_stack_size || this.thread_stack_size;
+            if (((tls_size + stack_size) & 7) !== 0) {
                 console.warn("alloc_thread_stack unavailable: stack size is not 8-byte aligned");
                 return null;
             }
-            ret.tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
-            this.update_array_buffer_refs();
+            const alloc_words = (tls_size + stack_size) >> 3;
+            const arena_index = this.thread_stack_arena.findIndex(block => block.words === alloc_words);
+            if (arena_index >= 0) {
+                const block = this.thread_stack_arena.splice(arena_index, 1)[0];
+                ret.tls_ptr = block.ptr;
+            } else {
+                ret.tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(alloc_words);
+                this.update_array_buffer_refs();
+            }
+            ret.alloc_words = alloc_words;
             ret.stack_ptr = ret.tls_ptr + tls_size + stack_size - 8;
             ret.wasm_bindgen = false;
         }
@@ -918,28 +979,86 @@ export class WasmWebBrowser extends WasmBridge {
     // And Ingvar Stepanyan for https://web.dev/webassembly-threads/
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
-    FromWasmCreateThread(args) {
+    create_thread(args) {
+        let allocated_thread_info = null;
         (async () => {
             if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
             }
             if (!this.wasm._has_thread_support) {
-                console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
-                return;
+                throw new Error("wasm file was not compiled with threading support");
             }
-            let thread_info = this.alloc_thread_stack(args.context_ptr, args.timer);
+            let thread_info = this.alloc_thread_stack(args.request_id, args.context_ptr, args.stack_size);
             if (!thread_info) {
-                console.error("FromWasmCreateThread not available, thread stack allocation prerequisites are missing");
-                return;
+                throw new Error("thread stack allocation prerequisites are missing");
             }
+            allocated_thread_info = thread_info;
             let worker = new Worker(
                 './makepad_platform/web_worker.js',
-                { type: 'module' }
+                { type: 'module', name: args.name || `makepad-worker-${args.request_id}` }
             );
+            const record = { worker, thread_info, started: false, closed: false };
+            this.workers.set(args.request_id, record);
+            const release = () => {
+                if (record.closed) {
+                    return;
+                }
+                record.closed = true;
+                worker.terminate();
+                this.workers.delete(args.request_id);
+                if (!thread_info.wasm_bindgen && thread_info.tls_ptr) {
+                    this.thread_stack_arena.push({ ptr: thread_info.tls_ptr, words: thread_info.alloc_words });
+                }
+            };
+            worker.onmessage = event => {
+                const message = event.data || {};
+                if (message.kind === 'spawn_request') {
+                    this.create_thread(message);
+                } else if (message.kind === 'wake_ui') {
+                    this.js_wake_ui();
+                } else if (message.kind === 'started') {
+                    record.started = true;
+                    this.exports.wasm_thread_started(args.request_id);
+                } else if (message.kind === 'finished') {
+                    this.exports.wasm_thread_finished(args.request_id);
+                    release();
+                } else if (message.kind === 'trapped') {
+                    this.exports.wasm_thread_worker_lost(args.request_id);
+                    release();
+                } else if (message.kind === 'failed_to_start') {
+                    this.exports.wasm_thread_failed_to_start(args.request_id);
+                    release();
+                }
+            };
+            worker.onerror = error => {
+                if (record.closed) {
+                    return;
+                }
+                console.error(error);
+                if (record.started) {
+                    this.exports.wasm_thread_worker_lost(args.request_id);
+                } else {
+                    this.exports.wasm_thread_failed_to_start(args.request_id);
+                }
+                release();
+            };
             worker.postMessage(thread_info);
-
-            this.workers.push(worker);
-        })().catch(err => console.error(err));
+        })().catch(err => {
+            console.error(err);
+            const record = this.workers.get(args.request_id);
+            if (record) {
+                record.closed = true;
+                record.worker.terminate();
+                this.workers.delete(args.request_id);
+            }
+            if (allocated_thread_info && !allocated_thread_info.wasm_bindgen) {
+                this.thread_stack_arena.push({
+                    ptr: allocated_thread_info.tls_ptr,
+                    words: allocated_thread_info.alloc_words
+                });
+            }
+            this.exports.wasm_thread_failed_to_start(args.request_id);
+        });
     }
 
     start_signal_poll() {
@@ -1561,11 +1680,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     // calling into wasm
-
-
-    wasm_terminate_thread_pools() {
-        this.exports.wasm_terminate_thread_pools(this.wasm_app);
-    }
 
     wasm_create_app() {
         let new_ptr = this.exports.wasm_create_app();

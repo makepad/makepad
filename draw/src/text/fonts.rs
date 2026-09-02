@@ -56,9 +56,11 @@ impl Fonts {
 
         let mut msdf_job_sender: FromUISender<QueuedMsdfJob> = Default::default();
         let msdf_result_receiver: ToUIReceiver<CompletedMsdfJob> = Default::default();
-        let worker_rx = msdf_job_sender.receiver();
+        let worker_rx = msdf_job_sender
+            .receiver()
+            .expect("MSDF worker receiver is taken exactly once");
         let worker_tx = msdf_result_receiver.sender();
-        cx.spawn_thread(move || {
+        if let Ok(task) = cx.spawn_thread(move || {
             let mut msdfer = Msdfer::new(msdfer_settings);
             while let Ok(job) = worker_rx.recv() {
                 let mut msdf = Image::<Bgra>::new(job.key.size);
@@ -78,7 +80,9 @@ impl Fonts {
                     break;
                 }
             }
-        });
+        }) {
+            task.detach();
+        }
 
         Self {
             layouter,

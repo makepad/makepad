@@ -19,10 +19,58 @@ const DEFAULT_COALESCE_MAX_LEN: u64 = 2 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
 
-pub type ArchiveWorkerPool = Arc<TagThreadPool<ReadToken>>;
+#[derive(Clone)]
+pub enum ArchiveWorkerPool {
+    Threaded(Arc<TaskPool>),
+    Serial,
+}
+
+impl ArchiveWorkerPool {
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Threaded(left), Self::Threaded(right)) => Arc::ptr_eq(left, right),
+            (Self::Serial, Self::Serial) => true,
+            _ => false,
+        }
+    }
+
+    pub fn submit<F>(&self, key: ReadToken, job: F) -> Result<(), SubmitError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            Self::Threaded(pool) => {
+                let task = pool.submit_tagged(key, true, QueueOrder::Lifo, job)?;
+                task.detach();
+            }
+            Self::Serial => job(),
+        }
+        Ok(())
+    }
+
+    pub fn retain_queued(&self, keep: impl FnMut(&ReadToken) -> bool) -> Vec<ReadToken> {
+        match self {
+            Self::Threaded(pool) => pool.retain_queued::<ReadToken>(keep),
+            Self::Serial => Vec::new(),
+        }
+    }
+}
 
 pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
-    Arc::new(TagThreadPool::new(cx, 2))
+    match TaskPool::new(
+        cx.thread_spawner(),
+        PoolOptions {
+            workers: std::num::NonZeroUsize::new(2).unwrap(),
+            capacity: std::num::NonZeroUsize::new(256).unwrap(),
+            name: "map-archive".into(),
+        },
+    ) {
+        Ok(pool) => ArchiveWorkerPool::Threaded(Arc::new(pool)),
+        Err(error) => {
+            error!("Map archive pool unavailable, using serial work: {error}");
+            ArchiveWorkerPool::Serial
+        }
+    }
 }
 
 pub fn next_archive_task_token() -> ReadToken {
@@ -143,6 +191,7 @@ impl ByteSource for FileByteSource {
     fn request_root(&mut self, _cx: &mut Cx, token: ReadToken) {
         let path = self.dir.join("root.mkidx");
         let sender = self.completions.sender();
+        let rejected_sender = sender.clone();
         let token_states = self.token_states.clone();
         let _ = self
             .token_states
@@ -150,7 +199,7 @@ impl ByteSource for FileByteSource {
             .map(|mut states| states.insert(token, FileReadState::Queued));
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
-        self.workers.execute_rev(token, move |_| {
+        match self.workers.submit(token, move || {
             if !begin_file_read(&token_states, token) {
                 return;
             }
@@ -169,7 +218,16 @@ impl ByteSource for FileByteSource {
             if complete_file_read(&token_states, token) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
-        });
+        }) {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = self.token_states.lock().map(|mut states| states.remove(&token));
+                let _ = rejected_sender.send(ReadCompletion {
+                    token,
+                    result: Err(format!("archive worker submission failed: {error}")),
+                });
+            }
+        }
     }
 
     fn request_range(
@@ -189,6 +247,7 @@ impl ByteSource for FileByteSource {
         }
         let path = self.dir.join(format!("tiles-{shard:03}.mkshard"));
         let sender = self.completions.sender();
+        let rejected_sender = sender.clone();
         let shard_files = self.shard_files.clone();
         let token_states = self.token_states.clone();
         let _ = self
@@ -197,7 +256,7 @@ impl ByteSource for FileByteSource {
             .map(|mut states| states.insert(token, FileReadState::Queued));
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
-        self.workers.execute_rev(token, move |_| {
+        match self.workers.submit(token, move || {
             if !begin_file_read(&token_states, token) {
                 return;
             }
@@ -210,7 +269,16 @@ impl ByteSource for FileByteSource {
             if complete_file_read(&token_states, token) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
-        });
+        }) {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = self.token_states.lock().map(|mut states| states.remove(&token));
+                let _ = rejected_sender.send(ReadCompletion {
+                    token,
+                    result: Err(format!("archive worker submission failed: {error}")),
+                });
+            }
+        }
     }
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
@@ -744,7 +812,7 @@ impl<S: ByteSource> TileArchive<S> {
             let root = self.root.clone();
             let sender = self.processed.sender();
             let token = completion.token;
-            self.workers.execute_rev(token, move |_| {
+            match self.workers.submit(token, move || {
                 let result = match pending {
                     PendingRead::Root { .. } => ProcessedRead::Root(MkmapRoot::parse(&bytes)),
                     PendingRead::Leaf {
@@ -765,7 +833,15 @@ impl<S: ByteSource> TileArchive<S> {
                     ),
                 };
                 let _ = sender.send(ProcessedCompletion { token, result });
-            });
+            }) {
+                Ok(()) => {}
+                Err(error) => {
+                    self.processing.remove(&token);
+                    self.pending_reads.remove(&token);
+                    self.complete_error(pending, format!("archive worker submission failed: {error}"));
+                    self.advance_waiters(cx);
+                }
+            }
         }
         while let Ok(completion) = self.processed.try_recv() {
             self.processing.remove(&completion.token);
@@ -814,7 +890,8 @@ impl<S: ByteSource> TileArchive<S> {
     pub fn reset_generation(&mut self, cx: &mut Cx, generation: u64) {
         for token in self.pending_reads.keys().copied().collect::<Vec<_>>() {
             self.source.cancel(cx, token);
-            self.workers.retain_queued(|queued| *queued != token);
+            self.workers
+                .retain_queued(|queued| *queued != token);
         }
         self.root = None;
         self.root_error = None;
@@ -1791,6 +1868,8 @@ mod tests {
         }
 
         let mut first = FileByteSource::new(&dir, workers.clone());
+        let second = FileByteSource::new(&dir, workers.clone());
+        assert!(first.workers.ptr_eq(&second.workers));
         first.request_root(&mut cx, token);
         for shard in 0..10_u32 {
             first.request_range(&mut cx, shard, 0, 1, next_archive_task_token());

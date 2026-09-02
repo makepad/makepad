@@ -63,6 +63,18 @@ use {
     },
 };
 
+pub(crate) fn wake_ui_event_loop() {
+    unsafe {
+        let main_thread_block = objc_block!(move || {});
+        let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+        let operation: ObjcId = msg_send![
+            class!(NSBlockOperation),
+            blockOperationWithBlock: &main_thread_block
+        ];
+        let () = msg_send![main_queue, addOperation: operation];
+    }
+}
+
 pub(crate) struct IosCameraPlayer {
     video_id: LiveId,
     tex_y_id: TextureId,
@@ -1798,13 +1810,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
         #[cfg(not(apple_sim))]
         self.apple_bundle_load_dependencies();
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
