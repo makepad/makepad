@@ -210,6 +210,26 @@ impl WindowHandle {
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
+    /// A hosted (stdin-loop) window's geometry as the HOST reports it: the
+    /// host's logical size at the host's dpi. Recorded as the window's native
+    /// geometry and converted into layout points through any `dpi_override`
+    /// the app has set — exactly what a native window's geometry goes
+    /// through — so an app that lays out at its own scale (a console that
+    /// shrinks to fit a tile) still gets the host's pointer coordinates
+    /// remapped into its points (`remap_dpi_override`).
+    pub(crate) fn stdin_apply_native_geom(
+        &mut self,
+        window_id: WindowId,
+        native_geom: WindowGeom,
+    ) -> crate::event::WindowGeomChangeEvent {
+        let window = &mut self[window_id];
+        let old_geom = window.window_geom.clone();
+        window.os_dpi_factor = Some(native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(native_geom);
+        window.window_geom = new_geom.clone();
+        crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }
+    }
+
     fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
@@ -218,23 +238,27 @@ impl CxWindowPool {
         self.0.pool.len()
     }
 
+    /// The window under a HOST pointer position (native points), and that
+    /// window's origin in the same points. Compared in native points: a
+    /// window with a `dpi_override` lays out in points of its own, and its
+    /// stored size is in those.
     pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
         for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            if pos.x >= window.window_geom.position.x
-                && pos.y >= window.window_geom.position.y
-                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
-                && pos.y <= window.window_geom.position.y + window.window_geom.inner_size.y
+            let position = window.layout_vec2d_to_native_points(window.window_geom.position);
+            let size = window.layout_vec2d_to_native_points(window.window_geom.inner_size);
+            if pos.x >= position.x
+                && pos.y >= position.y
+                && pos.x <= position.x + size.x
+                && pos.y <= position.y + size.y
             {
-                return (
-                    WindowId(index, item.generation),
-                    window.window_geom.position,
-                );
+                return (WindowId(index, item.generation), position);
             }
         }
+        let first = &self.0.pool[0];
         return (
-            WindowId(0, self.0.pool[0].generation),
-            self.0.pool[0].item.window_geom.position,
+            WindowId(0, first.generation),
+            first.item.layout_vec2d_to_native_points(first.item.window_geom.position),
         );
     }
 
@@ -310,7 +334,7 @@ impl CxWindowPool {
         window_id: WindowId,
         cached_native_geom: &WindowGeom,
         cached_window_zero_geom: &mut WindowGeom,
-    ) -> WindowGeomChangeEvent {
+    ) -> crate::event::WindowGeomChangeEvent {
         let window = &mut self[window_id];
         window.os_dpi_factor = Some(cached_native_geom.dpi_factor);
         let new_geom = window.native_window_geom_to_layout(cached_native_geom.clone());
