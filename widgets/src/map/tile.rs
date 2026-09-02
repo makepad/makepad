@@ -493,11 +493,9 @@ const NO_CASING_BITS: u32 = u32::MAX;
 /// shader (faces only widen; strokes keep the exact curve).
 pub const FACE_MORPH_CLASS_OFFSET: f32 = 4.0;
 
-/// Cascade-input dump lever: env for headless runs, file flag for
-/// studio-launched apps (their env is the studio's).
+/// Cascade-input dump lever.
 fn cascade_dump_armed() -> bool {
-    std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some()
-        || std::path::Path::new("/tmp/mp_cascade_dump").exists()
+    crate::makepad_platform::makepad_error_log::trace_enabled("map.cascade")
 }
 
 /// Theme-stable identity of one road-surface union tier. NO resolved
@@ -2543,16 +2541,16 @@ fn merge_detail_features(
             ways.push(way);
         }
     }
-    // MAKEPAD_DETAIL_KEY_CENSUS=1: distinct tag keys on forwarded detail
+    // Distinct tag keys on forwarded detail
     // ways — the ground truth for the parse whitelist above.
-    if std::env::var_os("MAKEPAD_DETAIL_KEY_CENSUS").is_some() {
+    if crate::makepad_platform::makepad_error_log::trace_enabled("map.census") {
         let mut census = std::collections::BTreeMap::<String, usize>::new();
         for way in ways.iter().skip(census_start) {
             for key in way.tags.keys() {
                 *census.entry(key.clone()).or_default() += 1;
             }
         }
-        eprintln!("DETAIL-KEY-CENSUS z{}/{}/{}: {census:?}", tile_key.z, tile_key.x, tile_key.y);
+        trace!("map.census", "z{}/{}/{}: {:?}", tile_key.z, tile_key.x, tile_key.y, census);
     }
     Ok(())
 }
@@ -3266,7 +3264,7 @@ pub struct TileWay {
     pub fidx: Option<u32>,
 }
 
-/// Stage clock for MAKEPAD_TILE_PROFILE=1: per-stage wall time to stderr, so the
+/// Stage clock for `map.tile_profile`: per-stage wall time, so the
 /// generator's cost distribution is measurable headless and in-app alike.
 struct TileProfiler {
     on: bool,
@@ -3280,11 +3278,8 @@ struct TileProfiler {
 impl TileProfiler {
     fn new() -> TileProfiler {
         let now = std::time::Instant::now();
-        // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
-            on: std::env::var_os("MAKEPAD_TILE_PROFILE").is_some()
-                || std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-                || std::path::Path::new("/tmp/mp_tile_profile").exists(),
+            on: crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile"),
             last: now,
             start: now,
             laps: Vec::new(),
@@ -3295,7 +3290,7 @@ impl TileProfiler {
         let ms = (now - self.last).as_secs_f64() * 1000.0;
         self.laps.push((name, ms));
         if self.on {
-            eprintln!("MPPROF {name} {ms:.1}ms {extra}");
+            trace!("map.tile_profile", "{name} {ms:.1}ms {extra}");
         }
         self.last = now;
     }
@@ -3318,8 +3313,9 @@ impl TileProfiler {
         if !self.on {
             return;
         }
-        eprintln!(
-            "MPPROF TOTAL z{}/{}/{} {:.1}ms {extra}",
+        trace!(
+            "map.tile_profile",
+            "TOTAL z{}/{}/{} {:.1}ms {extra}",
             tile_key.z,
             tile_key.x,
             tile_key.y,
@@ -6227,8 +6223,7 @@ fn build_tile_buffers_from_features_profiled(
         // styling at runtime. Guarded by the group-structure signature (and
         // the stream's coordinate checksum at parse time); any mismatch
         // falls back to the runtime cascade.
-        // MAKEPAD_CASCADE_DUMP=1 (or `touch /tmp/mp_cascade_dump` for
-        // studio-launched apps): structural dump of the cascade input —
+        // Structural dump of the cascade input —
         // diff two runs (e.g. light vs night) to find what diverges.
         if cascade_dump_armed() {
             for (key, _, ways) in &smoothed_tiers {
@@ -6237,7 +6232,8 @@ fn build_tile_buffers_from_features_profiled(
                     .iter()
                     .filter(|(_, dz)| dz.is_some())
                     .count();
-                eprintln!(
+                trace!(
+                    "map.cascade",
                     "CASCADE-TIER class={:08x} rank={} cw={:08x} caw={:08x} v={:?} l={} ways={} pts={} dz={}",
                     key.class_id,
                     key.sort_rank,
@@ -6251,7 +6247,8 @@ fn build_tile_buffers_from_features_profiled(
                 );
             }
             let plaza_pts: usize = plaza_rings.iter().map(|(_, _, p, _)| p.len()).sum();
-            eprintln!(
+            trace!(
+                "map.cascade",
                 "CASCADE-PLAZA count={} pts={} joints={} portals={}",
                 plaza_rings.len(),
                 plaza_pts,
@@ -6268,7 +6265,8 @@ fn build_tile_buffers_from_features_profiled(
                         (*max_dz >= LIFT_COVER_M) as u8 | (((*min_dz <= -LIFT_COVER_M) as u8) << 1)
                     })
                     .collect();
-                eprintln!(
+                trace!(
+                    "map.cascade",
                     "CASCADE-GROUP {gi}: phase={} rank={} field={} hw={} rings={:?} lift={:?}",
                     group.phase, group.rank, group.field, group.half_width, ring_lens, lift_bits
                 );
@@ -6277,8 +6275,9 @@ fn build_tile_buffers_from_features_profiled(
         let baked = baked_faces.as_ref().filter(|bake| {
             let ok = bake.bucket == render_zoom && bake.signature == input_sig;
             if !ok && profiler.on {
-                eprintln!(
-                    "MPPROF cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
+                trace!(
+                    "map.tile_profile",
+                    "cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
                     bake.bucket,
                     render_zoom,
                     bake.signature,
@@ -6292,7 +6291,7 @@ fn build_tile_buffers_from_features_profiled(
         match baked {
             Some(bake) => {
                 if profiler.on {
-                    eprintln!("MPPROF cascade-baked regions={}", bake.regions.len());
+                    trace!("map.tile_profile", "cascade-baked regions={}", bake.regions.len());
                 }
                 // Group count is pinned by the input signature; an index
                 // past it means a corrupt stream (already checksum-guarded
@@ -7103,9 +7102,9 @@ fn build_tile_buffers_from_features_profiled(
     compact_tile_labels(&mut labels);
 
     profiler.lap("tail", "");
-    // MAKEPAD_TILE_HASH=1: fnv over every emitted buffer, printed on the
+    // FNV over every emitted buffer, printed on the
     // TOTAL line — the bit-identity oracle for geometry-path refactors.
-    let buffer_hash = if std::env::var_os("MAKEPAD_TILE_HASH").is_some() {
+    let buffer_hash = if crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_hash") {
         let mut h = 0xcbf29ce484222325u64;
         let mut eat = |bytes: &[u8]| {
             for &b in bytes {
@@ -7122,6 +7121,7 @@ fn build_tile_buffers_from_features_profiled(
                 eat(&i.to_le_bytes());
             }
         }
+        trace!("map.tile_hash", "z{}/{}/{} hash={:016x}", tile_key.z, tile_key.x, tile_key.y, h);
         format!(" hash={h:016x}")
     } else {
         String::new()
@@ -7987,7 +7987,7 @@ pub fn load_local_tile_batch(
                                 format!(" TILE_PROFILE_OVERLAYS=\"{}\"", overlay_paths.join(";"))
                             };
                             log!(
-                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TILE_STAGES=1 TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
+                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TRACE=map.tile_profile TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
                                 tile_key.z,
                                 tile_key.x,
                                 tile_key.y,
@@ -11251,8 +11251,8 @@ mod bridge_probe_tests {
     }
 
     /// Headless generator probe: build real tiles with the mirrored live
-    /// theme, print per-stage timings (MAKEPAD_TILE_PROFILE=1) and buffer sizes.
-    /// Run: MAKEPAD_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
+    /// theme, print per-stage timings (`MAKEPAD_TRACE=map.tile_profile`) and buffer sizes.
+    /// Run: MAKEPAD_TRACE=map.tile_profile cargo test -p makepad-widgets --features maps \
     ///   --release union_perf_probe -- --ignored --nocapture
     #[test]
     #[ignore]

@@ -1040,13 +1040,10 @@ fn corridor_deck_overrides(
     if q.corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
         return None;
     }
-    // MAKEPAD_CORRIDOR_BRUTE=1: the pre-grid full scan, kept as the
-    // bit-identity oracle. MAKEPAD_CORRIDOR_VERIFY=1: run BOTH paths per
-    // vertex and panic on any bit difference.
-    static BRUTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let brute = *BRUTE.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_BRUTE").is_some());
-    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let verify = *VERIFY.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_VERIFY").is_some());
+    // With `map.corridor_verify`, use the pre-grid full scan as the result,
+    // run the grid path too, and panic on any bit difference.
+    let brute = crate::makepad_platform::makepad_error_log::trace_enabled("map.corridor_verify");
+    let verify = brute;
     let mut deck_max = 0.0f32;
     let mut out: Vec<f32> = Vec::with_capacity(verts.len());
     let mut prev: Option<(usize, f32)> = None;
@@ -1094,6 +1091,26 @@ fn corridor_deck_overrides(
                         deck = d;
                     }
                 }
+            }
+            if verify {
+                let mut grid_deck = 0.0f32;
+                for &(ci, si) in q.grid.entries(a[0], a[1]) {
+                    let d = probe_corridor_segment(
+                        &q.corridors[ci as usize],
+                        si as usize,
+                        a,
+                        dx,
+                        dy,
+                        dl,
+                    );
+                    if d > grid_deck {
+                        grid_deck = d;
+                    }
+                }
+                assert!(
+                    deck.to_bits() == grid_deck.to_bits(),
+                    "corridor grid mismatch at anchor {a:?}: grid {grid_deck} vs brute {deck}"
+                );
             }
         } else {
             for &(ci, si) in q.grid.entries(a[0], a[1]) {
@@ -2042,10 +2059,9 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
-    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MAKEPAD_TILE_PROFILE):
+    // Topic-gated sub-stage timing:
     // where the "boolean" lap actually goes.
-    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MAKEPAD_TILE_PROFILE").is_some();
+    let prof_on = crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile");
     let prof_dissolve: f64;
     let prof_cascade: f64;
 
@@ -2429,8 +2445,9 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
 
     prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
     if prof_on {
-        eprintln!(
-            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
+        trace!(
+            "map.tile_profile",
+            "boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
             groups.len()
         );
     }
@@ -2508,8 +2525,7 @@ pub fn build_paint_faces(
     tolerance: f32,
     aa: f32,
 ) -> Vec<PaintFace> {
-    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MAKEPAD_TILE_PROFILE").is_some();
+    let prof_on = crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile");
     let prof_t_facetess = std::time::Instant::now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
@@ -2703,8 +2719,9 @@ pub fn build_paint_faces(
         }
     }
     if prof_on {
-        eprintln!(
-            "MPPROF facetess {:.1}ms faces={}",
+        trace!(
+            "map.tile_profile",
+            "facetess {:.1}ms faces={}",
             prof_t_facetess.elapsed().as_secs_f64() * 1e3,
             faces.len()
         );

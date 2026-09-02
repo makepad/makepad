@@ -151,14 +151,14 @@ impl DrawVars {
                 }
             }
 
-            if std::env::var_os("MAKEPAD_DUMP_GLSL_IR").is_some() {
-                crate::log!("---- Linux GLSL IR io list ----");
+            if crate::makepad_error_log::trace_enabled("shader.glsl_ir") {
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR io list ----");
                 for io in &output.io {
-                    crate::log!("io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
+                    crate::trace!("shader.glsl_ir", "io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
                 }
-                crate::log!("---- Linux GLSL IR functions ----");
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR functions ----");
                 for f in &output.functions {
-                    crate::log!("{} {{\n{}\n}}", f.call_sig, f.out);
+                    crate::trace!("shader.glsl_ir", "{} {{\n{}\n}}", f.call_sig, f.out);
                 }
             }
 
@@ -455,7 +455,7 @@ impl Cx {
                         .and_then(GlShaderState::as_ready)
                         .unwrap()
                 };
-                let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+                let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
                 if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
                     draw_call.instance_dirty = false;
@@ -641,7 +641,8 @@ impl Cx {
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL VAO rebuilt shader={} vao={:?} geom_vb={:?} inst_vb={:?} geom_ib={:?}",
                             draw_call.draw_shader_id.index,
                             vao.vao,
@@ -789,7 +790,8 @@ impl Cx {
                         }
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL draw shader={} variant={} indices={} instances={} textures={}",
                             draw_call.draw_shader_id.index,
                             shader_variant,
@@ -1482,11 +1484,12 @@ impl GlShader {
 
         #[cfg(target_os = "android")]
         let log_shader_builds = matches!(_os_type, OsType::Android(_))
-            && std::env::var_os("MAKEPAD_LOG_GL_SHADER_BUILDS").is_some();
+            && crate::makepad_error_log::trace_enabled("gl.shader_builds");
 
         #[cfg(target_os = "android")]
         if log_shader_builds {
-            crate::log!(
+            crate::trace!(
+                "gl.shader_builds",
                 "GL shader build start renderer={} vertex_hash={:016x} vertex_len={} fragment_hash={:016x} fragment_len={} vertex_preview={:?} fragment_preview={:?}",
                 get_gl_string(gl, gl_sys::RENDERER),
                 vertex_hash.0,
@@ -1505,7 +1508,8 @@ impl GlShader {
             let vertex_lengths = [vertex_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload vertex shader={} hash={:016x} len={}",
                     vs,
                     vertex_hash.0,
@@ -1515,7 +1519,8 @@ impl GlShader {
             (gl.glShaderSource)(vs, 1, vertex_ptrs.as_ptr(), vertex_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile vertex shader={} hash={:016x}",
                     vs,
                     vertex_hash.0
@@ -1529,7 +1534,8 @@ impl GlShader {
             let pixel_lengths = [pixel_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload fragment shader={} hash={:016x} len={}",
                     fs,
                     pixel_hash.0,
@@ -1539,7 +1545,8 @@ impl GlShader {
             (gl.glShaderSource)(fs, 1, pixel_ptrs.as_ptr(), pixel_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile fragment shader={} hash={:016x}",
                     fs,
                     pixel_hash.0
@@ -1839,23 +1846,35 @@ impl GlShader {
         let has_errors = info
             .lines()
             .any(|line| line.to_ascii_lowercase().contains("error"));
-        let dump_sources = std::env::var_os("MAKEPAD_LOG_GLSL_SOURCES").is_some();
+        let dump_sources = crate::makepad_error_log::trace_enabled("shader.glsl_sources");
 
-        if has_errors || dump_sources {
+        if has_errors {
             let kind = if compile { "compile" } else { "link" };
             crate::warning!(
                 "GLSL {} {} info:\n{}",
                 kind,
                 stage_name,
-                if has_errors {
-                    info
-                } else {
-                    "(no compiler errors)\n".to_string()
-                }
+                info
             );
-            if dump_sources && !source.is_empty() {
-                crate::warning!("GLSL {} {} source:\n{}", kind, stage_name, source);
-            }
+        }
+        if dump_sources && !has_errors {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} info:\n(no compiler errors)",
+                kind,
+                stage_name
+            );
+        }
+        if dump_sources && !source.is_empty() {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} source:\n{}",
+                kind,
+                stage_name,
+                source
+            );
         }
     }
 
@@ -1902,7 +1921,7 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
-        let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+        let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
             name0.push_str(&i.to_string());
@@ -1915,7 +1934,8 @@ impl GlShader {
             unsafe {
                 let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
                 if trace_draw {
-                    crate::log!(
+                    crate::trace!(
+                        "gl.draw",
                         "GL attrib program={} name={} loc={} size={} stride={} offset={} format={:?}",
                         program,
                         name0.trim_end_matches('\0'),

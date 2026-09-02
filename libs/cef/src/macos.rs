@@ -1022,10 +1022,9 @@ impl MainArgsStorage {
     }
 }
 
-/// `MAKEPAD_CEF_DEBUG=1` traces the navigation / favicon callbacks to stderr.
+/// Whether detailed CEF tracing is enabled.
 fn cef_debug() -> bool {
-    static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| env_flag("MAKEPAD_CEF_DEBUG").unwrap_or(false))
+    makepad_error_log::trace_enabled("cef")
 }
 
 fn env_flag(name: &str) -> Option<bool> {
@@ -1720,6 +1719,9 @@ fn is_running_inside_app_bundle(executable: &PathBuf) -> bool {
 /// `main` (the OS's first-launch verification of a new executable lands
 /// here). `None` when not re-exec'd.
 pub fn startup_phases() -> Option<(u128, u128)> {
+    if !makepad_error_log::trace_enabled("startup") {
+        return None;
+    }
     let bundle_ms = env::var("MAKEPAD_CEF_BUNDLE_MS").ok()?.parse::<u128>().ok()?;
     let exec_at = env::var("MAKEPAD_CEF_EXEC_AT_MS").ok()?.parse::<u128>().ok()?;
     let now = std::time::SystemTime::now()
@@ -1742,22 +1744,24 @@ pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
         )));
     }
 
-    let started = std::time::Instant::now();
+    let startup_trace = makepad_error_log::trace_enabled("startup");
+    let started = startup_trace.then(std::time::Instant::now);
     let synthetic_bundle =
         ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_executable)?;
-    let bundle_ms = started.elapsed().as_millis();
-    let launch_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
     let mut command = std::process::Command::new(&synthetic_bundle.bundle_executable);
     command.args(env::args_os().skip(1));
     command.env("MAKEPAD_CEF_APP_BUNDLE_EXEC", "1");
-    // Startup measurement: the bundle work done here and the wall clock at
-    // exec, so the re-exec'd process can report the exec-to-main gap (macOS
-    // scans a freshly written executable on its first launch).
-    command.env("MAKEPAD_CEF_BUNDLE_MS", bundle_ms.to_string());
-    command.env("MAKEPAD_CEF_EXEC_AT_MS", launch_ms.to_string());
+    if let Some(started) = started {
+        // Internal self-signals let the re-exec'd process report time spent
+        // materialising and launching the synthetic bundle.
+        let bundle_ms = started.elapsed().as_millis();
+        let launch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        command.env("MAKEPAD_CEF_BUNDLE_MS", bundle_ms.to_string());
+        command.env("MAKEPAD_CEF_EXEC_AT_MS", launch_ms.to_string());
+    }
     command.env("MallocNanoZone", "0");
     let err = command.exec();
     Err(Error::new(format!(
@@ -2208,11 +2212,18 @@ unsafe extern "system" fn render_on_paint(
         slice::from_raw_parts(buffer as *const u32, width as usize * height as usize).to_vec();
     let state: &SharedBrowserState = &(*render).state;
     let n = state.software_frames.fetch_add(1, Ordering::AcqRel) + 1;
-    if matches!(n, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000) || cef_debug() {
-        eprintln!(
-            "[makepad-cef] software paint #{n}: CPU buffer {width}x{height} (on_paint, {} bytes copied)",
+    let milestone = matches!(n, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000);
+    let trace = cef_debug();
+    if milestone || trace {
+        let message = format!(
+            "software paint #{n}: CPU buffer {width}x{height} (on_paint, {} bytes copied)",
             width as usize * height as usize * 4
         );
+        if trace {
+            makepad_error_log::trace!("cef", "{}", message);
+        } else {
+            eprintln!("[makepad-cef] {message}");
+        }
     }
     state.set_frame(Frame {
         width: width as usize,
@@ -2318,11 +2329,12 @@ unsafe extern "system" fn render_on_accelerated_paint(
             stats.dropped_no_target += 1;
         }
         // Measured evidence of the GPU path: frames 1, 2, 10, 100, 1000... are
-        // logged unconditionally (every frame with MAKEPAD_CEF_DEBUG=1).
+        // logged unconditionally (every frame with the `cef` topic).
         let milestone = matches!(stats.frames, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000);
-        if milestone || cef_debug() {
-            eprintln!(
-                "[makepad-cef] accelerated paint #{}: IOSurface {}x{} format={} ({}) iosurface_pixel_format=0x{:08x} coded_size={}x{} visible_rect={:?} blit={}us (copied={}, no-target drops={})",
+        let trace = cef_debug();
+        if milestone || trace {
+            let message = format!(
+                "accelerated paint #{}: IOSurface {}x{} format={} ({}) iosurface_pixel_format=0x{:08x} coded_size={}x{} visible_rect={:?} blit={}us (copied={}, no-target drops={})",
                 stats.frames,
                 width,
                 height,
@@ -2341,6 +2353,11 @@ unsafe extern "system" fn render_on_accelerated_paint(
                 blitted,
                 stats.dropped_no_target
             );
+            if trace {
+                makepad_error_log::trace!("cef", "{}", message);
+            } else {
+                eprintln!("[makepad-cef] {message}");
+            }
         }
     }
     if blitted {
@@ -2412,7 +2429,7 @@ unsafe fn display_on_favicon_urlchange_inner(
         }
     }
     if cef_debug() {
-        eprintln!("[makepad-cef] favicon urls changed: {first_url:?}");
+        makepad_error_log::trace!("cef", "favicon urls changed: {:?}", first_url);
     }
     let Some(url) = first_url else {
         *state.favicon_url.lock().unwrap() = String::new();
@@ -2462,8 +2479,9 @@ unsafe extern "system" fn download_image_on_finished(
     image: *mut ffi::cef_image_t,
 ) {
     if cef_debug() {
-        eprintln!(
-            "[makepad-cef] favicon download {} -> http {}",
+        makepad_error_log::trace!(
+            "cef",
+            "favicon download {} -> http {}",
             cef_string_to_string(image_url),
             http_status_code
         );
@@ -2484,7 +2502,7 @@ unsafe fn download_image_on_finished_inner(
         } else {
             (*image).is_empty.map(|f| f(image) != 0).unwrap_or(true)
         };
-        eprintln!("[makepad-cef] favicon download finished: image null={} empty={}", image.is_null(), empty);
+        makepad_error_log::trace!("cef", "favicon download finished: image null={} empty={}", image.is_null(), empty);
     }
     if image.is_null() {
         return;
@@ -2528,7 +2546,7 @@ unsafe fn download_image_on_finished_inner(
         .map(|px| u32::from_le_bytes([px[0], px[1], px[2], px[3]]))
         .collect::<Vec<u32>>();
     if cef_debug() {
-        eprintln!("[makepad-cef] favicon bitmap {width}x{height}");
+        makepad_error_log::trace!("cef", "favicon bitmap {}x{}", width, height);
     }
     *state.favicon.lock().unwrap() = Some(Frame {
         width: width as usize,
