@@ -19,7 +19,7 @@ use {
         panic::{catch_unwind, AssertUnwindSafe},
         sync::{
             atomic::{AtomicBool, AtomicU32, Ordering},
-            Arc, Condvar, Mutex, OnceLock,
+            Arc, Condvar, Mutex, MutexGuard, OnceLock,
         },
         thread::ThreadId,
         time::Duration,
@@ -34,6 +34,20 @@ pub use makepad_network::{
     SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender,
     UiWaker,
 };
+
+pub fn lock_from_ui<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A browser UI thread cannot use the futex wait that a contended wasm Mutex::lock performs.
+    #[cfg(target_arch = "wasm32")]
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => return error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => std::hint::spin_loop(),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
 
 pub(crate) fn wake_ui_event_loop() {
     #[cfg(all(not(headless), target_os = "macos"))]
@@ -163,10 +177,9 @@ impl CancellationToken {
 
     pub fn cancel(&self) {
         if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
-            if let Ok(mut generation) = self.inner.generation.lock() {
-                *generation = generation.wrapping_add(1);
-                self.inner.wake.notify_all();
-            }
+            let mut generation = lock_from_ui(&self.inner.generation);
+            *generation = generation.wrapping_add(1);
+            self.inner.wake.notify_all();
         }
     }
 
@@ -756,7 +769,7 @@ pub struct TaskPool {
 
 impl fmt::Debug for TaskPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.inner.state.lock().unwrap();
+        let state = lock_from_ui(&self.inner.state);
         f.debug_struct("TaskPool")
             .field("name", &self.inner.name)
             .field("queued", &state.queue.len())
@@ -791,13 +804,13 @@ impl TaskPool {
             ) {
                 Ok(handle) => handle,
                 Err(error) => {
-                    let started = inner.worker_handles.lock().unwrap().len();
-                    *inner.workers_remaining.lock().unwrap() = started;
+                    let started = lock_from_ui(&inner.worker_handles).len();
+                    *lock_from_ui(&inner.workers_remaining) = started;
                     initiate_pool_shutdown(&inner, ShutdownMode::CancelPending);
                     return Err(error);
                 }
             };
-            inner.worker_handles.lock().unwrap().push(handle);
+            lock_from_ui(&inner.worker_handles).push(handle);
         }
         Ok(Self { inner })
     }
@@ -847,7 +860,7 @@ impl TaskPool {
             })),
         };
 
-        let mut pool_state = self.inner.state.lock().unwrap();
+        let mut pool_state = lock_from_ui(&self.inner.state);
         if pool_state.shutdown.is_some() {
             drop(pool_state);
             drop(job);
@@ -884,7 +897,7 @@ impl TaskPool {
         K: Clone + Send + 'static,
     {
         let mut dropped = Vec::new();
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = lock_from_ui(&self.inner.state);
         state.queue.retain(|job| {
             let Some(key) = job.tag.as_ref().and_then(ErasedTag::downcast_ref::<K>) else { return true };
             if keep(key) {
@@ -900,7 +913,7 @@ impl TaskPool {
     pub fn shutdown(&self, mode: ShutdownMode) -> TaskHandle<()> {
         initiate_pool_shutdown(&self.inner, mode);
         let inner = self.inner.clone();
-        let handles = std::mem::take(&mut *inner.worker_handles.lock().unwrap());
+        let handles = std::mem::take(&mut *lock_from_ui(&inner.worker_handles));
         match self.inner.spawner.spawn_with(
             ThreadOptions {
                 name: Some(format!("{}-shutdown", self.inner.name).into()),
@@ -925,14 +938,14 @@ impl TaskPool {
 impl Drop for TaskPool {
     fn drop(&mut self) {
         initiate_pool_shutdown(&self.inner, ShutdownMode::CancelPending);
-        if !self.inner.worker_handles.lock().unwrap().is_empty() {
+        if !lock_from_ui(&self.inner.worker_handles).is_empty() {
             self.shutdown(ShutdownMode::CancelPending).detach();
         }
     }
 }
 
 fn initiate_pool_shutdown(inner: &PoolInner, mode: ShutdownMode) {
-    let mut state = inner.state.lock().unwrap();
+    let mut state = lock_from_ui(&inner.state);
     match (state.shutdown, mode) {
         (None, mode) => state.shutdown = Some(mode),
         (Some(ShutdownMode::Drain), ShutdownMode::CancelPending) => state.shutdown = Some(ShutdownMode::CancelPending),
@@ -1128,7 +1141,7 @@ impl Scheduler {
         }
         let id = self.state.next_id.fetch_add(1, Ordering::Relaxed).max(1) as u64;
         let handle_token = CancellationToken::new();
-        self.state.inner.lock().unwrap().entries.push(TimerEntry {
+        lock_from_ui(&self.state.inner).entries.push(TimerEntry {
             deadline,
             period,
             missed,
@@ -1152,7 +1165,7 @@ fn wake_scheduler_ui() {
 fn run_scheduler_due(state: &Arc<SchedulerState>, now: f64) {
     let mut due = Vec::new();
     {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = lock_from_ui(&state.inner);
         inner.entries.retain(|entry| {
             !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled()
         });
@@ -1194,7 +1207,7 @@ fn run_scheduler_due(state: &Arc<SchedulerState>, now: f64) {
                         }
                     }
                 };
-                state.inner.lock().unwrap().entries.push(entry);
+                lock_from_ui(&state.inner).entries.push(entry);
             }
         }
     }
@@ -1208,7 +1221,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
         return;
     };
     if matches!(event, Event::Shutdown) {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = lock_from_ui(&state.inner);
         if let Some((timer, _)) = inner.armed.take() {
             cx.stop_timer(timer);
         }
@@ -1221,7 +1234,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
         _ => None,
     };
     {
-        let mut inner = state.inner.lock().unwrap();
+        let mut inner = lock_from_ui(&state.inner);
         if inner
             .armed
             .is_some_and(|(timer, _)| Some(timer.0) == fired)
@@ -1233,7 +1246,7 @@ pub(crate) fn service_scheduler(cx: &mut Cx, event: &Event) {
     let now = Cx::monotonic_now();
     run_scheduler_due(&state, now);
 
-    let mut inner = state.inner.lock().unwrap();
+    let mut inner = lock_from_ui(&state.inner);
     inner.entries.retain(|entry| {
         !entry.external_token.is_cancelled() && !entry.handle_token.is_cancelled()
     });
@@ -1342,7 +1355,7 @@ fn spawn_web_task<T: Send + 'static>(ui_thread: ThreadId, options: ThreadOptions
     let request_id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed).max(1);
     let closure: WebClosure = Box::new(run);
     let context_ptr = Box::into_raw(Box::new(closure)) as u32;
-    web_requests().lock().unwrap().insert(request_id, WebRequest {
+    lock_from_ui(web_requests()).insert(request_id, WebRequest {
         context_ptr,
         completion: state.clone(),
         stage: WebWorkerStage::Requested,
@@ -1351,7 +1364,7 @@ fn spawn_web_task<T: Send + 'static>(ui_thread: ThreadId, options: ThreadOptions
     let name = options.name.as_deref().unwrap_or("");
     let accepted = unsafe { js_spawn_thread(request_id, context_ptr, stack_size, name.as_ptr(), name.len()) };
     if accepted == 0 {
-        if let Some(request) = web_requests().lock().unwrap().remove(&request_id) {
+        if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
             unsafe { drop(Box::from_raw(request.context_ptr as *mut WebClosure)) };
         }
         return Err(SpawnError::Unsupported);
@@ -1383,7 +1396,7 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(_request_id: u32, closure_ptr: u
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_started"]
 pub extern "C" fn wasm_thread_started(request_id: u32) {
-    if let Some(request) = web_requests().lock().unwrap().get_mut(&request_id) {
+    if let Some(request) = lock_from_ui(web_requests()).get_mut(&request_id) {
         request.stage = WebWorkerStage::Started;
     }
 }
@@ -1391,7 +1404,7 @@ pub extern "C" fn wasm_thread_started(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_failed_to_start"]
 pub unsafe extern "C" fn wasm_thread_failed_to_start(request_id: u32) {
-    if let Some(request) = web_requests().lock().unwrap().remove(&request_id) {
+    if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
         drop(Box::from_raw(request.context_ptr as *mut WebClosure));
         request.completion.complete_error(TaskError::Spawn(SpawnError::Backend("web worker failed to start".into())));
     }
@@ -1400,7 +1413,7 @@ pub unsafe extern "C" fn wasm_thread_failed_to_start(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_worker_lost"]
 pub extern "C" fn wasm_thread_worker_lost(request_id: u32) {
-    if let Some(request) = web_requests().lock().unwrap().remove(&request_id) {
+    if let Some(request) = lock_from_ui(web_requests()).remove(&request_id) {
         request.completion.complete_error(TaskError::WorkerLost);
     }
 }
@@ -1408,7 +1421,7 @@ pub extern "C" fn wasm_thread_worker_lost(request_id: u32) {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 #[export_name = "wasm_thread_finished"]
 pub extern "C" fn wasm_thread_finished(request_id: u32) {
-    web_requests().lock().unwrap().remove(&request_id);
+    lock_from_ui(web_requests()).remove(&request_id);
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
@@ -1432,6 +1445,25 @@ mod tests {
 
     fn worker_join<T: Send + 'static>(handle: TaskHandle<T>) -> Result<T, TaskError> {
         std::thread::spawn(move || handle.join()).join().unwrap()
+    }
+
+    #[test]
+    fn lock_from_ui_returns_uncontended_and_contended_guards() {
+        let mutex = Mutex::new(1_u32);
+        *lock_from_ui(&mutex) += 1;
+        assert_eq!(*mutex.lock().unwrap(), 2);
+
+        let mutex = Arc::new(Mutex::new(7_u32));
+        let worker_mutex = mutex.clone();
+        let (held_tx, held_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _guard = worker_mutex.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        });
+        held_rx.recv().unwrap();
+        assert_eq!(*lock_from_ui(&mutex), 7);
+        worker.join().unwrap();
     }
 
     #[test]

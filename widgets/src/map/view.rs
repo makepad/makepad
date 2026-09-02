@@ -3306,6 +3306,8 @@ impl ScriptHook for MapView {
             return;
         }
 
+        super::warm_shared_registries();
+
         let min_zoom = self.min_zoom.max(0.0);
         let max_zoom = self.max_zoom.max(min_zoom);
         self.zoom = self.zoom.clamp(min_zoom, max_zoom);

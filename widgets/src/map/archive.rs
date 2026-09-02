@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use makepad_platform::thread::lock_from_ui;
 
 const LEAF_CACHE_CAPACITY: usize = 32;
 const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
@@ -154,9 +155,15 @@ impl FileByteSource {
 fn begin_file_read(
     states: &Mutex<HashMap<ReadToken, FileReadState>>,
     token: ReadToken,
+    from_ui: bool,
 ) -> bool {
-    let Ok(mut states) = states.lock() else {
-        return false;
+    let mut states = if from_ui {
+        lock_from_ui(states)
+    } else {
+        let Ok(states) = states.lock() else {
+            return false;
+        };
+        states
     };
     match states.get_mut(&token) {
         Some(state @ FileReadState::Queued) => {
@@ -174,9 +181,15 @@ fn begin_file_read(
 fn complete_file_read(
     states: &Mutex<HashMap<ReadToken, FileReadState>>,
     token: ReadToken,
+    from_ui: bool,
 ) -> bool {
-    let Ok(mut states) = states.lock() else {
-        return false;
+    let mut states = if from_ui {
+        lock_from_ui(states)
+    } else {
+        let Ok(states) = states.lock() else {
+            return false;
+        };
+        states
     };
     match states.get_mut(&token) {
         Some(state @ FileReadState::Running) => {
@@ -198,14 +211,12 @@ impl ByteSource for FileByteSource {
         let sender = self.completions.sender();
         let rejected_sender = sender.clone();
         let token_states = self.token_states.clone();
-        let _ = self
-            .token_states
-            .lock()
-            .map(|mut states| states.insert(token, FileReadState::Queued));
+        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
+        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token) {
+            if !begin_file_read(&token_states, token, read_runs_on_ui) {
                 return;
             }
             let result = std::fs::read(&path)
@@ -220,13 +231,13 @@ impl ByteSource for FileByteSource {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token) {
+            if complete_file_read(&token_states, token, read_runs_on_ui) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
         }) {
             Ok(()) => {}
             Err(error) => {
-                let _ = self.token_states.lock().map(|mut states| states.remove(&token));
+                lock_from_ui(&self.token_states).remove(&token);
                 let _ = rejected_sender.send(ReadCompletion {
                     token,
                     result: Err(format!("archive worker submission failed: {error}")),
@@ -257,29 +268,34 @@ impl ByteSource for FileByteSource {
         let rejected_sender = sender.clone();
         let shard_files = self.shard_files.clone();
         let token_states = self.token_states.clone();
-        let _ = self
-            .token_states
-            .lock()
-            .map(|mut states| states.insert(token, FileReadState::Queued));
+        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
+        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token) {
+            if !begin_file_read(&token_states, token, read_runs_on_ui) {
                 return;
             }
-            let result = read_file_range(&path, shard, offset, len, &shard_files);
+            let result = read_file_range(
+                &path,
+                shard,
+                offset,
+                len,
+                &shard_files,
+                read_runs_on_ui,
+            );
             #[cfg(test)]
             if let Some((reached, release)) = completion_barriers {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token) {
+            if complete_file_read(&token_states, token, read_runs_on_ui) {
                 let _ = sender.send(ReadCompletion { token, result });
             }
         }) {
             Ok(()) => {}
             Err(error) => {
-                let _ = self.token_states.lock().map(|mut states| states.remove(&token));
+                lock_from_ui(&self.token_states).remove(&token);
                 let _ = rejected_sender.send(ReadCompletion {
                     token,
                     result: Err(format!("archive worker submission failed: {error}")),
@@ -289,23 +305,22 @@ impl ByteSource for FileByteSource {
     }
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
-        let _ = self.token_states.lock().map(|mut states| {
-            if let Some(state @ (FileReadState::Queued | FileReadState::Running)) =
-                states.get_mut(&token)
-            {
-                *state = FileReadState::Cancelled;
-            }
-        });
+        let mut states = lock_from_ui(&self.token_states);
+        if let Some(state @ (FileReadState::Queued | FileReadState::Running)) =
+            states.get_mut(&token)
+        {
+            *state = FileReadState::Cancelled;
+        }
+        drop(states);
         let dropped = self.workers.retain_queued(|queued| *queued != token);
         if !dropped.is_empty() {
-            let _ = self.token_states.lock().map(|mut states| {
-                if matches!(
-                    states.get(&token),
-                    Some(FileReadState::Queued | FileReadState::Cancelled)
-                ) {
-                    states.remove(&token);
-                }
-            });
+            let mut states = lock_from_ui(&self.token_states);
+            if matches!(
+                states.get(&token),
+                Some(FileReadState::Queued | FileReadState::Cancelled)
+            ) {
+                states.remove(&token);
+            }
         }
     }
 
@@ -324,13 +339,18 @@ fn read_file_range(
     offset: u64,
     len: u64,
     shard_files: &Mutex<ShardFileCache>,
+    from_ui: bool,
 ) -> Result<Arc<[u8]>, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let len = usize::try_from(len).map_err(|_| "mkmap range is too large".to_string())?;
-    let mut files = shard_files
-        .lock()
-        .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?;
+    let mut files = if from_ui {
+        lock_from_ui(shard_files)
+    } else {
+        shard_files
+            .lock()
+            .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?
+    };
     if !files.files.contains_key(&shard) {
         while files.files.len() >= FILE_CACHE_CAPACITY {
             if let Some(oldest) = files.lru.pop_front() {
