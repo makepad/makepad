@@ -1206,6 +1206,284 @@ mod tests {
         assert_eq!(plan.end_sample(), plan.score_quarter_to_sample(end_quarter));
     }
 
+    /// DEBUG RIG (working tree only): render a MIDI file through the exact
+    /// path the application plays it on and write a WAV, so an app-vs-render
+    /// difference can be measured instead of argued about.
+    ///
+    ///   SCORE_RIG_IN=<midi> SCORE_RIG_OUT=<wav> SCORE_RIG_SECS=44 \
+    ///     cargo test -p makepad-score-ui --release rig_render -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rig_render() {
+        let input = std::env::var("SCORE_RIG_IN").expect("SCORE_RIG_IN");
+        let output = std::env::var("SCORE_RIG_OUT").expect("SCORE_RIG_OUT");
+        let secs: f64 = std::env::var("SCORE_RIG_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(44.0);
+        let bytes = std::fs::read(&input).expect("read midi");
+        let imported = makepad_score_import::import_midi_bytes(&bytes).expect("import midi");
+        let score = imported.score;
+        let bpm = crate::state::score_opening_tempo(&score).unwrap_or(120.0);
+        eprintln!("rig: tempo {bpm} bpm");
+
+        let plan = compile_plan(&score, bpm, false);
+        let shared = Arc::new(SharedSound::default());
+        // Exactly what the application publishes at startup.
+        let mut settings = SoundSettings::default();
+        let knob = |name: &str| -> Option<f32> {
+            std::env::var(name).ok().and_then(|v| v.parse().ok())
+        };
+        if let Some(v) = knob("RIG_MIX") { settings.room.mix = v; }
+        if let Some(v) = knob("RIG_EARLY") { settings.early_reflections = v; }
+        if let Some(v) = knob("RIG_SHELF") { settings.eq_shelf_db = v; }
+        if let Some(v) = knob("RIG_TREBLE") { settings.tone_treble_db = v; }
+        if let Some(v) = knob("RIG_BASS") { settings.tone_bass_db = v; }
+        if let Some(v) = knob("RIG_MASTER") { settings.master_gain = v; }
+        if let Some(v) = knob("RIG_BODYTAP") { settings.voicing.body_tap = v; }
+        if let Some(v) = knob("RIG_KNOCK") { settings.voicing.knock = v; }
+        if let Some(v) = knob("RIG_ROUGH") { settings.voicing.roughness = v; }
+        if let Some(v) = knob("RIG_PHANTOM") { settings.voicing.phantoms = v; }
+        if let Some(v) = knob("RIG_ATKNOISE") { settings.voicing.attack_noise = v; }
+        if let Some(v) = knob("RIG_ATKBODY") { settings.voicing.attack_body = v; }
+        if let Some(v) = knob("RIG_SYMP") { settings.voicing.sympathetic = v; }
+        if std::env::var("RIG_AUDIENCE").is_ok() {
+            settings.room.perspective = Perspective::Audience;
+        }
+        eprintln!("rig: voicing {:?}", settings.voicing);
+        eprintln!(
+            "rig: engine {:?} preset {} reverb {:?} mix {} bright {}",
+            settings.engine,
+            settings.preset,
+            settings.room.preset,
+            settings.room.mix,
+            settings.eq_shelf_db
+        );
+        // MODE=native leaves the shared cell at revision 0, which the backend
+        // reads as "nothing published": the instrument keeps the values its own
+        // preset built it with. That is the sound the offline renders had.
+        if std::env::var("SCORE_RIG_MODE").as_deref() != Ok("native") {
+            shared.publish(settings);
+        } else {
+            eprintln!("rig: NATIVE — publishing nothing, preset values stand");
+        }
+
+        let ring = SpscRing::<AudioMessage, 8>::new();
+        let mixer = PartMixer::<PART_CAPACITY>::new();
+        let clock = AtomicAudioClock::new();
+        let mut engine =
+            PlaybackEngine::<SamplerBackend, PENDING_CAPACITY, PART_CAPACITY>::new(test_backend(
+                Arc::clone(&shared),
+            ));
+        ring.push(AudioMessage {
+            at_device_sample: 0,
+            sequence: 1,
+            kind: AudioMessageKind::Play,
+        })
+        .expect("play");
+
+        const BLOCK: usize = 512;
+        let blocks = (secs * f64::from(PLAN_RATE) / BLOCK as f64) as u64;
+        let mut left = vec![0.0_f32; BLOCK];
+        let mut right = vec![0.0_f32; BLOCK];
+        let mut interleaved: Vec<i16> = Vec::with_capacity(blocks as usize * BLOCK * 2);
+        let mut peak = 0.0_f32;
+        let mut clipped = 0u64;
+        for block in 0..blocks {
+            left.fill(0.0);
+            right.fill(0.0);
+            let mut channels: [&mut [f32]; 2] = [&mut left, &mut right];
+            let context = RenderContext {
+                device_sample_rate: PLAN_RATE,
+                first_device_sample: block * BLOCK as u64,
+                first_presentation_host_ns: block * BLOCK as u64 * 1_000_000_000
+                    / u64::from(PLAN_RATE),
+                frames: BLOCK,
+                output_latency_frames: 0,
+                stream_generation: 1,
+                clock_quality: ClockQuality::Exact,
+            };
+            engine.render(context, &mut channels, &plan, &ring, &mixer, &clock);
+            for index in 0..BLOCK {
+                for sample in [left[index], right[index]] {
+                    peak = peak.max(sample.abs());
+                    if sample.abs() >= 1.0 {
+                        clipped += 1;
+                    }
+                    interleaved.push((sample.clamp(-1.0, 1.0) * 32767.0) as i16);
+                }
+            }
+        }
+        eprintln!("rig: peak {peak:.4}  clipped samples {clipped}");
+        write_wav(&output, &interleaved, PLAN_RATE);
+        eprintln!("rig: wrote {output}");
+    }
+
+
+    /// DEBUG RIG (working tree only): drive the piano DIRECTLY from the MIDI
+    /// file's own note-ons and note-offs, dry, with no plan, no scheduler and
+    /// no articulation gate — the path the offline candidate renders used.
+    /// This is the reference sound; the difference from `rig_render` is
+    /// exactly what the application's playback path is doing to it.
+    ///
+    ///   RIG_IN=<midi> RIG_OUT=<wav> RIG_SECS=44 [RIG_WET=0] \
+    ///     cargo test -p makepad-score-ui --release rig_direct -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rig_direct() {
+        let input = std::env::var("SCORE_RIG_IN").expect("SCORE_RIG_IN");
+        let output = std::env::var("SCORE_RIG_OUT").expect("SCORE_RIG_OUT");
+        let secs: f64 = std::env::var("SCORE_RIG_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(44.0);
+        let wet: f32 = std::env::var("RIG_WET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let target_dbfs: f32 = std::env::var("RIG_DBFS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(-18.0);
+        let bytes = std::fs::read(&input).expect("read midi");
+        let file = makepad_midi_file::MidiFile::parse(&bytes).expect("parse midi");
+        let sequences = file.paired_notes().expect("paired notes");
+        let tempo = file.tempo_map().expect("tempo map");
+        let rate = PLAN_RATE as f32;
+
+        let mut piano = Piano::new_with_preset(
+            rate,
+            &makepad_piano_model::PIANO_PRESETS
+                [crate::sound::default_preset_index(ScoreEngine::Physical)],
+        );
+        piano.set_reverb_mix(wet);
+
+        // The FILE, played: its own seconds (every tempo change already
+        // applied), its own velocities, its own sustain pedal. No score model,
+        // no quantisation, no articulation gate.
+        let mut events: Vec<(usize, PianoEvent)> = Vec::new();
+        let frame = |seconds: f64| -> usize { (seconds * f64::from(rate)).max(0.0) as usize };
+        let mut notes = 0usize;
+        for sequence in &sequences {
+            for note in &sequence.notes {
+                notes += 1;
+                events.push((
+                    frame(note.time_on),
+                    PianoEvent::NoteOn { key: note.key, velocity: note.velocity_on.max(1) },
+                ));
+                events.push((frame(note.time_off), PianoEvent::NoteOff { key: note.key }));
+            }
+        }
+        let mut pedals = 0usize;
+        if std::env::var("RIG_NOPEDAL").is_err() {
+            for track in &file.tracks {
+                for event in &track.events {
+                    if let makepad_midi_file::EventKind::Channel(channel) = &event.kind {
+                        if let makepad_midi_file::ChannelMessage::ControlChange {
+                            controller: 64,
+                            value,
+                        } = channel.message
+                        {
+                            pedals += 1;
+                            events.push((
+                                frame(tempo.ticks_to_seconds(event.tick)),
+                                PianoEvent::Sustain { value: f32::from(value) / 127.0 },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let velocities: std::collections::BTreeSet<u8> = sequences
+            .iter()
+            .flat_map(|s| s.notes.iter().map(|n| n.velocity_on))
+            .collect();
+        eprintln!(
+            "rig_direct: {notes} notes, {} distinct velocities, {pedals} pedal events, wet {wet}",
+            velocities.len()
+        );
+        events.sort_by_key(|(frame, _)| *frame);
+        for (frame, event) in events.iter().take(12) {
+            eprintln!(
+                "rig_direct: {:8.3}s {:?}",
+                *frame as f64 / f64::from(rate),
+                event
+            );
+        }
+
+        const BLOCK: usize = 512;
+        let total = (secs * f64::from(PLAN_RATE)) as usize;
+        let mut left = vec![0.0_f32; BLOCK];
+        let mut right = vec![0.0_f32; BLOCK];
+        let mut all_l: Vec<f32> = Vec::with_capacity(total);
+        let mut all_r: Vec<f32> = Vec::with_capacity(total);
+        let mut cursor = 0usize;
+        let mut start = 0usize;
+        while start < total {
+            let end = (start + BLOCK).min(total);
+            let mut block_events: Vec<PianoTimedEvent> = Vec::new();
+            while cursor < events.len() && events[cursor].0 < end {
+                let frame = events[cursor].0.max(start);
+                block_events.push(PianoTimedEvent {
+                    offset: (frame - start) as u32,
+                    event: events[cursor].1,
+                });
+                cursor += 1;
+            }
+            let count = end - start;
+            left[..count].fill(0.0);
+            right[..count].fill(0.0);
+            piano.process(&block_events, &mut left[..count], &mut right[..count]);
+            all_l.extend_from_slice(&left[..count]);
+            all_r.extend_from_slice(&right[..count]);
+            start = end;
+        }
+
+        // The candidate renders were normalised; match that so a comparison is
+        // about tone and not about level.
+        let n = all_l.len().max(1) as f32;
+        let rms = (all_l.iter().chain(all_r.iter()).map(|s| s * s).sum::<f32>()
+            / (2.0 * n))
+            .sqrt();
+        let gain = if rms > 0.0 {
+            10.0_f32.powf(target_dbfs / 20.0) / rms
+        } else {
+            1.0
+        };
+        let mut peak = 0.0_f32;
+        let mut interleaved: Vec<i16> = Vec::with_capacity(all_l.len() * 2);
+        for (l, r) in all_l.iter().zip(all_r.iter()) {
+            for sample in [l * gain, r * gain] {
+                peak = peak.max(sample.abs());
+                interleaved.push((sample.clamp(-1.0, 1.0) * 32767.0) as i16);
+            }
+        }
+        eprintln!("rig_direct: rms {rms:.4} gain {gain:.3} peak {peak:.3}");
+        write_wav(&output, &interleaved, PLAN_RATE);
+        eprintln!("rig_direct: wrote {output}");
+    }
+
+    fn write_wav(path: &str, samples: &[i16], rate: u32) {
+        let data_len = (samples.len() * 2) as u32;
+        let mut out = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 4).to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, out).expect("write wav");
+    }
+
     fn test_backend(sound: Arc<SharedSound>) -> SamplerBackend {
         SamplerBackend::new(
             PLAN_RATE as f32,

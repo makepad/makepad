@@ -884,7 +884,7 @@ fn pitch_name(diatonic: i32, alter: i32) -> String {
 
 /// The score's own opening tempo, when it carries one. An imported performance
 /// knows its tempo; playing it at the app default is simply wrong music.
-fn score_opening_tempo(score: &makepad_score::model::Score) -> Option<f64> {
+pub(crate) fn score_opening_tempo(score: &makepad_score::model::Score) -> Option<f64> {
     score.maps.tempo.iter().find_map(|change| match change.value {
         makepad_score::model::Tempo::Instant { quarters_per_minute } => {
             let bpm = rational_f64(quarters_per_minute);

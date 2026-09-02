@@ -5,6 +5,12 @@
 //! `apps/score` crate is intentionally only a window and event adapter.
 
 pub use makepad_widgets;
+pub use makepad_score_view::{
+    build, build_bass_tab_score, build_drum_score, build_pitched_score, view, BuildOptions,
+    DrumHit, DrumVoice, PitchedNote, ScoreView, ScoreViewRef, ScoreViewWidgetExt,
+    ScoreViewWidgetRefExt,
+};
+pub use makepad_score_view::ScoreDocument as ScoreViewDocument;
 
 pub mod action;
 pub mod document;
@@ -19,7 +25,6 @@ pub mod sound;
 pub mod spacing;
 pub mod state;
 pub mod theme;
-pub(crate) mod title;
 pub mod ui;
 
 pub use action::*;
@@ -34,6 +39,7 @@ use makepad_widgets::ScriptVm;
 
 /// Register the score theme and widgets in dependency order.
 pub fn script_mod(vm: &mut ScriptVm) {
+    makepad_score_view::script_mod(vm);
     theme::script_mod(vm);
     ui::widgets::script_mod(vm);
     ui::canvas::script_mod(vm);
