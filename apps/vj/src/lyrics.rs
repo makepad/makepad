@@ -951,25 +951,33 @@ pub fn time_words(lines: &mut [LyricLine], envelope: &VocalEnvelope) -> usize {
 /// now that the alignment lane landed; per-line confidence still downgrades
 /// doubtful lines to the sweep, so a hop never claims precision the data
 /// lacks. `VJ_KARAOKE_WORD_HOPS=0` forces the old line-sweep-only start.
-static WORD_HOPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-static WORD_HOPS_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+// 0 = uninitialized, 1 = off, 2 = on. Atomic initialization avoids the
+// blocking OnceLock path when the UI toggle races the lyrics worker on wasm.
+static WORD_HOPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn word_hops_enabled() -> bool {
-    WORD_HOPS_ENV.get_or_init(|| {
-        if let Ok(value) = std::env::var("VJ_KARAOKE_WORD_HOPS") {
-            let on = matches!(value.trim(), "1" | "on" | "true" | "yes");
-            WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
-        }
-    });
-    WORD_HOPS.load(std::sync::atomic::Ordering::Relaxed)
+    let ordering = std::sync::atomic::Ordering::Acquire;
+    let mut state = WORD_HOPS.load(ordering);
+    if state == 0 {
+        let on = std::env::var("VJ_KARAOKE_WORD_HOPS")
+            .map(|value| matches!(value.trim(), "1" | "on" | "true" | "yes"))
+            .unwrap_or(true);
+        let desired = if on { 2 } else { 1 };
+        let _ = WORD_HOPS.compare_exchange(
+            0,
+            desired,
+            std::sync::atomic::Ordering::AcqRel,
+            ordering,
+        );
+        state = WORD_HOPS.load(ordering);
+    }
+    state == 2
 }
 
 /// The UI checkbox's write half: flips hop mode live; the caller rebuilds
 /// the karaoke schedules so already-loaded decks re-time immediately.
 pub fn set_word_hops(on: bool) {
-    // Make sure a late env read cannot overwrite an explicit UI choice.
-    WORD_HOPS_ENV.get_or_init(|| ());
-    WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
+    WORD_HOPS.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Release);
 }
 
 /// The same, told explicitly whether to hop — the form tests and the audit

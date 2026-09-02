@@ -206,6 +206,10 @@ fn collect(message: &str, level: LogLevel) {
 pub fn install() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
+        // The log callback may run on any worker. Construct its OnceLock on
+        // the UI thread before publishing the callback so no worker can race
+        // the UI through OnceLock's blocking initialization path on wasm.
+        let _ = tap();
         #[cfg(not(target_arch = "wasm32"))]
         let _ = std::fs::create_dir_all(scratch_origin().join("status"));
         makepad_widgets::makepad_platform::log::set_log_tap(Some(collect));

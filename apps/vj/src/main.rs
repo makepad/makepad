@@ -214,6 +214,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use makepad_widgets::makepad_platform::thread::lock_from_ui;
 use crate::clock::Instant;
 use std::time::Duration;
 
@@ -4978,7 +4979,7 @@ impl SyncWorker {
     }
 
     pub fn snapshot(&self) -> SyncSnapshot {
-        self.shared.snap.lock().unwrap().clone()
+        lock_from_ui(&self.shared.snap).clone()
     }
 
     /// Drop the tracked grid and re-derive tempo and phase from the audio
@@ -6244,9 +6245,6 @@ pub struct App {
     fx_engage_now: f32,
     #[rust]
     fx_engage_synced: f32,
-    /// `VJ_TRACE_THUMBS=1` — log every tile texture transition.
-    #[rust(std::env::var_os("VJ_TRACE_THUMBS").is_some())]
-    trace_thumbs: bool,
     /// `VJ_TRACE_CUE=1` — log the click → cue → fade chain.
     #[rust(std::env::var_os("VJ_TRACE_CUE").is_some())]
     trace_cue: bool,
@@ -6941,9 +6939,6 @@ pub struct App {
     /// its install workers are pumped even if the containing modal closes.
     #[rust]
     hub_model_panel_ready: bool,
-    /// Thumb-load profile: (boot instant, last print, decoded at last print).
-    #[rust]
-    thumb_prof: Option<(crate::clock::Instant, crate::clock::Instant, u64)>,
     /// Frame-loop hang detector: the previous pump's instant.
     #[rust]
     frame_watch: Option<crate::clock::Instant>,
@@ -7086,7 +7081,7 @@ pub struct App {
     /// widths are only pushed when it actually flips.
     #[rust]
     fill_performing: Option<bool>,
-    /// `VJ_THUMB_STATS=1` — stage-by-stage thumbnail fill accounting.
+    /// Stage-by-stage thumbnail fill accounting for the performance graph.
     #[rust]
     thumb_stats: ThumbStats,
 
@@ -7103,15 +7098,10 @@ pub struct App {
     local_store: Option<LocalStore>,
 }
 
-/// Stage-by-stage accounting for the thumbnail FILL path, behind
-/// `VJ_THUMB_STATS=1`. Every number is cumulative since boot except the
-/// per-report deltas, which reset each line. This is the instrument the
-/// load-path work is measured with: without it "slow" is a feeling.
+/// Internal stage-by-stage accounting for the thumbnail fill path.
 #[derive(Default)]
 struct ThumbStats {
     on: bool,
-    t0: Option<crate::clock::Instant>,
-    last_report: Option<crate::clock::Instant>,
     /// Store blob fetches submitted / landed.
     fetch_submitted: u64,
     fetch_landed: u64,
@@ -7131,7 +7121,6 @@ struct ThumbStats {
     ticks: u64,
     rebuilds: u64,
     rebuild_ms: f64,
-    last_decoded: u64,
     /// submit -> blob-landed, per store fetch.
     fetch_at: HashMap<AssetRevisionId, crate::clock::Instant>,
     fetch_wait_ms: f64,
@@ -7153,12 +7142,6 @@ struct ThumbStats {
 }
 
 impl ThumbStats {
-    fn start(&mut self) {
-        self.on = std::env::var_os("VJ_THUMB_STATS").is_some();
-        self.t0 = Some(crate::clock::Instant::now());
-        self.last_report = self.t0;
-    }
-
     /// Note when a stage started for `revision`; nothing is recorded, and no
     /// map grows, unless the stats are on.
     fn stage_begin(map: &mut HashMap<AssetRevisionId, crate::clock::Instant>, on: bool, revision: AssetRevisionId) {
@@ -7179,68 +7162,6 @@ impl ThumbStats {
         *sum += ms;
         *max = max.max(ms);
         true
-    }
-    fn secs(&self) -> f64 {
-        self.t0.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
-    }
-    fn report(&mut self, backlog: usize, inflight: usize, cached: usize) {
-        if !self.on {
-            return;
-        }
-        let due = self
-            .last_report
-            .map(|t| t.elapsed().as_secs_f64() >= 0.5)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_report = Some(crate::clock::Instant::now());
-        let rate = self.decoded.saturating_sub(self.last_decoded);
-        self.last_decoded = self.decoded;
-        let fetch_avg = if self.fetch_landed > 0 {
-            self.fetch_wait_ms / self.fetch_landed as f64
-        } else {
-            0.0
-        };
-        let dec_avg = if self.dec_n > 0 { self.dec_wait_ms / self.dec_n as f64 } else { 0.0 };
-        log!(
-            "thumbstat t={:.2}s decoded={} (+{}) cached={} fetch={}/{} fxcache={} backlog={} inflight={} \
-             upload={:.0}ms fxread={:.0}ms rebuild={:.0}ms/{} ticks={} budget_hits={} textures={} \
-             fetchwait={:.0}/{:.0}ms decwait={:.0}/{:.0}ms",
-            self.secs(),
-            self.decoded,
-            rate,
-            cached,
-            self.fetch_landed,
-            self.fetch_submitted,
-            self.fx_cache_submitted,
-            backlog,
-            inflight,
-            self.upload_ms,
-            self.fx_read_ms,
-            self.rebuild_ms,
-            self.rebuilds,
-            self.ticks,
-            self.budget_hits,
-            self.textures,
-            fetch_avg,
-            self.fetch_wait_max,
-            dec_avg,
-            self.dec_wait_max,
-        );
-        log!(
-            "thumbstat   lru: resident={:.1}MB evicted={} pages={} details={} manifests={}",
-            self.resident_bytes as f64 / (1024.0 * 1024.0),
-            self.evicted,
-            self.pages,
-            self.details,
-            self.manifests,
-        );
-        log!(
-            "thumbstat   resolve: inflight={} queued={}",
-            self.resolving,
-            self.resolve_backlog,
-        );
     }
 }
 
@@ -11826,8 +11747,10 @@ p2 {}
     /// releases the rate back to 1.0 when the beat lock decays).
     fn pump_loop_reports(&mut self) {
         if let Some(results) = self.loop_results.as_ref() {
-            let drained: Vec<(AssetRevisionId, LoopReport)> =
-                results.lock().unwrap().drain(..).collect();
+            let drained: Vec<(AssetRevisionId, LoopReport)> = results
+                .try_lock()
+                .map(|mut results| results.drain(..).collect())
+                .unwrap_or_default();
             for (revision, report) in drained {
                 self.loop_reports.insert(revision, report);
             }
@@ -12946,9 +12869,6 @@ p2 {}
                             self.thumb_stats.on,
                             revision,
                         );
-                        if self.trace_thumbs {
-                            log!("thumb: fetching {revision}");
-                        }
                     }
                 }
             }
@@ -13599,11 +13519,6 @@ p2 {}
         for cmd in cmds {
             match cmd {
                 DeckCmd::LoadTrack { deck, gen, item } => {
-                    log!(
-                        "deck-load: requested deck={deck:?} gen={gen} revision={} role=audio blob={}",
-                        item.revision,
-                        item.media_blob
-                    );
                     // A new load supersedes whatever the last one was still
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
@@ -13655,18 +13570,20 @@ p2 {}
                         );
                         continue;
                     };
-                    if let Ok(id) = runtime.submit(ClientRequest::FetchBlob {
+                    match runtime.submit(ClientRequest::FetchBlob {
                         blob: item.media_blob,
                         expected_len: Some(item.media_len),
                         pin: false,
                     }) {
-                        log!(
-                            "deck-load: asset-client queued deck={deck:?} gen={gen} role=audio request={id}"
-                        );
-                        self.media_reqs.insert(
-                            (AUDIO_LANE, id),
-                            MediaPurpose::Deck { deck, gen, media: item.media },
-                        );
+                        Ok(id) => {
+                            self.media_reqs.insert(
+                                (AUDIO_LANE, id),
+                                MediaPurpose::Deck { deck, gen, media: item.media },
+                            );
+                        }
+                        Err(error) => {
+                            log!("deck {deck:?} gen {gen}: fetch request failed: {error}");
+                        }
                     }
                     // Whatever the store already knows about this track rides
                     // along with the audio: a few hundred kilobytes of stems
@@ -14025,8 +13942,7 @@ p2 {}
         // held, its shorter hazardous-output heartbeat.
         // FRAME-LOOP HANG DETECTOR: the pump runs every UI frame, so a gap
         // between pumps IS a frozen app — a paint that blocked, a stalled
-        // pipeline compile, a synchronous readback. Log the gap and let the
-        // thumbprof timeline say what was in flight when it happened.
+        // pipeline compile, or a synchronous readback. Log the gap.
         {
             let t = crate::clock::Instant::now();
             if let Some(last) = self.frame_watch {
@@ -14111,8 +14027,6 @@ p2 {}
         self.thumb_stats.ticks += 1;
         self.rebuild_grids_if_dirty(cx);
         self.arm_fill_pump(cx);
-        let (backlog, inflight, cached) =
-            (self.decode_backlog.len(), self.thumb_inflight.len(), self.thumbs.len());
         self.thumb_stats.resolving = SURFACES
             .iter()
             .map(|s| self.model_ref(*s).resolving())
@@ -14121,7 +14035,6 @@ p2 {}
             .iter()
             .map(|s| self.model_ref(*s).resolve_backlog())
             .sum();
-        self.thumb_stats.report(backlog, inflight, cached);
     }
 
     fn rebuild_grids_if_dirty(&mut self, cx: &mut Cx) {
@@ -14193,9 +14106,6 @@ p2 {}
             return;
         }
         self.fill_performing = Some(performing);
-        if self.thumb_stats.on {
-            log!("thumbstat   politeness: performing={performing}");
-        }
         self.decode.set_thumb_width(if performing {
             media::THUMB_WIDTH_PERFORMING
         } else {
@@ -14654,9 +14564,7 @@ p2 {}
                             // rebuild ask again, so a 404 straight after a
                             // republish heals itself.
                             self.thumb_inflight.remove(&revision);
-                            if self.trace_thumbs {
-                                log!("thumb: fetch FAILED {revision}: {error}");
-                            }
+                            log!("thumbnail {revision}: fetch failed: {error}");
                         }
                         CatPurpose::FxSource { revision, .. } => {
                             // Transient: the pump asks again on a later tick.
@@ -14892,7 +14800,7 @@ p2 {}
                         };
                     }
                     Err(error) => {
-                        log!("fx thumb: {title} source unreadable: {error}");
+                        log!("fx thumb {revision}: {title} source unreadable: {error}");
                     }
                 }
             }
@@ -15207,15 +15115,7 @@ p2 {}
             for event in events {
                 let id = event.id();
                 match event {
-                    ClientEvent::Started { .. } => {
-                        if let Some(MediaPurpose::Deck { deck, gen, .. }) =
-                            self.media_reqs.get(&(lane, id))
-                        {
-                            log!(
-                                "deck-load: asset-client fetch issued deck={deck:?} gen={gen} role=audio request={id}"
-                            );
-                        }
-                    }
+                    ClientEvent::Started { .. } => {}
                     ClientEvent::Progress { .. } => {}
                     ClientEvent::Done { output, .. } => {
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
@@ -15272,9 +15172,6 @@ p2 {}
                                 }
                             }
                             MediaPurpose::Deck { deck, gen, media } => {
-                                log!(
-                                    "deck-load: bytes arrived deck={deck:?} gen={gen} role=audio"
-                                );
                                 self.decode.submit(DecodeJob::Deck { deck, gen, source, media });
                             }
                             MediaPurpose::Preview { gen, media } => {
@@ -16388,9 +16285,6 @@ p2 {}
                     self.fx_decode_pending.remove(&revision);
                     self.thumb_stats.dec_at.remove(&revision);
                     self.grids_dirty = true;
-                    if self.trace_thumbs {
-                        log!("thumb: {revision} dropped unstarted (view moved) — will ask again");
-                    }
                 }
                 DecodeDone::Thumb { .. } => {
                     self.thumb_decodes_out = self.thumb_decodes_out.saturating_sub(1);
@@ -16463,7 +16357,7 @@ p2 {}
                         self.run_deck_cmds(cx, cmds);
                         self.run_deck_cmds(cx, trim_cmds);
                         if installed {
-                            log!("deck-load: ready deck={deck:?} gen={gen}");
+                            log!("deck {deck:?}: ready {}", format_duration(seconds));
                             // Marks saved for this track come back with it,
                             // and so does the red marker: a track starts
                             // where the operator left it, not at the top.
@@ -16779,9 +16673,6 @@ p2 {}
                         if fx_sheet {
                             self.grids_dirty = true;
                         }
-                        if self.trace_thumbs {
-                            log!("thumb: decoded {revision} ({} cached)", self.thumbs.len());
-                        }
                         self.apply_thumb(cx, revision, texture, frames, thumb.fps);
                         self.evict_thumbs();
                     } else if let Err(e) = result {
@@ -16800,10 +16691,9 @@ p2 {}
                             {
                                 thumbs.invalidate_cache(cx, revision);
                             }
-                            log!("fx thumb: sheet decode FAILED {revision}: {e}");
-                        }
-                        if self.trace_thumbs {
-                            log!("thumb: decode FAILED {revision}: {e}");
+                            log!("fx thumb {revision}: sheet decode failed: {e}");
+                        } else {
+                            log!("thumbnail {revision}: decode failed: {e}");
                         }
                     }
                     self.thumb_stats.upload_ms += t_up.elapsed().as_secs_f64() * 1000.0;
@@ -16878,9 +16768,6 @@ p2 {}
             self.thumb_leds.remove(&revision);
             self.thumb_used.remove(&revision);
             self.thumb_stats.evicted += 1;
-            if self.trace_thumbs {
-                log!("thumb: evicted {revision} (last wanted {used}, clock {})", self.thumb_clock);
-            }
         }
     }
 
@@ -16985,9 +16872,6 @@ p2 {}
                     self.thumb_stats.on,
                     revision,
                 );
-                if self.trace_thumbs {
-                    log!("thumb: re-requesting {revision} (texture gone)");
-                }
             }
         }
     }
@@ -17006,34 +16890,6 @@ p2 {}
     /// fetch path the moment its tile resolves. A cached sheet decodes
     /// straight from persistent storage instead of rendering.
     fn pump_fx_thumbs(&mut self, cx: &mut Cx) {
-        // THUMB LOAD PROFILE: one line a second from boot until the load
-        // settles — which counter stalls IS the diagnosis (heads = the seed
-        // stream, sub = cache decodes dispatched, done = decoder output,
-        // backlog = decoded-but-not-yet-uploaded, out = jobs in flight).
-        {
-            let t = crate::clock::Instant::now();
-            let t0 = *self.thumb_prof.get_or_insert((t, t, 0));
-            let busy = self.thumb_decodes_out > 0
-                || !self.decode_backlog.is_empty()
-                || self.thumb_stats.decoded != t0.2;
-            if busy && t.duration_since(t0.1).as_secs_f64() >= 1.0 {
-                if let Some(prof) = self.thumb_prof.as_mut() {
-                    prof.1 = t;
-                    prof.2 = self.thumb_stats.decoded;
-                }
-                log!(
-                    "thumbprof +{:.1}s heads={} sub={} fetch={} done={} out={} backlog={} resident={}MB",
-                    t.duration_since(t0.0).as_secs_f64(),
-                    self.fx_heads.len(),
-                    self.thumb_stats.fx_cache_submitted,
-                    self.thumb_stats.fetch_submitted,
-                    self.thumb_stats.decoded,
-                    self.thumb_decodes_out,
-                    self.decode_backlog.len(),
-                    self.thumb_stats.resident_bytes / 1_000_000
-                );
-            }
-        }
         if self.up.is_none() {
             return;
         }
@@ -17088,7 +16944,6 @@ p2 {}
         // no per-tile manifest trickle. Edited heads are never streamed
         // and bake via the store fetch path below.
         if let Some(rx) = self.fx_bundle_rx.take() {
-            let mut fed = 0usize;
             let mut open = true;
             if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
                 loop {
@@ -17120,14 +16975,8 @@ p2 {}
                                 transition,
                             },
                         );
-                        fed += 1;
                     }
                 }
-            }
-            if fed >= 8 {
-                // The big batches announce themselves; per-publish singles
-                // already log as they render.
-                log!("fx thumb: bundled feed — {fed} documents pending up front");
             }
             if open {
                 self.fx_bundle_rx = Some(rx);
@@ -24882,12 +24731,6 @@ p2 {}
                 }
             };
             if let Some(item) = self.track_item_at(index) {
-                log!(
-                    "deck-load: row clicked asset={} revision={} target={:?}",
-                    item.asset,
-                    item.revision,
-                    self.deck_target
-                );
                 self.deck_hands_on();
                 let cmds = self.decks.click(item, self.deck_target);
                 self.run_deck_cmds(cx, cmds);
@@ -25085,7 +24928,6 @@ impl MatchEvent for App {
             "startup: catalog connector started +{:.0}ms",
             (Cx::monotonic_now() - startup_started) * 1e3
         );
-        self.thumb_stats.start();
         // The shuffle draw is deterministic from its seed; the host is the
         // only party with a clock, so it seeds once here.
         let seed = Cx::time_now().to_bits().max(1);

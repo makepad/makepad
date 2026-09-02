@@ -19,6 +19,7 @@ use makepad_widgets::*;
 
 #[path = "../src/clock.rs"]
 mod clock;
+
 #[path = "../src/effects/mod.rs"]
 mod effects;
 
