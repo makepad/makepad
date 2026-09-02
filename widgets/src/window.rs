@@ -136,7 +136,7 @@ script_mod! {
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
         nav_control: NavControl {}
-        // SHIFT+F12 records this window to local/screencap/*.mp4, picture and
+        // CTRL+F10 records this window to local/screencap/*.mp4, picture and
         // sound (widgets/src/screen_cap.rs). Hardcoded like the caption bar:
         // inert and free until the key is pressed.
         screen_cap: ScreenCap {}
@@ -317,7 +317,7 @@ pub struct Window {
     //#[live] performance_view: PerformanceView,
     #[live]
     nav_control: NavControl,
-    /// Shift+F12 screen recorder. Hardcoded here so every app can record
+    /// Ctrl+F10 screen recorder. Hardcoded here so every app can record
     /// itself; Window owns it so the capture sink can be bound to THIS
     /// window rather than whichever one presents first.
     #[live]
@@ -1505,7 +1505,7 @@ impl Widget for Window {
         self.nav_control
             .handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
-        // The recorder is fed the raw event before focus routing, so Shift+F12
+        // The recorder is fed the raw event before focus routing, so Ctrl+F10
         // works while a text input holds the caret, and is told which window
         // it is recording so its capture sink follows THIS window.
         self.screen_cap.set_window_id(self.window.window_id().id());
