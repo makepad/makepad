@@ -123,9 +123,15 @@ pub struct View {
 
     #[live]
     on_render: ScriptFnRef,
+    /// `|index|` of the direct child a tap landed on. Lives on the container
+    /// so `on_render` rows stay closure-free and drag scrolling keeps working.
+    #[live]
+    on_item_tap: ScriptFnRef,
 
     #[rust]
     script_async: ScriptAsyncCalls,
+    #[rust]
+    item_tap_live: bool,
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
@@ -919,6 +925,32 @@ impl Widget for View {
 
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, scope, &mut Vec::new());
+        }
+
+        // After the scroll bars so their drag capture comes first; the overload
+        // lets this view capture the same press alongside it.
+        if self.visible && self.on_item_tap.as_object() != ScriptObject::ZERO {
+            match event.hits_with_capture_overload(cx, self.area(), true) {
+                Hit::FingerDown(e) => {
+                    // A child that already owns this press (a Button) gets the tap.
+                    self.item_tap_live = !cx.fingers.is_digit_captured_elsewhere(e.digit_id, self.area());
+                }
+                Hit::FingerUp(e) if e.was_tap() && self.item_tap_live => {
+                    self.item_tap_live = false;
+                    let index = self.children.iter()
+                        .position(|(_, child)| child.area().rect(cx).contains(e.abs));
+                    if let Some(index) = index {
+                        cx.widget_to_script_call(
+                            uid,
+                            NIL,
+                            self.source.clone(),
+                            self.on_item_tap.clone(),
+                            &[(index as f64).into()],
+                        );
+                    }
+                }
+                _ => (),
+            }
         }
     }
 
